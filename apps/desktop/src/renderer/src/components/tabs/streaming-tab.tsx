@@ -1,13 +1,4 @@
-import {
-  AlertIcon,
-  GaugeIcon,
-  HeartbeatIcon,
-  SaveIcon,
-  SearchIcon,
-  SuccessIcon,
-  SyncIcon,
-  TextIcon
-} from '@/components/icons'
+import { AlertIcon, SaveIcon, SearchIcon, TextIcon } from '@/components/icons'
 import { lazy, Suspense, useEffect, useMemo, useState, type ReactElement } from 'react'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 const ScheduledStreams = lazy(() =>
@@ -18,6 +9,7 @@ import { GroupedList } from '@/components/list-row'
 import { PlatformGlyph } from '@/components/platform-glyph'
 import { PanelSection } from '@/components/panel-section'
 import { DestinationCard } from '@/components/streaming/destination-card'
+import { GoLivePanel } from '@/components/streaming/go-live-panel'
 import {
   Accordion,
   AccordionContent,
@@ -40,44 +32,22 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import {
-  useStudioCore,
-  useStudioDiagnostics,
-  type StreamOutputTopologyPreflight
-} from '@/hooks/use-studio'
+import { useStudioCore } from '@/hooks/use-studio'
 import type {
-  DiagnosticStats,
   PlatformAccount,
   PlatformAccountValidation,
   OAuthProviderCredentialStatus,
-  StreamHealth,
   StreamMetadataDraft,
   StreamMetadataValidation,
   StreamPlatform,
   StreamPrivacy,
   StreamTargetRuntime,
   StreamTargetSettings,
-  VideoSettings,
   TwitchCategory,
   KickCategory
 } from '@/lib/backend'
-import {
-  isStreamTargetReady,
-  providerStreamOutputPlanOptions,
-  resolveProviderStreamOutputPlan,
-  STREAM_OUTPUT_GOP_SECONDS,
-  streamVideoProfileValidationReason,
-  type ProviderStreamOutputPlan,
-  videoProfileCompatibility
-} from '@/lib/capture'
 import { streamingDestinationEnableGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
-import {
-  classifyStreamHealthAttribution,
-  type StreamHealthAttribution
-} from '@/lib/stream-health-attribution'
-
-type BadgeTone = 'success' | 'warning' | 'destructive' | 'live' | 'outline'
 
 export function StreamingTab(): ReactElement {
   const [view, setView] = useState(() =>
@@ -129,15 +99,12 @@ function StreamingSetup(): ReactElement {
     oauthProviderCredentials,
     saveStreamMetadataDraft,
     selectYouTubeChannel,
-    health,
     entitlements,
     isSessionActive,
     streamMetadataDraft,
     streamMetadataSavePending,
     streamMetadataValidation,
     streamTargets,
-    streamOutputTopologyPreflight,
-    refreshStreamOutputTopology,
     twitchCategories,
     twitchCategorySearchPending,
     searchTwitchCategories,
@@ -150,27 +117,7 @@ function StreamingSetup(): ReactElement {
     authorizeXLive,
     stopSession
   } = useStudioCore()
-  const { diagnosticStats, streamHealth } = useStudioDiagnostics()
   const streaming = captureConfig.streaming
-  const { video } = captureConfig
-  const preflightProvesSeparateOutput =
-    streamOutputTopologyPreflight.state === 'ready' &&
-    streamOutputTopologyPreflight.result.outputRoles.length === 2 &&
-    streamOutputTopologyPreflight.result.outputRoles[0] === 'recording' &&
-    streamOutputTopologyPreflight.result.outputRoles[1] === 'stream' &&
-    streamOutputTopologyPreflight.result.effectiveBridgeOutput !== 'raw-yuv420p' &&
-    (streamOutputTopologyPreflight.result.probeState === 'passed' ||
-      streamOutputTopologyPreflight.result.probeState === 'not-required')
-  const separateEncodedOutputRoleAvailable = isSessionActive
-    ? diagnosticStats.encoderBridgeSeparateOutputEncodersActive
-    : preflightProvesSeparateOutput
-  const providerPlan = resolveProviderStreamOutputPlan(
-    video,
-    captureConfig.streamEnabled ? streaming : undefined,
-    providerStreamOutputPlanOptions(captureConfig, separateEncodedOutputRoleAvailable)
-  )
-  const compatibility = videoProfileCompatibility(captureConfig)
-  const compatibilityMessage = compatibility.blockingReason ?? compatibility.warning
   const livestreamingEntitlementReason = entitlementDisabledReason(entitlements, 'livestreaming')
   const streamingControlsDisabled = isSessionActive || Boolean(livestreamingEntitlementReason)
 
@@ -218,6 +165,18 @@ function StreamingSetup(): ReactElement {
       setDismissed(false)
     }
   }, [isSessionActive])
+
+  // Plan 080 S7: the readiness list opens the card that needs attention.
+  // Cards keep their own default until the user (or the list) toggles one.
+  const [expandedOverrides, setExpandedOverrides] = useState<Record<string, boolean>>({})
+  const openDestination = (targetId: string): void => {
+    setExpandedOverrides((current) => ({ ...current, [targetId]: true }))
+    requestAnimationFrame(() =>
+      document
+        .getElementById(`destination-${targetId}`)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    )
+  }
 
   const scheduledTargets = streaming.targets.filter((target) => target.scheduledEventId)
   const showNotices =
@@ -285,6 +244,10 @@ function StreamingSetup(): ReactElement {
                 account={accountByPlatform.get(target.platform)}
                 credentials={credentialsByPlatform.get(target.platform)}
                 disabled={streamingControlsDisabled}
+                expanded={expandedOverrides[target.id]}
+                onExpandedChange={(expanded) =>
+                  setExpandedOverrides((current) => ({ ...current, [target.id]: expanded }))
+                }
                 enableGate={streamingDestinationEnableGate({
                   entitlements,
                   streaming,
@@ -333,34 +296,7 @@ function StreamingSetup(): ReactElement {
         />
       </div>
 
-      <div className="flex min-w-0 flex-col border-t lg:border-t-0">
-        {compatibilityMessage ? (
-          <div className="border-b border-border p-gutter">
-            <Alert variant="warning">
-              <AlertIcon weight="fill" />
-              <AlertDescription>{compatibilityMessage}</AlertDescription>
-            </Alert>
-          </div>
-        ) : null}
-        <LiveOutputHealth
-          diagnosticStats={diagnosticStats}
-          isSessionActive={isSessionActive}
-          preflight={streamOutputTopologyPreflight}
-          providerPlan={providerPlan}
-          streamEnabled={captureConfig.streamEnabled && streaming.enabled}
-          streamHealth={streamHealth}
-          streamTargets={streamTargets}
-          onRetry={refreshStreamOutputTopology}
-        />
-        <StreamingReadiness
-          ffmpegReady={Boolean(health?.ffmpeg.available)}
-          profileCompatible={!compatibility.blockingReason}
-          recordEnabled={captureConfig.recordEnabled}
-          recordingVideo={video}
-          providerPlan={providerPlan}
-          targets={streaming.targets}
-        />
-      </div>
+      <GoLivePanel onOpenDestination={openDestination} />
     </div>
   )
 }
@@ -954,467 +890,4 @@ function metadataIssue(
   platform?: StreamPlatform
 ): StreamMetadataValidation['issues'][number] | undefined {
   return validation?.issues.find((issue) => issue.field === field && issue.platform === platform)
-}
-
-function platformLabel(platform: StreamPlatform): string {
-  switch (platform) {
-    case 'youtube':
-      return 'YouTube'
-    case 'twitch':
-      return 'Twitch'
-    case 'kick':
-      return 'Kick'
-    case 'x':
-      return 'X'
-    default:
-      return 'Custom'
-  }
-}
-
-function LiveOutputHealth({
-  diagnosticStats,
-  isSessionActive,
-  preflight,
-  providerPlan,
-  streamEnabled,
-  streamHealth,
-  streamTargets,
-  onRetry
-}: {
-  diagnosticStats: DiagnosticStats
-  isSessionActive: boolean
-  preflight: StreamOutputTopologyPreflight
-  providerPlan: ProviderStreamOutputPlan
-  streamEnabled: boolean
-  streamHealth: StreamHealth | null
-  streamTargets: StreamTargetRuntime[]
-  onRetry: () => Promise<void>
-}): ReactElement {
-  const liveOutputActive = isSessionActive && streamEnabled
-  const currentStreamHealth =
-    streamHealth &&
-    (!diagnosticStats.sessionId || diagnosticStats.sessionId === streamHealth.sessionId)
-      ? streamHealth
-      : null
-  const attribution = liveOutputActive
-    ? classifyStreamHealthAttribution(diagnosticStats, currentStreamHealth, streamTargets)
-    : preflightAttribution(preflight)
-  const badge = streamHealthBadge(attribution, liveOutputActive)
-  const probeResult = !liveOutputActive && preflight.state === 'ready' ? preflight.result : null
-  const requestedPath = liveOutputActive
-    ? diagnosticStats.encoderBridgeRequestedVideoOutput
-    : probeResult?.requestedBridgeOutput
-  const effectivePath = liveOutputActive
-    ? diagnosticStats.encoderBridgeEffectiveVideoOutput
-    : probeResult?.effectiveBridgeOutput
-  const effectiveEncoder = liveOutputActive
-    ? diagnosticStats.encodeBackend
-    : probeResult?.effectiveEncodeBackend
-  const fallbackReason = liveOutputActive
-    ? diagnosticStats.encoderBridgeEncodedOutputFallbackReason
-    : probeResult?.fallbackReason
-  const coalescedFrames = diagnosticStats.encoderBridgeSeparateOutputEncodersActive
-    ? diagnosticStats.encoderBridgeStreamQueueDroppedFrames
-    : diagnosticStats.encoderBridgeOutputQueueDroppedFrames
-  const effectiveProviders = [
-    ...new Set(
-      providerPlan.targets
-        .map(({ target }) => target?.platform)
-        .filter((platform): platform is StreamPlatform => Boolean(platform))
-        .map(platformLabel)
-    )
-  ].join(', ')
-  const effectiveProfiles = providerPlan.targets.length
-    ? providerPlan.targets
-        .map(({ target, video }) =>
-          target
-            ? `${platformLabel(target.platform)} ${formatEffectiveStreamProfile(video)}`
-            : formatEffectiveStreamProfile(video)
-        )
-        .join(' / ')
-    : formatEffectiveStreamProfile(providerPlan.streamVideo)
-
-  return (
-    <PanelSection
-      action={
-        !liveOutputActive && preflight.state === 'failed' ? (
-          <Button
-            size="xs"
-            variant="ghost"
-            onClick={() => {
-              void onRetry().catch(() => {})
-            }}
-          >
-            <SyncIcon data-icon="inline-start" weight="bold" />
-            Retry
-          </Button>
-        ) : null
-      }
-      contentClassName="gap-3"
-      description={streamHealthDescription(attribution, liveOutputActive, preflight)}
-      icon={HeartbeatIcon}
-      title="Live output health"
-    >
-      <div className="flex items-center justify-between gap-3">
-        <span className="text-[11px] font-semibold text-subtle">Classified stage</span>
-        <Badge variant={badge.tone}>{badge.label}</Badge>
-      </div>
-
-      <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
-        <OutputMetric
-          label="Delivered FPS"
-          value={liveOutputActive ? formatLiveFps(currentStreamHealth?.fps) : '-'}
-        />
-        <OutputMetric
-          label="Bitrate"
-          value={
-            liveOutputActive
-              ? formatLiveBitrate(
-                  currentStreamHealth?.bitrateKbps ?? diagnosticStats.streamMeasuredBitrateKbps
-                )
-              : '-'
-          }
-        />
-        <OutputMetric
-          label="Encoder speed"
-          value={
-            liveOutputActive
-              ? formatEncoderSpeed(currentStreamHealth?.speed ?? diagnosticStats.encoderSpeed)
-              : '-'
-          }
-        />
-        <OutputMetric
-          label="Duplicated"
-          value={
-            liveOutputActive
-              ? formatFrameCount(
-                  currentStreamHealth?.duplicatedFrames ?? diagnosticStats.streamDuplicatedFrames
-                )
-              : '-'
-          }
-        />
-        <OutputMetric
-          label="Dropped"
-          value={
-            liveOutputActive
-              ? formatFrameCount(
-                  currentStreamHealth?.droppedFrames ?? diagnosticStats.droppedFrames
-                )
-              : '-'
-          }
-        />
-        <OutputMetric
-          label="Coalesced"
-          value={liveOutputActive ? formatFrameCount(coalescedFrames) : '-'}
-        />
-      </div>
-
-      <div className="flex flex-col gap-1.5 border-t border-border pt-3">
-        <ExactOutputPath
-          label="Effective provider"
-          value={effectiveProviders || 'No enabled destination'}
-        />
-        <ExactOutputPath label="Effective profile" value={effectiveProfiles} />
-        <ExactOutputPath label="GOP" value={`${STREAM_OUTPUT_GOP_SECONDS} seconds`} />
-        <ExactOutputPath
-          label="Encode sharing"
-          value={
-            providerPlan.separateEncodedOutputRole
-              ? 'Separate recording + stream roles'
-              : 'Shared encode · strictest provider'
-          }
-        />
-        <ExactOutputPath label="Requested path" value={requestedPath} />
-        <ExactOutputPath label="Effective path" value={effectivePath} />
-        <ExactOutputPath label="Effective encoder" value={effectiveEncoder} />
-        {fallbackReason ? (
-          <p className="border-t border-border pt-2 text-xs text-warning">
-            Fallback reason: {fallbackReason}
-          </p>
-        ) : null}
-      </div>
-    </PanelSection>
-  )
-}
-
-function preflightAttribution(preflight: StreamOutputTopologyPreflight): StreamHealthAttribution {
-  if (preflight.state !== 'ready') {
-    return 'unknown'
-  }
-  const result = preflight.result
-  return result.fallbackReason ||
-    result.requestedBridgeOutput !== result.effectiveBridgeOutput ||
-    result.probeState === 'rejected' ||
-    result.probeState === 'unsupported'
-    ? 'fallback'
-    : 'healthy'
-}
-
-function streamHealthBadge(
-  attribution: StreamHealthAttribution,
-  liveOutputActive: boolean
-): { label: string; tone: BadgeTone } {
-  if (!liveOutputActive && attribution === 'healthy') {
-    return { label: 'Ready', tone: 'success' }
-  }
-  if (attribution === 'healthy') {
-    return { label: 'Healthy', tone: 'success' }
-  }
-  if (attribution === 'unknown') {
-    return { label: 'Unknown', tone: 'outline' }
-  }
-  if (attribution === 'fallback' || attribution === 'network' || attribution === 'preview') {
-    return {
-      label: attribution.charAt(0).toUpperCase() + attribution.slice(1),
-      tone: 'warning'
-    }
-  }
-  return {
-    label: attribution.charAt(0).toUpperCase() + attribution.slice(1),
-    tone: 'destructive'
-  }
-}
-
-function streamHealthDescription(
-  attribution: StreamHealthAttribution,
-  liveOutputActive: boolean,
-  preflight: StreamOutputTopologyPreflight
-): string {
-  if (!liveOutputActive) {
-    switch (preflight.state) {
-      case 'not-requested':
-        return 'The exact output path has not been checked. Go Live stays blocked.'
-      case 'pending':
-        return 'Checking the exact output path. Go Live stays blocked until it finishes.'
-      case 'failed':
-        return `Output path check failed: ${preflight.message}`
-      case 'ready':
-        return attribution === 'fallback'
-          ? 'The backend verified this fallback path for the selected output profile.'
-          : 'The backend verified the exact output path for the selected profile.'
-    }
-  }
-
-  switch (attribution) {
-    case 'device':
-      return 'A disconnected capture device is interrupting the livestream path.'
-    case 'audio':
-      return 'Audio capture is dropping data before the livestream encode.'
-    case 'capture':
-      return 'Capture is running below the target frame rate.'
-    case 'render':
-      return 'The compositor is running below the target frame rate.'
-    case 'encoder':
-      return 'The encoder or its bounded output queue is losing frames.'
-    case 'fallback':
-      return 'The livestream is using a backend-confirmed fallback output path.'
-    case 'network':
-      return 'Media stages are healthy, but delivery or a destination is degraded.'
-    case 'preview':
-      return 'Livestream media is healthy; only the local preview is degraded.'
-    case 'healthy':
-      return 'Backend evidence shows the livestream media and delivery path are healthy.'
-    default:
-      return 'Waiting for enough backend evidence to classify the active livestream.'
-  }
-}
-
-function OutputMetric({ label, value }: { label: string; value: string }): ReactElement {
-  return (
-    <div className="flex min-w-0 flex-col gap-0.5">
-      <div className="truncate text-[11px] text-muted-foreground">{label}</div>
-      <div className="text-sm font-medium tabular-nums">{value}</div>
-    </div>
-  )
-}
-
-function ExactOutputPath({ label, value }: { label: string; value?: string }): ReactElement {
-  return (
-    <div className="flex items-start justify-between gap-3 text-xs">
-      <span className="shrink-0 text-muted-foreground">{label}</span>
-      <code className="min-w-0 text-right break-words text-foreground">{value ?? 'unknown'}</code>
-    </div>
-  )
-}
-
-function formatLiveFps(value?: number): string {
-  return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(1)} fps` : '-'
-}
-
-function formatLiveBitrate(value?: number): string {
-  return typeof value === 'number' && Number.isFinite(value)
-    ? `${Math.round(value).toLocaleString()} kbps`
-    : '-'
-}
-
-function formatEncoderSpeed(value?: number): string {
-  return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(2)}×` : '-'
-}
-
-function formatFrameCount(value?: number): string {
-  return typeof value === 'number' && Number.isFinite(value)
-    ? Math.max(0, Math.round(value)).toLocaleString()
-    : '-'
-}
-
-function StreamingReadiness({
-  targets,
-  ffmpegReady,
-  profileCompatible,
-  providerPlan,
-  recordEnabled,
-  recordingVideo
-}: {
-  targets: StreamTargetSettings[]
-  ffmpegReady: boolean
-  profileCompatible: boolean
-  providerPlan: ProviderStreamOutputPlan
-  recordEnabled: boolean
-  recordingVideo: VideoSettings
-}): ReactElement {
-  const enabled = targets.filter((target) => target.enabled)
-  const readyCount = enabled.filter(isStreamTargetReady).length
-  const allReady = enabled.length > 0 && readyCount === enabled.length
-  const targetOutputs = providerPlan.targets.flatMap(({ target, video }) =>
-    target ? [{ target, video }] : []
-  )
-  const streamVideo = providerPlan.streamVideo
-  const splitOutputActive = providerPlan.separateEncodedOutputRole
-  const outputVideos = targetOutputs.length
-    ? targetOutputs.map((output) => output.video)
-    : [streamVideo]
-  const true4kStreamActive = outputVideos.some((video) => video.preset === 'stream-youtube-4k30')
-  const mixedDestinationOutputs =
-    true4kStreamActive &&
-    targetOutputs.some((output) => output.video.preset !== 'stream-youtube-4k30')
-  const presetOk =
-    profileCompatible &&
-    outputVideos.every((video, index) => {
-      const target = targetOutputs[index]?.target
-      return streamVideoProfileValidationReason(video, target?.platform) === null
-    })
-  const showRecordingOutput = recordEnabled && (splitOutputActive || true4kStreamActive)
-  const compatibilityHint = true4kStreamActive
-    ? ' · keep 4K on YouTube and companions stream-safe'
-    : ' · choose stream-safe 1080p'
-  // F-025: neutral fact labels — the ok flag and detail carry the verdict, so
-  // the label can't contradict a warning icon.
-  const outputCompatibilityLabel = true4kStreamActive
-    ? mixedDestinationOutputs
-      ? 'Mixed stream outputs'
-      : 'YouTube 4K stream'
-    : splitOutputActive
-      ? 'Stream output'
-      : 'Output preset'
-  const outputCompatibilityDetail =
-    targetOutputs.length > 1
-      ? `${formatTargetOutputSummary(targetOutputs)}${presetOk ? '' : compatibilityHint}`
-      : `${formatVideoOutput(streamVideo)} · ${streamVideo.bitrateKbps} kbps${
-          presetOk ? '' : compatibilityHint
-        }`
-  const uploadMbps = enabled.length
-    ? Math.round(
-        (outputVideos.reduce((total, video) => total + video.bitrateKbps + 128, 0) * 1.1) / 100
-      ) / 10
-    : 0
-  const diskMbPerMin = Math.round((recordingVideo.bitrateKbps / 8 / 1000) * 60)
-
-  return (
-    <PanelSection icon={GaugeIcon} title="Multistream readiness">
-      <ChecklistRow
-        detail={
-          enabled.length ? `${readyCount}/${enabled.length} ready` : 'No destinations enabled'
-        }
-        label="Destinations ready"
-        ok={allReady}
-      />
-      {showRecordingOutput ? (
-        <InfoRow
-          detail={`${formatVideoOutput(recordingVideo)} · ${recordingVideo.bitrateKbps} kbps`}
-          label="Recording output"
-        />
-      ) : null}
-      <ChecklistRow
-        detail={outputCompatibilityDetail}
-        label={outputCompatibilityLabel}
-        ok={presetOk}
-      />
-      <ChecklistRow
-        detail={ffmpegReady ? 'ready' : 'check Settings'}
-        label="FFmpeg available"
-        ok={ffmpegReady}
-      />
-      <InfoRow
-        detail={
-          enabled.length
-            ? `~${uploadMbps} Mbps to ${enabled.length} destination${enabled.length > 1 ? 's' : ''}`
-            : '-'
-        }
-        label="Estimated upload"
-      />
-      {recordEnabled ? <InfoRow detail={`~${diskMbPerMin} MB/min`} label="Estimated disk" /> : null}
-
-      <p className="text-xs text-muted-foreground">
-        {true4kStreamActive
-          ? mixedDestinationOutputs
-            ? 'YouTube 4K30 uses normal latency. Non-YouTube destinations use separate stream-safe 1080p outputs; upload is the sum of every active destination.'
-            : 'YouTube 4K30 uses normal latency. Keep stable upload comfortably above 30 Mbps.'
-          : splitOutputActive
-            ? 'Recording and livestreaming use separate output encoders; the stream leg stays platform-safe for every destination.'
-            : 'All destinations share one encode, so the bitrate is capped by the strictest platform (Twitch ~6000 kbps).'}
-      </p>
-    </PanelSection>
-  )
-}
-
-function formatVideoOutput(video: VideoSettings): string {
-  return `${video.width}×${video.height} @ ${video.fps}`
-}
-
-function formatEffectiveStreamProfile(video: VideoSettings): string {
-  return `${formatVideoOutput(video)} fps · ${video.bitrateKbps.toLocaleString()} kbps CBR`
-}
-
-function formatTargetOutputSummary(
-  outputs: Array<{ target: StreamTargetSettings; video: VideoSettings }>
-): string {
-  return outputs
-    .map(
-      ({ target, video }) =>
-        `${platformLabel(target.platform)} ${formatVideoOutput(video)} · ${video.bitrateKbps} kbps`
-    )
-    .join(' / ')
-}
-
-function ChecklistRow({
-  label,
-  detail,
-  ok
-}: {
-  label: string
-  detail: string
-  ok: boolean
-}): ReactElement {
-  return (
-    <div className="flex items-start justify-between gap-3 text-sm">
-      <div className="flex items-center gap-2">
-        {ok ? (
-          <SuccessIcon className="size-4 shrink-0 text-primary" weight="fill" />
-        ) : (
-          <AlertIcon className="size-4 shrink-0 text-muted-foreground" weight="fill" />
-        )}
-        <span>{label}</span>
-      </div>
-      <span className="text-right text-xs text-muted-foreground">{detail}</span>
-    </div>
-  )
-}
-
-function InfoRow({ label, detail }: { label: string; detail: string }): ReactElement {
-  return (
-    <div className="flex items-center justify-between gap-3 text-sm">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="text-xs tabular-nums">{detail}</span>
-    </div>
-  )
 }
