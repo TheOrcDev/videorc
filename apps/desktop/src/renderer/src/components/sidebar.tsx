@@ -123,7 +123,9 @@ function SidebarUpdateChip({
       <div className="overflow-hidden">
         <div className="px-3 pb-1">
           <button
+            aria-label={chip.detail}
             className="flex h-row-compact w-full items-center gap-2.5 rounded-row px-2.5 text-left text-sm text-foreground hover:bg-accent"
+            title={chip.detail}
             type="button"
             onClick={() => (chip.action === 'install' ? install() : onOpenSettings())}
           >

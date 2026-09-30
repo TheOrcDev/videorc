@@ -1,4 +1,3 @@
-import { SettingsIcon } from '@/components/icons'
 import { useState, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
@@ -49,7 +48,6 @@ export function RemoteSettings(): ReactElement {
           />
         }
         description="Let a Stream Deck or other local remote start recordings, switch scenes, and mute your mic. Off by default; clients pair with the token below on this Mac only."
-        icon={SettingsIcon}
         title="Remote control"
       >
         {remoteStatus?.enabled ? (

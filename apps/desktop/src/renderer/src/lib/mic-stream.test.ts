@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   createMicStreamController,
   closeVisualMicrophoneStreams,
+  micStreamFailureFromError,
   microphoneStreamAcquisitionEnabled,
   type MicStreamConstraints
 } from './mic-stream'
@@ -72,6 +73,87 @@ describe('createMicStreamController', () => {
       expect(getUserMedia).not.toHaveBeenCalled()
       controller.close()
     }
+  })
+
+  // Plan 080 S3: strict mode compared raw labels, and Chromium decorates every
+  // macOS label, so the preview never opened a real Mac mic after 0.9.101.
+  it('opens the selected Mac mic in strict mode behind Chromium label decorations', async () => {
+    const labels = [
+      {
+        kind: 'audioinput',
+        deviceId: 'default',
+        label: 'Default - MacBook Pro Microphone (Built-in)'
+      },
+      { kind: 'audioinput', deviceId: 'built-in', label: 'MacBook Pro Microphone (Built-in)' },
+      { kind: 'audioinput', deviceId: 'airpods', label: 'AirPods Pro (Bluetooth)' },
+      { kind: 'audioinput', deviceId: 'mv7', label: 'Shure MV7 (14ed:1012)' }
+    ]
+    for (const [name, deviceId] of [
+      ['AirPods Pro', 'airpods'],
+      ['MacBook Pro Microphone', 'built-in'],
+      ['Shure MV7', 'mv7']
+    ] as const) {
+      const { stream } = fakeStream()
+      const requested: MicStreamConstraints[] = []
+      const controller = createMicStreamController({
+        enumerateDevices: async () => labels,
+        getUserMedia: async (constraints) => {
+          requested.push(constraints)
+          return stream
+        }
+      })
+      await expect(controller.open(name, true)).resolves.toBe(stream)
+      expect(requested[0]?.audio.deviceId).toEqual({ exact: deviceId })
+      expect(controller.lastFailure()).toBeNull()
+      controller.close()
+    }
+  })
+
+  it('says why a strict open failed instead of a bare null', async () => {
+    for (const [labels, reason] of [
+      [[], 'device-missing'],
+      [['Other (Built-in)'], 'no-label-match'],
+      [['Studio Plus (USB)'], 'no-label-match'],
+      [['USB Mic (Virtual)', 'USB Mic (Virtual)'], 'ambiguous-label'],
+      [['', ''], 'labels-hidden']
+    ] as const) {
+      const controller = createMicStreamController({
+        enumerateDevices: async () =>
+          labels.map((label, index) => ({ kind: 'audioinput', deviceId: `mic-${index}`, label })),
+        getUserMedia: vi.fn(async () => fakeStream().stream)
+      })
+      const name = reason === 'ambiguous-label' ? 'USB Mic' : 'Studio'
+      await expect(controller.open(name, true)).resolves.toBeNull()
+      expect(controller.lastFailure()).toEqual({ reason })
+      controller.close()
+    }
+    const noMedia = createMicStreamController(undefined)
+    await expect(noMedia.open('Studio', true)).resolves.toBeNull()
+    expect(noMedia.lastFailure()).toEqual({ reason: 'no-media' })
+  })
+
+  it('maps getUserMedia errors onto a reason the UI can explain', async () => {
+    const error = (name: string): Error => Object.assign(new Error(`${name} message`), { name })
+    for (const [name, reason] of [
+      ['NotAllowedError', 'permission-denied'],
+      ['NotReadableError', 'device-busy'],
+      ['AbortError', 'device-busy'],
+      ['NotFoundError', 'device-missing'],
+      ['OverconstrainedError', 'overconstrained'],
+      ['TypeError', 'unknown']
+    ] as const) {
+      const controller = createMicStreamController({
+        enumerateDevices: async () => [
+          { kind: 'audioinput', deviceId: 'mic-1', label: 'AirPods Pro (Bluetooth)' }
+        ],
+        getUserMedia: async () => {
+          throw error(name)
+        }
+      })
+      await expect(controller.open('AirPods Pro', true)).resolves.toBeNull()
+      expect(controller.lastFailure()).toEqual({ reason, detail: `${name} message` })
+    }
+    expect(micStreamFailureFromError('boom')).toEqual({ reason: 'unknown' })
   })
 
   it('releases active and pending visual acquisitions before a live replacement', async () => {

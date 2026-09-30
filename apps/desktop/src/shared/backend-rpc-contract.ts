@@ -798,6 +798,7 @@ const sourceSelectionSchema = objectSchema(
     windowName: optionalText,
     cameraId: optionalText,
     cameraName: optionalText,
+    cameraOff: optionalSchema(booleanSchema),
     microphoneId: optionalText,
     microphoneName: optionalText,
     testPattern: optionalSchema(booleanSchema)

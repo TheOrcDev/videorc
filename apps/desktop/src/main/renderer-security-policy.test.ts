@@ -401,8 +401,9 @@ describe('renderer security policy', () => {
   })
 
   it('routes denied X documentation popups through the validated external opener', () => {
-    const streamingTab = source('../renderer/src/components/tabs/streaming-tab.tsx')
-    expect(streamingTab).toContain('openExternalUrl(xNativeCapability.docsUrl)')
-    expect(streamingTab).toContain('openExternalUrl(xNativeCapability.apiOverviewUrl)')
+    // Plan 080 S5 moved the destination card (and its X block) out of the tab.
+    const destinationCard = source('../renderer/src/components/streaming/destination-card.tsx')
+    expect(destinationCard).toContain('openExternalUrl(xNativeCapability.docsUrl)')
+    expect(destinationCard).toContain('openExternalUrl(xNativeCapability.apiOverviewUrl)')
   })
 })

@@ -1,4 +1,4 @@
-import { useRef, type ReactElement, type RefObject } from 'react'
+import { useEffect, useRef, type ReactElement, type RefObject } from 'react'
 
 import { LiveWaveform, type LiveWaveformHandle } from '@/components/ui/live-waveform'
 import { useStudioCore } from '@/hooks/use-studio'
@@ -6,6 +6,29 @@ import {
   useStudioMicVisualLifecycle,
   useStudioMicVisualPainter
 } from '@/hooks/use-studio-mic-visual'
+import type { MicStreamFailureReason } from '@/lib/mic-stream'
+
+/**
+ * Plan 080 S3: the reason decides the words. The old line blamed permission
+ * for every failure, yet this state is only reachable once the OS has
+ * granted the mic; only a real refusal may mention permission.
+ */
+export function micPreviewUnavailableCopy(reason: MicStreamFailureReason | undefined): string {
+  switch (reason) {
+    case 'permission-denied':
+      return "Videorc can't use this mic. Check Settings → Permissions."
+    case 'device-busy':
+      return "Another app is using this mic. The preview comes back when it's free. Recording still works."
+    case 'no-label-match':
+    case 'ambiguous-label':
+    case 'labels-hidden':
+    case 'device-missing':
+    case 'overconstrained':
+      return 'No live preview for this mic. Recording still works.'
+    default:
+      return 'Live preview unavailable. Recording still works.'
+  }
+}
 
 /**
  * See-before-you-pick mic preview (Studio audio rework S4): a scrolling live
@@ -29,11 +52,19 @@ export function MicPickerPreview({
   useMicPickerFramePainter(waveformRef)
   const enabled = Boolean(deviceName)
   const muted = enabled && captureConfig.audio.microphoneMuted
+  const unavailableReason =
+    enabled && lifecycle.status === 'unavailable' ? (lifecycle.reason ?? 'unknown') : undefined
+  useEffect(() => {
+    if (unavailableReason && import.meta.env.DEV) {
+      console.debug('[videorc] mic preview unavailable', { deviceName, reason: unavailableReason })
+    }
+  }, [deviceName, unavailableReason])
 
   return (
     <div
       className="flex flex-col gap-1"
       data-videorc-mic-preview
+      data-videorc-mic-preview-reason={unavailableReason}
       aria-label="Visual microphone preview"
     >
       <div className="rounded-row border bg-muted/20 px-2 py-1 text-foreground/70">
@@ -47,10 +78,9 @@ export function MicPickerPreview({
           processing={enabled && lifecycle.status === 'acquiring'}
         />
       </div>
-      {enabled && lifecycle.status === 'unavailable' ? (
+      {unavailableReason ? (
         <span className="text-xs text-muted-foreground">
-          Live preview unavailable. The mic may be in use or needs permission. Recording is
-          unaffected.
+          {micPreviewUnavailableCopy(unavailableReason)}
         </span>
       ) : muted ? (
         // The one honest reason the waveform is flat while the picker is open:

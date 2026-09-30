@@ -230,7 +230,6 @@ export function PhoneRemoteSection(): ReactElement {
         />
       }
       description="Read live comments, put one on stream with a tap, and switch scenes from a phone on the same Wi-Fi. Turning this on also turns on Remote control."
-      icon={MobileIcon}
       title="Phone remote"
     >
       {status?.enabled && summary ? (

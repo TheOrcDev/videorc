@@ -22,6 +22,7 @@ export function SourceSelect({
   selectedName,
   onChange,
   allowNone = false,
+  noneLabel = 'None',
   placeholder,
   discoveryPending = false,
   description,
@@ -34,6 +35,8 @@ export function SourceSelect({
   selectedName?: string
   onChange: (value: string | undefined) => void
   allowNone?: boolean
+  /** The "no device" item's words ("Off" for a camera row, plan 080 S4). */
+  noneLabel?: string
   placeholder?: string
   /** Device discovery hasn't reported yet — show "Finding devices…" over "none found". */
   discoveryPending?: boolean
@@ -74,6 +77,7 @@ export function SourceSelect({
           selectedName={selectedName}
           onChange={onChange}
           allowNone={allowNone}
+          noneLabel={noneLabel}
           placeholder={placeholder}
           discoveryPending={discoveryPending}
           description={description}
@@ -98,7 +102,7 @@ export function SourceSelect({
         </SelectTrigger>
         <SelectContent align="start" position="popper">
           <SelectGroup>
-            {allowNone ? <SelectItem value={NONE_VALUE}>None</SelectItem> : null}
+            {allowNone ? <SelectItem value={NONE_VALUE}>{noneLabel}</SelectItem> : null}
             {missing ? (
               <SelectItem disabled value={missing.value}>
                 {missing.label}

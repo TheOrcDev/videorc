@@ -1,4 +1,4 @@
-import { AlertIcon, CloseIcon, CohostIcon } from '@/components/icons'
+import { AlertIcon, CloseIcon } from '@/components/icons'
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
@@ -124,7 +124,6 @@ export function CohostSettingsSection(): ReactElement | null {
   return (
     <PanelSection
       description="Alpha: expect rough edges. An AI producer reads your live chat, groups the questions people are actually asking, and drafts replies you approve. Nothing is ever sent without you."
-      icon={CohostIcon}
       title="Orcle (alpha)"
     >
       {locked ? (

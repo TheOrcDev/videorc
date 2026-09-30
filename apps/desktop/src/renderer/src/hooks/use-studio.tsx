@@ -8493,6 +8493,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           : sourceKind === 'microphone'
             ? sources.microphoneId
             : (sources.screenId ?? sources.windowId)
+      if (sourceKind === 'camera') {
+        // Plan 080 S4: the backend confirms only the device; the Off intent
+        // is renderer state, so it must be recorded here to outlive the
+        // session's end (reconcile would otherwise fill in the first camera).
+        setCaptureConfig((current) =>
+          current.sources.cameraOff === sources.cameraOff
+            ? current
+            : { ...current, sources: { ...current.sources, cameraOff: sources.cameraOff } }
+        )
+      }
       try {
         await sourceSelectionController.select(
           sourceKind,

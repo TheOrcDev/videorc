@@ -94,6 +94,7 @@ import {
 } from './use-studio'
 import { DEFAULT_BASIC_ENTITLEMENTS, STREAMING_LIMITS } from '../lib/entitlements'
 import {
+  buildCameraSources,
   defaultCaptureConfig,
   STORAGE_KEYS,
   videoPresets,
@@ -4367,6 +4368,105 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 400))
     })
+    expect(toastSpies.error).not.toHaveBeenCalled()
+  }, 15_000)
+
+  // Plan 080 S4: the Studio Camera row's Off must stick. Device reconcile
+  // used to refill an empty camera slot with the first camera.
+  it('keeps camera Off through a device refresh, and a live Off is recorded as intent', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.cameraId === 'camera:1'
+    )
+    const cameras = latest()!.core.deviceList.devices.filter((device) => device.kind === 'camera')
+
+    await act(async () => {
+      await latest()!.core.switchSourceDeviceLive(
+        'camera',
+        buildCameraSources(latest()!.core.captureConfig.sources, cameras, undefined)
+      )
+    })
+    expect(latest()?.core.captureConfig.sources.cameraId).toBeUndefined()
+    expect(latest()?.core.captureConfig.sources.cameraOff).toBe(true)
+
+    await act(async () => {
+      await latest()!.core.refreshBackend({ fresh: true })
+    })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    })
+    expect(latest()?.core.captureConfig.sources.cameraId).toBeUndefined()
+    expect(latest()?.core.captureConfig.sources.cameraOff).toBe(true)
+
+    // Picking the camera again ends Off.
+    await act(async () => {
+      await latest()!.core.switchSourceDeviceLive(
+        'camera',
+        buildCameraSources(latest()!.core.captureConfig.sources, cameras, 'camera:1')
+      )
+    })
+    expect(latest()?.core.captureConfig.sources.cameraId).toBe('camera:1')
+    expect(latest()?.core.captureConfig.sources.cameraOff).toBeUndefined()
+  }, 15_000)
+
+  it('records a live camera Off as intent that survives confirmation', async () => {
+    const backend = new StudioBackend()
+    backend.recordingState = 'recording'
+    backend.recordingSessionId = 'session-1'
+    backend.confirmedSources = { ...backend.confirmedSources, cameraId: 'camera:1' }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.recording.recording.state === 'recording'
+    )
+    expect(latest()?.core.sourceSwitchReason('camera')).toBeNull()
+
+    await act(async () => {
+      await latest()!.core.switchSourceDeviceLive('camera', {
+        ...latest()!.core.captureConfig.sources,
+        cameraId: undefined,
+        cameraName: undefined,
+        cameraOff: true
+      })
+    })
+    await waitForObservation(
+      () => latest()?.core.sourceSelectionState.snapshot?.lastOperation?.stage === 'applied'
+    )
+    expect(backend.confirmedSources.cameraId).toBeUndefined()
+    expect(latest()?.core.captureConfig.sources.cameraId).toBeUndefined()
+    expect(latest()?.core.captureConfig.sources.cameraOff).toBe(true)
     expect(toastSpies.error).not.toHaveBeenCalled()
   }, 15_000)
 

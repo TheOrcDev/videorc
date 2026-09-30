@@ -638,3 +638,98 @@ describe('resampleMicVisualLevels', () => {
     expect(resampleMicVisualLevels([], 3)).toEqual([0, 0, 0])
   })
 })
+
+describe('createMicVisualPipeline unavailable reasons (plan 080 S3)', () => {
+  const source = {
+    selectionKey: 'backend-airpods',
+    deviceName: 'AirPods Pro',
+    strictDevice: true,
+    enabled: true,
+    permissionStatus: 'granted' as const
+  }
+
+  it('publishes why the preview is unavailable', async () => {
+    const harness = pipelineHarness()
+    harness.dependencies.mediaDevices = {
+      enumerateDevices: async () => [
+        { kind: 'audioinput', deviceId: 'mic-1', label: 'MacBook Pro Microphone (Built-in)' }
+      ],
+      getUserMedia: harness.getUserMedia
+    }
+    const pipeline = retainedPipeline(harness.dependencies)
+    pipeline.configure(source)
+    await vi.waitFor(() =>
+      expect(pipeline.getLifecycleSnapshot()).toEqual({
+        status: 'unavailable',
+        active: false,
+        reason: 'no-label-match'
+      })
+    )
+    expect(harness.getUserMedia).not.toHaveBeenCalled()
+  })
+
+  it('retries after a debounced devicechange and goes live when the device arrives', async () => {
+    const harness = pipelineHarness()
+    let labels = [
+      { kind: 'audioinput', deviceId: 'mic-1', label: 'MacBook Pro Microphone (Built-in)' }
+    ]
+    let deviceChange: (() => void) | undefined
+    const timers: Array<{ callback: () => void; ms: number; cleared: boolean }> = []
+    harness.dependencies.mediaDevices = {
+      enumerateDevices: async () => labels,
+      getUserMedia: harness.getUserMedia
+    }
+    harness.dependencies.subscribeDeviceChange = (listener) => {
+      deviceChange = listener
+      return () => {
+        deviceChange = undefined
+      }
+    }
+    harness.dependencies.setTimer = (callback, ms) => {
+      const timer = { callback, ms, cleared: false }
+      timers.push(timer)
+      return timer
+    }
+    harness.dependencies.clearTimer = (handle) => {
+      ;(handle as { cleared: boolean }).cleared = true
+    }
+    const pipeline = retainedPipeline(harness.dependencies)
+    pipeline.configure(source)
+    await vi.waitFor(() => expect(pipeline.getLifecycleSnapshot().status).toBe('unavailable'))
+
+    // AirPods connect: Bluetooth fires a burst; only the last timer runs.
+    labels = [
+      ...labels,
+      { kind: 'audioinput', deviceId: 'airpods', label: 'AirPods Pro (Bluetooth)' }
+    ]
+    deviceChange?.()
+    deviceChange?.()
+    expect(timers.map((timer) => [timer.ms, timer.cleared])).toEqual([
+      [500, true],
+      [500, false]
+    ])
+    timers[1]?.callback()
+    await vi.waitFor(() =>
+      expect(pipeline.getLifecycleSnapshot()).toEqual({ status: 'active', active: true })
+    )
+    expect(harness.getUserMedia).toHaveBeenCalledTimes(1)
+
+    pipeline.dispose()
+    expect(deviceChange).toBeUndefined()
+  })
+
+  it('does not reopen a working preview on devicechange', async () => {
+    const harness = pipelineHarness()
+    let deviceChange: (() => void) | undefined
+    harness.dependencies.subscribeDeviceChange = (listener) => {
+      deviceChange = listener
+      return () => undefined
+    }
+    const pipeline = retainedPipeline(harness.dependencies)
+    pipeline.configure({ ...source, deviceName: 'Studio microphone' })
+    await vi.waitFor(() => expect(pipeline.getLifecycleSnapshot().active).toBe(true))
+    deviceChange?.()
+    await Promise.resolve()
+    expect(harness.getUserMedia).toHaveBeenCalledTimes(1)
+  })
+})

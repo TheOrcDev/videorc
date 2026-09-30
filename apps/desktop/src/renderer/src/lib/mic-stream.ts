@@ -7,6 +7,7 @@
 // stays the capture/health authority; this stream is visual-only.
 
 import type { MediaAccessStatus } from './backend'
+import { matchStrictAudioInput } from './mic-device-label'
 import { matchMicrophoneDeviceId } from './mic-meter'
 
 import { registerVisualMicrophoneOwner } from './mic-visual-ownership'
@@ -48,6 +49,24 @@ export type MicMediaDevicesLike<S extends MicMediaStreamLike> = {
   getUserMedia?: (constraints: MicStreamConstraints) => Promise<S>
 }
 
+/**
+ * Why a visual stream could not open (plan 080 S3). Every reason used to
+ * collapse into one null, and the UI blamed permission for all of them.
+ */
+export type MicStreamFailureReason =
+  | 'no-media'
+  | 'no-label-match'
+  | 'ambiguous-label'
+  | 'labels-hidden'
+  | 'permission-denied'
+  | 'device-busy'
+  | 'device-missing'
+  | 'overconstrained'
+  | 'audio-context'
+  | 'unknown'
+
+export type MicStreamFailure = Readonly<{ reason: MicStreamFailureReason; detail?: string }>
+
 export type MicStreamController<S extends MicMediaStreamLike> = {
   /**
    * Open a stream for the backend-named device (default input when the name
@@ -56,8 +75,39 @@ export type MicStreamController<S extends MicMediaStreamLike> = {
    * acquiring (the racing stream's tracks are stopped).
    */
   open: (deviceName: string | undefined, strict?: boolean) => Promise<S | null>
+  /**
+   * Why the latest open() resolved null, or null when it opened a stream or
+   * lost a race with close() (a superseded open is not a failure).
+   */
+  lastFailure: () => MicStreamFailure | null
   /** Stop every open track; the controller cannot be reused afterwards. */
   close: () => void
+}
+
+/** getUserMedia's DOMException names mapped onto a failure the UI can explain. */
+export function micStreamFailureFromError(error: unknown): MicStreamFailure {
+  const name =
+    typeof error === 'object' && error !== null && 'name' in error
+      ? String((error as { name: unknown }).name)
+      : ''
+  const detail =
+    typeof error === 'object' && error !== null && 'message' in error
+      ? String((error as { message: unknown }).message)
+      : undefined
+  switch (name) {
+    case 'NotAllowedError':
+    case 'SecurityError':
+      return { reason: 'permission-denied', detail }
+    case 'NotReadableError':
+    case 'AbortError':
+      return { reason: 'device-busy', detail }
+    case 'NotFoundError':
+      return { reason: 'device-missing', detail }
+    case 'OverconstrainedError':
+      return { reason: 'overconstrained', detail }
+    default:
+      return { reason: 'unknown', detail }
+  }
 }
 
 /**
@@ -77,6 +127,7 @@ export function createMicStreamController<S extends MicMediaStreamLike>(
 ): MicStreamController<S> {
   let current: S | null = null
   let closed = false
+  let failure: MicStreamFailure | null = null
   let unregisterOwner: (() => void) | undefined
 
   const stopTracks = (stream: S | null): void => {
@@ -92,7 +143,12 @@ export function createMicStreamController<S extends MicMediaStreamLike>(
   }
   return {
     async open(deviceName, strict = false) {
-      if (closed || !media?.getUserMedia) {
+      failure = null
+      if (closed) {
+        return null
+      }
+      if (!media?.getUserMedia) {
+        failure = { reason: 'no-media' }
         return null
       }
       unregisterOwner ??= registerVisualMicrophoneOwner(close)
@@ -103,21 +159,20 @@ export function createMicStreamController<S extends MicMediaStreamLike>(
         if (closed) {
           return null
         }
-        const normalize = (value: string): string =>
-          value.trim().toLocaleLowerCase().replace(/\s+/g, ' ')
-        const exact = inputs.filter(
-          (input) =>
-            input.deviceId !== 'default' &&
-            input.deviceId !== 'communications' &&
-            deviceName &&
-            normalize(input.label) === normalize(deviceName)
-        )
-        const deviceId = strict
-          ? exact.length === 1
-            ? exact[0].deviceId
-            : undefined
-          : matchMicrophoneDeviceId(deviceName, inputs)
-        if (strict && !deviceId) return null
+        let deviceId: string | undefined
+        if (strict) {
+          // Plan 046 S5: a live-safe preview never meters a device other
+          // than the selected one. Plan 080 S3: "the selected one" is found
+          // by its plain name, since Chromium decorates every macOS label.
+          const match = matchStrictAudioInput(deviceName, inputs)
+          if ('failure' in match) {
+            failure = { reason: match.failure }
+            return null
+          }
+          deviceId = match.deviceId
+        } else {
+          deviceId = matchMicrophoneDeviceId(deviceName, inputs)
+        }
         const stream = await media.getUserMedia({
           audio: deviceId
             ? { ...MIC_METER_STREAM_PROCESSING, deviceId: { exact: deviceId } }
@@ -130,10 +185,14 @@ export function createMicStreamController<S extends MicMediaStreamLike>(
         }
         current = stream
         return stream
-      } catch {
+      } catch (error) {
+        if (!closed) {
+          failure = micStreamFailureFromError(error)
+        }
         return null
       }
     },
+    lastFailure: () => failure,
     close
   }
 }

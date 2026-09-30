@@ -1,9 +1,17 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
+import type { Device, SourceSelection } from '@/lib/backend'
+import { defaultCaptureConfig } from '@/lib/capture'
 import { systemAudioSwitchView, type SystemAudioSwitchInput } from '@/lib/system-audio'
-import { SystemAudioInspectorValue } from './quick-settings'
+import { QuickSettings, SystemAudioInspectorValue } from './quick-settings'
+
+const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
+vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
+vi.mock('@/components/workspace-nav', () => ({
+  useWorkspaceNav: () => ({ openSettings: vi.fn() })
+}))
 
 const noop = (): void => {}
 
@@ -64,6 +72,84 @@ describe('Studio inputs System audio row (plan 069)', () => {
     expect(markup).toContain('>Off for this session<')
     expect(markup).toContain(
       'title="System audio is off for this session because the microphone is on a fallback input."'
+    )
+  })
+})
+
+describe('Studio Inputs rows (plan 080 S4)', () => {
+  const display: Device = { id: 'screen:2', name: 'Display 2', kind: 'screen', status: 'available' }
+  const camera: Device = {
+    id: 'camera:1',
+    name: 'MacBook Pro Camera',
+    kind: 'camera',
+    status: 'available'
+  }
+
+  function renderInputs(sources: SourceSelection, devices: Device[] = [display, camera]): string {
+    mocked.core = {
+      captureConfig: { ...defaultCaptureConfig, sources },
+      setCaptureConfig: vi.fn(),
+      switchSourceDeviceLive: vi.fn(),
+      sourceSwitchReason: () => null,
+      allowCaptureNone: true,
+      deviceList: { devices, warnings: [] },
+      selectedCaptureDevice: devices.find((device) => device.id === sources.screenId),
+      selectedCamera: devices.find((device) => device.id === sources.cameraId),
+      selectedMicrophone: undefined,
+      patchVideo: vi.fn(),
+      isSessionActive: false,
+      entitlements: null,
+      captionsStatus: { state: 'idle' },
+      captionsCommandPending: false,
+      wsStatus: 'connected',
+      systemAudioConfirmed: null,
+      systemAudioIssue: null
+    }
+    return renderToStaticMarkup(createElement(QuickSettings))
+  }
+
+  const rowLabels = (markup: string): string[] =>
+    [...markup.matchAll(/data-slot="inspector-row".*?<span[^>]*>([^<]+)<\/span>/g)].map(
+      (match) => match[1] as string
+    )
+
+  it('gives screen and camera their own rows, in order', () => {
+    const systemAudio: Device = {
+      id: 'system-audio',
+      name: 'System audio',
+      kind: 'system-audio',
+      status: 'available'
+    }
+    const markup = renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' }, [
+      display,
+      camera,
+      systemAudio
+    ])
+    expect(rowLabels(markup)).toEqual([
+      'Screen',
+      'Camera',
+      'Mic',
+      'System audio',
+      'Output',
+      'Captions'
+    ])
+    expect(markup).toContain('title="Display 2"')
+    expect(markup).toContain('title="MacBook Pro Camera"')
+    // The old joined trigger ("Display 2 · MacBook Pro Camera") is gone.
+    expect(markup).not.toContain('Display 2 · MacBook Pro Camera')
+  })
+
+  it('shows Off for no camera, and the saved name for a missing one', () => {
+    expect(renderInputs({ screenId: 'screen:2', cameraOff: true })).toContain('title="Off"')
+    expect(
+      renderInputs({ screenId: 'screen:2', cameraId: 'camera:gone', cameraName: 'Cam Link 4K' })
+    ).toContain('title="Cam Link 4K"')
+  })
+
+  it('names the test pattern and a missing screen instead of going blank', () => {
+    expect(renderInputs({ testPattern: true, cameraOff: true })).toContain('title="Test pattern"')
+    expect(renderInputs({ screenId: 'screen:gone', screenName: 'Display 3' })).toContain(
+      'title="Display 3"'
     )
   })
 })
