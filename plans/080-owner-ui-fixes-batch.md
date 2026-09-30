@@ -757,9 +757,19 @@ Gates run on the branch:
   `pnpm test:scripts` (1686 tests);
 - `pnpm build` + `pnpm check:renderer-assets`: 1,992,440 raw / 384,750 gzip
   eager, which is under budget and unchanged by the lazy Livestream work.
-- `pnpm smoke:recording-studio` (33 steps) PASSED at `1a1319a5` (S3 + S4).
-  It was re-run at `2b2acc32` after the analyser fix; see the PR for the
-  result.
+- `pnpm smoke:recording-studio` (33 steps) passed end to end at `1a1319a5`
+  (S3 + S4).
+- Re-run at `2b2acc32` after the analyser fix: every step passes, with two
+  failures that did not reproduce.
+  - Step 10 (freeform pointer capture) failed once; alone it passed with 98
+    gestures.
+  - Step 28 (`probe:preview-lifecycle`) failed 3 times, all between 13:04 and
+    13:07: the main window closed mid-probe. It then passed 7 of 7 at the same
+    commit (4 instrumented, with no renderer crash or stray close logged).
+    The commit before the fix passed 2 of 2 in the same period.
+  - Steps 11-27 and 29-33 passed.
+  - The cause of the clustered failures is unproven. Give
+    `probe:preview-lifecycle` one more run on the owner's machine.
 - Dev-app by-eye pass (`capture-page`, 1280 px and 760 px):
   - Inputs rows read Screen, Camera, Mic, System audio, Output, Captions.
   - Settings headings have 0 heading SVGs across all seven tabs.
