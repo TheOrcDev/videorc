@@ -11,7 +11,6 @@ import {
 
 function completeEnv(overrides = {}) {
   return {
-    VIDEORC_ENABLE_YOUTUBE_OAUTH: '1',
     VIDEORC_YOUTUBE_CLIENT_ID: 'youtube-client-id-value',
     // Google's Desktop client rejects a secretless token exchange, so a
     // complete YouTube setup now carries the secret too.
@@ -67,8 +66,9 @@ describe('provider readiness evidence', () => {
 
     assert.equal(result.ready, false)
     assert.match(markdown, /VIDEORC_SMOKE_PROVIDER_CALLBACKS_READY=missing/)
-    assert.match(markdown, /Paused Provider Paths/)
-    assert.match(markdown, /YouTube OAuth is paused/)
+    // Google approved YouTube OAuth, so a missing secret is a gap, not a pause.
+    assert.doesNotMatch(markdown, /Paused Provider Paths/)
+    assert.equal(result.providers.find((provider) => provider.label === 'YouTube').ready, false)
     assert.match(markdown, /X Native Live Access/)
     assert.match(consoleReport, /Provider live-smoke readiness is incomplete/)
     assert.doesNotMatch(markdown, /do-not-print-youtube-client/)

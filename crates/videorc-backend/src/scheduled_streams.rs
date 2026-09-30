@@ -386,10 +386,10 @@ pub fn sanitized_error_for(provider: &str, error: &anyhow::Error) -> ScheduleErr
             "external-change",
             "This event changed on YouTube. Reload and review the changes before editing.",
         )
-    } else if raw.contains("approval") || raw.contains("paused") {
+    } else if raw.contains("not configured") {
         (
             "unavailable",
-            "YouTube connection is unavailable pending Google approval.",
+            "YouTube sign-in is not available in this build.",
         )
     } else if error.downcast_ref::<reqwest::Error>().is_some() {
         (

@@ -71,16 +71,13 @@ describe('evaluateMacosReleaseGithubSecrets', () => {
       'VIDEORC_BUNDLED_KICK_CLIENT_ID',
       'VIDEORC_BUNDLED_KICK_CLIENT_SECRET',
       'VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_KEY',
-      'VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_SECRET'
-    ]) {
-      assert.ok(names(REQUIRED_MACOS_RELEASE_GITHUB_SECRETS).includes(name), name)
-    }
-    for (const name of [
+      'VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_SECRET',
+      // Google approved YouTube OAuth on 2026-09-30.
       'VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID',
       'VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET'
     ]) {
-      assert.ok(names(CONDITIONAL_MACOS_RELEASE_GITHUB_SECRETS).includes(name), name)
-      assert.ok(!names(REQUIRED_MACOS_RELEASE_GITHUB_SECRETS).includes(name), name)
+      assert.ok(names(REQUIRED_MACOS_RELEASE_GITHUB_SECRETS).includes(name), name)
+      assert.ok(!names(CONDITIONAL_MACOS_RELEASE_GITHUB_SECRETS).includes(name), name)
     }
   })
 

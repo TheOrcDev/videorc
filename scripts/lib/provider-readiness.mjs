@@ -11,15 +11,10 @@ export const REQUIRED_OAUTH_CALLBACK_URLS = [
 ]
 
 export const PROVIDER_CALLBACKS_READY_ENV = 'VIDEORC_SMOKE_PROVIDER_CALLBACKS_READY'
-export const YOUTUBE_OAUTH_PAUSED_REASON =
-  'YouTube OAuth is paused while Videorc awaits Google approval; use Manual RTMP for YouTube acceptance.'
 
 export const PROVIDERS = [
   {
     label: 'YouTube',
-    paused: true,
-    pauseReason: YOUTUBE_OAUTH_PAUSED_REASON,
-    enableVars: ['VIDEORC_ENABLE_YOUTUBE_OAUTH', 'VIDEORC_BUNDLED_YOUTUBE_OAUTH_ENABLED'],
     clientIdVars: ['VIDEORC_YOUTUBE_CLIENT_ID', 'VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID'],
     // Google's Desktop client type REQUIRES client_secret in the token
     // exchange even with PKCE: omitting it fails AFTER consent with
@@ -260,7 +255,7 @@ export function formatProviderReadinessMarkdown(result) {
     )
   } else {
     lines.push(
-      '- Run the real Twitch and X OAuth/live acceptance steps from `docs/oauth-live-smoke.md`; use Manual RTMP for YouTube until Google approval completes.'
+      '- Run the real YouTube, Twitch, Kick and X OAuth/live acceptance steps from `docs/oauth-live-smoke.md`.'
     )
   }
 

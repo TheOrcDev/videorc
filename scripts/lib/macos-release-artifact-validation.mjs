@@ -45,8 +45,8 @@ export function captureEntitlementCheckTargets(appPath) {
 
 // Native X Live is dead in a release whose backend lacks the baked OAuth 1.0a
 // consumer pair (users would see "Credentials needed" instead of Authorize X
-// Live), so the validator fails closed on both halves — same mechanism the
-// baked YouTube secret used before Google approval paused that flow.
+// Live), so the validator fails closed on both halves — same mechanism as the
+// baked YouTube pair below.
 export const BUNDLED_X_OAUTH1_CONSUMER_ENVS = [
   'VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_KEY',
   'VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_SECRET'
@@ -56,6 +56,24 @@ export function bundledXOauth1ConsumerCheckTargets(appPath) {
   return BUNDLED_X_OAUTH1_CONSUMER_ENVS.map((envName) => ({
     id: `bundled-x-oauth1-${envName.endsWith('KEY') ? 'consumer-key' : 'consumer-secret'}`,
     label: `bundled X OAuth1 ${envName.endsWith('KEY') ? 'consumer key' : 'consumer secret'} (videorc-backend)`,
+    type: 'binary-contains-env-secret',
+    envName,
+    path: `${appPath}/Contents/Resources/videorc-backend`
+  }))
+}
+
+// YouTube sign-in (Google approved youtube.force-ssl on 2026-09-30) is dead in
+// a release whose backend lacks the baked Desktop client pair: Google refuses
+// the token exchange without the secret even with PKCE (#182).
+export const BUNDLED_YOUTUBE_OAUTH_ENVS = [
+  'VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID',
+  'VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET'
+]
+
+export function bundledYoutubeOauthCheckTargets(appPath) {
+  return BUNDLED_YOUTUBE_OAUTH_ENVS.map((envName) => ({
+    id: `bundled-youtube-oauth-${envName.endsWith('ID') ? 'client-id' : 'client-secret'}`,
+    label: `bundled YouTube OAuth ${envName.endsWith('ID') ? 'client ID' : 'client secret'} (videorc-backend)`,
     type: 'binary-contains-env-secret',
     envName,
     path: `${appPath}/Contents/Resources/videorc-backend`
@@ -262,6 +280,7 @@ export function buildMacosReleaseArtifactChecks(path) {
         ]
       },
       ...bundledXOauth1ConsumerCheckTargets(path),
+      ...bundledYoutubeOauthCheckTargets(path),
       ...bundledKickSecretLeakCheckTargets(path)
     ]
   }

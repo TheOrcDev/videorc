@@ -25,8 +25,15 @@ try {
     const youtubeStart = await requestRaw(ws, timeoutMs, 'platformAccounts.oauth.startProvider', {
       platform: 'youtube'
     })
-    if (youtubeStart.ok || !String(youtubeStart.error?.message).includes('Google approval')) {
-      throw new Error(`YouTube provider OAuth should be paused: ${JSON.stringify(youtubeStart)}`)
+    // Google's Desktop client needs the secret even with PKCE (#182), so a
+    // build with the id alone must refuse before the browser opens.
+    if (
+      youtubeStart.ok ||
+      !String(youtubeStart.error?.message).includes('YouTube OAuth is not configured')
+    ) {
+      throw new Error(
+        `YouTube provider OAuth without its client secret should refuse to start: ${JSON.stringify(youtubeStart)}`
+      )
     }
 
     const refreshedAccounts = await request(ws, timeoutMs, 'platformAccounts.refresh')
@@ -94,14 +101,16 @@ function assertProviderCredentials(credentials) {
   }
   const byPlatform = new Map(credentials.map((credential) => [credential.platform, credential]))
 
-  const youtube = byPlatform.get('youtube')
+  // YouTube needs BOTH halves: Google's Desktop client requires the secret in
+  // the token exchange even with PKCE (#182). The smoke env sets the id only.
+  const youtube = requireCredential(byPlatform, 'youtube')
   if (
-    !youtube ||
     youtube.ready ||
     !youtube.pkce ||
-    !String(youtube.message).includes('Google approval')
+    youtube.clientSecretPresent ||
+    !String(youtube.message).includes('VIDEORC_YOUTUBE_CLIENT_SECRET')
   ) {
-    throw new Error(`YouTube OAuth paused-state mismatch: ${JSON.stringify(youtube)}`)
+    throw new Error(`YouTube secret-required readiness mismatch: ${JSON.stringify(youtube)}`)
   }
 
   // Twitch is a PUBLIC client type: ready with the client id alone, no
@@ -280,16 +289,18 @@ function assertSecretRefPreflight(preflight) {
   ) {
     throw new Error(`Secret-ref Go Live preflight should be valid: ${JSON.stringify(preflight)}`)
   }
-  const [approvalWarning] = preflight.issues
+  // No YouTube account is connected in the smoke profile, so comments are a
+  // non-blocking warning.
+  const [commentsWarning] = preflight.issues
   if (
     preflight.issues.length !== 1 ||
-    approvalWarning?.platform !== 'youtube' ||
-    approvalWarning?.targetId !== 'youtube' ||
-    approvalWarning?.severity !== 'warning' ||
-    !String(approvalWarning?.message).includes('Google approval')
+    commentsWarning?.platform !== 'youtube' ||
+    commentsWarning?.targetId !== 'youtube' ||
+    commentsWarning?.severity !== 'warning' ||
+    !String(commentsWarning?.message).includes('Connect YouTube')
   ) {
     throw new Error(
-      `Secret-ref Go Live preflight should report only the non-blocking YouTube approval warning: ${JSON.stringify(preflight)}`
+      `Secret-ref Go Live preflight should report only the non-blocking YouTube comments warning: ${JSON.stringify(preflight)}`
     )
   }
 
@@ -300,7 +311,7 @@ function assertSecretRefPreflight(preflight) {
     youtube.authMode !== 'manual-rtmp' ||
     youtube.chatRead !== 'unavailable' ||
     youtube.chatWrite !== 'unavailable' ||
-    !String(youtube.chatMessage).includes('Google approval')
+    !String(youtube.chatMessage).includes('Connect YouTube')
   ) {
     throw new Error(
       `Manual YouTube secret-ref preflight should be ready: ${JSON.stringify(preflight)}`
@@ -391,7 +402,9 @@ function launchAndReadConnection() {
         VIDEORC_X_CLIENT_ID: 'smoke-x-client-id',
         VIDEORC_TWITCH_CLIENT_SECRET: '',
         VIDEORC_KICK_CLIENT_ID: 'smoke-kick-client-id',
-        VIDEORC_KICK_CLIENT_SECRET: ''
+        VIDEORC_KICK_CLIENT_SECRET: '',
+        VIDEORC_YOUTUBE_CLIENT_ID: 'smoke-youtube-client-id',
+        VIDEORC_YOUTUBE_CLIENT_SECRET: ''
       }),
       stdio: ['ignore', 'pipe', 'pipe']
     })

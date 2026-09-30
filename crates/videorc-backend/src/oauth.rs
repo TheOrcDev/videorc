@@ -54,37 +54,6 @@ const KICK_OAUTH_SCOPES: &[&str] = &[
     "streamkey:read",
     "events:subscribe",
 ];
-pub const YOUTUBE_OAUTH_UNAVAILABLE_MESSAGE: &str = "YouTube OAuth is temporarily unavailable while Videorc awaits Google approval. Use Manual RTMP for YouTube for now.";
-
-pub fn provider_oauth_unavailable_message(platform: StreamPlatform) -> Option<&'static str> {
-    match platform {
-        StreamPlatform::Youtube if !youtube_oauth_enabled() => {
-            Some(YOUTUBE_OAUTH_UNAVAILABLE_MESSAGE)
-        }
-        StreamPlatform::Twitch
-        | StreamPlatform::Kick
-        | StreamPlatform::X
-        | StreamPlatform::Tiktok
-        | StreamPlatform::Instagram
-        | StreamPlatform::Custom => None,
-        StreamPlatform::Youtube => None,
-    }
-}
-
-fn youtube_oauth_enabled() -> bool {
-    optional_env("VIDEORC_ENABLE_YOUTUBE_OAUTH")
-        .as_deref()
-        .is_some_and(env_flag_enabled)
-        || option_env!("VIDEORC_BUNDLED_YOUTUBE_OAUTH_ENABLED").is_some_and(env_flag_enabled)
-}
-
-fn env_flag_enabled(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes"
-    )
-}
-
 pub fn provider_http_client() -> reqwest::Client {
     provider_http_client_with_timeout(OAUTH_PROVIDER_REQUEST_TIMEOUT)
 }
@@ -852,23 +821,24 @@ where
         let platform = session.platform;
         let work = match restore_oauth_work(&session.state, platform, session.work) {
             Ok(work) => work,
-            // A checkpoint whose restoration fails ONLY because the platform's
-            // OAuth is currently gated off (a YouTube pre-exchange flow
-            // recorded while the integration was enabled, loaded after it was
-            // disabled again) is not corruption: the flow can never resume
-            // while the gate is closed, so the checkpoint is dropped and its
-            // secrets are cleaned up. Later stages (token / account storage)
-            // restore without provider config and MUST survive restarts, so
-            // the drop is keyed to the restoration error, not the platform.
-            // Failing the whole store here put every backend into a 5-second
-            // "storage is unavailable" ERROR loop for the life of the process
-            // (2026-08-27 field log).
+            // A checkpoint whose restoration fails ONLY because this build
+            // cannot configure the platform's OAuth (a pre-exchange flow
+            // recorded by a build with the credentials, loaded by one
+            // without them) is not corruption: the flow can never resume
+            // here, so the checkpoint is dropped and its secrets are cleaned
+            // up. Later stages (token / account storage) restore without
+            // provider config and MUST survive restarts, so the drop is keyed
+            // to the restoration error, not the platform. Failing the whole
+            // store here put every backend into a 5-second "storage is
+            // unavailable" ERROR loop for the life of the process (2026-08-27
+            // field log, when YouTube OAuth was paused for Google review).
             Err(error)
-                if provider_oauth_unavailable_message(platform)
-                    .is_some_and(|message| format!("{error:#}").contains(message)) =>
+                if provider_config(platform).err().is_some_and(|unavailable| {
+                    format!("{error:#}").contains(&unavailable.to_string())
+                }) =>
             {
                 tracing::warn!(
-                    "Dropped a pending {platform:?} OAuth recovery checkpoint: the platform's OAuth is currently disabled, so the interrupted flow can never resume."
+                    "Dropped a pending {platform:?} OAuth recovery checkpoint: this build cannot configure the platform's OAuth, so the interrupted flow can never resume."
                 );
                 for secret_ref in secret_refs {
                     if let Err(error) = delete_secret(&secret_ref) {
@@ -1209,9 +1179,6 @@ impl OAuthSessions {
         self.ensure_store_available()?;
         if matches!(params.platform, StreamPlatform::Custom) {
             anyhow::bail!("Custom RTMP does not support OAuth.");
-        }
-        if let Some(message) = provider_oauth_unavailable_message(params.platform) {
-            anyhow::bail!("{message}");
         }
         let mut config = provider_config(params.platform)?;
         for scope in optional_provider_scopes(params.platform, &params.optional_scopes)? {
@@ -2866,15 +2833,16 @@ fn provider_config(platform: StreamPlatform) -> Result<OAuthProviderConfig> {
             crate::streaming::stream_platform_label(platform)
         ),
         StreamPlatform::Youtube => {
-            if let Some(message) = provider_oauth_unavailable_message(platform) {
-                anyhow::bail!("{message}");
-            }
+            let not_configured =
+                |_| anyhow::anyhow!("YouTube OAuth is not configured in this build.");
             Ok(youtube_provider_config(
-                required_credential("VIDEORC_YOUTUBE_CLIENT_ID", BUNDLED_YOUTUBE_CLIENT_ID)?,
+                required_credential("VIDEORC_YOUTUBE_CLIENT_ID", BUNDLED_YOUTUBE_CLIENT_ID)
+                    .map_err(not_configured)?,
                 required_credential(
                     "VIDEORC_YOUTUBE_CLIENT_SECRET",
                     BUNDLED_YOUTUBE_CLIENT_SECRET,
-                )?,
+                )
+                .map_err(not_configured)?,
             ))
         }
         StreamPlatform::Twitch => Ok(OAuthProviderConfig {
@@ -3002,25 +2970,18 @@ pub fn provider_client_id(platform: StreamPlatform) -> Result<String> {
 }
 
 pub fn provider_credential_statuses() -> Vec<OAuthProviderCredentialStatus> {
-    let youtube = if youtube_oauth_enabled() {
+    vec![
+        // Google's Desktop client needs its secret in the token exchange even
+        // with PKCE (#182), so an ID alone is not ready.
         provider_credential_status(
             StreamPlatform::Youtube,
             "VIDEORC_YOUTUBE_CLIENT_ID",
             "VIDEORC_YOUTUBE_CLIENT_SECRET",
             BUNDLED_YOUTUBE_CLIENT_ID,
-            None,
+            BUNDLED_YOUTUBE_CLIENT_SECRET,
             true,
-            true,
-        )
-    } else {
-        disabled_provider_credential_status(
-            StreamPlatform::Youtube,
-            YOUTUBE_OAUTH_UNAVAILABLE_MESSAGE,
-            true,
-        )
-    };
-    vec![
-        youtube,
+            false,
+        ),
         // Twitch ships as a PUBLIC client type (dev console setting), so no
         // client secret exists. That does NOT make the authorization-code
         // grant work: Twitch rejects a secretless public client with
@@ -3121,22 +3082,6 @@ async fn revoke_youtube_token_at(
         return Ok(());
     }
     anyhow::bail!("Google rejected YouTube access revocation with HTTP {status}.")
-}
-
-fn disabled_provider_credential_status(
-    platform: StreamPlatform,
-    message: &str,
-    pkce: bool,
-) -> OAuthProviderCredentialStatus {
-    OAuthProviderCredentialStatus {
-        platform,
-        ready: false,
-        client_id_present: false,
-        client_secret_present: false,
-        client_id_source: OAuthCredentialSource::Missing,
-        pkce,
-        message: message.to_string(),
-    }
 }
 
 fn provider_credential_status(
@@ -3374,13 +3319,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gate_closed_youtube_checkpoint_is_dropped_not_fatal() {
-        // 2026-08-27 field incident: a YouTube checkpoint persisted while the
-        // OAuth gate was open failed restoration once the gate closed, which
+    async fn unconfigured_provider_checkpoint_is_dropped_not_fatal() {
+        // 2026-08-27 field incident: a YouTube checkpoint persisted while
+        // YouTube OAuth was usable failed restoration once it was not, which
         // failed the WHOLE store load and put every backend into a 5-second
         // "storage is unavailable" ERROR loop for the life of the process.
-        // (This test assumes the ambient environment leaves the YouTube gate
-        // closed, like every other gate-dependent test in this file.)
+        // Test builds bake no YouTube credentials; a shell that exports the
+        // runtime ones makes the checkpoint restorable, so there is nothing
+        // to drop.
+        if provider_config(StreamPlatform::Youtube).is_ok() {
+            return;
+        }
         let store_path = pending_store_path();
         let store = format!(
             concat!(
@@ -5100,7 +5049,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn youtube_provider_start_is_paused_until_google_approval() {
+    async fn youtube_provider_start_needs_only_credentials_not_an_approval_gate() {
+        // Google approved the youtube.force-ssl scope (2026-09-30), so the
+        // only thing that keeps YouTube dark is a build without credentials.
+        if provider_config(StreamPlatform::Youtube).is_ok() {
+            return;
+        }
         let sessions = OAuthSessions::default();
 
         let error = sessions
@@ -5115,7 +5069,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(error.to_string().contains("Google approval"));
+        assert_eq!(
+            error.to_string(),
+            "YouTube OAuth is not configured in this build."
+        );
     }
 
     #[test]
@@ -5363,8 +5320,12 @@ mod tests {
             .find(|status| status.platform == StreamPlatform::Youtube)
             .unwrap();
         assert!(youtube.pkce);
-        assert!(!youtube.ready);
-        assert!(youtube.message.contains("Google approval"));
+        // Google's Desktop client needs the secret with PKCE, so YouTube is
+        // ready only with both halves.
+        assert_eq!(
+            youtube.ready,
+            youtube.client_id_present && youtube.client_secret_present
+        );
         assert!(
             statuses
                 .iter()
@@ -5389,10 +5350,6 @@ mod tests {
 
     #[test]
     fn kick_is_dark_until_credentials_are_configured() {
-        assert_eq!(
-            provider_oauth_unavailable_message(StreamPlatform::Kick),
-            None
-        );
         // No test build bakes Kick credentials and no test sets the runtime
         // vars, so both the config and the readiness row stay dark.
         if BUNDLED_KICK_CLIENT_ID.is_none() && optional_env("VIDEORC_KICK_CLIENT_ID").is_none() {
@@ -5697,8 +5654,6 @@ mod tests {
             config.extra_params.get("prompt").map(String::as_str),
             Some("consent")
         );
-        assert!(env_flag_enabled("TRUE"));
-        assert!(!env_flag_enabled("0"));
     }
 
     #[tokio::test]

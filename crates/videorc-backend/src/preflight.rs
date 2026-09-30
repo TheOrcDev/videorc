@@ -7,7 +7,7 @@ use crate::streaming::{
     PlatformAccount, PlatformAccountStatus, StreamAuthMode, StreamMetadataDraft, StreamPlatform,
     StreamTargetSettings, StreamingSettings,
 };
-use crate::{oauth, x_live};
+use crate::x_live;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -194,20 +194,7 @@ fn destination_preflight(
         }
         StreamAuthMode::Oauth => {
             let account = account_for_target(target, accounts);
-            if let Some(unavailable) = oauth::provider_oauth_unavailable_message(target.platform) {
-                if let Some(account) = account {
-                    account_id = Some(account.account_id.clone());
-                    account_label = Some(account.account_label.clone());
-                }
-                ready = false;
-                let issue = unavailable.to_string();
-                message = issue.clone();
-                issues.push(target_issue(
-                    target,
-                    GoLivePreflightIssueSeverity::Error,
-                    issue,
-                ));
-            } else if target.platform == StreamPlatform::X {
+            if target.platform == StreamPlatform::X {
                 if let Some(account) = account {
                     account_id = Some(account.account_id.clone());
                     account_label = Some(account.account_label.clone());
@@ -595,7 +582,7 @@ mod tests {
         }
     }
     #[test]
-    fn preflight_blocks_youtube_oauth_while_twitch_is_ready_and_x_is_blocked() {
+    fn preflight_passes_youtube_oauth_and_twitch_while_x_is_blocked() {
         let mut targets = default_stream_targets();
         for target in &mut targets {
             // Enable the horizontal trio by ID — the platform alone is
@@ -618,8 +605,10 @@ mod tests {
         metadata.title = "Launch stream".to_string();
         metadata.description = "We are live.".to_string();
         metadata.default_privacy = StreamPrivacy::Public;
+        let mut youtube_account = account(StreamPlatform::Youtube, "yt", "YouTube Channel");
+        youtube_account.scopes = vec![crate::live_chat::YOUTUBE_CHAT_SCOPE.to_string()];
         let accounts = vec![
-            account(StreamPlatform::Youtube, "yt", "YouTube Channel"),
+            youtube_account,
             account(StreamPlatform::Twitch, "tw", "Twitch Channel"),
             account(StreamPlatform::X, "x", "X Account"),
         ];
@@ -642,8 +631,8 @@ mod tests {
             .iter()
             .find(|destination| destination.platform == StreamPlatform::Youtube)
             .unwrap();
-        assert!(!youtube.ready);
-        assert!(youtube.message.contains("Google approval"));
+        assert!(youtube.ready);
+        assert_eq!(youtube.account_id.as_deref(), Some("yt"));
         assert!(
             preflight
                 .destinations
@@ -666,7 +655,7 @@ mod tests {
                 .any(|issue| issue.platform == Some(StreamPlatform::X))
         );
         assert!(
-            preflight
+            !preflight
                 .issues
                 .iter()
                 .any(|issue| issue.platform == Some(StreamPlatform::Youtube))
@@ -676,9 +665,9 @@ mod tests {
         assert_eq!(x.chat_read, CommentsReadState::Unavailable);
         assert_eq!(x.chat_write, CommentsWriteState::ReadOnly);
         assert!(x.chat_message.contains("OAuth 1.0a"));
-        assert_eq!(youtube.chat_read, CommentsReadState::Unavailable);
-        assert_eq!(youtube.chat_write, CommentsWriteState::Unavailable);
-        assert!(!youtube.chat_message.is_empty());
+        assert_eq!(youtube.chat_read, CommentsReadState::Ready);
+        assert_eq!(youtube.chat_write, CommentsWriteState::Ready);
+        assert_eq!(youtube.chat_message, "YouTube live comments are ready.");
     }
 
     #[test]

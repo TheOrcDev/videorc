@@ -68,7 +68,10 @@ const launch = async () => {
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
       VIDEORC_SMOKE_PREVIEW_MOTION: '1',
       VIDEORC_NATIVE_PREVIEW_SURFACE: '1',
-      VIDEORC_ENABLE_YOUTUBE_OAUTH: '1',
+      // Scheduling is offered only when YouTube sign-in is configured; the
+      // fixture API never sees these.
+      VIDEORC_YOUTUBE_CLIENT_ID: 'scheduled-smoke-client-id',
+      VIDEORC_YOUTUBE_CLIENT_SECRET: 'scheduled-smoke-client-secret',
       VIDEORC_SCHEDULED_STREAMS_SMOKE_URL: fixture.origin
     }
   })

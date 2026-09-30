@@ -724,9 +724,6 @@ async fn read_source(
     client: &reqwest::Client,
     source: &AudienceSource,
 ) -> SourceRead {
-    if let Some(message) = crate::oauth::provider_oauth_unavailable_message(source.platform) {
-        return AudienceReading::Unavailable(message.to_string()).into();
-    }
     let account_id = source.account_id.as_deref();
     let credential = crate::platform_account_credential(state, source.platform, account_id).ok();
     // X: the "Authorize X Live" OAuth 1.0a token signed this broadcast, so it

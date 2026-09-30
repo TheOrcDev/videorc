@@ -47,11 +47,14 @@ send-result honesty, highlight slot, and event protocol end to end over a real W
       isolated spawned async tasks that only touch provider status + the bounded buffer, never
       the capture/encode path, so there should be no regression.
 
-## YouTube live chat (deferred until Google approval)
+## YouTube OAuth live smoke (Google approved `youtube.force-ssl` on 2026-09-30)
 
-- [ ] Confirm YouTube chat readiness reports the Google approval pause message.
-- [ ] Do not connect a YouTube OAuth account or run YouTube chat acceptance until Google approval completes.
-- [ ] Use Manual RTMP for YouTube stream acceptance in the meantime.
+- [ ] Connect YouTube; preflight must report read and write readiness (one scope grants both).
+- [ ] Go Live to a YouTube OAuth destination; confirm the panel shows YouTube `connected` once
+      the broadcast's live chat exists, and a watch-page message arrives in Videorc.
+- [ ] Send a message from Videorc; it appears in the watch-page chat and reports sent.
+- [ ] A YouTube destination on Manual RTMP has no broadcast to attach comments to; confirm its
+      row says so instead of failing silently.
 
 ## Twitch OAuth live smoke (requires a Twitch account with chat read + write scopes)
 
@@ -111,9 +114,8 @@ OAuth with `events:subscribe` and `chat:write`.
 
 ## Multistream + partial release
 
-- [ ] Go Live to YouTube Manual RTMP + Twitch + X simultaneously; confirm a single unified panel shows
-      every platform's state and merges Twitch + native X comments chronologically, while
-      YouTube reports the Google approval pause without blocking Go Live.
+- [ ] Go Live to YouTube OAuth + Twitch + X simultaneously; confirm a single unified panel shows
+      every platform's state and merges YouTube, Twitch and native X comments chronologically.
 - [ ] Send one message from Videorc. Every writable destination receives one copy and reports
       its own result; X remains explicitly receive-only rather than being omitted or shown sent.
 - [ ] Confirm the streamer can read all comments from the in-app panel **without opening any

@@ -4,7 +4,6 @@ import { describe, it } from 'node:test'
 
 import {
   RELEASE_BUNDLED_OAUTH_ENV,
-  RELEASE_OPTIONAL_BUNDLED_OAUTH_ENV,
   releaseBundledOauthChecks
 } from './release-bundled-oauth.mjs'
 
@@ -27,7 +26,9 @@ describe('release bundled OAuth credentials', () => {
       ...completeBundledOauthEnv,
       VIDEORC_BUNDLED_TWITCH_CLIENT_ID: undefined,
       VIDEORC_BUNDLED_KICK_CLIENT_SECRET: '   ',
-      VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_KEY: 'paste-your-client-id-here'
+      VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_KEY: 'paste-your-client-id-here',
+      // An unset GitHub secret expands to "": YouTube sign-in would ship dead.
+      VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET: ''
     }
     const failed = releaseBundledOauthChecks(env).filter((check) => !check.ok)
     assert.deepEqual(
@@ -35,7 +36,8 @@ describe('release bundled OAuth credentials', () => {
       [
         'bundled-oauth-VIDEORC_BUNDLED_TWITCH_CLIENT_ID',
         'bundled-oauth-VIDEORC_BUNDLED_KICK_CLIENT_SECRET',
-        'bundled-oauth-VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_KEY'
+        'bundled-oauth-VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_KEY',
+        'bundled-oauth-VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET'
       ]
     )
     assert.match(failed[2].detail, /template text/)
@@ -52,7 +54,7 @@ describe('release bundled OAuth credentials', () => {
     const windows = workflow('release-windows-alpha.yml')
     const linux = workflow('release-linux-alpha.yml')
     const macos = workflow('release-macos.yml')
-    for (const name of [...RELEASE_BUNDLED_OAUTH_ENV, ...RELEASE_OPTIONAL_BUNDLED_OAUTH_ENV]) {
+    for (const name of RELEASE_BUNDLED_OAUTH_ENV) {
       const mapping = `${name}: \${{ secrets.${name} }}`
       assert.equal(windows.split(mapping).length - 1, 1, `Windows build step maps ${name}`)
       // Linux: once for the preflight step, once for the package step.

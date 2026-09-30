@@ -17,17 +17,16 @@ export const RELEASE_BUNDLED_OAUTH_ENV = [
   'VIDEORC_BUNDLED_KICK_CLIENT_SECRET',
   // Native X Live signs every request with OAuth 1.0a (consumer pair).
   'VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_KEY',
-  'VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_SECRET'
-]
-
-// Baked when set, for parity with macOS, but not required: YouTube OAuth is
-// paused until Google approves the scope. VIDEORC_BUNDLED_X_CLIENT_ID is
-// deliberately absent: X OAuth 2.0 uses the public client id written into
-// oauth.rs, and an unset GitHub secret expands to "" rather than nothing.
-export const RELEASE_OPTIONAL_BUNDLED_OAUTH_ENV = [
+  'VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_SECRET',
+  // YouTube (Google approved youtube.force-ssl on 2026-09-30): the Desktop
+  // client's token exchange needs the secret even with PKCE (#182).
   'VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID',
   'VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET'
 ]
+
+// VIDEORC_BUNDLED_X_CLIENT_ID is deliberately absent: X OAuth 2.0 uses the
+// public client id written into oauth.rs, and an unset GitHub secret expands
+// to "" rather than nothing.
 
 /** One preflight check per required credential. Never includes a value. */
 export function releaseBundledOauthChecks(env = process.env) {

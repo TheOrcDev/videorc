@@ -268,11 +268,12 @@ Required GitHub secrets:
 - `VIDEORC_BUNDLED_KICK_CLIENT_SECRET`: baked into `videorc-backend` only (never `app.asar`)
 - `VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_KEY`: allow-listed X app API key; Native X Live is dead without it
 - `VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_SECRET`: allow-listed X app API secret; `release:validate:macos` fails closed if either X half is missing
+- `VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID`: Google Desktop client ID, baked into `videorc-backend`
+- `VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET`: Google Desktop client secret; Google refuses the token exchange without it even with PKCE, and `release:validate:macos` fails closed if either YouTube half is missing
 
 A local keychain release reads the same bundled OAuth names from
 `~/.videorc-release.env` (source `export NAME=` lines too). Do not invent
-placeholder values. Optional while YouTube OAuth is paused:
-`VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID` and `VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET`.
+placeholder values.
 
 Required private download storage secrets:
 
@@ -467,9 +468,9 @@ feed/backend).
 
 Production builds should inject Videorc-owned OAuth client IDs at backend compile time. Development and self-hosted builds can override those IDs at runtime.
 
-YouTube OAuth is paused in public builds until Google approval completes. Keep
-YouTube available through Manual RTMP. Only reviewer candidates (or approved
-releases) should set the two guarded YouTube build variables below.
+Google approved YouTube OAuth (`youtube.force-ssl`) on 2026-09-30. There is no
+separate enable flag: a build that bakes both YouTube values offers YouTube
+sign-in, and one without them keeps YouTube on Manual RTMP.
 
 Bundled production defaults:
 
@@ -480,9 +481,10 @@ VIDEORC_BUNDLED_X_CLIENT_ID=...
 # even with PKCE, so Kick OAuth is dark unless both are baked in.
 VIDEORC_BUNDLED_KICK_CLIENT_ID=...
 VIDEORC_BUNDLED_KICK_CLIENT_SECRET=...
-# Reviewer candidate or approved release only:
+# YouTube: id AND secret. Google's Desktop client requires the secret in the
+# token exchange even with PKCE.
 VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID=...
-VIDEORC_BUNDLED_YOUTUBE_OAUTH_ENABLED=1
+VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET=...
 pnpm package:backend
 ```
 
@@ -493,7 +495,8 @@ Where the bundled values come from:
   repository secrets with the same names (`VIDEORC_BUNDLED_TWITCH_CLIENT_ID`,
   `VIDEORC_BUNDLED_KICK_CLIENT_ID`, `VIDEORC_BUNDLED_KICK_CLIENT_SECRET`,
   `VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_KEY`, `VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_SECRET`,
-  and the two YouTube values). `release:preflight:windows` and
+  `VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID`, `VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET`).
+  `release:preflight:windows` and
   `release:preflight:linux` fail closed when a required one is missing
   (`scripts/lib/release-bundled-oauth.mjs`). Until this check existed, every
   Windows alpha shipped with no Twitch, Kick or X Live sign-in: users saw
@@ -510,14 +513,13 @@ VIDEORC_TWITCH_CLIENT_ID=...
 VIDEORC_X_CLIENT_ID=...
 VIDEORC_KICK_CLIENT_ID=...
 VIDEORC_KICK_CLIENT_SECRET=...
-# Local Google verification only:
-VIDEORC_ENABLE_YOUTUBE_OAUTH=1
 VIDEORC_YOUTUBE_CLIENT_ID=...
+VIDEORC_YOUTUBE_CLIENT_SECRET=...
 ```
 
-Runtime values take precedence over bundled defaults. Kick is the one provider
-whose client secret is baked into the backend binary (like the X OAuth 1.0a
-consumer pair below), because Kick has no secretless flow. The release
+Runtime values take precedence over bundled defaults. Kick and YouTube are the
+providers whose client secrets are baked into the backend binary (like the X
+OAuth 1.0a consumer pair below), because neither has a secretless flow. The release
 validator fails if `VIDEORC_BUNDLED_KICK_CLIENT_SECRET` appears in plain text in
 `app.asar`: it belongs to the Rust backend only. Other client secrets, when used
 for provider flows, remain runtime-only:
@@ -595,7 +597,7 @@ Twitch release blocker:
 - Verify the app requests the scopes used by the backend:
   `channel:manage:broadcast`, `channel:read:stream_key`, and `user:read:chat`.
 
-The backend exposes credential source status to the renderer as `environment`, `bundled`, or `missing`; it never exposes actual client ID or secret values. Before a public pre-approval release, confirm YouTube shows Manual RTMP with the Google approval pause message. In reviewer candidates, confirm the YouTube row reports the intended credential source and opens the consent disclosure before Google OAuth.
+The backend exposes credential source status to the renderer as `environment`, `bundled`, or `missing`; it never exposes actual client ID or secret values. Before a public release, confirm the YouTube row reports `bundled` and opens the consent disclosure before Google OAuth.
 
 Before a release candidate, run the redacted provider readiness check:
 
