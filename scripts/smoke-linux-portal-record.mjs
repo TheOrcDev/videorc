@@ -162,6 +162,9 @@ try {
     env: {
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
       VIDEORC_SMOKE_STATE_DIR: outputDirectory,
+      // The smoke owns the portal source. The renderer's own screen preview
+      // replaced the smoke's live session mid-check (ogre 2026-09-30).
+      VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW: '1',
       VIDEORC_LINUX_H264_ENCODER: encoder
     },
     timeoutMs: launchTimeoutMs,
