@@ -91,6 +91,8 @@ describe('Studio Inputs rows (plan 080 S4)', () => {
       setCaptureConfig: vi.fn(),
       switchSourceDeviceLive: vi.fn(),
       sourceSwitchReason: () => null,
+      sourceSelectionState: { pending: null, checking: false, error: null, snapshot: null },
+      retrySourceStatus: vi.fn(),
       allowCaptureNone: true,
       deviceList: { devices, warnings: [] },
       selectedCaptureDevice: devices.find((device) => device.id === sources.screenId),
@@ -137,6 +139,20 @@ describe('Studio Inputs rows (plan 080 S4)', () => {
     expect(markup).toContain('title="MacBook Pro Camera"')
     // The old joined trigger ("Display 2 · MacBook Pro Camera") is gone.
     expect(markup).not.toContain('Display 2 · MacBook Pro Camera')
+  })
+
+  it('opens Screen and Camera with one click: the row control is the dropdown', () => {
+    // Owner, 2026-09-30: "for screen we're opening two dropdowns, it should
+    // just be one ... same for camera". No popover wraps a second select.
+    const markup = renderInputs({ screenId: 'screen:2', cameraId: 'camera:1' })
+    for (const label of ['Screen', 'Camera']) {
+      const trigger = new RegExp(`<button[^>]*role="combobox"[^>]*aria-label="${label}"`)
+      expect(markup).toMatch(trigger)
+    }
+    const rows = markup.split('data-slot="inspector-row"')
+    for (const row of rows.slice(1, 3)) {
+      expect(row).not.toContain('aria-haspopup="dialog"')
+    }
   })
 
   it('shows Off for no camera, and the saved name for a missing one', () => {

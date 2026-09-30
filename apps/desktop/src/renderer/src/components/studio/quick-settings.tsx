@@ -22,14 +22,18 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
+  SelectSeparator,
   SelectTrigger,
   SelectValue
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { useStudioCore } from '@/hooks/use-studio'
+import { missingSelection, sourceSelectPlaceholder } from '@/lib/source-select-state'
 import { recordingQuality } from '@/lib/studio-session-view'
-import type { CaptionsStatus } from '@/lib/backend'
+import type { CaptionsStatus, Device } from '@/lib/backend'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
 import {
   buildCameraSources,
@@ -161,62 +165,55 @@ export function QuickSettings(): ReactElement {
   return (
     <PanelSection title="Inputs">
       <GroupedList>
-        {/* SCREEN: shared live source controller; full picker on Sources. */}
-        <InspectorRow icon={DisplayIcon} label="Screen">
-          <Popover>
-            <PopoverTrigger className={TRIGGER_CLASS} title={screenSummary}>
-              <span className="min-w-0 truncate text-right font-medium">{screenSummary}</span>
-              <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground" />
-            </PopoverTrigger>
-            <PopoverContent align="start" className="flex w-72 flex-col gap-3 p-3">
-              <SourceSelect
-                searchable
-                allowNone={allowCaptureNone}
-                discoveryPending={discoveryPending}
-                devices={captureDevices}
-                disabled={Boolean(sourceSwitchReason('capture'))}
-                description={<SourceSwitchStatus kind="capture" />}
-                selectedName={captureConfig.sources.screenName ?? captureConfig.sources.windowName}
-                label="Screen"
-                value={selectedCaptureId}
-                onChange={(captureId) =>
-                  void switchSourceDeviceLive(
-                    'capture',
-                    buildCaptureSources(captureConfig.sources, captureDevices, captureId)
-                  )
-                }
-              />
-            </PopoverContent>
-          </Popover>
+        {/* SCREEN: one click straight to the list (owner, 2026-09-30); the
+            searchable picker stays on Sources. */}
+        <InspectorRow
+          icon={DisplayIcon}
+          label="Screen"
+          status={<SourceSwitchStatus kind="capture" />}
+        >
+          <InspectorSourceSelect
+            allowNone={allowCaptureNone}
+            devices={captureDevices}
+            disabled={Boolean(sourceSwitchReason('capture'))}
+            discoveryPending={discoveryPending}
+            groupByKind
+            label="Screen"
+            selectedName={captureConfig.sources.screenName ?? captureConfig.sources.windowName}
+            summary={screenSummary}
+            value={selectedCaptureId}
+            onChange={(captureId) =>
+              void switchSourceDeviceLive(
+                'capture',
+                buildCaptureSources(captureConfig.sources, captureDevices, captureId)
+              )
+            }
+          />
         </InspectorRow>
 
         {/* CAMERA: its own row (plan 080 S4). Off is a choice that sticks. */}
-        <InspectorRow icon={CameraIcon} label="Camera">
-          <Popover>
-            <PopoverTrigger className={TRIGGER_CLASS} title={cameraSummary}>
-              <span className="min-w-0 truncate text-right font-medium">{cameraSummary}</span>
-              <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground" />
-            </PopoverTrigger>
-            <PopoverContent align="start" className="flex w-72 flex-col gap-3 p-3">
-              <SourceSelect
-                allowNone
-                noneLabel="Off"
-                discoveryPending={discoveryPending}
-                devices={cameras}
-                disabled={Boolean(sourceSwitchReason('camera'))}
-                description={<SourceSwitchStatus kind="camera" />}
-                selectedName={captureConfig.sources.cameraName}
-                label="Camera"
-                value={captureConfig.sources.cameraId}
-                onChange={(cameraId) =>
-                  void switchSourceDeviceLive(
-                    'camera',
-                    buildCameraSources(captureConfig.sources, cameras, cameraId)
-                  )
-                }
-              />
-            </PopoverContent>
-          </Popover>
+        <InspectorRow
+          icon={CameraIcon}
+          label="Camera"
+          status={<SourceSwitchStatus kind="camera" />}
+        >
+          <InspectorSourceSelect
+            allowNone
+            devices={cameras}
+            disabled={Boolean(sourceSwitchReason('camera'))}
+            discoveryPending={discoveryPending}
+            label="Camera"
+            noneLabel="Off"
+            selectedName={captureConfig.sources.cameraName}
+            summary={cameraSummary}
+            value={captureConfig.sources.cameraId}
+            onChange={(cameraId) =>
+              void switchSourceDeviceLive(
+                'camera',
+                buildCameraSources(captureConfig.sources, cameras, cameraId)
+              )
+            }
+          />
         </InspectorRow>
 
         {/* MIC — confirmed source selection and live mute. */}
@@ -428,17 +425,118 @@ export function SystemAudioInspectorValue({
 function InspectorRow({
   icon: RowIcon,
   label,
+  status,
   children
 }: {
   icon: AppIcon
   label: string
+  /** A live-switch status line under the row; collapses when it renders nothing. */
+  status?: ReactNode
   children: ReactNode
 }): ReactElement {
   return (
-    <div className="flex min-h-row items-center gap-2.5 py-0.5 pr-1 pl-3" data-slot="inspector-row">
-      <RowIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
-      <span className="w-22 shrink-0 truncate text-sm text-muted-foreground">{label}</span>
-      <div className="flex min-w-0 flex-1 justify-end">{children}</div>
+    <div className="flex flex-col" data-slot="inspector-row">
+      <div className="flex min-h-row items-center gap-2.5 py-0.5 pr-1 pl-3">
+        <RowIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
+        <span className="w-22 shrink-0 truncate text-sm text-muted-foreground">{label}</span>
+        <div className="flex min-w-0 flex-1 justify-end">{children}</div>
+      </div>
+      {status ? (
+        <div className="px-3 pb-2 pl-9.5 text-xs text-muted-foreground empty:hidden">{status}</div>
+      ) : null}
     </div>
+  )
+}
+
+const NONE_VALUE = '__none__'
+
+/**
+ * A device picker that IS the row control: one click opens the list, like the
+ * Output row. The popover-around-a-select it replaces took two clicks (owner,
+ * 2026-09-30: "it should just be one").
+ */
+function InspectorSourceSelect({
+  label,
+  devices,
+  value,
+  selectedName,
+  summary,
+  allowNone = false,
+  noneLabel = 'None',
+  groupByKind = false,
+  disabled,
+  discoveryPending,
+  onChange
+}: {
+  label: string
+  devices: Device[]
+  value: string | undefined
+  selectedName?: string
+  summary: string
+  allowNone?: boolean
+  noneLabel?: string
+  /** Screens and windows under their own headings. */
+  groupByKind?: boolean
+  disabled: boolean
+  discoveryPending: boolean
+  onChange: (value: string | undefined) => void
+}): ReactElement {
+  const missing = missingSelection(devices, value, selectedName)
+  const screens = devices.filter((device) => device.kind === 'screen')
+  const windows = devices.filter((device) => device.kind === 'window')
+  const groups =
+    groupByKind && screens.length && windows.length
+      ? [
+          { heading: 'Screens', items: screens },
+          { heading: 'Windows', items: windows }
+        ]
+      : [{ heading: undefined, items: devices }]
+  return (
+    <Select
+      disabled={disabled}
+      value={value ?? (allowNone ? NONE_VALUE : '')}
+      onValueChange={(next) => onChange(next === NONE_VALUE || next === '' ? undefined : next)}
+    >
+      <SelectTrigger
+        aria-label={label}
+        className="w-full min-w-0 justify-end border-transparent bg-transparent px-2 font-medium hover:bg-accent data-[state=open]:bg-accent"
+        title={summary}
+      >
+        <SelectValue>
+          <span className="min-w-0 truncate text-right">{summary}</span>
+        </SelectValue>
+      </SelectTrigger>
+      <SelectContent align="end" className="max-w-80" position="popper">
+        {allowNone ? <SelectItem value={NONE_VALUE}>{noneLabel}</SelectItem> : null}
+        {missing ? (
+          <SelectItem disabled value={missing.value}>
+            {missing.label}
+          </SelectItem>
+        ) : null}
+        {devices.length === 0 ? (
+          <SelectItem disabled value="__empty__">
+            {sourceSelectPlaceholder(0, discoveryPending)}
+          </SelectItem>
+        ) : null}
+        {groups.map((group, index) => (
+          <SelectGroup key={group.heading ?? 'devices'}>
+            {index > 0 ? <SelectSeparator /> : null}
+            {group.heading ? <SelectLabel>{group.heading}</SelectLabel> : null}
+            {group.items.map((device) => (
+              <SelectItem
+                disabled={device.status !== 'available'}
+                key={device.id}
+                value={device.id}
+              >
+                <span className="truncate">
+                  {device.name}
+                  {device.status !== 'available' ? ` (${device.status})` : ''}
+                </span>
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        ))}
+      </SelectContent>
+    </Select>
   )
 }
