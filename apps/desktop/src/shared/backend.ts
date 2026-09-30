@@ -333,6 +333,13 @@ export interface SourceSelection {
   windowName?: string
   cameraId?: string
   cameraName?: string
+  /**
+   * The user chose no camera (plan 080 S4). Without it an empty camera slot
+   * reads as "never chosen", and device reconcile fills in the first camera.
+   * Renderer intent only: the backend ignores it. Meaningless once a
+   * `cameraId` is set, and reconcile drops it then.
+   */
+  cameraOff?: boolean
   microphoneId?: string
   microphoneName?: string
   testPattern?: boolean

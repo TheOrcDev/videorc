@@ -1,5 +1,6 @@
 import {
   type AppIcon,
+  CameraIcon,
   CaptionsIcon,
   ChevronDownIcon,
   DesktopIcon,
@@ -142,36 +143,41 @@ export function QuickSettings(): ReactElement {
     (resolution) => resolutionKey(resolution.width, resolution.height) === currentResolution
   )
 
-  // F-015: the synthetic diagnostic source replaces the screen — say so
-  // instead of claiming "No screen".
-  // Q7 (plan 022): the compact trigger lost its distinguishing tail to
-  // truncation ("No screen - …"). Name only what IS selected; absence gets one
-  // short phrase instead of two "No …" fragments fighting for the width.
+  // F-015: the synthetic diagnostic source replaces the screen, so say so
+  // instead of claiming "No screen". Plan 080 S4: screen and camera are two
+  // rows, so neither name is truncated to fit beside the other; a saved
+  // device that is missing keeps its saved name, as the Mic row does.
   const screenSummary = captureConfig.sources.testPattern
     ? 'Test pattern'
-    : selectedCaptureDevice?.name
-  const sourceSummary =
-    [screenSummary, selectedCamera?.name].filter(Boolean).join(' · ') || 'No sources selected'
+    : (selectedCaptureDevice?.name ??
+      captureConfig.sources.screenName ??
+      captureConfig.sources.windowName ??
+      'None')
+  const cameraSummary =
+    selectedCamera?.name ??
+    (captureConfig.sources.cameraId ? captureConfig.sources.cameraName : undefined) ??
+    'Off'
 
   return (
     <PanelSection title="Inputs">
       <GroupedList>
-        {/* SOURCE — shared live source controller; full picker on Sources. */}
-        <InspectorRow icon={DisplayIcon} label="Source">
+        {/* SCREEN: shared live source controller; full picker on Sources. */}
+        <InspectorRow icon={DisplayIcon} label="Screen">
           <Popover>
-            <PopoverTrigger className={TRIGGER_CLASS} title={sourceSummary}>
-              <span className="min-w-0 truncate text-right font-medium">{sourceSummary}</span>
+            <PopoverTrigger className={TRIGGER_CLASS} title={screenSummary}>
+              <span className="min-w-0 truncate text-right font-medium">{screenSummary}</span>
               <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground" />
             </PopoverTrigger>
             <PopoverContent align="start" className="flex w-72 flex-col gap-3 p-3">
               <SourceSelect
+                searchable
                 allowNone={allowCaptureNone}
                 discoveryPending={discoveryPending}
                 devices={captureDevices}
                 disabled={Boolean(sourceSwitchReason('capture'))}
                 description={<SourceSwitchStatus kind="capture" />}
                 selectedName={captureConfig.sources.screenName ?? captureConfig.sources.windowName}
-                label="Screen / window"
+                label="Screen"
                 value={selectedCaptureId}
                 onChange={(captureId) =>
                   void switchSourceDeviceLive(
@@ -180,8 +186,21 @@ export function QuickSettings(): ReactElement {
                   )
                 }
               />
+            </PopoverContent>
+          </Popover>
+        </InspectorRow>
+
+        {/* CAMERA: its own row (plan 080 S4). Off is a choice that sticks. */}
+        <InspectorRow icon={CameraIcon} label="Camera">
+          <Popover>
+            <PopoverTrigger className={TRIGGER_CLASS} title={cameraSummary}>
+              <span className="min-w-0 truncate text-right font-medium">{cameraSummary}</span>
+              <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground" />
+            </PopoverTrigger>
+            <PopoverContent align="start" className="flex w-72 flex-col gap-3 p-3">
               <SourceSelect
                 allowNone
+                noneLabel="Off"
                 discoveryPending={discoveryPending}
                 devices={cameras}
                 disabled={Boolean(sourceSwitchReason('camera'))}

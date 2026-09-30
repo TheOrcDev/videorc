@@ -2484,7 +2484,10 @@ export function buildCameraSources(
   cameraId: string | undefined
 ): SourceSelection {
   const selected = cameras.find((device) => device.id === cameraId)
-  return { ...current, cameraId, cameraName: selected?.name }
+  // Plan 080 S4: picking no camera is a choice that must outlive reconcile.
+  return cameraId
+    ? { ...current, cameraId, cameraName: selected?.name, cameraOff: undefined }
+    : { ...current, cameraId: undefined, cameraName: undefined, cameraOff: true }
 }
 
 export function buildMicrophoneSources(
@@ -2498,7 +2501,7 @@ export function buildMicrophoneSources(
 
 const SOURCE_KIND_FIELDS = {
   capture: ['screenId', 'screenName', 'windowId', 'windowName', 'testPattern'],
-  camera: ['cameraId', 'cameraName'],
+  camera: ['cameraId', 'cameraName', 'cameraOff'],
   microphone: ['microphoneId', 'microphoneName']
 } as const satisfies Record<string, readonly (keyof SourceSelection)[]>
 
@@ -2601,8 +2604,13 @@ export function reconcileSourceSelection(
     nextSources.windowName = selectedCapture?.kind === 'window' ? selectedCapture.name : undefined
   }
 
-  const selectedCamera =
-    findRememberedSource(nextSources.cameraId, nextSources.cameraName, cameras) ?? cameras[0]
+  // Plan 080 S4: an explicit Off stays off. Only a camera that was never
+  // chosen (or vanished) falls back to the first available one.
+  const cameraOff = nextSources.cameraOff === true && !nextSources.cameraId
+  const selectedCamera = cameraOff
+    ? undefined
+    : (findRememberedSource(nextSources.cameraId, nextSources.cameraName, cameras) ?? cameras[0])
+  nextSources.cameraOff = cameraOff ? true : undefined
   // Migrate selections persisted onto the retired "Fallback - X" avfoundation
   // rows: drop the synthetic id when native rows exist and match the native
   // device by its unprefixed name instead of re-pinning the broken fallback.

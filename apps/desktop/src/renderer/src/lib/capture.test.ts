@@ -81,6 +81,36 @@ function captureConfigFixture(): CaptureConfig {
 }
 
 describe('reconcileSourceSelection', () => {
+  describe('camera Off (plan 080 S4)', () => {
+    const devices = [
+      { id: 'screen:1', name: 'Display 1', kind: 'screen', status: 'available' },
+      { id: 'camera:1', name: 'FaceTime HD Camera', kind: 'camera', status: 'available' },
+      { id: 'camera:2', name: 'Cam Link 4K', kind: 'camera', status: 'available' }
+    ] as const satisfies Device[]
+
+    it('keeps an explicit Off through every device refresh', () => {
+      const once = reconcileSourceSelection({ screenId: 'screen:1', cameraOff: true }, [...devices])
+      expect(once.cameraId).toBeUndefined()
+      expect(once.cameraOff).toBe(true)
+      expect(reconcileSourceSelection(once, [...devices])).toEqual(once)
+    })
+
+    it('still picks the first camera when none was ever chosen', () => {
+      const next = reconcileSourceSelection({ screenId: 'screen:1' }, [...devices])
+      expect(next.cameraId).toBe('camera:1')
+      expect(next.cameraOff).toBeUndefined()
+    })
+
+    it('drops a stale Off once a camera is set, and falls back if that camera vanished', () => {
+      expect(
+        reconcileSourceSelection({ cameraId: 'camera:2', cameraOff: true }, [...devices])
+      ).toMatchObject({ cameraId: 'camera:2', cameraOff: undefined })
+      expect(
+        reconcileSourceSelection({ cameraId: 'camera:gone', cameraOff: true }, [...devices])
+      ).toMatchObject({ cameraId: 'camera:1', cameraOff: undefined })
+    })
+  })
+
   it('keeps the dev synthetic source authoritative across later device refreshes', () => {
     const next = reconcileSourceSelection(
       {
@@ -1794,6 +1824,17 @@ describe('buildCaptureSources / buildCameraSources / buildMicrophoneSources', ()
     expect(next.screenId).toBe('screen:1')
   })
 
+  // Plan 080 S4: the Camera row's Off is a choice, not an empty slot.
+  it('records an explicit camera Off and clears it when a camera is picked', () => {
+    const off = buildCameraSources({ screenId: 'screen:1', cameraId: 'cam:1' }, cameras, undefined)
+    expect(off).toMatchObject({ screenId: 'screen:1', cameraOff: true })
+    expect(off.cameraId).toBeUndefined()
+    expect(off.cameraName).toBeUndefined()
+    const on = buildCameraSources(off, cameras, 'cam:1')
+    expect(on).toMatchObject({ cameraId: 'cam:1', cameraName: 'FaceTime HD' })
+    expect(on.cameraOff).toBeUndefined()
+  })
+
   it('sets microphone id + name and clears it for undefined', () => {
     const set = buildMicrophoneSources({}, microphones, 'mic:1')
     expect(set.microphoneId).toBe('mic:1')
@@ -1829,11 +1870,12 @@ describe('mergeSourceKind', () => {
       microphoneId: 'mic:2',
       microphoneName: 'New Mic'
     })
-    const camera = { ...stale, cameraId: undefined, cameraName: undefined }
+    const camera = { ...stale, cameraId: undefined, cameraName: undefined, cameraOff: true }
     expect(mergeSourceKind(latest, camera, 'camera')).toEqual({
       ...latest,
       cameraId: undefined,
-      cameraName: undefined
+      cameraName: undefined,
+      cameraOff: true
     })
   })
 

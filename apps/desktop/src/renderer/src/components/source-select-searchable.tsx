@@ -28,6 +28,7 @@ export default function SearchableSourceSelect({
   selectedName,
   onChange,
   allowNone = false,
+  noneLabel = 'None',
   placeholder,
   discoveryPending = false,
   description,
@@ -39,6 +40,8 @@ export default function SearchableSourceSelect({
   selectedName?: string
   onChange: (value: string | undefined) => void
   allowNone?: boolean
+  /** The "no device" item's words ("Off" for a camera row, plan 080 S4). */
+  noneLabel?: string
   placeholder?: string
   /** Device discovery hasn't reported yet — show "Finding devices…" over "none found". */
   discoveryPending?: boolean
@@ -85,7 +88,7 @@ export default function SearchableSourceSelect({
               {selected?.name ??
                 missing?.label ??
                 (allowNone && !value
-                  ? 'None'
+                  ? noneLabel
                   : (placeholder ?? sourceSelectPlaceholder(devices.length, discoveryPending)))}
             </span>
             <ChevronDownIcon data-icon="inline-end" />
@@ -114,7 +117,7 @@ export default function SearchableSourceSelect({
                       close()
                     }}
                   >
-                    None
+                    {noneLabel}
                   </CommandItem>
                 </CommandGroup>
               ) : null}
