@@ -8387,6 +8387,9 @@ function startBackendWithRegistryLock(): void {
       // check alone misses the dev chain (electron -> cargo -> backend), where
       // killing Electron leaves cargo alive as the backend's parent.
       VIDEORC_SUPERVISOR_PID: String(process.pid),
+      // The backend crate stays at 0.9.0 across desktop releases. Hashing
+      // only that left Linux performance-check poison sticky.
+      VIDEORC_APP_VERSION: app.getVersion(),
       // Root of the process tree Windows system audio excludes (plan 069):
       // this process, its Chromium audio service and renderers are Videorc.
       VIDEORC_ELECTRON_MAIN_PID: String(process.pid),
@@ -12335,6 +12338,7 @@ async function runtimeInfo(): Promise<RuntimeInfo> {
   return buildRuntimeInfo({
     appVersion: app.getVersion(),
     execPath: process.execPath,
+    isPackaged: app.isPackaged,
     captureExecPath: resolveBackendPermissionTargetPath(),
     platform: process.platform,
     arch: process.arch,

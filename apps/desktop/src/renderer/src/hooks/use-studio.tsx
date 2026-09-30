@@ -122,9 +122,9 @@ import {
 import {
   autoApplyPreset,
   isShippedDefaultOutput,
-  outputLabel,
-  outputVerdict,
+  isUntrustedPerformanceCheckResult,
   performanceCheckCeiling,
+  performanceCheckTooHeavyToast,
   shouldRunPerformanceCheck
 } from '@/lib/performance-check'
 import {
@@ -13435,7 +13435,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
     // An install that never picked an output follows the measurement; anyone
     // who chose one only ever gets the suggestion in Recording → Output.
-    if (next.running || next.stale || !next.result || outputChosenByUser()) {
+    if (
+      next.running ||
+      next.stale ||
+      !next.result ||
+      outputChosenByUser() ||
+      isUntrustedPerformanceCheckResult(next.result)
+    ) {
       return
     }
     const preset = autoApplyPreset(next.result)
@@ -13485,14 +13491,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // News the interface does not already show: a chosen output this
         // computer measurably cannot hold. Said once per finished check.
         const chosen = captureConfigRef.current.video
-        if (
-          next.result &&
-          !isShippedDefaultOutput(chosen) &&
-          outputVerdict(chosen, next.result) === 'too-heavy'
-        ) {
-          toast.warning(`${outputLabel(chosen)} is too heavy for this computer`, {
-            description: `Recordings will stutter. ${outputLabel(next.result.recommended)} held steady. Switch in Recording → Output.`
-          })
+        const tooHeavy = next.result && performanceCheckTooHeavyToast(chosen, next.result)
+        if (tooHeavy) {
+          toast.warning(tooHeavy.title, { description: tooHeavy.description })
         }
       })
     ]

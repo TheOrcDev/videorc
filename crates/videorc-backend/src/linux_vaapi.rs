@@ -134,6 +134,30 @@ pub(crate) fn render_node_candidates(
     candidates
 }
 
+/// Stable material for the performance-check capability key. The previous
+/// Linux identity was a constant (`platform=linux;windows-adapter-driver=not-
+/// applicable`), so a poisoned `belowFloor` result never went stale across
+/// GPU or driver changes (ogre, 2026-09-28).
+pub(crate) fn linux_graphics_adapter_driver_identity(
+    dri_directory: &Path,
+    sysfs_drm_directory: &Path,
+) -> String {
+    let listed = render_node_candidates(dri_directory, sysfs_drm_directory)
+        .into_iter()
+        .map(|candidate| {
+            format!(
+                "{}={}",
+                candidate.node_name(),
+                candidate.driver.as_deref().unwrap_or("unknown")
+            )
+        })
+        .collect::<Vec<_>>();
+    if listed.is_empty() {
+        return "linux-render-nodes=none".to_string();
+    }
+    format!("linux-render-nodes={}", listed.join(","))
+}
+
 /// Written before a probe starts; removed when the probe returns. If the file
 /// survives a restart, the probe never returned and the node is quarantined.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -476,7 +500,23 @@ mod tests {
         );
         assert_eq!(candidates[0].describe(), "renderD128 (i915)");
         assert_eq!(candidates[1].describe(), "renderD129 (driver unknown)");
+        assert_eq!(
+            linux_graphics_adapter_driver_identity(&dri, &sysfs),
+            "linux-render-nodes=renderD128=i915,renderD129=unknown"
+        );
 
+        std::fs::remove_dir_all(dri).ok();
+        std::fs::remove_dir_all(sysfs).ok();
+    }
+
+    #[test]
+    fn linux_gpu_identity_is_none_when_there_are_no_render_nodes() {
+        let dri = fixture_directory("empty-dri");
+        let sysfs = fixture_directory("empty-sysfs");
+        assert_eq!(
+            linux_graphics_adapter_driver_identity(&dri, &sysfs),
+            "linux-render-nodes=none"
+        );
         std::fs::remove_dir_all(dri).ok();
         std::fs::remove_dir_all(sysfs).ok();
     }

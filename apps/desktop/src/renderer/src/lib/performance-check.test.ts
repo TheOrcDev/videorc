@@ -9,10 +9,12 @@ import { videoPresets } from './capture'
 import {
   autoApplyPreset,
   isShippedDefaultOutput,
+  isUntrustedPerformanceCheckResult,
   outputLabel,
   outputVerdict,
   performanceCheckLine,
   performanceCheckCeiling,
+  performanceCheckTooHeavyToast,
   shouldRunPerformanceCheck
 } from './performance-check'
 
@@ -117,6 +119,28 @@ describe('shouldRunPerformanceCheck', () => {
     expect(shouldRunPerformanceCheck({ running: false, stale: true, result: strong })).toBe(true)
     expect(shouldRunPerformanceCheck({ running: false, stale: false, result: strong })).toBe(false)
   })
+
+  it('reruns Linux v1 did-not-start below-floor poison without applying it', () => {
+    const poison = result([['tutorial-720p30', 'failed']], 'tutorial-720p30', true)
+    poison.rungs[0].reasons = ['did-not-start']
+    expect(isUntrustedPerformanceCheckResult(poison)).toBe(true)
+    expect(autoApplyPreset(poison)).toBeUndefined()
+    expect(outputVerdict(videoPresets['tutorial-720p30'], poison)).toBe('unknown')
+    expect(shouldRunPerformanceCheck({ running: false, stale: false, result: poison })).toBe(true)
+    expect(
+      performanceCheckLine({
+        state: { running: false, stale: false, result: poison },
+        progress: null,
+        video: videoPresets['tutorial-720p30']
+      })
+    ).toMatchObject({
+      checkLabel: 'Check this computer',
+      text: 'This computer has not been measured yet.'
+    })
+    const trustedV2 = { ...poison, capabilityKey: 'performance-check-v2:abc' }
+    expect(isUntrustedPerformanceCheckResult(trustedV2)).toBe(false)
+    expect(autoApplyPreset(trustedV2)).toBe('tutorial-720p30')
+  })
 })
 
 describe('outputLabel', () => {
@@ -179,6 +203,30 @@ describe('performanceCheckLine', () => {
     const nothing = result([['tutorial-720p30', 'failed']], 'tutorial-720p30', true)
     expect(
       line({ running: false, stale: false, result: nothing }, 'tutorial-720p30')
-    ).toMatchObject({ tone: 'warning', checkLabel: 'Check again' })
+    ).toMatchObject({
+      tone: 'warning',
+      checkLabel: 'Check again',
+      text: 'Nothing held steady on this computer, not even 720p 30. Close other apps and check again.'
+    })
+  })
+})
+
+describe('performanceCheckTooHeavyToast', () => {
+  it('warns once when a chosen output is heavier than what held', () => {
+    expect(performanceCheckTooHeavyToast(videoPresets['record-4k30'], weak)).toEqual({
+      title: '4K 30 is too heavy for this computer',
+      description: 'Recordings will stutter. 720p 30 held steady. Switch in Recording → Output.'
+    })
+  })
+
+  it('does not claim the floor held when nothing passed', () => {
+    const nothing = result([['tutorial-720p30', 'failed']], 'tutorial-720p30', true)
+    expect(performanceCheckTooHeavyToast(videoPresets['tutorial-720p30'], nothing)).toBeUndefined()
+    expect(performanceCheckTooHeavyToast(videoPresets['record-4k30'], nothing)).toBeUndefined()
+  })
+
+  it('stays quiet for a shipped default and for a verified selection', () => {
+    expect(performanceCheckTooHeavyToast(videoPresets['tutorial-1080p30'], weak)).toBeUndefined()
+    expect(performanceCheckTooHeavyToast(videoPresets['tutorial-720p30'], weak)).toBeUndefined()
   })
 })

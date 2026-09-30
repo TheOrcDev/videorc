@@ -17,11 +17,12 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 use sha2::{Digest, Sha256};
 
+use crate::capture_interruption::CaptureAdmissionBlocker;
 use crate::protocol::{
-    DiagnosticStats, OutputSettings, PerformanceCheckProgress, PerformanceCheckResult,
-    PerformanceCheckRunParams, PerformanceCheckRung, PerformanceCheckRungVerdict,
-    PerformanceCheckState, RecordingState, RtmpPreset, RtmpSettings, SessionPurpose,
-    SourceSelection, StartSessionParams, VideoPreset, VideoSettings,
+    DiagnosticStats, EncodeBackend, OutputSettings, PerformanceCheckProgress,
+    PerformanceCheckResult, PerformanceCheckRunParams, PerformanceCheckRung,
+    PerformanceCheckRungVerdict, PerformanceCheckState, RecordingState, RtmpPreset, RtmpSettings,
+    SessionPurpose, SourceSelection, StartSessionParams, VideoPreset, VideoSettings,
 };
 use crate::state::AppState;
 
@@ -96,6 +97,9 @@ fn pixels(video: &VideoSettings) -> u64 {
 pub(crate) struct RungMeasurement {
     pub started: bool,
     pub start_error: Option<String>,
+    /// The start was refused because another capture session held the
+    /// slot. That measures the studio, not the machine.
+    pub studio_busy: bool,
     pub target_fps: u32,
     pub encoder_speed: Option<f64>,
     pub delivered_fps: Option<f64>,
@@ -111,26 +115,43 @@ pub(crate) struct RungMeasurement {
 }
 
 /// Bounded, renderer-safe reason codes; empty means the rung passed.
+/// Test helper — production scoring goes through `score_rung_for_backend`.
+#[cfg(test)]
 pub(crate) fn score_rung(measurement: &RungMeasurement) -> Vec<String> {
+    score_rung_for_backend(measurement, None)
+}
+
+/// OpenH264 on hard synthetic content reports far-below-realtime `speed=`
+/// (ogre Omarchy 2026-09-28: ~0.08 at 720p30) while the same machine already
+/// records 1080p through the real Record path. FFmpeg speed, delivered fps
+/// and skip-frames are therefore not capability evidence for that backend;
+/// start, finalize, queue, pipe and drain still catch the UHD 600 shape.
+pub(crate) fn score_rung_for_backend(
+    measurement: &RungMeasurement,
+    encode_backend: Option<EncodeBackend>,
+) -> Vec<String> {
     let mut reasons = Vec::new();
     if !measurement.started {
         reasons.push("did-not-start".to_string());
         return reasons;
     }
+    let openh264_synthetic = encode_backend == Some(EncodeBackend::SoftwareOpenH264);
     let frame_budget_ms = 1_000.0 / f64::from(measurement.target_fps.max(1));
-    match measurement.encoder_speed {
-        Some(speed) if speed >= MIN_ENCODER_SPEED => {}
-        Some(_) => reasons.push("encoder-below-realtime".to_string()),
-        None => reasons.push("encoder-speed-unmeasured".to_string()),
-    }
-    match measurement.delivered_fps {
-        Some(fps) if fps >= f64::from(measurement.target_fps) * MIN_DELIVERED_FPS_RATIO => {}
-        Some(_) => reasons.push("frame-rate-below-target".to_string()),
-        None => reasons.push("frame-rate-unmeasured".to_string()),
-    }
-    let expected_frames = f64::from(measurement.target_fps) * RUNG_MEASURE.as_secs_f64();
-    if measurement.stalled_frames as f64 > expected_frames * MAX_STALLED_FRAME_RATIO {
-        reasons.push("frames-skipped-or-repeated".to_string());
+    if !openh264_synthetic {
+        match measurement.encoder_speed {
+            Some(speed) if speed >= MIN_ENCODER_SPEED => {}
+            Some(_) => reasons.push("encoder-below-realtime".to_string()),
+            None => reasons.push("encoder-speed-unmeasured".to_string()),
+        }
+        match measurement.delivered_fps {
+            Some(fps) if fps >= f64::from(measurement.target_fps) * MIN_DELIVERED_FPS_RATIO => {}
+            Some(_) => reasons.push("frame-rate-below-target".to_string()),
+            None => reasons.push("frame-rate-unmeasured".to_string()),
+        }
+        let expected_frames = f64::from(measurement.target_fps) * RUNG_MEASURE.as_secs_f64();
+        if measurement.stalled_frames as f64 > expected_frames * MAX_STALLED_FRAME_RATIO {
+            reasons.push("frames-skipped-or-repeated".to_string());
+        }
     }
     if measurement
         .queue_oldest_frame_age_ms
@@ -170,13 +191,38 @@ pub(crate) fn score_rung(measurement: &RungMeasurement) -> Vec<String> {
 
 /// A failing rung this far below realtime also rules out the next one down.
 pub(crate) fn should_fast_skip_next(measurement: &RungMeasurement) -> bool {
-    measurement.started
+    should_fast_skip_next_on(measurement, cfg!(target_os = "linux"))
+}
+
+/// Linux never fast-skips: ogre's VAAPI D128 soft-failed 1440p and skipped
+/// 1080p, while acceptance Record→file at 1080p already passed on that box.
+pub(crate) fn should_fast_skip_next_on(measurement: &RungMeasurement, linux: bool) -> bool {
+    !linux
+        && measurement.started
         && measurement
             .encoder_speed
             .is_some_and(|speed| speed < FAST_SKIP_ENCODER_SPEED)
 }
 
-/// First passing rung wins; with none, the floor is recommended and flagged.
+/// Start refusals that mean another session owns the capture slot. The
+/// check was started from an idle studio, so this is a collision (a Record
+/// click, a renderer preview start), never a property of the machine.
+pub(crate) fn start_error_means_busy_studio(message: &str) -> bool {
+    [
+        CaptureAdmissionBlocker::SessionStarting.to_string(),
+        CaptureAdmissionBlocker::CaptureActive.to_string(),
+        CaptureAdmissionBlocker::InterruptionInProgress.to_string(),
+        "A capture session is already running".to_string(),
+    ]
+    .iter()
+    .any(|busy| message.contains(busy.as_str()))
+}
+
+/// First passing rung wins; with none, the floor is recommended. `below_floor`
+/// is only true when that floor was actually measured and failed — a skipped
+/// floor (budget ran out, cancelled mid-ladder) must not be reported as
+/// "this computer cannot hold 720p". Linux first-rung VAAPI probing can eat
+/// most of `TOTAL_BUDGET` before 720p is reached.
 pub(crate) fn recommend(rungs: &[PerformanceCheckRung]) -> Option<(VideoSettings, bool)> {
     if let Some(passed) = rungs
         .iter()
@@ -184,11 +230,29 @@ pub(crate) fn recommend(rungs: &[PerformanceCheckRung]) -> Option<(VideoSettings
     {
         return Some((passed.video.clone(), false));
     }
-    rungs.last().map(|floor| (floor.video.clone(), true))
+    rungs.last().map(|floor| {
+        (
+            floor.video.clone(),
+            floor.verdict == PerformanceCheckRungVerdict::Failed,
+        )
+    })
+}
+
+/// Remaining rungs after a pass are omitted. Fast-skip and the total wall
+/// budget may drop mid-ladder rungs, but never the floor: the check must
+/// measure 720p before it is allowed to say the machine cannot hold it.
+pub(crate) fn should_skip_rung(
+    already_passed: bool,
+    skip_next: bool,
+    over_budget: bool,
+    is_floor: bool,
+) -> bool {
+    already_passed || ((skip_next || over_budget) && !is_floor)
 }
 
 const RESULT_SETTING_KEY: &str = "performance_check_result";
-const CAPABILITY_KEY_VERSION: &str = "performance-check-v1";
+const CAPABILITY_KEY_VERSION: &str = "performance-check-v2";
+const DESKTOP_APP_VERSION_ENV: &str = "VIDEORC_APP_VERSION";
 const RUNG_WARMUP: Duration = Duration::from_millis(1_500);
 const RUNG_MEASURE: Duration = Duration::from_secs(4);
 const RUNG_START_TIMEOUT: Duration = Duration::from_secs(15);
@@ -242,16 +306,71 @@ impl Drop for RunningGuard<'_> {
     }
 }
 
+/// Desktop version when Electron set it; otherwise the backend crate version.
+/// The crate stays at 0.9.0 across desktop releases, so hashing only that
+/// left Linux `belowFloor` poison sticky (ogre, 2026-09-28).
+pub(crate) fn desktop_app_version() -> String {
+    std::env::var(DESKTOP_APP_VERSION_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+}
+
 /// Names the machine a verdict belongs to. A new GPU, driver or app version
 /// makes the stored result stale instead of silently trusting it.
 pub(crate) fn capability_key() -> String {
+    capability_key_from(
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        &crate::recording::graphics_adapter_driver_identity(),
+        &desktop_app_version(),
+        env!("CARGO_PKG_VERSION"),
+    )
+}
+
+pub(crate) fn capability_key_from(
+    os: &str,
+    arch: &str,
+    graphics_identity: &str,
+    app_version: &str,
+    backend_crate_version: &str,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(CAPABILITY_KEY_VERSION);
-    hasher.update(std::env::consts::OS);
-    hasher.update(std::env::consts::ARCH);
-    hasher.update(crate::recording::graphics_adapter_driver_identity());
-    hasher.update(env!("CARGO_PKG_VERSION"));
+    hasher.update(os);
+    hasher.update(arch);
+    hasher.update(graphics_identity);
+    hasher.update(app_version);
+    hasher.update(backend_crate_version);
     format!("{CAPABILITY_KEY_VERSION}:{:x}", hasher.finalize())
+}
+
+/// v1 keys never match the v2 hasher, and Linux `belowFloor` rows whose
+/// every measured rung is `did-not-start` are a failed ladder, not a
+/// machine class. `run_ladder` no longer saves a ladder where nothing
+/// started, so only rows written before that rule can match.
+pub(crate) fn stored_result_is_stale(result: &PerformanceCheckResult) -> bool {
+    result.capability_key != capability_key() || linux_did_not_start_below_floor(result)
+}
+
+pub(crate) fn linux_did_not_start_below_floor(result: &PerformanceCheckResult) -> bool {
+    if std::env::consts::OS != "linux"
+        || !result.below_floor
+        || !result.capability_key.starts_with("performance-check-v1:")
+    {
+        return false;
+    }
+    let measured: Vec<_> = result
+        .rungs
+        .iter()
+        .filter(|rung| rung.verdict != PerformanceCheckRungVerdict::Skipped)
+        .collect();
+    !measured.is_empty()
+        && measured.iter().all(|rung| {
+            rung.verdict == PerformanceCheckRungVerdict::Failed
+                && rung.reasons.iter().any(|reason| reason == "did-not-start")
+        })
 }
 
 fn benchmark_directory() -> PathBuf {
@@ -283,9 +402,7 @@ pub async fn current_state(state: &AppState) -> PerformanceCheckState {
         .load_setting::<PerformanceCheckResult>(RESULT_SETTING_KEY)
         .ok()
         .flatten();
-    let stale = result
-        .as_ref()
-        .is_some_and(|result| result.capability_key != capability_key());
+    let stale = result.as_ref().is_some_and(stored_result_is_stale);
     PerformanceCheckState {
         running: state.performance_check.is_running(),
         result,
@@ -345,13 +462,20 @@ async fn run_ladder(
     let mut rungs = Vec::with_capacity(ladder.len());
     let mut skip_next = false;
     let mut passed = false;
+    let mut any_started = false;
+    let mut last_start_error = None;
     for (index, video) in ladder.into_iter().enumerate() {
         if state.performance_check.cancelled() {
             discard_benchmark_sessions(state, &directory).await;
             bail!("cancelled");
         }
         let is_floor = index as u32 + 1 == rung_count;
-        if passed || (skip_next && !is_floor) || started.elapsed() > TOTAL_BUDGET {
+        if should_skip_rung(
+            passed,
+            skip_next,
+            started.elapsed() > TOTAL_BUDGET,
+            is_floor,
+        ) {
             if !passed {
                 rungs.push(PerformanceCheckRung {
                     video,
@@ -377,7 +501,22 @@ async fn run_ladder(
         );
         let (measurement, stats) = measure_rung(state, &video, &directory).await;
         discard_benchmark_sessions(state, &directory).await;
-        let mut reasons = score_rung(&measurement);
+        if measurement.studio_busy {
+            // ogre 2026-09-30: the check ran while a session was starting,
+            // every rung was refused in 100 ms, and the refusals were saved
+            // as "this computer cannot hold 720p". Keep the previous verdict.
+            bail!(
+                "the studio became busy ({}); no verdict recorded",
+                measurement
+                    .start_error
+                    .as_deref()
+                    .unwrap_or("capture active")
+            );
+        }
+        any_started |= measurement.started;
+        last_start_error = measurement.start_error.clone().or(last_start_error);
+        let encode_backend = stats.as_ref().and_then(|stats| stats.encode_backend);
+        let mut reasons = score_rung_for_backend(&measurement, encode_backend);
         if forced_failure_above_height().is_some_and(|height| video.height > height) {
             reasons.push("forced-by-test-seam".to_string());
         }
@@ -411,7 +550,7 @@ async fn run_ladder(
             } else {
                 PerformanceCheckRungVerdict::Failed
             },
-            encode_backend: stats.as_ref().and_then(|stats| stats.encode_backend),
+            encode_backend,
             compositor_backend: stats.as_ref().and_then(|stats| stats.compositor_backend),
             encoder_speed: measurement.encoder_speed,
             delivered_fps: measurement.delivered_fps,
@@ -420,13 +559,21 @@ async fn run_ladder(
         });
     }
 
+    if !any_started {
+        // Nothing was measured, so there is no verdict to keep. Saving one
+        // would brand the floor "too heavy" until the key changes.
+        bail!(
+            "no benchmark session started ({}); no verdict recorded",
+            last_start_error.as_deref().unwrap_or("no rung measured")
+        );
+    }
     let Some((recommended, below_floor)) = recommend(&rungs) else {
         bail!("the ladder produced no rungs");
     };
     let result = PerformanceCheckResult {
         capability_key: capability_key(),
         checked_at: chrono::Utc::now().to_rfc3339(),
-        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        app_version: desktop_app_version(),
         duration_ms: started.elapsed().as_millis() as u64,
         recommended,
         below_floor,
@@ -495,7 +642,9 @@ async fn measure_rung(
     match start {
         Ok(Ok(_)) => measurement.started = true,
         Ok(Err(error)) => {
-            measurement.start_error = Some(format!("{error:#}"));
+            let message = format!("{error:#}");
+            measurement.studio_busy = start_error_means_busy_studio(&message);
+            measurement.start_error = Some(message);
             return (measurement, None);
         }
         Err(_) => {
@@ -617,6 +766,7 @@ mod tests {
         RungMeasurement {
             started: true,
             start_error: None,
+            studio_busy: false,
             target_fps,
             encoder_speed: Some(1.0),
             delivered_fps: Some(f64::from(target_fps)),
@@ -641,6 +791,24 @@ mod tests {
             drain_after_stop_ms: None,
             reasons: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_busy_studio_refusal_is_not_a_machine_verdict() {
+        // ogre 2026-09-30 support log, verbatim start errors.
+        assert!(start_error_means_busy_studio(
+            "A capture session is starting"
+        ));
+        assert!(start_error_means_busy_studio(
+            "A capture session is active or finalizing"
+        ));
+        assert!(start_error_means_busy_studio(
+            "A capture session is already running"
+        ));
+        assert!(!start_error_means_busy_studio("start timed out"));
+        assert!(!start_error_means_busy_studio(
+            "FFmpeg is unavailable: No such file or directory"
+        ));
     }
 
     #[test]
@@ -724,8 +892,175 @@ mod tests {
                 "{expected}"
             );
         }
-        assert!(should_fast_skip_next(&measurement));
-        assert!(!should_fast_skip_next(&healthy(30)));
+        assert!(should_fast_skip_next_on(&measurement, false));
+        assert!(!should_fast_skip_next_on(&measurement, true));
+        assert!(!should_fast_skip_next_on(&healthy(30), false));
+    }
+
+    #[test]
+    fn linux_never_fast_skips_a_soft_fail() {
+        let soft = RungMeasurement {
+            encoder_speed: Some(0.4),
+            ..healthy(30)
+        };
+        assert!(should_fast_skip_next_on(&soft, false));
+        assert!(!should_fast_skip_next_on(&soft, true));
+    }
+
+    #[test]
+    fn openh264_ogre_speed_does_not_fail_a_healthy_720p_rung() {
+        // Omarchy 2026-09-28: OpenH264 synthetic speed ≈ 0.08 at 720p30 while
+        // acceptance Record→file at 1080p already passed on the same box.
+        let measurement = RungMeasurement {
+            encoder_speed: Some(0.08),
+            delivered_fps: Some(2.4),
+            stalled_frames: 20,
+            ..healthy(30)
+        };
+        assert!(
+            score_rung_for_backend(&measurement, Some(EncodeBackend::SoftwareOpenH264)).is_empty()
+        );
+        assert_eq!(
+            score_rung_for_backend(&measurement, Some(EncodeBackend::HardwareVaapi)),
+            vec![
+                "encoder-below-realtime".to_string(),
+                "frame-rate-below-target".to_string(),
+                "frames-skipped-or-repeated".to_string(),
+            ]
+        );
+        assert_eq!(
+            score_rung(&measurement),
+            vec![
+                "encoder-below-realtime".to_string(),
+                "frame-rate-below-target".to_string(),
+                "frames-skipped-or-repeated".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn openh264_still_fails_the_uhd_600_queue_and_drain_shape() {
+        let measurement = RungMeasurement {
+            encoder_speed: Some(0.277),
+            delivered_fps: Some(2.5),
+            stalled_frames: 343,
+            queue_oldest_frame_age_ms: Some(12_000),
+            fifo_write_p95_ms: Some(9_700.0),
+            drain_after_stop_ms: Some(12_000),
+            finalized_cleanly: false,
+            ..healthy(30)
+        };
+        let reasons = score_rung_for_backend(&measurement, Some(EncodeBackend::SoftwareOpenH264));
+        for expected in [
+            "encoder-queue-backlog",
+            "encoder-pipe-backpressure",
+            "slow-drain-after-stop",
+            "did-not-finalize",
+        ] {
+            assert!(
+                reasons.iter().any(|reason| reason == expected),
+                "{expected} in {reasons:?}"
+            );
+        }
+        for unexpected in [
+            "encoder-below-realtime",
+            "frame-rate-below-target",
+            "frames-skipped-or-repeated",
+        ] {
+            assert!(
+                !reasons.iter().any(|reason| reason == unexpected),
+                "{unexpected} in {reasons:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_key_changes_with_gpu_identity_and_app_version() {
+        let a = capability_key_from(
+            "linux",
+            "x86_64",
+            "linux-render-nodes=renderD128=i915",
+            "0.9.119",
+            "0.9.0",
+        );
+        let same = capability_key_from(
+            "linux",
+            "x86_64",
+            "linux-render-nodes=renderD128=i915",
+            "0.9.119",
+            "0.9.0",
+        );
+        let gpu = capability_key_from(
+            "linux",
+            "x86_64",
+            "linux-render-nodes=renderD129=amdgpu",
+            "0.9.119",
+            "0.9.0",
+        );
+        let app = capability_key_from(
+            "linux",
+            "x86_64",
+            "linux-render-nodes=renderD128=i915",
+            "0.9.120",
+            "0.9.0",
+        );
+        let crate_version = capability_key_from(
+            "linux",
+            "x86_64",
+            "linux-render-nodes=renderD128=i915",
+            "0.9.119",
+            "0.9.1",
+        );
+        assert!(a.starts_with("performance-check-v2:"));
+        assert_eq!(a, same);
+        assert_ne!(a, gpu);
+        assert_ne!(a, app);
+        assert_ne!(a, crate_version);
+    }
+
+    fn sample_result(
+        capability_key: &str,
+        below_floor: bool,
+        rungs: Vec<PerformanceCheckRung>,
+    ) -> PerformanceCheckResult {
+        PerformanceCheckResult {
+            capability_key: capability_key.to_string(),
+            checked_at: "2026-09-28T00:00:00Z".to_string(),
+            app_version: "0.9.0".to_string(),
+            duration_ms: 1_000,
+            recommended: full_ladder().last().cloned().expect("floor"),
+            below_floor,
+            rungs,
+        }
+    }
+
+    fn did_not_start(video: VideoSettings) -> PerformanceCheckRung {
+        PerformanceCheckRung {
+            reasons: vec!["did-not-start".to_string()],
+            ..rung(video, PerformanceCheckRungVerdict::Failed)
+        }
+    }
+
+    #[test]
+    fn linux_v1_did_not_start_below_floor_is_poison_v2_is_not() {
+        let floor = did_not_start(full_ladder().last().cloned().expect("floor"));
+        let v1 = sample_result("performance-check-v1:deadbeef", true, vec![floor.clone()]);
+        let v2 = sample_result("performance-check-v2:abc", true, vec![floor.clone()]);
+        let passed = sample_result(
+            "performance-check-v1:deadbeef",
+            false,
+            vec![rung(
+                full_ladder().last().cloned().expect("floor"),
+                PerformanceCheckRungVerdict::Passed,
+            )],
+        );
+        if cfg!(target_os = "linux") {
+            assert!(linux_did_not_start_below_floor(&v1));
+        } else {
+            assert!(!linux_did_not_start_below_floor(&v1));
+        }
+        assert!(!linux_did_not_start_below_floor(&v2));
+        assert!(!linux_did_not_start_below_floor(&passed));
     }
 
     #[test]
@@ -786,5 +1121,25 @@ mod tests {
         let (video, below_floor) = recommend(&all_failed).expect("floor");
         assert_eq!((video.width, video.height, below_floor), (1280, 720, true));
         assert!(recommend(&[]).is_none());
+    }
+
+    #[test]
+    fn a_skipped_floor_is_not_reported_as_below_the_machine() {
+        let ladder = ladder_under_ceiling(1920, 1080, 30);
+        let unfinished = vec![
+            rung(ladder[0].clone(), PerformanceCheckRungVerdict::Failed),
+            rung(ladder[1].clone(), PerformanceCheckRungVerdict::Skipped),
+        ];
+        let (video, below_floor) = recommend(&unfinished).expect("floor");
+        assert_eq!((video.width, video.height, below_floor), (1280, 720, false));
+    }
+
+    #[test]
+    fn budget_and_fast_skip_never_drop_the_floor() {
+        assert!(!should_skip_rung(false, true, true, true));
+        assert!(should_skip_rung(false, true, false, false));
+        assert!(should_skip_rung(false, false, true, false));
+        assert!(should_skip_rung(true, false, false, true));
+        assert!(!should_skip_rung(false, false, false, true));
     }
 }

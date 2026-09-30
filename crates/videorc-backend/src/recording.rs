@@ -12765,6 +12765,9 @@ fn append_h264_encoding_args_for_platform_with_timing(
                 "-allow_skip_frames".to_string(),
                 "1".to_string(),
             ]);
+            args.extend(linux_openh264_threading_args(
+                std::thread::available_parallelism().map_or(1, |count| count.get()),
+            ));
         }
         FfmpegH264Platform::WindowsHardware => {
             args.extend(["-hw_encoding".to_string(), "1".to_string()]);
@@ -12847,6 +12850,21 @@ fn append_h264_encoding_args_for_platform_with_timing(
     if performance_check {
         disable_openh264_frame_skip(args);
     }
+}
+
+/// libopenh264 only threads across slices: one slice (the FFmpeg default)
+/// encodes on one core whatever `-threads` says. ogre's i7-8750H encoded
+/// per-frame noise at 11 fps at 720p and 5 fps at 1080p that way; four
+/// slices ran 2.6-2.9x faster (29 / 15 fps), while six and twelve were
+/// slower again. Four is the cap; smaller machines use what they have.
+fn linux_openh264_threading_args(parallelism: usize) -> [String; 4] {
+    let slices = parallelism.clamp(1, 4).to_string();
+    [
+        "-threads".to_string(),
+        slices.clone(),
+        "-slices".to_string(),
+        slices,
+    ]
 }
 
 /// Performance-check sessions encode per-frame noise on purpose (the cheap
@@ -13672,7 +13690,15 @@ pub(crate) fn graphics_adapter_driver_identity() -> String {
     })
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+pub(crate) fn graphics_adapter_driver_identity() -> String {
+    crate::linux_vaapi::linux_graphics_adapter_driver_identity(
+        Path::new("/dev/dri"),
+        Path::new("/sys/class/drm"),
+    )
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub(crate) fn graphics_adapter_driver_identity() -> String {
     format!(
         "platform={};windows-adapter-driver=not-applicable",
@@ -22263,6 +22289,18 @@ mod tests {
         assert_eq!(arg_value(&linux_software_args, "-c:v"), Some("libopenh264"));
         assert_eq!(arg_value(&linux_software_args, "-pix_fmt"), Some("yuv420p"));
         assert_eq!(arg_value(&linux_software_args, "-rc_mode"), Some("bitrate"));
+        // Slices are what libopenh264 threads across; -threads alone is a
+        // no-op. Windows software keeps the #149-benchmarked single slice.
+        let slices = arg_value(&linux_software_args, "-slices")
+            .expect("Linux OpenH264 sets a slice count")
+            .parse::<usize>()
+            .expect("numeric slice count");
+        assert!((1..=4).contains(&slices));
+        assert_eq!(
+            arg_value(&linux_software_args, "-threads"),
+            Some(slices.to_string().as_str())
+        );
+        assert_eq!(arg_value(&windows_software_args, "-slices"), None);
 
         // libopenh264 writes no VUI and h264_vaapi drops primaries/transfer
         // (Plan 0002): every Linux arm and the Windows software arm rewrite
@@ -27755,6 +27793,26 @@ mod tests {
         assert_eq!(
             arg_value(&args, "-af"),
             Some("aresample=async=1:first_pts=0,apad")
+        );
+    }
+
+    #[test]
+    fn linux_openh264_slices_follow_cores_up_to_four() {
+        assert_eq!(
+            linux_openh264_threading_args(1),
+            ["-threads", "1", "-slices", "1"].map(String::from)
+        );
+        assert_eq!(
+            linux_openh264_threading_args(2),
+            ["-threads", "2", "-slices", "2"].map(String::from)
+        );
+        assert_eq!(
+            linux_openh264_threading_args(12),
+            ["-threads", "4", "-slices", "4"].map(String::from)
+        );
+        assert_eq!(
+            linux_openh264_threading_args(0),
+            ["-threads", "1", "-slices", "1"].map(String::from)
         );
     }
 

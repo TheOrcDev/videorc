@@ -1694,8 +1694,9 @@ pub struct PerformanceCheckRung {
 }
 
 /// A completed check. `capability_key` names the machine the verdict belongs
-/// to (OS, graphics adapter + driver, FFmpeg binary): when it no longer
-/// matches, the stored result is stale and the check runs again.
+/// to (OS, arch, real GPU/driver identity, desktop app version, backend
+/// crate): when it no longer matches, the stored result is stale and the
+/// check runs again.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PerformanceCheckResult {
