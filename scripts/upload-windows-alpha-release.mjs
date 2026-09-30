@@ -40,14 +40,20 @@ async function main() {
     throw new Error(
       'Controlled Windows publication must use the protected staging/finalization workflow.'
     )
-  const sourcePackage = controlled
-    ? JSON.parse(
-        spawnSync('git', ['show', `${manifest.sourceCommit}:apps/desktop/package.json`], {
-          cwd: repoRoot,
-          encoding: 'utf8'
-        }).stdout
-      )
-    : JSON.parse(await readFile(join(repoRoot, 'apps', 'desktop', 'package.json'), 'utf8'))
+  // Promote the exact candidate's numeric version, not whatever main is now.
+  // macOS may already have rolled the package.json forward; the skill allows
+  // the Windows Alpha to stay on the already-built candidate.
+  const sourcePackageShow = spawnSync(
+    'git',
+    ['show', `${manifest.sourceCommit}:apps/desktop/package.json`],
+    { cwd: repoRoot, encoding: 'utf8' }
+  )
+  if (sourcePackageShow.status !== 0) {
+    throw new Error(
+      `Could not read apps/desktop/package.json at candidate source ${manifest.sourceCommit}.`
+    )
+  }
+  const sourcePackage = JSON.parse(sourcePackageShow.stdout)
   const acceptedReleaseIds = await loadValidatedWindowsAcceptanceHistory(
     join(repoRoot, 'docs', 'acceptance', 'windows-alpha')
   )
