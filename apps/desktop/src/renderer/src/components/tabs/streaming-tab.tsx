@@ -292,6 +292,7 @@ function StreamingSetup(): ReactElement {
                 })}
                 key={target.id}
                 runtime={runtimeById.get(target.id)}
+                sharedAccountWith={sharedAccountLabel(streaming.targets, target)}
                 target={target}
                 validation={validationByPlatform.get(target.platform)}
                 xNativeCapability={xNativeCapability}
@@ -362,6 +363,26 @@ function StreamingSetup(): ReactElement {
       </div>
     </div>
   )
+}
+
+/**
+ * YouTube Vertical signs in with the YouTube account (accounts are keyed by
+ * platform). When the horizontal YouTube card is also signed in, the channel
+ * and Disconnect live there and the vertical card says so (plan 080 S6).
+ */
+function sharedAccountLabel(
+  targets: StreamTargetSettings[],
+  target: StreamTargetSettings
+): string | undefined {
+  if (target.outputOrientation !== 'vertical' || target.authMode !== 'oauth') return undefined
+  const owner = targets.find(
+    (candidate) =>
+      candidate.platform === target.platform &&
+      candidate.id !== target.id &&
+      candidate.outputOrientation !== 'vertical' &&
+      candidate.authMode === 'oauth'
+  )
+  return owner?.label
 }
 
 function StreamFailureBanner({
