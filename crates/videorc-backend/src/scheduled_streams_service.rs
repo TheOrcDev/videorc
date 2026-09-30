@@ -99,10 +99,6 @@ fn x_capability(state: &AppState) -> Result<Value> {
 }
 
 pub async fn youtube_api(state: &AppState, account_id: &str) -> Result<YouTubeEvents> {
-    if let Some(message) = crate::oauth::provider_oauth_unavailable_message(StreamPlatform::Youtube)
-    {
-        bail!("{message}");
-    }
     #[cfg(debug_assertions)]
     if account_id == "scheduled-smoke-channel"
         && let Some(base) = smoke_api_base()?
@@ -140,8 +136,11 @@ pub async fn dispatch(state: &AppState, method: &str, params: Value) -> Result<V
         .context("Invalid scheduling method")?;
     match action {
         "capabilities" => {
-            let youtube_reason =
-                crate::oauth::provider_oauth_unavailable_message(StreamPlatform::Youtube);
+            // Scheduling needs YouTube sign-in, which only a build with the
+            // Google client credentials can do.
+            let youtube_reason = crate::oauth::provider_client_id(StreamPlatform::Youtube)
+                .err()
+                .map(|error| error.to_string());
             let youtube_accounts = state
                 .database
                 .list_platform_accounts()?

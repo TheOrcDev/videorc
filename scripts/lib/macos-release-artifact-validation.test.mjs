@@ -5,7 +5,9 @@ import {
   artifactKindFromPath,
   buildMacosReleaseArtifactChecks,
   BUNDLED_X_OAUTH1_CONSUMER_ENVS,
+  BUNDLED_YOUTUBE_OAUTH_ENVS,
   bundledXOauth1ConsumerCheckTargets,
+  bundledYoutubeOauthCheckTargets,
   bundledKickSecretLeakCheckTargets,
   evaluateFileExcludesEnvSecretCheck,
   captureEntitlementCheckTargets,
@@ -55,6 +57,8 @@ describe('buildMacosReleaseArtifactChecks', () => {
         'native preview addon signature',
         'bundled X OAuth1 consumer key (videorc-backend)',
         'bundled X OAuth1 consumer secret (videorc-backend)',
+        'bundled YouTube OAuth client ID (videorc-backend)',
+        'bundled YouTube OAuth client secret (videorc-backend)',
         'bundled Kick client secret absent from app.asar'
       ]
     )
@@ -234,6 +238,29 @@ describe('capture entitlement gate', () => {
       assert.equal(check.type, 'binary-contains-env-secret')
       assert.equal(check.command, undefined)
       assert.equal(check.path, '/release/Videorc.app/Contents/Resources/videorc-backend')
+    }
+  })
+
+  it('fails closed when the release backend lacks the baked YouTube OAuth pair', () => {
+    const checks = buildMacosReleaseArtifactChecks('/release/Videorc.app').filter((check) =>
+      check.label.startsWith('bundled YouTube OAuth')
+    )
+
+    assert.deepEqual(checks, bundledYoutubeOauthCheckTargets('/release/Videorc.app'))
+    assert.deepEqual(
+      checks.map((check) => check.envName),
+      BUNDLED_YOUTUBE_OAUTH_ENVS
+    )
+    for (const check of checks) {
+      assert.equal(check.type, 'binary-contains-env-secret')
+      assert.equal(check.path, '/release/Videorc.app/Contents/Resources/videorc-backend')
+      assert.equal(
+        evaluateBinaryContainsEnvSecretCheck(check, {
+          env: {},
+          readFile: () => Buffer.from('')
+        }).ok,
+        false
+      )
     }
   })
 

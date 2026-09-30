@@ -217,10 +217,10 @@ use crate::storage::Database;
 use crate::streaming::{
     ManualStreamKeyPlan, ManualStreamKeyRefParams, PlatformAccountStatus,
     PlatformAccountValidation, PlatformAccountValidationState, StoreManualStreamKeyParams,
-    StoreManualStreamKeyResult, StreamAuthMode, StreamMetadataDraft, StreamPlatform,
-    UpsertPlatformAccount, manual_stream_key_previous_secret_ref, manual_stream_key_secret_ref,
-    manual_stream_key_state, normalize_stream_metadata_draft, plan_manual_stream_key_restore,
-    plan_manual_stream_key_store, validate_stream_metadata_draft,
+    StoreManualStreamKeyResult, StreamMetadataDraft, StreamPlatform, UpsertPlatformAccount,
+    manual_stream_key_previous_secret_ref, manual_stream_key_secret_ref, manual_stream_key_state,
+    normalize_stream_metadata_draft, plan_manual_stream_key_restore, plan_manual_stream_key_store,
+    validate_stream_metadata_draft,
 };
 use crate::twitch::{
     PreparedTwitchBroadcast, TwitchCategorySearchParams, TwitchCategorySearchRequest,
@@ -2561,41 +2561,10 @@ async fn validate_platform_accounts(state: &AppState) -> Vec<PlatformAccountVali
     validations
 }
 
-fn oauth_streaming_for_start(
-    params: &protocol::StartSessionParams,
-) -> Option<&crate::streaming::StreamingSettings> {
-    if !params.output.stream_enabled {
-        return None;
-    }
-    params
-        .streaming
-        .as_ref()
-        .filter(|streaming| streaming.enabled)
-}
-
-fn validate_start_session_oauth_availability(params: &protocol::StartSessionParams) -> Result<()> {
-    let Some(streaming) = oauth_streaming_for_start(params) else {
-        return Ok(());
-    };
-    for target in &streaming.targets {
-        let enabled = target.enabled || streaming.enabled_target_ids.contains(&target.id);
-        if enabled
-            && target.auth_mode == StreamAuthMode::Oauth
-            && let Some(message) = oauth::provider_oauth_unavailable_message(target.platform)
-        {
-            anyhow::bail!("{message}");
-        }
-    }
-    Ok(())
-}
-
 async fn prepare_youtube_stream_target(
     state: &AppState,
     params: YouTubePrepareParams,
 ) -> anyhow::Result<PreparedYouTubeBroadcast> {
-    if let Some(message) = oauth::provider_oauth_unavailable_message(StreamPlatform::Youtube) {
-        anyhow::bail!("{message}");
-    }
     let metadata = state.database.stream_metadata_draft()?;
     let validation = validate_stream_metadata_draft(&metadata);
     if !validation.valid {
@@ -2688,9 +2657,6 @@ async fn transition_youtube_stream_target(
     {
         anyhow::bail!("Scheduled broadcasts must use their owned scheduling lifecycle.");
     }
-    if let Some(message) = oauth::provider_oauth_unavailable_message(StreamPlatform::Youtube) {
-        anyhow::bail!("{message}");
-    }
     let credential = youtube_account_credentials(state, params.account_id.as_deref())?;
     let client = reqwest::Client::new();
     let mut fresh = fresh_platform_access_token(state, &credential, &client).await?;
@@ -2730,9 +2696,6 @@ async fn youtube_stream_status(
     state: &AppState,
     params: YouTubeStreamStatusParams,
 ) -> anyhow::Result<YouTubeStreamStatusResult> {
-    if let Some(message) = oauth::provider_oauth_unavailable_message(StreamPlatform::Youtube) {
-        anyhow::bail!("{message}");
-    }
     let credential = youtube_account_credentials(state, params.account_id.as_deref())?;
     let client = reqwest::Client::new();
     let mut fresh = fresh_platform_access_token(state, &credential, &client).await?;
@@ -2770,9 +2733,6 @@ async fn list_youtube_channels(
     state: &AppState,
     params: YouTubeChannelListParams,
 ) -> anyhow::Result<YouTubeChannelListResult> {
-    if let Some(message) = oauth::provider_oauth_unavailable_message(StreamPlatform::Youtube) {
-        anyhow::bail!("{message}");
-    }
     let credential = youtube_account_credentials(state, params.account_id.as_deref())?;
     #[cfg(debug_assertions)]
     if credential.account.account_id == "scheduled-smoke-channel"
@@ -2823,9 +2783,6 @@ async fn select_youtube_channel_account(
     state: &AppState,
     params: YouTubeChannelSelectParams,
 ) -> anyhow::Result<crate::streaming::PlatformAccount> {
-    if let Some(message) = oauth::provider_oauth_unavailable_message(StreamPlatform::Youtube) {
-        anyhow::bail!("{message}");
-    }
     let credential = youtube_account_credentials(state, params.account_id.as_deref())?;
     let client = reqwest::Client::new();
     let mut fresh = fresh_platform_access_token(state, &credential, &client).await?;
@@ -2907,9 +2864,6 @@ async fn youtube_chat_config(
     state: &AppState,
     target: &crate::streaming::StreamTargetSettings,
 ) -> Result<youtube_chat::YouTubeChatConfig> {
-    if let Some(message) = oauth::provider_oauth_unavailable_message(StreamPlatform::Youtube) {
-        anyhow::bail!("{message}");
-    }
     #[cfg(debug_assertions)]
     if target.account_id.as_deref() == Some("scheduled-smoke-channel")
         && let Some(base) = scheduled_streams_service::smoke_api_base()?
@@ -9676,15 +9630,8 @@ async fn handle_text_message_with_role(
         #[cfg(debug_assertions)]
         "recording.start_test" => {
             match serde_json::from_value::<protocol::StartSessionParams>(command.params) {
-                Ok(params) => match validate_start_session_oauth_availability(&params) {
-                    Ok(()) => match start_session(state.clone(), params).await {
-                        Ok(status) => ServerResponse::ok(command.id, status),
-                        Err(error) => ServerResponse::error(
-                            command.id,
-                            "recording-start-failed",
-                            error.to_string(),
-                        ),
-                    },
+                Ok(params) => match start_session(state.clone(), params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
                     Err(error) => ServerResponse::error(
                         command.id,
                         "recording-start-failed",
@@ -9751,23 +9698,16 @@ async fn handle_text_message_with_role(
                 Ok(params) => {
                     let streaming = params.streaming.clone();
                     let attach_live_chat = session_attaches_live_chat(&params);
-                    match validate_start_session_oauth_availability(&params) {
-                        Ok(()) => match start_session(state.clone(), params).await {
-                            Ok(status) => {
-                                if attach_live_chat
-                                    && let Some(streaming) = streaming.as_ref()
-                                    && let Some(session_id) = status.session_id.as_deref()
-                                {
-                                    spawn_session_live_chat(state, session_id, streaming).await;
-                                }
-                                ServerResponse::ok(command.id, status)
+                    match start_session(state.clone(), params).await {
+                        Ok(status) => {
+                            if attach_live_chat
+                                && let Some(streaming) = streaming.as_ref()
+                                && let Some(session_id) = status.session_id.as_deref()
+                            {
+                                spawn_session_live_chat(state, session_id, streaming).await;
                             }
-                            Err(error) => ServerResponse::error(
-                                command.id,
-                                "session-start-failed",
-                                error.to_string(),
-                            ),
-                        },
+                            ServerResponse::ok(command.id, status)
+                        }
                         Err(error) => ServerResponse::error(
                             command.id,
                             "session-start-failed",
@@ -19272,23 +19212,6 @@ mod tests {
         assert!(!session_attaches_live_chat(
             &session_params_with_stream_output(true)
         ));
-    }
-
-    #[test]
-    fn oauth_start_validation_only_applies_to_streaming_sessions() {
-        let streaming = streaming_with_enabled_target(
-            StreamPlatform::Youtube,
-            crate::streaming::StreamAuthMode::Oauth,
-        );
-
-        let mut recording = session_params_with_stream_output(false);
-        recording.streaming = Some(streaming.clone());
-        assert!(oauth_streaming_for_start(&recording).is_none());
-        assert!(validate_start_session_oauth_availability(&recording).is_ok());
-
-        let mut live = session_params_with_stream_output(true);
-        live.streaming = Some(streaming);
-        assert!(oauth_streaming_for_start(&live).is_some());
     }
 
     #[test]

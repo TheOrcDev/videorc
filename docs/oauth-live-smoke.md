@@ -6,10 +6,14 @@ This runbook is the release acceptance path for first-class OAuth/native livestr
 
 ## Provider Assumptions Checked 2026-07-07
 
-- **YouTube:** Public builds keep OAuth/native Live Streaming API support paused
-  until Google approves the app. A verification candidate can explicitly enable
-  the complete flow so reviewers can exercise consent, channel selection,
-  broadcast management, chat, and revocation before approval.
+- **YouTube:** Google approved the `youtube.force-ssl` scope on 2026-09-30, so
+  every build that bakes the Desktop client ID and secret offers YouTube OAuth.
+  Live Streaming API requests must be authorized by the Google account that
+  owns the broadcasting channel. The channel must be verified, free of
+  live-streaming restrictions, and live streaming may take up to 24 hours to
+  become available after first enablement. Videorc waits for the bound stream
+  to report active ingest before transitioning a broadcast live, then
+  transitions it to complete when the session ends.
 - **Twitch:** Videorc's app is registered as a PUBLIC client, which has no
   client secret. Twitch's authorization-code grant rejects a secretless public
   client (`Invalid client credentials`, returned AFTER the user approves,
@@ -137,27 +141,28 @@ without a user gesture and browsers block gestureless custom-scheme navigation,
 leaving x.com's consent page on an infinite spinner while the app never receives the
 callback.
 
-YouTube public releases remain paused until Google approval completes. To build
-or run a reviewer candidate, enable the guarded path and provide the public
-installed-app client ID (PKCE is used; no client secret is bundled):
+YouTube:
 
 ```sh
-VIDEORC_ENABLE_YOUTUBE_OAUTH=1
 VIDEORC_YOUTUBE_CLIENT_ID=...
+VIDEORC_YOUTUBE_CLIENT_SECRET=...
+VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID=...
+VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET=...
 VIDEORC_SMOKE_YOUTUBE_CHANNEL_READY=1
 ```
 
-For a packaged reviewer or approved release, compile with:
-
-```sh
-VIDEORC_BUNDLED_YOUTUBE_OAUTH_ENABLED=1
-VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID=...
-```
+YouTube needs both halves: Google's Desktop client type rejects the token
+exchange without the client secret even with PKCE (`invalid_request:
+client_secret is missing.`, returned AFTER consent). For an installed app the
+secret is not confidential; PKCE protects the exchange. Release builds bake the
+bundled pair (`~/.videorc-release.env` locally, repository secrets in GitHub
+Actions), and the release preflights and `release:validate:macos` fail closed
+without it. Without both values the YouTube card stays Manual RTMP only.
 
 The Google app must register the three `127.0.0.1` callback URLs above. The
 authorization requests only `youtube.force-ssl`, requests offline access with
 PKCE, and Disconnect revokes the Google token before deleting local account
-data. Leave both enable flags unset in public builds until approval.
+data.
 
 Twitch:
 
@@ -222,11 +227,39 @@ bundled consumer pair nor OAuth1 env credentials are configured, leave
 `VIDEORC_SMOKE_X_LIVESTREAM_OAUTH1_READY` unset and keep X OAuth/native blocked
 with explicit manual RTMP still available.
 
+## YouTube OAuth Acceptance
+
+1. Launch the packaged release candidate with YouTube OAuth credentials baked in.
+2. Open Streaming and connect YouTube through OAuth, starting from a disconnected state.
+3. Confirm the connected account identity appears and the credential source badge is `Bundled default` or the intended environment override.
+4. Select the intended YouTube channel or brand channel.
+5. Set global title and description. Use unlisted or private privacy for the test.
+6. Enable the YouTube OAuth destination.
+7. Click Start, review the Go Live confirmation, then confirm.
+8. Verify YouTube Studio shows the expected title, description, privacy, and fresh broadcast.
+9. Verify Videorc waits for active ingest before transitioning the broadcast live.
+10. Verify video and audio arrive on YouTube.
+11. Verify YouTube chat messages appear in the Stream Manager, and a reply sent from Videorc appears in the watch-page chat.
+12. Stop in Videorc and verify the YouTube broadcast transitions to complete.
+13. Disconnect YouTube and verify Videorc no longer appears under myaccount.google.com/permissions.
+
+OAuth creates a fresh broadcast and stream for every session, so a YouTube
+Vertical manual key tied to Studio's Dual stream setting does not carry over to
+it. Test the vertical leg with the horizontal leg on Manual RTMP.
+
+Expected evidence:
+
+- YouTube OAuth account screenshot.
+- selected channel screenshot.
+- YouTube Studio screenshot showing matching metadata.
+- Stream Manager screenshot with a YouTube chat message and the reply.
+- final broadcast URL or ID.
+
 ## YouTube Manual RTMP Acceptance
 
-1. Launch the packaged release candidate without Google OAuth credentials.
+1. Launch the packaged release candidate.
 2. Open Streaming and expand YouTube.
-3. Confirm the auth mode is Manual RTMP and the OAuth pause message mentions Google approval.
+3. Switch the auth mode to Manual RTMP.
 4. Paste a YouTube RTMP stream key and save it.
 5. Set global title and description in Videorc, then create/configure the YouTube live event in YouTube Studio.
 6. Enable the YouTube destination.
@@ -237,7 +270,7 @@ with explicit manual RTMP still available.
 
 Expected evidence:
 
-- YouTube Manual RTMP auth-mode screenshot showing the Google approval pause message.
+- YouTube Manual RTMP auth-mode screenshot.
 - Go Live confirmation screenshot.
 - YouTube Studio screenshot for the manually configured event.
 - final platform URL or broadcast ID.
@@ -340,6 +373,7 @@ Expected evidence:
 - Run context: dev/packaged
 - Provider readiness: pass/fail, redacted output attached
 - Provider readiness evidence: paste `pnpm smoke:provider-readiness:evidence` output
+- YouTube OAuth: pass/fail, channel, broadcast ID/URL, chat read/send, revoke, notes
 - YouTube Manual RTMP: pass/fail, channel, broadcast ID/URL, notes
 - Twitch: pass/fail, channel URL, notes
 - X: pass/fail/blocked, allow-list/OAuth1 evidence, broadcast URL, notes

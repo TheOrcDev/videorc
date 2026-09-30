@@ -90,10 +90,12 @@ check (default in packaged builds since 0.9.10; opt out via
   `~/.videorc-release.env`. While R2 is still an origin, also the
   `VIDEORC_DOWNLOAD_S3_*` values (same bucket as videorc-web, **Object Read &
   Write** token) from the web app's `.env` (`~/projects/videorcweb/.env`).
-- **YouTube OAuth paused** — do not require or bundle Google OAuth credentials
-  while Videorc awaits Google approval. YouTube remains available through Manual
-  RTMP, and `release:validate:macos` does not check for a bundled YouTube OAuth
-  secret while this pause is active.
+- **YouTube OAuth pair** — `VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID` and
+  `VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET` in `~/.videorc-release.env` (repository
+  secrets for GitHub Actions builds). Google approved `youtube.force-ssl` on
+  2026-09-30 and there is no enable flag: a build with both values offers YouTube
+  sign-in. `release:validate:macos` and the Windows and Linux preflights fail
+  closed when either half is missing.
 - **⚠️ Bucket-less S3 endpoint** — every origin's endpoint must be host only
   (Neon: `https://<branch-id>.storage.c-<N>.<region>.aws.neon.tech`). For R2,
   `VIDEORC_DOWNLOAD_S3_ENDPOINT_URL` must be the

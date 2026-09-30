@@ -54,6 +54,14 @@ export const REQUIRED_MACOS_RELEASE_GITHUB_SECRETS = [
   {
     group: 'bundled oauth',
     name: 'VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_SECRET'
+  },
+  {
+    group: 'bundled oauth',
+    name: 'VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID'
+  },
+  {
+    group: 'bundled oauth',
+    name: 'VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET'
   }
 ]
 
@@ -94,16 +102,6 @@ export const CONDITIONAL_MACOS_RELEASE_GITHUB_SECRETS = [
     group: 'release origin hetzner',
     name: 'VIDEORC_RELEASE_UPLOAD_HETZNER_S3_SECRET_ACCESS_KEY',
     detail: 'required while hetzner is a release origin (retired after the Neon soak)'
-  },
-  {
-    group: 'bundled oauth',
-    name: 'VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID',
-    detail: 'optional while YouTube OAuth remains paused pending Google approval'
-  },
-  {
-    group: 'bundled oauth',
-    name: 'VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET',
-    detail: 'optional while YouTube OAuth remains paused pending Google approval'
   }
 ]
 
