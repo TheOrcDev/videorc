@@ -1,8 +1,10 @@
 # Plan 080: Six owner fixes: update chip, Livestream setup, mic preview, Screen and Camera rows, Settings icons
 
-Status: **PLANNED** 2026-09-30 against `origin/main` `9ec80d41`, on branch
-`plan/080-studio-live-settings-cleanup` (worktree `../videorc-wt-080`).
-All six owner decisions were confirmed on 2026-09-30. Nothing is implemented yet. Priority P1: item 4 is a user-visible false error
+Status: **IMPLEMENTED** 2026-09-30 (S1-S7) against `origin/main` `9ec80d41`,
+on branch `plan/080-studio-live-settings-cleanup` (worktree `../videorc-wt-080`).
+See [Implementation record](#implementation-record-2026-09-30). All six owner
+decisions were confirmed on 2026-09-30. The owner's packaged by-eye pass (S8) is
+still owed. Priority P1: item 4 is a user-visible false error
 that has shipped in every macOS build since 0.9.101. The rest is polish the
 owner asked for directly. Size L overall, in 8 ordered slices. Slices 1-4 are
 independent of each other; slices 5-7 build on each other.
@@ -29,6 +31,7 @@ independent of each other; slices 5-7 build on each other.
    any section heading, on every Settings tab.
 
 Scope decisions already stated to the owner (not objected to):
+
 - Item 6 covers **Settings only**. Headings on Livestream, Sources, Health and
   the other pages keep their icons unless a slice below rebuilds that section.
 - Button icons, platform logos and status dots stay. Only the decorative
@@ -36,14 +39,14 @@ Scope decisions already stated to the owner (not objected to):
 
 ## Owner decisions (all six CONFIRMED by the owner, 2026-09-30)
 
-| # | Question | Decision |
-| --- | --- | --- |
-| D1 | "Update 0.9.124 available" and "Downloading update… 42%" truncate the same way. Drop the version from them too? | Yes: "Update available", "Downloading… 42%", "Restart to update". The full text (with version) goes in the tooltip. |
-| D2 | Rename the connection modes "OAuth" / "Manual RTMP"? | Yes: **Sign in** / **Stream key**, under the label "Connect with". |
-| D3 | Where does Disconnect go? | A small ghost button at the end of the account row, not full width and not hidden in a menu. |
-| D4 | The technical details: collapsed in place, or moved to the Health page? | Collapsed in place, at the bottom of the right column ("Technical details", closed by default). The owner said "expandable there". |
-| D5 | What does the Camera row show when no camera is chosen? | "Off", matching the System audio and Captions rows. |
-| D6 | The Screen row also lists windows. Label it "Screen" anyway? | Yes, "Screen" (the owner's word). The picker groups items under "Screens" and "Windows". |
+| #   | Question                                                                                                        | Decision                                                                                                                           |
+| --- | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| D1  | "Update 0.9.124 available" and "Downloading update… 42%" truncate the same way. Drop the version from them too? | Yes: "Update available", "Downloading… 42%", "Restart to update". The full text (with version) goes in the tooltip.                |
+| D2  | Rename the connection modes "OAuth" / "Manual RTMP"?                                                            | Yes: **Sign in** / **Stream key**, under the label "Connect with".                                                                 |
+| D3  | Where does Disconnect go?                                                                                       | A small ghost button at the end of the account row, not full width and not hidden in a menu.                                       |
+| D4  | The technical details: collapsed in place, or moved to the Health page?                                         | Collapsed in place, at the bottom of the right column ("Technical details", closed by default). The owner said "expandable there". |
+| D5  | What does the Camera row show when no camera is chosen?                                                         | "Off", matching the System audio and Captions rows.                                                                                |
+| D6  | The Screen row also lists windows. Label it "Screen" anyway?                                                    | Yes, "Screen" (the owner's word). The picker groups items under "Screens" and "Windows".                                           |
 
 ## Findings (read-only research, 2026-09-30)
 
@@ -204,8 +207,7 @@ loaded from `app-shell.tsx:65-67`, so it costs nothing in the eager bundle).
 - The five local commits on `feat/windows-owner-waiver` in the shared checkout
   (71d7c3e5 "say Muted", 15206746 "remove the system audio row", dc76bd5b and
   others) are **already on main** through #375 `f1beb51b`. Plan 069 then
-  superseded the system-audio row. Nothing needs porting. Do not re-apply
-  15206746.
+  superseded the system-audio row. Nothing needs porting. Do not re-apply 15206746.
 
 ### Item 5: Inputs card
 
@@ -241,19 +243,19 @@ loaded from `app-shell.tsx:65-67`, so it costs nothing in the eager bundle).
   rendered at :43-48).
 - Settings has 11 call sites, and **all** of them pass an icon:
 
-  | Tab | File:line | Heading | Icon |
-  | --- | --- | --- | --- |
-  | General | `settings/general-settings.tsx:24` | Appearance & behavior | ThemeIcon |
-  | General | `settings/general-settings.tsx:116` | Import | DownloadIcon |
-  | Recording | `settings/recording-settings.tsx:73` | Recording & storage | SettingsIcon |
-  | Permissions | `settings/permissions-settings.tsx:34` | System access | LockIcon |
-  | Shortcuts | `settings/shortcuts-settings.tsx:83` | Global shortcuts | SettingsIcon |
-  | Shortcuts | `settings/shortcuts-settings.tsx:137` | App shortcuts | KeyboardIcon |
-  | Remote | `settings/remote-settings.tsx:40` | Remote control | SettingsIcon |
-  | Remote | `components/phone-remote-section.tsx:223` | Phone remote | MobileIcon |
-  | Orcle | `components/cohost-settings-section.tsx:125` | Orcle (alpha) | CohostIcon |
-  | About | `settings/about-settings.tsx:31` | Support | BugIcon |
-  | About | `settings/about-settings.tsx:61` | About & updates | SparkleIcon |
+  | Tab         | File:line                                    | Heading               | Icon         |
+  | ----------- | -------------------------------------------- | --------------------- | ------------ |
+  | General     | `settings/general-settings.tsx:24`           | Appearance & behavior | ThemeIcon    |
+  | General     | `settings/general-settings.tsx:116`          | Import                | DownloadIcon |
+  | Recording   | `settings/recording-settings.tsx:73`         | Recording & storage   | SettingsIcon |
+  | Permissions | `settings/permissions-settings.tsx:34`       | System access         | LockIcon     |
+  | Shortcuts   | `settings/shortcuts-settings.tsx:83`         | Global shortcuts      | SettingsIcon |
+  | Shortcuts   | `settings/shortcuts-settings.tsx:137`        | App shortcuts         | KeyboardIcon |
+  | Remote      | `settings/remote-settings.tsx:40`            | Remote control        | SettingsIcon |
+  | Remote      | `components/phone-remote-section.tsx:223`    | Phone remote          | MobileIcon   |
+  | Orcle       | `components/cohost-settings-section.tsx:125` | Orcle (alpha)         | CohostIcon   |
+  | About       | `settings/about-settings.tsx:31`             | Support               | BugIcon      |
+  | About       | `settings/about-settings.tsx:61`             | About & updates       | SparkleIcon  |
 
 - `ThemeIcon` (PaintBrush) and `KeyboardIcon` (Keyboard) are used nowhere
   else, so they become unused. The icon set is licence-counted (100 glyphs).
@@ -301,6 +303,7 @@ loaded from `app-shell.tsx:65-67`, so it costs nothing in the eager bundle).
 ## Slices
 
 Route and model per `CLAUDE.md`:
+
 - S1-S2: Implementation (fit 8), lane `opus-4.8` (small, user-facing copy and
   cosmetics).
 - S3: Diagnose (fit 9), lane `gpt-5.5`. The root cause is identified and the
@@ -343,6 +346,7 @@ width. Gates: `pnpm typecheck`, `pnpm lint`,
 - Do not touch `PanelSection` itself or any call site outside Settings.
 
 **Done when:**
+
 - the guard test passes and fails if any one `icon=` is restored;
 - `settings-layout.test.ts` title checks still pass;
 - a click through all seven Settings tabs in the dev app shows text-only
@@ -402,6 +406,7 @@ Gates: `pnpm typecheck`, `pnpm lint`, `pnpm --filter @videorc/desktop test`,
      and add a test that pins this.
 
 **Done when:**
+
 - `mic-stream.test.ts` passes. It must include "AirPods Pro (Bluetooth)",
   "MacBook Pro Microphone (Built-in)", "Default - MacBook Pro Microphone
   (Built-in)", "Shure MV7 (14ed:1012)", two identical "USB Mic (Virtual)"
@@ -460,6 +465,7 @@ cannot normalize (for example data-source names).
    keep its wording.
 
 **Done when:**
+
 - new `quick-settings.test.ts` cases render six labelled rows in order;
 - the Camera row shows "Off" when no camera is selected;
 - a `capture.test.ts` case proves an explicit Off survives
@@ -512,6 +518,7 @@ move the policy test's target in the same commit.
 
 **Done when:** a new `destination-card.test.tsx` (renderToStaticMarkup, like
 `streaming-metadata.test.ts`) covers:
+
 - a connected Twitch card with no scope strings in the markup;
 - a TikTok card with no mode switch;
 - the header badge for each of enabled/not-ready, ready and prepared;
@@ -556,6 +563,7 @@ Replace the connected box :1159-1360 with, top to bottom:
 6. The YouTube consent dialog is unchanged.
 
 **Done when:** `destination-card.test.tsx` renders every account state:
+
 - connected+valid;
 - connected+refreshed;
 - not-checked;
@@ -622,6 +630,7 @@ still pass.
    Broadcast info form.
 
 **Done when:**
+
 - `streaming-readiness.test.tsx` covers:
   - two sign-in destinations with no stored key counting as ready;
   - a TikTok destination labelled "TikTok";
@@ -641,6 +650,7 @@ glass captures: `magick in.png -background '#000' -flatten`.
 ### S8. Owner acceptance
 
 In a packaged build, check each item by eye:
+
 1. the chip reads "Restart to update";
 2. each destination card is clean for Sign in and for Stream key;
 3. the right column is short, and Technical details opens and closes and
@@ -664,11 +674,100 @@ notes of the version that ships it.
 
 ## Verification summary
 
-| Slice | Focused gates | Device / by-eye |
-| --- | --- | --- |
-| S1 | update-ui, settings-entry-points, sidebar tests | chip at default width |
-| S2 | settings-layout guard, full desktop tests, renderer assets | 7 Settings tabs |
-| S3 | mic-stream, pipeline, preview tests; `smoke:recording-studio` | packaged, AirPods + built-in |
-| S4 | quick-settings, capture, provider tests; `smoke:recording-studio`, live source switch smoke | packaged, camera switch while recording |
-| S5-S7 | destination-card, readiness tests; security-policy, comments-header, activity-pane; renderer assets | dev screenshots, all card states |
-| S8 | - | owner, packaged |
+| Slice | Focused gates                                                                                       | Device / by-eye                         |
+| ----- | --------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| S1    | update-ui, settings-entry-points, sidebar tests                                                     | chip at default width                   |
+| S2    | settings-layout guard, full desktop tests, renderer assets                                          | 7 Settings tabs                         |
+| S3    | mic-stream, pipeline, preview tests; `smoke:recording-studio`                                       | packaged, AirPods + built-in            |
+| S4    | quick-settings, capture, provider tests; `smoke:recording-studio`, live source switch smoke         | packaged, camera switch while recording |
+| S5-S7 | destination-card, readiness tests; security-policy, comments-header, activity-pane; renderer assets | dev screenshots, all card states        |
+| S8    | -                                                                                                   | owner, packaged                         |
+
+## Implementation record (2026-09-30)
+
+| Slice        | Commit     | Notes                                                                                                                                                                    |
+| ------------ | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| S1           | `c7616677` | Labels "Update available" / "Downloading… N%" / "Restart to update"; `detail` is the `title` and `aria-label`.                                                           |
+| S2           | `ae7aac8c` | 11 icons removed; `ThemeIcon` and `KeyboardIcon` slots deleted (91 slots / 86 glyphs); guard test in `settings-layout.test.ts`, proven to fail when an icon is restored. |
+| S3           | `27acefbd` | See below.                                                                                                                                                               |
+| S4           | `1a1319a5` | `cameraOff` on `SourceSelection` (RPC schema accepts it; Rust ignores unknown fields). The Screen row uses the searchable picker inside the row popover.                 |
+| S5 step 0    | `95a33e22` | Card moved to `components/streaming/destination-card.tsx`; the X-docs security pin moved with it.                                                                        |
+| S5 + S6      | `f32970bf` | One commit: both live in the card file.                                                                                                                                  |
+| S7           | `70595407` | New `components/streaming/go-live-panel.tsx`.                                                                                                                            |
+| S3 follow-up | `2b2acc32` | The browser adapter passed its analyser wrapper to Web Audio `connect()`; see below.                                                                                     |
+
+Deviations from the plan text, and why:
+
+- **S3 repro** ran on this Mac with a throwaway Electron 39 script, not the dev
+  app.
+  - Chromium listed "MacBook Pro Microphone (Built-in)" and "Default -
+    MacBook Pro Microphone (Built-in)". `system_profiler` names the same device
+    "MacBook Pro Microphone". So the strict match failed for the built-in mic
+    too, as predicted.
+  - AirPods were not connected at the time. Their "(Bluetooth)" label comes
+    from the same Chromium rule and is covered by fixtures.
+  - Virtual devices showed one more wrinkle: Chromium "Microsoft Teams Audio
+    Device (Virtual)" vs `system_profiler` "Microsoft Teams Audio". Such a
+    device reports `no-label-match` honestly (no permission blame). The
+    backend-level follow-up stays open for it.
+- **Readiness.** S5-S7 count readiness with a new account-aware helper
+  (`lib/destination-readiness.ts`), not `isStreamTargetStartReady`.
+  - The latter treats every sign-in destination as ready whenever the
+    platform supports sign-in, even with no account connected.
+  - The helper counts a sign-in destination as ready only with a connected
+    account, and a stream-key destination only with a saved key. Each
+    not-ready destination is named with what it needs ("sign in or add a
+    stream key", "reconnect your account", "add a stream key").
+- **S6 X block copy.** "X Live ready" and "Not checked yet" replace "X API
+  ready" and "X API check needed". "Check again" replaces Refresh. The
+  authorize helper sentence moved into the button's tooltip.
+- **S7 render cost** is pinned by a source guard
+  (`tabs/streaming-render-cost.test.ts`): Setup and the card never subscribe
+  to diagnostics, and the right column does. It is not a Profiler count.
+  The guard catches the regression that matters (re-adding the subscription
+  to `StreamingSetup`).
+- **S7 preflight row** appears only when at least one destination is on. While
+  live, it becomes a "Stream" row (Healthy, or the problem in a few words).
+
+- **S3 found a second, older bug.** With failure reasons in place, the dev
+  app reported `audio-context` instead of `no-label-match`: the label fix
+  worked and `getUserMedia` succeeded, but the pipeline still failed.
+  - A step-by-step `eval-js` probe showed that getUserMedia, AudioContext,
+    the analyser and the stream source all work on their own.
+  - The cause: since #153 (2026-07-18), `browser-mic-visual-pipeline.ts`
+    passed the pipeline's analyser wrapper to `source.connect()`, which
+    accepts only an AudioNode and throws a TypeError.
+  - So the idle visuals could not have run in the real browser since July,
+    whatever the label. The pipeline tests' fakes accept any object.
+  - Fixed in `2b2acc32`, with a strict fake Web Audio test that fails
+    without the fix.
+  - After the fix, the dev-app Sources waveform moved with the built-in mic
+    on this Mac.
+  - Consequence to watch: the renderer now really holds a visual mic stream
+    whenever Studio or Sources is visible, beside the backend capture, as the
+    plan 046 / Studio audio design always intended. The recording-studio gate
+    was re-run on the final commit for exactly this reason.
+
+Gates run on the branch:
+
+- `pnpm typecheck`, eslint on every touched file (the one warning,
+  `use-studio.tsx` exhaustive-deps, is on main unchanged), `pnpm format:check`,
+  `pnpm check:em-dashes`;
+- the full desktop vitest suite on the final commit (239 files, 2462 tests),
+  `pnpm test:scripts` (1686 tests);
+- `pnpm build` + `pnpm check:renderer-assets`: 1,992,440 raw / 384,750 gzip
+  eager, which is under budget and unchanged by the lazy Livestream work.
+- `pnpm smoke:recording-studio` (33 steps) PASSED at `1a1319a5` (S3 + S4).
+  It was re-run at `2b2acc32` after the analyser fix; see the PR for the
+  result.
+- Dev-app by-eye pass (`capture-page`, 1280 px and 760 px):
+  - Inputs rows read Screen, Camera, Mic, System audio, Output, Captions.
+  - Settings headings have 0 heading SVGs across all seven tabs.
+  - The Livestream checklist reads "0 of 2 ready" with "Kick · add a stream
+    key" and "YouTube Vertical · add a stream key", then Stream settings
+    Checked and Quality "1080p · 30 fps · 6 Mbps".
+  - Technical details opens with "VideoToolbox · hardware" and one row per
+    destination.
+  - The narrow layout stacks into one column.
+  - The update chip's downloaded state cannot be forced in the dev app; its
+    labels are pinned by `update-ui.test.ts`.
