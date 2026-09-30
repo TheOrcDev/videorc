@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { spawnSync } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -31,9 +32,17 @@ async function main() {
     process.env.VIDEORC_RELEASE_MANIFEST_PATH ?? join(releaseDir, 'release.json')
   )
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
-  const trustedDesktopPackage = JSON.parse(
-    await readFile(join(repoRoot, 'apps', 'desktop', 'package.json'), 'utf8')
+  const trustedDesktopShow = spawnSync(
+    'git',
+    ['show', `${manifest.sourceCommit}:apps/desktop/package.json`],
+    { cwd: repoRoot, encoding: 'utf8' }
   )
+  if (trustedDesktopShow.status !== 0) {
+    throw new Error(
+      `Could not read apps/desktop/package.json at candidate source ${manifest.sourceCommit}.`
+    )
+  }
+  const trustedDesktopPackage = JSON.parse(trustedDesktopShow.stdout)
   const acceptedReleaseIds = await loadValidatedWindowsAcceptanceHistory(
     join(repoRoot, 'docs', 'acceptance', 'windows-alpha')
   )
