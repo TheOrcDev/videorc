@@ -5,7 +5,6 @@ import {
   globalShortcutLayout,
   type GlobalShortcutAction
 } from '../../../../shared/global-shortcuts'
-import { KeyboardIcon, SettingsIcon } from '@/components/icons'
 import { useSyncExternalStore, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
@@ -82,7 +81,6 @@ export function ShortcutsSettings(): ReactElement {
     <>
       <PanelSection
         description="Work system-wide, even when Videorc is in the background. Click a field and press the keys. Stream Deck hotkeys and F13 to F24 work too."
-        icon={SettingsIcon}
         title="Global shortcuts"
       >
         <FieldGroup variant="grouped">
@@ -134,11 +132,7 @@ export function ShortcutsSettings(): ReactElement {
         </p>
       </PanelSection>
 
-      <PanelSection
-        description="Keys that work while Videorc is in front."
-        icon={KeyboardIcon}
-        title="App shortcuts"
-      >
+      <PanelSection description="Keys that work while Videorc is in front." title="App shortcuts">
         <div className="flex flex-col gap-3">
           {[...shortcutsByGroup().entries()].map(([group, entries]) => (
             <div key={group} className="flex flex-col gap-1">

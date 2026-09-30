@@ -33,7 +33,6 @@ export function PermissionsSettings({
   return (
     <PanelSection
       description={`What ${osSettingsName(runtimeInfo?.platform)} lets Videorc capture right now.`}
-      icon={LockIcon}
       title="System access"
       action={
         <Button size="sm" variant="ghost" onClick={() => void refreshBackend()}>

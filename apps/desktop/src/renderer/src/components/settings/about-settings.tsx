@@ -2,7 +2,6 @@ import {
   BugIcon,
   DownloadIcon,
   RefreshIcon,
-  SparkleIcon,
   SpinnerIcon,
   SuccessIcon,
   WarningIcon
@@ -28,7 +27,7 @@ export function AboutSettings({ onShowWhatsNew }: { onShowWhatsNew: () => void }
     <>
       <AboutAndUpdates onShowWhatsNew={onShowWhatsNew} />
 
-      <PanelSection description="Get help or report a problem." icon={BugIcon} title="Support">
+      <PanelSection description="Get help or report a problem." title="Support">
         <div className="flex flex-col gap-2">
           <div className="flex flex-wrap gap-2">
             <Button
@@ -60,7 +59,6 @@ function AboutAndUpdates({ onShowWhatsNew }: { onShowWhatsNew: () => void }): Re
   return (
     <PanelSection
       description="Check for new versions of Videorc and install them."
-      icon={SparkleIcon}
       title="About & updates"
     >
       <div className="flex flex-col gap-4">

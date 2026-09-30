@@ -1,4 +1,4 @@
-import { DownloadIcon, RefreshIcon, ThemeIcon } from '@/components/icons'
+import { DownloadIcon, RefreshIcon } from '@/components/icons'
 import { useTheme } from 'next-themes'
 import { useState, type ReactElement } from 'react'
 
@@ -23,7 +23,6 @@ export function GeneralSettings(): ReactElement {
     <>
       <PanelSection
         description="How Videorc looks and behaves on this device."
-        icon={ThemeIcon}
         title="Appearance & behavior"
       >
         <FieldGroup variant="grouped">
@@ -115,7 +114,6 @@ export function GeneralSettings(): ReactElement {
 
       <PanelSection
         description="Coming from OBS Studio? Bring your scenes and settings across."
-        icon={DownloadIcon}
         title="Import"
       >
         {/* O4 (OBS import plan): the wizard previews the truthful

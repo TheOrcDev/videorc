@@ -21,10 +21,14 @@ The registry names icons by **meaning**, not by shape: call sites ask for
   variants, two pins, two locks and two spinners — nobody could have answered
   "which icons does Videorc use?" without a grep.
 
-Today: **99 semantic slots over 94 glyphs**, six of them platform brand marks outside the Nucleo count (`KickIcon` is a hand-drawn inline SVG, plan 063; the other five come from Phosphor). The Stream Manager adds seven slots in its own registry, `components/stream-manager/activity-icons.tsx`: six activity slots (plan 055: follow, supporter, gift, tip, raid, announcement) and the stats bar's viewer count (plan 057). The shared registry ships in every window's eager chunk, and these are only drawn in the Stream Manager. They count toward the same ceiling. Five slots share a glyph
+Today (plan 080, 2026-09-30): **91 semantic slots over 86 glyphs**, six of them platform brand marks outside the Nucleo count (`KickIcon` is a hand-drawn inline SVG, plan 063; the other five come from Phosphor). The Stream Manager adds seven slots in its own registry, `components/stream-manager/activity-icons.tsx`: six activity slots (plan 055: follow, supporter, gift, tip, raid, announcement) and the stats bar's viewer count (plan 057). The shared registry ships in every window's eager chunk, and these are only drawn in the Stream Manager. They count toward the same ceiling. Five slots share a glyph
 (`StudioIcon`/`CameraIcon`, `SourcesIcon`/`DisplayIcon`, `AssetsIcon`/`ImageIcon`,
 `OutputIcon`/`RecordIcon`, `PublishIcon`/`SparkleIcon`) — those are exactly the
 places the audit below expects to diverge.
+
+Plan 080 freed two glyphs: `ThemeIcon` (PaintBrush) and `KeyboardIcon`
+(Keyboard) only ever decorated Settings section headings, and Settings
+headings carry no icons any more.
 
 ### Adding an icon
 
@@ -51,7 +55,7 @@ lands**:
 
 1. **Count.** 100 is the hard ceiling. `pnpm icons:build` refuses to build a
    larger export rather than leaving the count to whoever last added a glyph.
-   At 85 glyphs the app has ~15 of headroom; the audit's divergences would
+   At 86 glyphs the app has ~14 of headroom; the audit's divergences would
    spend about 4 of it.
 
 2. **Where the SVGs may live.** Videorc's repository is public and AGPL, which
@@ -135,7 +139,7 @@ like-for-like glyph.
 
 ### Export shopping list
 
-The 90 slots are the authoritative list — read them straight out of
+The 91 slots are the authoritative list — read them straight out of
 `components/icons.tsx`, where each is grouped and documented. Export one SVG
 per slot name in kebab-case (`sources-icon.svg` → `SourcesIcon`), plus solid
 variants for the filled slots noted above.

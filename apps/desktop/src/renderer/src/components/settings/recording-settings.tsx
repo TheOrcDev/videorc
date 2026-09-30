@@ -3,7 +3,6 @@ import {
   ClapperboardIcon,
   FolderIcon,
   LivestreamIcon,
-  SettingsIcon,
   SuccessIcon,
   WarningIcon
 } from '@/components/icons'
@@ -72,7 +71,6 @@ export function RecordingSettings(): ReactElement {
   return (
     <PanelSection
       description="Where recordings are written and what new sessions use."
-      icon={SettingsIcon}
       title="Recording & storage"
     >
       <FieldGroup variant="grouped">

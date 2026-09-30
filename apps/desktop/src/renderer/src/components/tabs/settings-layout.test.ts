@@ -32,6 +32,34 @@ const SECTION_COMPONENTS: Record<string, string> = {
   AboutAndUpdates: 'About & updates'
 }
 
+/** Files rendered only under Settings that carry their own `PanelSection`. */
+const SECTION_FILES: Record<string, string> = {
+  CohostSettingsSection: '../cohost-settings-section.tsx',
+  PhoneRemoteSection: '../phone-remote-section.tsx'
+}
+
+/**
+ * Every `<Tag …>` opening tag in a source, attribute JSX included: braces are
+ * tracked so a `>` inside `action={<Switch />}` does not end the tag.
+ */
+function openingTags(source: string, tag: string): string[] {
+  const tags: string[] = []
+  let from = source.indexOf(`<${tag}`)
+  while (from !== -1) {
+    let depth = 0
+    let end = from + tag.length + 1
+    for (; end < source.length; end += 1) {
+      const char = source[end]
+      if (char === '{') depth += 1
+      else if (char === '}') depth -= 1
+      else if (char === '>' && depth === 0) break
+    }
+    tags.push(source.slice(from, end + 1))
+    from = source.indexOf(`<${tag}`, end)
+  }
+  return tags
+}
+
 /** One exported component's body, without the helpers declared after it. */
 function exportedBody(source: string, component: string): string {
   const start = source.indexOf(`export function ${component}`)
@@ -98,6 +126,31 @@ describe('Settings layout', () => {
       orcle: ['Orcle (alpha)'],
       about: ['About & updates', 'Support']
     })
+  })
+
+  it('never puts an icon beside a Settings section heading', () => {
+    // Plan 080 S2, owner call 2026-09-30: "in settings no need for those
+    // icons at all". Headings are text only on every tab.
+    const sources = {
+      ...panelSources,
+      ...Object.fromEntries(
+        Object.entries(SECTION_FILES).map(([component, path]) => [component, read(path)])
+      )
+    }
+    let sections = 0
+    for (const [component, source] of Object.entries(sources)) {
+      for (const tag of openingTags(source, 'PanelSection')) {
+        sections += 1
+        // `data-icon=` on a button inside `action` is not a heading icon.
+        expect(tag, `${component} heading`).not.toMatch(/(?<![\w-])icon=/)
+      }
+    }
+    // Every Settings section is covered, so a new file cannot slip past.
+    expect(sections).toBe(
+      Object.values(
+        Object.fromEntries(tabPanels().map((panel) => [panel.value, sectionTitles(panel.jsx)]))
+      ).flat().length
+    )
   })
 
   it('gives every section and control exactly one home', () => {

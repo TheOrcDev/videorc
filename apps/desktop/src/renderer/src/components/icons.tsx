@@ -57,7 +57,6 @@ import {
   ImageBroken,
   ImageSquare,
   Info,
-  Keyboard,
   Layout,
   Lightning,
   LinkSimple,
@@ -68,7 +67,6 @@ import {
   Monitor,
   Moon,
   NotePencil,
-  PaintBrush,
   PaperPlaneRight,
   PencilSimple,
   Play,
@@ -174,7 +172,6 @@ export const CloseIcon: AppIcon = X
 export const MoreIcon: AppIcon = DotsThree
 export const SearchIcon: AppIcon = MagnifyingGlass
 export const AdjustIcon: AppIcon = SlidersHorizontal
-export const KeyboardIcon: AppIcon = Keyboard
 export const LayoutIcon: AppIcon = Layout
 
 /**
@@ -245,7 +242,6 @@ export const ClipIcon: AppIcon = Scissors
 export const RepairIcon: AppIcon = Wrench
 export const BugIcon: AppIcon = Bug
 export const TerminalIcon: AppIcon = TerminalWindow
-export const ThemeIcon: AppIcon = PaintBrush
 export const TextIcon: AppIcon = TextAa
 export const ChatIcon: AppIcon = ChatCircle
 export const SendIcon: AppIcon = PaperPlaneRight
