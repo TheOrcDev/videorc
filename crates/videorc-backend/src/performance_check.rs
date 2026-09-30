@@ -115,6 +115,8 @@ pub(crate) struct RungMeasurement {
 }
 
 /// Bounded, renderer-safe reason codes; empty means the rung passed.
+/// Test helper — production scoring goes through `score_rung_for_backend`.
+#[cfg(test)]
 pub(crate) fn score_rung(measurement: &RungMeasurement) -> Vec<String> {
     score_rung_for_backend(measurement, None)
 }
