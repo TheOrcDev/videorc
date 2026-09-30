@@ -202,7 +202,12 @@ try {
     env: {
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
       VIDEORC_SMOKE_STATE_DIR: outputDirectory,
-      VIDEORC_LINUX_H264_ENCODER: encoder
+      VIDEORC_LINUX_H264_ENCODER: encoder,
+      // The smoke drives every device itself. The renderer's own source
+      // previews re-opened the camera and requested portal consent after
+      // each take; the unanswered picker then held the next session.start
+      // until it timed out (L3, ogre 2026-09-30).
+      VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW: '1'
     },
     timeoutMs: launchTimeoutMs,
     requiredMarkers: ['backend-ready', 'preview-motion-ready'],
@@ -229,7 +234,10 @@ try {
   const mics = assessLinuxDeviceList(list.devices, 'microphone')
   const requestedMicrophoneId = process.env.VIDEORC_LINUX_AV_MICROPHONE_ID
   const microphoneId = requestedMicrophoneId ?? mics.devices[0]?.id ?? null
-  if (requestedMicrophoneId && !mics.devices.some((device) => device.id === requestedMicrophoneId)) {
+  if (
+    requestedMicrophoneId &&
+    !mics.devices.some((device) => device.id === requestedMicrophoneId)
+  ) {
     throw new Error('The requested Linux microphone is not available.')
   }
 

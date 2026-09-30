@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
@@ -11,6 +11,25 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 import { createPreviewSurfaceOutputGuard } from './lib/smoke-output-guards.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..')
+
+// This smoke's contract is a detached surface whose placement the native
+// presenter owns (macOS CAMetalLayer, Windows D3D11). Linux has neither: its
+// proof surface is a WebContentsView Electron places inside the host window
+// (#483), so `nativeOwnsPlacement` is never true there and this contract can
+// only time out (ogre, 2026-09-30). Linux runs its own preview gate instead:
+// live portal pixels on the proof surface.
+if (process.platform === 'linux') {
+  console.log(
+    'Preview surface smoke: Linux has no native presenter; running the Linux preview gate ' +
+      '(smoke:portal-preview-proof) instead.'
+  )
+  const linuxGate = spawnSync(
+    process.execPath,
+    [join(repoRoot, 'scripts', 'smoke-portal-preview-proof.mjs')],
+    { stdio: 'inherit', env: process.env }
+  )
+  process.exit(linuxGate.status ?? 1)
+}
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 100000)
 const launchAttempts = Number(process.env.VIDEORC_PREVIEW_SURFACE_LAUNCH_ATTEMPTS ?? 2)
 const measurementMs = Number(process.env.VIDEORC_PREVIEW_SURFACE_SAMPLE_MS ?? 3000)

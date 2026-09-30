@@ -12,6 +12,8 @@
 //   VIDEORC_PORTAL_WAIT_MS            consent wait for the first start (default 60000)
 //   VIDEORC_PORTAL_STEP_TIMEOUT_MS    every later request (default 45000)
 //   VIDEORC_PORTAL_RECORDING_MS       take length (default 6000)
+//   VIDEORC_PORTAL_RECORD_MOTION      '0' records the desktop as it is and
+//                                     keeps freeze/repeat findings advisory
 //   VIDEORC_SMOKE_OUTPUT_DIR          evidence + recording directory
 //
 // Safe GPU: the encoder defaults to OpenH264. Set VIDEORC_LINUX_H264_ENCODER
@@ -30,6 +32,7 @@ import {
   assessPortalScreenStatus
 } from './lib/linux-portal-capture-gates.mjs'
 import { isLinuxSmokeEvidenceLine } from './lib/linux-smoke-evidence.mjs'
+import { startLinuxMotionWindow } from './lib/linux-motion-window.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
@@ -38,6 +41,10 @@ const launchTimeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
 const consentWaitMs = Number(process.env.VIDEORC_PORTAL_WAIT_MS ?? 60000)
 const stepTimeoutMs = Number(process.env.VIDEORC_PORTAL_STEP_TIMEOUT_MS ?? 45000)
 const recordingMs = Number(process.env.VIDEORC_PORTAL_RECORDING_MS ?? 6000)
+// A static desktop only repaints on damage, so exact repeats are its correct
+// output and the analyzer's freeze gates say nothing about the pipeline.
+// With a window repainting every frame on the captured monitor they do.
+const motionEnabled = process.env.VIDEORC_PORTAL_RECORD_MOTION !== '0'
 const encoder = process.env.VIDEORC_LINUX_H264_ENCODER ?? 'openh264'
 const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? mkdtempSync(join(tmpdir(), 'videorc-portal-record-'))
@@ -82,6 +89,7 @@ const evidence = {
   encoder,
   video,
   recordingMs,
+  motion: motionEnabled,
   steps: [],
   failures: []
 }
@@ -148,6 +156,7 @@ if (process.platform !== 'linux') {
 }
 
 let stopApp = async () => {}
+let stopMotion = async () => {}
 try {
   const launch = await launchDevApp({
     env: {
@@ -183,7 +192,14 @@ try {
   step('portal preview #1 stop', { state: stopped.state })
   await startPortalPreview(ws, 'portal preview #2', stepTimeoutMs)
 
-  // 3. Record from the live portal source.
+  // 3. Record from the live portal source, with guaranteed motion on it.
+  if (motionEnabled) {
+    const motion = await startLinuxMotionWindow({ timeoutMs: stepTimeoutMs })
+    stopMotion = motion.stop
+    step('motion window', { pid: motion.pid })
+    // Let the compositor map and paint it before the take starts.
+    await sleep(1000)
+  }
   const { capabilityId } = await requestSmokeCommand(
     smoke,
     'authorize-smoke-resource',
@@ -222,6 +238,7 @@ try {
   const stopRequestedAt = Date.now()
   const stoppedSession = await request(ws, stepTimeoutMs, 'session.stop')
   step('session.stop', { state: stoppedSession.state, ms: Date.now() - stopRequestedAt })
+  await stopMotion()
 
   const outputPath = await resolveFinalRecordingPath({
     started,
@@ -258,6 +275,9 @@ try {
     { width: video.width, height: video.height, recordingMs }
   )
   if (!assessment.ok) fail(assessment.failures.join('; '))
+  if (motionEnabled && quality.verdict.failures.length > 0) {
+    fail(`quality gates with motion on screen: ${quality.verdict.failures.join('; ')}`)
+  }
 
   const previewStopped = await request(ws, stepTimeoutMs, 'preview.screen.stop')
   step('portal preview #2 stop', { state: previewStopped.state })
@@ -278,5 +298,6 @@ try {
   saveEvidence()
   process.exitCode = 1
 } finally {
+  await stopMotion()
   await stopApp()
 }
