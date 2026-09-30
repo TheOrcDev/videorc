@@ -45,6 +45,14 @@ export function createBrowserMicVisualPipeline(): MicVisualPipeline {
     },
     requestFrame: (callback) => window.requestAnimationFrame(callback),
     cancelFrame: (id) => window.cancelAnimationFrame(id),
-    queueMicrotask: (callback) => globalThis.queueMicrotask(callback)
+    queueMicrotask: (callback) => globalThis.queueMicrotask(callback),
+    subscribeDeviceChange: (listener) => {
+      const media = typeof navigator === 'undefined' ? undefined : navigator.mediaDevices
+      if (!media?.addEventListener) return () => undefined
+      media.addEventListener('devicechange', listener)
+      return () => media.removeEventListener('devicechange', listener)
+    },
+    setTimer: (callback, ms) => window.setTimeout(callback, ms),
+    clearTimer: (handle) => window.clearTimeout(handle as number)
   })
 }

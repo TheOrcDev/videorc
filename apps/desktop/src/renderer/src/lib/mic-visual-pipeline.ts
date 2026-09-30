@@ -7,7 +7,8 @@ import {
   microphoneStreamAcquisitionEnabled,
   type MicMediaDevicesLike,
   type MicMediaStreamLike,
-  type MicStreamController
+  type MicStreamController,
+  type MicStreamFailureReason
 } from './mic-stream'
 
 export type MicVisualStatus = 'idle' | 'acquiring' | 'active' | 'unavailable'
@@ -15,6 +16,8 @@ export type MicVisualStatus = 'idle' | 'acquiring' | 'active' | 'unavailable'
 export type MicVisualLifecycleSnapshot = Readonly<{
   status: MicVisualStatus
   active: boolean
+  /** Why the preview is `unavailable` (plan 080 S3); absent in every other status. */
+  reason?: MicStreamFailureReason
 }>
 
 export type MicVisualFrameSnapshot = Readonly<{
@@ -57,7 +60,18 @@ export type MicVisualPipelineDependencies<S extends MicMediaStreamLike> = {
   requestFrame: (callback: (at: number) => void) => number
   cancelFrame: (id: number) => void
   queueMicrotask: (callback: () => void) => void
+  /**
+   * `devicechange` from the OS (plan 080 S3): an unavailable preview retries
+   * when a device connects or disconnects (AirPods come and go constantly).
+   * Returns the unsubscribe. Optional: without it the preview never retries.
+   */
+  subscribeDeviceChange?: (listener: () => void) => () => void
+  setTimer?: (callback: () => void, ms: number) => unknown
+  clearTimer?: (handle: unknown) => void
 }
+
+/** Bluetooth devices fire several devicechange events while they connect. */
+export const MIC_VISUAL_DEVICE_CHANGE_DEBOUNCE_MS = 500
 
 export type MicVisualSource = Readonly<{
   /** Stable backend device identity; acquisition still matches Chromium by label. */
@@ -223,7 +237,11 @@ export function createMicVisualPipeline<S extends MicMediaStreamLike>(
   const frameListeners = new Set<() => void>()
 
   const publishLifecycle = (next: MicVisualLifecycleSnapshot): void => {
-    if (lifecycle.status === next.status && lifecycle.active === next.active) {
+    if (
+      lifecycle.status === next.status &&
+      lifecycle.active === next.active &&
+      lifecycle.reason === next.reason
+    ) {
       return
     }
     lifecycle = next
@@ -353,12 +371,14 @@ export function createMicVisualPipeline<S extends MicMediaStreamLike>(
     }
   }
 
-  const retireSelectedDevice = (status: MicVisualStatus): void => {
+  const retireSelectedDevice = (status: MicVisualStatus, reason?: MicStreamFailureReason): void => {
     const previous = activeSession
     activeSession = null
     stopActiveSession(previous)
     publishFrame()
-    publishLifecycle(Object.freeze({ status, active: false }))
+    publishLifecycle(
+      Object.freeze(reason ? { status, active: false, reason } : { status, active: false })
+    )
   }
 
   const acquire = (source: MicVisualSource, key: string): void => {
@@ -386,7 +406,7 @@ export function createMicVisualPipeline<S extends MicMediaStreamLike>(
       }
       pendingSession = null
       if (!stream) {
-        retireSelectedDevice('unavailable')
+        retireSelectedDevice('unavailable', controller.lastFailure()?.reason ?? 'unknown')
         return
       }
 
@@ -394,7 +414,7 @@ export function createMicVisualPipeline<S extends MicMediaStreamLike>(
       try {
         prepared = prepareActiveSession(key, controller, stream)
       } catch {
-        retireSelectedDevice('unavailable')
+        retireSelectedDevice('unavailable', 'audio-context')
         return
       }
 
@@ -464,6 +484,32 @@ export function createMicVisualPipeline<S extends MicMediaStreamLike>(
     stopPendingSession(superseded)
     acquire(source, nextKey)
   }
+
+  // Plan 080 S3: an unavailable preview is not final. A device that connects,
+  // disconnects or frees up fires devicechange; retry the same selection once
+  // the burst settles. Missing media APIs cannot recover, so they never retry.
+  let deviceChangeTimer: unknown = null
+  const retryAfterDeviceChange = (): void => {
+    deviceChangeTimer = null
+    if (
+      disposed ||
+      lifecycle.status !== 'unavailable' ||
+      lifecycle.reason === 'no-media' ||
+      demandCount === 0 ||
+      !configuredSource
+    ) {
+      return
+    }
+    desiredKey = null
+    applyConfiguration()
+  }
+  const unsubscribeDeviceChange =
+    dependencies.subscribeDeviceChange?.(() => {
+      if (deviceChangeTimer !== null) dependencies.clearTimer?.(deviceChangeTimer)
+      deviceChangeTimer = dependencies.setTimer
+        ? dependencies.setTimer(retryAfterDeviceChange, MIC_VISUAL_DEVICE_CHANGE_DEBOUNCE_MS)
+        : (retryAfterDeviceChange(), null)
+    }) ?? (() => undefined)
 
   const copyCurrentFrame = (target: MicVisualFrameBuffer): MicVisualFrameBuffer => {
     const source = activeSession?.frame
@@ -553,6 +599,9 @@ export function createMicVisualPipeline<S extends MicMediaStreamLike>(
       }
       disposed = true
       unregisterSuspension()
+      unsubscribeDeviceChange()
+      if (deviceChangeTimer !== null) dependencies.clearTimer?.(deviceChangeTimer)
+      deviceChangeTimer = null
       configuredSource = null
       demandCount = 0
       generation += 1
