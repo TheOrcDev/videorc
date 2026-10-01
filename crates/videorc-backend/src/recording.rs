@@ -3981,14 +3981,12 @@ async fn start_session_with_timeline(
     initial_diagnostics.encoder_bridge_encoded_output_input_subtype =
         windows_encoded_bridge_decision.input_subtype.clone();
     initial_diagnostics.encoder_bridge_encoded_output_fallback_reason =
-        windows_encoded_bridge_decision
-            .fallback_reason
-            .clone()
-            .or_else(|| {
-                windows_encoded_bridge_decision
-                    .encoder_selection_fallback_reason
-                    .clone()
-            });
+        combined_output_fallback_reason(
+            windows_encoded_bridge_decision.fallback_reason.clone(),
+            windows_encoded_bridge_decision
+                .encoder_selection_fallback_reason
+                .clone(),
+        );
     initial_diagnostics.recording_protected = use_encoder_bridge;
     #[cfg(target_os = "windows")]
     {
@@ -14952,10 +14950,27 @@ pub async fn probe_stream_output_topology(
         effective_bridge_output: stream_output_bridge(decision.effective),
         effective_encode_backend: decision.effective_encode_backend,
         probe_state: decision.probe_state,
-        fallback_reason: decision
-            .fallback_reason
-            .or(decision.encoder_selection_fallback_reason),
+        fallback_reason: combined_output_fallback_reason(
+            decision.fallback_reason,
+            decision.encoder_selection_fallback_reason,
+        ),
     })
+}
+
+/// Why the session is not on its requested path. When the bridge was rejected
+/// AND the chosen raw-path encoder also fell back (Quick Sync asked for, its
+/// check failed), both are reported, encoder first so the bound keeps it:
+/// "why am I on software after choosing Quick Sync" is the question asked.
+fn combined_output_fallback_reason(
+    bridge: Option<String>,
+    encoder_selection: Option<String>,
+) -> Option<String> {
+    match (bridge, encoder_selection) {
+        (Some(bridge), Some(encoder)) => Some(bounded_stream_output_topology_fallback_reason(
+            &format!("{encoder} {bridge}"),
+        )),
+        (bridge, encoder) => bridge.or(encoder),
+    }
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -23846,6 +23861,38 @@ mod tests {
         );
         assert!(failed.contains("failed after 40ms"), "{failed}");
         assert!(failed.contains("unsupported"), "{failed}");
+    }
+
+    #[test]
+    fn a_failed_quick_sync_choice_is_reported_beside_the_bridge_rejection() {
+        let bridge = "Media Foundation shared output probe rejected 1920x1080@30 6000kbps";
+        let encoder = "Intel Quick Sync was selected but its check failed (default: exit code 187); using the OpenH264 software encoder.";
+        let both =
+            combined_output_fallback_reason(Some(bridge.to_string()), Some(encoder.to_string()))
+                .unwrap();
+        assert!(both.starts_with("Intel Quick Sync was selected"), "{both}");
+        assert!(
+            both.contains("Media Foundation shared output probe"),
+            "{both}"
+        );
+        assert!(both.len() <= STREAM_OUTPUT_TOPOLOGY_FALLBACK_REASON_MAX_BYTES);
+
+        // The encoder reason survives the bound even behind a long rejection.
+        let long =
+            combined_output_fallback_reason(Some("x".repeat(2_000)), Some(encoder.to_string()))
+                .unwrap();
+        assert!(long.contains("exit code 187"), "{long}");
+        assert!(long.len() <= STREAM_OUTPUT_TOPOLOGY_FALLBACK_REASON_MAX_BYTES);
+
+        assert_eq!(
+            combined_output_fallback_reason(Some(bridge.to_string()), None).as_deref(),
+            Some(bridge)
+        );
+        assert_eq!(
+            combined_output_fallback_reason(None, Some(encoder.to_string())).as_deref(),
+            Some(encoder)
+        );
+        assert_eq!(combined_output_fallback_reason(None, None), None);
     }
 
     #[test]
