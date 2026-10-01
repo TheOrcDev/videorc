@@ -19,7 +19,8 @@ const AVATAR_ALLOWED_HOST_SUFFIXES = [
   'static-cdn.jtvnw.net',
   // X profile images (broadcast.chat authors)
   'pbs.twimg.com',
-  // Kick profile pictures (plan 063; served from files.kick.com)
+  // Kick profile pictures (plan 063) and chat emotes (plan 085:
+  // files.kick.com/emotes/<id>/fullsize)
   'files.kick.com',
   'kick.com',
   // Videorc account avatars uploaded on videorc.com (Vercel Blob storage).

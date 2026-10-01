@@ -6450,7 +6450,7 @@ fn live_chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveC
     let author_roles_json: String = row.get(9)?;
     let fragments_json: String = row.get(13)?;
     let event_type_json: String = row.get(14)?;
-    Ok(LiveChatMessage {
+    let mut message = LiveChatMessage {
         id: row.get(0)?,
         session_id: row.get(1)?,
         provider_message_id: row.get(2)?,
@@ -6482,7 +6482,18 @@ fn live_chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveC
         author_affiliation: row
             .get::<_, Option<String>>(21)?
             .and_then(|json| serde_json::from_str(&json).ok()),
-    })
+    };
+    // Kick rows stored before plan 085 hold the raw `[emote:<id>:<name>]`
+    // tokens and no fragments; a rehydrated session still shows the images.
+    if message.platform == StreamPlatform::Kick
+        && message.fragments.is_empty()
+        && !message.is_deleted
+        && message.message_text.contains("[emote:")
+    {
+        (message.message_text, message.fragments) =
+            crate::kick_chat::kick_message_parts(&message.message_text);
+    }
+    Ok(message)
 }
 
 fn chat_send_operation_from_row(
@@ -7909,6 +7920,45 @@ mod tests {
                 .iter()
                 .all(|artifact| !older.artifacts.iter().any(|older| older.id == artifact.id))
         );
+    }
+
+    #[test]
+    fn stored_kick_rows_with_raw_emote_tokens_load_with_emote_fragments() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("session-1"))
+            .unwrap();
+        // Saved before plan 085: the raw token and no fragments.
+        let raw = "hi [emote:1579033:emojiAstonished]";
+        let mut kick = sample_live_chat_message("session-1", 1);
+        kick.platform = StreamPlatform::Kick;
+        kick.message_text = raw.to_string();
+        kick.fragments = Vec::new();
+        database.save_live_chat_message(&kick).unwrap();
+        // The same text from another platform is not Kick's syntax.
+        let mut twitch = sample_live_chat_message("session-1", 2);
+        twitch.platform = StreamPlatform::Twitch;
+        twitch.message_text = raw.to_string();
+        twitch.fragments = Vec::new();
+        database.save_live_chat_message(&twitch).unwrap();
+
+        let messages = database.list_live_chat_messages("session-1").unwrap();
+        let kick = messages
+            .iter()
+            .find(|message| message.platform == StreamPlatform::Kick)
+            .unwrap();
+        assert_eq!(kick.message_text, "hi emojiAstonished");
+        assert_eq!(kick.fragments.len(), 2);
+        assert_eq!(
+            kick.fragments[1].image_url.as_deref(),
+            Some("https://files.kick.com/emotes/1579033/fullsize")
+        );
+        let twitch = messages
+            .iter()
+            .find(|message| message.platform == StreamPlatform::Twitch)
+            .unwrap();
+        assert_eq!(twitch.message_text, raw);
+        assert!(twitch.fragments.is_empty());
     }
 
     #[test]
