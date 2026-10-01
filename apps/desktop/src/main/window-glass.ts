@@ -87,6 +87,27 @@ function glassMaterialFrom(value: string | undefined): GlassMaterial | null {
     : null
 }
 
+/**
+ * How the macOS material is drawn (plan 091). `material` is AppKit's own
+ * look: a grey or white tint, wallpaper tinting and a saturation boost over
+ * its blur. `clear` is Ghostex's strip, run by the native addon on Electron's
+ * own vibrancy view: nothing but a neutral blur of the desktop, so the window
+ * coats decide the whole tone.
+ */
+export type GlassStyle = 'clear' | 'material'
+
+/** S0 ships the strip behind `VIDEORC_GLASS_STYLE=clear`; S1 makes `clear` the default. */
+export const DEFAULT_GLASS_STYLE: GlassStyle = 'material'
+
+/** Ghostex's blur: 60 pt, wide enough that desktop detail never reads as noise under a tint. */
+export const CLEAR_GLASS_BLUR_RADIUS = 60
+
+/** `VIDEORC_GLASS_STYLE`: `clear` or `material`; anything else keeps the default. */
+export function resolveGlassStyle(value: string | undefined): GlassStyle {
+  const trimmed = value?.trim().toLowerCase()
+  return trimmed === 'clear' || trimmed === 'material' ? trimmed : DEFAULT_GLASS_STYLE
+}
+
 export function resolveGlassMode(environment: GlassEnvironment): GlassMode {
   const disabled = environment.glass?.trim() === '0' || environment.legacyVibrancy?.trim() === '0'
   if (environment.platform === 'win32') {
@@ -201,6 +222,14 @@ export interface AppliedGlass {
   appearance: GlassAppearance
   /** Why the appearance pin is unavailable, when it is. */
   appearanceNote?: string
+  /**
+   * How the material is drawn (plan 091): `clear` once the addon has run the
+   * strip on this window, `material` for AppKit's own look, and null where
+   * there is no macOS material (solid, Mica).
+   */
+  style: GlassStyle | null
+  /** Why a requested `clear` style stayed `material`, when it did. */
+  styleNote?: string
 }
 
 const appliedGlassByWindow = new WeakMap<BrowserWindow, AppliedGlass>()

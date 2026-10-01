@@ -15,6 +15,25 @@ export interface WindowEffectView {
   state: 'active' | 'inactive' | 'follows-window'
   material: number
   blendingMode: number
+  /** Plan 091 diagnostics (an addon built before them reports none of these). */
+  className?: string
+  /** The view carries the clear-glass class (`VideorcClearGlassView`). */
+  clear?: boolean
+  /** The backdrop's gaussian blur radius, read back from its filter. */
+  blurRadius?: number | null
+  /** A wallpaper-tinting layer is visible (null: none in the tree). */
+  chameleonVisible?: boolean | null
+  /** The material's saturation boost is still in the tree. */
+  saturatePresent?: boolean
+  /** The root layer's background (the snapshot base), if set. */
+  rootBackground?: string | null
+  /** The layer tree, one line per layer. */
+  layerTree?: string[]
+}
+
+export interface WindowGlassStyleResult {
+  restyled: boolean
+  reason: string | null
 }
 
 export interface WindowAppearanceBinding {
@@ -22,6 +41,14 @@ export interface WindowAppearanceBinding {
   setWindowAppearance(nativeWindowHandle: Buffer, appearance: WindowAppearance): boolean
   /** Reads back the window's vibrancy views (diagnostics; older addons lack it). */
   windowEffectViews?(nativeWindowHandle: Buffer): WindowEffectView[]
+  /**
+   * Re-classes the window's vibrancy view to the clear-glass subclass and
+   * redraws it (plan 091; older addons lack it).
+   */
+  setWindowGlassStyle?(
+    nativeWindowHandle: Buffer,
+    options: { blurRadius: number }
+  ): WindowGlassStyleResult
 }
 
 export type WindowAppearanceLoad =
@@ -50,12 +77,65 @@ export function windowAppearanceBindingFromModule(
     typeof candidate.windowEffectViews === 'function'
       ? (candidate.windowEffectViews as (nativeWindowHandle: Buffer) => WindowEffectView[])
       : null
+  const setWindowGlassStyle =
+    typeof candidate.setWindowGlassStyle === 'function'
+      ? (candidate.setWindowGlassStyle as (
+          nativeWindowHandle: Buffer,
+          options: { blurRadius: number }
+        ) => WindowGlassStyleResult)
+      : null
   return {
     setWindowAppearance: (nativeWindowHandle, appearance) =>
       setWindowAppearance(nativeWindowHandle, appearance) === true,
     ...(windowEffectViews
       ? { windowEffectViews: (nativeWindowHandle: Buffer) => windowEffectViews(nativeWindowHandle) }
+      : {}),
+    ...(setWindowGlassStyle
+      ? {
+          setWindowGlassStyle: (nativeWindowHandle: Buffer, options: { blurRadius: number }) => {
+            const result = setWindowGlassStyle(nativeWindowHandle, options)
+            return {
+              restyled: isRecord(result) && result.restyled === true,
+              reason: isRecord(result) && typeof result.reason === 'string' ? result.reason : null
+            }
+          }
+        }
       : {})
+  }
+}
+
+export type ClearGlassApplication = { applied: true } | { applied: false; reason: string }
+
+/**
+ * Runs the clear-glass strip on a window's vibrancy view (plan 091). The
+ * reason names what stood in the way: no addon, an addon built before the
+ * export, a view the addon refused to re-class, or a thrown call.
+ */
+export function applyClearGlass(
+  load: WindowAppearanceLoad,
+  nativeWindowHandle: () => Buffer,
+  blurRadius: number
+): ClearGlassApplication {
+  if (!load.binding) {
+    return { applied: false, reason: load.unavailableReason }
+  }
+  if (!load.binding.setWindowGlassStyle) {
+    return {
+      applied: false,
+      reason:
+        'The native addon has no setWindowGlassStyle export; rebuild it with pnpm build:native-preview-addon.'
+    }
+  }
+  try {
+    const result = load.binding.setWindowGlassStyle(nativeWindowHandle(), { blurRadius })
+    return result.restyled
+      ? { applied: true }
+      : { applied: false, reason: result.reason ?? 'The addon re-classed no effect view.' }
+  } catch (error) {
+    return {
+      applied: false,
+      reason: `Applying the clear glass failed: ${error instanceof Error ? error.message : String(error)}`
+    }
   }
 }
 

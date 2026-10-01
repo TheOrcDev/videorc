@@ -279,7 +279,11 @@ import {
   DARK_WINDOW_PALETTE,
   DOCKED_PREVIEW_CORNER_RADIUS
 } from './window-palette'
-import { loadWindowAppearanceBinding, pinWindowAppearance } from './window-appearance'
+import {
+  applyClearGlass,
+  loadWindowAppearanceBinding,
+  pinWindowAppearance
+} from './window-appearance'
 import {
   clearMicaFallbackState,
   loadFailureNeedsRecovery,
@@ -294,15 +298,19 @@ import {
 } from './main-window-recovery'
 import {
   appliedGlass,
+  CLEAR_GLASS_BLUR_RADIUS,
   DARK_ALWAYS_ROLES,
   DEFAULT_GLASS_MATERIAL,
   glassModeForRole,
   recordAppliedGlass,
   resolveGlassMode,
+  resolveGlassStyle,
   solidWindowBase,
   WINDOW_HEADER_HEIGHT,
   windowGlassOptions,
+  type AppliedGlass,
   type GlassMode,
+  type GlassStyle,
   type GlassWindowRole,
   windowsBuildFromRelease
 } from './window-glass'
@@ -775,8 +783,12 @@ app.setName('Videorc')
 // Dark glass is the default theme; the renderer re-syncs this on toggle.
 nativeTheme.themeSource = 'dark'
 // An OS appearance change (or any themeSource write) resets per-window
-// appearances; keep the dark-always windows pinned.
-nativeTheme.on('updated', () => repinDarkAlwaysWindows())
+// appearances; keep the dark-always windows pinned, and have the clear glass
+// redraw its strip over the material AppKit rebuilds for the new appearance.
+nativeTheme.on('updated', () => {
+  repinDarkAlwaysWindows()
+  restyleGlassWindows()
+})
 // Window glass is real macOS vibrancy (window-glass.ts, plan 050). VIDEORC_GLASS=0
 // paints the solid palette; a material name overrides the material.
 type GlassVibrancyMaterial = NonNullable<Parameters<BrowserWindow['setVibrancy']>[0]>
@@ -940,6 +952,10 @@ const glassMode = resolveGlassMode({
 })
 const glassVibrancyMaterial: GlassVibrancyMaterial =
   glassMode.kind === 'material' ? glassMode.material : DEFAULT_GLASS_MATERIAL
+// Plan 091: `clear` has the native addon strip the material down to a neutral
+// blur (Ghostex's look); `material` keeps AppKit's own tint and saturation.
+const glassStyle: GlassStyle = resolveGlassStyle(process.env.VIDEORC_GLASS_STYLE)
+let clearGlassFailureLogged = false
 let gpuProcessCrashCount = 0
 let gpuFallbackPersistedThisLaunch = false
 // A dead renderer leaves its window empty, and child-process-gone never fires
@@ -1681,7 +1697,12 @@ function glassWindowChrome(role: GlassWindowRole): {
 // light material.
 function finishGlassWindow(window: BrowserWindow, role: GlassWindowRole, mode: GlassMode): void {
   if (!DARK_ALWAYS_ROLES.has(role)) {
-    recordAppliedGlass(window, { role, mode, appearance: 'follows-app' })
+    recordAppliedGlass(window, {
+      role,
+      mode,
+      appearance: 'follows-app',
+      ...applyGlassStyle(window, role, mode)
+    })
     return
   }
   if (mode.kind === 'solid') {
@@ -1691,14 +1712,15 @@ function finishGlassWindow(window: BrowserWindow, role: GlassWindowRole, mode: G
       appearance: mode.reason === 'appearance-unpinned' ? 'pin-unavailable' : 'follows-app',
       ...(mode.reason === 'appearance-unpinned'
         ? { appearanceNote: windowAppearanceLoad.unavailableReason ?? undefined }
-        : {})
+        : {}),
+      style: null
     })
     return
   }
   if (mode.kind === 'mica') {
     // Not reached today: glassModeForRole keeps the dark-always windows solid
     // on Windows, which has no per-window appearance pin.
-    recordAppliedGlass(window, { role, mode, appearance: 'follows-app' })
+    recordAppliedGlass(window, { role, mode, appearance: 'follows-app', style: null })
     return
   }
   const pin = pinWindowAppearance(
@@ -1707,7 +1729,12 @@ function finishGlassWindow(window: BrowserWindow, role: GlassWindowRole, mode: G
     'dark'
   )
   if (pin.pinned) {
-    recordAppliedGlass(window, { role, mode, appearance: 'pinned-dark' })
+    recordAppliedGlass(window, {
+      role,
+      mode,
+      appearance: 'pinned-dark',
+      ...applyGlassStyle(window, role, mode)
+    })
     return
   }
   window.setVibrancy(null)
@@ -1719,8 +1746,65 @@ function finishGlassWindow(window: BrowserWindow, role: GlassWindowRole, mode: G
     role,
     mode: { kind: 'solid', reason: 'appearance-unpinned' },
     appearance: 'pin-unavailable',
-    appearanceNote: pin.reason
+    appearanceNote: pin.reason,
+    style: null
   })
+}
+
+// Plan 091. Runs the clear-glass strip on a material window when
+// VIDEORC_GLASS_STYLE asks for it. A failure keeps the plan 050 material as
+// AppKit draws it (never a solid, never a fake frost) and is logged once:
+// every window and every re-apply would otherwise repeat the same reason.
+function applyGlassStyle(
+  window: BrowserWindow,
+  role: GlassWindowRole,
+  mode: GlassMode
+): Pick<AppliedGlass, 'style' | 'styleNote'> {
+  if (mode.kind !== 'material') {
+    return { style: null }
+  }
+  if (glassStyle !== 'clear') {
+    return { style: 'material' }
+  }
+  const result = applyClearGlass(
+    windowAppearanceLoad,
+    () => window.getNativeWindowHandle(),
+    CLEAR_GLASS_BLUR_RADIUS
+  )
+  if (result.applied) {
+    return { style: 'clear' }
+  }
+  if (!clearGlassFailureLogged) {
+    clearGlassFailureLogged = true
+    safeConsole.warn(
+      `Clear glass unavailable on the ${role} window; keeping the material as AppKit draws it: ${result.reason}`
+    )
+  }
+  return { style: 'material', styleNote: result.reason }
+}
+
+// Re-runs the style on one window after its vibrancy view was re-created or
+// AppKit rebuilt its material (a theme change), and records the outcome.
+function restyleGlassWindow(window: BrowserWindow): Pick<AppliedGlass, 'style' | 'styleNote'> {
+  const applied = appliedGlass(window)
+  if (!applied || window.isDestroyed()) {
+    return { style: null }
+  }
+  const styled = applyGlassStyle(window, applied.role, applied.mode)
+  const { styleNote: _previousNote, ...rest } = applied
+  recordAppliedGlass(window, { ...rest, ...styled })
+  return styled
+}
+
+function restyleGlassWindows(): void {
+  if (glassStyle !== 'clear') {
+    return
+  }
+  for (const window of [mainWindow, commentsWindow, captionsWindow, notesWindow, previewWindow]) {
+    if (window && !window.isDestroyed() && appliedGlass(window)?.mode.kind === 'material') {
+      restyleGlassWindow(window)
+    }
+  }
 }
 
 // Electron re-applies every window's appearance when nativeTheme.themeSource
@@ -1937,7 +2021,8 @@ function applyMicaBlankFallback(window: BrowserWindow): void {
   recordAppliedGlass(window, {
     role: 'main',
     mode: { kind: 'solid', reason: 'paint-check-blank' },
-    appearance: 'follows-app'
+    appearance: 'follows-app',
+    style: null
   })
   window.webContents.invalidate()
 }
@@ -9560,6 +9645,17 @@ function smokeWindowForRole(role: string): BrowserWindow | null {
   return null
 }
 
+// `show()` asks AppKit to activate the app (activateIgnoringOtherApps), which
+// takes the user's focus. A placement command with `focus: false`
+// (probe:ui-glass) shows the window inactive instead.
+function showSmokeWindow(window: BrowserWindow, params: Record<string, unknown>): void {
+  if (params.focus === false) {
+    window.showInactive()
+  } else {
+    window.show()
+  }
+}
+
 // Windows raise-window re-levelled (lifted above the backdrop or dropped below
 // it), restored to their own keep-on-top preference when the backdrop closes.
 const smokeRaisedWindowRoles = new Map<BrowserWindow, string>()
@@ -9780,7 +9876,10 @@ async function runSmokePreviewMotionCommand(
     if (mainWindow.isMinimized()) {
       mainWindow.restore()
     }
-    mainWindow.focus()
+    // `focus: false` (probe:ui-glass) restores without taking the user's focus.
+    if (params.focus !== false) {
+      mainWindow.focus()
+    }
     return { minimized: mainWindow.isMinimized(), bounds: mainWindow.getBounds() }
   }
 
@@ -10084,7 +10183,7 @@ async function runSmokePreviewMotionCommand(
       width: typeof params.width === 'number' ? params.width : current.width,
       height: typeof params.height === 'number' ? params.height : current.height
     })
-    previewWindow.show()
+    showSmokeWindow(previewWindow, params)
     previewWindow.moveTop()
     if (nativePreviewSurfaceWindow && !nativePreviewSurfaceWindow.isDestroyed()) {
       nativePreviewSurfaceWindow.moveTop()
@@ -10121,7 +10220,7 @@ async function runSmokePreviewMotionCommand(
       width: typeof params.width === 'number' ? params.width : current.width,
       height: typeof params.height === 'number' ? params.height : current.height
     })
-    mainWindow.show()
+    showSmokeWindow(mainWindow, params)
     mainWindow.moveTop()
     // Position-only programmatic setBounds does not reliably emit 'move' on
     // macOS; kick the docked follower directly like preview-window-set-bounds.
@@ -10314,7 +10413,7 @@ async function runSmokePreviewMotionCommand(
       width: typeof params.width === 'number' ? params.width : current.width,
       height: typeof params.height === 'number' ? params.height : current.height
     })
-    window.show()
+    showSmokeWindow(window, params)
     window.moveTop()
     emitNotesWindowState()
     return notesWindowState()
@@ -10351,7 +10450,7 @@ async function runSmokePreviewMotionCommand(
       width: typeof params.width === 'number' ? params.width : current.width,
       height: typeof params.height === 'number' ? params.height : current.height
     })
-    window.show()
+    showSmokeWindow(window, params)
     window.moveTop()
     return captionsWindowState()
   }
@@ -10389,7 +10488,7 @@ async function runSmokePreviewMotionCommand(
       width: typeof params.width === 'number' ? params.width : current.width,
       height: typeof params.height === 'number' ? params.height : current.height
     })
-    window.show()
+    showSmokeWindow(window, params)
     window.moveTop()
     emitCommentsWindowState()
     return commentsWindowState()
@@ -11306,8 +11405,15 @@ async function runSmokePreviewMotionCommand(
     if (!target || target.isDestroyed()) {
       throw new Error('No open window for that role.')
     }
+    const effectViewsOf = (): unknown =>
+      windowAppearanceLoad.binding?.windowEffectViews?.(target.getNativeWindowHandle()) ?? null
     target.setVibrancy((material as Parameters<BrowserWindow['setVibrancy']>[0]) ?? null)
-    return { material }
+    // Plan 091: Electron creates a fresh, plain NSVisualEffectView for a new
+    // material, so the clear-glass strip has to be applied to it again. The
+    // tree before the re-apply is the calibration doc's "before the strip".
+    const before = material ? effectViewsOf() : null
+    const styled = material ? restyleGlassWindow(target) : { style: null }
+    return { material, ...styled, before, after: material ? effectViewsOf() : null }
   }
 
   // Glass bisect: sample the renderer's OWN output alpha. capturePage sees the
@@ -11387,6 +11493,9 @@ async function runSmokePreviewMotionCommand(
     return {
       role,
       applied: appliedGlass(target),
+      // Plan 091: what VIDEORC_GLASS_STYLE asked for; `applied.style` says
+      // what this window got, so the probe gates nativeClear on the request.
+      styleRequested: glassStyle,
       appearancePin: windowAppearanceLoad.binding
         ? 'available'
         : windowAppearanceLoad.unavailableReason,
@@ -11466,8 +11575,24 @@ async function runSmokePreviewMotionCommand(
     } else if (lever === 'revibrancy') {
       mainWindow.setVibrancy(null)
       mainWindow.setVibrancy(glassVibrancyMaterial)
+      // The re-created vibrancy view is plain again (plan 091).
+      return { lever, ...restyleGlassWindow(mainWindow) }
     }
     return { lever }
+  }
+
+  // Plan 091 persistence probes: transitions AppKit rebuilds a window's
+  // material through, driven without activating the app. Native fullscreen
+  // (a new Space) would take over the user's display, so the probe uses
+  // simple fullscreen: the same frame-to-screen and style-mask change.
+  if (command === 'main-window-simple-fullscreen') {
+    mainWindow.setSimpleFullScreen(params.enabled === true)
+    return { simpleFullScreen: mainWindow.isSimpleFullScreen(), bounds: mainWindow.getBounds() }
+  }
+
+  if (command === 'main-window-blur') {
+    mainWindow.blur()
+    return { focused: mainWindow.isFocused() }
   }
 
   // Leak bisection: replace the main window's content with about:blank (the
@@ -12618,11 +12743,14 @@ async function runtimeInfo(): Promise<RuntimeInfo> {
 }
 
 function mainWindowGlassInfo(): RuntimeInfo['windowGlass'] {
-  const mode = appliedGlass(mainWindow)?.mode ?? glassMode
+  const applied = appliedGlass(mainWindow)
+  const mode = applied?.mode ?? glassMode
   return {
     kind: mode.kind,
     reason: mode.kind === 'solid' ? mode.reason : null,
-    paintCheck: mainWindowPaintCheck
+    paintCheck: mainWindowPaintCheck,
+    style: applied?.style ?? null,
+    styleRequested: glassStyle
   }
 }
 
@@ -13587,6 +13715,9 @@ app.whenReady().then(async () => {
   secureIpcHandle('app:set-native-theme', (_event, theme: string) => {
     nativeTheme.themeSource = theme === 'light' ? 'light' : 'dark'
     repinDarkAlwaysWindows()
+    // AppKit rebuilds each material for the new appearance; the clear glass
+    // strips it again (plan 091).
+    restyleGlassWindows()
     // A solid window (off macOS, or VIDEORC_GLASS=0) repaints its palette base
     // with the theme; the glass windows' material follows nativeTheme itself,
     // and every window's page follows it through prefers-color-scheme.
