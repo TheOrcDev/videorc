@@ -16,9 +16,7 @@ mkdirSync(outDir, { recursive: true })
 
 const VARIANTS = [
   { name: 'default', env: {} },
-  { name: 'glass-off', env: { VIDEORC_GLASS: '0' } },
-  { name: 'gpu-off', env: { VIDEORC_DISABLE_GPU: '1' } },
-  { name: 'gpu-off-glass-off', env: { VIDEORC_DISABLE_GPU: '1', VIDEORC_GLASS: '0' } }
+  { name: 'gpu-off', env: { VIDEORC_DISABLE_GPU: '1' } }
 ]
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -42,20 +40,35 @@ function screenshot(file) {
   `)
 }
 
-function maximize(pid) {
+function maximize() {
   return powershell(`
     Add-Type @"
     using System; using System.Runtime.InteropServices;
     public static class W { [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
+      [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string c, string t);
       [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h); }
 "@
-    $p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue
-    if ($p -and $p.MainWindowHandle -ne 0) {
-      [W]::ShowWindow($p.MainWindowHandle, 3) | Out-Null
-      [W]::SetForegroundWindow($p.MainWindowHandle) | Out-Null
-      "maximized $($p.MainWindowHandle) title=$($p.MainWindowTitle)"
-    } else { "no main window handle" }
+    $h = [W]::FindWindow($null, 'Videorc')
+    if ($h -ne [IntPtr]::Zero) {
+      [W]::ShowWindow($h, 3) | Out-Null
+      [W]::SetForegroundWindow($h) | Out-Null
+      "maximized main $h"
+    } else { "main window not found" }
   `)
+}
+
+async function crashMainRenderer(port) {
+  try {
+    const targets = await cdpTargets(port)
+    const main = targets.find((t) => t.type === 'page' && /renderer\/index\.html/.test(t.url))
+    if (!main) return 'no main renderer target'
+    const session = await cdpSession(main.webSocketDebuggerUrl)
+    session.send('Page.crash').catch(() => {})
+    await sleep(500)
+    return 'Page.crash sent'
+  } catch (error) {
+    return String(error)
+  }
 }
 
 async function cdpTargets(port) {
@@ -155,12 +168,22 @@ for (const variant of VARIANTS) {
 
   await sleep(25000)
   const first = screenshot(join(variantDir, 'screen-1-launched.png'))
-  const max = maximize(child.pid)
+  const max = maximize()
   await sleep(4000)
   const second = screenshot(join(variantDir, 'screen-2-maximized.png'))
   const renderer = await inspectRenderer(port, variantDir)
   await sleep(1000)
   const third = screenshot(join(variantDir, 'screen-3-after-cdp.png'))
+
+  const crash = await crashMainRenderer(port)
+  await sleep(6000)
+  const fourth = screenshot(join(variantDir, 'screen-4-renderer-crashed.png'))
+  let targetsAfterCrash = null
+  try {
+    targetsAfterCrash = (await cdpTargets(port)).map(({ type, url, title }) => ({ type, title, url: url.slice(-40) }))
+  } catch (error) {
+    targetsAfterCrash = String(error)
+  }
 
   // Only the process tree this script started.
   spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'])
@@ -182,7 +205,9 @@ for (const variant of VARIANTS) {
     env: variant.env,
     pid: child.pid,
     exitedBeforeKill: exited,
-    screenshots: [first, second, third],
+    screenshots: [first, second, third, fourth],
+    crash,
+    targetsAfterCrash,
     maximize: max,
     renderer
   }
