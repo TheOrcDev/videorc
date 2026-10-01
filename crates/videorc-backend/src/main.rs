@@ -3409,6 +3409,31 @@ fn validated_stream_metadata_draft(state: &AppState) -> anyhow::Result<StreamMet
     Ok(metadata)
 }
 
+/// Plan 083: a newly chosen draft thumbnail must be a registered managed
+/// asset. An unchanged one is not re-checked, so a slow startup rehydration
+/// never blocks saving a title; Go Live reports it if it is still missing.
+fn check_stream_metadata_thumbnail(
+    state: &AppState,
+    draft: &StreamMetadataDraft,
+) -> anyhow::Result<()> {
+    let Some(asset_id) = draft.thumbnail_asset_id.as_deref() else {
+        return Ok(());
+    };
+    if state
+        .database
+        .stream_metadata_draft()?
+        .thumbnail_asset_id
+        .as_deref()
+        == Some(asset_id)
+    {
+        return Ok(());
+    }
+    state
+        .resource_authority
+        .resolve_managed_thumbnail(asset_id)?;
+    Ok(())
+}
+
 /// A Kick user token, refreshed when near expiry, plus the account it belongs
 /// to. `refused` forces a refresh after Kick answered 401 with that token.
 async fn kick_access(
@@ -10504,7 +10529,9 @@ async fn handle_text_message_with_role(
         },
         "streamTargets.metadata.update" => {
             match serde_json::from_value::<StreamMetadataDraft>(command.params) {
-                Ok(draft) => match state.database.save_stream_metadata_draft(draft) {
+                Ok(draft) => match check_stream_metadata_thumbnail(state, &draft)
+                    .and_then(|()| state.database.save_stream_metadata_draft(draft))
+                {
                     Ok(saved) => {
                         state.emit_event("streamTargets.metadata.changed", &saved);
                         ServerResponse::ok(command.id, saved)
@@ -16668,6 +16695,26 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    #[test]
+    fn stream_metadata_save_rejects_a_newly_chosen_unregistered_thumbnail() {
+        let state = test_state();
+        let mut draft = state.database.stream_metadata_draft().unwrap();
+        assert!(check_stream_metadata_thumbnail(&state, &draft).is_ok());
+
+        draft.thumbnail_asset_id = Some("b".repeat(64));
+        let error = check_stream_metadata_thumbnail(&state, &draft).unwrap_err();
+        assert!(error.to_string().contains("Pick it again"), "{error}");
+
+        // An id already stored is not re-resolved: a late rehydration must
+        // never block saving the title.
+        state
+            .database
+            .save_stream_metadata_draft(draft.clone())
+            .unwrap();
+        draft.title = "New title".to_string();
+        assert!(check_stream_metadata_thumbnail(&state, &draft).is_ok());
     }
 
     #[tokio::test]

@@ -2614,6 +2614,7 @@ pub async fn resolve_preflight_metadata(
                     description: confirmed["description"].as_str().unwrap_or("").into(),
                     default_privacy: crate::streaming::StreamPrivacy::Public,
                     target_overrides: vec![],
+                    thumbnail_asset_id: None,
                     updated_at: event.updated_at,
                 },
             );
@@ -2664,6 +2665,7 @@ pub async fn resolve_preflight_metadata(
                     confirmed["status"]["privacyStatus"].clone(),
                 )?,
                 target_overrides: vec![],
+                thumbnail_asset_id: None,
                 updated_at: event.updated_at,
             },
         );

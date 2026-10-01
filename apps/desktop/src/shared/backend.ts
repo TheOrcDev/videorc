@@ -854,6 +854,11 @@ export interface StreamMetadataDraft {
   description: string
   defaultPrivacy: StreamPrivacy
   targetOverrides: StreamTargetMetadataDraft[]
+  /**
+   * Managed thumbnail asset id (plan 083), from `importScheduledThumbnail`.
+   * Uploaded to each YouTube broadcast an instant Go Live prepares.
+   */
+  thumbnailAssetId?: string
   updatedAt: string
 }
 
