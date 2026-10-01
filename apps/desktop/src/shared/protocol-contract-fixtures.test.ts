@@ -484,8 +484,14 @@ describe('shared high-risk protocol fixture', () => {
   })
 
   it('loads chat rows with and without structured event details', () => {
-    const [plain, cheer, resub, raid, superChat, follow, kicks] = fixtures.comments.eventMessages
-    expect('details' in plain || 'reply' in plain || 'firstMessage' in plain).toBe(false)
+    const [plain, cheer, resub, raid, superChat, follow, kicks, affiliated] =
+      fixtures.comments.eventMessages
+    expect(
+      'details' in plain ||
+        'reply' in plain ||
+        'firstMessage' in plain ||
+        'authorAffiliation' in plain
+    ).toBe(false)
     expect(cheer.details).toEqual({ kind: 'cheer', bits: 1500 })
     expect(cheer.reply?.parentAuthorName).toBe('regular_viewer')
     expect(cheer.firstMessage).toBe(true)
@@ -494,6 +500,11 @@ describe('shared high-risk protocol fixture', () => {
     expect(superChat.details).toMatchObject({ kind: 'super-chat', amountMicros: 5_000_000 })
     expect(follow.eventType).toBe('follow')
     expect(kicks.details).toEqual({ kind: 'kicks', amount: 500, giftName: 'Rage Quit' })
+    expect(affiliated.authorAffiliation).toEqual({
+      badgeUrl: 'https://pbs.twimg.com/profile_images/2/neon_normal.jpg',
+      description: 'Neon',
+      url: 'https://x.com/neondatabase'
+    })
 
     const snapshot = fixtures.comments.eventMessages.reduce(
       (current, message) => applyCommentsSnapshotDelta(current, { kind: 'message', message }),
