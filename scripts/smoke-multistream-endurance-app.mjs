@@ -23,11 +23,12 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 //   downstream hiccup. The session must run to its planned stop and
 //   complete: transient pressure degrades the stream, never kills it.
 //
-//   Session B — stream-death honesty. The session FFmpeg is frozen for
-//   several seconds, past the sustained-violation window, so the stream
-//   output legitimately dies. The session must NOT be marked failed: the
-//   local recording finalizes healthy and a `stream-output-failed` health
-//   event tells the truth about the stream.
+//   Session B — a long freeze. The session FFmpeg is frozen for several
+//   seconds (the 2026-10-01 incident shape, plan 087). Stream and recording
+//   are expected to wait it out and resume. If the stream output does die,
+//   the session must NOT be marked failed: the local recording finalizes
+//   healthy and a `stream-output-failed` health event tells the truth about
+//   the stream.
 //
 // No Docker or external services: listeners are plain `ffmpeg -listen 1`.
 
@@ -43,6 +44,7 @@ const basePort = Number(process.env.VIDEORC_SMOKE_RTMP_PORT ?? 12935)
 // Session A duration; the release endurance run passes 600000.
 const streamMs = Number(process.env.VIDEORC_SMOKE_STREAM_MS ?? 60000)
 const listenerBindMs = Number(process.env.VIDEORC_SMOKE_LISTENER_BIND_MS ?? 2500)
+const finalizationTimeoutMs = Number(process.env.VIDEORC_SMOKE_FINALIZATION_TIMEOUT_MS ?? 30000)
 // Network stall profile for the proxied leg in session A.
 const stallEveryMs = Number(process.env.VIDEORC_SMOKE_STALL_EVERY_MS ?? 15000)
 const stallForMs = Number(process.env.VIDEORC_SMOKE_STALL_FOR_MS ?? 4000)
@@ -275,7 +277,7 @@ async function verifySessionB(finalStatus, endedEarly) {
       `session B was marked FAILED (${finalStatus.message ?? 'no message'}) — the recording was condemned for a stream failure`
     )
   }
-  await verifyRecording(finalStatus.outputPath, failures)
+  await verifyRecording(finalStatus.outputPath, failures, { spansFreeze: !endedEarly })
   if (endedEarly) {
     // The stream died — the reason must be an explicit, user-visible event,
     // never silence (the incident sessions had zero warnings before death).
@@ -296,13 +298,41 @@ async function verifySessionB(finalStatus, endedEarly) {
   )
 }
 
-async function verifyRecording(outputPath, failures) {
+// The session reports its capture MKV; since instant stop the published
+// artifact is the MP4 a background job exports after the terminal status.
+// Wait for whichever the session leaves behind.
+async function waitForFinalRecording(reportedPath) {
+  if (!reportedPath) {
+    return reportedPath
+  }
+  const candidates = [reportedPath.replace(/\.mkv$/i, '.mp4'), reportedPath]
+  const deadline = Date.now() + finalizationTimeoutMs
+  for (;;) {
+    const mkvPresent = existsSync(reportedPath)
+    for (const candidate of candidates) {
+      // The MKV is only final once no export is going to replace it.
+      const settled = candidate !== reportedPath || Date.now() >= deadline
+      if (settled && existsSync(candidate) && statSync(candidate).size > 0) {
+        return candidate
+      }
+    }
+    if (Date.now() >= deadline) {
+      return mkvPresent ? reportedPath : candidates[0]
+    }
+    await sleep(500)
+  }
+}
+
+async function verifyRecording(reportedPath, failures, { spansFreeze = false } = {}) {
+  const outputPath = await waitForFinalRecording(reportedPath)
   const recordingSize = outputPath && existsSync(outputPath) ? statSync(outputPath).size : 0
   if (recordingSize > 0) {
     const quality = await analyzeRecording(outputPath, {
       ffmpegPath,
       ffprobePath: process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe',
-      intendedFps: 30,
+      // A recording that waited out a multi-second freeze keeps a truthful
+      // gap, so its average cadence is below the session rate by design.
+      intendedFps: spansFreeze ? undefined : 30,
       expectAudio: false,
       gates: {
         requireMotion: false,

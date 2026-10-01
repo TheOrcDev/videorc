@@ -641,8 +641,14 @@ impl CaptureHealthMonitor {
             || (producer_screen_slow && consumer_screen_starved);
         if slow_delivery && !self.slow_delivery_log_active {
             self.slow_delivery_log_active = true;
+            // Whole-host numbers beside self_cpu: the 2026-10-01 line read
+            // self_cpu=7% while the host ran at a load of 70 on 10 cores.
+            let host = crate::host_pressure::sample_host_pressure().map_or_else(
+                || "host_load=n/a".to_string(),
+                crate::host_pressure::HostPressureSample::diagnostics_fields,
+            );
             tracing::warn!(
-                "[capture-health] delivery is slow but flowing (system capture pressure suspected; no restart will be attempted): {detail}"
+                "[capture-health] delivery is slow but flowing (system capture pressure suspected; no restart will be attempted): {detail} {host}"
             );
         } else if !slow_delivery {
             self.slow_delivery_log_active = false;
