@@ -17,6 +17,7 @@ import type {
   LiveChatMessageFragment
 } from '@/lib/backend'
 import { monogramInitials, useCachedAvatar } from '@/lib/chat-avatar'
+import { groupEmoteOverlays } from '@/lib/chat-emotes'
 import { cohostFlagActionLabel, cohostFlagChipLabel, cohostFlagDetail } from '@/lib/cohost-view'
 import { cn } from '@/lib/utils'
 
@@ -203,23 +204,43 @@ function AffiliationBadge({
   )
 }
 
-/** An emote image through main's allowlisted avatar cache; its text until then. */
-function Emote({ url, text }: { url: string; text: string }): ReactElement {
+/**
+ * An emote image through main's allowlisted avatar cache; its text until then.
+ * Text height, natural width: 7TV has many wide emotes (plan 089). A stacked
+ * zero-width overlay shows nothing until its image is cached.
+ */
+function Emote({
+  url,
+  text,
+  stacked = 'no'
+}: {
+  url: string
+  text: string
+  stacked?: 'no' | 'base' | 'overlay'
+}): ReactElement | null {
   const localUrl = useCachedAvatar(url)
-  if (!localUrl) return <span>{text}</span>
+  if (!localUrl) {
+    if (stacked === 'overlay') return null
+    return <span className={cn(stacked === 'base' && 'col-start-1 row-start-1')}>{text}</span>
+  }
   return (
     <img
       alt={text}
-      className="inline-block size-5 align-text-bottom"
+      className={cn(
+        'inline-block h-5 w-auto max-w-24 object-contain align-text-bottom',
+        stacked !== 'no' && 'col-start-1 row-start-1'
+      )}
       data-slot="comment-emote"
       draggable={false}
       src={localUrl}
-      title={text}
+      title={stacked === 'no' ? text : undefined}
     />
   )
 }
 
-/** The message body: emotes inline when the platform sent them (Twitch, Kick). */
+/** The message body: emotes inline when the platform sent them (Twitch,
+ * Kick) or the backend matched them (7TV), zero-width 7TV emotes stacked on
+ * the emote before them. */
 function MessageBody({
   message,
   fragments
@@ -228,13 +249,25 @@ function MessageBody({
   fragments: readonly LiveChatMessageFragment[]
 }): ReactNode {
   if (!fragments.some((fragment) => fragment.imageUrl)) return message.messageText
-  return fragments.map((fragment, index) =>
-    fragment.imageUrl ? (
-      <Emote key={index} text={fragment.text} url={fragment.imageUrl} />
-    ) : (
-      <span key={index}>{fragment.text}</span>
+  return groupEmoteOverlays(fragments).map((piece, index) => {
+    if (piece.kind === 'text') return <span key={index}>{piece.text}</span>
+    if (piece.overlays.length === 0) {
+      return <Emote key={index} text={piece.emote.text} url={piece.emote.url} />
+    }
+    return (
+      <span
+        className="inline-grid place-items-center align-text-bottom"
+        data-slot="comment-emote-stack"
+        key={index}
+        title={[piece.emote, ...piece.overlays].map((emote) => emote.text).join(' ')}
+      >
+        <Emote stacked="base" text={piece.emote.text} url={piece.emote.url} />
+        {piece.overlays.map((overlay, layer) => (
+          <Emote key={layer} stacked="overlay" text={overlay.text} url={overlay.url} />
+        ))}
+      </span>
     )
-  )
+  })
 }
 
 /** True when the message names one of the streamer's own accounts. */

@@ -3,10 +3,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   AvatarFetchTimeoutError,
   AVATAR_MAX_BYTES,
+  AVATAR_PRUNE_MIN_INTERVAL_MS,
   avatarCacheFileName,
   avatarCacheRejectionKey,
   avatarCacheRejectionMessage,
   avatarHostAllowed,
+  avatarPruneDelayMs,
   avatarUrlDecision,
   httpStatusClass,
   redactAvatarFetchError,
@@ -54,14 +56,18 @@ describe('avatarHostAllowed', () => {
       true
     )
     expect(avatarHostAllowed('https://notkick.com/a.webp')).toBe(false)
-    // Stream Manager emotes (plan 055, S10): Twitch's own emote CDN only;
-    // third-party emote CDNs are refused like any other host.
+    // Stream Manager emotes (plan 055, S10): Twitch's own emote CDN.
     expect(avatarHostAllowed('https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/1.0')).toBe(
       true
     )
-    expect(avatarHostAllowed('https://cdn.7tv.app/emote/60ae958e229664e8667aea38/1x.webp')).toBe(
-      false
+    // 7TV emotes (plan 089): its CDN host exactly, never a lookalike.
+    expect(avatarHostAllowed('https://cdn.7tv.app/emote/01FCY771D800007PQ2DF3GDTN6/2x.webp')).toBe(
+      true
     )
+    expect(avatarHostAllowed('https://cdn.7tv.app.evil.example/emote/x/2x.webp')).toBe(false)
+    expect(avatarHostAllowed('https://7tv.app/emote/x/2x.webp')).toBe(false)
+    expect(avatarHostAllowed('http://cdn.7tv.app/emote/x/2x.webp')).toBe(false)
+    // Other third-party emote CDNs are refused like any other host.
     expect(avatarHostAllowed('https://cdn.betterttv.net/emote/5f1b0186cf6d2144653d2970/1x')).toBe(
       false
     )
@@ -200,5 +206,21 @@ describe('avatarCacheFileName', () => {
     expect(avatarCacheFileName('https://yt3.ggpht.com/../../../etc/passwd')).toMatch(
       /^[0-9a-f]{32}\.img$/
     )
+  })
+
+  it('keeps .webp for 7TV emotes, so the asset protocol serves them as WebP', () => {
+    expect(
+      avatarCacheFileName('https://cdn.7tv.app/emote/01FCY771D800007PQ2DF3GDTN6/2x.webp')
+    ).toMatch(/^[0-9a-f]{32}\.webp$/)
+  })
+})
+
+describe('avatarPruneDelayMs', () => {
+  it('prunes at once the first time, then at most once per interval', () => {
+    expect(avatarPruneDelayMs(null, 1_000)).toBe(0)
+    expect(avatarPruneDelayMs(1_000, 1_000)).toBe(AVATAR_PRUNE_MIN_INTERVAL_MS)
+    expect(avatarPruneDelayMs(1_000, 3_000)).toBe(AVATAR_PRUNE_MIN_INTERVAL_MS - 2_000)
+    expect(avatarPruneDelayMs(1_000, 1_000 + AVATAR_PRUNE_MIN_INTERVAL_MS)).toBe(0)
+    expect(avatarPruneDelayMs(1_000, 1_000_000)).toBe(0)
   })
 })

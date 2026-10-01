@@ -159,6 +159,34 @@ describe('Stream Manager chat pane', () => {
     expect(markup).not.toContain('[emote:')
   })
 
+  it('renders 7TV emotes from fragments, stacking a zero-width one on the emote before it', () => {
+    const cdn = (id: string): string => `https://cdn.7tv.app/emote/${id}/2x.webp`
+    const markup = renderToStaticMarkup(
+      createElement(CommentRow, {
+        message: message('10', 'youtube', 'hi catJAM RainTime', {
+          fragments: [
+            { type: 'text', text: 'hi ' },
+            { type: 'emote', text: 'catJAM', imageUrl: cdn('01F6MZGCNG000255K4X1K0NEX9') },
+            { type: 'text', text: ' ' },
+            {
+              type: 'emote',
+              text: 'RainTime',
+              imageUrl: cdn('01FCY771D800007PQ2DF3GDTN6'),
+              zeroWidth: true
+            }
+          ]
+        })
+      })
+    )
+    expect(markup).toContain('hi ')
+    // One stack named for both; the base's name stands in until it is
+    // cached, and the pending overlay draws nothing on top of it.
+    expect(markup).toContain('data-slot="comment-emote-stack"')
+    expect(markup).toContain('title="catJAM RainTime"')
+    expect(markup).toContain('>catJAM</span>')
+    expect(markup).not.toContain('>RainTime<')
+  })
+
   it('shows the time on every row in History, and on hover while live', () => {
     const row = (timestamps: 'always' | 'hover'): string =>
       renderToStaticMarkup(

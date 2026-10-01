@@ -23,6 +23,9 @@ const AVATAR_ALLOWED_HOST_SUFFIXES = [
   // files.kick.com/emotes/<id>/fullsize)
   'files.kick.com',
   'kick.com',
+  // 7TV emotes (plan 089). The backend builds every URL as
+  // cdn.7tv.app/emote/<ULID>/2x.webp; it never takes one from the 7TV API.
+  'cdn.7tv.app',
   // Videorc account avatars uploaded on videorc.com (Vercel Blob storage).
   // Any store subdomain, matching the web's own isAccountAvatarBlobUrl check;
   // Google account photos are covered by googleusercontent.com above.
@@ -33,8 +36,20 @@ const AVATAR_ALLOWED_HOST_SUFFIXES = [
 ]
 
 /** Keep the cache bounded; oldest files (by mtime) are pruned past this.
- * Emotes share it with avatars, so it holds a busy stream's worth of both. */
-export const AVATAR_CACHE_MAX_FILES = 500
+ * Emotes share it with avatars, so it holds a busy stream's worth of both;
+ * 7TV chats are emote-dense, hence 1000 rather than 500 (plan 089). */
+export const AVATAR_CACHE_MAX_FILES = 1000
+
+/** Prune at most this often. A chat flooding new emotes otherwise re-lists
+ * and stats the whole cache directory on the main process for every new
+ * file (plan 089). */
+export const AVATAR_PRUNE_MIN_INTERVAL_MS = 5_000
+
+/** How long until the cache may be pruned again: 0 when a prune is due now. */
+export function avatarPruneDelayMs(lastPruneAtMs: number | null, nowMs: number): number {
+  if (lastPruneAtMs === null) return 0
+  return Math.max(0, AVATAR_PRUNE_MIN_INTERVAL_MS - (nowMs - lastPruneAtMs))
+}
 
 /** Refuse to store avatars past this size. Matches the web's account-avatar
  * upload cap (2 MB) — the old 512 KB desktop cap silently monogrammed any
