@@ -617,6 +617,11 @@ describe('createMicVisualPipeline level feel', () => {
     expect(spoken.bands[band]).toBeLessThanOrEqual(dbToMeterLevel(-12))
     expect(spoken.peakDb).toBeCloseTo(-12, 0)
     expect(spoken.bands.filter((level) => level > 0)).toHaveLength(1)
+    // Level meters read the same block in true dBFS (plan 092): the sine's
+    // peak, and its RMS 3.01 dB below.
+    const meter = pipeline.readFrame(createMicVisualFrameBuffer())
+    expect(meter.peakDbfs).toBeCloseTo(-12, 0)
+    expect(meter.rmsDbfs).toBeCloseTo(-15.01, 0)
 
     // Back to silence: the bar decays instead of snapping — still most of the
     // way up after one tick, near floor only after ~1 s.
@@ -628,6 +633,11 @@ describe('createMicVisualPipeline level feel', () => {
     for (let count = 0; count < 20; count += 1) tick()
     expect(pipeline.getFrameSnapshot().bands[band]).toBeLessThan(0.05)
     expect(pipeline.getFrameSnapshot().peakDb).toBe(-60)
+    // The label floors silence at -60; the meter reading never floors, so a
+    // gain added later cannot lift digital silence into a level.
+    const silent = pipeline.readFrame(createMicVisualFrameBuffer())
+    expect(silent.peakDbfs).toBe(Number.NEGATIVE_INFINITY)
+    expect(silent.rmsDbfs).toBe(Number.NEGATIVE_INFINITY)
   })
 })
 

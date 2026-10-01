@@ -3,11 +3,8 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_METER_BALLISTICS,
   INITIAL_METER_BALLISTICS,
-  MIC_CLIP_HOLD_MS,
-  MIC_CLIP_THRESHOLD_DB,
   MIC_METER_FLOOR_DB,
   MIC_METER_GATE_DB,
-  advanceClipHoldDeadline,
   advanceMeterBallistics,
   amplitudeToDb,
   approachMeterLevel,
@@ -117,19 +114,6 @@ describe('mic meter math', () => {
     expect(matchMicrophoneDeviceId('Pro Microphone', [inputs[2]])).toBe('b')
     expect(matchMicrophoneDeviceId('Elgato Wave:3', inputs)).toBeUndefined()
     expect(matchMicrophoneDeviceId(undefined, inputs)).toBeUndefined()
-  })
-})
-
-describe('clip hold deadline', () => {
-  it('arms and extends the deadline while peaks are at or above the threshold', () => {
-    expect(advanceClipHoldDeadline(0, MIC_CLIP_THRESHOLD_DB, 1000)).toBe(1000 + MIC_CLIP_HOLD_MS)
-    expect(advanceClipHoldDeadline(0, 0, 1000)).toBe(1000 + MIC_CLIP_HOLD_MS)
-    expect(advanceClipHoldDeadline(2000, 0, 1500)).toBe(1500 + MIC_CLIP_HOLD_MS)
-  })
-
-  it('leaves the running deadline untouched for quiet or missing peaks', () => {
-    expect(advanceClipHoldDeadline(2500, -12, 1000)).toBe(2500)
-    expect(advanceClipHoldDeadline(2500, null, 1000)).toBe(2500)
   })
 })
 

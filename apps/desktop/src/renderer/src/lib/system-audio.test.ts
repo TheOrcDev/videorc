@@ -4,7 +4,6 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 import type { AudioTrack, Device } from '@/lib/backend'
-import { backendMeterReading } from '@/lib/mic-meter'
 import {
   SYSTEM_AUDIO_RESUME_EVENT,
   confirmedSystemAudioMix,
@@ -183,16 +182,6 @@ describe('systemAudioSwitchView', () => {
     expect(
       view({ sessionActive: true, requested: true, confirmed: false, issue: 'echo' })
     ).toMatchObject({ checked: true, issue: 'echo', meter: false, stateLabel: 'Paused' })
-  })
-})
-
-describe('backendMeterReading for the system audio row', () => {
-  it('reads the backend level and peak, and never invents one', () => {
-    expect(backendMeterReading(undefined, undefined)).toBeNull()
-    expect(backendMeterReading(null, null)).toBeNull()
-    expect(backendMeterReading(0.5, -12)).toEqual({ level: 0.5, peakDb: -12 })
-    expect(backendMeterReading(undefined, -30)).toEqual({ level: 0.5, peakDb: -30 })
-    expect(backendMeterReading(2, null)).toEqual({ level: 1, peakDb: null })
   })
 })
 

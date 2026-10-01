@@ -4,7 +4,15 @@ export type MicVisualFrameBuffer = {
   historyRing: Float32Array
   historyStart: number
   historyLength: number
+  /** Frame peak for labels: dBFS floored at the visual floor (-60); null with no data. */
   peakDb: number | null
+  /**
+   * Level-meter readings of the same block, in true dBFS: -Infinity for
+   * digital silence and never floored, so a gain offset added later cannot
+   * turn the floor into a level (plan 092).
+   */
+  peakDbfs: number
+  rmsDbfs: number
 }
 
 const EMPTY_HISTORY_RING = new Float32Array(0)
@@ -16,7 +24,9 @@ export function createMicVisualFrameBuffer(): MicVisualFrameBuffer {
     historyRing: EMPTY_HISTORY_RING,
     historyStart: 0,
     historyLength: 0,
-    peakDb: null
+    peakDb: null,
+    peakDbfs: Number.NEGATIVE_INFINITY,
+    rmsDbfs: Number.NEGATIVE_INFINITY
   }
 }
 

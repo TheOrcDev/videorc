@@ -69,10 +69,6 @@ function formatDurationUnit(value: number, unit: 'hour' | 'minute'): string {
   return `${value} ${unit}${value === 1 ? '' : 's'}`
 }
 
-export function formatDb(value?: number): string {
-  return typeof value === 'number' ? `${value.toFixed(1)} dB` : 'Not checked'
-}
-
 export function formatMetric(value: number | undefined, suffix: string): string {
   return typeof value === 'number'
     ? `${value.toFixed(suffix === 'fps' ? 1 : 2)} ${suffix}`
