@@ -40,6 +40,24 @@ test('a fully capable ffmpeg passes', () => {
   assert.deepEqual(result.missing, [])
 })
 
+test('Quick Sync is reported but never required', () => {
+  const without = assessWindowsFfmpegCapabilities({
+    protocolsOutput: PROTOCOLS_WITH_TLS,
+    encodersOutput: ENCODERS_WITH_MF,
+    filtersOutput: FILTERS_WITH_NOISE_CLEANUP
+  })
+  assert.equal(without.ok, true)
+  assert.deepEqual(without.optionalMissing, ['encoder:h264_qsv'])
+
+  const withQsv = assessWindowsFfmpegCapabilities({
+    protocolsOutput: PROTOCOLS_WITH_TLS,
+    encodersOutput: `${ENCODERS_WITH_MF}\n V..... h264_qsv             H.264 (Intel Quick Sync Video acceleration) (codec h264)`,
+    filtersOutput: FILTERS_WITH_NOISE_CLEANUP
+  })
+  assert.equal(withQsv.ok, true)
+  assert.deepEqual(withQsv.optionalMissing, [])
+})
+
 test('an ffmpeg without a TLS stack fails on rtmps and tls (the 0.9.23 class)', () => {
   const result = assessWindowsFfmpegCapabilities({
     protocolsOutput: PROTOCOLS_WITH_TLS.split('\n')

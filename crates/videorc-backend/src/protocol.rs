@@ -1540,6 +1540,40 @@ pub enum EncodeBackend {
     /// libopenh264 (software): the Linux LGPL fallback and the Windows fallback
     /// after the hardware probe failed (issue #149).
     SoftwareOpenH264,
+    /// h264_qsv: Intel Quick Sync driven by FFmpeg on the Windows raw path,
+    /// selected only after the Media Foundation bridge was rejected and its
+    /// own probe passed (plan 090 C).
+    HardwareQsv,
+}
+
+/// Which FFmpeg H.264 encoder the Windows raw path may use once the Media
+/// Foundation bridge is unavailable (plan 090 C). `Auto` keeps the OpenH264
+/// fallback; Quick Sync is opt-in until it has run real sessions.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowsH264EncoderPreference {
+    #[default]
+    Auto,
+    QuickSync,
+    Software,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EncoderPreferenceState {
+    pub preference: WindowsH264EncoderPreference,
+    /// Windows with an Intel graphics adapter: the only place the choice
+    /// does anything, and the only place the setting is shown.
+    pub quick_sync_available: bool,
+    /// The tester environment override decided `preference`; the saved
+    /// setting is ignored until it is removed.
+    pub env_override: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EncoderPreferenceSetParams {
+    pub preference: WindowsH264EncoderPreference,
 }
 
 /// One production encoder role represented by an off-air stream topology probe.
@@ -5202,6 +5236,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(EncodeBackend::SoftwareOpenH264).unwrap(),
             serde_json::json!("software-open-h264")
+        );
+        assert_eq!(
+            serde_json::to_value(EncodeBackend::HardwareQsv).unwrap(),
+            serde_json::json!("hardware-qsv")
         );
     }
 

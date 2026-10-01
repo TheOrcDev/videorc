@@ -323,10 +323,30 @@ pub(crate) fn capability_key() -> String {
     capability_key_from(
         std::env::consts::OS,
         std::env::consts::ARCH,
-        &crate::recording::graphics_adapter_driver_identity(),
+        &graphics_identity_for_encoder_preference(
+            &crate::recording::graphics_adapter_driver_identity(),
+            crate::recording::windows_h264_encoder_preference().0,
+        ),
         &desktop_app_version(),
         env!("CARGO_PKG_VERSION"),
     )
+}
+
+/// A result measured on one raw-path encoder must not answer for another
+/// (plan 090 C6): choosing Quick Sync or software re-measures the machine.
+/// The default leaves the material untouched, so no existing result goes
+/// stale just because this build knows about the preference.
+pub(crate) fn graphics_identity_for_encoder_preference(
+    identity: &str,
+    preference: crate::protocol::WindowsH264EncoderPreference,
+) -> String {
+    match preference {
+        crate::protocol::WindowsH264EncoderPreference::Auto => identity.to_string(),
+        chosen => format!(
+            "{identity};h264-encoder={}",
+            crate::recording::windows_h264_encoder_preference_label(chosen)
+        ),
+    }
 }
 
 pub(crate) fn capability_key_from(
@@ -972,6 +992,27 @@ mod tests {
                 "{unexpected} in {reasons:?}"
             );
         }
+    }
+
+    #[test]
+    fn choosing_an_encoder_re_measures_but_the_default_keeps_existing_results() {
+        use crate::protocol::WindowsH264EncoderPreference as Preference;
+        let identity = "luid=1;pci=8086:3185:00000000:03;d3d11-driver=1";
+        let key = |preference| {
+            capability_key_from(
+                "windows",
+                "x86_64",
+                &graphics_identity_for_encoder_preference(identity, preference),
+                "0.9.126",
+                "0.9.0",
+            )
+        };
+        assert_eq!(
+            key(Preference::Auto),
+            capability_key_from("windows", "x86_64", identity, "0.9.126", "0.9.0")
+        );
+        assert_ne!(key(Preference::Auto), key(Preference::QuickSync));
+        assert_ne!(key(Preference::QuickSync), key(Preference::Software));
     }
 
     #[test]

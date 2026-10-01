@@ -64,6 +64,8 @@ import type {
   StartSessionParams,
   PerformanceCheckProgress,
   PerformanceCheckRunParams,
+  EncoderPreferenceSetParams,
+  EncoderPreferenceState,
   PerformanceCheckState,
   StreamOutputTopologyProbeParams,
   StreamOutputTopologyProbeResult,
@@ -191,6 +193,8 @@ export interface BackendRpcMethodMap {
   'performance.check.get': BackendRpcDefinition<undefined, PerformanceCheckState>
   'performance.check.run': BackendRpcDefinition<PerformanceCheckRunParams, PerformanceCheckState>
   'performance.check.cancel': BackendRpcDefinition<undefined, PerformanceCheckState>
+  'encoder.preference.get': BackendRpcDefinition<undefined, EncoderPreferenceState>
+  'encoder.preference.set': BackendRpcDefinition<EncoderPreferenceSetParams, EncoderPreferenceState>
   'stream.targets.snapshot': BackendRpcDefinition<undefined, StreamTargetsSnapshot>
   'session.start': BackendRpcDefinition<StartSessionParams, RecordingStatus>
   'session.stop': BackendRpcDefinition<SessionStopParams | undefined, RecordingStatus>
@@ -496,8 +500,19 @@ const encodeBackendSchema = enumSchema([
   'hardware-vaapi',
   'hardware-media-foundation',
   'software-media-foundation',
-  'software-open-h264'
+  'software-open-h264',
+  'hardware-qsv'
 ])
+const windowsH264EncoderPreferenceSchema = enumSchema(['auto', 'quick-sync', 'software'])
+const encoderPreferenceStateSchema = objectSchema({
+  preference: windowsH264EncoderPreferenceSchema,
+  quickSyncAvailable: booleanSchema,
+  envOverride: booleanSchema
+}) as RuntimeSchema<EncoderPreferenceState>
+const encoderPreferenceSetParamsSchema = objectSchema(
+  { preference: windowsH264EncoderPreferenceSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<EncoderPreferenceSetParams>
 const streamOutputTopologyProbeStateSchema = enumSchema([
   'not-required',
   'passed',
@@ -2427,6 +2442,11 @@ const runtimeContracts = {
     result: performanceCheckStateSchema
   },
   'performance.check.cancel': { params: undefinedSchema, result: performanceCheckStateSchema },
+  'encoder.preference.get': { params: undefinedSchema, result: encoderPreferenceStateSchema },
+  'encoder.preference.set': {
+    params: encoderPreferenceSetParamsSchema,
+    result: encoderPreferenceStateSchema
+  },
   'stream.targets.snapshot': {
     params: undefinedSchema,
     result: streamTargetsSnapshotSchema

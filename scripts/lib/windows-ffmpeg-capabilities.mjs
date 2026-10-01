@@ -20,6 +20,12 @@ export const REQUIRED_WINDOWS_FFMPEG_PROTOCOLS = ['rtmp', 'rtmps', 'tls']
 export const REQUIRED_WINDOWS_FFMPEG_ENCODERS = ['h264_mf', 'aac', 'pcm_s16le']
 export const REQUIRED_WINDOWS_FFMPEG_FILTERS = ['afftdn']
 
+/** Encoders the app uses when present and lives without when absent: Intel
+ * Quick Sync for the Windows raw path (plan 090 C). Reported, never required,
+ * so a future pin without it degrades to software instead of failing the
+ * package gate. */
+export const OPTIONAL_WINDOWS_FFMPEG_ENCODERS = ['h264_qsv']
+
 function hasWord(output, word) {
   return new RegExp(`(^|[^A-Za-z0-9_])${word}([^A-Za-z0-9_]|$)`, 'm').test(output)
 }
@@ -50,7 +56,10 @@ export function assessWindowsFfmpegCapabilities({
       missing.push(`filter:${filter}`)
     }
   }
-  return { ok: missing.length === 0, missing }
+  const optionalMissing = OPTIONAL_WINDOWS_FFMPEG_ENCODERS.filter(
+    (encoder) => !hasWord(encodersOutput, encoder)
+  ).map((encoder) => `encoder:${encoder}`)
+  return { ok: missing.length === 0, missing, optionalMissing }
 }
 
 /**

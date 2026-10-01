@@ -1511,6 +1511,28 @@ export type EncodeBackend =
   // libopenh264 software fallback on Windows and Linux. On Linux it is the
   // required LGPL fallback when no DRM render node passes the VAAPI probe.
   | 'software-open-h264'
+  // Intel Quick Sync through FFmpeg's h264_qsv on the Windows raw path,
+  // chosen only after the Media Foundation bridge was rejected (plan 090 C).
+  | 'hardware-qsv'
+
+/**
+ * Which FFmpeg H.264 encoder the Windows raw path may use once the Media
+ * Foundation bridge is unavailable. `auto` keeps the OpenH264 fallback;
+ * Quick Sync is opt-in until it has run real sessions (plan 090 C).
+ */
+export type WindowsH264EncoderPreference = 'auto' | 'quick-sync' | 'software'
+
+export interface EncoderPreferenceState {
+  preference: WindowsH264EncoderPreference
+  /** Windows with an Intel graphics adapter: the only place the setting shows. */
+  quickSyncAvailable: boolean
+  /** A tester environment override decided `preference`; the setting is ignored. */
+  envOverride: boolean
+}
+
+export interface EncoderPreferenceSetParams {
+  preference: WindowsH264EncoderPreference
+}
 
 /** One `/dev/dri/renderD*` node as the Linux VAAPI policy saw it (Plan 052). */
 export type LinuxRenderNodeState = 'probed-ok' | 'rejected' | 'quarantined' | 'skipped'

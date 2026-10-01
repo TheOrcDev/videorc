@@ -39,6 +39,16 @@ export const WINDOWS_STREAM_D3D11_PREVIEW = Object.freeze({
 
 export const WINDOWS_STREAM_NATURAL_FALLBACK_HARDWARE_CLASS = 'unsupported-natural-fallback'
 
+/**
+ * Raw-path encoders a run may name with --expect-fallback after the Media
+ * Foundation bridge is rejected. `hardware-qsv` (plan 090 C6) also selects
+ * Intel Quick Sync for the app under test.
+ */
+export const WINDOWS_STREAM_EXPECTED_ENCODER_FALLBACKS = Object.freeze([
+  'software-open-h264',
+  'hardware-qsv'
+])
+
 export function assertWindowsStreamSelectionEnvironmentIsRunnerOwned(env = {}) {
   const inherited = WINDOWS_D3D11_SELECTION_ENVIRONMENT_KEYS.filter(
     (name) => typeof env[name] === 'string' && env[name].trim()
@@ -263,7 +273,8 @@ export function parseWindowsStreamPerformanceArgs(
   const fallbackCalibrations = takeOption(values, '--fallback-calibrations')
   const budget = takeOption(values, '--budget')
   const bridge =
-    takeOption(values, '--bridge') ?? (expectFallback === 'software-open-h264' ? 'mf' : 'auto')
+    takeOption(values, '--bridge') ??
+    (WINDOWS_STREAM_EXPECTED_ENCODER_FALLBACKS.includes(expectFallback) ? 'mf' : 'auto')
   const output = takeOption(values, '--output')
   if (values.length > 0) {
     throw new Error(`Unknown Windows stream performance argument: ${values[0]}`)
@@ -335,14 +346,20 @@ export function parseWindowsStreamPerformanceArgs(
   if (requireD3d11 && !d3d11) {
     throw new Error('--require-d3d11 requires --d3d11.')
   }
-  if (expectFallback !== undefined && !['software-open-h264', 'natural'].includes(expectFallback)) {
+  if (
+    expectFallback !== undefined &&
+    ![...WINDOWS_STREAM_EXPECTED_ENCODER_FALLBACKS, 'natural'].includes(expectFallback)
+  ) {
     throw new Error(
-      `--expect-fallback must be software-open-h264 or natural; received ${expectFallback}.`
+      `--expect-fallback must be software-open-h264, hardware-qsv, or natural; received ${expectFallback}.`
     )
   }
-  if (expectFallback === 'software-open-h264' && (bridge !== 'mf' || requireBridge)) {
+  if (
+    WINDOWS_STREAM_EXPECTED_ENCODER_FALLBACKS.includes(expectFallback) &&
+    (bridge !== 'mf' || requireBridge)
+  ) {
     throw new Error(
-      '--expect-fallback software-open-h264 requests --bridge mf without --require-bridge.'
+      `--expect-fallback ${expectFallback} requests --bridge mf without --require-bridge.`
     )
   }
   if (expectFallback === 'natural' && (d3d11 || requireD3d11)) {
@@ -368,7 +385,7 @@ export function parseWindowsStreamPerformanceArgs(
       'The protected gate cannot use --bridge raw; it must prove the Media Foundation production path.'
     )
   }
-  if (mode === 'gate' && expectFallback === 'software-open-h264') {
+  if (mode === 'gate' && WINDOWS_STREAM_EXPECTED_ENCODER_FALLBACKS.includes(expectFallback)) {
     throw new Error('The protected gate cannot qualify an expected encoder fallback.')
   }
 
@@ -829,21 +846,24 @@ export function evaluateWindowsStreamRun(
     requirePositive(failures, 'encoded frames', evidence?.pipeline?.encodedFrames)
     requirePositive(failures, 'encoded bytes', evidence?.pipeline?.encodedBytes)
   }
-  if (evidence?.pipeline?.expectedFallback === 'software-open-h264') {
+  const expectedEncoderFallback = evidence?.pipeline?.expectedFallback
+  if (WINDOWS_STREAM_EXPECTED_ENCODER_FALLBACKS.includes(expectedEncoderFallback)) {
     requireEqual(
       failures,
       'fallback bridge output',
       evidence?.pipeline?.effectiveBridgeOutput,
       'raw-yuv420p'
     )
+    // Exactly the named encoder: a Quick Sync run that quietly landed on
+    // OpenH264 (its probe failed) must fail, not pass as "a fallback".
     requireEqual(
       failures,
       'fallback encode backend',
       evidence?.pipeline?.effectiveEncodeBackend,
-      'software-open-h264'
+      expectedEncoderFallback
     )
     if (!nonEmptyString(evidence?.pipeline?.fallbackReason)) {
-      failures.push('expected software-open-h264 fallback reason was missing')
+      failures.push(`expected ${expectedEncoderFallback} fallback reason was missing`)
     }
   }
   if (

@@ -462,6 +462,10 @@ async function runScenario({
     ...(options.requireBridge ? { VIDEORC_WINDOWS_REQUIRE_ENCODED_BRIDGE: '1' } : {}),
     ...(options.d3d11 ? { VIDEORC_WINDOWS_D3D11_MEDIA: '1' } : {}),
     ...(options.requireD3d11 ? { VIDEORC_WINDOWS_REQUIRE_D3D11_MEDIA: '1' } : {}),
+    // Plan 090 C6: a Quick Sync run opts the app under test into the tier.
+    ...(options.expectFallback === 'hardware-qsv'
+      ? { VIDEORC_WINDOWS_H264_ENCODER: 'quick-sync' }
+      : {}),
     ...(options.bridge === 'mf'
       ? {
           VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT: 'windows-media-foundation-h264-mpegts'
@@ -1816,6 +1820,7 @@ async function runScenario({
     ...summarizeWindowsStreamDiagnosticSamples(diagnosticSamples, {
       fallbackAcknowledged:
         options.expectFallback === 'software-open-h264' ||
+        options.expectFallback === 'hardware-qsv' ||
         options.expectFallback === 'natural' ||
         process.env.VIDEORC_WINDOWS_STREAM_ACKNOWLEDGE_FALLBACK === '1',
       recordEnabled: scenario.recordEnabled
