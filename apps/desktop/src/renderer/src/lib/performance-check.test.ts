@@ -12,13 +12,12 @@ import {
   isUntrustedPerformanceCheckResult,
   outputLabel,
   outputVerdict,
-  performanceCheckLine,
   performanceCheckCeiling,
   performanceCheckTooHeavyToast,
-  shouldRunPerformanceCheck,
-  softwareStreamAdvice,
-  streamingAtSteppedDownProfile
+  shouldRunPerformanceCheck
 } from './performance-check'
+import { softwareStreamAdvice, streamingAtSteppedDownProfile } from './go-live-output'
+import { performanceCheckLine } from './performance-check-line'
 
 function result(
   rungs: Array<[VideoPreset, PerformanceCheckRungVerdict]>,

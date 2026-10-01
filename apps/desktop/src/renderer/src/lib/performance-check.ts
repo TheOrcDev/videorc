@@ -1,10 +1,7 @@
 import type {
-  EncodeBackend,
-  PerformanceCheckProgress,
   PerformanceCheckResult,
   PerformanceCheckRunParams,
   PerformanceCheckState,
-  StreamingSettings,
   VideoPreset,
   VideoSettings
 } from '../../../shared/backend'
@@ -140,16 +137,6 @@ export function outputLabel(video: Pick<VideoSettings, 'width' | 'height' | 'fps
   return `${name} ${video.fps}`
 }
 
-export interface PerformanceCheckLine {
-  tone: 'muted' | 'warning'
-  busy: boolean
-  text: string
-  /** Offer "Use <recommended>" next to the text. */
-  applyPreset?: VideoPreset
-  applyLabel?: string
-  checkLabel?: 'Check this computer' | 'Check again'
-}
-
 /** Toast for a user-chosen output this computer measurably cannot hold. */
 export function performanceCheckTooHeavyToast(
   chosen: VideoSettings,
@@ -166,166 +153,5 @@ export function performanceCheckTooHeavyToast(
   return {
     title: `${outputLabel(chosen)} is too heavy for this computer`,
     description: `Recordings will stutter. ${outputLabel(result.recommended)} held steady. Switch in Recording → Output.`
-  }
-}
-
-/** The one line under the preset select in Recording → Output. */
-export function performanceCheckLine({
-  state,
-  progress,
-  video
-}: {
-  state: PerformanceCheckState | undefined
-  progress: PerformanceCheckProgress | null
-  video: VideoSettings
-}): PerformanceCheckLine | null {
-  if (!state) {
-    return null
-  }
-  if (state.running) {
-    return {
-      tone: 'muted',
-      busy: true,
-      text: progress
-        ? `Checking what this computer can record… ${outputLabel(progress.video)}`
-        : 'Checking what this computer can record…'
-    }
-  }
-  const result = state.result
-  if (!result || isUntrustedPerformanceCheckResult(result)) {
-    return {
-      tone: 'muted',
-      busy: false,
-      text: 'This computer has not been measured yet.',
-      checkLabel: 'Check this computer'
-    }
-  }
-  if (result.belowFloor) {
-    return {
-      tone: 'warning',
-      busy: false,
-      text: `Nothing held steady on this computer, not even ${outputLabel(result.recommended)}. Close other apps and check again.`,
-      checkLabel: 'Check again'
-    }
-  }
-  const recommended = outputLabel(result.recommended)
-  const offer =
-    pixels(video) === pixels(result.recommended) && video.fps === result.recommended.fps
-      ? {}
-      : { applyPreset: result.recommended.preset, applyLabel: `Use ${recommended}` }
-  switch (outputVerdict(video, result)) {
-    case 'verified':
-      return {
-        tone: 'muted',
-        busy: false,
-        text: `${outputLabel(video)} is verified for this computer.`,
-        checkLabel: 'Check again'
-      }
-    case 'too-heavy':
-      return {
-        tone: 'warning',
-        busy: false,
-        text: `${outputLabel(video)} is too heavy for this computer. Recordings will stutter. ${recommended} held steady.`,
-        checkLabel: 'Check again',
-        ...offer
-      }
-    case 'unknown':
-      return {
-        tone: 'muted',
-        busy: false,
-        text: `${outputLabel(video)} has not been measured. ${recommended} held steady.`,
-        checkLabel: 'Check again',
-        ...offer
-      }
-  }
-}
-
-/** What the measured machine means for a livestream about to start. */
-export type SoftwareStreamAdvice =
-  | {
-      /** The stream goes out at the largest output that held steady. */
-      kind: 'step-down'
-      requested: VideoSettings
-      video: VideoSettings
-    }
-  | {
-      /** Nothing held steady, not even the floor: warn, never pretend. */
-      kind: 'below-floor'
-      floor: VideoSettings
-    }
-
-const SOFTWARE_ENCODE_BACKENDS: readonly EncodeBackend[] = [
-  'software-open-h264',
-  'software-media-foundation',
-  'software-x264'
-]
-
-/**
- * Plan 090 D2 / B3. Only a session that will encode on the CPU is advised:
- * a hardware encoder's stream profile is the user's call, and a stale or
- * untrusted measurement advises nothing. Portrait streams are left alone;
- * the ladder is landscape.
- */
-export function softwareStreamAdvice({
-  streamVideo,
-  encodeBackend,
-  state
-}: {
-  streamVideo: VideoSettings
-  encodeBackend: EncodeBackend | undefined
-  state: PerformanceCheckState | undefined
-}): SoftwareStreamAdvice | null {
-  const result = state?.result
-  if (
-    !result ||
-    state.stale ||
-    isUntrustedPerformanceCheckResult(result) ||
-    !encodeBackend ||
-    !SOFTWARE_ENCODE_BACKENDS.includes(encodeBackend) ||
-    streamVideo.width < streamVideo.height
-  ) {
-    return null
-  }
-  if (result.belowFloor) {
-    return { kind: 'below-floor', floor: result.recommended }
-  }
-  const recommended = videoPresets[result.recommended.preset]
-  if (
-    result.recommended.preset === 'custom' ||
-    !recommended ||
-    outputVerdict(streamVideo, result) !== 'too-heavy' ||
-    !dominates(streamVideo, recommended) ||
-    (pixels(streamVideo) === pixels(recommended) && streamVideo.fps === recommended.fps)
-  ) {
-    return null
-  }
-  // A stream never goes out above the provider-safe rate, whatever the
-  // recording preset of that size uses.
-  return {
-    kind: 'step-down',
-    requested: streamVideo,
-    video: { ...recommended, bitrateKbps: Math.min(recommended.bitrateKbps, 6000) }
-  }
-}
-
-/**
- * The same destinations at the stepped-down profile, for one session. Every
- * enabled landscape destination gets the profile explicitly, so no
- * per-destination or provider default can pull one of them back up. Saved
- * settings are never written.
- */
-export function streamingAtSteppedDownProfile(
-  streaming: StreamingSettings,
-  video: VideoSettings
-): StreamingSettings {
-  return {
-    ...streaming,
-    defaultOutputPreset: video.preset,
-    defaultBitrateKbps: video.bitrateKbps,
-    targets: streaming.targets.map((target) =>
-      target.enabled && target.outputOrientation !== 'vertical'
-        ? { ...target, outputPreset: video.preset, outputBitrateKbps: video.bitrateKbps }
-        : target
-    )
   }
 }

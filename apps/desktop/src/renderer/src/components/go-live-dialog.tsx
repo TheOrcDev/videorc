@@ -35,7 +35,8 @@ import type {
 } from '@/lib/backend'
 import { type EntitlementUiGate } from '@/lib/entitlement-ui'
 import type { GoLiveCaptionsReadiness } from '@/lib/captions-preflight'
-import { outputLabel, type SoftwareStreamAdvice } from '@/lib/performance-check'
+import { softwareStreamAdvice, type SoftwareStreamAdvice } from '@/lib/go-live-output'
+import { outputLabel } from '@/lib/performance-check'
 
 // The Go Live confirmation flow: review destinations + metadata, resolve any
 // error-severity blockers, then start the livestream. Extracted from StudioTab
@@ -70,8 +71,22 @@ export function GoLiveConfirmationDialog({
   onContinueWithoutCaptions: () => void
   onResolveBlocker: (targetId: string, resolution: 'disable' | 'manual-rtmp') => void
 }): ReactElement {
-  const { captureConfig, streamPerformanceAdvice, streamSharedEncodeFallbackVideo } =
-    useStudioCore()
+  const {
+    captureConfig,
+    performanceCheck,
+    streamOutputTopologyPreflight,
+    streamSharedEncodeFallbackVideo
+  } = useStudioCore()
+  // What the finished check and this computer's measurement say about the
+  // stream as configured, before anything starts.
+  const streamPerformanceAdvice =
+    streamOutputTopologyPreflight.state === 'ready' && !simulcastArmed(captureConfig)
+      ? softwareStreamAdvice({
+          streamVideo: streamOutputTopologyPreflight.result.streamProfile,
+          encodeBackend: streamOutputTopologyPreflight.result.effectiveEncodeBackend,
+          state: performanceCheck
+        })
+      : null
   const scheduledTargets = captureConfig.streaming.targets.filter(
     (target) => target.enabled && target.scheduledEventId
   )

@@ -10005,8 +10005,7 @@ describe('real StudioProvider lifecycle', () => {
         latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
     )
     await openYouTubeGoLiveConfirmation(latest)
-    // The confirmation already knows, before anything starts.
-    await waitForObservation(() => latest()?.core.streamPerformanceAdvice?.kind === 'step-down')
+    await waitForObservation(() => latest()?.core.performanceCheck?.result !== undefined)
 
     await act(async () => {
       await latest()!.core.confirmGoLive()

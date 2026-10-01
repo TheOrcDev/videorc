@@ -17,7 +17,7 @@ import {
   videoProfileCompatibility
 } from '@/lib/capture'
 import { videoProfileEntitlementGate } from '@/lib/entitlement-ui'
-import { performanceCheckLine } from '@/lib/performance-check'
+import { performanceCheckLine } from '@/lib/performance-check-line'
 import { VIDEORC_PREMIUM_URL } from '@/lib/premium-upgrade'
 
 export function RecordingTab(): ReactElement {
