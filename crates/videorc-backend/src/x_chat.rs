@@ -23,12 +23,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::time::sleep;
 
 use crate::live_chat::{
-    LiveChatEventDetails, LiveChatEventType, LiveChatMessage, LiveChatProviderConnectionState,
-    live_chat_message_id, set_provider_and_emit, try_deliver_message,
+    LiveChatAuthorAffiliation, LiveChatEventDetails, LiveChatEventType, LiveChatMessage,
+    LiveChatProviderConnectionState, live_chat_message_id, set_provider_and_emit,
+    try_deliver_message,
 };
 use crate::live_chat_persistence::LiveChatPersistenceFailure;
 use crate::state::AppState;
@@ -154,6 +155,10 @@ struct RelayAuthor {
     name: Option<String>,
     #[serde(default)]
     avatar_url: Option<String>,
+    /// The organization badge (plan 086). Kept as raw JSON so a malformed
+    /// badge drops only the badge, never the whole relay page.
+    #[serde(default)]
+    affiliation: Option<Value>,
 }
 
 /// Retrying cannot fix this; the user has to act (sign in, re-authorize X).
@@ -706,6 +711,29 @@ fn non_empty(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn https_url(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|url| url.starts_with("https://"))
+        .map(ToOwned::to_owned)
+}
+
+/// X's organization badge, kept only with an `https://` image to show.
+fn relay_affiliation(value: Option<&Value>) -> Option<LiveChatAuthorAffiliation> {
+    let value = value?.as_object()?;
+    Some(LiveChatAuthorAffiliation {
+        badge_url: https_url(value.get("badgeUrl"))?,
+        description: non_empty(
+            value
+                .get("description")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+        ),
+        url: https_url(value.get("url")),
+    })
+}
+
 fn relay_event_to_message(
     event: RelayEvent,
     session_id: &str,
@@ -753,6 +781,7 @@ fn relay_event_to_message(
         author_avatar_url: non_empty(event.author.avatar_url)
             .filter(|url| url.starts_with("https://")),
         author_badges: Vec::new(),
+        author_affiliation: relay_affiliation(event.author.affiliation.as_ref()),
         author_roles: if event.is_subscriber {
             vec!["member".to_string()]
         } else {
@@ -814,6 +843,7 @@ fn follow_event_to_message(
         details: Some(LiveChatEventDetails::Follow { handle: username }),
         reply: None,
         first_message: false,
+        author_affiliation: None,
     })
 }
 
@@ -827,7 +857,6 @@ mod tests {
     use axum::http::{HeaderMap, StatusCode};
     use axum::routing::{delete, get, post};
     use axum::{Json, Router};
-    use serde_json::Value;
     use tokio::sync::{Mutex, Notify, broadcast, oneshot};
 
     use crate::live_chat::{
@@ -947,7 +976,12 @@ mod tests {
                 "username": "viewer",
                 "name": "Viewer Name",
                 "avatarUrl": "https://pbs.twimg.com/profile_images/1/a_normal.jpg",
-                "verifiedType": "blue"
+                "verifiedType": "blue",
+                "affiliation": {
+                    "badgeUrl": "https://pbs.twimg.com/profile_images/2/neon_normal.jpg",
+                    "description": "Neon",
+                    "url": "https://x.com/neondatabase"
+                }
             }
         })
     }
@@ -1297,6 +1331,48 @@ mod tests {
         assert!(config.overrides.credentials.is_none());
     }
 
+    /// Plan 086: a bad badge drops only the badge, never the comment.
+    #[test]
+    fn relay_affiliation_needs_an_https_badge_and_never_drops_the_comment() {
+        let with_affiliation = |affiliation: Value| {
+            let event: RelayEvent = serde_json::from_value(json!({
+                "messageId": "m1",
+                "text": "hi",
+                "author": { "name": "Dom", "affiliation": affiliation }
+            }))
+            .unwrap();
+            relay_event_to_message(event, "session-1", None)
+                .expect("the comment survives")
+                .author_affiliation
+        };
+
+        assert_eq!(
+            with_affiliation(
+                json!({ "badgeUrl": " https://pbs.twimg.com/b.jpg ", "description": "  " })
+            ),
+            Some(LiveChatAuthorAffiliation {
+                badge_url: "https://pbs.twimg.com/b.jpg".to_string(),
+                description: None,
+                url: None,
+            })
+        );
+        for unusable in [
+            json!({ "badgeUrl": "http://pbs.twimg.com/b.jpg", "description": "Neon" }),
+            json!({ "description": "Neon" }),
+            json!({ "badgeUrl": 42 }),
+            json!("Neon"),
+            Value::Null,
+        ] {
+            assert!(with_affiliation(unusable).is_none());
+        }
+        let event = with_affiliation(json!({
+            "badgeUrl": "https://pbs.twimg.com/b.jpg",
+            "url": "javascript:alert(1)"
+        }))
+        .unwrap();
+        assert!(event.url.is_none());
+    }
+
     #[test]
     fn relay_event_maps_to_a_comment_row() {
         let event: RelayEvent = serde_json::from_value(relay_event("2090000000000000004")).unwrap();
@@ -1310,6 +1386,14 @@ mod tests {
             Some("https://pbs.twimg.com/profile_images/1/a_normal.jpg")
         );
         assert_eq!(message.author_roles, vec!["member".to_string()]);
+        assert_eq!(
+            message.author_affiliation,
+            Some(LiveChatAuthorAffiliation {
+                badge_url: "https://pbs.twimg.com/profile_images/2/neon_normal.jpg".to_string(),
+                description: Some("Neon".to_string()),
+                url: Some("https://x.com/neondatabase".to_string()),
+            })
+        );
         assert_eq!(message.published_at, "2026-09-19T20:00:00.000Z");
         assert_eq!(message.message_text, "hello from mocked x");
 
@@ -1319,6 +1403,7 @@ mod tests {
         assert_eq!(message.author_name, "X viewer");
         assert!(message.author_avatar_url.is_none());
         assert!(message.author_roles.is_empty());
+        assert!(message.author_affiliation.is_none());
 
         let handle_only: RelayEvent = serde_json::from_value(json!({
             "messageId": "m3",

@@ -5612,6 +5612,14 @@ mod tests {
                 gift_name: Some("Rage Quit".to_string()),
             })
         );
+        assert!(messages[0].author_affiliation.is_none());
+        assert_eq!(
+            messages[7]
+                .author_affiliation
+                .as_ref()
+                .and_then(|badge| badge.description.as_deref()),
+            Some("Neon")
+        );
     }
 
     #[test]

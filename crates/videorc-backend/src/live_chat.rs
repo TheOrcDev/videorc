@@ -229,6 +229,21 @@ pub struct LiveChatReply {
     pub parent_text: String,
 }
 
+/// The organization badge a platform shows next to an affiliated author's
+/// name: X's affiliation (a Verified Organization's logo, plan 086).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveChatAuthorAffiliation {
+    /// An `https://` image URL; a badge without one is never kept.
+    pub badge_url: String,
+    /// The organization's name, e.g. "Neon".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The organization's profile URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
@@ -247,6 +262,9 @@ pub struct LiveChatMessage {
     pub author_avatar_url: Option<String>,
     #[serde(default)]
     pub author_badges: Vec<String>,
+    /// The organization badge next to the author's name (X affiliation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_affiliation: Option<LiveChatAuthorAffiliation>,
     #[serde(default)]
     pub author_roles: Vec<String>,
     pub published_at: String,
@@ -1112,6 +1130,7 @@ impl LiveChatCoordinator {
                 message.author_name = existing.author_name.clone();
                 message.author_avatar_url = existing.author_avatar_url.clone();
                 message.author_badges = existing.author_badges.clone();
+                message.author_affiliation = existing.author_affiliation.clone();
                 message.author_roles = existing.author_roles.clone();
                 message.published_at = existing.published_at.clone();
                 message.received_at = existing.received_at.clone();
@@ -3170,6 +3189,7 @@ fn fake_message(
         details: None,
         reply: None,
         first_message: false,
+        author_affiliation: None,
     }
 }
 
@@ -5525,6 +5545,7 @@ mod tests {
             details: None,
             reply: None,
             first_message: false,
+            author_affiliation: None,
         };
         assert_eq!(message.id, "session-1:youtube:target-1:abc123");
         let json = serde_json::to_value(&message).unwrap();

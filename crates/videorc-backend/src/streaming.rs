@@ -293,6 +293,11 @@ pub struct StreamMetadataDraft {
     pub description: String,
     pub default_privacy: StreamPrivacy,
     pub target_overrides: Vec<StreamTargetMetadataDraft>,
+    /// Managed thumbnail (plan 083): the sha256 asset id of an image in the
+    /// managed thumbnail root, uploaded to each YouTube broadcast an instant
+    /// Go Live prepares. Absent, never null, on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail_asset_id: Option<String>,
     pub updated_at: String,
 }
 
@@ -495,6 +500,7 @@ pub fn default_stream_metadata_draft(updated_at: String) -> StreamMetadataDraft 
                 updated_at: updated_at.clone(),
             })
             .collect(),
+        thumbnail_asset_id: None,
         updated_at,
     }
 }
@@ -1044,6 +1050,27 @@ mod tests {
             .unwrap()
             .title = "Twitch-specific launch".to_string();
         assert!(validate_stream_metadata_draft(&draft).valid);
+    }
+
+    #[test]
+    fn stream_metadata_thumbnail_is_absent_never_null_on_the_wire() {
+        // A draft stored before plan 083 has no thumbnail key and still loads.
+        let mut stored =
+            serde_json::to_value(default_stream_metadata_draft("now".to_string())).unwrap();
+        stored.as_object_mut().unwrap().remove("thumbnailAssetId");
+        let legacy: StreamMetadataDraft = serde_json::from_value(stored).unwrap();
+        assert_eq!(legacy.thumbnail_asset_id, None);
+
+        // None serializes with NO key: the renderer's optional schemas reject null.
+        let json = serde_json::to_value(&legacy).unwrap();
+        assert!(json.get("thumbnailAssetId").is_none());
+
+        let mut draft = legacy;
+        draft.thumbnail_asset_id = Some("a".repeat(64));
+        let json = serde_json::to_value(&draft).unwrap();
+        assert_eq!(json["thumbnailAssetId"], "a".repeat(64));
+        let back: StreamMetadataDraft = serde_json::from_value(json).unwrap();
+        assert_eq!(back, draft);
     }
 
     #[test]

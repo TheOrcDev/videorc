@@ -395,6 +395,29 @@
         "isDeleted": false,
         "rawProviderType": "kicks.gifted",
         "details": { "kind": "kicks", "amount": 500, "giftName": "Rage Quit" }
+      },
+      {
+        "id": "session-fixture:x:affiliated-1",
+        "providerMessageId": "affiliated-1",
+        "platform": "x",
+        "sessionId": "session-fixture",
+        "authorId": "1461047860854759434",
+        "authorName": "Dominik Koch",
+        "authorAvatarUrl": "https://pbs.twimg.com/profile_images/1/dom_normal.jpg",
+        "authorBadges": [],
+        "authorAffiliation": {
+          "badgeUrl": "https://pbs.twimg.com/profile_images/2/neon_normal.jpg",
+          "description": "Neon",
+          "url": "https://x.com/neondatabase"
+        },
+        "authorRoles": [],
+        "publishedAt": "2026-09-24T10:06:00Z",
+        "receivedAt": "2026-09-24T10:06:00.120Z",
+        "messageText": "Does it display my neon twitter badge?",
+        "fragments": [],
+        "eventType": "message",
+        "isDeleted": false,
+        "rawProviderType": "x-broadcast-chat"
       }
     ]
   },

@@ -691,6 +691,7 @@ mod tests {
             details: None,
             reply: None,
             first_message: false,
+            author_affiliation: None,
         }
     }
 

@@ -24,9 +24,9 @@ use tokio::time::sleep;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::live_chat::{
-    LiveChatEventDetails, LiveChatEventType, LiveChatMessage, LiveChatProviderConnectionState,
-    ProviderSendReceipt, SubscriptionKind, live_chat_message_id, set_provider_and_emit,
-    try_deliver_message,
+    LiveChatEventDetails, LiveChatEventType, LiveChatMessage, LiveChatMessageFragment,
+    LiveChatProviderConnectionState, ProviderSendReceipt, SubscriptionKind, live_chat_message_id,
+    set_provider_and_emit, try_deliver_message,
 };
 use crate::live_chat_persistence::LiveChatPersistenceFailure;
 use crate::state::AppState;
@@ -1320,6 +1320,7 @@ fn relay_event_to_message(
         details: None,
         reply: None,
         first_message: false,
+        author_affiliation: None,
     };
     match event.kind.as_str() {
         "chat" => {
@@ -1347,7 +1348,7 @@ fn relay_event_to_message(
             if let Some(created_at) = non_empty(payload.created_at) {
                 message.published_at = created_at;
             }
-            message.message_text = payload.content;
+            (message.message_text, message.fragments) = kick_message_parts(&payload.content);
             // Only the id is relayed; the connector fills the parent from
             // this session's rows, or drops the reply when it is not there.
             message.reply = non_empty(payload.replies_to_message_id).map(|parent_message_id| {
@@ -1467,7 +1468,8 @@ fn relay_event_to_message(
             let mut message = base(non_empty(Some(event.message_id))?);
             apply_relay_author(&mut message, &payload.sender.unwrap_or_default());
             // Like a cheer: the viewer's own words are the row's text.
-            message.message_text = non_empty(payload.message).unwrap_or_default();
+            (message.message_text, message.fragments) =
+                kick_message_parts(&non_empty(payload.message).unwrap_or_default());
             if let Some(created_at) = non_empty(payload.created_at) {
                 message.published_at = created_at;
             }
@@ -1538,6 +1540,78 @@ fn kicks_amount_text(amount: u64) -> String {
         grouped.push(digit);
     }
     format!("{grouped} {}", if amount == 1 { "KICK" } else { "KICKs" })
+}
+
+/// Kick's emote CDN (plan 085). The id is ASCII digits only, so a message can
+/// never steer this URL anywhere else.
+const KICK_EMOTE_URL_PREFIX: &str = "https://files.kick.com/emotes/";
+const KICK_EMOTE_TOKEN_OPEN: &str = "[emote:";
+const KICK_EMOTE_ID_MAX_DIGITS: usize = 20;
+const KICK_EMOTE_NAME_MAX_CHARS: usize = 100;
+
+/// Kick sends emotes inline in the text as `[emote:<id>:<name>]` (plan 085).
+/// Returns the readable text, with each token replaced by its name (as
+/// Twitch's text carries `Kappa`), and the fragments the Stream Manager draws
+/// emote images from. A message without a valid token keeps its text and gets
+/// no fragments; anything off the strict grammar stays literal text.
+pub(crate) fn kick_message_parts(content: &str) -> (String, Vec<LiveChatMessageFragment>) {
+    let mut text = String::with_capacity(content.len());
+    let mut fragments = Vec::new();
+    let mut run = String::new();
+    let mut rest = content;
+    while let Some(start) = rest.find(KICK_EMOTE_TOKEN_OPEN) {
+        run.push_str(&rest[..start]);
+        let candidate = &rest[start..];
+        let Some((id, name, token_len)) = kick_emote_token(candidate) else {
+            // Not a token: keep the bracket as text and look past it.
+            run.push('[');
+            rest = &candidate[1..];
+            continue;
+        };
+        if !run.is_empty() {
+            text.push_str(&run);
+            fragments.push(LiveChatMessageFragment {
+                fragment_type: "text".to_string(),
+                text: std::mem::take(&mut run),
+                image_url: None,
+            });
+        }
+        text.push_str(name);
+        fragments.push(LiveChatMessageFragment {
+            fragment_type: "emote".to_string(),
+            text: name.to_string(),
+            image_url: Some(format!("{KICK_EMOTE_URL_PREFIX}{id}/fullsize")),
+        });
+        rest = &candidate[token_len..];
+    }
+    if fragments.is_empty() {
+        return (content.to_string(), Vec::new());
+    }
+    run.push_str(rest);
+    if !run.is_empty() {
+        text.push_str(&run);
+        fragments.push(LiveChatMessageFragment {
+            fragment_type: "text".to_string(),
+            text: run,
+            image_url: None,
+        });
+    }
+    (text, fragments)
+}
+
+/// One `[emote:<id>:<name>]` token at the start of `input`: its id, its name
+/// and its length in bytes.
+fn kick_emote_token(input: &str) -> Option<(&str, &str, usize)> {
+    let body = input.strip_prefix(KICK_EMOTE_TOKEN_OPEN)?;
+    let close = body.find(']')?;
+    let (id, name) = body[..close].split_once(':')?;
+    let id_valid = (1..=KICK_EMOTE_ID_MAX_DIGITS).contains(&id.len())
+        && id.bytes().all(|byte| byte.is_ascii_digit());
+    let name_valid = (1..=KICK_EMOTE_NAME_MAX_CHARS).contains(&name.chars().count())
+        && !name
+            .chars()
+            .any(|character| character == '[' || character == ':' || character.is_whitespace());
+    (id_valid && name_valid).then_some((id, name, KICK_EMOTE_TOKEN_OPEN.len() + close + 1))
 }
 
 #[cfg(test)]
@@ -1967,6 +2041,146 @@ mod tests {
         assert!(config.overrides.relay_base_url.is_none());
         assert!(config.overrides.kick_api_base_url.is_none());
         assert!(config.overrides.session_token.is_none());
+    }
+
+    fn text_fragment(text: &str) -> LiveChatMessageFragment {
+        LiveChatMessageFragment {
+            fragment_type: "text".to_string(),
+            text: text.to_string(),
+            image_url: None,
+        }
+    }
+
+    fn emote_fragment(id: &str, name: &str) -> LiveChatMessageFragment {
+        LiveChatMessageFragment {
+            fragment_type: "emote".to_string(),
+            text: name.to_string(),
+            image_url: Some(format!("https://files.kick.com/emotes/{id}/fullsize")),
+        }
+    }
+
+    #[test]
+    fn kick_emote_tokens_become_emote_fragments_and_readable_text() {
+        let cases: Vec<(&str, &str, Vec<LiveChatMessageFragment>)> = vec![
+            (
+                "[emote:1579033:emojiAstonished]",
+                "emojiAstonished",
+                vec![emote_fragment("1579033", "emojiAstonished")],
+            ),
+            (
+                "hi [emote:1730752:emojiAngel] there",
+                "hi emojiAngel there",
+                vec![
+                    text_fragment("hi "),
+                    emote_fragment("1730752", "emojiAngel"),
+                    text_fragment(" there"),
+                ],
+            ),
+            (
+                "[emote:1730753:emojiAngry][emote:1730754:emojiAwake]",
+                "emojiAngryemojiAwake",
+                vec![
+                    emote_fragment("1730753", "emojiAngry"),
+                    emote_fragment("1730754", "emojiAwake"),
+                ],
+            ),
+            (
+                "🎉 [emote:4148074:HYPERCLAPH]👨‍👩‍👧",
+                "🎉 HYPERCLAPH👨‍👩‍👧",
+                vec![
+                    text_fragment("🎉 "),
+                    emote_fragment("4148074", "HYPERCLAPH"),
+                    text_fragment("👨‍👩‍👧"),
+                ],
+            ),
+            // A broken token next to a good one stays literal text.
+            (
+                "[emote:abc:x] [emote:1:ok]",
+                "[emote:abc:x] ok",
+                vec![text_fragment("[emote:abc:x] "), emote_fragment("1", "ok")],
+            ),
+        ];
+        for (content, text, fragments) in cases {
+            assert_eq!(
+                kick_message_parts(content),
+                (text.to_string(), fragments),
+                "{content}"
+            );
+        }
+
+        // Off the grammar: the text is kept exactly and no fragments are made.
+        let twenty_one_digits = format!("[emote:{}:x]", "1".repeat(21));
+        let long_name = format!("[emote:1:{}]", "a".repeat(101));
+        for content in [
+            "plain hello",
+            "",
+            "[emote:abc:x]",
+            "[emote:1:]",
+            "[emote::name]",
+            "[emote:1]",
+            "[emote:1:two words]",
+            "[emote:1:a:b]",
+            "[emote:-1:x]",
+            "[emote:1:a[b]",
+            "cut at the limit [emote:1579033:emojiAsto",
+            "[emote:1579033",
+            "[emote:",
+            "[Emote:1:x]",
+            twenty_one_digits.as_str(),
+            long_name.as_str(),
+        ] {
+            assert_eq!(
+                kick_message_parts(content),
+                (content.to_string(), Vec::new()),
+                "{content}"
+            );
+        }
+        // The longest valid id and name are accepted.
+        let longest = format!("[emote:{}:{}]", "9".repeat(20), "a".repeat(100));
+        assert_eq!(kick_message_parts(&longest).1.len(), 1);
+    }
+
+    #[test]
+    fn relayed_chat_and_kicks_carry_kick_emotes() {
+        let mut event = chat_event("m1");
+        event["payload"]["content"] = json!("hi [emote:1579033:emojiAstonished]");
+        let message =
+            relay_event_to_message(serde_json::from_value(event).unwrap(), "s1", None).unwrap();
+        assert_eq!(message.message_text, "hi emojiAstonished");
+        assert_eq!(
+            message.fragments,
+            vec![
+                text_fragment("hi "),
+                emote_fragment("1579033", "emojiAstonished")
+            ]
+        );
+        assert!(!serde_json::to_string(&message).unwrap().contains("[emote:"));
+
+        // A message without emotes keeps no fragments, as before.
+        let plain = relay_event_to_message(
+            serde_json::from_value(chat_event("m2")).unwrap(),
+            "s1",
+            None,
+        )
+        .unwrap();
+        assert_eq!(plain.message_text, "hello from kick");
+        assert!(plain.fragments.is_empty());
+
+        let kicks = relay_event_to_message(
+            serde_json::from_value(json!({
+                "kind": "kicks", "messageId": "kicks-1",
+                "payload": { "amount": 100, "message": "gg [emote:39261:kkHuh]" }
+            }))
+            .unwrap(),
+            "s1",
+            None,
+        )
+        .unwrap();
+        assert_eq!(kicks.message_text, "gg kkHuh");
+        assert_eq!(
+            kicks.fragments,
+            vec![text_fragment("gg "), emote_fragment("39261", "kkHuh")]
+        );
     }
 
     #[test]

@@ -1938,6 +1938,15 @@ mod tests {
             .unwrap();
         (e, m, op)
     }
+    #[test]
+    fn instant_youtube_commands_refuse_a_scheduled_broadcast() {
+        let state = state();
+        let mut scheduled = event();
+        scheduled.provider_event_id = Some("scheduled-broadcast".into());
+        reserve(&state, scheduled);
+        assert!(crate::refuse_scheduled_youtube_broadcast(&state, "scheduled-broadcast").is_err());
+        assert!(crate::refuse_scheduled_youtube_broadcast(&state, "instant-broadcast").is_ok());
+    }
     #[tokio::test]
     async fn scheduled_creation_is_metadata_only_and_manual() {
         let (api, fixture, handle) = fixture().await;
@@ -2614,6 +2623,7 @@ pub async fn resolve_preflight_metadata(
                     description: confirmed["description"].as_str().unwrap_or("").into(),
                     default_privacy: crate::streaming::StreamPrivacy::Public,
                     target_overrides: vec![],
+                    thumbnail_asset_id: None,
                     updated_at: event.updated_at,
                 },
             );
@@ -2664,6 +2674,7 @@ pub async fn resolve_preflight_metadata(
                     confirmed["status"]["privacyStatus"].clone(),
                 )?,
                 target_overrides: vec![],
+                thumbnail_asset_id: None,
                 updated_at: event.updated_at,
             },
         );

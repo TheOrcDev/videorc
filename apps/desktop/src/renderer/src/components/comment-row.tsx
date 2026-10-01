@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button'
 import type {
   CohostFlag,
   CommentHighlightState,
+  LiveChatAuthorAffiliation,
   LiveChatMessage,
   LiveChatMessageFragment
 } from '@/lib/backend'
@@ -178,6 +179,30 @@ function RoleTags({ roles }: { roles: readonly string[] }): ReactElement | null 
   )
 }
 
+/**
+ * The author's organization badge (X affiliation, plan 086): the company logo
+ * X shows beside an affiliated name. Nothing until main's cache resolves it.
+ */
+function AffiliationBadge({
+  affiliation
+}: {
+  affiliation: LiveChatAuthorAffiliation
+}): ReactElement | null {
+  const localUrl = useCachedAvatar(affiliation.badgeUrl)
+  if (!localUrl) return null
+  const label = affiliation.description ?? 'Affiliated organization'
+  return (
+    <img
+      alt={label}
+      className="size-4 shrink-0 rounded-[4px] object-cover"
+      data-slot="comment-affiliation"
+      draggable={false}
+      src={localUrl}
+      title={label}
+    />
+  )
+}
+
 /** An emote image through main's allowlisted avatar cache; its text until then. */
 function Emote({ url, text }: { url: string; text: string }): ReactElement {
   const localUrl = useCachedAvatar(url)
@@ -194,7 +219,7 @@ function Emote({ url, text }: { url: string; text: string }): ReactElement {
   )
 }
 
-/** The message body: emotes inline when the platform sent them (Twitch). */
+/** The message body: emotes inline when the platform sent them (Twitch, Kick). */
 function MessageBody({
   message,
   fragments
@@ -274,6 +299,9 @@ function CommentContent({
           <span className="min-w-0 truncate text-left font-medium text-foreground">
             {message.authorName}
           </span>
+          {message.authorAffiliation ? (
+            <AffiliationBadge affiliation={message.authorAffiliation} />
+          ) : null}
           <RoleTags roles={message.authorRoles} />
           {message.firstMessage ? (
             <Badge className="shrink-0" data-slot="comment-first-message" variant="outline">

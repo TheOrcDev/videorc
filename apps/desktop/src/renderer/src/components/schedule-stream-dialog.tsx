@@ -41,6 +41,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Switch } from '@/components/ui/switch'
 import { Kbd } from '@/components/ui/kbd'
 import { PlatformGlyph } from '@/components/platform-glyph'
+import { ThumbnailField } from '@/components/streaming/thumbnail-field'
 import type {
   ScheduledEventMetadata,
   ScheduledStreamEvent,
@@ -124,11 +125,6 @@ export function ScheduleStreamDialog({
   const [timeError, setTimeError] = useState('')
   const [error, setError] = useState('')
   const [conflict, setConflict] = useState(false)
-  const [preview, setPreview] = useState<string | null>(
-    event?.requested.thumbnailAssetId
-      ? `videorc-asset://scheduled-thumbnail/${event.requested.thumbnailAssetId}`
-      : null
-  )
   const [saving, setSaving] = useState(false)
   const [published, setPublished] = useState(event?.providerEventId ?? null)
   const [watchUrl, setWatchUrl] = useState(event?.watchUrl ?? null)
@@ -255,11 +251,6 @@ export function ScheduleStreamDialog({
         latest = await state.request<ScheduledStreamEvent>('get', { eventId: identity.id })
       }
       setMetadata(latest.requested)
-      setPreview(
-        latest.requested.thumbnailAssetId
-          ? `videorc-asset://scheduled-thumbnail/${latest.requested.thumbnailAssetId}`
-          : null
-      )
       setAudience(String(latest.requested.madeForKids))
       setIdentity({ id: latest.id, revision: latest.revision })
       setPublished(latest.providerEventId)
@@ -526,47 +517,15 @@ export function ScheduleStreamDialog({
                   )}
                 </FieldGroup>
               </FieldSet>
-              <Field>
-                <FieldLabel>Thumbnail</FieldLabel>
-                {preview && (
-                  <img
-                    src={preview}
-                    alt="Upcoming stream thumbnail"
-                    className="aspect-video max-h-40 rounded-md object-contain"
-                  />
-                )}
-                <Button
-                  variant="outline"
-                  disabled={saving}
-                  onClick={() => {
-                    void window.videorc
-                      .importScheduledThumbnail()
-                      .then((image) => {
-                        if (image) {
-                          patch({ thumbnailAssetId: image.id })
-                          setPreview(image.previewUrl)
-                        }
-                      })
-                      .catch((error: Error) => setError(error.message))
-                  }}
-                >
-                  {metadata.thumbnailAssetId ? 'Replace thumbnail' : 'Choose thumbnail'}
-                </Button>
-                {metadata.thumbnailAssetId && !published && (
-                  <Button
-                    variant="ghost"
-                    onClick={() => {
-                      patch({ thumbnailAssetId: null })
-                      setPreview(null)
-                    }}
-                  >
-                    Remove thumbnail
-                  </Button>
-                )}
-                <FieldDescription>
-                  JPEG or PNG, up to 2 MB. Recommended: 1280 × 720, 16:9.
-                </FieldDescription>
-              </Field>
+              <ThumbnailField
+                alt="Upcoming stream thumbnail"
+                assetId={metadata.thumbnailAssetId}
+                disabled={saving}
+                hint="JPEG or PNG, 16:9. Files over 2 MB are scaled down to fit."
+                removable={!published}
+                onChange={(thumbnailAssetId) => patch({ thumbnailAssetId })}
+                onError={setError}
+              />
               {watchUrl && (
                 <Alert>
                   <AlertDescription>

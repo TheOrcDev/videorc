@@ -65,6 +65,8 @@ describe('avatarHostAllowed', () => {
     expect(avatarHostAllowed('https://cdn.betterttv.net/emote/5f1b0186cf6d2144653d2970/1x')).toBe(
       false
     )
+    // Kick chat emotes (plan 085) come from Kick's own file host.
+    expect(avatarHostAllowed('https://files.kick.com/emotes/1579033/fullsize')).toBe(true)
     expect(avatarHostAllowed('http://yt3.ggpht.com/abc')).toBe(false)
   })
 

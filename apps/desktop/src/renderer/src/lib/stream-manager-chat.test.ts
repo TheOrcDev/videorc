@@ -138,6 +138,27 @@ describe('Stream Manager chat pane', () => {
     expect(markup).toContain('Kappa')
   })
 
+  it('renders Kick emotes from fragments, never the raw token', () => {
+    const markup = renderToStaticMarkup(
+      createElement(CommentRow, {
+        message: message('9', 'kick', 'hi emojiAstonished', {
+          fragments: [
+            { type: 'text', text: 'hi ' },
+            {
+              type: 'emote',
+              text: 'emojiAstonished',
+              imageUrl: 'https://files.kick.com/emotes/1579033/fullsize'
+            }
+          ]
+        })
+      })
+    )
+    // The cache resolves asynchronously: the emote's name stands in until then.
+    expect(markup).toContain('hi ')
+    expect(markup).toContain('emojiAstonished')
+    expect(markup).not.toContain('[emote:')
+  })
+
   it('shows the time on every row in History, and on hover while live', () => {
     const row = (timestamps: 'always' | 'hover'): string =>
       renderToStaticMarkup(

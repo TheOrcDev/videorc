@@ -2817,8 +2817,9 @@ impl Database {
                     id, session_id, provider_message_id, platform, target_id, author_id,
                     author_name, author_avatar_url, author_badges_json, author_roles_json,
                     published_at, received_at, message_text, fragments_json, event_type,
-                    amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+                    amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message,
+                    author_affiliation_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
                  ON CONFLICT(id) DO UPDATE SET
                     target_id = excluded.target_id,
                     author_id = excluded.author_id,
@@ -2836,7 +2837,8 @@ impl Database {
                     raw_provider_type = excluded.raw_provider_type,
                     details_json = excluded.details_json,
                     reply_json = excluded.reply_json,
-                    first_message = excluded.first_message",
+                    first_message = excluded.first_message,
+                    author_affiliation_json = excluded.author_affiliation_json",
                 params![
                     message.id,
                     message.session_id,
@@ -2863,6 +2865,11 @@ impl Database {
                         .transpose()?,
                     message.reply.as_ref().map(serde_json::to_string).transpose()?,
                     message.first_message,
+                    message
+                        .author_affiliation
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()?,
                 ],
             )?;
         }
@@ -2935,7 +2942,8 @@ impl Database {
                 "SELECT id, session_id, provider_message_id, platform, target_id, author_id,
                         author_name, author_avatar_url, author_badges_json, author_roles_json,
                         published_at, received_at, message_text, fragments_json, event_type,
-                        amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message
+                        amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message,
+                        author_affiliation_json
                  FROM live_chat_messages
                  WHERE session_id = ?1
                    AND (received_at < ?2 OR (received_at = ?2 AND id < ?3))
@@ -2953,7 +2961,8 @@ impl Database {
                 "SELECT id, session_id, provider_message_id, platform, target_id, author_id,
                         author_name, author_avatar_url, author_badges_json, author_roles_json,
                         published_at, received_at, message_text, fragments_json, event_type,
-                        amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message
+                        amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message,
+                        author_affiliation_json
                  FROM live_chat_messages
                  WHERE session_id = ?1
                  ORDER BY received_at DESC, id DESC
@@ -6019,6 +6028,13 @@ impl Database {
             "first_message",
             "first_message INTEGER NOT NULL DEFAULT 0",
         )?;
+        // Plan 086: the author's organization badge (X affiliation).
+        ensure_column(
+            &conn,
+            "live_chat_messages",
+            "author_affiliation_json",
+            "author_affiliation_json TEXT",
+        )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_live_chat_messages_platform_author
                  ON live_chat_messages(platform, author_id)",
@@ -6167,7 +6183,8 @@ impl Database {
             "SELECT id, session_id, provider_message_id, platform, target_id, author_id,
                     author_name, author_avatar_url, author_badges_json, author_roles_json,
                     published_at, received_at, message_text, fragments_json, event_type,
-                    amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message
+                    amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message,
+                    author_affiliation_json
              FROM live_chat_messages
              WHERE session_id = ?1
              ORDER BY received_at ASC, id ASC",
@@ -6433,7 +6450,7 @@ fn live_chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveC
     let author_roles_json: String = row.get(9)?;
     let fragments_json: String = row.get(13)?;
     let event_type_json: String = row.get(14)?;
-    Ok(LiveChatMessage {
+    let mut message = LiveChatMessage {
         id: row.get(0)?,
         session_id: row.get(1)?,
         provider_message_id: row.get(2)?,
@@ -6462,7 +6479,21 @@ fn live_chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveC
             .get::<_, Option<String>>(19)?
             .and_then(|json| serde_json::from_str(&json).ok()),
         first_message: row.get::<_, Option<bool>>(20)?.unwrap_or(false),
-    })
+        author_affiliation: row
+            .get::<_, Option<String>>(21)?
+            .and_then(|json| serde_json::from_str(&json).ok()),
+    };
+    // Kick rows stored before plan 085 hold the raw `[emote:<id>:<name>]`
+    // tokens and no fragments; a rehydrated session still shows the images.
+    if message.platform == StreamPlatform::Kick
+        && message.fragments.is_empty()
+        && !message.is_deleted
+        && message.message_text.contains("[emote:")
+    {
+        (message.message_text, message.fragments) =
+            crate::kick_chat::kick_message_parts(&message.message_text);
+    }
+    Ok(message)
 }
 
 fn chat_send_operation_from_row(
@@ -7437,6 +7468,7 @@ mod tests {
             details: None,
             reply: None,
             first_message: false,
+            author_affiliation: None,
         }
     }
 
@@ -7891,6 +7923,45 @@ mod tests {
     }
 
     #[test]
+    fn stored_kick_rows_with_raw_emote_tokens_load_with_emote_fragments() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("session-1"))
+            .unwrap();
+        // Saved before plan 085: the raw token and no fragments.
+        let raw = "hi [emote:1579033:emojiAstonished]";
+        let mut kick = sample_live_chat_message("session-1", 1);
+        kick.platform = StreamPlatform::Kick;
+        kick.message_text = raw.to_string();
+        kick.fragments = Vec::new();
+        database.save_live_chat_message(&kick).unwrap();
+        // The same text from another platform is not Kick's syntax.
+        let mut twitch = sample_live_chat_message("session-1", 2);
+        twitch.platform = StreamPlatform::Twitch;
+        twitch.message_text = raw.to_string();
+        twitch.fragments = Vec::new();
+        database.save_live_chat_message(&twitch).unwrap();
+
+        let messages = database.list_live_chat_messages("session-1").unwrap();
+        let kick = messages
+            .iter()
+            .find(|message| message.platform == StreamPlatform::Kick)
+            .unwrap();
+        assert_eq!(kick.message_text, "hi emojiAstonished");
+        assert_eq!(kick.fragments.len(), 2);
+        assert_eq!(
+            kick.fragments[1].image_url.as_deref(),
+            Some("https://files.kick.com/emotes/1579033/fullsize")
+        );
+        let twitch = messages
+            .iter()
+            .find(|message| message.platform == StreamPlatform::Twitch)
+            .unwrap();
+        assert_eq!(twitch.message_text, raw);
+        assert!(twitch.fragments.is_empty());
+    }
+
+    #[test]
     fn live_chat_messages_round_trip_and_count_on_session_summary() {
         let database = test_database();
         database
@@ -7940,6 +8011,11 @@ mod tests {
             parent_text: "hi".to_string(),
         });
         message.first_message = true;
+        message.author_affiliation = Some(crate::live_chat::LiveChatAuthorAffiliation {
+            badge_url: "https://pbs.twimg.com/profile_images/2/neon_normal.jpg".to_string(),
+            description: Some("Neon".to_string()),
+            url: Some("https://x.com/neondatabase".to_string()),
+        });
         database.save_live_chat_message(&message).unwrap();
         let plain = sample_live_chat_message("session-details", 2);
         database.save_live_chat_message(&plain).unwrap();
@@ -7949,6 +8025,7 @@ mod tests {
         assert_eq!(messages[1].details, None);
         assert_eq!(messages[1].reply, None);
         assert!(!messages[1].first_message);
+        assert_eq!(messages[1].author_affiliation, None);
     }
 
     #[test]
