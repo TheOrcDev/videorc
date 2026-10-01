@@ -465,6 +465,7 @@ const recordingStatusSchema = objectSchema(
 const videoSettingsSchema = objectSchema(
   {
     preset: enumSchema([
+      'tutorial-540p30',
       'tutorial-720p30',
       'tutorial-1080p30',
       'tutorial-1440p30',

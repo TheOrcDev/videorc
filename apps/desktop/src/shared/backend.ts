@@ -710,6 +710,7 @@ export interface ActiveSceneState {
 
 export type RtmpPreset = 'youtube' | 'twitch' | 'kick' | 'x' | 'custom'
 export type VideoPreset =
+  | 'tutorial-540p30'
   | 'tutorial-720p30'
   | 'tutorial-1080p30'
   | 'tutorial-1440p30'

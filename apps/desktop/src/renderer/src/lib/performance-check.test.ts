@@ -356,3 +356,46 @@ describe('softwareStreamAdvice (plan 090)', () => {
     expect(streaming.targets[0].outputPreset).toBe('stream-youtube-1080p30')
   })
 })
+
+describe('540p30 floor (plan 090 D1)', () => {
+  // The reporter's class of PC: 720p30 in software ran at 0.69x real time.
+  const floorHeld = result(
+    [
+      ['tutorial-1080p30', 'failed'],
+      ['tutorial-720p30', 'failed'],
+      ['tutorial-540p30', 'passed']
+    ],
+    'tutorial-540p30'
+  )
+
+  it('is a named preset the renderer and backend agree on', () => {
+    expect(videoPresets['tutorial-540p30']).toEqual({
+      preset: 'tutorial-540p30',
+      width: 960,
+      height: 540,
+      fps: 30,
+      bitrateKbps: 2500
+    })
+    expect(outputLabel(videoPresets['tutorial-540p30'])).toBe('540p 30')
+  })
+
+  it('moves an untouched install to it and verifies it', () => {
+    expect(autoApplyPreset(floorHeld)).toBe('tutorial-540p30')
+    expect(outputVerdict(videoPresets['tutorial-540p30'], floorHeld)).toBe('verified')
+    expect(outputVerdict(videoPresets['tutorial-720p30'], floorHeld)).toBe('too-heavy')
+  })
+
+  it('steps a software stream down to it', () => {
+    expect(
+      softwareStreamAdvice({
+        streamVideo: videoPresets['stream-safe-1080p30'],
+        encodeBackend: 'software-open-h264',
+        state: { running: false, stale: false, result: floorHeld }
+      })
+    ).toEqual({
+      kind: 'step-down',
+      requested: videoPresets['stream-safe-1080p30'],
+      video: videoPresets['tutorial-540p30']
+    })
+  })
+})

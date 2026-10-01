@@ -609,8 +609,17 @@ export function defaultStreamingSettings(): StreamingSettings {
 }
 
 export const videoPresets: Record<VideoPreset, VideoSettings> = {
-  // Floor of the performance-check ladder: what a machine that cannot hold
-  // 1080p30 records at. Mirrors the backend's Tutorial720p30.
+  // Floor of the performance-check ladder (plan 090 D1): what a machine that
+  // cannot hold 720p30 records and streams at. Mirrors Tutorial540p30.
+  'tutorial-540p30': {
+    preset: 'tutorial-540p30',
+    width: 960,
+    height: 540,
+    fps: 30,
+    bitrateKbps: 2500
+  },
+  // What a machine that cannot hold 1080p30 records at. Mirrors the
+  // backend's Tutorial720p30.
   'tutorial-720p30': {
     preset: 'tutorial-720p30',
     width: 1280,
@@ -718,6 +727,7 @@ export const recordingVideoPresetOptions: VideoPresetOption[] = [
   { value: 'tutorial-1440p30', label: 'Tutorial 1440p30' },
   { value: 'tutorial-1080p30', label: 'Tutorial 1080p30' },
   { value: 'tutorial-720p30', label: 'Tutorial 720p30' },
+  { value: 'tutorial-540p30', label: 'Tutorial 540p30' },
   { value: 'vertical-1080x1920', label: 'Vertical 1080×1920 (9:16)' }
 ]
 

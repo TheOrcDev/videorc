@@ -23,7 +23,8 @@ const LADDER_PRESETS: VideoPreset[] = [
   'tutorial-1440p30',
   'stream-safe-1080p60',
   'tutorial-1080p30',
-  'tutorial-720p30'
+  'tutorial-720p30',
+  'tutorial-540p30'
 ]
 
 const pixels = (video: Pick<VideoSettings, 'width' | 'height'>): number =>

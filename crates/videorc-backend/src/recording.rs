@@ -20534,6 +20534,13 @@ fn enabled_streaming_targets(params: &StartSessionParams) -> Vec<&StreamTargetSe
 
 fn video_preset_defaults(preset: VideoPreset) -> VideoSettings {
     match preset {
+        VideoPreset::Tutorial540p30 => VideoSettings {
+            preset,
+            width: 960,
+            height: 540,
+            fps: 30,
+            bitrate_kbps: 2500,
+        },
         VideoPreset::Tutorial720p30 => VideoSettings {
             preset,
             width: 1280,

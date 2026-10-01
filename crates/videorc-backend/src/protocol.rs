@@ -1002,6 +1002,10 @@ pub struct VideoSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum VideoPreset {
+    /// Floor of the performance-check ladder (plan 090 D1): what a PC that
+    /// cannot hold 720p30 records and streams at.
+    #[serde(rename = "tutorial-540p30")]
+    Tutorial540p30,
     #[serde(rename = "tutorial-720p30")]
     Tutorial720p30,
     #[serde(rename = "tutorial-1080p30")]

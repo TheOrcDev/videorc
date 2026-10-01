@@ -66,6 +66,10 @@ pub(crate) fn full_ladder() -> Vec<VideoSettings> {
         rung(VideoPreset::StreamSafe1080p60, 1920, 1080, 60, 6_000),
         rung(VideoPreset::Tutorial1080p30, 1920, 1080, 30, 6_000),
         rung(VideoPreset::Tutorial720p30, 1280, 720, 30, 4_000),
+        // The floor (plan 090 D1). A UHD 600 class PC encoded 720p30 at 0.69x
+        // real time in software; a quarter fewer pixels than that gives it
+        // something it can hold, and the check a truthful recommendation.
+        rung(VideoPreset::Tutorial540p30, 960, 540, 30, 2_500),
     ]
 }
 
@@ -1121,23 +1125,45 @@ mod tests {
         };
         assert_eq!(
             labels(ladder_under_ceiling(3840, 2160, 60)),
-            vec![(2160, 30), (1440, 30), (1080, 60), (1080, 30), (720, 30)]
+            vec![
+                (2160, 30),
+                (1440, 30),
+                (1080, 60),
+                (1080, 30),
+                (720, 30),
+                (540, 30)
+            ]
         );
         // The UHD 600 tester: 1440p30 selected on a 1080p display.
         assert_eq!(
             labels(ladder_under_ceiling(2560, 1440, 30)),
-            vec![(1440, 30), (1080, 30), (720, 30)]
+            vec![(1440, 30), (1080, 30), (720, 30), (540, 30)]
         );
         assert_eq!(
             labels(ladder_under_ceiling(1920, 1080, 60)),
-            vec![(1080, 60), (1080, 30), (720, 30)]
+            vec![(1080, 60), (1080, 30), (720, 30), (540, 30)]
         );
         // Portrait 1080x1920 has the pixel count of 1080p.
         assert_eq!(
             labels(ladder_under_ceiling(1080, 1920, 30)),
-            vec![(1080, 30), (720, 30)]
+            vec![(1080, 30), (720, 30), (540, 30)]
         );
-        assert_eq!(labels(ladder_under_ceiling(640, 360, 24)), vec![(720, 30)]);
+        // The floor is kept even under a smaller ceiling: the check never
+        // comes back without a recommendation.
+        assert_eq!(labels(ladder_under_ceiling(640, 360, 24)), vec![(540, 30)]);
+        // 540p30 is the floor (plan 090 D1): a PC that cannot hold 720p30 in
+        // software still gets something it measurably can.
+        let floor = full_ladder().pop().expect("floor rung");
+        assert_eq!(
+            (
+                floor.preset,
+                floor.width,
+                floor.height,
+                floor.fps,
+                floor.bitrate_kbps
+            ),
+            (VideoPreset::Tutorial540p30, 960, 540, 30, 2_500)
+        );
     }
 
     #[test]
@@ -1160,8 +1186,24 @@ mod tests {
             .map(|video| rung(video, PerformanceCheckRungVerdict::Failed))
             .collect();
         let (video, below_floor) = recommend(&all_failed).expect("floor");
-        assert_eq!((video.width, video.height, below_floor), (1280, 720, true));
+        assert_eq!((video.width, video.height, below_floor), (960, 540, true));
         assert!(recommend(&[]).is_none());
+
+        // 720p30 too heavy, 540p30 holds: a real recommendation, not a flag.
+        let held_at_the_floor: Vec<_> = ladder
+            .iter()
+            .cloned()
+            .map(|video| {
+                let verdict = if video.height == 540 {
+                    PerformanceCheckRungVerdict::Passed
+                } else {
+                    PerformanceCheckRungVerdict::Failed
+                };
+                rung(video, verdict)
+            })
+            .collect();
+        let (video, below_floor) = recommend(&held_at_the_floor).expect("floor held");
+        assert_eq!((video.width, video.height, below_floor), (960, 540, false));
     }
 
     #[test]
