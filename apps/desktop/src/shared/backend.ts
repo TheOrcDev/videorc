@@ -4262,6 +4262,30 @@ export interface LiveChatMessageFragment {
   type: string
   text: string
   imageUrl?: string
+  /** A 7TV zero-width emote (plan 089): drawn on top of the emote before it. */
+  zeroWidth?: boolean
+}
+
+/** Where 7TV emotes stand (plan 089): the line under the Settings switch. */
+export type SevenTvState = 'off' | 'idle' | 'loading' | 'linked' | 'notLinked' | 'error'
+
+export interface SevenTvStatus {
+  state: SevenTvState
+  setName?: string
+  emoteCount?: number
+  globalCount?: number
+  platforms?: StreamPlatform[]
+  error?: string
+}
+
+/** `liveChat.emotes.get` / `.set`, and the `liveChat.emotes` event. */
+export interface ChatEmotesSettings {
+  sevenTv: boolean
+  sevenTvStatus: SevenTvStatus
+}
+
+export interface ChatEmotesSettingsPatch {
+  sevenTv?: boolean
 }
 
 /**

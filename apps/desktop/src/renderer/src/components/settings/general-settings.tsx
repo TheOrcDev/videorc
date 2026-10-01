@@ -4,6 +4,7 @@ import { useState, type ReactElement } from 'react'
 
 import { ObsImportDialog } from '@/components/obs-import-dialog'
 import { PanelSection } from '@/components/panel-section'
+import { SevenTvEmotesField } from '@/components/settings/seventv-emotes-field'
 import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
@@ -60,6 +61,7 @@ export function GeneralSettings(): ReactElement {
               </div>
             </Field>
           ) : null}
+          {runtimeInfo?.commentsWindowEnabled !== false ? <SevenTvEmotesField /> : null}
           {/* Plan 064: a studio behavior, not a storage setting, so it moved
               here from Recording. */}
           <Field>

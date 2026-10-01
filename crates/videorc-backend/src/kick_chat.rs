@@ -1574,6 +1574,7 @@ pub(crate) fn kick_message_parts(content: &str) -> (String, Vec<LiveChatMessageF
                 fragment_type: "text".to_string(),
                 text: std::mem::take(&mut run),
                 image_url: None,
+                zero_width: false,
             });
         }
         text.push_str(name);
@@ -1581,6 +1582,7 @@ pub(crate) fn kick_message_parts(content: &str) -> (String, Vec<LiveChatMessageF
             fragment_type: "emote".to_string(),
             text: name.to_string(),
             image_url: Some(format!("{KICK_EMOTE_URL_PREFIX}{id}/fullsize")),
+            zero_width: false,
         });
         rest = &candidate[token_len..];
     }
@@ -1594,6 +1596,7 @@ pub(crate) fn kick_message_parts(content: &str) -> (String, Vec<LiveChatMessageF
             fragment_type: "text".to_string(),
             text: run,
             image_url: None,
+            zero_width: false,
         });
     }
     (text, fragments)
@@ -2048,6 +2051,7 @@ mod tests {
             fragment_type: "text".to_string(),
             text: text.to_string(),
             image_url: None,
+            zero_width: false,
         }
     }
 
@@ -2056,6 +2060,7 @@ mod tests {
             fragment_type: "emote".to_string(),
             text: name.to_string(),
             image_url: Some(format!("https://files.kick.com/emotes/{id}/fullsize")),
+            zero_width: false,
         }
     }
 

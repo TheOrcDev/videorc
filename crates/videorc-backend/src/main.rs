@@ -92,6 +92,7 @@ mod secrets;
 mod session_audio;
 mod session_ops;
 mod session_token;
+mod seventv;
 mod source_mask;
 mod source_registry;
 mod source_status;
@@ -5177,6 +5178,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "liveChat.stop"
         | "liveChat.send"
         | "liveChat.clearLocal"
+        | "liveChat.emotes.set"
         | "platformAccounts.oauth.providerCredentials"
         | "streamTargets.metadata.update"
         | "scheduledStreams.saveDraft"
@@ -5324,6 +5326,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "liveChat.sendOperations.list"
         | "liveChat.sendOperations.latest"
         | "liveChat.xCommentsReadiness"
+        | "liveChat.emotes.get"
         | "streamTargets.metadata.get"
         | "streamTargets.metadata.validate"
         | "streamTargets.manualKey.inspect"
@@ -10297,6 +10300,23 @@ async fn handle_text_message_with_role(
             }
         }
         "liveChat.stop" => ServerResponse::ok(command.id, live_chat::stop_live_chat(state).await),
+        // Settings → General → "Show 7TV emotes in chat" (plan 089).
+        "liveChat.emotes.get" => {
+            ServerResponse::ok(command.id, seventv::current_state(state).await)
+        }
+        "liveChat.emotes.set" => {
+            match serde_json::from_value::<seventv::ChatEmoteSettingsPatch>(command.params) {
+                Ok(patch) => match seventv::set_settings(state, patch).await {
+                    Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "settings-unavailable", error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "liveChat.diagnostics" => {
             ServerResponse::ok(command.id, live_chat::current_diagnostics(state).await)
         }

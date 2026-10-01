@@ -14,6 +14,8 @@ import type {
   CohostPromiseParams,
   CohostRecapParams,
   CohostQuestionParams,
+  ChatEmotesSettings,
+  ChatEmotesSettingsPatch,
   CohostSettings,
   CohostSettingsPatch,
   CohostStartParams,
@@ -253,6 +255,8 @@ export interface BackendRpcMethodMap {
   'cohost.author.greeted': BackendRpcDefinition<CohostAuthorParams, CohostState>
   'cohost.settings.get': BackendRpcDefinition<undefined, CohostSettings>
   'cohost.settings.set': BackendRpcDefinition<CohostSettingsPatch, CohostSettings>
+  'liveChat.emotes.get': BackendRpcDefinition<undefined, ChatEmotesSettings>
+  'liveChat.emotes.set': BackendRpcDefinition<ChatEmotesSettingsPatch, ChatEmotesSettings>
   'clip.mark': BackendRpcDefinition<undefined, ClipMarkedEvent>
   'clip.marks.list': BackendRpcDefinition<{ sessionId: string }, ClipMark[]>
 }
@@ -284,6 +288,7 @@ export interface BackendEventMap {
   'clip.marked': ClipMarkedEvent
   'performance.check.progress': PerformanceCheckProgress
   'performance.check.completed': PerformanceCheckState
+  'liveChat.emotes': ChatEmotesSettings
 }
 
 export type BackendEvent = keyof BackendEventMap
@@ -1863,6 +1868,26 @@ const cohostSettingsPatchSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSettingsPatch>
+// Plan 089: Settings → General → "Show 7TV emotes in chat".
+const sevenTvStatusSchema = objectSchema(
+  {
+    state: enumSchema(['off', 'idle', 'loading', 'linked', 'notLinked', 'error']),
+    setName: optionalSchema(stringSchema({ maxLength: 1000 })),
+    emoteCount: optionalSchema(numberSchema({ integer: true, min: 0 })),
+    globalCount: optionalSchema(numberSchema({ integer: true, min: 0 })),
+    platforms: optionalSchema(arraySchema(streamPlatformSchema, { maxLength: 8 })),
+    error: optionalSchema(stringSchema({ maxLength: 1000 }))
+  },
+  { allowUnknown: false }
+)
+const chatEmotesSettingsSchema = objectSchema(
+  { sevenTv: booleanSchema, sevenTvStatus: sevenTvStatusSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<ChatEmotesSettings>
+const chatEmotesSettingsPatchSchema = objectSchema(
+  { sevenTv: optionalSchema(booleanSchema) },
+  { allowUnknown: false }
+) as RuntimeSchema<ChatEmotesSettingsPatch>
 const cohostQuestionSchema = objectSchema(
   {
     id: boundedString,
@@ -2574,6 +2599,11 @@ const runtimeContracts = {
   'cohost.author.greeted': { params: cohostAuthorParamsSchema, result: cohostStateSchema },
   'cohost.settings.get': { params: undefinedSchema, result: cohostSettingsSchema },
   'cohost.settings.set': { params: cohostSettingsPatchSchema, result: cohostSettingsSchema },
+  'liveChat.emotes.get': { params: undefinedSchema, result: chatEmotesSettingsSchema },
+  'liveChat.emotes.set': {
+    params: chatEmotesSettingsPatchSchema,
+    result: chatEmotesSettingsSchema
+  },
   'clip.mark': { params: undefinedSchema, result: clipMarkedEventSchema },
   'clip.marks.list': {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
@@ -2624,7 +2654,8 @@ const runtimeEventSchemas = {
   'cohost.state': cohostStateSchema,
   'clip.marked': clipMarkedEventSchema,
   'performance.check.progress': performanceCheckProgressSchema,
-  'performance.check.completed': performanceCheckStateSchema
+  'performance.check.completed': performanceCheckStateSchema,
+  'liveChat.emotes': chatEmotesSettingsSchema
 } satisfies Record<BackendEvent, RuntimeSchema<unknown>>
 
 export function validateBackendEventPayload(event: string, payload: unknown): unknown {

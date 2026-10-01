@@ -267,6 +267,7 @@ import {
   avatarCacheFileName,
   avatarCacheRejectionKey,
   avatarCacheRejectionMessage,
+  avatarPruneDelayMs,
   avatarUrlDecision,
   httpStatusClass,
   redactAvatarFetchError,
@@ -12970,7 +12971,7 @@ async function cacheChatAvatar(rawUrl: unknown): Promise<string | null> {
       }
       mkdirSync(avatarCacheDirectory(), { recursive: true })
       writeFileSync(filePath, bytes)
-      pruneAvatarCache()
+      scheduleAvatarCachePrune()
       return localUrl
     } catch (error) {
       return rejectChatAvatar({
@@ -12986,8 +12987,28 @@ async function cacheChatAvatar(rawUrl: unknown): Promise<string | null> {
   return fetchPromise
 }
 
+let avatarCacheLastPruneAt: number | null = null
+let avatarCachePruneTimer: ReturnType<typeof setTimeout> | null = null
+
+// At most one prune per AVATAR_PRUNE_MIN_INTERVAL_MS, with one trailing pass
+// so the last burst of new files is still bounded (plan 089).
+function scheduleAvatarCachePrune(): void {
+  if (avatarCachePruneTimer) return
+  const delayMs = avatarPruneDelayMs(avatarCacheLastPruneAt, Date.now())
+  if (delayMs === 0) {
+    pruneAvatarCache()
+    return
+  }
+  avatarCachePruneTimer = setTimeout(() => {
+    avatarCachePruneTimer = null
+    pruneAvatarCache()
+  }, delayMs)
+  avatarCachePruneTimer.unref?.()
+}
+
 // Oldest-by-mtime files past the cap are pruned; best-effort.
 function pruneAvatarCache(): void {
+  avatarCacheLastPruneAt = Date.now()
   try {
     const directory = avatarCacheDirectory()
     const entries = readdirSync(directory)

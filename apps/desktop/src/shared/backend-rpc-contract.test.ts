@@ -1950,6 +1950,42 @@ describe('backend RPC contract', () => {
     expectTypeOf<BackendRpcParams<'cohost.start'>['sessionId']>().toEqualTypeOf<string>()
   })
 
+  it('validates the 7TV emote switch, its status and its event (plan 089)', () => {
+    const linked = {
+      sevenTv: true,
+      sevenTvStatus: {
+        state: 'linked',
+        setName: 'Halloween Emotes 2026',
+        emoteCount: 986,
+        globalCount: 45,
+        platforms: ['twitch', 'kick', 'youtube']
+      }
+    }
+    expect(validateBackendRpcResult('liveChat.emotes.get', linked)).toEqual(linked)
+    expect(validateBackendEventPayload('liveChat.emotes', linked)).toEqual(linked)
+    const off = { sevenTv: false, sevenTvStatus: { state: 'off' } }
+    expect(validateBackendRpcResult('liveChat.emotes.set', off)).toEqual(off)
+    expect(validateBackendRpcParams('liveChat.emotes.set', { sevenTv: false })).toEqual({
+      sevenTv: false
+    })
+    // The backend never sends null or unknown keys; refuse them loudly.
+    expect(() =>
+      validateBackendRpcResult('liveChat.emotes.get', {
+        ...linked,
+        sevenTvStatus: { state: 'linked', setName: null }
+      })
+    ).toThrow('liveChat.emotes.get')
+    expect(() =>
+      validateBackendRpcResult('liveChat.emotes.get', {
+        ...linked,
+        sevenTvStatus: { state: 'paused' }
+      })
+    ).toThrow('liveChat.emotes.get')
+    expect(() =>
+      validateBackendRpcParams('liveChat.emotes.set', { sevenTv: true, bttv: true })
+    ).toThrow('liveChat.emotes.set')
+  })
+
   it('bounds unregistered method and event payloads instead of passing arbitrary values', () => {
     expect(validateBackendRpcParams('screens.rename', { screenId: '1', name: 'Demo' })).toEqual({
       screenId: '1',

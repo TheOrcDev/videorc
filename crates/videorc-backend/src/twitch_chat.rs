@@ -255,6 +255,7 @@ fn parse_fragments(fragments: &Value) -> Vec<LiveChatMessageFragment> {
                         fragment_type,
                         text,
                         image_url,
+                        zero_width: false,
                     })
                 })
                 .collect()
