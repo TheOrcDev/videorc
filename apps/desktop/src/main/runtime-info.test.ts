@@ -245,6 +245,17 @@ describe('runtime info helpers', () => {
     })
   })
 
+  it('carries the main window material and paint verdict only when given', () => {
+    const base = { appVersion: '1.2.3', execPath: 'C:\\Videorc\\Videorc.exe', env: {} }
+    expect(buildRuntimeInfo(base)).not.toHaveProperty('windowGlass')
+    const windowGlass = {
+      kind: 'solid',
+      reason: 'paint-check-blank',
+      paintCheck: 'blank'
+    } as const
+    expect(buildRuntimeInfo({ ...base, windowGlass }).windowGlass).toEqual(windowGlass)
+  })
+
   it('surfaces graphics fallback evidence and recovery state', () => {
     const info = buildRuntimeInfo({
       appVersion: '1.2.3',

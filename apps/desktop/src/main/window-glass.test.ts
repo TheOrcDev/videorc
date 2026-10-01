@@ -152,6 +152,38 @@ describe('Windows Mica (plan 050, D7)', () => {
     expect(resolveGlassMode(win(22631, '0'))).toEqual({ kind: 'solid', reason: 'disabled' })
   })
 
+  it('paints the solid palette under software rendering (plan 082)', () => {
+    expect(resolveGlassMode({ ...win(22631), softwareRendering: true })).toEqual({
+      kind: 'solid',
+      reason: 'software-rendering'
+    })
+  })
+
+  it('stays solid after an earlier launch found the Mica window blank (plan 082)', () => {
+    expect(resolveGlassMode({ ...win(22631), micaFoundBlank: true })).toEqual({
+      kind: 'solid',
+      reason: 'paint-check-blank'
+    })
+  })
+
+  it('keeps the older reasons ahead of the new ones', () => {
+    const both = { softwareRendering: true, micaFoundBlank: true }
+    expect(resolveGlassMode({ ...win(22631, '0'), ...both })).toEqual({
+      kind: 'solid',
+      reason: 'disabled'
+    })
+    expect(resolveGlassMode({ ...win(19045), ...both })).toEqual({
+      kind: 'solid',
+      reason: 'platform'
+    })
+  })
+
+  it('never lets the Windows-only inputs change macOS', () => {
+    expect(
+      resolveGlassMode({ platform: 'darwin', softwareRendering: true, micaFoundBlank: true })
+    ).toEqual({ kind: 'material', material: DEFAULT_GLASS_MATERIAL })
+  })
+
   it('gives main Mica over transparent web contents, and keeps the native frame', () => {
     const options = windowGlassOptions('main', {
       platform: 'win32',

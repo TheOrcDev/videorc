@@ -206,6 +206,7 @@
     "smoke:notes-window-invisible": "node scripts/run-with-env.mjs --platform=darwin VIDEORC_NOTES_WINDOW=1 VIDEORC_BASELINE_NOTES_OVERLAY=1 VIDEORC_BASELINE_RECORDING_MS=8000 VIDEORC_BASELINE_WARMUP_MS=2000 VIDEORC_BASELINE_PREVIEW_MEASUREMENT_MS=2000 VIDEORC_BASELINE_NO_CAMERA=1 VIDEORC_BASELINE_NO_MIC=1 VIDEORC_BASELINE_LAYOUT_PRESET=screen-only VIDEORC_BASELINE_SCREEN_MOTION_STIMULUS=1 -- node scripts/real-source-baseline-app.mjs --notes-overlay-gate",
     "smoke:recording-native-preview": "node scripts/smoke-recording-native-preview-app.mjs",
     "smoke:windows-native-screen": "node scripts/smoke-windows-native-screen-app.mjs",
+    "smoke:windows-main-window-recovery": "node scripts/smoke-windows-main-window-recovery.mjs",
     "smoke:windows-texture-capture": "node scripts/run-with-env.mjs --platform=win32 VIDEORC_WINDOWS_GRAPHICS_CAPTURE=1 VIDEORC_WINDOWS_REQUIRE_GRAPHICS_CAPTURE=1 -- pnpm smoke:windows-native-screen",
     "smoke:windows-encoded-bridge": "node scripts/smoke-windows-encoded-bridge.mjs",
     "smoke:windows-stream-performance": "node scripts/smoke-windows-stream-performance.mjs",

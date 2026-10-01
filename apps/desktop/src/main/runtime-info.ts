@@ -43,6 +43,7 @@ export interface RuntimeInfoInput {
   gpuFallback?: RuntimeInfo['gpuFallback']
   /** Persisted crash evidence, most recent first (see backend-crash-log.ts). */
   backendCrashes?: readonly BackendCrashRecord[]
+  windowGlass?: RuntimeInfo['windowGlass']
   env: Partial<
     Pick<
       NodeJS.ProcessEnv,
@@ -113,6 +114,7 @@ export function buildRuntimeInfo({
     retryAttempts: 0
   },
   backendCrashes = [],
+  windowGlass,
   env
 }: RuntimeInfoInput): RuntimeInfo {
   const targetPath = permissionTargetPath(execPath)
@@ -128,6 +130,7 @@ export function buildRuntimeInfo({
     hardwareAccelerationDisabled,
     gpuFallback,
     backendCrashes: [...backendCrashes],
+    ...(windowGlass ? { windowGlass } : {}),
     isPackaged,
     permissionTargetName: isPackaged ? 'Videorc' : 'Electron',
     permissionTargetPath: targetPath,
