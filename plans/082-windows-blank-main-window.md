@@ -1,6 +1,6 @@
 # Plan 082: Windows main window opens blank (Mica with nothing painted on it)
 
-Status: **IMPLEMENTED, in review** 2026-10-01 on `fix/windows-blank-main-window`
+Status: **IMPLEMENTED, in review** 2026-10-01: PR #518 on `fix/windows-blank-main-window`
 (S1-S3; see [Implementation record](#implementation-record-2026-10-01)). The
 picture is reproduced on a GitHub Windows runner by crashing the main renderer
 (see [Repro record](#repro-record-2026-10-01)); what killed the reporter's
@@ -284,6 +284,15 @@ What shipped in the PR, and where it departs from the slices above:
 - **Verified on macOS** with the built app: `Page.crash` on the main renderer,
   UI back within seconds, one `Renderer process gone` + one `Reloading the
   main window` line.
+- **Verified on Windows CI** (PR #518, run 36836853964, build 26100, packaged
+  app): default launch `mica` + paint check `painted`; crash then UI back with
+  both log lines; `VIDEORC_DISABLE_GPU=1` gives `solid/software-rendering`;
+  forced blank gives `solid/paint-check-blank`, persisted, and the next launch
+  starts solid. So `capturePage()` does not misread a healthy Mica window.
+- `pnpm probe:preview-lifecycle` on the branch: 2 failures ("Main window is
+  not ready", the failure #513 also recorded), then 2 passes at 100/100;
+  clean main passed once. No recovery line in the failing logs. Read as the
+  existing flake, not proven.
 - **Not verified:** a reload while a recording or stream is live (the default
   View > Reload menu already reaches that path; the log line records the
   capture state); the repeated-crash dialog by hand; a real GPU driver; RDP.
