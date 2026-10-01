@@ -1,6 +1,8 @@
 # Plan 083: YouTube thumbnail in Broadcast info (instant Go Live)
 
-**Status:** PLANNED 2026-10-01. **Priority:** P2 (missing feature the owner
+**Status:** IMPLEMENTED 2026-10-01 on `feat/083-youtube-live-thumbnail`
+(S1-S4, one PR); owner live acceptance (S3) and quota check owed. See
+"Execution notes" at the end. **Priority:** P2 (missing feature the owner
 calls "really important"; nothing is broken). **Size:** M, 4 slices.
 **Planned against:** `origin/main` `9f1a46a3` (0.9.125).
 **Owner route:** UI/Product Design for S2, Implementation for S1/S3/S4 (fit 8).
@@ -293,3 +295,31 @@ Done when:
 
 "Livestream: choose a thumbnail in Broadcast info and Videorc sets it on your
 YouTube stream when you go live."
+
+## Execution notes (2026-10-01)
+
+Where execution deviated from the slices above, and why:
+
+- **S1.** Save resolves the thumbnail only when the id CHANGES. Startup
+  rehydration of the managed root is asynchronous; re-checking an unchanged id
+  could block saving a title. Go Live still reports a missing file.
+- **S2.** A missing preview file shows "The thumbnail file is missing. Choose
+  it again." with Remove still available; the field is not cleared silently.
+  The 16:9 hint is measured from the loaded preview, so a thumbnail saved
+  earlier is checked too.
+- **S3.** `thumbnails.set` failures keep YouTube's reason as
+  `thumbnail<Reason>` (for example `thumbnailForbidden`) rather than the bare
+  reason. The scheduled-event sanitizer matches "thumbnail" before 403/429, so
+  scheduled thumbnail failures are classified exactly as before. The toast
+  handler lives in `lib/youtube-thumbnail-toast.ts`, re-exported through the
+  lazy `session-runtime-recovery` chunk; a separate dynamic chunk cost about
+  640 B of eager raw JS for its preload map.
+- **S4.** Oversize images get a **1280 px long edge**, not a fit inside
+  1280 × 720: a portrait 1080 × 1920 fitted to 405 × 720, under YouTube's
+  640 px minimum width. Verified in real Electron `nativeImage`: a 25 MB 4K
+  noise PNG became a 470 KB 1280 × 720 JPEG; 1080 × 1920 became 720 × 1280 at
+  643 KB. The source read cap is 50 MB; the stored cap stays 2 MB.
+
+Not done here: the live YouTube acceptance on a Private stream, and the
+Google Cloud quota check. Both need the owner.
+
