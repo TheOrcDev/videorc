@@ -2,7 +2,6 @@ import {
   createContext,
   useContext,
   useEffect,
-  useRef,
   useState,
   useSyncExternalStore,
   type ReactElement,
@@ -14,7 +13,6 @@ import { useDocumentVisible } from '@/hooks/use-document-visible'
 import { useStudioCore } from '@/hooks/use-studio'
 import { micVisualAnalyserEnabled } from '@/lib/mic-visual-gate'
 import { warmMicrophoneWanted } from '@/lib/warm-microphone-gate'
-import { createMicVisualFrameBuffer, type MicVisualFrameBuffer } from '@/lib/mic-visual-frame'
 import type {
   MicVisualLifecycleSnapshot,
   MicVisualPipeline,
@@ -209,32 +207,4 @@ export function useStudioMicVisualLifecycle(): MicVisualLifecycleSnapshot {
     pipeline.getLifecycleSnapshot,
     pipeline.getLifecycleSnapshot
   )
-}
-
-/**
- * Delivers analyser frames imperatively. Updating the painter never changes
- * React state, so any number of bars/canvases can share the clock without a
- * component render per frame.
- */
-export function useStudioMicVisualPainter(paint: (frame: MicVisualFrameBuffer) => void): void {
-  const pipeline = useStudioMicVisualPipeline()
-  const paintRef = useRef(paint)
-  const frameBufferRef = useRef<MicVisualFrameBuffer | null>(null)
-  if (!frameBufferRef.current) {
-    frameBufferRef.current = createMicVisualFrameBuffer()
-  }
-  paintRef.current = paint
-
-  useEffect(() => {
-    const releaseDemand = pipeline.retain()
-    const frameBuffer = frameBufferRef.current
-    if (!frameBuffer) return releaseDemand
-    const paintCurrentFrame = (): void => paintRef.current(pipeline.readFrame(frameBuffer))
-    paintCurrentFrame()
-    const unsubscribe = pipeline.subscribeFrame(paintCurrentFrame)
-    return () => {
-      unsubscribe()
-      releaseDemand()
-    }
-  }, [pipeline])
 }

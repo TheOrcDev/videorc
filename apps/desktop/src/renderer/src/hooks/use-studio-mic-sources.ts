@@ -1,8 +1,12 @@
 import { useMemo, useRef } from 'react'
 
 import { useStudioMicVisualPipeline } from '@/hooks/use-studio-mic-visual'
-import type { FrameSource, MeterFrame } from '@/lib/audio/types'
-import { createMicMeterSource, type MicMeterSettings } from '@/lib/mic-frame-sources'
+import type { FrameSource, MeterFrame, VisualFrame } from '@/lib/audio/types'
+import {
+  createMicMeterSource,
+  createMicVisualSource,
+  type MicMeterSettings
+} from '@/lib/mic-frame-sources'
 
 // Plan 092: audiocn frame sources over the workspace's visual mic pipeline.
 // Only lazy chunks (the Studio dashboard, the Studio tab, Sources) import this
@@ -19,4 +23,10 @@ export function useStudioMicMeterSource(settings: MicMeterSettings): FrameSource
   const settingsRef = useRef(settings)
   settingsRef.current = settings
   return useMemo(() => createMicMeterSource(pipeline, () => settingsRef.current), [pipeline])
+}
+
+/** The Studio microphone's bands and level history, raw, for bars and waveforms. */
+export function useStudioMicVisualSource(): FrameSource<VisualFrame> {
+  const pipeline = useStudioMicVisualPipeline()
+  return useMemo(() => createMicVisualSource(pipeline), [pipeline])
 }

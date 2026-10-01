@@ -6,8 +6,6 @@ import {
   advanceBandLevelsInto,
   createMicVisualFrameBuffer,
   createMicVisualPipeline,
-  resampleMicVisualLevels,
-  resampleMicVisualLevelsInto,
   spectrumBandTargetsInto,
   type MicVisualAnalyserLike,
   type MicVisualAudioContextLike,
@@ -398,7 +396,7 @@ describe('createMicVisualPipeline', () => {
     expect(harness.frames).toHaveLength(2)
   })
 
-  it('reuses caller-owned frame and resample buffers while snapshots stay stable', async () => {
+  it('reuses caller-owned frame buffers while snapshots stay stable', async () => {
     const harness = pipelineHarness()
     const pipeline = retainedPipeline(harness.dependencies)
     pipeline.configure({
@@ -410,7 +408,6 @@ describe('createMicVisualPipeline', () => {
 
     const frameBuffer = createMicVisualFrameBuffer()
     const bands = frameBuffer.bands
-    const resampled = new Array<number>(5).fill(0)
     let historyRing: Float32Array | undefined
     for (let index = 1; index <= 80; index += 1) {
       harness.frames.at(-1)?.(index * 48)
@@ -418,7 +415,6 @@ describe('createMicVisualPipeline', () => {
       expect(frameBuffer.bands).toBe(bands)
       historyRing ??= frameBuffer.historyRing
       expect(frameBuffer.historyRing).toBe(historyRing)
-      expect(resampleMicVisualLevelsInto(frameBuffer.bands, resampled)).toBe(resampled)
     }
 
     expect(historyRing).toBeInstanceOf(Float32Array)
@@ -638,14 +634,6 @@ describe('createMicVisualPipeline level feel', () => {
     const silent = pipeline.readFrame(createMicVisualFrameBuffer())
     expect(silent.peakDbfs).toBe(Number.NEGATIVE_INFINITY)
     expect(silent.rmsDbfs).toBe(Number.NEGATIVE_INFINITY)
-  })
-})
-
-describe('resampleMicVisualLevels', () => {
-  it('adapts the shared spectrum to each visual without another analyser', () => {
-    expect(resampleMicVisualLevels([0, 1, 0, 1], 2)).toEqual([0.5, 0.5])
-    expect(resampleMicVisualLevels([0, 1], 5)).toEqual([0, 0.25, 0.5, 0.75, 1])
-    expect(resampleMicVisualLevels([], 3)).toEqual([0, 0, 0])
   })
 })
 

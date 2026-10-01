@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import type { MeterFrame } from './audio/types'
-import { createMicMeterSource, writeMicMeterLevel, type MicFrameFeed } from './mic-frame-sources'
+import type { MeterFrame, VisualFrame } from './audio/types'
+import {
+  createMicMeterSource,
+  createMicVisualSource,
+  writeMicMeterLevel,
+  type MicFrameFeed
+} from './mic-frame-sources'
 import { createMicVisualFrameBuffer, type MicVisualFrameBuffer } from './mic-visual-frame'
 
 type FakeFeed = MicFrameFeed & {
@@ -128,5 +133,49 @@ describe('createMicMeterSource (plan 092)', () => {
     feed.publish()
     feed.publish()
     expect(frames[0]).toBe(frames[1])
+  })
+})
+
+describe('createMicVisualSource (plan 092)', () => {
+  const ring = Float32Array.from([0.2, 0.4, 0.6])
+  const live = {
+    peakDb: -12,
+    peakDbfs: -12,
+    bands: [0.1, 0.5, 0.9],
+    historyRing: ring,
+    historyStart: 1,
+    historyLength: 3
+  }
+
+  it('copies the bands into one reused array and borrows the level history', () => {
+    const feed = fakeFeed(live)
+    const source = createMicVisualSource(feed)
+    const frames: VisualFrame[] = []
+    source.subscribe((frame) => frames.push(frame))
+    feed.publish()
+    feed.publish()
+
+    expect(frames[0]).toBe(frames[1])
+    expect(Array.from(frames[0].bands)).toEqual([
+      expect.closeTo(0.1, 5),
+      expect.closeTo(0.5, 5),
+      expect.closeTo(0.9, 5)
+    ])
+    expect(frames[0].history).toBe(ring)
+    expect(frames[0].historyStart).toBe(1)
+    expect(frames[0].historyLength).toBe(3)
+    expect(frames[0].peakDb).toBe(-12)
+    expect(feed.retains).toBe(1)
+  })
+
+  it('sends empty bands with no analyser data, so bars fall instead of freezing', () => {
+    const feed = fakeFeed(live)
+    const source = createMicVisualSource(feed)
+    const bandCounts: number[] = []
+    source.subscribe((frame) => bandCounts.push(frame.bands.length))
+    feed.publish()
+    feed.frame = { ...createMicVisualFrameBuffer() }
+    feed.publish()
+    expect(bandCounts).toEqual([3, 0])
   })
 })

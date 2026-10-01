@@ -29,11 +29,7 @@ export type MicVisualFrameSnapshot = Readonly<{
 
 /** Caller-owned mutable read buffer. Reuse it for every analyser notification. */
 export type { MicVisualFrameBuffer } from './mic-visual-frame'
-export {
-  createMicVisualFrameBuffer,
-  resampleMicVisualLevels,
-  resampleMicVisualLevelsInto
-} from './mic-visual-frame'
+export { createMicVisualFrameBuffer } from './mic-visual-frame'
 
 export type MicVisualAnalyserLike = {
   fftSize: number

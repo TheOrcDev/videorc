@@ -1,11 +1,9 @@
-import { useEffect, useRef, type ReactElement, type RefObject } from 'react'
+import { useEffect, type ReactElement } from 'react'
 
-import { LiveWaveform, type LiveWaveformHandle } from '@/components/ui/live-waveform'
+import { LiveWaveform } from '@/components/ui/live-waveform'
 import { useStudioCore } from '@/hooks/use-studio'
-import {
-  useStudioMicVisualLifecycle,
-  useStudioMicVisualPainter
-} from '@/hooks/use-studio-mic-visual'
+import { useStudioMicVisualSource } from '@/hooks/use-studio-mic-sources'
+import { useStudioMicVisualLifecycle } from '@/hooks/use-studio-mic-visual'
 import type { MicStreamFailureReason } from '@/lib/mic-stream'
 
 /**
@@ -31,14 +29,13 @@ export function micPreviewUnavailableCopy(reason: MicStreamFailureReason | undef
 }
 
 /**
- * See-before-you-pick mic preview (Studio audio rework S4): a scrolling live
- * waveform of the selected device rendered under the mic pickers, so choosing
- * a microphone is never blind. One shared composition for both picker homes
- * (Quick Settings popover, Sources panel). The workspace provider owns the
- * sole stream, analyser, and frame clock; this surface only paints its rolling
- * snapshots. Failures show an honest inline reason, never a fake wave or toast.
- * While no session runs the analyser only opens with "Monitor input" on
- * (live feedback batch 3, B2), so the idle line offers that toggle inline.
+ * See-before-you-pick mic preview (Studio audio rework S4, on audiocn's live
+ * waveform since plan 092): a scrolling waveform of the selected device under
+ * the mic picker, so choosing a microphone is never blind. The workspace
+ * provider owns the sole stream, analyser, and frame clock; this surface only
+ * draws its level history, and sleeps between frames. Until the first frame
+ * arrives it shows the idle line, never a made-up shape. Failures show an
+ * honest inline reason, never a toast.
  */
 export function MicPickerPreview({
   deviceName
@@ -48,8 +45,7 @@ export function MicPickerPreview({
 }): ReactElement {
   const lifecycle = useStudioMicVisualLifecycle()
   const { captureConfig } = useStudioCore()
-  const waveformRef = useRef<LiveWaveformHandle>(null)
-  useMicPickerFramePainter(waveformRef)
+  const source = useStudioMicVisualSource()
   const enabled = Boolean(deviceName)
   const muted = enabled && captureConfig.audio.microphoneMuted
   const unavailableReason =
@@ -69,13 +65,13 @@ export function MicPickerPreview({
     >
       <div className="rounded-row border bg-muted/20 px-2 py-1 text-foreground/70">
         <LiveWaveform
-          ref={waveformRef}
           active={lifecycle.active}
           barGap={1}
           barWidth={2}
-          height={28}
+          className="h-7"
           mode="scrolling"
-          processing={enabled && lifecycle.status === 'acquiring'}
+          source={source}
+          variant="bars"
         />
       </div>
       {unavailableReason ? (
@@ -90,12 +86,5 @@ export function MicPickerPreview({
         </span>
       ) : null}
     </div>
-  )
-}
-
-/** Shared by both picker homes and the provider integration regression. */
-export function useMicPickerFramePainter(waveformRef: RefObject<LiveWaveformHandle | null>): void {
-  useStudioMicVisualPainter((frame) =>
-    waveformRef.current?.paint(frame.historyRing, frame.historyStart, frame.historyLength)
   )
 }
