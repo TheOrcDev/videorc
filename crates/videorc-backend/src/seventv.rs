@@ -16,7 +16,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::task::JoinHandle;
 
@@ -894,6 +894,174 @@ fn split_text_run(
     changed
 }
 
+/// Where the Settings switch is stored (`app_settings`).
+const CHAT_EMOTE_SETTINGS_KEY: &str = "chatEmoteSettings";
+
+/// Settings → General → "Show 7TV emotes in chat". On unless the streamer
+/// turned it off; off means Videorc never contacts 7TV.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChatEmoteSettings {
+    #[serde(default = "seven_tv_on_by_default")]
+    pub seven_tv: bool,
+}
+
+fn seven_tv_on_by_default() -> bool {
+    true
+}
+
+impl Default for ChatEmoteSettings {
+    fn default() -> Self {
+        Self { seven_tv: true }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ChatEmoteSettingsPatch {
+    #[serde(default)]
+    pub seven_tv: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum SevenTvState {
+    /// The Settings switch is off.
+    Off,
+    /// On, and nothing loaded yet in this app run.
+    #[default]
+    Idle,
+    Loading,
+    Linked,
+    NotLinked,
+    Error,
+}
+
+/// The line under the Settings switch. Every optional field is skipped when
+/// absent: a serialized `null` has broken app load before.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SevenTvStatus {
+    pub state: SevenTvState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub set_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emote_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub global_count: Option<usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<StreamPlatform>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl SevenTvStatus {
+    fn of(state: SevenTvState) -> Self {
+        Self {
+            state,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn loading() -> Self {
+        Self::of(SevenTvState::Loading)
+    }
+
+    fn from_summary(summary: &SevenTvSummary) -> Self {
+        match summary {
+            SevenTvSummary::NotLinked => Self::of(SevenTvState::NotLinked),
+            SevenTvSummary::Linked {
+                set_name,
+                emote_count,
+                global_count,
+                platforms,
+                ..
+            } => Self {
+                state: SevenTvState::Linked,
+                set_name: Some(set_name.clone()),
+                emote_count: Some(*emote_count),
+                global_count: Some(*global_count),
+                platforms: platforms.clone(),
+                error: None,
+            },
+        }
+    }
+
+    fn failed(error: &SevenTvError) -> Self {
+        Self {
+            error: Some(error.to_string()),
+            ..Self::of(SevenTvState::Error)
+        }
+    }
+}
+
+/// `liveChat.emotes.get` / `.set`, and the `liveChat.emotes` event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChatEmotesState {
+    pub seven_tv: bool,
+    pub seven_tv_status: SevenTvStatus,
+}
+
+pub(crate) fn load_settings(state: &AppState) -> ChatEmoteSettings {
+    match state
+        .database
+        .load_setting::<ChatEmoteSettings>(CHAT_EMOTE_SETTINGS_KEY)
+    {
+        Ok(settings) => settings.unwrap_or_default(),
+        Err(error) => {
+            state.emit_log(
+                "warn",
+                format!("The 7TV emote setting could not be read ({error}); treating it as on."),
+            );
+            ChatEmoteSettings::default()
+        }
+    }
+}
+
+pub(crate) async fn current_state(state: &AppState) -> ChatEmotesState {
+    let settings = load_settings(state);
+    let seven_tv_status = if settings.seven_tv {
+        state.live_chat.lock().await.seventv_status()
+    } else {
+        SevenTvStatus::of(SevenTvState::Off)
+    };
+    ChatEmotesState {
+        seven_tv: settings.seven_tv,
+        seven_tv_status,
+    }
+}
+
+/// Tell an open Settings window what changed.
+pub(crate) async fn publish_state(state: &AppState) {
+    let snapshot = current_state(state).await;
+    state.emit_event("liveChat.emotes", snapshot);
+}
+
+/// Apply the Settings switch. Off stops the loader at once and drops the
+/// emotes (rows already decorated keep theirs); on loads them for a stream
+/// that is already live, without waiting for the next Go Live.
+pub(crate) async fn set_settings(
+    state: &AppState,
+    patch: ChatEmoteSettingsPatch,
+) -> anyhow::Result<ChatEmotesState> {
+    let mut settings = load_settings(state);
+    if let Some(seven_tv) = patch.seven_tv {
+        settings.seven_tv = seven_tv;
+    }
+    state
+        .database
+        .save_setting(CHAT_EMOTE_SETTINGS_KEY, &settings)?;
+    if settings.seven_tv {
+        crate::live_chat::ensure_seventv_for_current_session(state).await;
+    } else {
+        state.live_chat.lock().await.stop_seventv();
+    }
+    let snapshot = current_state(state).await;
+    state.emit_event("liveChat.emotes", snapshot.clone());
+    Ok(snapshot)
+}
+
 fn platform_list(platforms: &[StreamPlatform]) -> String {
     platforms
         .iter()
@@ -1011,15 +1179,15 @@ async fn run_session(
         match outcome {
             None => failures = 0,
             Some(Ok(next)) => {
-                if !state
-                    .live_chat
-                    .lock()
-                    .await
-                    .install_seventv_indexes(session_generation, next.indexes.clone())
-                {
+                if !state.live_chat.lock().await.install_seventv_load(
+                    session_generation,
+                    next.indexes.clone(),
+                    SevenTvStatus::from_summary(&next.summary),
+                ) {
                     return;
                 }
                 state.emit_log("info", load_log_line(&next, &connections, loaded.is_some()));
+                publish_state(&state).await;
                 loaded = Some(next);
                 failures = 0;
             }
@@ -1031,6 +1199,17 @@ async fn run_session(
                             "7TV emotes unavailable ({error}). Chat works without them; Videorc keeps retrying."
                         ),
                     );
+                }
+                // Loaded emotes keep working through a failed poll; only a
+                // session with nothing loaded reports the error.
+                if loaded.is_none()
+                    && state
+                        .live_chat
+                        .lock()
+                        .await
+                        .set_seventv_status(session_generation, SevenTvStatus::failed(&error))
+                {
+                    publish_state(&state).await;
                 }
                 failures = failures.saturating_add(1);
             }
@@ -2002,11 +2181,46 @@ mod tests {
         .await;
         assert!(server.state.bodies.lock().unwrap().is_empty());
         let mut coordinator = state.live_chat.lock().await;
-        assert!(!coordinator.install_seventv_indexes(old, all_indexes()));
+        let linked = SevenTvStatus::of(SevenTvState::Linked);
+        assert!(!coordinator.install_seventv_load(old, all_indexes(), linked.clone()));
+        assert!(!coordinator.set_seventv_status(old, SevenTvStatus::loading()));
         assert!(coordinator.seventv_indexes().is_empty());
-        assert!(coordinator.install_seventv_indexes(fresh, all_indexes()));
+        assert_eq!(coordinator.seventv_status().state, SevenTvState::Idle);
+        assert!(coordinator.install_seventv_load(fresh, all_indexes(), linked));
         coordinator.stop_session();
         assert!(coordinator.seventv_indexes().is_empty(), "stop drops them");
+        assert_eq!(
+            coordinator.seventv_status().state,
+            SevenTvState::Linked,
+            "Settings keeps the last outcome after the stream ends"
+        );
+    }
+
+    #[test]
+    fn statuses_serialize_without_nulls() {
+        let sets = sets();
+        let load = assemble_load(&connections(), &[link(CHANNEL_SET), None, None], &sets);
+        assert_eq!(
+            serde_json::to_value(SevenTvStatus::from_summary(&load.summary)).unwrap(),
+            json!({
+                "state": "linked",
+                "setName": "Halloween Emotes 2026",
+                "emoteCount": 2,
+                "globalCount": 4,
+                "platforms": ["twitch", "kick", "youtube"]
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(SevenTvStatus::failed(&SevenTvError::Http(
+                "5xx".to_string()
+            )))
+            .unwrap(),
+            json!({ "state": "error", "error": "http 5xx" })
+        );
+        assert_eq!(
+            serde_json::to_value(SevenTvStatus::from_summary(&SevenTvSummary::NotLinked)).unwrap(),
+            json!({ "state": "notLinked" })
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

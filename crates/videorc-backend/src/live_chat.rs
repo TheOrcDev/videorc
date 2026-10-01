@@ -876,6 +876,12 @@ pub struct LiveChatCoordinator {
     /// Where the 7TV loader sends requests. `None` turns 7TV off; unit tests
     /// start that way so they never reach the network.
     seventv_endpoint: Option<String>,
+    /// The session's 7TV loader, kept apart from the connectors so the
+    /// Settings switch can stop it alone. Aborted with them on stop.
+    seventv_task: Option<JoinHandle<()>>,
+    /// What Settings shows: the last 7TV outcome in this app run. Outlives
+    /// sessions, so "Loads when you go live" only shows before the first.
+    seventv_status: crate::seventv::SevenTvStatus,
 }
 
 /// Minimal authoritative answer needed at the comment-card commit edge. Do
@@ -957,6 +963,8 @@ impl LiveChatCoordinator {
             chatters_seen: HashSet::new(),
             seventv_indexes: Arc::default(),
             seventv_endpoint: (!cfg!(test)).then(|| crate::seventv::SEVENTV_GQL_URL.to_string()),
+            seventv_task: None,
+            seventv_status: crate::seventv::SevenTvStatus::default(),
         }
     }
 
@@ -1330,18 +1338,65 @@ impl LiveChatCoordinator {
         self.seventv_indexes.clone()
     }
 
-    /// Install freshly loaded 7TV indexes, unless the session they were
-    /// loaded for has ended or been replaced. Returns whether it did.
-    pub(crate) fn install_seventv_indexes(
+    fn owns_seventv_session(&self, session_generation: u64) -> bool {
+        self.session_id.is_some() && self.session_generation == session_generation
+    }
+
+    /// Install freshly loaded 7TV indexes and their status, unless the
+    /// session they were loaded for has ended or been replaced. Returns
+    /// whether it did.
+    pub(crate) fn install_seventv_load(
         &mut self,
         session_generation: u64,
         indexes: crate::seventv::SevenTvIndexes,
+        status: crate::seventv::SevenTvStatus,
     ) -> bool {
-        if self.session_id.is_none() || self.session_generation != session_generation {
+        if !self.owns_seventv_session(session_generation) {
             return false;
         }
         self.seventv_indexes = Arc::new(indexes);
+        self.seventv_status = status;
         true
+    }
+
+    /// Record a 7TV status for Settings, under the same session check.
+    pub(crate) fn set_seventv_status(
+        &mut self,
+        session_generation: u64,
+        status: crate::seventv::SevenTvStatus,
+    ) -> bool {
+        if !self.owns_seventv_session(session_generation) {
+            return false;
+        }
+        self.seventv_status = status;
+        true
+    }
+
+    pub(crate) fn seventv_status(&self) -> crate::seventv::SevenTvStatus {
+        self.seventv_status.clone()
+    }
+
+    /// Whether this session's 7TV loader is running.
+    pub(crate) fn seventv_running(&self) -> bool {
+        self.seventv_task
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+    }
+
+    fn attach_seventv_task(&mut self, task: JoinHandle<()>) {
+        if let Some(previous) = self.seventv_task.replace(task) {
+            previous.abort();
+        }
+    }
+
+    /// The Settings switch went off: stop the loader, drop the emotes, and
+    /// forget the last outcome. Messages already decorated keep their emotes.
+    pub(crate) fn stop_seventv(&mut self) {
+        if let Some(task) = self.seventv_task.take() {
+            task.abort();
+        }
+        self.seventv_indexes = Arc::default();
+        self.seventv_status = crate::seventv::SevenTvStatus::default();
     }
 
     /// Where 7TV requests go; `None` when 7TV is off.
@@ -1371,6 +1426,9 @@ impl LiveChatCoordinator {
 
     fn abort_tasks(&mut self) {
         for task in self.tasks.drain(..) {
+            task.abort();
+        }
+        if let Some(task) = self.seventv_task.take() {
             task.abort();
         }
     }
@@ -1856,23 +1914,47 @@ where
 }
 
 /// Start the 7TV emote loader (plan 089) for a chat session that has a
-/// Twitch, Kick or YouTube channel to look up. X attaching later never needs
-/// it: 7TV has no X connection.
+/// Twitch, Kick or YouTube channel to look up, unless the streamer turned 7TV
+/// off in Settings. X attaching later never needs it: 7TV has no X
+/// connection.
 async fn start_seventv_for_session(state: &AppState, session_generation: u64) {
-    let mut coordinator = state.live_chat.lock().await;
-    if coordinator.session_generation() != session_generation {
+    if !crate::seventv::load_settings(state).seven_tv {
         return;
     }
-    let Some(endpoint) = coordinator.seventv_endpoint() else {
-        return;
+    {
+        let mut coordinator = state.live_chat.lock().await;
+        if coordinator.session_id().is_none()
+            || coordinator.session_generation() != session_generation
+        {
+            return;
+        }
+        let Some(endpoint) = coordinator.seventv_endpoint() else {
+            return;
+        };
+        let connections = coordinator.seventv_connections();
+        if connections.is_empty() {
+            return;
+        }
+        coordinator
+            .set_seventv_status(session_generation, crate::seventv::SevenTvStatus::loading());
+        let handle =
+            crate::seventv::spawn_session_loader(state, session_generation, endpoint, connections);
+        coordinator.attach_seventv_task(handle);
+    }
+    crate::seventv::publish_state(state).await;
+}
+
+/// The Settings switch went on mid-stream: load 7TV emotes now rather than
+/// at the next Go Live.
+pub(crate) async fn ensure_seventv_for_current_session(state: &AppState) {
+    let generation = {
+        let coordinator = state.live_chat.lock().await;
+        (coordinator.session_id().is_some() && !coordinator.seventv_running())
+            .then(|| coordinator.session_generation())
     };
-    let connections = coordinator.seventv_connections();
-    if connections.is_empty() {
-        return;
+    if let Some(generation) = generation {
+        start_seventv_for_session(state, generation).await;
     }
-    let handle =
-        crate::seventv::spawn_session_loader(state, session_generation, endpoint, connections);
-    coordinator.attach_task(handle);
 }
 
 pub async fn start_x_live_chat(
@@ -3385,7 +3467,7 @@ mod tests {
         assert_eq!(state.live_chat.lock().await.seventv_endpoint(), None);
         let generation = start(vec![with_account(StreamPlatform::Twitch, "1")]).await;
         start_seventv_for_session(&state, generation).await;
-        assert_eq!(state.live_chat.lock().await.runtime_ownership().0, 0);
+        assert!(!state.live_chat.lock().await.seventv_running());
 
         // On, but only X and an account-less Kick row: nothing to look up.
         state
@@ -3399,15 +3481,74 @@ mod tests {
         ])
         .await;
         start_seventv_for_session(&state, generation).await;
-        assert_eq!(state.live_chat.lock().await.runtime_ownership().0, 0);
+        assert!(!state.live_chat.lock().await.seventv_running());
 
-        // On with a YouTube channel: the loader joins the session's tasks,
-        // and a stop aborts it with the connectors.
+        // On with a YouTube channel: the loader runs beside the connectors
+        // (never counted as one), and a stop aborts it with them.
         let generation = start(vec![with_account(StreamPlatform::Youtube, "UC1")]).await;
         start_seventv_for_session(&state, generation).await;
-        assert_eq!(state.live_chat.lock().await.runtime_ownership().0, 1);
-        state.live_chat.lock().await.stop_session();
+        assert!(state.live_chat.lock().await.seventv_running());
         assert_eq!(state.live_chat.lock().await.runtime_ownership().0, 0);
+        state.live_chat.lock().await.stop_session();
+        assert!(!state.live_chat.lock().await.seventv_running());
+    }
+
+    #[tokio::test]
+    async fn the_settings_switch_stops_and_starts_7tv_mid_stream() {
+        use crate::seventv::{ChatEmoteSettingsPatch, SevenTvState};
+        let state = test_state();
+        let switch = |on: bool| ChatEmoteSettingsPatch { seven_tv: Some(on) };
+        // On by default, with nothing loaded yet in this app run.
+        let initial = crate::seventv::current_state(&state).await;
+        assert!(initial.seven_tv);
+        assert_eq!(initial.seven_tv_status.state, SevenTvState::Idle);
+        assert_eq!(
+            serde_json::to_value(&initial).unwrap(),
+            serde_json::json!({ "sevenTv": true, "sevenTvStatus": { "state": "idle" } })
+        );
+
+        let generation = {
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.set_seventv_endpoint(Some("http://127.0.0.1:9/v4/gql".to_string()));
+            coordinator.start_session(
+                "s".to_string(),
+                vec![LiveChatProviderState {
+                    account_id: Some("1".to_string()),
+                    ..provider_row(StreamPlatform::Twitch)
+                }],
+            );
+            coordinator.session_generation()
+        };
+        start_seventv_for_session(&state, generation).await;
+        assert!(state.live_chat.lock().await.seventv_running());
+
+        // Off: the loader stops at once, the setting persists, and a new
+        // session does not start it.
+        let off = crate::seventv::set_settings(&state, switch(false))
+            .await
+            .unwrap();
+        assert!(!off.seven_tv);
+        assert_eq!(off.seven_tv_status.state, SevenTvState::Off);
+        assert!(!state.live_chat.lock().await.seventv_running());
+        assert!(!crate::seventv::load_settings(&state).seven_tv);
+        start_seventv_for_session(&state, generation).await;
+        assert!(!state.live_chat.lock().await.seventv_running());
+
+        // On again mid-stream: it loads without waiting for the next Go Live.
+        let on = crate::seventv::set_settings(&state, switch(true))
+            .await
+            .unwrap();
+        assert!(on.seven_tv);
+        assert_ne!(on.seven_tv_status.state, SevenTvState::Off);
+        assert!(state.live_chat.lock().await.seventv_running());
+
+        // An unknown field is refused rather than ignored.
+        assert!(
+            serde_json::from_value::<ChatEmoteSettingsPatch>(
+                serde_json::json!({ "sevenTv": true, "bttv": true })
+            )
+            .is_err()
+        );
     }
 
     fn empty_start_params(session_id: &str) -> LiveChatStartParams {
