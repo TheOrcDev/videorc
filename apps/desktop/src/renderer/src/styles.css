@@ -319,6 +319,26 @@
   }
 }
 
+/* audiocn (plan 092): meter and channel tones are Videorc tones. A healthy
+   level is chrome; colour means hot (warning) or clipping (destructive).
+   Mute is the muted-speaker amber. Solo and monitor are unused. Declared on
+   both selectors so each theme resolves the aliases against its own tokens. */
+:root,
+.dark {
+  --meter-ok: color-mix(in oklch, var(--foreground) 80%, transparent);
+  --meter-warn: var(--warning);
+  --meter-clip: var(--destructive);
+  --channel-mute: var(--warning);
+  --channel-solo: var(--foreground);
+  --channel-monitor: var(--info);
+  --meter-ok-foreground: var(--foreground);
+  --meter-warn-foreground: var(--warning);
+  --meter-clip-foreground: var(--destructive);
+  --channel-mute-foreground: var(--warning);
+  --channel-solo-foreground: var(--foreground);
+  --channel-monitor-foreground: var(--info);
+}
+
 @theme inline {
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
@@ -399,6 +419,20 @@
   --color-video-ground: var(--video-ground);
   --color-video-ground-foreground: var(--video-ground-foreground);
   --color-video-ground-muted: var(--video-ground-muted);
+
+  /* audiocn meter and channel tones (plan 092), aliased above. */
+  --color-meter-ok: var(--meter-ok);
+  --color-meter-warn: var(--meter-warn);
+  --color-meter-clip: var(--meter-clip);
+  --color-channel-mute: var(--channel-mute);
+  --color-channel-solo: var(--channel-solo);
+  --color-channel-monitor: var(--channel-monitor);
+  --color-meter-ok-foreground: var(--meter-ok-foreground);
+  --color-meter-warn-foreground: var(--meter-warn-foreground);
+  --color-meter-clip-foreground: var(--meter-clip-foreground);
+  --color-channel-mute-foreground: var(--channel-mute-foreground);
+  --color-channel-solo-foreground: var(--channel-solo-foreground);
+  --color-channel-monitor-foreground: var(--channel-monitor-foreground);
 
   /* Platform brand tints: with source icons, the only large saturated colour
      in the chrome (videorc-design). Theme-invariant. */

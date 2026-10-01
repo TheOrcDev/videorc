@@ -2,6 +2,26 @@ import js from '@eslint/js'
 import reactHooks from 'eslint-plugin-react-hooks'
 import tseslint from 'typescript-eslint'
 
+const PHOSPHOR_RESTRICTION = {
+  name: '@phosphor-icons/react',
+  message:
+    'Import icons from @/components/icons instead. Add a new semantic slot there only if no existing slot already means the same thing.'
+}
+
+// Base UI is audiocn's primitive layer (plan 092). Videorc's own UI is Radix
+// (components.json: radix-rhea), so only files installed from the @audiocn
+// registry may import it. docs/audiocn.md lists them.
+const BASE_UI_RESTRICTION = {
+  group: ['@base-ui/react', '@base-ui/react/*'],
+  message:
+    "Base UI is audiocn's primitive layer; Videorc UI uses Radix. Only files installed from @audiocn may import it (docs/audiocn.md)."
+}
+
+const AUDIOCN_BASE_UI_FILES = [
+  'apps/desktop/src/renderer/src/components/ui/channel-strip.tsx',
+  'apps/desktop/src/renderer/src/components/ui/clip-indicator.tsx'
+]
+
 export default tseslint.config(
   {
     ignores: [
@@ -55,16 +75,16 @@ export default tseslint.config(
     rules: {
       'no-restricted-imports': [
         'error',
-        {
-          paths: [
-            {
-              name: '@phosphor-icons/react',
-              message:
-                'Import icons from @/components/icons instead. Add a new semantic slot there only if no existing slot already means the same thing.'
-            }
-          ]
-        }
+        { paths: [PHOSPHOR_RESTRICTION], patterns: [BASE_UI_RESTRICTION] }
       ]
+    }
+  },
+  {
+    // audiocn files may build on Base UI (plan 092). Flat config does not merge
+    // rule options, so this block re-declares the rule with the icon ban only.
+    files: AUDIOCN_BASE_UI_FILES,
+    rules: {
+      'no-restricted-imports': ['error', { paths: [PHOSPHOR_RESTRICTION] }]
     }
   }
 )
