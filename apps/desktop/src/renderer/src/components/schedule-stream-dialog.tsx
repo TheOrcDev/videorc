@@ -521,7 +521,7 @@ export function ScheduleStreamDialog({
                 alt="Upcoming stream thumbnail"
                 assetId={metadata.thumbnailAssetId}
                 disabled={saving}
-                hint="JPEG or PNG, up to 2 MB. Recommended: 1280 × 720, 16:9."
+                hint="JPEG or PNG, 16:9. Files over 2 MB are scaled down to fit."
                 removable={!published}
                 onChange={(thumbnailAssetId) => patch({ thumbnailAssetId })}
                 onError={setError}

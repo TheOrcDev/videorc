@@ -13105,7 +13105,7 @@ async function pickScheduledThumbnail() {
   const options: Electron.OpenDialogOptions = {
     title: 'Choose livestream thumbnail',
     properties: ['openFile'],
-    filters: [{ name: 'JPEG or PNG (up to 2 MB)', extensions: ['jpg', 'jpeg', 'png'] }]
+    filters: [{ name: 'JPEG or PNG', extensions: ['jpg', 'jpeg', 'png'] }]
   }
   const result = mainWindow
     ? await dialog.showOpenDialog(mainWindow, options)
@@ -13116,8 +13116,30 @@ async function pickScheduledThumbnail() {
     join(app.getPath('userData'), 'scheduled-thumbnails'),
     (bytes) => nativeImage.createFromBuffer(bytes).getSize(),
     (assetId, path) =>
-      requestBackendAdmin('resource.capability.register_thumbnail', { assetId, path })
+      requestBackendAdmin('resource.capability.register_thumbnail', { assetId, path }),
+    fitScheduledThumbnail
   )
+}
+
+/**
+ * Plan 083: an image over 2 MB becomes a JPEG with a 1280 px long edge
+ * (1280 × 720 for 16:9). Capping the long edge, not fitting 1280 × 720, keeps
+ * a portrait image above YouTube's 640 px minimum width.
+ */
+function fitScheduledThumbnail(bytes: Buffer, quality: number): Buffer {
+  const image = nativeImage.createFromBuffer(bytes)
+  if (image.isEmpty()) throw new Error('Corrupt or unsupported thumbnail image.')
+  const { width, height } = image.getSize()
+  const scale = Math.min(1, 1280 / Math.max(width, height))
+  const fitted =
+    scale < 1
+      ? image.resize({
+          width: Math.max(1, Math.round(width * scale)),
+          height: Math.max(1, Math.round(height * scale)),
+          quality: 'best'
+        })
+      : image
+  return fitted.toJPEG(quality)
 }
 
 async function importBackgroundImage(): Promise<BackgroundImportResult | null> {
