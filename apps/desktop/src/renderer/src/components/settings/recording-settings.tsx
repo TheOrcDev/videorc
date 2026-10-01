@@ -7,8 +7,10 @@ import {
   WarningIcon
 } from '@/components/icons'
 import { useEffect, useState, type ReactElement } from 'react'
+import { toast } from 'sonner'
 
 import { NavigableRow } from '@/components/navigable-row'
+import { EncoderPreferenceField } from '@/components/settings/encoder-preference-field'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -30,7 +32,8 @@ import { recordingQuality, streamingSummary } from '@/lib/studio-session-view'
  * captureConfig).
  */
 export function RecordingSettings(): ReactElement {
-  const { settings, setSettings, health, captureConfig } = useStudioCore()
+  const { settings, setSettings, health, captureConfig, encoderPreference, setEncoderPreference } =
+    useStudioCore()
   const { openStudioPanel } = useWorkspaceNav()
 
   // ST2: validate the output directory as it changes — a typo here used to
@@ -164,6 +167,16 @@ export function RecordingSettings(): ReactElement {
             />
           </div>
         </Field>
+        <EncoderPreferenceField
+          state={encoderPreference}
+          onChange={(preference) => {
+            void setEncoderPreference(preference).catch((error: unknown) => {
+              toast.error('Could not change the fallback video encoder.', {
+                description: error instanceof Error ? error.message : String(error)
+              })
+            })
+          }}
+        />
       </FieldGroup>
 
       <div className="flex flex-col divide-y divide-border overflow-hidden rounded-row border border-border bg-foreground/[0.03]">

@@ -1382,6 +1382,10 @@ class StudioBackend {
       case 'performance.check.get':
         // Measured and current: the provider must not start a check on mount.
         return this.performanceCheck
+      case 'encoder.preference.get':
+        return { preference: 'auto', quickSyncAvailable: false, envOverride: false }
+      case 'encoder.preference.set':
+        return { preference: params.preference, quickSyncAvailable: true, envOverride: false }
       default:
         return null
     }
@@ -9951,6 +9955,84 @@ describe('real StudioProvider lifecycle', () => {
     })
     // The saved Output setting is untouched; only this session shares.
     expect(latest()?.core.captureConfig.video.bitrateKbps).toBe(recordingBitrateKbps)
+    expect(latest()?.core.lastError).toBeNull()
+  })
+
+  it('steps a software-encoded stream down to what this computer measurably holds', async () => {
+    // The fake backend answers every probe with the raw path and OpenH264.
+    // The saved performance check says 1080p30 is too heavy and 720p30 held.
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    backend.performanceCheck = {
+      running: false,
+      stale: false,
+      result: {
+        capabilityKey: 'performance-check-v2:test',
+        checkedAt: now,
+        appVersion: '0.9.126',
+        durationMs: 12_000,
+        recommended: videoPresets['tutorial-720p30'],
+        belowFloor: false,
+        rungs: [
+          {
+            video: videoPresets['tutorial-1080p30'],
+            verdict: 'failed',
+            reasons: ['encoder-below-realtime']
+          },
+          { video: videoPresets['tutorial-720p30'], verdict: 'passed', reasons: [] }
+        ]
+      }
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openYouTubeGoLiveConfirmation(latest)
+    // The confirmation already knows, before anything starts.
+    await waitForObservation(() => latest()?.core.streamPerformanceAdvice?.kind === 'step-down')
+
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+
+    const prepare = backend.sentCommands.find(
+      (command) => command.method === 'streamTargets.youtube.prepare'
+    )
+    expect(prepare?.params).toMatchObject({ video: { width: 1280, height: 720, fps: 30 } })
+    const start = backend.sentCommands.find((command) => command.method === 'session.start')
+    expect(start?.params).toMatchObject({
+      output: { streamEnabled: true },
+      streaming: {
+        defaultOutputPreset: 'tutorial-720p30',
+        defaultBitrateKbps: 4000,
+        targets: expect.arrayContaining([
+          expect.objectContaining({
+            id: 'youtube',
+            outputPreset: 'tutorial-720p30',
+            outputBitrateKbps: 4000
+          })
+        ])
+      }
+    })
+    // Only the session moved. The saved destination settings are untouched.
+    expect(latest()?.core.captureConfig.streaming.defaultOutputPreset).toBe('stream-safe-1080p30')
     expect(latest()?.core.lastError).toBeNull()
   })
 

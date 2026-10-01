@@ -2,10 +2,13 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
+import { videoPresets } from '@/lib/capture'
+
 import {
   GoLiveCaptionsStatus,
   GoLiveCommentsStatus,
-  GoLiveDestinationSummary
+  GoLiveDestinationSummary,
+  GoLiveOutputAdvice
 } from './go-live-dialog'
 
 describe('Go Live comments status', () => {
@@ -91,5 +94,59 @@ describe('Go Live captions status', () => {
     expect(markup).toContain('Continue without captions')
     expect(markup).toContain('deployment')
     expect(markup).toContain('data-variant="warning"')
+  })
+})
+
+describe('Go Live output advice (plan 090)', () => {
+  const stream = videoPresets['stream-safe-1080p30']
+  const floor = videoPresets['tutorial-720p30']
+
+  it('is quiet when the saved settings go out as they are', () => {
+    expect(
+      renderToStaticMarkup(
+        createElement(GoLiveOutputAdvice, { advice: null, recordEnabled: true, sharedVideo: null })
+      )
+    ).toBe('')
+  })
+
+  it('says what a stepped-down session will stream at, and that settings are kept', () => {
+    const markup = renderToStaticMarkup(
+      createElement(GoLiveOutputAdvice, {
+        advice: { kind: 'step-down', requested: stream, video: floor },
+        recordEnabled: true,
+        sharedVideo: null
+      })
+    )
+    expect(markup).toContain('Streaming at 720p 30')
+    expect(markup).toContain('1080p 30')
+    expect(markup).toContain('for the recording too')
+    expect(markup).toContain('Your saved settings stay as they are.')
+    expect(markup).not.toContain('data-variant="warning"')
+  })
+
+  it('warns when nothing held steady instead of promising a step-down', () => {
+    const markup = renderToStaticMarkup(
+      createElement(GoLiveOutputAdvice, {
+        advice: { kind: 'below-floor', floor },
+        recordEnabled: false,
+        sharedVideo: null
+      })
+    )
+    expect(markup).toContain('This computer may not keep up')
+    expect(markup).toContain('not even 720p 30')
+    expect(markup).not.toContain('Streaming at')
+  })
+
+  it('explains a recording that takes the stream profile, without error codes', () => {
+    const markup = renderToStaticMarkup(
+      createElement(GoLiveOutputAdvice, {
+        advice: null,
+        recordEnabled: true,
+        sharedVideo: stream
+      })
+    )
+    expect(markup).toContain('Recording will match the stream')
+    expect(markup).toContain('1080p 30 at 6000 kbps')
+    expect(markup).not.toMatch(/HRESULT|Media Foundation/)
   })
 })
