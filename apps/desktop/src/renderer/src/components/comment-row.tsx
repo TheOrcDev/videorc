@@ -219,7 +219,7 @@ function Emote({ url, text }: { url: string; text: string }): ReactElement {
   )
 }
 
-/** The message body: emotes inline when the platform sent them (Twitch). */
+/** The message body: emotes inline when the platform sent them (Twitch, Kick). */
 function MessageBody({
   message,
   fragments
