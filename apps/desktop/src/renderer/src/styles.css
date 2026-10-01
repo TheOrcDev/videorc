@@ -232,11 +232,14 @@
 
   /* Dark window glass (plan 091, D3): the sidebar covers 88% and the work
      area 83% of the clear blur. 83% is the smallest work cover that keeps
-     --muted-foreground at 4.5:1 over a white desktop (probe:ui-glass). */
-  --glass-base: 0.13 0.003 286;
+     --muted-foreground at 4.5:1 over a white desktop (probe:ui-glass). The
+     base is the OKLCH of #0D0D0F, the dark solid the palette, the addon's
+     snapshot base and the design skill all name (0.13 rendered #070708 and
+     composited to near-black over a dark desktop). */
+  --glass-base: 0.16 0.004 286;
   --glass-cover-sidebar: 0.88;
   --glass-cover-work: 0.83;
-  --glass-solid: oklch(0.13 0.003 286);
+  --glass-solid: oklch(0.16 0.004 286);
 
   /* Dark floating glass: the window glass measures L 0.19–0.26 over the
      probe backdrops, so the float sits just above it: a raised step, never

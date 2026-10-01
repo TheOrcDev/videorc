@@ -117,8 +117,11 @@ export function compositeCover(body: number, coat: number): number {
   return 1 - (1 - body) * (1 - coat)
 }
 
-/** styles.css `.dark` `--glass-base`: the dark tone every dark coat is cut from. */
-export const DARK_GLASS_BASE = '0.13 0.003 286'
+/**
+ * styles.css `.dark` `--glass-base`: the dark tone every dark coat is cut
+ * from, the OKLCH of DARK_WINDOW_PALETTE.base (#0D0D0F).
+ */
+export const DARK_GLASS_BASE = '0.16 0.004 286'
 
 function alphaPercent(alpha: number): string {
   return `${Math.round(alpha * 10_000) / 100}%`

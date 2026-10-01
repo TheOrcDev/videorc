@@ -543,3 +543,10 @@ Evidence: `docs/acceptance/2026-10-02-clear-glass-calibration.md`.
   and `probe:comments-window` were not run because both activate the app
   by design (`main-window-focus` and OS clicks; the Stream Manager's open
   and toggle paths).
+- **Step A (2026-10-02).** The dark `--glass-base` / `--glass-solid` moved
+  from `oklch(0.13 0.003 286)` (`#070708`) to the exact OKLCH of `#0D0D0F`,
+  `0.16 0.004 286`, so the token, the palette, the addon's snapshot base and
+  this plan's gap table agree. All five windows pass the gate in both
+  themes; the dark rows now sit on the table (work L 0.330 / 0.146 over
+  white / black, sidebar 0.282) and secondary contrast reads 4.76:1 at 83%.
+  No cover moved.

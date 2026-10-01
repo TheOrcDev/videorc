@@ -395,3 +395,35 @@ the window and focus an existing one, so a five-role run can activate the
 app once at the start (not measured; the walk records `mainFocused` only
 in the main-only runs, where it stays false). A `focus: false` variant of
 the open commands would close that gap.
+
+## Step A: the dark base is `#0D0D0F`
+
+S1 found the dark token `oklch(0.13 0.003 286)` rendering `#070708` while
+everything else intends `#0D0D0F`: the design skill's token table,
+`window-palette.ts`'s dark base, the addon's snapshot base and this plan's
+gap table (Ghostex's dark workspace is `#0e0e0e`). At 83% the old base
+composited to about `#060606` over a black desktop, the pure black the
+skill says kills the glass depth. The dark `--glass-base` and
+`--glass-solid` are now the exact OKLCH of `#0D0D0F`, `0.16 0.004 286`
+(L 0.15999, C 0.00418, h 285.9; the short form rounds back to 13, 13, 15).
+No other token moved; `DARK_GLASS_BASE` and the Preview coats follow.
+
+`--gate --themes=dark,light`, all five roles, after the change: every
+sample passes, no cover moved.
+
+| theme | window · sample        | cover | transmission | primary | secondary | parity | L white (pred.) |  plan | L black (pred.) |  plan |
+| ----- | ---------------------- | ----: | -----------: | ------: | --------: | -----: | --------------: | ----: | --------------: | ----: |
+| dark  | main · content toolbar |  0.83 |        54.54 |   11.23 |      4.76 |   1.79 |   0.330 (0.334) | 0.333 |   0.146 (0.149) | 0.150 |
+| dark  | main · sidebar foot    |  0.88 |        37.97 |   13.33 |      5.64 |   1.66 |   0.282 (0.286) | 0.286 |   0.151 (0.153) | 0.150 |
+| dark  | Stream Manager · list  |  0.83 |        53.65 |   11.23 |      4.76 |   1.75 |   0.330 (0.334) | 0.333 |   0.146 (0.149) | 0.150 |
+| dark  | Captions · body        |  0.83 |        54.37 |   11.23 |      4.76 |   1.79 |   0.330 (0.334) | 0.333 |   0.146 (0.149) | 0.150 |
+| dark  | Notes · textarea       |  0.83 |        53.83 |   11.23 |      4.76 |   1.79 |   0.330 (0.334) | 0.333 |   0.146 (0.149) | 0.150 |
+| dark  | Preview · strip        |  0.83 |        54.04 |   11.23 |      4.76 |    n/a |      lum 0.0358 |       |                 |       |
+
+The dark rows now land on the plan's gap table (within 0.004 L), and
+secondary contrast reads 4.76:1 at 83%, the plan's 4.69 plus the panel's
+margin: still above 4.5, so D3 stands. Light rows are unchanged. The
+parity population grew to 1.79 (the dark coats are now a hair further from
+neutral), still under the ≤ 4 gate. WindowServer read 66.5% in this run,
+an outlier against the 47–52% of every other run today; nothing in the
+tree changed between them but a token, so it is session noise.

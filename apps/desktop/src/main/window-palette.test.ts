@@ -38,11 +38,12 @@ describe('window palette mirrors styles.css', () => {
     expect(covers(block('.dark'))).toEqual(GLASS_COVERS.darwin.dark)
     expect(covers(block(":root[data-platform='win32']"))).toEqual(GLASS_COVERS.win32.light)
     expect(covers(block(":root[data-platform='win32'].dark"))).toEqual(GLASS_COVERS.win32.dark)
-    // One base per theme, and the solid is that base.
+    // One base per theme, and the solid is that base: the OKLCH of the
+    // palette's #FAFAFB and #0D0D0F.
     expect(token(block(':root'), 'glass-base')).toBe('0.985 0.001 286')
-    expect(token(block('.dark'), 'glass-base')).toBe('0.13 0.003 286')
+    expect(token(block('.dark'), 'glass-base')).toBe('0.16 0.004 286')
     expect(token(block(':root'), 'glass-solid')).toBe('oklch(0.985 0.001 286)')
-    expect(token(block('.dark'), 'glass-solid')).toBe('oklch(0.13 0.003 286)')
+    expect(token(block('.dark'), 'glass-solid')).toBe('oklch(0.16 0.004 286)')
   })
 
   it('derives the coats so every region composites to exactly its cover', () => {
@@ -74,8 +75,8 @@ describe('window palette mirrors styles.css', () => {
   it('paints the Preview frame with the dark work cover and a 0% content coat (plan 091 S2)', () => {
     expect(token(block('.dark'), 'glass-base')).toBe(DARK_GLASS_BASE)
     expect(DARK_GLASS_COATS).toEqual({
-      window: 'oklch(0.13 0.003 286 / 83%)',
-      content: 'oklch(0.13 0.003 286 / 0%)'
+      window: 'oklch(0.16 0.004 286 / 83%)',
+      content: 'oklch(0.16 0.004 286 / 0%)'
     })
     const coats = deriveGlassCoats(covers(block('.dark')))
     expect(DARK_GLASS_COATS.window).toBe(`oklch(${DARK_GLASS_BASE} / ${coats.body * 100}%)`)

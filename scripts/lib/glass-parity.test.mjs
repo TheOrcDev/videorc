@@ -19,11 +19,13 @@ test('oklch converts to sRGB like the design tokens expect', () => {
   near(light.r, 0xfa, 0.6, 'light r')
   near(light.g, 0xfa, 0.6, 'light g')
   near(light.b, 0xfb, 0.6, 'light b')
-  // The dark base oklch(0.13 0.003 286) renders #070708 (the palette's
-  // #0D0D0F is its rounding).
-  const dark = oklchToSrgb(0.13, 0.003, 286)
-  near(dark.r, 7.1, 0.3, 'dark r')
-  near(dark.b, 8.3, 0.3, 'dark b')
+  // The dark base oklch(0.16 0.004 286) is the palette's #0D0D0F; the
+  // pre-plan-091 token oklch(0.13 0.003 286) rendered #070708.
+  const dark = oklchToSrgb(0.16, 0.004, 286)
+  assert.deepEqual([dark.r, dark.g, dark.b].map(Math.round), [0x0d, 0x0d, 0x0f])
+  const old = oklchToSrgb(0.13, 0.003, 286)
+  near(old.r, 7.1, 0.3, 'old dark r')
+  near(old.b, 8.3, 0.3, 'old dark b')
   const white = oklchToSrgb(1, 0, 0)
   near(white.r, 255, 1e-9, 'white r')
   near(white.g, 255, 1e-9, 'white g')
