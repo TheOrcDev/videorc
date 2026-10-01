@@ -734,6 +734,8 @@ fn adjust_retention_capacity(counters: &MetalRetentionCounters, previous: u64, n
     update_atomic_peak(&counters.cached_source_capacity_peak, live);
 }
 
+// Rust 1.99 renames fetch_update to try_update; release builds still use 1.98.
+#[allow(deprecated)]
 fn update_atomic_peak(peak: &AtomicU64, value: u64) {
     let _ = peak.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
         (value > current).then_some(value)

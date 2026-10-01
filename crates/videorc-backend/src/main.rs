@@ -8116,6 +8116,8 @@ fn rpc_params_are_empty(params: &serde_json::Value) -> bool {
     params.is_null() || params.as_object().is_some_and(serde_json::Map::is_empty)
 }
 
+// Rust 1.99 renames fetch_update to try_update; release builds still use 1.98.
+#[allow(deprecated)]
 async fn handle_text_message_with_role(
     state: &AppState,
     text: &str,
@@ -11576,6 +11578,8 @@ struct PreparedAccountEntitlementRefresh {
 }
 
 /// Capture while holding `AppState.account_auth_transition`.
+// Rust 1.99 renames fetch_update to try_update; release builds still use 1.98.
+#[allow(deprecated)]
 fn capture_account_entitlement_refresh_identity(
     state: &AppState,
 ) -> Result<AccountEntitlementRefreshIdentity> {

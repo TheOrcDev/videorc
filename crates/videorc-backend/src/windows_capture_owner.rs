@@ -46,6 +46,8 @@ impl<I: Send + 'static, O: Send + 'static, E: Send + 'static> CaptureOwner<I, O,
     ) -> Result<Self, String> {
         Self::start_with_wake(generation, owners, open, acquire, || {})
     }
+    // Rust 1.99 renames fetch_update to try_update; release builds still use 1.98.
+    #[allow(deprecated)]
     pub(crate) fn start_with_wake<T: 'static>(
         generation: u64,
         owners: Arc<AtomicUsize>,
