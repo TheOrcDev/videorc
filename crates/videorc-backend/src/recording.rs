@@ -9018,15 +9018,18 @@ async fn monitor_session(
     // A dead stream output is its own user-visible truth, whatever happens to
     // the recording below: streaming stopped, the destinations went dark, and
     // the reason must reach the session log — as an event, not a session kill.
-    if let Some(stream_error) = stream_bridge_terminal_failure.as_deref() {
+    // The session normally hears it the moment the stream writer dies
+    // (`publish_stream_output_failure_if_active`); this is the fallback for a
+    // failure that only became known during teardown.
+    if let Some(stream_error) = stream_bridge_terminal_failure.as_deref()
+        && announce_stream_output_failure_once(&session_id)
+    {
         let _ = emit_health_event(
             &state,
             Some(&session_id),
             HealthLevel::Error,
-            "stream-output-failed",
-            &format!(
-                "Streaming stopped early: {stream_error}. The local recording continued and is being preserved."
-            ),
+            STREAM_OUTPUT_FAILED_CODE,
+            &stream_output_failed_message(stream_error),
         );
     }
     // Instant stop (instant-record P2): a recording leg hands MP4 export and the
@@ -20478,6 +20481,68 @@ async fn publish_stream_target_failure_if_active(
     }
 }
 
+pub(crate) const STREAM_OUTPUT_FAILED_CODE: &str = "stream-output-failed";
+
+fn stream_output_failed_message(stream_error: &str) -> String {
+    format!(
+        "Streaming stopped early: {stream_error}. The local recording continued and is being preserved."
+    )
+}
+
+/// The session whose dead stream output was already announced. One slot is
+/// enough: only one capture session exists at a time.
+static STREAM_OUTPUT_FAILURE_ANNOUNCED: StdMutex<Option<String>> = StdMutex::new(None);
+
+/// True exactly once per session, so the mid-session announcement and the
+/// stop path never both report the same dead stream.
+fn announce_stream_output_failure_once(session_id: &str) -> bool {
+    let mut announced = STREAM_OUTPUT_FAILURE_ANNOUNCED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if announced.as_deref() == Some(session_id) {
+        return false;
+    }
+    *announced = Some(session_id.to_string());
+    true
+}
+
+/// Plan 087: say that the stream died when it dies. Until 0.9.125 this was
+/// reported only by the stop path, so on 2026-10-01 the owner presented to a
+/// dead stream for 54 s, then for 115 s, with nothing on screen.
+///
+/// A user stop also ends the stream writer; that is not a failure, and the
+/// stop path owns whatever the teardown finds.
+pub(crate) fn publish_stream_output_failure_if_active(
+    state: &AppState,
+    session_id: &str,
+    stream_error: &str,
+) {
+    let Ok(recording) = state.recording.try_lock() else {
+        return;
+    };
+    if !recording
+        .as_ref()
+        .is_some_and(|active| active.session_id == session_id && !active.stop_requested)
+    {
+        return;
+    }
+    if !announce_stream_output_failure_once(session_id) {
+        return;
+    }
+    tracing::error!(
+        session_id,
+        stream_error,
+        "stream output stopped mid-session; the recording continues"
+    );
+    let _ = emit_health_event(
+        state,
+        Some(session_id),
+        HealthLevel::Error,
+        STREAM_OUTPUT_FAILED_CODE,
+        &stream_output_failed_message(stream_error),
+    );
+}
+
 async fn publish_ffmpeg_health_event_if_active(state: &AppState, session_id: &str, message: &str) {
     // The stderr consumer has a bounded abort join. Keep its final persistent
     // health write and broadcast behind exact-session ownership in case an
@@ -26467,6 +26532,22 @@ mod tests {
         assert!(
             mark_stream_target_failed(&shared, 0, "later duplicate".to_string()).is_none(),
             "duplicate stderr lines must not create a second transition"
+        );
+    }
+
+    #[test]
+    fn a_dead_stream_output_is_announced_once_per_session() {
+        let first = format!("stream-failure-{}", uuid::Uuid::new_v4());
+        let second = format!("stream-failure-{}", uuid::Uuid::new_v4());
+        assert!(announce_stream_output_failure_once(&first));
+        assert!(
+            !announce_stream_output_failure_once(&first),
+            "the stop path must not repeat the mid-session announcement"
+        );
+        assert!(announce_stream_output_failure_once(&second));
+        assert!(
+            stream_output_failed_message("stream encoder output stopped: boom")
+                .contains("The local recording continued")
         );
     }
 

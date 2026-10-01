@@ -83,18 +83,30 @@ const STREAM_OUTPUT_QUEUE_COALESCE_FRAMES: usize = 4;
 const STREAM_OUTPUT_QUEUE_COALESCE_AGE: Duration = Duration::from_millis(100);
 const STREAM_OUTPUT_QUEUE_MAX_FRAMES: usize = 8;
 const STREAM_OUTPUT_QUEUE_MAX_AGE: Duration = Duration::from_millis(150);
+/// An output that made no progress at all for this long is wedged. Anything
+/// shorter is a stall the session waits out: on 2026-10-01 a busy host starved
+/// FFmpeg for a little over two seconds, and the two-second limits that stood
+/// here ended a four-platform broadcast for the rest of the session (plan
+/// 087). Waiting loses nothing: a skipped tick never reaches the encoder and
+/// every encoded access unit is kept and written in order, so viewers see a
+/// freeze and the file keeps a truthful gap.
+const OUTPUT_WEDGED_TIMEOUT: Duration = Duration::from_secs(30);
 /// Recording output pressure is recoverable while either VideoToolbox or the
 /// FIFO writer is still advancing. Queue depth/age are pressure signals, not a
 /// liveness verdict; only a complete lack of pipeline progress for this window
 /// may stop the output.
+/// VideoToolbox outputs wait `OUTPUT_WEDGED_TIMEOUT` instead (see
+/// `encoder_bridge_recording_no_progress_timeout`).
 const RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(2);
-/// A stream output over its age budget DEGRADES (latest-wins coalescing) for
-/// this long before the failure is treated as real. A single over-budget
-/// sample used to be a death sentence: one 166ms-old frame killed a
-/// 3-platform live session (2026-07-15 owner incident) while the queue held
-/// 2 of 8 frames. Transient downstream stalls recover within this window; a
-/// genuinely wedged output still fails honestly.
-const STREAM_OUTPUT_SUSTAINED_FAIL_WINDOW: Duration = Duration::from_secs(2);
+/// A stream output over its budget DEGRADES (latest-wins coalescing) for as
+/// long as the pipeline still makes progress, and for this long without any.
+/// A single over-budget sample used to be a death sentence: one 166ms-old
+/// frame killed a 3-platform live session (2026-07-15 owner incident), and the
+/// 2 s window that replaced it was still one (2026-10-01).
+const STREAM_OUTPUT_WEDGED_TIMEOUT: Duration = OUTPUT_WEDGED_TIMEOUT;
+/// A stream stall at least this long is reported to the streamer while it
+/// lasts, and again when the stream resumes.
+const STREAM_OUTPUT_STALL_NOTICE_THRESHOLD: Duration = Duration::from_secs(2);
 // Raw stream frames receive wall-clock PTS at FFmpeg demux, so the stream leg
 // may remain latest-wins under pressure. Recording/shared raw fallback has the
 // same integrity contract as encoded output: preserve admitted frames in order
@@ -102,8 +114,12 @@ const STREAM_OUTPUT_SUSTAINED_FAIL_WINDOW: Duration = Duration::from_secs(2);
 // silently replacing content.
 #[cfg(not(target_os = "windows"))]
 const FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long one encoded access unit may wait on a FIFO that accepts no bytes
+/// before the output counts as wedged. Both roles wait out a starved FFmpeg:
+/// with only the stream waiting, a six-second freeze kept the stream and
+/// condemned the recording (`smoke:multistream-endurance`, plan 087).
 #[cfg(target_os = "macos")]
-const VIDEOTOOLBOX_FIFO_WRITE_STALL_TOLERANCE: Duration = FIFO_FRAME_WRITE_HARD_TIMEOUT;
+const VIDEOTOOLBOX_FIFO_WRITE_STALL_TOLERANCE: Duration = OUTPUT_WEDGED_TIMEOUT;
 #[cfg(all(target_os = "macos", debug_assertions))]
 const VIDEORC_TEST_VT_FIFO_PAUSE_AFTER_FRAMES_ENV: &str = "VIDEORC_TEST_VT_FIFO_PAUSE_AFTER_FRAMES";
 #[cfg(all(target_os = "macos", debug_assertions))]
@@ -1032,6 +1048,7 @@ where
     let guard = EncoderBridgeFifoWriterGuard::enter(lifecycle);
     spawn(Box::new(move || {
         let _guard = guard;
+        crate::host_pressure::promote_current_thread_for_live_media();
         writer();
     }))
 }
@@ -1160,13 +1177,19 @@ fn encoder_bridge_recording_no_progress_timeout(
     video_output: EncoderBridgeVideoOutput,
     raw_fifo_write_stall_tolerance: Duration,
 ) -> Duration {
-    // Encoded outputs retain the proven two-second bridge contract. Raw fallback
-    // must not be failed on that shorter generic window when its platform writer
-    // is explicitly allowed to wait longer for the next FIFO byte (Windows MF).
-    // The writer's complete-frame hard timeout independently bounds a write that
-    // keeps making byte progress.
+    // Media Foundation retains the proven two-second bridge contract. Raw
+    // fallback must not be failed on that shorter generic window when its
+    // platform writer is explicitly allowed to wait longer for the next FIFO
+    // byte (Windows MF). The writer's complete-frame hard timeout independently
+    // bounds a write that keeps making byte progress.
+    //
+    // VideoToolbox waits out a starved FFmpeg (plan 087): its FIFO writer
+    // tolerates the same window, so a recording pauses before encode through a
+    // host stall and resumes with a truthful gap instead of ending.
     if video_output == EncoderBridgeVideoOutput::RawYuv420p {
         RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT.max(raw_fifo_write_stall_tolerance)
+    } else if video_output.uses_video_toolbox() {
+        OUTPUT_WEDGED_TIMEOUT
     } else {
         RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT
     }
@@ -1195,27 +1218,29 @@ enum EncoderBridgeOverBudgetEscalation {
     Fail,
 }
 
-/// Stream output DEGRADES under transient pressure — its latest-wins
-/// coalescing makes dropped frames an honest, visible quality trade.
-/// Recording uses the separate progress-aware admission policy above.
+/// Stream output DEGRADES under pressure — its latest-wins coalescing makes
+/// dropped frames an honest, visible quality trade. Recording uses the
+/// separate progress-aware admission policy above.
 /// A single over-age sample used to kill a recording outright — the
 /// 2026-07-16 owner incident lost a 4K session 2s in at "oldest 251/250ms"
 /// while the encoder was merely warming up (depth 6/16, still progressing).
+///
+/// Neither a full queue nor time spent over budget ends the stream: both are
+/// what a starved host looks like, and the stream has no way back once its
+/// writer exits. Only an output that made no progress at all for
+/// `STREAM_OUTPUT_WEDGED_TIMEOUT` fails.
 fn encoder_bridge_over_budget_escalation(
-    policy: EncoderBridgeOutputQueuePolicy,
-    queue_depth: u64,
-    over_budget_since: Instant,
-    now: Instant,
+    last_progress_age: Duration,
 ) -> EncoderBridgeOverBudgetEscalation {
-    // A queue at its frame ceiling means the consumer made no progress across
-    // the whole depth ladder — that is not jitter.
-    if queue_depth >= policy.max_frames as u64 {
-        return EncoderBridgeOverBudgetEscalation::Fail;
-    }
-    if now.duration_since(over_budget_since) >= STREAM_OUTPUT_SUSTAINED_FAIL_WINDOW {
+    if last_progress_age >= STREAM_OUTPUT_WEDGED_TIMEOUT {
         return EncoderBridgeOverBudgetEscalation::Fail;
     }
     EncoderBridgeOverBudgetEscalation::Degrade
+}
+
+/// Whether a finished stream stall was long enough to tell the streamer about.
+fn stream_output_stall_is_notable(stall: Duration) -> bool {
+    stall >= STREAM_OUTPUT_STALL_NOTICE_THRESHOLD
 }
 
 fn encoder_bridge_output_pressure_error(
@@ -1234,7 +1259,9 @@ fn encoder_bridge_output_pressure_error(
     };
     if policy.role == EncoderBridgeOutputRole::Stream {
         io::Error::other(format!(
-            "{role} encoder output exceeded its bounded latency contract (depth {queue_depth}/{}, oldest {age_ms}/{}ms); {integrity}",
+            "{role} encoder output made no progress for {}ms (limit {}ms; depth {queue_depth}/{}, oldest {age_ms}/{}ms); {integrity}",
+            last_progress_age.as_millis(),
+            STREAM_OUTPUT_WEDGED_TIMEOUT.as_millis(),
             policy.max_frames,
             policy.max_age.as_millis(),
         ))
@@ -2737,6 +2764,7 @@ pub fn start_synthetic_recording_bridge(
     let writer = thread::Builder::new()
         .name("videorc-recording-encoder-bridge".to_string())
         .spawn(move || {
+            crate::host_pressure::promote_current_thread_for_live_media();
             let params = SyntheticRecordingWriterParams {
                 session_id,
                 target_fps: target_fps.max(1),
@@ -3733,22 +3761,16 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 recording_no_progress_timeout,
             )
         };
-        // Over-budget is a death sentence only when SUSTAINED (or the queue is
-        // truly full): a transient downstream stall degrades to latest-wins
-        // coalescing and recovers, instead of one over-age sample killing a
-        // live session (2026-07-15 incident).
+        // Over-budget is a death sentence only when the output is WEDGED: a
+        // downstream stall degrades to latest-wins coalescing and recovers,
+        // instead of an over-age sample (2026-07-15 incident) or a two-second
+        // host stall (2026-10-01 incident) killing a live session.
         let admission = match admission {
             EncoderBridgePreEncodeAdmission::FailOutput
                 if output_queue_policy.role == EncoderBridgeOutputRole::Stream =>
             {
-                let now = Instant::now();
-                let since = *output_over_budget_since.get_or_insert(now);
-                match encoder_bridge_over_budget_escalation(
-                    output_queue_policy,
-                    queue_depth,
-                    since,
-                    now,
-                ) {
+                output_over_budget_since.get_or_insert_with(Instant::now);
+                match encoder_bridge_over_budget_escalation(last_output_progress_at.elapsed()) {
                     EncoderBridgeOverBudgetEscalation::Degrade => {
                         EncoderBridgePreEncodeAdmission::CoalesceLatestStreamFrame
                     }
@@ -3765,7 +3787,16 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 EncoderBridgePreEncodeAdmission::FailOutput
             }
             other => {
-                output_over_budget_since = None;
+                if let Some(since) = output_over_budget_since.take()
+                    && stream_output_stall_is_notable(since.elapsed())
+                {
+                    tracing::warn!(
+                        role = encoder_bridge_output_role_label(output_queue_policy.role),
+                        stall_ms = since.elapsed().as_millis() as u64,
+                        queue_depth,
+                        "stream output resumed after a stall; no encoded frame was dropped"
+                    );
+                }
                 other
             }
         };
@@ -6051,7 +6082,9 @@ impl VideoToolboxH264PipeWriter {
             stop,
             deadline,
             write_stall_tolerance,
-            FIFO_FRAME_WRITE_HARD_TIMEOUT,
+            // The stall tolerance also bounds the whole write, so a reader
+            // that is merely starved is waited out (plan 087).
+            write_stall_tolerance.max(FIFO_FRAME_WRITE_HARD_TIMEOUT),
             // Stop closes the sender and prevents new access units. Finish the
             // one already in flight so an ordinary user stop cannot manufacture
             // a bridge failure and strand a complete recording as recovery MKV.
@@ -7218,6 +7251,68 @@ static RECORDING_QUEUE_DROP_WATCH: std::sync::Mutex<Option<RecordingQueueDropWat
 static STREAM_QUEUE_PRESSURE_WATCH: std::sync::Mutex<Option<RecordingQueueDropWatch>> =
     std::sync::Mutex::new(None);
 
+pub(crate) const STREAM_OUTPUT_STALLED_CODE: &str = "stream-output-stalled";
+pub(crate) const STREAM_OUTPUT_RESUMED_CODE: &str = "stream-output-resumed";
+
+#[derive(Default)]
+struct StreamOutputStallWatch {
+    session_id: String,
+    /// Longest no-progress age sampled during the stall being reported.
+    stalled_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamOutputStallTransition {
+    Unchanged,
+    Stalled { stalled_ms: u64 },
+    Resumed { stalled_ms: u64 },
+}
+
+/// Feed one stream-leg diagnostics sample. A stall is frames waiting on an
+/// output that has not moved for the notice threshold; it is reported once
+/// when it starts and once when the output moves again.
+fn stream_output_stall_watch_update(
+    watch: &mut StreamOutputStallWatch,
+    session_id: &str,
+    queue_depth: u64,
+    last_progress_age_ms: Option<u64>,
+) -> StreamOutputStallTransition {
+    if watch.session_id != session_id {
+        *watch = StreamOutputStallWatch {
+            session_id: session_id.to_string(),
+            stalled_ms: None,
+        };
+    }
+    let stalled_now = last_progress_age_ms.filter(|age_ms| {
+        queue_depth > 0 && stream_output_stall_is_notable(Duration::from_millis(*age_ms))
+    });
+    match (watch.stalled_ms, stalled_now) {
+        (None, Some(age_ms)) => {
+            watch.stalled_ms = Some(age_ms);
+            StreamOutputStallTransition::Stalled { stalled_ms: age_ms }
+        }
+        (Some(longest_ms), Some(age_ms)) => {
+            watch.stalled_ms = Some(longest_ms.max(age_ms));
+            StreamOutputStallTransition::Unchanged
+        }
+        (Some(longest_ms), None) => {
+            watch.stalled_ms = None;
+            // A writer that has exited reports no progress age at all. That
+            // is the end of the output, not a recovery.
+            if last_progress_age_ms.is_none() {
+                return StreamOutputStallTransition::Unchanged;
+            }
+            StreamOutputStallTransition::Resumed {
+                stalled_ms: longest_ms,
+            }
+        }
+        (None, None) => StreamOutputStallTransition::Unchanged,
+    }
+}
+
+static STREAM_OUTPUT_STALL_WATCH: std::sync::Mutex<Option<StreamOutputStallWatch>> =
+    std::sync::Mutex::new(None);
+
 async fn emit_encoder_bridge_diagnostics(
     state: &AppState,
     session_id: &str,
@@ -7258,6 +7353,19 @@ async fn emit_encoder_bridge_diagnostics(
         }
     }
 
+    // Plan 087: the session record names an overloaded host while it is
+    // overloaded, instead of leaving "this Mac was busy" to be reconstructed.
+    if let Some(message) = crate::host_pressure::poll_host_overload_notice(session_id) {
+        tracing::warn!(session_id, "{message}");
+        let _ = crate::recording::emit_health_event(
+            state,
+            Some(session_id),
+            crate::protocol::HealthLevel::Warn,
+            crate::host_pressure::HOST_OVERLOADED_CODE,
+            &message,
+        );
+    }
+
     // Stream pressure must be audible BEFORE any failure: the watchdog now
     // degrades (drops to latest-wins) instead of dying on one over-age
     // sample, and this is the user's signal that a platform connection is
@@ -7281,7 +7389,55 @@ async fn emit_encoder_bridge_diagnostics(
                 Some(session_id),
                 crate::protocol::HealthLevel::Warn,
                 "stream-output-pressure",
-                "Stream output is under pressure: a destination is accepting data slower than the stream produces it. Frames are being dropped from the live stream to keep latency; the recording is unaffected.",
+                "Stream output is under pressure: the stream is being produced faster than it can be sent, because this computer is busy or a destination is slow. Frames are being dropped from the live stream to keep latency; the recording is unaffected.",
+            );
+        }
+
+        // Plan 087: a stalled stream is news while it lasts, not at stop.
+        let stall = {
+            let mut guard = STREAM_OUTPUT_STALL_WATCH
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let watch = guard.get_or_insert_with(StreamOutputStallWatch::default);
+            stream_output_stall_watch_update(
+                watch,
+                session_id,
+                runtime.queue_depth,
+                runtime.output_last_progress_age_ms,
+            )
+        };
+        match stall {
+            StreamOutputStallTransition::Unchanged => {}
+            StreamOutputStallTransition::Stalled { stalled_ms } => {
+                let _ = crate::recording::emit_health_event(
+                    state,
+                    Some(session_id),
+                    crate::protocol::HealthLevel::Warn,
+                    STREAM_OUTPUT_STALLED_CODE,
+                    &format!(
+                        "The live stream is frozen: its output has not moved for {} seconds because this computer is too busy. It resumes by itself when the computer catches up. Closing heavy apps helps.",
+                        stalled_ms / 1000
+                    ),
+                );
+            }
+            StreamOutputStallTransition::Resumed { stalled_ms } => {
+                let _ = crate::recording::emit_health_event(
+                    state,
+                    Some(session_id),
+                    crate::protocol::HealthLevel::Info,
+                    STREAM_OUTPUT_RESUMED_CODE,
+                    &format!(
+                        "The live stream resumed after a freeze of about {} seconds. Viewers saw a frozen picture; the stream stayed connected.",
+                        stalled_ms / 1000
+                    ),
+                );
+            }
+        }
+        if let Some(stream_error) = error.as_deref() {
+            crate::recording::publish_stream_output_failure_if_active(
+                state,
+                session_id,
+                stream_error,
             );
         }
     }
@@ -8465,43 +8621,85 @@ mod tests {
     }
 
     #[test]
-    fn stream_over_budget_degrades_first_and_fails_only_when_sustained() {
-        let policy = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
-            role: EncoderBridgeOutputRole::Stream,
-            ..EncoderBridgeDiagnosticsContext::default()
-        });
-        let since = Instant::now();
+    fn stream_over_budget_degrades_until_the_output_is_wedged() {
+        // The 2026-07-15 shape (one over-age sample) and both 2026-10-01
+        // shapes (a FIFO that accepted nothing for 2 s; an encoder holding one
+        // frame for 2090 ms) degrade instead of killing the stream.
+        for last_progress_age in [
+            Duration::ZERO,
+            Duration::from_millis(166),
+            Duration::from_millis(2_090),
+            STREAM_OUTPUT_WEDGED_TIMEOUT - Duration::from_millis(1),
+        ] {
+            assert_eq!(
+                encoder_bridge_over_budget_escalation(last_progress_age),
+                EncoderBridgeOverBudgetEscalation::Degrade,
+                "{last_progress_age:?} without progress is a stall, not a wedge"
+            );
+        }
+        // No encoder completion and no FIFO write for the whole window.
+        assert_eq!(
+            encoder_bridge_over_budget_escalation(STREAM_OUTPUT_WEDGED_TIMEOUT),
+            EncoderBridgeOverBudgetEscalation::Fail
+        );
+    }
 
-        // A fresh over-age sample (the 2026-07-15 incident shape: depth 2/8,
-        // oldest 166ms) degrades instead of killing the stream.
+    #[test]
+    fn stream_stall_watch_reports_a_stall_once_and_its_end_once() {
+        let mut watch = StreamOutputStallWatch::default();
+        // Healthy: frames flow, or nothing is waiting.
         assert_eq!(
-            encoder_bridge_over_budget_escalation(policy, 2, since, since),
-            EncoderBridgeOverBudgetEscalation::Degrade
+            stream_output_stall_watch_update(&mut watch, "s1", 1, Some(20)),
+            StreamOutputStallTransition::Unchanged
         );
         assert_eq!(
-            encoder_bridge_over_budget_escalation(
-                policy,
-                2,
-                since,
-                since + STREAM_OUTPUT_SUSTAINED_FAIL_WINDOW - Duration::from_millis(1),
-            ),
-            EncoderBridgeOverBudgetEscalation::Degrade
+            stream_output_stall_watch_update(&mut watch, "s1", 0, Some(9_000)),
+            StreamOutputStallTransition::Unchanged,
+            "an idle output with nothing queued is not a stall"
         );
-        // Continuously over budget for the whole window → real failure.
+        // The 2026-10-01 shape: frames queued, nothing moving.
         assert_eq!(
-            encoder_bridge_over_budget_escalation(
-                policy,
-                2,
-                since,
-                since + STREAM_OUTPUT_SUSTAINED_FAIL_WINDOW,
-            ),
-            EncoderBridgeOverBudgetEscalation::Fail
+            stream_output_stall_watch_update(&mut watch, "s1", 8, Some(2_100)),
+            StreamOutputStallTransition::Stalled { stalled_ms: 2_100 }
         );
-        // A queue at its frame ceiling is not jitter — fail immediately.
         assert_eq!(
-            encoder_bridge_over_budget_escalation(policy, 8, since, since),
-            EncoderBridgeOverBudgetEscalation::Fail
+            stream_output_stall_watch_update(&mut watch, "s1", 8, Some(4_100)),
+            StreamOutputStallTransition::Unchanged
         );
+        assert_eq!(
+            stream_output_stall_watch_update(&mut watch, "s1", 2, Some(40)),
+            StreamOutputStallTransition::Resumed { stalled_ms: 4_100 }
+        );
+        assert_eq!(
+            stream_output_stall_watch_update(&mut watch, "s1", 2, Some(40)),
+            StreamOutputStallTransition::Unchanged
+        );
+        // A new session never inherits the previous one's stall.
+        assert_eq!(
+            stream_output_stall_watch_update(&mut watch, "s1", 8, Some(3_000)),
+            StreamOutputStallTransition::Stalled { stalled_ms: 3_000 }
+        );
+        assert_eq!(
+            stream_output_stall_watch_update(&mut watch, "s2", 1, Some(10)),
+            StreamOutputStallTransition::Unchanged
+        );
+        // A writer that exits mid-stall did not recover.
+        assert_eq!(
+            stream_output_stall_watch_update(&mut watch, "s2", 8, Some(5_000)),
+            StreamOutputStallTransition::Stalled { stalled_ms: 5_000 }
+        );
+        assert_eq!(
+            stream_output_stall_watch_update(&mut watch, "s2", 0, None),
+            StreamOutputStallTransition::Unchanged
+        );
+    }
+
+    #[test]
+    fn stream_stall_notice_ignores_ordinary_jitter() {
+        assert!(!stream_output_stall_is_notable(Duration::from_millis(166)));
+        assert!(stream_output_stall_is_notable(
+            STREAM_OUTPUT_STALL_NOTICE_THRESHOLD
+        ));
     }
 
     #[test]
@@ -8658,8 +8856,21 @@ mod tests {
                 windows_raw_fifo_stall_tolerance,
             ),
             RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
-            "encoded outputs keep the existing two-second bridge contract",
+            "Media Foundation keeps the existing two-second bridge contract",
         );
+        for video_output in [
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+            EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
+        ] {
+            assert_eq!(
+                encoder_bridge_recording_no_progress_timeout(
+                    video_output,
+                    windows_raw_fifo_stall_tolerance,
+                ),
+                OUTPUT_WEDGED_TIMEOUT,
+                "a VideoToolbox recording waits out a starved FFmpeg (plan 087)",
+            );
+        }
         for role in [
             EncoderBridgeOutputRole::Recording,
             EncoderBridgeOutputRole::Shared,
@@ -11043,10 +11254,12 @@ mod tests {
             VIDEOTOOLBOX_FIFO_WRITE_STALL_TOLERANCE > RECORDING_OUTPUT_QUEUE_MAX_AGE,
             "queue pressure must not become a FIFO liveness verdict"
         );
+        // Plan 087: a starved reader is waited out; only a wedged one fails.
         assert_eq!(
             VIDEOTOOLBOX_FIFO_WRITE_STALL_TOLERANCE,
-            FIFO_FRAME_WRITE_HARD_TIMEOUT
+            OUTPUT_WEDGED_TIMEOUT
         );
+        assert!(VIDEOTOOLBOX_FIFO_WRITE_STALL_TOLERANCE > FIFO_FRAME_WRITE_HARD_TIMEOUT);
     }
 
     #[cfg(target_os = "macos")]
@@ -11223,6 +11436,70 @@ mod tests {
         };
         // FFmpeg going away is the process exit's story, not a bridge verdict.
         assert!(downstream_closed);
+    }
+
+    /// A reader that accepts nothing until `ready_at`: FFmpeg starved by a
+    /// busy host, then running again.
+    #[cfg(target_os = "macos")]
+    struct StalledThenReadySink {
+        ready_at: Instant,
+        written: SharedCountingSink,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl StdWrite for StalledThenReadySink {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if Instant::now() < self.ready_at {
+                return Err(io::Error::from(io::ErrorKind::WouldBlock));
+            }
+            self.written.write(buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Plan 087 regression: the 2026-10-01 stream died because FFmpeg read
+    /// nothing for a little over two seconds. The writer now waits that out.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn fifo_writer_outlasts_a_reader_stall_longer_than_the_old_two_second_limit() {
+        let stall = Duration::from_millis(2_400);
+        let (frame_tx, frame_rx) = std_mpsc::sync_channel(1);
+        let (result_tx, result_rx) = std_mpsc::sync_channel(3);
+        frame_tx
+            .send(QueuedVideoToolboxFrame {
+                frame: VideoToolboxH264AnnexBFrame {
+                    timing: VideoToolboxFrameTiming::new(0, 30, 1, 30),
+                    bytes: vec![0x44; 8],
+                    nal_types: vec![1],
+                    is_idr: false,
+                },
+            })
+            .expect("queue frame");
+        drop(frame_tx);
+        let written = SharedCountingSink::default();
+        run_video_toolbox_fifo_writer_loop(
+            StalledThenReadySink {
+                ready_at: Instant::now() + stall,
+                written: written.clone(),
+            },
+            VideoToolboxH264PipeWriter::for_output(
+                EncoderBridgeVideoOutput::VideoToolboxH264AnnexB,
+            ),
+            frame_rx,
+            result_tx,
+            Arc::new(AtomicBool::new(false)),
+            VIDEOTOOLBOX_FIFO_WRITE_STALL_TOLERANCE,
+            None,
+        );
+        let result = result_rx.recv().expect("writer result");
+        assert!(
+            matches!(result, VideoToolboxFifoWriterResult::FrameWritten { .. }),
+            "the writer must wait out a {stall:?} stall: {result:?}"
+        );
+        assert_eq!(written.bytes(), vec![0x44; 8]);
     }
 
     struct AlwaysWouldBlockSink;

@@ -1,6 +1,8 @@
 # Plan 089: 7TV emotes in the Stream Manager
 
-**Status:** PLANNED 2026-10-01. **Priority:** P2 (a feature, not a bug; 7TV is
+**Status:** EXECUTED 2026-10-01 (S1-S4 on `plan/089-7tv-emotes`; S5 owner
+live acceptance, the privacy-page PR merge and the terms skim are owed; see
+"Execution notes" at the end). **Priority:** P2 (a feature, not a bug; 7TV is
 the emote layer most Twitch and Kick communities type in). **Size:** M, 5
 slices. **Planned against:** `26ccbf96` (origin/main; the shared checkout was
 184 commits behind, so every reference below is from a clean worktree).
@@ -515,3 +517,44 @@ Also confirm:
 - **Prefetching the set when an account connects or the app starts**, so the first second after Go Live is covered too.
 - **Retrying a failed image URL after ~60 s** instead of never (`chat-avatar.tsx`). This touches the main window's eager bundle.
 - **YouTube's own custom emoji** (`:shortcode:` text). It is a separate feature.
+
+## Execution notes (2026-10-01)
+
+Branch `plan/089-7tv-emotes`, one commit per slice: S1 `5a03e34f`, S2
+`747966e9`, S3 `290c21c8`, S4 `75b40e70`. The privacy paragraph (D3) is
+videorc-web PR #66, open and unmerged. D1 and D2 use the recommended defaults.
+
+**Where the build differs from the plan, and why:**
+
+- **The zero-width helper lives in `lib/chat-emotes.ts`, not `lib/stream-manager-chat.ts`.**
+  That module already imports `comment-row`, so putting it there would have made a cycle.
+- **The prune throttle helper returns a delay (`avatarPruneDelayMs`), not a boolean.**
+  Main needs the delay to schedule the trailing pass.
+- **The 7TV loader has its own task handle (`seventv_task`) instead of joining `tasks`.**
+  That lets the Settings switch stop it alone. `abort_tasks` still aborts it with the connectors.
+- **The Settings row opens its own short-lived backend client, as Upcoming does, instead of going through `use-studio`.**
+  The main window's eager bundle is byte-identical in raw size (1,993,737 raw before and after S4).
+- **`needs_reload` was added.**
+  With nothing linked, the global set is unused, so its edits do not trigger a reload. A link appearing still does.
+- **The loading line reads "Loading your 7TV emotes…".**
+- **Unit tests start with 7TV off.**
+  The coordinator has no 7TV endpoint under `cfg(test)`, so no test reaches the network. Tests that want the loader point it at a mock server.
+
+**Verified locally:**
+
+- **Rust:** 336 targeted backend tests and 260 live-chat-path tests pass, including `seventv`, `live_chat`, `remote_lan`, `storage::`, Kick, Twitch, YouTube, X, Orcle, highlight, and the method-policy inventory. `seventv_live_schema` passes against production 7TV. Clippy `-D warnings` and `cargo fmt --check` are clean, all on Rust 1.98.0.
+- **Desktop:** the full desktop suite passes (245 files, 2,513 tests). Typecheck, format and build pass. Lint shows 1 warning, which is pre-existing in `use-studio.tsx`. The renderer budget is 385,065 gzip (local).
+- **Smokes:** `smoke:live-chat-fake-providers` passes (375 messages, no 7TV request without accounts). `smoke:remote-lan` passes.
+- **Comments window:** `probe:comments-window` passes all 154 assertions.
+- **By eye:** a throwaway copy of `probe:comments-window`, deleted afterwards, rendered real 7TV images in the Stream Manager:
+  - `catJAM` with `RainTime` stacked on it
+  - the 96×32 `yonose`, unsquashed
+  - `GAMBA`
+- **Settings:** `capture-ui-pages` shows the new General row, on by default, reading "Loads when you go live."
+
+**Still owed:**
+
+- S5 live acceptance by the owner (the table above).
+- Merge and deploy web PR #66 before the release.
+- D4: skim the terms.
+- Run `seventv_live_schema` on the release commit.

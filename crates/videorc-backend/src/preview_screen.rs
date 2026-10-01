@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, TryLockError, mpsc as std_mpsc};
 use std::thread;
@@ -655,8 +656,72 @@ pub struct PreviewScreenShared {
     window_started_at: Option<Instant>,
     source_fps: Option<f64>,
     last_error: Option<String>,
+    /// A running stream the system stopped (`stream:didStopWithError:`), held
+    /// until the metrics poll decides between a restart and a failure.
+    stream_stop: Option<ScreenStreamStop>,
     capture_timings: ScreenCaptureTimingWindow,
 }
+
+/// `SCStreamErrorUserStopped`: the person ended sharing from the macOS menu
+/// bar. That is a decision, not a fault, and is never restarted.
+const SC_STREAM_ERROR_USER_STOPPED: isize = -3817;
+/// A stopped screen stream is restarted at most this many times per window.
+/// One `replayd` crash needs one restart; a stream that keeps stopping is a
+/// real fault and is reported as one.
+const SCREEN_STREAM_STOP_RESTART_LIMIT: usize = 3;
+const SCREEN_STREAM_STOP_RESTART_WINDOW: Duration = Duration::from_secs(60);
+pub(crate) const SCREEN_CAPTURE_STOPPED_CODE: &str = "screen-capture-stopped";
+pub(crate) const SCREEN_CAPTURE_RESTORED_CODE: &str = "screen-capture-restored";
+
+// Only ScreenCaptureKit reports a stopped stream; the policy around it is
+// unit-tested on every platform.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScreenStreamStop {
+    reason: String,
+    code: isize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScreenStreamStopDisposition {
+    /// Start the same source again; `replayd` relaunches within a second.
+    Restart,
+    /// Leave the source failed with this message.
+    Fail(String),
+}
+
+/// Plan 087: on 2026-10-01 `replayd` crashed under a live session and the
+/// screen stayed frozen until the session was stopped. A stream stop was only
+/// stored as a string: logged nowhere, and never restarted, because a Failed
+/// source has no restart snapshot.
+fn screen_stream_stop_disposition(
+    stop: &ScreenStreamStop,
+    recent_restarts: &mut VecDeque<Instant>,
+    now: Instant,
+) -> ScreenStreamStopDisposition {
+    if stop.code == SC_STREAM_ERROR_USER_STOPPED {
+        return ScreenStreamStopDisposition::Fail(
+            "Screen sharing was stopped from the macOS menu bar. Select the screen again to resume."
+                .to_string(),
+        );
+    }
+    while recent_restarts
+        .front()
+        .is_some_and(|at| now.duration_since(*at) >= SCREEN_STREAM_STOP_RESTART_WINDOW)
+    {
+        recent_restarts.pop_front();
+    }
+    if recent_restarts.len() >= SCREEN_STREAM_STOP_RESTART_LIMIT {
+        return ScreenStreamStopDisposition::Fail(format!(
+            "ScreenCaptureKit stream stopped: {} (code {}). Videorc restarted it {} times in the last minute and it stopped again. Select the screen again to retry.",
+            stop.reason, stop.code, SCREEN_STREAM_STOP_RESTART_LIMIT
+        ));
+    }
+    recent_restarts.push_back(now);
+    ScreenStreamStopDisposition::Restart
+}
+
+static SCREEN_STREAM_STOP_RESTARTS: StdMutex<VecDeque<Instant>> = StdMutex::new(VecDeque::new());
 
 impl PreviewScreenShared {
     fn with_surface_backing_tracker(tracker: SurfaceBackingTrackerHandle) -> Self {
@@ -3830,6 +3895,137 @@ fn apply_screen_snapshot_to_status(
     status.updated_at = Utc::now().to_rfc3339();
 }
 
+fn emit_screen_capture_health_event(
+    state: &AppState,
+    level: crate::protocol::HealthLevel,
+    code: &str,
+    message: &str,
+) {
+    // Attach the event to the capture session when one is running, so it lands
+    // in that session's record; never wait for the recording lock from here.
+    let session_id = state
+        .recording
+        .try_lock()
+        .ok()
+        .and_then(|recording| recording.as_ref().map(|active| active.session_id.clone()));
+    let _ = crate::recording::emit_health_event(state, session_id.as_deref(), level, code, message);
+}
+
+fn fail_stopped_screen_stream(shared: &Arc<StdMutex<PreviewScreenShared>>, message: String) {
+    shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .last_error = Some(message);
+}
+
+/// The system stopped a running screen stream. Say so, then start the same
+/// source again unless the person stopped it or it keeps stopping.
+async fn handle_screen_stream_stop(
+    state: &AppState,
+    run_id: &str,
+    shared: &Arc<StdMutex<PreviewScreenShared>>,
+    stop: ScreenStreamStop,
+) {
+    let disposition = {
+        let mut recent_restarts = SCREEN_STREAM_STOP_RESTARTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        screen_stream_stop_disposition(&stop, &mut recent_restarts, Instant::now())
+    };
+    let snapshot = match disposition {
+        ScreenStreamStopDisposition::Fail(message) => {
+            emit_screen_capture_health_event(
+                state,
+                crate::protocol::HealthLevel::Error,
+                SCREEN_CAPTURE_STOPPED_CODE,
+                &message,
+            );
+            fail_stopped_screen_stream(shared, message);
+            return;
+        }
+        ScreenStreamStopDisposition::Restart => {
+            let slot = state.preview_screen.lock().await;
+            if slot.run_id.as_deref() != Some(run_id) {
+                // A newer source already replaced this stream.
+                return;
+            }
+            screen_restart_snapshot_from_slot(&slot)
+        }
+    };
+    let stopped = format!(
+        "ScreenCaptureKit stream stopped: {} (code {})",
+        stop.reason, stop.code
+    );
+    let Some(snapshot) = snapshot else {
+        // Not a Live, restartable generation (already starting or changing).
+        fail_stopped_screen_stream(shared, stopped);
+        return;
+    };
+    emit_screen_capture_health_event(
+        state,
+        crate::protocol::HealthLevel::Warn,
+        SCREEN_CAPTURE_STOPPED_CODE,
+        &format!(
+            "{stopped}. Videorc is restarting screen capture; the picture is frozen until it is back."
+        ),
+    );
+    let state = state.clone();
+    let shared = Arc::clone(shared);
+    // The restart retires this poll task with the generation it belongs to,
+    // so the restart itself must be process-owned.
+    state.clone().spawn_process_task(async move {
+        let attempt = {
+            let _session_start_source_transition_fence = state
+                .session_start_source_transition_fence
+                .clone()
+                .lock_owned()
+                .await;
+            if state.process_shutdown_requested() {
+                return;
+            }
+            let transition = acquire_preview_screen_transition(&state).await;
+            let prepared = begin_forced_screen_restart(&state, &snapshot, None).await;
+            let attempt = prepared.map(|prepared| {
+                queue_forced_preview_screen_restart(&state, prepared, "stream-stopped")
+            });
+            drop(transition);
+            attempt
+        };
+        let Some(attempt) = attempt else {
+            // The source changed between the stop and the restart; whatever
+            // replaced it owns the screen now.
+            return;
+        };
+        match complete_force_restart_preview_screen(&state, attempt).await {
+            PreviewScreenForceRestartResult::Restarted { status, .. }
+                if status.state != PreviewScreenState::Failed =>
+            {
+                emit_screen_capture_health_event(
+                    &state,
+                    crate::protocol::HealthLevel::Info,
+                    SCREEN_CAPTURE_RESTORED_CODE,
+                    "Screen capture is back after the system stopped it.",
+                );
+            }
+            PreviewScreenForceRestartResult::Restarted { status, .. } => {
+                let message = format!(
+                    "{stopped}. Restarting it failed: {}",
+                    status.message.as_deref().unwrap_or("no detail")
+                );
+                emit_screen_capture_health_event(
+                    &state,
+                    crate::protocol::HealthLevel::Error,
+                    SCREEN_CAPTURE_STOPPED_CODE,
+                    &message,
+                );
+            }
+            PreviewScreenForceRestartResult::RejectedStale => {
+                fail_stopped_screen_stream(&shared, stopped);
+            }
+        }
+    });
+}
+
 async fn poll_screen_metrics(
     state: AppState,
     run_id: String,
@@ -3841,6 +4037,14 @@ async fn poll_screen_metrics(
 
     loop {
         ticker.tick().await;
+        let stream_stop = shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .stream_stop
+            .take();
+        if let Some(stop) = stream_stop {
+            handle_screen_stream_stop(&state, &run_id, &shared, stop).await;
+        }
         let snapshot = screen_shared_snapshot(&shared);
 
         let status = {
@@ -4997,17 +5201,18 @@ mod macos {
         unsafe impl SCStreamDelegate for ScreenPreviewDelegate {
             #[unsafe(method(stream:didStopWithError:))]
             unsafe fn stream_didStopWithError(&self, _stream: &SCStream, error: &NSError) {
-                let description = error.localizedDescription();
+                let reason = ns_string_to_string(&error.localizedDescription())
+                    .unwrap_or_else(|| "unknown error".to_string());
+                let code = error.code();
+                tracing::warn!(code, reason = %reason, "ScreenCaptureKit stopped the screen stream");
                 let mut guard = self
                     .ivars()
                     .shared
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                guard.last_error = Some(format!(
-                    "ScreenCaptureKit stream stopped: {}",
-                    ns_string_to_string(&description)
-                        .unwrap_or_else(|| "unknown error".to_string())
-                ));
+                // The metrics poll owns the verdict: restart the source, or
+                // publish the failure.
+                guard.stream_stop = Some(ScreenStreamStop { reason, code });
             }
         }
     );
@@ -5854,6 +6059,58 @@ mod tests {
     use crate::protocol::{SourceSelection, VideoPreset};
     use crate::storage::Database;
     use tokio::sync::{broadcast, oneshot};
+
+    #[test]
+    fn stopped_screen_stream_restarts_unless_the_person_stopped_it_or_it_keeps_stopping() {
+        let now = Instant::now();
+        // The 2026-10-01 shape: replayd crashed under a live session.
+        let crashed = ScreenStreamStop {
+            reason: "The stream was stopped".to_string(),
+            code: -3805,
+        };
+        let mut recent = VecDeque::new();
+        for attempt in 0..SCREEN_STREAM_STOP_RESTART_LIMIT {
+            assert_eq!(
+                screen_stream_stop_disposition(
+                    &crashed,
+                    &mut recent,
+                    now + Duration::from_secs(attempt as u64)
+                ),
+                ScreenStreamStopDisposition::Restart
+            );
+        }
+        // It keeps stopping: report it instead of restarting for ever.
+        let ScreenStreamStopDisposition::Fail(message) =
+            screen_stream_stop_disposition(&crashed, &mut recent, now + Duration::from_secs(10))
+        else {
+            panic!("a stream that stops again and again must fail honestly");
+        };
+        assert!(message.contains("code -3805"));
+        assert!(message.contains("stopped again"));
+        // Old restarts age out of the window.
+        assert_eq!(
+            screen_stream_stop_disposition(
+                &crashed,
+                &mut recent,
+                now + SCREEN_STREAM_STOP_RESTART_WINDOW + Duration::from_secs(5)
+            ),
+            ScreenStreamStopDisposition::Restart
+        );
+
+        // "Stop sharing" in the menu bar is a decision and never restarts.
+        let user_stopped = ScreenStreamStop {
+            reason: "The user stopped the stream".to_string(),
+            code: SC_STREAM_ERROR_USER_STOPPED,
+        };
+        let mut untouched = VecDeque::new();
+        let ScreenStreamStopDisposition::Fail(message) =
+            screen_stream_stop_disposition(&user_stopped, &mut untouched, now)
+        else {
+            panic!("a user stop must not restart");
+        };
+        assert!(message.contains("macOS menu bar"));
+        assert!(untouched.is_empty());
+    }
 
     #[test]
     fn capture_drop_reason_screen_frame_status_classifies_complete_and_noncomplete_fixtures() {
