@@ -239,7 +239,10 @@ with explicit manual RTMP still available.
 8. Verify YouTube Studio shows the expected title, description, privacy, and fresh broadcast.
 9. Verify Videorc waits for active ingest before transitioning the broadcast live.
 10. Verify video and audio arrive on YouTube.
-11. Verify YouTube chat messages appear in the Stream Manager, and a reply sent from Videorc appears in the watch-page chat.
+11. Verify YouTube chat messages appear in the Stream Manager. Then send a reply from the
+    Videorc composer and verify it appears in the watch-page chat with no error chip.
+    `YouTube send failed (404 Not Found).` means the send route is wrong (plan 084);
+    the documented route is `POST /youtube/v3/liveChat/messages`.
 12. Stop in Videorc and verify the YouTube broadcast transitions to complete.
 13. Disconnect YouTube and verify Videorc no longer appears under myaccount.google.com/permissions.
 
@@ -384,6 +387,12 @@ Expected evidence:
 
 ## Official Docs Checked
 
+- 2026-10-01:
+  [YouTube liveChatMessages.insert](https://developers.google.com/youtube/v3/live/docs/liveChatMessages/insert)
+  (`POST https://www.googleapis.com/youtube/v3/liveChat/messages`, `part=snippet`,
+  `youtube` or `youtube.force-ssl`; 404 `liveChatNotFound`), cross-checked against the
+  [YouTube Data API discovery document](https://www.googleapis.com/discovery/v1/apis/youtube/v3/rest)
+  revision 20260924.
 - 2026-06-13:
   [YouTube Live Streaming API overview](https://developers.google.com/youtube/v3/live/getting-started),
   [YouTube Life of a Broadcast](https://developers.google.com/youtube/v3/live/life-of-a-broadcast),

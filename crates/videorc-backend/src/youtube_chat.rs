@@ -74,6 +74,11 @@ pub fn chat_send_body(live_chat_id: &str, text: &str) -> serde_json::Value {
 
 /// Send one chat message to the broadcast's live chat (Comments upgrade S4).
 /// The `youtube.force-ssl` scope already granted for reading authorizes this.
+///
+/// `api_base_url` is the API host, the same override the reader takes. The
+/// documented insert route is `POST /youtube/v3/liveChat/messages`, which is
+/// the reader's `list` path. The resource is named `liveChatMessages`, but
+/// `/youtube/v3/liveChatMessages` is not a route (Google answers HTML 404).
 pub async fn send_youtube_chat_message(
     client: &reqwest::Client,
     api_base_url: Option<&str>,
@@ -81,9 +86,12 @@ pub async fn send_youtube_chat_message(
     live_chat_id: &str,
     text: &str,
 ) -> Result<ProviderSendReceipt, String> {
-    let base = api_base_url.unwrap_or("https://www.googleapis.com/youtube/v3");
+    let base = api_base_url.unwrap_or(YOUTUBE_API_BASE_URL);
     let response = client
-        .post(format!("{base}/liveChatMessages"))
+        .post(format!(
+            "{}{LIVE_CHAT_MESSAGES_PATH}",
+            base.trim_end_matches('/')
+        ))
         .query(&[("part", "snippet")])
         .bearer_auth(access_token)
         .json(&chat_send_body(live_chat_id, text))
@@ -175,6 +183,12 @@ fn classify_youtube_send_error(
         403 => provider_reason
             .map(|reason| format!("YouTube send failed ({status}): {reason}"))
             .unwrap_or_else(|| format!("YouTube send failed ({status}).")),
+        // Documented `liveChatNotFound`. A 404 without that reason (Google's
+        // HTML "no such route" page) falls through with its raw status, so a
+        // wrong send path stays diagnosable instead of reading as "ended".
+        404 if normalized_code == "livechatnotfound" => {
+            "YouTube live chat isn't available for this broadcast (it may have ended).".to_string()
+        }
         429 => format!("YouTube rate-limited the send{}.", retry_suffix()),
         _ => provider_reason
             .map(|reason| format!("YouTube send failed ({status}): {reason}"))
@@ -1039,7 +1053,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new()
-            .route("/liveChatMessages", post(mock_send_response))
+            .route(LIVE_CHAT_MESSAGES_PATH, post(mock_send_response))
             .with_state(MockSendResponse { status, body });
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
@@ -1051,7 +1065,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new()
-            .route("/liveChatMessages", post(mock_raw_send_response))
+            .route(LIVE_CHAT_MESSAGES_PATH, post(mock_raw_send_response))
             .with_state(MockRawSendResponse {
                 status,
                 body: body.to_string(),
@@ -1060,6 +1074,36 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         format!("http://{address}")
+    }
+
+    #[derive(Debug, Clone)]
+    struct CapturedSend {
+        method: String,
+        path: String,
+        query: String,
+        authorization: String,
+        body: Value,
+    }
+
+    async fn capture_send(
+        State(captured): State<Arc<Mutex<Option<CapturedSend>>>>,
+        method: axum::http::Method,
+        OriginalUri(uri): OriginalUri,
+        headers: axum::http::HeaderMap,
+        Json(body): Json<Value>,
+    ) -> impl IntoResponse {
+        *captured.lock().unwrap() = Some(CapturedSend {
+            method: method.to_string(),
+            path: uri.path().to_string(),
+            query: uri.query().unwrap_or_default().to_string(),
+            authorization: headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string(),
+            body,
+        });
+        Json(json!({ "id": "yt-sent-1" }))
     }
 
     fn text_response() -> LiveChatMessagesResponse {
@@ -1186,6 +1230,69 @@ mod tests {
             body["snippet"]["textMessageDetails"]["messageText"],
             "hello viewers"
         );
+    }
+
+    /// Pins the documented `liveChatMessages.insert` route. The resource is
+    /// named `liveChatMessages` but its REST path is `liveChat/messages`;
+    /// posting to `/youtube/v3/liveChatMessages` gets Google's HTML 404.
+    #[tokio::test]
+    async fn send_posts_to_the_documented_insert_route() {
+        let captured = Arc::new(Mutex::new(None));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .fallback(capture_send)
+            .with_state(captured.clone());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let receipt = send_youtube_chat_message(
+            &reqwest::Client::new(),
+            Some(&format!("http://{address}")),
+            "token-1",
+            "chat-1",
+            "hello",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(receipt.provider_message_id.as_deref(), Some("yt-sent-1"));
+        let request = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("send reached the mock");
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/youtube/v3/liveChat/messages");
+        assert_eq!(request.path, LIVE_CHAT_MESSAGES_PATH);
+        assert_eq!(request.query, "part=snippet");
+        assert_eq!(request.authorization, "Bearer token-1");
+        assert_eq!(request.body, chat_send_body("chat-1", "hello"));
+    }
+
+    #[test]
+    fn send_classifies_documented_live_chat_not_found() {
+        let body = json!({
+            "error": {
+                "code": 404,
+                "message": "The live chat identified in the API request does not exist.",
+                "errors": [{ "reason": "liveChatNotFound", "domain": "youtube.liveChat" }]
+            }
+        });
+        let error = classify_youtube_send_error(StatusCode::NOT_FOUND, Some(&body), None);
+        assert_eq!(
+            error,
+            "YouTube live chat isn't available for this broadcast (it may have ended)."
+        );
+    }
+
+    #[test]
+    fn send_keeps_route_level_404_explicit() {
+        // A non-JSON 404 is Google saying the route does not exist (our bug),
+        // not a missing chat; keep the raw status so it stays diagnosable.
+        let error = classify_youtube_send_error(StatusCode::NOT_FOUND, None, None);
+        assert_eq!(error, "YouTube send failed (404 Not Found).");
     }
 
     #[tokio::test]
