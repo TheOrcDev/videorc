@@ -350,3 +350,48 @@ cycle and minimize/restore stay behind `--allow-focus`. The run passed the
 gate. Eager renderer bytes after the token change: 1,993,889 raw /
 385,143 gzip, 152 raw and 68 gzip bytes over the pre-S1 build on this
 machine.
+
+## S2: the Preview frame
+
+The Preview frame is a data-URL document that cannot read the stylesheet;
+`window-palette.ts` paints its coats. `DARK_GLASS_COATS` is now derived
+from the dark covers the same way styles.css derives its own: the body
+paints the work cover, `oklch(0.13 0.003 286 / 83%)`, and the content coat
+is the work delta, `oklch(0.13 0.003 286 / 0%)`. The frame therefore
+composites to exactly what the main window's work area does, and
+`window-palette.test.ts` pins both strings to the covers it parses out of
+`styles.css`. The window's dark pin (`set_window_appearance`) and the clear
+strip (applied after the pin, S0) are unchanged.
+
+`--gate --themes=dark,light`, all five roles, S2 tree: every sample passes,
+the Preview included.
+
+| theme | sample          | transmission | sharpness | primary | secondary | white luminance | nativeClear |
+| ----- | --------------- | -----------: | --------: | ------: | --------: | --------------: | ----------- |
+| dark  | Preview · strip |        53.17 |      0.05 |   11.93 |      5.05 |          0.0308 | yes         |
+| light | Preview · strip |        53.17 |      0.05 |   11.93 |      5.05 |          0.0308 | yes         |
+
+The light row is the pinned-dark check: with the main window in light
+theme the frame still measures 0.0308 over white (gate ≤ 0.12), the same
+as in dark theme, so the dark pin holds under the clear material. Before
+S2 (the S1 gate run) the frame failed on the plan 050 coats: primary 5.24,
+secondary 2.22, white luminance 0.134. The strip's sharpness also drops
+from the 4.1–4.2 the 2026-09-23 calibration recorded at the window edge to
+0.05: the 60 pt blur reaches past the 28 pt strip's edge where AppKit's
+30 pt did not. The main, Stream Manager, Captions and Notes rows repeat
+the S1 table to the hundredth. WindowServer, five windows up: 51.8%.
+
+Not run, and why: `pnpm probe:preview-lifecycle` steals focus about a
+hundred times and is the owner's to schedule. `pnpm probe:preview-window`
+calls `main-window-focus` and clicks through the OS by design, and
+`pnpm probe:comments-window` opens and toggles the Stream Manager through
+`openCommentsWindow`, which shows and focuses the window as the product
+does (`comments-window-open`, `comments-window-toggle`,
+`comments-window-click-message`). Both activate the app, so neither ran
+with the owner at the machine. The glass probe's own window-open step
+(`comments-window-open`, `captions-window-open`, `notes-window-open`,
+`preview-window-open`) goes through the product's open paths, which show
+the window and focus an existing one, so a five-role run can activate the
+app once at the start (not measured; the walk records `mainFocused` only
+in the main-only runs, where it stays false). A `focus: false` variant of
+the open commands would close that gap.

@@ -4,6 +4,8 @@ import { describe, expect, it } from 'vitest'
 
 import {
   compositeCover,
+  DARK_GLASS_BASE,
+  DARK_GLASS_COATS,
   deriveGlassCoats,
   DOCKED_PREVIEW_CORNER_RADIUS,
   GLASS_COVERS
@@ -67,6 +69,17 @@ describe('window palette mirrors styles.css', () => {
     expect(light.sidebar).toBe(0)
     expect(light.content).toBeCloseTo(0.24, 10)
     expect(compositeCover(0.5, 0.24)).toBeCloseTo(GLASS_COVERS.win32.light.work, 10)
+  })
+
+  it('paints the Preview frame with the dark work cover and a 0% content coat (plan 091 S2)', () => {
+    expect(token(block('.dark'), 'glass-base')).toBe(DARK_GLASS_BASE)
+    expect(DARK_GLASS_COATS).toEqual({
+      window: 'oklch(0.13 0.003 286 / 83%)',
+      content: 'oklch(0.13 0.003 286 / 0%)'
+    })
+    const coats = deriveGlassCoats(covers(block('.dark')))
+    expect(DARK_GLASS_COATS.window).toBe(`oklch(${DARK_GLASS_BASE} / ${coats.body * 100}%)`)
+    expect(DARK_GLASS_COATS.content).toBe(`oklch(${DARK_GLASS_BASE} / ${coats.content * 100}%)`)
   })
 
   it('reads the Increase Contrast covers at 95% and the reduced-transparency solid', () => {

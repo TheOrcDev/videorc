@@ -534,3 +534,12 @@ Evidence: `docs/acceptance/2026-10-02-clear-glass-calibration.md`.
   (≤ 4) against a prediction from the computed coats over a bare-backdrop
   reference, with the OKLCH L reported beside it, rather than the ±0.02 L
   check the slice sketched.
+- **S2 (2026-10-02).** `DARK_GLASS_COATS` is derived from the dark covers
+  (body 83%, content 0%), pinned to `styles.css` by `window-palette.test.ts`.
+  The Preview passes the full gate in both themes, the pinned-dark check
+  included (white luminance 0.031 with main in light theme), and its strip
+  sharpness drops from 4.2 to 0.05 under the 60 pt blur.
+  `probe:preview-lifecycle` is the owner's to schedule; `probe:preview-window`
+  and `probe:comments-window` were not run because both activate the app
+  by design (`main-window-focus` and OS clicks; the Stream Manager's open
+  and toggle paths).

@@ -117,12 +117,28 @@ export function compositeCover(body: number, coat: number): number {
   return 1 - (1 - body) * (1 - coat)
 }
 
+/** styles.css `.dark` `--glass-base`: the dark tone every dark coat is cut from. */
+export const DARK_GLASS_BASE = '0.13 0.003 286'
+
+function alphaPercent(alpha: number): string {
+  return `${Math.round(alpha * 10_000) / 100}%`
+}
+
 /**
  * The dark glass coats for main-side documents that cannot read the
- * stylesheet: the Preview frame paints both over the OS material (plan 050).
- * Still the plan 050 values; plan 091 S2 derives them from the dark covers.
+ * stylesheet: the Preview frame paints both over the clear material, pinned
+ * dark because it frames video (plan 050; plan 091 S2). Derived from the
+ * dark covers like styles.css derives its own: the body paints the work
+ * cover (83%) and the content coat is the work delta, 0% on macOS, so the
+ * frame composites to exactly what the main window's work area does.
+ * window-palette.test.ts fails when these drift from styles.css.
  */
-export const DARK_GLASS_COATS = Object.freeze({
-  window: 'oklch(0.13 0.003 286 / 42%)',
-  content: 'oklch(0.13 0.003 286 / 34%)'
-})
+export const DARK_GLASS_COATS = Object.freeze(
+  (() => {
+    const coats = deriveGlassCoats(GLASS_COVERS.darwin.dark)
+    return {
+      window: `oklch(${DARK_GLASS_BASE} / ${alphaPercent(coats.body)})`,
+      content: `oklch(${DARK_GLASS_BASE} / ${alphaPercent(coats.content)})`
+    }
+  })()
+)
