@@ -4262,6 +4262,8 @@ export interface LiveChatMessageFragment {
   type: string
   text: string
   imageUrl?: string
+  /** A 7TV zero-width emote (plan 089): drawn on top of the emote before it. */
+  zeroWidth?: boolean
 }
 
 /**

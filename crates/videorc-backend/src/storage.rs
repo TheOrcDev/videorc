@@ -7460,6 +7460,7 @@ mod tests {
                 fragment_type: "text".to_string(),
                 text: format!("hello {seq}"),
                 image_url: None,
+                zero_width: false,
             }],
             event_type: LiveChatEventType::Message,
             amount_text: None,

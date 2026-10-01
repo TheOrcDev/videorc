@@ -91,8 +91,6 @@ mod secrets;
 mod session_audio;
 mod session_ops;
 mod session_token;
-// Plan 089 S1 lands the client alone; S2 wires it into live chat.
-#[allow(dead_code)]
 mod seventv;
 mod source_mask;
 mod source_registry;

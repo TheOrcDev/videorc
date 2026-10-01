@@ -11,15 +11,18 @@
 //! about 13x larger for the same set; and polling rather than the EventAPI,
 //! which acknowledges no subscription, so a broken one would go unnoticed.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
+use tokio::task::JoinHandle;
 
-use crate::streaming::StreamPlatform;
+use crate::live_chat::{LiveChatEventType, LiveChatMessage, LiveChatMessageFragment};
+use crate::state::AppState;
+use crate::streaming::{StreamPlatform, stream_platform_label};
 
 /// 7TV's v4 GraphQL endpoint (the same API is served at `api.7tv.app`).
 pub(crate) const SEVENTV_GQL_URL: &str = "https://7tv.io/v4/gql";
@@ -43,6 +46,13 @@ const SEVENTV_EMOTE_NAME_MAX_CHARS: usize = 100;
 const SEVENTV_ERROR_MAX_CHARS: usize = 160;
 const SEVENTV_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const SEVENTV_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Platform limits already bound a message (500 chars on Twitch); this bounds
+/// the stored row whatever a platform allows.
+const SEVENTV_MAX_EMOTES_PER_MESSAGE: usize = 100;
+/// How often a running chat session asks whether the emotes changed. An emote
+/// the streamer adds mid-stream renders within this.
+const SEVENTV_POLL_INTERVAL: Duration = Duration::from_secs(30);
+const SEVENTV_MAX_BACKOFF: Duration = Duration::from_secs(300);
 
 /// The 7TV connection platform for a Videorc platform. 7TV links Twitch, Kick
 /// and YouTube (as `GOOGLE`), and nothing else.
@@ -761,6 +771,286 @@ pub(crate) async fn load(
     Ok(assemble_load(connections, &links, &sets))
 }
 
+fn is_seventv_fragment(fragment: &LiveChatMessageFragment) -> bool {
+    fragment
+        .image_url
+        .as_deref()
+        .is_some_and(|url| url.starts_with(SEVENTV_CDN_EMOTE_PREFIX))
+}
+
+fn text_fragment(text: String) -> LiveChatMessageFragment {
+    LiveChatMessageFragment {
+        fragment_type: "text".to_string(),
+        text,
+        image_url: None,
+        zero_width: false,
+    }
+}
+
+/// Turn 7TV emote names in viewers' messages into `emote` fragments (plan
+/// 089, decision 6). A word matches when it equals an emote name exactly,
+/// case included, between whitespace. Only text a viewer wrote is scanned:
+/// `text` fragments, or the message text when a platform sent no fragments.
+/// Twitch and Kick emotes, mentions and cheermotes pass through untouched, as
+/// do deleted, system, membership, follow and moderation rows. The message
+/// text never changes, and a message without a match keeps its fragments
+/// exactly. Running it twice gives the same result as once, because emote
+/// fragments are never scanned again; connectors retry the same message.
+pub(crate) fn decorate(messages: &mut [LiveChatMessage], indexes: &SevenTvIndexes) {
+    if indexes.is_empty() {
+        return;
+    }
+    for message in messages {
+        if message.is_deleted
+            || !matches!(
+                message.event_type,
+                LiveChatEventType::Message | LiveChatEventType::Paid
+            )
+        {
+            continue;
+        }
+        if let Some(index) = indexes.get(&message.platform) {
+            decorate_message(message, index);
+        }
+    }
+}
+
+fn decorate_message(message: &mut LiveChatMessage, index: &SevenTvEmoteIndex) {
+    if index.is_empty()
+        || !message
+            .message_text
+            .split_whitespace()
+            .any(|word| index.get(word).is_some())
+    {
+        return;
+    }
+    let already = message
+        .fragments
+        .iter()
+        .filter(|fragment| is_seventv_fragment(fragment))
+        .count();
+    let mut budget = SEVENTV_MAX_EMOTES_PER_MESSAGE.saturating_sub(already);
+    let plain;
+    let source: &[LiveChatMessageFragment] = if message.fragments.is_empty() {
+        plain = [text_fragment(message.message_text.clone())];
+        &plain
+    } else {
+        &message.fragments
+    };
+    let mut decorated = Vec::with_capacity(source.len() + 2);
+    let mut changed = false;
+    for fragment in source {
+        if fragment.fragment_type == "text" && fragment.image_url.is_none() {
+            changed |= split_text_run(&fragment.text, index, &mut budget, &mut decorated);
+        } else {
+            decorated.push(fragment.clone());
+        }
+    }
+    if changed {
+        message.fragments = decorated;
+    }
+}
+
+/// Split one text run into text and emote fragments, keeping every whitespace
+/// char where it was. Returns whether any emote matched.
+fn split_text_run(
+    text: &str,
+    index: &SevenTvEmoteIndex,
+    budget: &mut usize,
+    out: &mut Vec<LiveChatMessageFragment>,
+) -> bool {
+    let mut changed = false;
+    let mut pending = String::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let word_start = rest
+            .find(|character: char| !character.is_whitespace())
+            .unwrap_or(rest.len());
+        pending.push_str(&rest[..word_start]);
+        rest = &rest[word_start..];
+        let word_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let word = &rest[..word_end];
+        match index.get(word).filter(|_| *budget > 0) {
+            Some(emote) => {
+                if !pending.is_empty() {
+                    out.push(text_fragment(std::mem::take(&mut pending)));
+                }
+                out.push(LiveChatMessageFragment {
+                    fragment_type: "emote".to_string(),
+                    text: word.to_string(),
+                    image_url: Some(emote_image_url(&emote.id)),
+                    zero_width: emote.zero_width,
+                });
+                *budget -= 1;
+                changed = true;
+            }
+            None => pending.push_str(word),
+        }
+        rest = &rest[word_end..];
+    }
+    if !pending.is_empty() {
+        out.push(text_fragment(pending));
+    }
+    changed
+}
+
+fn platform_list(platforms: &[StreamPlatform]) -> String {
+    platforms
+        .iter()
+        .map(|platform| stream_platform_label(*platform))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The backend log line for a load. It reaches support bundles.
+fn load_log_line(load: &SevenTvLoad, connections: &[SevenTvConnection], reloaded: bool) -> String {
+    let prefix = if reloaded {
+        "7TV emotes updated"
+    } else {
+        "7TV emotes"
+    };
+    match &load.summary {
+        SevenTvSummary::NotLinked => {
+            let connected: Vec<StreamPlatform> = connections
+                .iter()
+                .map(|connection| connection.platform)
+                .collect();
+            format!(
+                "{prefix}: no 7TV account is linked to the connected {} channel, so chat shows none.",
+                platform_list(&connected)
+            )
+        }
+        SevenTvSummary::Linked {
+            set_name,
+            emote_count,
+            global_count,
+            platforms,
+            truncated,
+        } => {
+            let mut line = format!(
+                "{prefix}: \"{}\" ({emote_count} emotes + {global_count} global) for {} chat.",
+                log_safe(set_name),
+                platform_list(platforms)
+            );
+            if *truncated {
+                line.push_str(" The set has more emotes than Videorc loads; the rest stay text.");
+            }
+            line
+        }
+    }
+}
+
+/// The streamer's own channels that 7TV can link, in the order a platform
+/// without a link borrows from (Twitch, Kick, YouTube): one per platform.
+pub(crate) fn session_connections<'a>(
+    accounts: impl IntoIterator<Item = (StreamPlatform, Option<&'a str>)>,
+) -> Vec<SevenTvConnection> {
+    let accounts: Vec<(StreamPlatform, Option<&str>)> = accounts.into_iter().collect();
+    [
+        StreamPlatform::Twitch,
+        StreamPlatform::Kick,
+        StreamPlatform::Youtube,
+    ]
+    .into_iter()
+    .filter_map(|platform| {
+        accounts.iter().find_map(|(candidate, account_id)| {
+            (*candidate == platform)
+                .then_some(*account_id)
+                .flatten()
+                .and_then(|account_id| SevenTvConnection::new(platform, account_id))
+        })
+    })
+    .collect()
+}
+
+/// Load the session's 7TV emotes beside its chat connectors, then keep them
+/// fresh until the session ends; the coordinator aborts this task with the
+/// connectors. Chat delivery never waits for it: messages that arrive before
+/// the first load stay text.
+pub(crate) fn spawn_session_loader(
+    state: &AppState,
+    session_generation: u64,
+    endpoint: String,
+    connections: Vec<SevenTvConnection>,
+) -> JoinHandle<()> {
+    let state = state.clone();
+    tokio::spawn(async move {
+        run_session(
+            state,
+            session_generation,
+            SevenTvClient::with_endpoint(endpoint),
+            connections,
+            SEVENTV_POLL_INTERVAL,
+        )
+        .await;
+    })
+}
+
+async fn run_session(
+    state: AppState,
+    session_generation: u64,
+    client: SevenTvClient,
+    connections: Vec<SevenTvConnection>,
+    interval: Duration,
+) {
+    let mut loaded: Option<SevenTvLoad> = None;
+    let mut logged_failures = HashSet::new();
+    let mut failures: u32 = 0;
+    loop {
+        if state.live_chat.lock().await.session_generation() != session_generation {
+            return;
+        }
+        let outcome = match &loaded {
+            None => Some(load(&client, &connections).await),
+            Some(current) => match client.poll_versions(&connections, &current.set_ids).await {
+                Ok(versions) if !needs_reload(current, &versions) => None,
+                Ok(_) => Some(load(&client, &connections).await),
+                Err(error) => Some(Err(error)),
+            },
+        };
+        match outcome {
+            None => failures = 0,
+            Some(Ok(next)) => {
+                if !state
+                    .live_chat
+                    .lock()
+                    .await
+                    .install_seventv_indexes(session_generation, next.indexes.clone())
+                {
+                    return;
+                }
+                state.emit_log("info", load_log_line(&next, &connections, loaded.is_some()));
+                loaded = Some(next);
+                failures = 0;
+            }
+            Some(Err(error)) => {
+                if logged_failures.insert(error.to_string()) {
+                    state.emit_log(
+                        "warn",
+                        format!(
+                            "7TV emotes unavailable ({error}). Chat works without them; Videorc keeps retrying."
+                        ),
+                    );
+                }
+                failures = failures.saturating_add(1);
+            }
+        }
+        tokio::time::sleep(backoff(interval, failures)).await;
+    }
+}
+
+/// The wait before the next 7TV request: the poll interval, doubled per
+/// consecutive failure up to five minutes (30, 60, 120, 240, 300 s).
+fn backoff(interval: Duration, failures: u32) -> Duration {
+    let doublings = failures.saturating_sub(1).min(16);
+    if failures == 0 {
+        return interval;
+    }
+    interval
+        .saturating_mul(1 << doublings)
+        .min(SEVENTV_MAX_BACKOFF.max(interval))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1243,6 +1533,588 @@ mod tests {
             }
         );
         assert_eq!(server.state.bodies.lock().unwrap().len(), 1);
+    }
+
+    fn chat(
+        platform: StreamPlatform,
+        text: &str,
+        fragments: Vec<LiveChatMessageFragment>,
+    ) -> LiveChatMessage {
+        LiveChatMessage {
+            id: format!("{platform:?}:{text}"),
+            provider_message_id: format!("p-{text}"),
+            platform,
+            target_id: None,
+            session_id: "s".to_string(),
+            author_id: Some("viewer".to_string()),
+            author_name: "Viewer".to_string(),
+            author_avatar_url: None,
+            author_badges: Vec::new(),
+            author_affiliation: None,
+            author_roles: Vec::new(),
+            published_at: "2026-10-01T00:00:00Z".to_string(),
+            received_at: "2026-10-01T00:00:00Z".to_string(),
+            message_text: text.to_string(),
+            fragments,
+            event_type: LiveChatEventType::Message,
+            amount_text: None,
+            is_deleted: false,
+            raw_provider_type: None,
+            details: None,
+            reply: None,
+            first_message: false,
+        }
+    }
+
+    fn fragment(kind: &str, text: &str, image_url: Option<&str>) -> LiveChatMessageFragment {
+        LiveChatMessageFragment {
+            fragment_type: kind.to_string(),
+            text: text.to_string(),
+            image_url: image_url.map(str::to_string),
+            zero_width: false,
+        }
+    }
+
+    fn text(text: &str) -> LiveChatMessageFragment {
+        fragment("text", text, None)
+    }
+
+    fn seventv(name: &str, id: &str, zero_width: bool) -> LiveChatMessageFragment {
+        LiveChatMessageFragment {
+            zero_width,
+            ..fragment("emote", name, Some(&emote_image_url(id)))
+        }
+    }
+
+    fn all_indexes() -> SevenTvIndexes {
+        let sets = sets();
+        let index = Arc::new(build_index(Some(&sets.sets[0]), &sets.global));
+        [
+            StreamPlatform::Twitch,
+            StreamPlatform::Kick,
+            StreamPlatform::Youtube,
+        ]
+        .into_iter()
+        .map(|platform| (platform, index.clone()))
+        .collect()
+    }
+
+    fn decorated(message: LiveChatMessage) -> LiveChatMessage {
+        let mut messages = vec![message];
+        decorate(&mut messages, &all_indexes());
+        messages.remove(0)
+    }
+
+    #[test]
+    fn twitch_text_runs_split_around_7tv_emotes_with_whitespace_kept() {
+        let message = decorated(chat(
+            StreamPlatform::Twitch,
+            "hi catJAM  there",
+            vec![text("hi catJAM  there")],
+        ));
+        assert_eq!(message.message_text, "hi catJAM  there");
+        assert_eq!(
+            message.fragments,
+            vec![
+                text("hi "),
+                seventv("catJAM", CAT_JAM, false),
+                text("  there")
+            ]
+        );
+    }
+
+    #[test]
+    fn platform_emotes_mentions_and_zero_width_are_handled() {
+        let twitch_kappa = "https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/1.0";
+        let message = decorated(chat(
+            StreamPlatform::Twitch,
+            "@catJAM catJAM RainTime",
+            vec![
+                fragment("mention", "@catJAM", None),
+                text(" "),
+                fragment("emote", "catJAM", Some(twitch_kappa)),
+                text(" RainTime"),
+            ],
+        ));
+        assert_eq!(
+            message.fragments,
+            vec![
+                fragment("mention", "@catJAM", None),
+                text(" "),
+                fragment("emote", "catJAM", Some(twitch_kappa)),
+                text(" "),
+                seventv("RainTime", RAIN_TIME, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn youtube_and_kick_messages_get_fragments_built_from_their_text() {
+        let youtube = decorated(chat(
+            StreamPlatform::Youtube,
+            "catJAM\u{3000}EZ",
+            Vec::new(),
+        ));
+        assert_eq!(
+            youtube.fragments,
+            vec![
+                seventv("catJAM", CAT_JAM, false),
+                text("\u{3000}"),
+                seventv("EZ", EZ, false)
+            ]
+        );
+        let kick_angel = "https://files.kick.com/emotes/1730752/fullsize";
+        let kick = decorated(chat(
+            StreamPlatform::Kick,
+            "hi emojiAngel catJAM",
+            vec![
+                text("hi "),
+                fragment("emote", "emojiAngel", Some(kick_angel)),
+                text(" catJAM"),
+            ],
+        ));
+        assert_eq!(
+            kick.fragments,
+            vec![
+                text("hi "),
+                fragment("emote", "emojiAngel", Some(kick_angel)),
+                text(" "),
+                seventv("catJAM", CAT_JAM, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn messages_without_a_match_are_left_exactly_as_they_were() {
+        for (text_value, fragments) in [
+            ("hello there", Vec::new()),
+            ("hello there", vec![text("hello there")]),
+            ("catjam CATJAM", Vec::new()),
+            ("catJAM, EZ! (catJAM)", Vec::new()),
+            ("", Vec::new()),
+        ] {
+            let original = chat(StreamPlatform::Youtube, text_value, fragments);
+            assert_eq!(decorated(original.clone()), original, "{text_value:?}");
+        }
+        let punctuated = decorated(chat(StreamPlatform::Youtube, "WHAT? catJAM?", Vec::new()));
+        assert_eq!(
+            punctuated.fragments,
+            vec![seventv("WHAT?", EZ, false), text(" catJAM?")]
+        );
+    }
+
+    #[test]
+    fn multibyte_text_next_to_emotes_never_splits_a_char() {
+        let message = decorated(chat(
+            StreamPlatform::Twitch,
+            "🎉catJAM 🎉 catJAM🎉 ñ catJAM",
+            Vec::new(),
+        ));
+        assert_eq!(
+            message.fragments,
+            vec![
+                text("🎉catJAM 🎉 catJAM🎉 ñ "),
+                seventv("catJAM", CAT_JAM, false)
+            ]
+        );
+    }
+
+    #[test]
+    fn only_viewer_chat_and_paid_rows_on_7tv_platforms_are_decorated() {
+        let mut paid = chat(StreamPlatform::Twitch, "catJAM", Vec::new());
+        paid.event_type = LiveChatEventType::Paid;
+        assert_eq!(
+            decorated(paid).fragments,
+            vec![seventv("catJAM", CAT_JAM, false)]
+        );
+        for event_type in [
+            LiveChatEventType::System,
+            LiveChatEventType::Membership,
+            LiveChatEventType::Follow,
+            LiveChatEventType::Moderation,
+            LiveChatEventType::Deleted,
+        ] {
+            let mut row = chat(StreamPlatform::Twitch, "catJAM", Vec::new());
+            row.event_type = event_type;
+            assert_eq!(decorated(row.clone()), row, "{event_type:?}");
+        }
+        let mut deleted = chat(StreamPlatform::Twitch, "catJAM", Vec::new());
+        deleted.is_deleted = true;
+        assert_eq!(decorated(deleted.clone()), deleted);
+        let x = chat(StreamPlatform::X, "catJAM", Vec::new());
+        assert_eq!(decorated(x.clone()), x);
+    }
+
+    #[test]
+    fn at_most_100_emotes_per_message_and_decorating_twice_changes_nothing() {
+        let spam = vec!["EZ"; 101].join(" ");
+        let once = decorated(chat(StreamPlatform::Youtube, &spam, Vec::new()));
+        let emotes = once
+            .fragments
+            .iter()
+            .filter(|fragment| is_seventv_fragment(fragment))
+            .count();
+        assert_eq!(emotes, 100);
+        assert_eq!(once.fragments.last(), Some(&text(" EZ")));
+        assert_eq!(decorated(once.clone()), once);
+
+        let simple = decorated(chat(StreamPlatform::Twitch, "hi catJAM", Vec::new()));
+        assert_eq!(decorated(simple.clone()), simple);
+    }
+
+    #[test]
+    fn decorated_fragments_serialize_zero_width_only_when_set() {
+        let message = decorated(chat(StreamPlatform::Twitch, "catJAM RainTime", Vec::new()));
+        let json = serde_json::to_value(&message.fragments).unwrap();
+        assert_eq!(
+            json,
+            json!([
+                { "type": "emote", "text": "catJAM",
+                  "imageUrl": format!("https://cdn.7tv.app/emote/{CAT_JAM}/2x.webp") },
+                { "type": "text", "text": " " },
+                { "type": "emote", "text": "RainTime", "zeroWidth": true,
+                  "imageUrl": format!("https://cdn.7tv.app/emote/{RAIN_TIME}/2x.webp") },
+            ])
+        );
+    }
+
+    #[test]
+    fn session_connections_take_one_channel_per_platform_in_borrow_order() {
+        let connections = session_connections([
+            (StreamPlatform::X, Some("x-user")),
+            (StreamPlatform::Youtube, Some("UC123")),
+            (StreamPlatform::Kick, None),
+            (StreamPlatform::Twitch, Some("71092938")),
+            (StreamPlatform::Twitch, Some("second-twitch")),
+            (StreamPlatform::Kick, Some("676")),
+        ]);
+        assert_eq!(
+            connections,
+            vec![
+                SevenTvConnection::new(StreamPlatform::Twitch, "71092938").unwrap(),
+                SevenTvConnection::new(StreamPlatform::Kick, "676").unwrap(),
+                SevenTvConnection::new(StreamPlatform::Youtube, "UC123").unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn failures_back_off_to_five_minutes() {
+        let interval = Duration::from_secs(30);
+        let waits: Vec<u64> = [0, 1, 2, 3, 4, 5, 50]
+            .into_iter()
+            .map(|failures| backoff(interval, failures).as_secs())
+            .collect();
+        assert_eq!(waits, vec![30, 30, 60, 120, 240, 300, 300]);
+    }
+
+    fn test_state() -> AppState {
+        let (events, _) = tokio::sync::broadcast::channel(64);
+        AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            crate::storage::Database::open_in_memory_for_tests(),
+        )
+    }
+
+    fn provider(
+        platform: StreamPlatform,
+        account_id: &str,
+    ) -> crate::live_chat::LiveChatProviderState {
+        use crate::live_chat::{
+            CommentsReadState, CommentsWriteState, LiveChatProviderConnectionState,
+        };
+        crate::live_chat::LiveChatProviderState {
+            id: format!("{platform:?}"),
+            platform,
+            target_id: None,
+            account_id: Some(account_id.to_string()),
+            account_label: None,
+            read: CommentsReadState::Ready,
+            write: CommentsWriteState::Unavailable,
+            state: LiveChatProviderConnectionState::Connected,
+            message: String::new(),
+            last_connected_at: None,
+            last_message_at: None,
+            last_error: None,
+        }
+    }
+
+    async fn start_chat_session(
+        state: &AppState,
+        providers: Vec<crate::live_chat::LiveChatProviderState>,
+    ) -> u64 {
+        state.database.ensure_fake_live_chat_session("s").unwrap();
+        let mut coordinator = state.live_chat.lock().await;
+        coordinator.start_session("s".to_string(), providers);
+        coordinator.session_generation()
+    }
+
+    async fn wait_until(mut condition: impl AsyncFnMut() -> bool) {
+        for _ in 0..500 {
+            if condition().await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("condition never held");
+    }
+
+    fn logs_containing(state: &AppState, needle: &str) -> Vec<String> {
+        state
+            .recent_logs(200)
+            .into_iter()
+            .filter(|log| log.message.contains(needle))
+            .map(|log| format!("{} {}", log.level, log.message))
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_loaded_session_decorates_buffer_storage_event_and_phone_alike() {
+        let server = spawn_mock(StatusCode::OK, seventv_like).await;
+        let state = test_state();
+        let generation = start_chat_session(
+            &state,
+            vec![
+                provider(StreamPlatform::Twitch, "71092938"),
+                provider(StreamPlatform::Youtube, "UC-not-linked"),
+                provider(StreamPlatform::X, "x-user"),
+            ],
+        )
+        .await;
+        let connections = state.live_chat.lock().await.seventv_connections();
+        assert_eq!(connections.len(), 2, "X has no 7TV connection");
+        let task = tokio::spawn(run_session(
+            state.clone(),
+            generation,
+            SevenTvClient::with_endpoint(&server.url),
+            connections,
+            Duration::from_secs(3600),
+        ));
+        wait_until(async || !state.live_chat.lock().await.seventv_indexes().is_empty()).await;
+        assert_eq!(
+            logs_containing(&state, "7TV emotes"),
+            vec![
+                "info 7TV emotes: \"Halloween Emotes 2026\" (2 emotes + 4 global) for Twitch, YouTube chat."
+                    .to_string()
+            ]
+        );
+
+        let mut events = state.events.subscribe();
+        let mut youtube = chat(StreamPlatform::Youtube, "hi catJAM RainTime", Vec::new());
+        youtube.id = "youtube-1".to_string();
+        let mut x = chat(StreamPlatform::X, "catJAM", Vec::new());
+        x.id = "x-1".to_string();
+        assert!(crate::live_chat::deliver_message(&state, youtube).await);
+        assert!(crate::live_chat::deliver_message(&state, x).await);
+
+        let expected = vec![
+            text("hi "),
+            seventv("catJAM", CAT_JAM, false),
+            text(" "),
+            seventv("RainTime", RAIN_TIME, true),
+        ];
+        let stored = state
+            .database
+            .list_live_chat_messages_recent("s", 10)
+            .unwrap();
+        let stored_youtube = stored.iter().find(|row| row.id == "youtube-1").unwrap();
+        assert_eq!(stored_youtube.fragments, expected);
+        assert_eq!(stored_youtube.message_text, "hi catJAM RainTime");
+        let stored_x = stored.iter().find(|row| row.id == "x-1").unwrap();
+        assert!(stored_x.fragments.is_empty(), "X is never decorated");
+
+        let snapshot = crate::live_chat::current_status(&state).await;
+        let buffered = snapshot
+            .messages
+            .iter()
+            .find(|row| row.id == "youtube-1")
+            .unwrap();
+        assert_eq!(buffered.fragments, expected);
+
+        let mut emitted = None;
+        let mut phone = None;
+        while let Ok(event) = events.try_recv() {
+            if event.event == "liveChat.message" && event.payload["id"] == "youtube-1" {
+                emitted = Some(event.payload.clone());
+            }
+            if event.event == "remote.chat.message" && event.payload["id"] == "youtube-1" {
+                phone = Some(event.payload.clone());
+            }
+        }
+        let emitted = emitted.expect("liveChat.message for the YouTube row");
+        assert_eq!(emitted["fragments"][3]["zeroWidth"], true);
+        assert_eq!(
+            emitted["fragments"][1]["imageUrl"],
+            format!("https://cdn.7tv.app/emote/{CAT_JAM}/2x.webp")
+        );
+        if let Some(phone) = phone {
+            assert!(
+                !phone.to_string().contains("cdn.7tv.app"),
+                "the phone projection never carries image URLs"
+            );
+        }
+        task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nothing_linked_installs_nothing_and_says_so() {
+        let server = spawn_mock(StatusCode::OK, seventv_like).await;
+        let state = test_state();
+        let generation =
+            start_chat_session(&state, vec![provider(StreamPlatform::Kick, "676")]).await;
+        let connections = state.live_chat.lock().await.seventv_connections();
+        let task = tokio::spawn(run_session(
+            state.clone(),
+            generation,
+            SevenTvClient::with_endpoint(&server.url),
+            connections,
+            Duration::from_secs(3600),
+        ));
+        wait_until(async || !logs_containing(&state, "7TV emotes").is_empty()).await;
+        assert_eq!(
+            logs_containing(&state, "7TV emotes"),
+            vec![
+                "info 7TV emotes: no 7TV account is linked to the connected Kick channel, so chat shows none."
+                    .to_string()
+            ]
+        );
+        assert!(state.live_chat.lock().await.seventv_indexes().is_empty());
+        task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_replaced_session_never_receives_the_old_load() {
+        let server = spawn_mock(StatusCode::OK, seventv_like).await;
+        let state = test_state();
+        let old =
+            start_chat_session(&state, vec![provider(StreamPlatform::Twitch, "71092938")]).await;
+        let fresh = start_chat_session(&state, Vec::new()).await;
+        assert_ne!(old, fresh);
+        run_session(
+            state.clone(),
+            old,
+            SevenTvClient::with_endpoint(&server.url),
+            connections(),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(server.state.bodies.lock().unwrap().is_empty());
+        let mut coordinator = state.live_chat.lock().await;
+        assert!(!coordinator.install_seventv_indexes(old, all_indexes()));
+        assert!(coordinator.seventv_indexes().is_empty());
+        assert!(coordinator.install_seventv_indexes(fresh, all_indexes()));
+        coordinator.stop_session();
+        assert!(coordinator.seventv_indexes().is_empty(), "stop drops them");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_changed_set_is_reloaded_once_and_swapped_in() {
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen_polls = polls.clone();
+        let server = spawn_mock(StatusCode::OK, move |body| {
+            let query = body["query"].as_str().unwrap_or_default();
+            let edited = seen_polls.load(std::sync::atomic::Ordering::SeqCst) >= 2;
+            if query.starts_with("query Poll") {
+                seen_polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let updated = if seen_polls.load(std::sync::atomic::Ordering::SeqCst) >= 2 {
+                    "edited"
+                } else {
+                    "2026-10-01T08:20:30.009+00:00"
+                };
+                return json!({ "data": {
+                    "users": { "c0": { "id": "u", "style": { "activeEmoteSetId": CHANNEL_SET } } },
+                    "emoteSets": {
+                        "emoteSets": [{ "id": CHANNEL_SET, "updatedAt": updated }],
+                        "global": { "id": GLOBAL_SET, "updatedAt": "2026-08-01T21:13:37.761+00:00" }
+                    }
+                } });
+            }
+            if query.starts_with("query Sets") && edited {
+                let mut channel = channel_value();
+                channel["updatedAt"] = json!("edited");
+                channel["emotes"]["items"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(entry("newEmote", AYAYA, false));
+                return json!({ "data": { "emoteSets": {
+                    "emoteSets": [channel],
+                    "global": global_value()
+                } } });
+            }
+            seventv_like(body)
+        })
+        .await;
+        let state = test_state();
+        let generation =
+            start_chat_session(&state, vec![provider(StreamPlatform::Twitch, "71092938")]).await;
+        let task = tokio::spawn(run_session(
+            state.clone(),
+            generation,
+            SevenTvClient::with_endpoint(&server.url),
+            vec![SevenTvConnection::new(StreamPlatform::Twitch, "71092938").unwrap()],
+            Duration::from_millis(10),
+        ));
+        wait_until(async || {
+            state
+                .live_chat
+                .lock()
+                .await
+                .seventv_indexes()
+                .get(&StreamPlatform::Twitch)
+                .is_some_and(|index| index.get("newEmote").is_some())
+        })
+        .await;
+        // Let a few unchanged polls pass, then check nothing reloaded again.
+        wait_until(async || polls.load(std::sync::atomic::Ordering::SeqCst) >= 5).await;
+        task.abort();
+        let kinds: Vec<String> = server
+            .state
+            .bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|body| {
+                body["query"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .split('(')
+                    .next()
+                    .unwrap_or_default()
+                    .trim_start_matches("query ")
+                    .to_string()
+            })
+            .collect();
+        let loads = kinds.iter().filter(|kind| *kind == "Sets").count();
+        assert_eq!(loads, 2, "initial load plus exactly one reload: {kinds:?}");
+        assert_eq!(&kinds[..4], ["Resolve", "Sets", "Poll", "Poll"]);
+        assert_eq!(logs_containing(&state, "7TV emotes updated").len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failures_are_logged_once_per_kind_and_chat_is_untouched() {
+        let server = spawn_mock(StatusCode::SERVICE_UNAVAILABLE, |_| json!({})).await;
+        let state = test_state();
+        let generation =
+            start_chat_session(&state, vec![provider(StreamPlatform::Twitch, "71092938")]).await;
+        let task = tokio::spawn(run_session(
+            state.clone(),
+            generation,
+            SevenTvClient::with_endpoint(&server.url),
+            vec![SevenTvConnection::new(StreamPlatform::Twitch, "71092938").unwrap()],
+            Duration::from_millis(5),
+        ));
+        wait_until(async || server.state.bodies.lock().unwrap().len() >= 3).await;
+        task.abort();
+        assert_eq!(
+            logs_containing(&state, "7TV"),
+            vec![
+                "warn 7TV emotes unavailable (http 5xx). Chat works without them; Videorc keeps retrying."
+                    .to_string()
+            ]
+        );
+        assert!(state.live_chat.lock().await.seventv_indexes().is_empty());
     }
 
     /// Schema-drift alarm against the real 7TV API. Run by hand before a

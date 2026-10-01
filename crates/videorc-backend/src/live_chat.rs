@@ -112,6 +112,10 @@ pub struct LiveChatMessageFragment {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_url: Option<String>,
+    /// A 7TV zero-width emote (plan 089): drawn on top of the emote before it.
+    /// Omitted when false, so every other fragment serializes as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub zero_width: bool,
 }
 
 /// Structured facts of a monetized or community event (plan 055). `None` on a
@@ -866,6 +870,12 @@ pub struct LiveChatCoordinator {
     /// `platform:author_id` of every chatter this session already checked for
     /// the first-time marker (plan 055). Reset per session, not by Clear view.
     chatters_seen: HashSet<String>,
+    /// The session's 7TV emotes per platform (plan 089). The loader swaps
+    /// the whole map; delivery clones the `Arc` and matches outside the lock.
+    seventv_indexes: Arc<crate::seventv::SevenTvIndexes>,
+    /// Where the 7TV loader sends requests. `None` turns 7TV off; unit tests
+    /// start that way so they never reach the network.
+    seventv_endpoint: Option<String>,
 }
 
 /// Minimal authoritative answer needed at the comment-card commit edge. Do
@@ -945,6 +955,8 @@ impl LiveChatCoordinator {
             senders: HashMap::new(),
             send_operations_in_flight: HashMap::new(),
             chatters_seen: HashSet::new(),
+            seventv_indexes: Arc::default(),
+            seventv_endpoint: (!cfg!(test)).then(|| crate::seventv::SEVENTV_GQL_URL.to_string()),
         }
     }
 
@@ -1079,6 +1091,7 @@ impl LiveChatCoordinator {
         self.reconnect_count = 0;
         self.senders.clear();
         self.chatters_seen.clear();
+        self.seventv_indexes = Arc::default();
     }
 
     /// Abort connector tasks and mark every connected provider `ended`. The transcript is
@@ -1094,6 +1107,7 @@ impl LiveChatCoordinator {
         }
         self.session_id = None;
         self.senders.clear();
+        self.seventv_indexes = Arc::default();
     }
 
     /// Clear the local message view (buffer + unread) without touching providers, the
@@ -1309,6 +1323,45 @@ impl LiveChatCoordinator {
 
     pub fn attach_task(&mut self, task: JoinHandle<()>) {
         self.tasks.push(task);
+    }
+
+    /// The session's 7TV emote indexes (plan 089); empty until loaded.
+    pub(crate) fn seventv_indexes(&self) -> Arc<crate::seventv::SevenTvIndexes> {
+        self.seventv_indexes.clone()
+    }
+
+    /// Install freshly loaded 7TV indexes, unless the session they were
+    /// loaded for has ended or been replaced. Returns whether it did.
+    pub(crate) fn install_seventv_indexes(
+        &mut self,
+        session_generation: u64,
+        indexes: crate::seventv::SevenTvIndexes,
+    ) -> bool {
+        if self.session_id.is_none() || self.session_generation != session_generation {
+            return false;
+        }
+        self.seventv_indexes = Arc::new(indexes);
+        true
+    }
+
+    /// Where 7TV requests go; `None` when 7TV is off.
+    pub(crate) fn seventv_endpoint(&self) -> Option<String> {
+        self.seventv_endpoint.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_seventv_endpoint(&mut self, endpoint: Option<String>) {
+        self.seventv_endpoint = endpoint;
+    }
+
+    /// The streamer's own Twitch, Kick and YouTube channels in this session,
+    /// as 7TV connections (plan 089).
+    pub(crate) fn seventv_connections(&self) -> Vec<crate::seventv::SevenTvConnection> {
+        crate::seventv::session_connections(
+            self.providers
+                .iter()
+                .map(|provider| (provider.platform, provider.account_id.as_deref())),
+        )
     }
 
     #[cfg(test)]
@@ -1793,11 +1846,33 @@ where
             coordinator.attach_task(handle);
         }
     }
+    // 7TV emotes (plan 089) load beside the connectors and stop with them.
+    start_seventv_for_session(state, session_generation).await;
     let snapshot = current_status(state).await;
     before_snapshot_emit.await;
     state.emit_event("liveChat.snapshot", snapshot.clone());
     drop(lifecycle_delivery);
     snapshot
+}
+
+/// Start the 7TV emote loader (plan 089) for a chat session that has a
+/// Twitch, Kick or YouTube channel to look up. X attaching later never needs
+/// it: 7TV has no X connection.
+async fn start_seventv_for_session(state: &AppState, session_generation: u64) {
+    let mut coordinator = state.live_chat.lock().await;
+    if coordinator.session_generation() != session_generation {
+        return;
+    }
+    let Some(endpoint) = coordinator.seventv_endpoint() else {
+        return;
+    };
+    let connections = coordinator.seventv_connections();
+    if connections.is_empty() {
+        return;
+    }
+    let handle =
+        crate::seventv::spawn_session_loader(state, session_generation, endpoint, connections);
+    coordinator.attach_task(handle);
 }
 
 pub async fn start_x_live_chat(
@@ -2728,6 +2803,19 @@ async fn mark_first_time_chatters(
     messages
 }
 
+/// Turn 7TV emote names into image fragments (plan 089) before the buffer,
+/// SQLite, the renderer, the phone and Orcle see the message, so they all
+/// agree. A pure lookup in the session's loaded index, outside every fence;
+/// it never touches the network.
+async fn decorate_seventv_emotes(
+    state: &AppState,
+    mut messages: Vec<LiveChatMessage>,
+) -> Vec<LiveChatMessage> {
+    let indexes = state.live_chat.lock().await.seventv_indexes();
+    crate::seventv::decorate(&mut messages, &indexes);
+    messages
+}
+
 /// Persist and emit one sequential provider delivery as one atomic transaction. The
 /// delivery guard plus constant-size per-message undo records make a terminal
 /// persistence failure retryable without cloning the full transcript. Transient
@@ -2741,6 +2829,7 @@ pub(crate) async fn try_deliver_messages(
         return Ok(());
     }
     let messages = mark_first_time_chatters(state, messages).await;
+    let messages = decorate_seventv_emotes(state, messages).await;
     let _delivery = state.live_chat_persistence.begin_delivery().await;
     let (delivery_generation, delivery_session_id, undos, authoritative_messages) = {
         // Coordinator ingest can turn an eligible message into a tombstone.
@@ -3274,6 +3363,51 @@ mod tests {
         );
         assert!(first("fake-3"), "a newcomer's first message is marked");
         assert!(!first("fake-4"), "only the first message is marked");
+    }
+
+    #[tokio::test]
+    async fn seventv_loads_only_with_an_endpoint_and_a_channel_to_look_up() {
+        let state = test_state();
+        let with_account = |platform: StreamPlatform, account_id: &str| LiveChatProviderState {
+            account_id: Some(account_id.to_string()),
+            ..provider_row(platform)
+        };
+        let start = |providers: Vec<LiveChatProviderState>| {
+            let state = state.clone();
+            async move {
+                let mut coordinator = state.live_chat.lock().await;
+                coordinator.start_session("s".to_string(), providers);
+                coordinator.session_generation()
+            }
+        };
+
+        // Unit tests start with 7TV off: no task, so no network.
+        assert_eq!(state.live_chat.lock().await.seventv_endpoint(), None);
+        let generation = start(vec![with_account(StreamPlatform::Twitch, "1")]).await;
+        start_seventv_for_session(&state, generation).await;
+        assert_eq!(state.live_chat.lock().await.runtime_ownership().0, 0);
+
+        // On, but only X and an account-less Kick row: nothing to look up.
+        state
+            .live_chat
+            .lock()
+            .await
+            .set_seventv_endpoint(Some("http://127.0.0.1:9/v4/gql".to_string()));
+        let generation = start(vec![
+            with_account(StreamPlatform::X, "x-user"),
+            provider_row(StreamPlatform::Kick),
+        ])
+        .await;
+        start_seventv_for_session(&state, generation).await;
+        assert_eq!(state.live_chat.lock().await.runtime_ownership().0, 0);
+
+        // On with a YouTube channel: the loader joins the session's tasks,
+        // and a stop aborts it with the connectors.
+        let generation = start(vec![with_account(StreamPlatform::Youtube, "UC1")]).await;
+        start_seventv_for_session(&state, generation).await;
+        assert_eq!(state.live_chat.lock().await.runtime_ownership().0, 1);
+        state.live_chat.lock().await.stop_session();
+        assert_eq!(state.live_chat.lock().await.runtime_ownership().0, 0);
     }
 
     fn empty_start_params(session_id: &str) -> LiveChatStartParams {
@@ -5537,6 +5671,7 @@ mod tests {
                 fragment_type: "text".to_string(),
                 text: "hello".to_string(),
                 image_url: None,
+                zero_width: false,
             }],
             event_type: LiveChatEventType::Paid,
             amount_text: Some("$5.00".to_string()),
