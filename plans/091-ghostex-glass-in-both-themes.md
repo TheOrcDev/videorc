@@ -505,3 +505,32 @@ Done when the owner signs off, or picks the D8 fallback for light mode.
   - plan 050 (`plans/050-real-glass-in-every-window.md`);
   - plan 072 (`plans/072-glass-floating-surfaces.md`);
   - `docs/acceptance/2026-09-23-real-glass-calibration.md`.
+
+## Implementation record
+
+Evidence: `docs/acceptance/2026-10-02-clear-glass-calibration.md`.
+
+- **S0 (2026-10-02).** D1 held on the first attempt: Electron's vibrancy view
+  takes the `VideorcClearGlassView` class in place, the strip is neutral
+  (≤ 1.03 RGB steps from the bare backdrop against 297–349 for AppKit's
+  material) and it persists through theme, resize, simple fullscreen,
+  minimize/restore and a re-created view. macOS 26.5.1 carries one filter
+  the Ghostex comment does not know, `sdrNormalize`; the strip leaves it. No
+  fallback (B or C) was needed. Two findings outside the plan: the addon's
+  test build had never mounted `frame_store` (the compositor's tests use it),
+  and every `*-window-set-bounds` smoke command activated the app through
+  `show()`, so `probe:ui-glass` had been taking focus at placement since
+  plan 050; the commands now honour `focus: false`.
+- **S1 (2026-10-02).** D3's covers held as written: dark 88% / 83%, light
+  93% / 86%, no adjustment. The dark token base `oklch(0.13 0.003 286)`
+  renders `#070708`, not the `#0D0D0F` this plan's gap table assumed (that
+  hex is `window-palette.ts`'s rounding), so the measured dark samples sit
+  about 0.02 OKLCH L below the table and contrast lands higher than the
+  table's 4.69:1 (secondary 5.05:1 dark work, 4.71:1 light work). The
+  derived coats survive Tailwind v4 / lightningcss verbatim and Chromium
+  resolves them to the designed alphas (0.83 / 0.294 / 0 dark, 0.86 / 0.5 / 0
+  light). D5's dark work cover is 0.5116, not 0.512, so the Windows content
+  delta is exactly plan 050's 26%. `ghostexParity` is an RGB-distance gate
+  (≤ 4) against a prediction from the computed coats over a bare-backdrop
+  reference, with the OKLCH L reported beside it, rather than the ±0.02 L
+  check the slice sketched.

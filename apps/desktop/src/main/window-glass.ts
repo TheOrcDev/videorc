@@ -96,8 +96,12 @@ function glassMaterialFrom(value: string | undefined): GlassMaterial | null {
  */
 export type GlassStyle = 'clear' | 'material'
 
-/** S0 ships the strip behind `VIDEORC_GLASS_STYLE=clear`; S1 makes `clear` the default. */
-export const DEFAULT_GLASS_STYLE: GlassStyle = 'material'
+/**
+ * Clear glass is the default (plan 091, S1). `VIDEORC_GLASS_STYLE=material`
+ * keeps the plan 050 look, AppKit's own tint and saturation, as the A/B
+ * control for one release.
+ */
+export const DEFAULT_GLASS_STYLE: GlassStyle = 'clear'
 
 /** Ghostex's blur: 60 pt, wide enough that desktop detail never reads as noise under a tint. */
 export const CLEAR_GLASS_BLUR_RADIUS = 60

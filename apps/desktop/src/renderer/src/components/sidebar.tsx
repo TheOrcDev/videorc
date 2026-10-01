@@ -179,10 +179,12 @@ export function Sidebar({
   const trafficLightGutter = useTrafficLightGutter()
 
   return (
-    // No fill of its own: the sidebar sits on the window coat alone, which is
-    // what makes it read lighter than the content pane (plan 050 D3). A white
-    // tint here dropped secondary text under 4.5:1 over a bright desktop.
-    <aside className="flex w-52 shrink-0 flex-col border-r text-sidebar-foreground">
+    // The sidebar coat (plan 091, D3/D4): the delta that takes the body's
+    // cover up to the sidebar's, so the sidebar is the heavier, more covered
+    // region, as in Ghostex. The pane's own tone comes from the same base as
+    // the window coat; this is never a white tint (plan 050 found one dropped
+    // secondary text under 4.5:1 over a bright desktop).
+    <aside className="flex w-52 shrink-0 flex-col border-r bg-glass-sidebar text-sidebar-foreground">
       {/* The top row shares the window's 40 px header band with the toolbar.
           macOS: traffic lights, then search; the brand lives in About and the
           Dock. Windows has no traffic lights, and its title bars lead with the

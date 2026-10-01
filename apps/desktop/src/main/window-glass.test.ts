@@ -60,13 +60,13 @@ describe('resolveGlassMode', () => {
 })
 
 describe('resolveGlassStyle (plan 091)', () => {
-  it('keeps the material as AppKit draws it unless VIDEORC_GLASS_STYLE asks for clear', () => {
-    expect(DEFAULT_GLASS_STYLE).toBe('material')
-    expect(resolveGlassStyle(undefined)).toBe('material')
-    expect(resolveGlassStyle('clear')).toBe('clear')
-    expect(resolveGlassStyle(' Clear ')).toBe('clear')
+  it('strips to clear glass unless VIDEORC_GLASS_STYLE=material asks for the A/B control', () => {
+    expect(DEFAULT_GLASS_STYLE).toBe('clear')
+    expect(resolveGlassStyle(undefined)).toBe('clear')
     expect(resolveGlassStyle('material')).toBe('material')
-    for (const value of ['', '1', 'ghostex', 'frost']) {
+    expect(resolveGlassStyle(' Material ')).toBe('material')
+    expect(resolveGlassStyle('clear')).toBe('clear')
+    for (const value of ['', '1', 'ghostex', 'frost', '0']) {
       expect(resolveGlassStyle(value)).toBe(DEFAULT_GLASS_STYLE)
     }
   })

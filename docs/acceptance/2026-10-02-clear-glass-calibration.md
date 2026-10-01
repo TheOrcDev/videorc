@@ -233,3 +233,120 @@ or without the strip. S3 stays flat.
 - `node scripts/ui-glass-probe.mjs --gate` (default `material`) passes
   unchanged; `--style=clear --themes=dark,light --roles=main --persistence
 --frost-check` is the run above.
+
+## S1: Ghostex's covers, clear glass by default
+
+Same day, same machine. `DEFAULT_GLASS_STYLE` is now `clear`;
+`VIDEORC_GLASS_STYLE=material` is the A/B control. `styles.css` carries one
+base tone per theme (`--glass-base`) and two covers per theme and platform
+(`--glass-cover-sidebar`, `--glass-cover-work`, plan 091 D3/D5); the coats are
+derived from them (D4): the body paints `min(sidebar, work)`, the sidebar
+and the content pane add `1 - (1 - cover) / (1 - body)`. The sidebar
+`<aside>` paints `bg-glass-sidebar`; `main` and `WindowFrame` keep
+`bg-glass-content`.
+
+### The computed coats, read back from the running app
+
+`getComputedStyle(...).backgroundColor` through CDP, after `pnpm build` and
+in the dev app (the probe's `report.coats`). Tailwind v4 / lightningcss emit
+the `oklch(var(--glass-base) / calc(...))` expressions verbatim (the only
+change is `0.001` to `.001`), and Chromium resolves them to the designed
+alphas:
+
+| theme | body                            | aside                              | main / WindowFrame           |
+| ----- | ------------------------------- | ---------------------------------- | ---------------------------- |
+| dark  | `oklch(0.13 0.003 286 / 0.83)`  | `oklch(0.13 0.003 286 / 0.294118)` | `oklch(0.13 0.003 286 / 0)`  |
+| light | `oklch(0.985 0.001 286 / 0.86)` | `oklch(0.985 0.001 286 / 0.5)`     | `oklch(0.985 0.001 286 / 0)` |
+
+So the sidebar composites to 1 − 0.17 × 0.705882 = 0.88 (dark) and
+1 − 0.14 × 0.5 = 0.93 (light), the work area to 0.83 and 0.86, exactly the
+covers. `window-palette.test.ts` computes the same from the covers it parses
+out of `styles.css`, and pins the Windows covers (0.34 / 0.5116 dark,
+0.5 / 0.62 light) to plan 050's Mica composite (34% + 26%, 50% + 24%).
+
+### Per role and theme (`--gate --themes=dark,light`, all five roles)
+
+Clear glass with the new covers. Contrast is the worst case over white and
+black; `parity` is the worst RGB distance between the capture and the
+computed coats composited over the bare-backdrop reference (white and
+black); `L` is the OKLCH lightness of the capture over white / black, with
+the prediction in brackets.
+
+| theme | window · sample        | cover | transmission | sharpness | primary | secondary | neutrality | parity | L white (pred.) | L black (pred.) |
+| ----- | ---------------------- | ----: | -----------: | --------: | ------: | --------: | ---------: | -----: | --------------: | --------------: |
+| dark  | main · content toolbar |  0.83 |        53.17 |      0.08 |   11.93 |      5.05 |       1.03 |   0.45 |   0.314 (0.315) |   0.123 (0.122) |
+| dark  | main · sidebar foot    |  0.88 |        37.70 |      0.06 |   14.23 |      6.03 |       0.43 |   1.53 |   0.261 (0.264) |   0.123 (0.125) |
+| dark  | Stream Manager · list  |  0.83 |        53.18 |      0.92 |   11.92 |      5.05 |       1.50 |   0.41 |   0.314 (0.315) |   0.123 (0.122) |
+| dark  | Captions · body        |  0.83 |        53.19 |      0.07 |   11.93 |      5.05 |       0.46 |   0.45 |   0.314 (0.315) |   0.123 (0.122) |
+| dark  | Notes · textarea       |  0.83 |        53.20 |      0.02 |   11.93 |      5.05 |       1.27 |   0.45 |   0.314 (0.315) |   0.123 (0.122) |
+| light | main · content toolbar |  0.86 |        44.49 |      0.03 |   13.22 |      4.71 |       1.03 |   0.92 |   0.988 (0.987) |   0.879 (0.879) |
+| light | main · sidebar foot    |  0.93 |        22.16 |      0.08 |   15.65 |      5.57 |       0.43 |   1.06 |   0.988 (0.986) |   0.934 (0.932) |
+| light | Stream Manager · list  |  0.86 |        44.50 |      1.62 |   13.21 |      4.70 |       1.53 |   0.88 |   0.988 (0.987) |   0.879 (0.879) |
+| light | Captions · body        |  0.86 |        44.53 |      0.07 |   13.22 |      4.71 |       0.46 |   0.92 |   0.988 (0.987) |   0.879 (0.879) |
+| light | Notes · textarea       |  0.86 |        44.52 |      0.01 |   13.22 |      4.71 |       1.27 |   0.92 |   0.988 (0.987) |   0.879 (0.879) |
+
+Every plan 050 gate passes unchanged (transmission ≥ 8, sharpness ≤ 6,
+primary ≥ 7, secondary ≥ 4.5), plus `neutrality`, `nativeClear` and
+`parity`. **No cover moved**: D3's numbers pass on this panel as written.
+The Preview frame fails in this run (primary 5.24, secondary 2.22, and the
+pinned-dark luminance in light theme): it still paints the plan 050 coats
+over the now-clear material, which is S2's slice.
+
+Against the plan's gap table (which assumed a `#0D0D0F` base):
+
+| region       | backdrop | plan target L | measured L |
+| ------------ | -------- | ------------: | ---------: |
+| dark work    | white    |         0.333 |      0.314 |
+| dark work    | black    |         0.150 |      0.123 |
+| dark sidebar | white    |         0.286 |      0.261 |
+| dark sidebar | black    |         0.150 |      0.123 |
+| light work   | black    |         0.879 |      0.879 |
+| light work   | white    |         0.995 |      0.988 |
+
+The dark rows sit about 0.02 L under the table because the token base
+`oklch(0.13 0.003 286)` renders `#070708`; the table's `#0D0D0F` is
+`window-palette.ts`'s rounding of it (OKLCH L 0.158). The predictions from
+the computed coats match the captures to within 0.003 L, so the base, not
+the covers, explains the gap. It also explains why contrast lands above the
+plan's 4.69:1 at 83%. The light rows match.
+
+### ghostexParity's threshold
+
+The population above is 20 samples, five windows, both themes, two
+backdrops each: parity 0.16 to 1.53. The gate is **≤ 4**: 2.6x the worst
+sample, and still a tripwire. A cover off by 0.02 moves a dark sample about
+5 steps over white; a missing sidebar coat moves it 70; the plan 050 coats
+would miss by more than 100. The S0 neutrality gate (≤ 8 against a 1.03
+population) was set the same way.
+
+### The A/B control (`--style=material`, main, S1 tokens)
+
+The same covers over AppKit's material, report mode. This is what
+`VIDEORC_GLASS_STYLE=material` now shows: the control for one release, not
+a look.
+
+| theme | sample          | transmission | secondary | neutrality | parity | L white | L black |
+| ----- | --------------- | -----------: | --------: | ---------: | -----: | ------: | ------: |
+| dark  | content toolbar |        10.63 |      7.16 |     297.34 |  50.67 |   0.192 |   0.158 |
+| dark  | sidebar foot    |         7.81 |      7.39 |     297.34 |  36.17 |   0.173 |   0.149 |
+| light | content toolbar |         5.74 |      6.10 |     348.72 |  48.86 |   0.976 |   0.964 |
+| light | sidebar foot    |         2.83 |      6.32 |     348.72 |  24.89 |   0.982 |   0.976 |
+
+Ghostex's covers over the grey material leave almost nothing of the desktop
+(three of the four samples fall under the plan 050 transmission gate) and
+sit 25–51 steps from the coat prediction, because the material tints what
+the coats composite over. The covers and the strip go together; neither is
+the look on its own. WindowServer: 46.9% for the control against 50.0% for
+the clear gate run with all five windows up, the same session.
+
+### Persistence on the S1 tree
+
+`--gate --themes=dark,light --roles=main --persistence` re-walked the S0
+matrix on the final S1 tree: baseline, dark → light → dark, resize, simple
+fullscreen in and out, the `set-vibrancy` re-create and the `revibrancy`
+lever all hold (clear class, radius 60, chameleon hidden, no saturate, red
+neutrality 1.03–1.09), with `mainFocused: false` on every row; the focus
+cycle and minimize/restore stay behind `--allow-focus`. The run passed the
+gate. Eager renderer bytes after the token change: 1,993,889 raw /
+385,143 gzip, 152 raw and 68 gzip bytes over the pre-S1 build on this
+machine.

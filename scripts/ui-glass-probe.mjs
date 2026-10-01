@@ -43,6 +43,12 @@
 //   nativeClear   every behind-window effect view reads back as the
 //                 clear-glass class with the Ghostex radius, no wallpaper
 //                 tinting and no saturation filter (scripts/lib/glass-neutrality.mjs)
+//   parity        ghostexParity (S1): the coats a sample sits under are read
+//                 from the page (getComputedStyle), composited over the
+//                 bare-backdrop reference in sRGB, and the prediction must
+//                 sit within a few RGB steps of the capture over white and
+//                 black (scripts/lib/glass-parity.mjs). The OKLCH L of both
+//                 is reported beside it for the plan's table
 //
 // --style=clear|material launches the app with that VIDEORC_GLASS_STYLE.
 // --persistence (main only) walks the transitions AppKit rebuilds a material
@@ -82,6 +88,7 @@ import {
   NEUTRALITY_BACKDROPS,
   neutralityOf
 } from './lib/glass-neutrality.mjs'
+import { parityOf, parseCssColor } from './lib/glass-parity.mjs'
 import {
   colorDistance,
   contrastRatio,
@@ -108,7 +115,12 @@ export const GLASS_THRESHOLDS = Object.freeze({
   // Plan 091: a stripped material within 8 RGB steps of the bare backdrop
   // (AppKit's dark material measures about 313 over white), at Ghostex's radius.
   maxNeutrality: 8,
-  clearBlurRadius: 60
+  clearBlurRadius: 60,
+  // Plan 091 S1: the coats composited over the reference predict the sample
+  // within this many RGB steps. The 2026-10-02 population (20 samples, five
+  // windows, both themes) tops out at 1.53; 4 keeps 2.6x that and still fails
+  // a cover off by 0.016 or more (0.02 moves a dark sample 5 steps over white).
+  maxParity: 4
 })
 
 // sRGB of the text tokens in styles.css: --foreground / --muted-foreground
@@ -382,6 +394,42 @@ async function placeOnPrimaryDisplay(smoke, role, index) {
   })
 }
 
+// ghostexParity (plan 091 S1): the elements whose coats a sample sits under,
+// body first. main's toolbar sample sits on body + main (the content coat),
+// its sidebar sample on body + aside (the sidebar coat); the single-pane
+// windows paint the content coat on their WindowFrame. The preview has no
+// page (its coats come from window-palette.ts) and is not scored.
+const COAT_STACKS = {
+  main: { 'content-toolbar': ['body', 'main'], 'sidebar-foot': ['body', 'aside'] },
+  chat: { 'list-foot': ['body', '[data-slot="window-frame"]'] },
+  captions: { body: ['body', '[data-slot="window-frame"]'] },
+  notes: { textarea: ['body', '[data-slot="window-frame"]'] }
+}
+
+// The computed background of each coat element, as Chromium resolved the
+// tokens (`oklch(L C H / A)`), per sample: the read-back that proves the
+// derived coats survived the CSS pipeline, and the input to the parity
+// prediction. Null for a role without a page.
+async function readCoats(devtoolsHost, role) {
+  const stacks = COAT_STACKS[role]
+  const target = stacks ? await pageTarget(devtoolsHost, role) : null
+  if (!target) return null
+  const selectors = [...new Set(Object.values(stacks).flat())]
+  const computed = await cdpEvaluate(
+    target.webSocketDebuggerUrl,
+    `(() => Object.fromEntries(${JSON.stringify(selectors)}.map((selector) => {
+      const el = document.querySelector(selector);
+      return [selector, el ? getComputedStyle(el).backgroundColor : null];
+    })))()`
+  )
+  const coats = {}
+  for (const [sample, stack] of Object.entries(stacks)) {
+    if (stack.some((selector) => computed[selector] === null)) continue
+    coats[sample] = stack.map((selector) => parseCssColor(computed[selector]))
+  }
+  return { computed, coats }
+}
+
 // Plan 091: zero (or restore) the window coats in the role's page, so a shot
 // shows the native material alone. An injected `!important` rule on the
 // token hosts beats styles.css whatever the theme class; a reload drops it.
@@ -584,16 +632,21 @@ function imageMean(file) {
 
 // One backdrop shot of the window with a reference patch of the bare
 // backdrop beside it, captured in the same pass (plan 091).
-async function shootWithReference(smoke, theme, role, variant, prefix) {
+async function shootWithReference(smoke, theme, role, variant, prefix = '') {
   const shot = await shoot(smoke, theme, role, variant, prefix)
   const reference = backdropReferenceRect(shot.raised.bounds, shot.raised.primaryWorkArea)
-  if (!reference) {
+  if (!reference) return { ...shot, referenceMean: null }
+  const referenceFile = capture(reference, `${prefix}${theme}-${role}-${variant}-reference`)
+  return { ...shot, referenceMean: imageMean(referenceFile) }
+}
+
+function requireReference(shot, role, variant) {
+  if (!shot.referenceMean) {
     throw new Error(
       `No bare backdrop beside the ${role} window for a ${variant} reference; shrink the window.`
     )
   }
-  const referenceFile = capture(reference, `${prefix}${theme}-${role}-${variant}-reference`)
-  return { ...shot, referenceMean: imageMean(referenceFile) }
+  return shot.referenceMean
 }
 
 // neutrality (plan 091): the role's samples with the coats zeroed, against
@@ -605,15 +658,9 @@ async function measureNeutrality(smoke, devtoolsHost, theme, role) {
   const references = {}
   try {
     for (const variant of NEUTRALITY_BACKDROPS) {
-      const { raised, file, referenceMean } = await shootWithReference(
-        smoke,
-        theme,
-        role,
-        variant,
-        'neutral-'
-      )
-      samples[variant] = measure(file, raised.bounds, role).map((sample) => sample.mean)
-      references[variant] = referenceMean
+      const shot = await shootWithReference(smoke, theme, role, variant, 'neutral-')
+      samples[variant] = measure(shot.file, shot.raised.bounds, role).map((sample) => sample.mean)
+      references[variant] = requireReference(shot, role, variant)
     }
   } finally {
     await setCoats(devtoolsHost, role, false)
@@ -791,7 +838,7 @@ async function runPersistence(smoke, devtoolsHost, theme) {
   return { rows, layerTrees: { before: recreated.before ?? null, after: recreated.after ?? null } }
 }
 
-function evaluate(theme, role, shots, glassState, pageDark, neutrality) {
+function evaluate(theme, role, shots, glassState, pageDark, neutrality, parity = {}) {
   const results = []
   const byName = (variant) => shots[variant]
   const styleRequested = glassState?.styleRequested ?? 'material'
@@ -800,6 +847,15 @@ function evaluate(theme, role, shots, glassState, pageDark, neutrality) {
   })
   for (const [index, sample] of SAMPLES[role].entries()) {
     const at = (variant) => byName(variant)[index]
+    const coats = parity.coats?.[sample.name] ?? null
+    const ghostex =
+      coats && parity.references?.white && parity.references?.black
+        ? parityOf({
+            sampleMeans: { white: at('white').mean, black: at('black').mean },
+            referenceMeans: { white: parity.references.white, black: parity.references.black },
+            coats
+          })
+        : null
     const transmission = colorDistance(at('red').mean, at('blue').mean)
     const sharpness = at('text').sharpness
     const text = TEXT[PINNED_DARK_ROLES.has(role) ? 'dark' : theme]
@@ -829,6 +885,7 @@ function evaluate(theme, role, shots, glassState, pageDark, neutrality) {
     if (styleRequested === 'clear') {
       checks.nativeClear = native.pass
       if (neutral) checks.neutrality = neutral.max <= GLASS_THRESHOLDS.maxNeutrality
+      if (ghostex) checks.parity = ghostex.max <= GLASS_THRESHOLDS.maxParity
     }
     results.push({
       theme,
@@ -849,6 +906,22 @@ function evaluate(theme, role, shots, glassState, pageDark, neutrality) {
                 Object.entries(neutral.byBackdrop).map(([variant, value]) => [
                   variant,
                   round(value)
+                ])
+              )
+            }
+          : {}),
+        ...(ghostex
+          ? {
+              parity: round(ghostex.max),
+              parityBy: {
+                white: round(ghostex.byBackdrop.white),
+                black: round(ghostex.byBackdrop.black)
+              },
+              cover: round(ghostex.cover, 4),
+              lightness: Object.fromEntries(
+                Object.entries(ghostex.lightness).map(([variant, value]) => [
+                  variant,
+                  { measured: round(value.measured, 3), expected: round(value.expected, 3) }
                 ])
               )
             }
@@ -926,6 +999,7 @@ async function main() {
     styleRequested: null,
     results: [],
     effectViews: {},
+    coats: {},
     persistence: null,
     layerTrees: null,
     windowServerCpu: null
@@ -952,11 +1026,18 @@ async function main() {
         const shots = {}
         const files = {}
         let bounds = null
+        const references = {}
         for (const variant of BACKDROPS) {
-          const { raised, file } = await shoot(smoke, theme, role, variant)
+          const { raised, file, referenceMean } = await shootWithReference(
+            smoke,
+            theme,
+            role,
+            variant
+          )
           shots[variant] = measure(file, raised.bounds, role)
           files[variant] = file
           bounds = raised.bounds
+          references[variant] = referenceMean
         }
         await assertTheme(devtoolsHost, theme)
         const look = await shoot(smoke, theme, role, 'photo')
@@ -965,9 +1046,16 @@ async function main() {
         report.effectViews[`${theme}-${role}`] = glassState.effectViews ?? null
         report.styleRequested = glassState.styleRequested ?? null
         const pageDark = await pageDarkClass(devtoolsHost, role)
+        const coatsRead = await readCoats(devtoolsHost, role)
+        if (coatsRead) report.coats[`${theme}-${role}`] = coatsRead.computed
         const neutrality = await measureNeutrality(smoke, devtoolsHost, theme, role)
         await assertTheme(devtoolsHost, theme)
-        report.results.push(...evaluate(theme, role, shots, glassState, pageDark, neutrality))
+        report.results.push(
+          ...evaluate(theme, role, shots, glassState, pageDark, neutrality, {
+            references,
+            coats: coatsRead?.coats ?? null
+          })
+        )
         if (frostCheck && role === 'main') {
           const frost = await measureFrostBleed(smoke, devtoolsHost, theme, bounds)
           if (frost) report.results.push(frost)
