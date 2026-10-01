@@ -1,0 +1,73 @@
+name: Repro - Windows blank main window (plan 082)
+
+# Throwaway. Runs only on this branch; never merge it.
+on:
+  push:
+    branches: [repro/windows-blank-main-window]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  repro:
+    name: Launch 0.9.124 and photograph the desktop
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.6.0'
+
+      - name: Describe the machine
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\repro" | Out-Null
+          $info = [ordered]@{
+            os = (Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber)
+            video = (Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion, VideoProcessor, CurrentHorizontalResolution, CurrentVerticalResolution, PNPDeviceID)
+            session = $env:SESSIONNAME
+          }
+          $info | ConvertTo-Json -Depth 5 | Tee-Object "$env:RUNNER_TEMP\repro\machine.json"
+
+      - name: Download the installer CI built from the 0.9.124 release commit
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Run 36685662146 = windows.yml on 06c295db (the 0.9.124-alpha.1 source
+        # commit). Unsigned, same source as the shipped installer.
+        run: |
+          gh run download 36685662146 --repo $env:GITHUB_REPOSITORY -n videorc-windows-installer -D "$env:RUNNER_TEMP\installer"
+          Get-ChildItem -Recurse "$env:RUNNER_TEMP\installer" | Select-Object FullName, Length
+
+      - name: Install silently
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -Recurse "$env:RUNNER_TEMP\installer" -Filter *.exe | Select-Object -First 1
+          $target = "$env:RUNNER_TEMP\VideorcApp"
+          $p = Start-Process -FilePath $installer.FullName -ArgumentList '/S', "/D=$target" -Wait -PassThru
+          "installer exit $($p.ExitCode)"
+          Get-ChildItem $target | Select-Object Name, Length
+          if (-not (Test-Path "$target\Videorc.exe")) { throw 'Videorc.exe not installed' }
+
+      - name: Launch, photograph, inspect
+        shell: pwsh
+        env:
+          VIDEORC_REPRO_EXE: ${{ runner.temp }}\VideorcApp\Videorc.exe
+          VIDEORC_REPRO_OUT: ${{ runner.temp }}\repro
+        run: node scripts/repro-windows-blank-main-window.mjs
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-blank-main-window-repro
+          path: |
+            ${{ runner.temp }}/repro/**/*.png
+            ${{ runner.temp }}/repro/**/*.json
+            ${{ runner.temp }}/repro/**/*.log
+            !${{ runner.temp }}/repro/*-userdata/**
+          if-no-files-found: warn
+          retention-days: 7
