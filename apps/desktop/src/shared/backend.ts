@@ -4264,6 +4264,18 @@ export interface LiveChatMessageFragment {
   imageUrl?: string
 }
 
+/**
+ * The organization badge a platform shows next to an affiliated author's name:
+ * X's affiliation, a Verified Organization's logo (plan 086).
+ */
+export interface LiveChatAuthorAffiliation {
+  /** Always `https://`; main's avatar cache serves it to the renderer. */
+  badgeUrl: string
+  /** The organization's name, e.g. "Neon". */
+  description?: string
+  url?: string
+}
+
 /** One normalized, SQLite-persisted chat message. `id` is the app-level dedupe key. */
 export interface LiveChatMessage {
   id: string
@@ -4275,6 +4287,7 @@ export interface LiveChatMessage {
   authorName: string
   authorAvatarUrl?: string
   authorBadges: string[]
+  authorAffiliation?: LiveChatAuthorAffiliation
   authorRoles: string[]
   publishedAt: string
   receivedAt: string

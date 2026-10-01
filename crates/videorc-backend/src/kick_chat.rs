@@ -1320,6 +1320,7 @@ fn relay_event_to_message(
         details: None,
         reply: None,
         first_message: false,
+        author_affiliation: None,
     };
     match event.kind.as_str() {
         "chat" => {
