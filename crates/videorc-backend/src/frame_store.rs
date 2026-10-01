@@ -8,6 +8,8 @@ use std::time::Instant;
 
 static NEXT_FRAME_STORAGE_IDENTITY: AtomicU64 = AtomicU64::new(1);
 
+// Rust 1.99 renames fetch_update to try_update; release builds still use 1.98.
+#[allow(deprecated)]
 fn next_frame_storage_identity() -> u64 {
     NEXT_FRAME_STORAGE_IDENTITY
         .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |identity| {

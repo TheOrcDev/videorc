@@ -922,6 +922,8 @@ fn start_caption_contract_test_audio_source(
 }
 
 #[cfg(debug_assertions)]
+// Rust 1.99 renames fetch_update to try_update; release builds still use 1.98.
+#[allow(deprecated)]
 fn start_contract_test_audio_source(
     settings: AudioProcessingSettings,
     device_id: u32,

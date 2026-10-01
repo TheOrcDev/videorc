@@ -457,6 +457,8 @@ impl ProducerPermit {
     fn acquire_in(local: Arc<AtomicU64>, platform: Arc<AtomicU64>) -> anyhow::Result<Self> {
         Self::acquire_in_role(SourceRole::Microphone, local, platform)
     }
+    // Rust 1.99 renames fetch_update to try_update; release builds still use 1.98.
+    #[allow(deprecated)]
     fn acquire_in_role(
         role: SourceRole,
         local: Arc<AtomicU64>,
