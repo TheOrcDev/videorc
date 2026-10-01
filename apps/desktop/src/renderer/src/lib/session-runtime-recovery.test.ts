@@ -286,4 +286,55 @@ describe('session audio news (plan 076)', () => {
     showSessionHealthEvent(healthEvent('system-audio-recovered', 'info'), false)
     expect(toastSpies.success).toHaveBeenCalledTimes(1)
   })
+
+  it('says the stream stopped when it stops, and keeps saying it', () => {
+    showSessionHealthEvent(healthEvent('stream-output-failed', 'error'), false)
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      'Your stream stopped',
+      expect.objectContaining({
+        id: 'stream-output',
+        description: 'stream-output-failed message',
+        duration: Infinity
+      })
+    )
+  })
+
+  it('replaces a frozen-stream warning with the news that it resumed', () => {
+    showSessionHealthEvent(healthEvent('stream-output-stalled'), false)
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Your stream is frozen',
+      expect.objectContaining({ id: 'stream-output', duration: Infinity })
+    )
+    showSessionHealthEvent(healthEvent('stream-output-resumed', 'info'), false)
+    expect(toastSpies.success).toHaveBeenCalledWith(
+      'Your stream is moving again',
+      expect.objectContaining({ id: 'stream-output' })
+    )
+  })
+
+  it('reports a stopped screen capture by severity, and its return', () => {
+    showSessionHealthEvent(healthEvent('screen-capture-stopped'), false)
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Screen capture stopped',
+      expect.objectContaining({ id: 'screen-capture', duration: 20_000 })
+    )
+    showSessionHealthEvent(healthEvent('screen-capture-stopped', 'error'), false)
+    expect(toastSpies.error).toHaveBeenCalledWith(
+      'Screen capture stopped',
+      expect.objectContaining({ id: 'screen-capture', duration: Infinity })
+    )
+    showSessionHealthEvent(healthEvent('screen-capture-restored', 'info'), false)
+    expect(toastSpies.success).toHaveBeenCalledWith(
+      'Screen capture is back',
+      expect.objectContaining({ id: 'screen-capture' })
+    )
+  })
+
+  it('warns once that the computer is overloaded', () => {
+    showSessionHealthEvent(healthEvent('host-overloaded'), false)
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'This computer is overloaded',
+      expect.objectContaining({ id: 'host-overloaded', description: 'host-overloaded message' })
+    )
+  })
 })

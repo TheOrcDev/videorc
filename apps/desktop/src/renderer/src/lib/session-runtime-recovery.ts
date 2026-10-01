@@ -333,7 +333,58 @@ export function showSessionHealthEvent(
     })
   }
   showSessionAudioNews(event)
+  showLiveOutputNews(event)
   return null
+}
+
+const STREAM_OUTPUT_TOAST_ID = 'stream-output'
+const SCREEN_CAPTURE_TOAST_ID = 'screen-capture'
+
+/**
+ * Plan 087: what happens to the live output mid-session. Until 0.9.125 a dead
+ * stream was reported only when the session stopped, so the streamer kept
+ * presenting to nothing. Each pair shares a key: the good news replaces the
+ * bad news instead of stacking beside it.
+ */
+function showLiveOutputNews(event: HealthEvent): void {
+  if (event.code === 'stream-output-failed') {
+    toast.error('Your stream stopped', {
+      id: STREAM_OUTPUT_TOAST_ID,
+      description: event.message,
+      duration: Infinity
+    })
+  } else if (event.code === 'stream-output-stalled') {
+    toast.warning('Your stream is frozen', {
+      id: STREAM_OUTPUT_TOAST_ID,
+      description: event.message,
+      duration: Infinity
+    })
+  } else if (event.code === 'stream-output-resumed') {
+    toast.success('Your stream is moving again', {
+      id: STREAM_OUTPUT_TOAST_ID,
+      description: event.message,
+      duration: 8_000
+    })
+  } else if (event.code === 'screen-capture-stopped') {
+    const show = event.level === 'error' ? toast.error : toast.warning
+    show('Screen capture stopped', {
+      id: SCREEN_CAPTURE_TOAST_ID,
+      description: event.message,
+      duration: event.level === 'error' ? Infinity : 20_000
+    })
+  } else if (event.code === 'screen-capture-restored') {
+    toast.success('Screen capture is back', {
+      id: SCREEN_CAPTURE_TOAST_ID,
+      description: event.message,
+      duration: 8_000
+    })
+  } else if (event.code === 'host-overloaded') {
+    toast.warning('This computer is overloaded', {
+      id: 'host-overloaded',
+      description: event.message,
+      duration: 20_000
+    })
+  }
 }
 
 /**

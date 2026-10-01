@@ -36,6 +36,7 @@ mod ffmpeg_work;
 mod fifo;
 mod frame_store;
 mod h264_profile;
+mod host_pressure;
 mod kick;
 mod kick_chat;
 #[cfg(any(test, target_os = "linux"))]
