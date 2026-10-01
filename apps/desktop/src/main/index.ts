@@ -1748,10 +1748,13 @@ function repinDarkAlwaysWindows(): void {
 function installMainWindowRecovery(window: BrowserWindow, loadMainDocument: () => void): void {
   const budget = new ReloadBudget()
   let asking = false
+  let reloadPending = false
   const usable = (): boolean => !appIsQuitting && !window.isDestroyed()
 
   const recover = (cause: string): void => {
-    if (!usable() || asking) {
+    // One failure can report twice (a renderer that dies mid-load also fails
+    // the load): only the first report spends a reload.
+    if (!usable() || asking || reloadPending) {
       return
     }
     if (budget.next(Date.now()) === 'reload') {
@@ -1761,7 +1764,9 @@ function installMainWindowRecovery(window: BrowserWindow, loadMainDocument: () =
       )
       // Not inside the event that reported the failure: a load started there
       // can be dropped, or torn down with the frame that is still dying.
+      reloadPending = true
       setTimeout(() => {
+        reloadPending = false
         if (usable()) {
           loadMainDocument()
         }
