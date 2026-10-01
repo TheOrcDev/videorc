@@ -1938,6 +1938,15 @@ mod tests {
             .unwrap();
         (e, m, op)
     }
+    #[test]
+    fn instant_youtube_commands_refuse_a_scheduled_broadcast() {
+        let state = state();
+        let mut scheduled = event();
+        scheduled.provider_event_id = Some("scheduled-broadcast".into());
+        reserve(&state, scheduled);
+        assert!(crate::refuse_scheduled_youtube_broadcast(&state, "scheduled-broadcast").is_err());
+        assert!(crate::refuse_scheduled_youtube_broadcast(&state, "instant-broadcast").is_ok());
+    }
     #[tokio::test]
     async fn scheduled_creation_is_metadata_only_and_manual() {
         let (api, fixture, handle) = fixture().await;

@@ -935,6 +935,28 @@ export interface PreparedYouTubeBroadcast {
   scheduledStartTime: string
 }
 
+/**
+ * Plan 083: the outcome of setting the Broadcast info thumbnail on an instant
+ * YouTube broadcast, emitted as `streamTargets.youtube.thumbnail` and returned
+ * by `streamTargets.youtube.thumbnail.retry`.
+ */
+export interface YouTubeThumbnailResult {
+  platform: 'youtube'
+  accountId: string
+  broadcastId: string
+  targetId?: string
+  state: 'uploaded' | 'error'
+  code?: string
+  message?: string
+  retryable: boolean
+}
+
+export interface YouTubeThumbnailRetryParams {
+  accountId?: string
+  broadcastId: string
+  targetId?: string
+}
+
 export type YouTubeBroadcastTransitionStatus = 'complete' | 'live' | 'testing'
 
 export interface YouTubeBroadcastTransitionParams {

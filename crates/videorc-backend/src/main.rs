@@ -241,6 +241,7 @@ use crate::youtube::{
     YouTubeChannelSelectParams, YouTubeStreamStatusParams, YouTubeStreamStatusRequest,
     YouTubeStreamStatusResult,
 };
+use crate::youtube::{YouTubeThumbnailResult, YouTubeThumbnailRetryParams};
 
 /// Stderr writer that reports every write as successful even when the real
 /// write fails (e.g. the parent process died and the pipe broke). See the
@@ -2581,6 +2582,7 @@ async fn prepare_youtube_stream_target(
     let mut fresh = fresh_platform_access_token(state, &credential, &client).await?;
     let video = params.video;
     let target_id = params.target_id;
+    let thumbnail_asset_id = metadata.thumbnail_asset_id.clone();
     let mut prepared = youtube::prepare_youtube_broadcast(
         YouTubePrepareRequest {
             access_token: fresh.access_token.clone(),
@@ -2642,21 +2644,113 @@ async fn prepare_youtube_stream_target(
         state.emit_event("platformAccounts.changed", accounts);
     }
 
+    // Plan 083: the Broadcast info thumbnail goes up in the background. Go
+    // Live never waits on it and never fails because of it; the outcome
+    // arrives as an event the renderer turns into a warning with Retry.
+    if let Some(asset_id) = thumbnail_asset_id {
+        let state = state.clone();
+        let account_id = prepared.account_id.clone();
+        let broadcast_id = prepared.broadcast_id.clone();
+        tokio::spawn(async move {
+            let result = set_youtube_broadcast_thumbnail(
+                &state,
+                &account_id,
+                &broadcast_id,
+                target_id,
+                &asset_id,
+            )
+            .await;
+            state.emit_event("streamTargets.youtube.thumbnail", &result);
+        });
+    }
+
     Ok(prepared)
+}
+
+/// Plan 083: set a managed thumbnail on an instant YouTube broadcast. Never
+/// fails the caller; every outcome becomes a bounded, user-worded result.
+async fn set_youtube_broadcast_thumbnail(
+    state: &AppState,
+    account_id: &str,
+    broadcast_id: &str,
+    target_id: Option<String>,
+    asset_id: &str,
+) -> YouTubeThumbnailResult {
+    let outcome = match state.resource_authority.resolve_managed_thumbnail(asset_id) {
+        Err(error) => {
+            tracing::warn!("[youtube-thumbnail] managed thumbnail unavailable: {error}");
+            Err("thumbnailUnavailable".to_string())
+        }
+        Ok(path) => {
+            let upload = async {
+                scheduled_streams_service::youtube_api(state, account_id)
+                    .await?
+                    .thumbnail(broadcast_id, &path, asset_id)
+                    .await
+            };
+            upload
+                .await
+                .map_err(|error| youtube::youtube_thumbnail_failure_code(&error))
+        }
+    };
+    match &outcome {
+        Ok(()) => tracing::info!("[youtube-thumbnail] uploaded"),
+        Err(code) => tracing::warn!("[youtube-thumbnail] failed: {code}"),
+    }
+    YouTubeThumbnailResult::new(account_id, broadcast_id, target_id, outcome)
+}
+
+/// Retry the Broadcast info thumbnail on an instant broadcast, with the
+/// draft's CURRENT thumbnail (the user may have picked another one).
+async fn retry_youtube_stream_thumbnail(
+    state: &AppState,
+    params: YouTubeThumbnailRetryParams,
+) -> anyhow::Result<YouTubeThumbnailResult> {
+    if params.broadcast_id.is_empty()
+        || params.broadcast_id.len() > 64
+        || !params
+            .broadcast_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        anyhow::bail!("Invalid YouTube broadcast id.");
+    }
+    refuse_scheduled_youtube_broadcast(state, &params.broadcast_id)?;
+    let asset_id = state
+        .database
+        .stream_metadata_draft()?
+        .thumbnail_asset_id
+        .context("Choose a thumbnail in Broadcast info first.")?;
+    let credential = youtube_account_credentials(state, params.account_id.as_deref())?;
+    Ok(set_youtube_broadcast_thumbnail(
+        state,
+        &credential.account.account_id,
+        &params.broadcast_id,
+        params.target_id,
+        &asset_id,
+    )
+    .await)
+}
+
+/// A scheduled event's broadcast belongs to the scheduling lifecycle; the
+/// instant-broadcast commands must never act on it.
+fn refuse_scheduled_youtube_broadcast(state: &AppState, broadcast_id: &str) -> anyhow::Result<()> {
+    if state
+        .database
+        .scheduled_events()?
+        .iter()
+        .any(|event| event.provider_event_id.as_deref() == Some(broadcast_id))
+    {
+        anyhow::bail!("Scheduled broadcasts must use their owned scheduling lifecycle.");
+    }
+    Ok(())
 }
 
 async fn transition_youtube_stream_target(
     state: &AppState,
     params: YouTubeBroadcastTransitionParams,
 ) -> anyhow::Result<YouTubeBroadcastTransitionResult> {
-    if state
-        .database
-        .scheduled_events()?
-        .iter()
-        .any(|event| event.provider_event_id.as_deref() == Some(params.broadcast_id.as_str()))
-    {
-        anyhow::bail!("Scheduled broadcasts must use their owned scheduling lifecycle.");
-    }
+    refuse_scheduled_youtube_broadcast(state, &params.broadcast_id)?;
     let credential = youtube_account_credentials(state, params.account_id.as_deref())?;
     let client = reqwest::Client::new();
     let mut fresh = fresh_platform_access_token(state, &credential, &client).await?;
@@ -5134,6 +5228,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "platformAccounts.refresh"
         | "streamTargets.youtube.prepare"
         | "streamTargets.youtube.transition"
+        | "streamTargets.youtube.thumbnail.retry"
         | "streamTargets.twitch.prepare"
         | "streamTargets.twitch.applyMetadata"
         | "streamTargets.kick.prepare"
@@ -10675,6 +10770,21 @@ async fn handle_text_message_with_role(
                     Err(error) => ServerResponse::error(
                         command.id,
                         "youtube-prepare-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "streamTargets.youtube.thumbnail.retry" => {
+            match serde_json::from_value::<YouTubeThumbnailRetryParams>(command.params) {
+                Ok(params) => match retry_youtube_stream_thumbnail(state, params).await {
+                    Ok(result) => ServerResponse::ok(command.id, result),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "youtube-thumbnail-failed",
                         error.to_string(),
                     ),
                 },
@@ -16695,6 +16805,41 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    #[tokio::test]
+    async fn youtube_thumbnail_failure_is_a_result_never_an_error() {
+        let state = test_state();
+        let result = set_youtube_broadcast_thumbnail(
+            &state,
+            "acct",
+            "broadcast-1",
+            Some("youtube".into()),
+            &"d".repeat(64),
+        )
+        .await;
+        assert_eq!(result.state, youtube::YouTubeThumbnailState::Error);
+        assert_eq!(result.code.as_deref(), Some("thumbnailUnavailable"));
+        assert_eq!(result.target_id.as_deref(), Some("youtube"));
+        assert!(result.retryable);
+    }
+
+    #[tokio::test]
+    async fn youtube_thumbnail_retry_checks_its_input_before_any_provider_call() {
+        let state = test_state();
+        let retry = |broadcast_id: &str| YouTubeThumbnailRetryParams {
+            account_id: None,
+            broadcast_id: broadcast_id.to_string(),
+            target_id: None,
+        };
+        let error = retry_youtube_stream_thumbnail(&state, retry("../x?y"))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Invalid YouTube broadcast id"));
+        let error = retry_youtube_stream_thumbnail(&state, retry("broadcast-1"))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Choose a thumbnail"), "{error}");
     }
 
     #[test]
