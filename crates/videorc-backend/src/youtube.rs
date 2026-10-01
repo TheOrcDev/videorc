@@ -166,6 +166,113 @@ pub struct YouTubeChannel {
     pub avatar_url: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct YouTubeThumbnailRetryParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    pub broadcast_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum YouTubeThumbnailState {
+    Uploaded,
+    Error,
+}
+
+/// Plan 083: the outcome of setting the Broadcast info thumbnail on an
+/// instant broadcast. Emitted as `streamTargets.youtube.thumbnail`; a failure
+/// never fails Go Live.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct YouTubeThumbnailResult {
+    pub platform: StreamPlatform,
+    pub account_id: String,
+    pub broadcast_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    pub state: YouTubeThumbnailState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    pub retryable: bool,
+}
+
+impl YouTubeThumbnailResult {
+    pub fn new(
+        account_id: &str,
+        broadcast_id: &str,
+        target_id: Option<String>,
+        outcome: Result<(), String>,
+    ) -> Self {
+        let (state, code, message, retryable) = match outcome {
+            Ok(()) => (YouTubeThumbnailState::Uploaded, None, None, false),
+            Err(code) => {
+                let message = youtube_thumbnail_failure_message(&code).to_string();
+                // The daily limit only resets after hours; Retry would just fail.
+                let retryable = code != "uploadRateLimitExceeded";
+                (
+                    YouTubeThumbnailState::Error,
+                    Some(code),
+                    Some(message),
+                    retryable,
+                )
+            }
+        };
+        Self {
+            platform: StreamPlatform::Youtube,
+            account_id: account_id.to_string(),
+            broadcast_id: broadcast_id.to_string(),
+            target_id,
+            state,
+            code,
+            message,
+            retryable,
+        }
+    }
+}
+
+/// A bounded code for a failed thumbnail upload: the provider's reason when
+/// YouTube gave one, else what went wrong on our side. Never a raw body.
+pub fn youtube_thumbnail_failure_code(error: &anyhow::Error) -> String {
+    if let Some(rejection) = error.downcast_ref::<crate::scheduled_youtube::YouTubeRejection>() {
+        return crate::scheduled_youtube::thumbnail_provider_reason(&rejection.reason)
+            .filter(|reason| reason != "uploadDenied")
+            .unwrap_or_else(|| {
+                if rejection.status == 401 {
+                    "reconnect".to_string()
+                } else {
+                    "thumbnailFailed".to_string()
+                }
+            });
+    }
+    if is_youtube_auth_error(error) || error.to_string().contains("Reconnect") {
+        return "reconnect".to_string();
+    }
+    "thumbnailFailed".to_string()
+}
+
+pub fn youtube_thumbnail_failure_message(code: &str) -> &'static str {
+    match code {
+        "forbidden" => {
+            "YouTube refused the thumbnail. Check that custom thumbnails are enabled for this channel in YouTube Studio."
+        }
+        "uploadRateLimitExceeded" => {
+            "YouTube's daily thumbnail limit is reached for this channel. The stream goes on without it."
+        }
+        "invalidImage" | "mediaBodyRequired" | "uploadTooLarge" => {
+            "YouTube could not read this image. Choose another JPEG or PNG."
+        }
+        "thumbnailUnavailable" => "Thumbnail is unavailable. Pick it again.",
+        "reconnect" => "Reconnect YouTube in Destinations, then retry.",
+        _ => "The thumbnail was not set. The stream is not affected.",
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EffectiveYouTubeMetadata {
     title: String,
@@ -972,6 +1079,81 @@ mod tests {
     use super::*;
     use crate::protocol::{VideoPreset, VideoSettings};
     use crate::streaming::{StreamPrivacy, default_stream_metadata_draft};
+
+    #[test]
+    fn thumbnail_failures_map_to_codes_and_user_copy() {
+        use crate::scheduled_youtube::YouTubeRejection;
+        let rejection = |status, reason: &str| {
+            anyhow::Error::new(YouTubeRejection {
+                status,
+                reason: reason.to_string(),
+            })
+        };
+        assert_eq!(
+            youtube_thumbnail_failure_code(&rejection(403, "thumbnailForbidden")),
+            "forbidden"
+        );
+        assert_eq!(
+            youtube_thumbnail_failure_code(&rejection(429, "thumbnailUploadRateLimitExceeded")),
+            "uploadRateLimitExceeded"
+        );
+        assert_eq!(
+            youtube_thumbnail_failure_code(&rejection(401, "thumbnailUploadDenied")),
+            "reconnect"
+        );
+        assert_eq!(
+            youtube_thumbnail_failure_code(&rejection(500, "thumbnailUploadDenied")),
+            "thumbnailFailed"
+        );
+        assert_eq!(
+            youtube_thumbnail_failure_code(&anyhow::anyhow!(
+                "Reconnect the exact scheduled channel."
+            )),
+            "reconnect"
+        );
+        assert_eq!(
+            youtube_thumbnail_failure_code(&anyhow::anyhow!("connection reset")),
+            "thumbnailFailed"
+        );
+
+        assert!(youtube_thumbnail_failure_message("forbidden").contains("YouTube Studio"));
+        assert!(youtube_thumbnail_failure_message("invalidImage").contains("another JPEG or PNG"));
+        assert_eq!(
+            youtube_thumbnail_failure_message("thumbnailUnavailable"),
+            "Thumbnail is unavailable. Pick it again."
+        );
+        assert_eq!(
+            youtube_thumbnail_failure_message("anythingElse"),
+            "The thumbnail was not set. The stream is not affected."
+        );
+    }
+
+    #[test]
+    fn thumbnail_result_is_retryable_except_at_the_daily_limit_and_has_no_null_keys() {
+        let uploaded = YouTubeThumbnailResult::new("acct", "b1", None, Ok(()));
+        let json = serde_json::to_value(&uploaded).unwrap();
+        assert_eq!(json["state"], "uploaded");
+        for key in ["targetId", "code", "message"] {
+            assert!(json.get(key).is_none(), "{key} must be absent, never null");
+        }
+
+        let forbidden = YouTubeThumbnailResult::new(
+            "acct",
+            "b1",
+            Some("youtube".into()),
+            Err("forbidden".into()),
+        );
+        assert_eq!(forbidden.state, YouTubeThumbnailState::Error);
+        assert!(forbidden.retryable);
+        assert_eq!(
+            serde_json::to_value(&forbidden).unwrap()["targetId"],
+            "youtube"
+        );
+
+        let limited =
+            YouTubeThumbnailResult::new("acct", "b1", None, Err("uploadRateLimitExceeded".into()));
+        assert!(!limited.retryable);
+    }
 
     #[derive(Debug, Clone)]
     struct RequestLog {

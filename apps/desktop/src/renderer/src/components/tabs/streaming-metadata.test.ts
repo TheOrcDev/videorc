@@ -8,6 +8,8 @@ import type {
   StreamTargetSettings
 } from '@/lib/backend'
 
+import { isSixteenByNine } from '@/components/streaming/thumbnail-field'
+
 import { MetadataEditor } from './streaming-tab'
 
 function draft(patch: Partial<StreamMetadataDraft> = {}): StreamMetadataDraft {
@@ -172,5 +174,40 @@ describe('Broadcast info', () => {
     expect(markup).toContain('id="twitch-category"')
     expect(markup).toContain('id="twitch-language"')
     expect(markup).not.toContain('id="twitch-metadata-title"')
+  })
+
+  it('draws the thumbnail field only with a YouTube destination', () => {
+    expect(render(draft(), [target('twitch', 'Twitch main')])).not.toContain('Thumbnail')
+
+    const oauth = { ...target('youtube', 'Orc TV'), authMode: 'oauth' } as StreamTargetSettings
+    const markup = render(draft(), [oauth])
+    expect(markup).toContain('Thumbnail')
+    expect(markup).toContain('Choose thumbnail')
+    expect(markup).toContain('Shown on YouTube. JPEG or PNG, 16:9, 1280 × 720 or larger.')
+  })
+
+  it('says a stream-key-only YouTube setup cannot receive a thumbnail', () => {
+    const markup = render(draft(), [target('youtube', 'Orc TV')])
+    expect(markup).toContain('Stream key destinations can&#x27;t receive a thumbnail.')
+  })
+
+  it('previews a saved thumbnail with Replace and Remove', () => {
+    const id = 'c'.repeat(64)
+    const oauth = { ...target('youtube', 'Orc TV'), authMode: 'oauth' } as StreamTargetSettings
+    const markup = render(draft({ thumbnailAssetId: id }), [oauth])
+    expect(markup).toContain(`src="videorc-asset://scheduled-thumbnail/${id}"`)
+    expect(markup).toContain('Replace thumbnail')
+    expect(markup).toContain('Remove thumbnail')
+  })
+})
+
+describe('isSixteenByNine', () => {
+  it('accepts 16:9 within 1% and flags other shapes', () => {
+    expect(isSixteenByNine(1280, 720)).toBe(true)
+    expect(isSixteenByNine(1920, 1080)).toBe(true)
+    expect(isSixteenByNine(1280, 726)).toBe(true)
+    expect(isSixteenByNine(1080, 1080)).toBe(false)
+    expect(isSixteenByNine(1080, 1920)).toBe(false)
+    expect(isSixteenByNine(1600, 1200)).toBe(false)
   })
 })

@@ -314,9 +314,11 @@ impl YouTubeEvents {
             )
             .await?;
         if !result.status().is_success() {
+            let status = result.status().as_u16();
+            let body = result.json::<Value>().await.unwrap_or(Value::Null);
             return Err(YouTubeRejection {
-                status: result.status().as_u16(),
-                reason: "thumbnailUploadDenied".into(),
+                status,
+                reason: thumbnail_rejection_reason(&body),
             }
             .into());
         }
@@ -378,6 +380,33 @@ pub fn lifecycle(value: &Value) -> &'static str {
 pub fn metadata_snapshot(value: &Value) -> Value {
     json!({"title":value.pointer("/snippet/title"),"description":value.pointer("/snippet/description"),"scheduledStartTime":value.pointer("/snippet/scheduledStartTime"),"privacyStatus":value.pointer("/status/privacyStatus"),"selfDeclaredMadeForKids":value.pointer("/status/selfDeclaredMadeForKids")})
 }
+/// `thumbnail` + the provider's bounded reason code ("thumbnailForbidden").
+/// The prefix keeps every thumbnail failure classified as one by the
+/// scheduled error sanitizer; [`thumbnail_provider_reason`] reverses it.
+fn thumbnail_rejection_reason(body: &Value) -> String {
+    let provider: String = body
+        .pointer("/error/errors/0/reason")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(70)
+        .collect();
+    let mut chars = provider.chars();
+    match chars.next() {
+        Some(first) => format!("thumbnail{}{}", first.to_ascii_uppercase(), chars.as_str()),
+        None => "thumbnailUploadDenied".into(),
+    }
+}
+
+/// The provider reason inside a thumbnail rejection ("forbidden"), if any.
+pub fn thumbnail_provider_reason(reason: &str) -> Option<String> {
+    let rest = reason.strip_prefix("thumbnail")?;
+    let mut chars = rest.chars();
+    let first = chars.next()?;
+    Some(format!("{}{}", first.to_ascii_lowercase(), chars.as_str()))
+}
+
 pub fn validate_thumbnail(bytes: &[u8]) -> Result<&'static str> {
     if bytes.len() > 2 * 1024 * 1024 {
         bail!("Thumbnail must be at most 2 MB.");
@@ -405,6 +434,126 @@ pub fn validate_thumbnail(bytes: &[u8]) -> Result<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn thumbnail_upload_targets_the_video_and_keeps_the_provider_reason() {
+        use axum::{
+            Router,
+            body::to_bytes,
+            extract::Request,
+            http::StatusCode,
+            response::{IntoResponse, Response},
+        };
+        use sha2::{Digest, Sha256};
+        use std::sync::{Arc, Mutex};
+
+        type Seen = (String, String, String, Vec<u8>);
+        let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
+        let record = seen.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let router = Router::new().fallback(move |req: Request| {
+            let record = record.clone();
+            async move {
+                let path = req.uri().path().to_string();
+                let query = req.uri().query().unwrap_or("").to_string();
+                let content_type = req
+                    .headers()
+                    .get("content-type")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                let body = to_bytes(req.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .to_vec();
+                let mut calls = record.lock().unwrap();
+                calls.push((path, query, content_type, body));
+                let response: Response = if calls.len() == 1 {
+                    StatusCode::OK.into_response()
+                } else {
+                    (
+                        StatusCode::FORBIDDEN,
+                        axum::Json(json!({"error": {"errors": [{"reason": "forbidden"}]}})),
+                    )
+                        .into_response()
+                };
+                response
+            }
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let mut png = Vec::new();
+        image::RgbImage::new(16, 9)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let asset_id = format!("{:x}", Sha256::digest(&png));
+        let dir = std::env::temp_dir().join(format!("videorc-thumb-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{asset_id}.png"));
+        std::fs::write(&path, &png).unwrap();
+
+        let api = YouTubeEvents {
+            client: Client::new(),
+            token: "fixture".into(),
+            base: format!("http://127.0.0.1:{port}"),
+            refresh_context: None,
+        };
+        api.thumbnail("broadcast-1", &path, &asset_id)
+            .await
+            .unwrap();
+        {
+            let calls = seen.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            let (path, query, content_type, body) = &calls[0];
+            assert_eq!(path, "/upload/youtube/v3/thumbnails/set");
+            assert!(query.contains("videoId=broadcast-1"), "{query}");
+            assert!(query.contains("uploadType=media"), "{query}");
+            assert_eq!(content_type, "image/png");
+            assert_eq!(body, &png);
+        }
+
+        let error = api
+            .thumbnail("broadcast-1", &path, &asset_id)
+            .await
+            .unwrap_err();
+        let rejection = error.downcast_ref::<YouTubeRejection>().unwrap();
+        assert_eq!(rejection.status, 403);
+        assert_eq!(rejection.reason, "thumbnailForbidden");
+        assert_eq!(
+            thumbnail_provider_reason(&rejection.reason).as_deref(),
+            Some("forbidden")
+        );
+        // A scheduled event still files it as a thumbnail failure, not as a
+        // channel-permission one.
+        assert_eq!(
+            crate::scheduled_streams::sanitized_error(&error).code,
+            "thumbnail"
+        );
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn thumbnail_rejection_reason_is_bounded_and_prefixed() {
+        assert_eq!(
+            thumbnail_rejection_reason(
+                &json!({"error": {"errors": [{"reason": "uploadRateLimitExceeded"}]}})
+            ),
+            "thumbnailUploadRateLimitExceeded"
+        );
+        assert_eq!(
+            thumbnail_rejection_reason(&Value::Null),
+            "thumbnailUploadDenied"
+        );
+        assert_eq!(
+            thumbnail_rejection_reason(&json!({"error": {"errors": [{"reason": "<b>x y</b>"}]}})),
+            "thumbnailBxyb"
+        );
+        assert_eq!(thumbnail_provider_reason("forbidden"), None);
+    }
+
     #[tokio::test]
     async fn safe_401_refresh_replays_once_even_for_thumbnail_uploads() {
         use axum::{Router, extract::Request, http::StatusCode};

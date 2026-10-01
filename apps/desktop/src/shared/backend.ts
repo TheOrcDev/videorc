@@ -854,6 +854,11 @@ export interface StreamMetadataDraft {
   description: string
   defaultPrivacy: StreamPrivacy
   targetOverrides: StreamTargetMetadataDraft[]
+  /**
+   * Managed thumbnail asset id (plan 083), from `importScheduledThumbnail`.
+   * Uploaded to each YouTube broadcast an instant Go Live prepares.
+   */
+  thumbnailAssetId?: string
   updatedAt: string
 }
 
@@ -928,6 +933,28 @@ export interface PreparedYouTubeBroadcast {
   privacy: StreamPrivacy
   madeForKids: boolean
   scheduledStartTime: string
+}
+
+/**
+ * Plan 083: the outcome of setting the Broadcast info thumbnail on an instant
+ * YouTube broadcast, emitted as `streamTargets.youtube.thumbnail` and returned
+ * by `streamTargets.youtube.thumbnail.retry`.
+ */
+export interface YouTubeThumbnailResult {
+  platform: 'youtube'
+  accountId: string
+  broadcastId: string
+  targetId?: string
+  state: 'uploaded' | 'error'
+  code?: string
+  message?: string
+  retryable: boolean
+}
+
+export interface YouTubeThumbnailRetryParams {
+  accountId?: string
+  broadcastId: string
+  targetId?: string
 }
 
 export type YouTubeBroadcastTransitionStatus = 'complete' | 'live' | 'testing'

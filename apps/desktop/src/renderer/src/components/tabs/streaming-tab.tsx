@@ -10,6 +10,7 @@ import { PlatformGlyph } from '@/components/platform-glyph'
 import { PanelSection } from '@/components/panel-section'
 import { DestinationCard } from '@/components/streaming/destination-card'
 import { GoLivePanel } from '@/components/streaming/go-live-panel'
+import { ThumbnailField } from '@/components/streaming/thumbnail-field'
 import {
   Accordion,
   AccordionContent,
@@ -413,6 +414,8 @@ export function MetadataEditor({
     .filter(({ override }) => metadataIssue(validation, 'title', override.platform))
     .map(({ override }) => override.platform)
   const accordionValue = Array.from(new Set([...openPlatforms, ...issuePlatforms]))
+  // The thumbnail is YouTube-only: drawn when a YouTube destination exists.
+  const youtubeTargets = targets.filter((target) => target.platform === 'youtube')
 
   return (
     <PanelSection
@@ -460,6 +463,22 @@ export function MetadataEditor({
               onChange={(event) => onPatchDraft({ description: event.target.value })}
             />
           </Field>
+
+          {youtubeTargets.length ? (
+            <ThumbnailField
+              alt="Livestream thumbnail"
+              assetId={draft.thumbnailAssetId}
+              disabled={disabled}
+              hint={
+                youtubeTargets.some((target) => target.authMode === 'oauth')
+                  ? 'Shown on YouTube. JPEG or PNG, 16:9, 1280 × 720 or larger.'
+                  : "Stream key destinations can't receive a thumbnail. Connect the YouTube account, or set it in YouTube Studio."
+              }
+              onChange={(thumbnailAssetId) =>
+                onPatchDraft({ thumbnailAssetId: thumbnailAssetId ?? undefined })
+              }
+            />
+          ) : null}
 
           <Field>
             <FieldLabel>Default privacy</FieldLabel>

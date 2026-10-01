@@ -19,6 +19,9 @@ import { isTransientBackendError, shouldToastBackendError } from '@/lib/backend-
 import type { WsStatus } from '@/lib/capture'
 import { toast } from 'sonner'
 
+// Plan 083: the thumbnail warning rides this lazy runtime-toast chunk.
+export { showYouTubeThumbnailFailure, youtubeThumbnailFailure } from '@/lib/youtube-thumbnail-toast'
+
 const WORKSPACE_NAVIGATE_EVENT = 'videorc:navigate-workspace'
 const RECORDING_STOPPED_UNEXPECTEDLY_TOAST_ID = 'recording-stopped-unexpectedly'
 const MICROPHONE_INPUT_LOST_TOAST_ID = 'microphone-input-lost'

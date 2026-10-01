@@ -6492,6 +6492,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           .request<StreamMetadataValidation>('streamTargets.metadata.validate', draft)
           .then(setStreamMetadataValidation)
       }),
+      // Plan 083: a failed Broadcast info thumbnail warns with Retry.
+      nextClient.on('streamTargets.youtube.thumbnail', (payload) => {
+        void loadSessionRuntimeRecovery().then((runtime) => {
+          const failure = runtime.youtubeThumbnailFailure(payload)
+          if (failure && generationIsCurrent())
+            runtime.showYouTubeThumbnailFailure(nextClient, failure)
+        })
+      }),
       nextClient.on('platformAccounts.oauth.callback', (result) => {
         void loadSessionRuntimeRecovery().then((runtime) => {
           if (generationIsCurrent()) runtime.showOAuthCallbackResult(result)
