@@ -20,7 +20,15 @@ export type GlassMaterial = NonNullable<Parameters<BrowserWindow['setVibrancy']>
 export type GlassMode =
   | { kind: 'material'; material: GlassMaterial }
   | { kind: 'mica' }
-  | { kind: 'solid'; reason: 'disabled' | 'platform' | 'appearance-unpinned' }
+  | {
+      kind: 'solid'
+      reason:
+        | 'disabled'
+        | 'platform'
+        | 'appearance-unpinned'
+        | 'software-rendering'
+        | 'paint-check-blank'
+    }
 
 export interface GlassEnvironment {
   platform: NodeJS.Platform
@@ -30,6 +38,14 @@ export interface GlassEnvironment {
   legacyVibrancy?: string
   /** Windows build number (from `os.release()`), which decides Mica. */
   windowsBuild?: number
+  /**
+   * Hardware acceleration is off for this launch (the GPU-crash fallback or
+   * `VIDEORC_DISABLE_GPU`). Windows only: Mica needs a transparent backing,
+   * and the safe mode must not depend on the compositor it just gave up on.
+   */
+  softwareRendering?: boolean
+  /** Windows only: an earlier launch of this version found the Mica window blank. */
+  micaFoundBlank?: boolean
 }
 
 /**
@@ -79,9 +95,16 @@ export function resolveGlassMode(environment: GlassEnvironment): GlassMode {
     if (disabled) {
       return { kind: 'solid', reason: 'disabled' }
     }
-    return (environment.windowsBuild ?? 0) >= WINDOWS_MICA_MIN_BUILD
-      ? { kind: 'mica' }
-      : { kind: 'solid', reason: 'platform' }
+    if ((environment.windowsBuild ?? 0) < WINDOWS_MICA_MIN_BUILD) {
+      return { kind: 'solid', reason: 'platform' }
+    }
+    if (environment.softwareRendering) {
+      return { kind: 'solid', reason: 'software-rendering' }
+    }
+    if (environment.micaFoundBlank) {
+      return { kind: 'solid', reason: 'paint-check-blank' }
+    }
+    return { kind: 'mica' }
   }
   if (environment.platform !== 'darwin') {
     return { kind: 'solid', reason: 'platform' }

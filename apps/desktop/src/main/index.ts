@@ -280,6 +280,18 @@ import {
 } from './window-palette'
 import { loadWindowAppearanceBinding, pinWindowAppearance } from './window-appearance'
 import {
+  clearMicaFallbackState,
+  loadFailureNeedsRecovery,
+  micaFallbackApplies,
+  micaFallbackStatePath,
+  paintVerdictFromBitmap,
+  readMicaFallbackState,
+  ReloadBudget,
+  rendererExitNeedsRecovery,
+  writeMicaFallbackState,
+  type PaintVerdict
+} from './main-window-recovery'
+import {
   appliedGlass,
   DARK_ALWAYS_ROLES,
   DEFAULT_GLASS_MATERIAL,
@@ -842,15 +854,6 @@ function smokeNativeWindowIdentity(window: BrowserWindow | null): {
   }
 }
 
-const glassMode = resolveGlassMode({
-  platform: process.platform,
-  glass: process.env.VIDEORC_GLASS,
-  legacyVibrancy: process.env.VIDEORC_GLASS_VIBRANCY,
-  windowsBuild: process.platform === 'win32' ? windowsBuildFromRelease(release()) : undefined
-})
-const glassVibrancyMaterial: GlassVibrancyMaterial =
-  glassMode.kind === 'material' ? glassMode.material : DEFAULT_GLASS_MATERIAL
-
 // Lifecycle smokes can isolate the app-level backend ledger without touching
 // the developer's real app data.
 if (app.isPackaged) {
@@ -914,8 +917,47 @@ if (gpuFallbackDecision.source === 'retry' && gpuFallbackState) {
 if (gpuFallbackDecision.disable) {
   app.disableHardwareAcceleration()
 }
+// The Mica paint check (plan 082) persists a blank verdict for this app version
+// only; an update tries Mica again.
+const micaFallbackFile = micaFallbackStatePath(app.getPath('userData'))
+const micaFallbackLaunchState =
+  process.platform === 'win32' ? readMicaFallbackState(micaFallbackFile) : null
+const micaFoundBlank = micaFallbackApplies(micaFallbackLaunchState, app.getVersion())
+if (micaFallbackLaunchState && !micaFoundBlank) {
+  clearMicaFallbackState(micaFallbackFile)
+}
+// Resolved after the GPU decision: software rendering must never get the
+// transparent-backed Mica window (plan 082).
+const glassMode = resolveGlassMode({
+  platform: process.platform,
+  glass: process.env.VIDEORC_GLASS,
+  legacyVibrancy: process.env.VIDEORC_GLASS_VIBRANCY,
+  windowsBuild: process.platform === 'win32' ? windowsBuildFromRelease(release()) : undefined,
+  softwareRendering:
+    gpuFallbackDecision.disable || process.env.VIDEORC_SMOKE_DISABLE_ELECTRON_GPU === '1',
+  micaFoundBlank
+})
+const glassVibrancyMaterial: GlassVibrancyMaterial =
+  glassMode.kind === 'material' ? glassMode.material : DEFAULT_GLASS_MATERIAL
 let gpuProcessCrashCount = 0
 let gpuFallbackPersistedThisLaunch = false
+// A dead renderer leaves its window empty, and child-process-gone never fires
+// for renderers: without this line a support bundle says nothing (plan 082).
+app.on('render-process-gone', (_event, contents, details) => {
+  if (details.reason === 'clean-exit') {
+    return
+  }
+  let page = 'unknown'
+  try {
+    page = contents.getURL().split(/[/\\]/).at(-1)?.split('?')[0] || 'unknown'
+  } catch {
+    // The web contents may already be gone.
+  }
+  logBackend(
+    'warn',
+    `Renderer process gone (${details.reason}, exit ${details.exitCode}) for ${page.slice(0, 80)}.`
+  )
+})
 app.on('child-process-gone', (_event, details) => {
   // Every abnormal child exit is worth a support-bundle line; GPU crashes
   // additionally drive the persisted software-rendering fallback.
@@ -1699,6 +1741,206 @@ function repinDarkAlwaysWindows(): void {
   }
 }
 
+// Plan 082. A renderer that died, or a document that failed to load, used to
+// leave the main window as a title bar over an empty client area for ever.
+// Reload it, bounded; past the bound a native dialog (which needs no renderer)
+// lets the user choose.
+function installMainWindowRecovery(window: BrowserWindow, loadMainDocument: () => void): void {
+  const budget = new ReloadBudget()
+  let asking = false
+  let reloadPending = false
+  const usable = (): boolean => !appIsQuitting && !window.isDestroyed()
+
+  const recover = (cause: string): void => {
+    // One failure can report twice (a renderer that dies mid-load also fails
+    // the load): only the first report spends a reload.
+    if (!usable() || asking || reloadPending) {
+      return
+    }
+    if (budget.next(Date.now()) === 'reload') {
+      logBackend(
+        'warn',
+        `Reloading the main window: ${cause} (capture state: ${mainCaptureState}).`
+      )
+      // Not inside the event that reported the failure: a load started there
+      // can be dropped, or torn down with the frame that is still dying.
+      reloadPending = true
+      setTimeout(() => {
+        reloadPending = false
+        if (usable()) {
+          loadMainDocument()
+        }
+      }, MAIN_WINDOW_RELOAD_DELAY_MS)
+      return
+    }
+    asking = true
+    logBackend('error', `The main window keeps failing (${cause}); asking the user.`)
+    void dialog
+      .showMessageBox(window, {
+        type: 'error',
+        title: 'Videorc',
+        message: 'The Videorc window stopped working',
+        detail: `It was reloaded and stopped again (${cause}). Reload to try once more, or quit and reopen Videorc.`,
+        buttons: ['Reload', 'Quit Videorc'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true
+      })
+      .then(({ response }) => {
+        asking = false
+        if (response === 1) {
+          app.quit()
+          return
+        }
+        if (usable()) {
+          budget.reset()
+          budget.next(Date.now())
+          logBackend('warn', "Reloading the main window at the user's request.")
+          loadMainDocument()
+        }
+      })
+      .catch(() => {
+        asking = false
+      })
+  }
+
+  window.webContents.on('render-process-gone', (_event, details) => {
+    if (rendererExitNeedsRecovery(details.reason)) {
+      recover(`its renderer process is gone (${details.reason}, exit ${details.exitCode})`)
+    }
+  })
+  window.webContents.on(
+    'did-fail-load',
+    (_event, errorCode, errorDescription, _validatedUrl, isMainFrame) => {
+      if (!loadFailureNeedsRecovery({ errorCode, isMainFrame })) {
+        return
+      }
+      logBackend('warn', `The main window failed to load (${errorCode} ${errorDescription}).`)
+      recover(`its page failed to load (${errorCode} ${errorDescription})`)
+    }
+  )
+  window.on('unresponsive', () => logBackend('warn', 'The main window stopped responding.'))
+  window.on('responsive', () => logBackend('info', 'The main window is responding again.'))
+}
+
+const MAIN_WINDOW_RELOAD_DELAY_MS = 500
+
+type MainWindowPaintCheck = PaintVerdict | 'pending' | 'skipped'
+let mainWindowPaintCheck: MainWindowPaintCheck = 'skipped'
+const MICA_PAINT_CHECK_DELAY_MS = 5000
+const MICA_PAINT_CHECK_RETRY_MS = 2000
+const MICA_PAINT_CHECK_MAX_ATTEMPTS = 5
+
+// Plan 082. The Mica window's backing is transparent, so a page whose pixels
+// never reach the window leaves bare material with no way back (Electron
+// #42446). Ask the compositor what the page drew; nothing at all, twice, drops
+// this window to the solid palette and keeps this version solid from now on.
+function installMicaPaintCheck(window: BrowserWindow): void {
+  if (appliedGlass(window)?.mode.kind !== 'mica') {
+    mainWindowPaintCheck = 'skipped'
+    return
+  }
+  mainWindowPaintCheck = 'pending'
+  let timer: NodeJS.Timeout | null = null
+  let attempts = 0
+  let blanks = 0
+
+  const schedule = (delayMs: number): void => {
+    if (timer) {
+      clearTimeout(timer)
+    }
+    timer = setTimeout(() => void check(), delayMs)
+  }
+
+  const check = async (): Promise<void> => {
+    timer = null
+    if (window.isDestroyed() || appliedGlass(window)?.mode.kind !== 'mica') {
+      return
+    }
+    // A dead renderer is the recovery path's business, and a hidden window
+    // captures nothing: neither says anything about Mica.
+    if (window.webContents.isCrashed() || !window.isVisible() || window.isMinimized()) {
+      schedule(MICA_PAINT_CHECK_RETRY_MS)
+      return
+    }
+    attempts += 1
+    let verdict: PaintVerdict
+    try {
+      const [width, height] = window.getContentSize()
+      const image = await window.webContents.capturePage({
+        x: 0,
+        y: 0,
+        width: Math.min(width, 480),
+        height: Math.min(height, 320)
+      })
+      verdict = paintVerdictFromBitmap(image.toBitmap())
+    } catch {
+      verdict = 'unknown'
+    }
+    if (process.env.VIDEORC_SMOKE_FORCE_BLANK_PAINT_CHECK === '1') {
+      verdict = 'blank'
+    }
+    if (window.isDestroyed()) {
+      return
+    }
+    if (verdict === 'painted') {
+      mainWindowPaintCheck = 'painted'
+      return
+    }
+    if (verdict === 'blank') {
+      blanks += 1
+      if (blanks >= 2) {
+        applyMicaBlankFallback(window)
+        return
+      }
+    }
+    if (attempts >= MICA_PAINT_CHECK_MAX_ATTEMPTS) {
+      mainWindowPaintCheck = 'unknown'
+      return
+    }
+    schedule(MICA_PAINT_CHECK_RETRY_MS)
+  }
+
+  // Checked until there is a verdict: a crash before it leaves the check
+  // pending, and the reload's own load event picks it up again.
+  window.webContents.on('did-finish-load', () => {
+    if (mainWindowPaintCheck === 'pending') {
+      schedule(MICA_PAINT_CHECK_DELAY_MS)
+    }
+  })
+  window.once('closed', () => {
+    if (timer) {
+      clearTimeout(timer)
+    }
+  })
+}
+
+function applyMicaBlankFallback(window: BrowserWindow): void {
+  mainWindowPaintCheck = 'blank'
+  logBackend(
+    'warn',
+    'The main window drew nothing on the Mica backdrop. Switching to the solid window; this version of Videorc keeps it from now on.'
+  )
+  try {
+    writeMicaFallbackState(micaFallbackFile, {
+      disableMica: true,
+      reason: 'paint-check-blank',
+      appVersion: app.getVersion(),
+      updatedAt: new Date().toISOString()
+    })
+  } catch (error) {
+    logBackend('warn', `Could not remember the solid window: ${errorMessageText(error)}`)
+  }
+  window.setBackgroundMaterial('none')
+  window.setBackgroundColor(solidWindowBase('main', nativeTheme.shouldUseDarkColors))
+  recordAppliedGlass(window, {
+    role: 'main',
+    mode: { kind: 'solid', reason: 'paint-check-blank' },
+    appearance: 'follows-app'
+  })
+  window.webContents.invalidate()
+}
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1180,
@@ -1741,14 +1983,22 @@ function createWindow(): void {
   setTimeout(showMainWindow, 3000)
 
   const rendererUrl = trustedRendererDevServerUrl(process.env.ELECTRON_RENDERER_URL, app.isPackaged)
-  if (rendererUrl) {
-    trustRendererDocument(mainWindow, rendererUrl)
-    mainWindow.loadURL(rendererUrl)
-  } else {
-    const rendererPath = join(__dirname, '../renderer/index.html')
-    trustRendererDocument(mainWindow, pathToFileURL(rendererPath).toString())
-    mainWindow.loadFile(rendererPath)
+  const rendererPath = join(__dirname, '../renderer/index.html')
+  const loadMainDocument = (): void => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return
+    }
+    // The failure is reported by did-fail-load; the promise only repeats it.
+    if (rendererUrl) {
+      void mainWindow.loadURL(rendererUrl).catch(() => undefined)
+    } else {
+      void mainWindow.loadFile(rendererPath).catch(() => undefined)
+    }
   }
+  trustRendererDocument(mainWindow, rendererUrl ?? pathToFileURL(rendererPath).toString())
+  loadMainDocument()
+  installMainWindowRecovery(mainWindow, loadMainDocument)
+  installMicaPaintCheck(mainWindow)
 
   // Deduped so a held key's repeat storm does not flood the renderer.
   let lastPublishedShortcutModifier = false
@@ -12361,8 +12611,18 @@ async function runtimeInfo(): Promise<RuntimeInfo> {
       retryAttempts: gpuFallbackState?.retryAttempts ?? gpuFallbackLaunchState?.retryAttempts ?? 0
     },
     backendCrashes: backendCrashRecords,
+    windowGlass: mainWindowGlassInfo(),
     env: process.env
   })
+}
+
+function mainWindowGlassInfo(): RuntimeInfo['windowGlass'] {
+  const mode = appliedGlass(mainWindow)?.mode ?? glassMode
+  return {
+    kind: mode.kind,
+    reason: mode.kind === 'solid' ? mode.reason : null,
+    paintCheck: mainWindowPaintCheck
+  }
 }
 
 async function retryHardwareAcceleration(): Promise<RuntimeInfo> {

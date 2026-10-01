@@ -3393,6 +3393,16 @@ export interface RuntimeInfo {
     retryScheduled: boolean
     retryAttempts: number
   }
+  /**
+   * The main window's material and why (plan 082), so a support bundle shows
+   * whether Mica was dropped. `paintCheck` is the Windows Mica check's
+   * verdict on whether the page drew anything; `skipped` off Mica.
+   */
+  windowGlass?: {
+    kind: 'material' | 'mica' | 'solid'
+    reason: string | null
+    paintCheck: 'pending' | 'painted' | 'blank' | 'unknown' | 'skipped'
+  }
   isPackaged: boolean
   permissionTargetName: string
   permissionTargetPath: string

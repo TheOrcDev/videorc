@@ -154,6 +154,26 @@ jobs:
           VIDEORC_NATIVE_PREVIEW_MEASUREMENT_ATTEMPTS: '4'
           VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT: raw-yuv420p
 
+      - name: Verify the main window recovers from a dead renderer and never strands Mica
+        # Plan 082: a crashed renderer used to leave an empty window for ever.
+        run: pnpm smoke:windows-main-window-recovery
+        env:
+          VIDEORC_PERF_APP_EXECUTABLE: apps/desktop/release/win-unpacked/Videorc.exe
+          VIDEORC_SMOKE_OUTPUT_DIR: ${{ runner.temp }}/videorc-windows-main-window-recovery
+
+      - name: Upload main-window recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-main-window-recovery
+          path: |
+            ${{ runner.temp }}/videorc-windows-main-window-recovery/**/*.png
+            ${{ runner.temp }}/videorc-windows-main-window-recovery/**/*.json
+            ${{ runner.temp }}/videorc-windows-main-window-recovery/**/*.log
+            !${{ runner.temp }}/videorc-windows-main-window-recovery/*-userdata/**
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
