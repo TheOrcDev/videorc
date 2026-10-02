@@ -24,6 +24,7 @@ import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
 import { Field, FieldContent, FieldDescription, FieldLabel } from '@/components/ui/field'
+import { ScrollArea } from '@/components/ui/scroll-area'
 import { Switch } from '@/components/ui/switch'
 import { useVideorcAccount } from '@/hooks/use-account'
 import { setPostStreamPackAuto, usePostStreamPackAuto } from '@/hooks/use-post-stream-pack-auto'
@@ -474,10 +475,17 @@ function ArtifactView({
   const problemArtifact = latestAiProblemArtifact(session)
 
   const pipelineContent: Record<string, ReactNode> = {
+    // A long recording's transcript scrolls inside its card instead of
+    // stretching the whole Publish page.
     transcript: transcript ? (
-      <p className="text-sm whitespace-pre-line text-muted-foreground">
-        {artifactText(transcript)}
-      </p>
+      <ScrollArea
+        className="-mr-2 [&>[data-slot=scroll-area-viewport]]:max-h-72"
+        data-slot="publish-transcript"
+      >
+        <p className="pr-2 text-sm whitespace-pre-line text-muted-foreground">
+          {artifactText(transcript)}
+        </p>
+      </ScrollArea>
     ) : null,
     'title-description':
       title || description ? (
