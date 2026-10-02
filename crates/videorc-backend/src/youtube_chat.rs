@@ -752,10 +752,21 @@ fn normalize_page(
 /// [`IDLE_EMPTY_PAGES`] empty pages in a row the poll stretches to
 /// [`IDLE_POLLING_INTERVAL_MS`], and snaps back on the next message.
 pub fn next_poll_delay_ms(server_interval_ms: Option<u64>, empty_pages_in_a_row: u32) -> u64 {
+    next_poll_delay_ms_with_floor(server_interval_ms, empty_pages_in_a_row, MIN_POLLING_INTERVAL_MS)
+}
+
+/// The same with the remote `minPollMs` floor (plan 094, S7): never below the
+/// compiled 5 s floor, and the idle stretch never below the remote floor.
+pub fn next_poll_delay_ms_with_floor(
+    server_interval_ms: Option<u64>,
+    empty_pages_in_a_row: u32,
+    floor_ms: u64,
+) -> u64 {
+    let floor_ms = floor_ms.max(MIN_POLLING_INTERVAL_MS);
     let floor = if empty_pages_in_a_row >= IDLE_EMPTY_PAGES {
-        IDLE_POLLING_INTERVAL_MS
+        IDLE_POLLING_INTERVAL_MS.max(floor_ms)
     } else {
-        MIN_POLLING_INTERVAL_MS
+        floor_ms
     };
     server_interval_ms
         .unwrap_or(DEFAULT_POLLING_INTERVAL_MS)
@@ -962,6 +973,31 @@ pub async fn run_youtube_chat_connector(
         config.token_source.clone(),
     );
 
+    // Park while the remote `chatTransport: off` flag is set (plan 094, S7):
+    // Waiting with a clear message, no request, back by itself on the next
+    // flag refresh.
+    let park_while_off = || {
+        let state = state.clone();
+        let session_id = session_id.clone();
+        let target_id = target_id.clone();
+        async move {
+            if crate::youtube_quota::chat_switched_off(&state) {
+                set_provider_and_emit(
+                    &state,
+                    &session_id,
+                    session_generation,
+                    StreamPlatform::Youtube,
+                    target_id.as_deref(),
+                    LiveChatProviderConnectionState::Waiting,
+                    crate::youtube_quota::CHAT_OFF_MESSAGE,
+                )
+                .await;
+                crate::youtube_quota::wait_while_chat_off(&state).await;
+                return true;
+            }
+            false
+        }
+    };
     // Park while the shared breaker is set (plan 094): chat says it is waiting
     // and until when, spends nothing, and comes back by itself.
     let park = |message: &'static str| {
@@ -989,6 +1025,7 @@ pub async fn run_youtube_chat_connector(
         Some(id) => Some(id),
         None => match &config.broadcast_id {
             Some(broadcast_id) => loop {
+                park_while_off().await;
                 park(crate::youtube_quota::CHAT_PAUSED_MESSAGE).await;
                 let access_token = token.ensure_fresh(&state, &client).await.to_string();
                 crate::youtube_quota::record_call(
@@ -1066,6 +1103,10 @@ pub async fn run_youtube_chat_connector(
     let mut renewed_since_success = false;
 
     loop {
+        if park_while_off().await {
+            connected = false;
+            continue;
+        }
         if crate::youtube_quota::paused_until(&state).is_some() {
             park(crate::youtube_quota::CHAT_PAUSED_MESSAGE).await;
             // Resumed: the page token still points at the next unseen page.
@@ -1110,7 +1151,11 @@ pub async fn run_youtube_chat_connector(
                 } else {
                     empty_pages_in_a_row = 0;
                 }
-                let delay_ms = next_poll_delay_ms(server_interval_ms, empty_pages_in_a_row);
+                let delay_ms = next_poll_delay_ms_with_floor(
+                    server_interval_ms,
+                    empty_pages_in_a_row,
+                    crate::youtube_quota::chat_poll_floor_ms(&state),
+                );
                 if let Err(error) =
                     try_deliver_messages(&state, session_generation, page.messages).await
                 {
@@ -1855,6 +1900,18 @@ mod tests {
         );
         assert_eq!(next_poll_delay_ms(Some(1_000), 0), 5_000, "snap back");
         assert_eq!(next_poll_delay_ms(Some(12_000), IDLE_EMPTY_PAGES), 12_000);
+        // Plan 094 (S7): a remote floor only ever slows the reader down.
+        assert_eq!(next_poll_delay_ms_with_floor(Some(1_000), 0, 8_000), 8_000);
+        assert_eq!(next_poll_delay_ms_with_floor(Some(9_000), 0, 8_000), 9_000);
+        assert_eq!(next_poll_delay_ms_with_floor(Some(1_000), 0, 10), 5_000, "never below 5 s");
+        assert_eq!(
+            next_poll_delay_ms_with_floor(Some(1_000), IDLE_EMPTY_PAGES, 8_000),
+            10_000
+        );
+        assert_eq!(
+            next_poll_delay_ms_with_floor(Some(1_000), IDLE_EMPTY_PAGES, 15_000),
+            15_000
+        );
     }
 
     #[test]

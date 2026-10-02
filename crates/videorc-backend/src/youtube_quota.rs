@@ -621,6 +621,9 @@ fn budget_step_log_line(step: BudgetStep, units: u64, limit: u64) -> String {
 struct QuotaInner {
     /// S7's remote `youtube.dailyBudgetUnits`; `None` keeps the compiled default.
     budget_limit_override: Option<u64>,
+    /// The pause end the remote `youtube.pausedUntil` flag set, so a flag that
+    /// is withdrawn lifts its own pause and nothing else.
+    remote_pause: Option<DateTime<Utc>>,
     /// When the last pause expired (the probe cleared it or it lapsed).
     last_expiry: Option<DateTime<Utc>>,
     /// A probe task is sleeping towards the current pause.
@@ -638,6 +641,9 @@ struct QuotaInner {
 #[derive(Debug)]
 pub struct YouTubeQuota {
     paused: watch::Sender<Option<DateTime<Utc>>>,
+    /// The remote service flags in effect (plan 094, S7); compiled defaults
+    /// until the first fetch. Parked readers wake on every change.
+    flags: watch::Sender<crate::service_flags::YouTubeServiceFlags>,
     inner: StdMutex<QuotaInner>,
 }
 
@@ -645,6 +651,7 @@ impl Default for YouTubeQuota {
     fn default() -> Self {
         Self {
             paused: watch::channel(None).0,
+            flags: watch::channel(crate::service_flags::YouTubeServiceFlags::default()).0,
             inner: StdMutex::new(QuotaInner::default()),
         }
     }
@@ -849,6 +856,7 @@ fn clear_pause(state: &AppState, why: &str) {
     {
         let mut inner = state.youtube_quota.lock();
         inner.last_expiry = Some(Utc::now());
+        inner.remote_pause = None;
     }
     if was_paused {
         tracing::info!("[youtube-quota] pause cleared: {why}");
@@ -1144,11 +1152,158 @@ pub fn log_usage_summary(state: &AppState, session_id: &str, moment: &str) {
 }
 
 /// Session task: a summary every [`USAGE_REPORT_INTERVAL`]. Aborted with the
-/// chat connectors; the stop path logs the final line.
+/// chat connectors; the stop path logs the final line. Logs the service flags
+/// in effect first, so a session's log says which throttles it ran under.
 pub async fn run_usage_reporter(state: AppState, session_id: String) {
+    log_flags_in_effect(&state, &session_id);
     loop {
         tokio::time::sleep(USAGE_REPORT_INTERVAL).await;
         log_usage_summary(&state, &session_id, "10-minute summary");
+    }
+}
+
+// --- Remote service flags (plan 094, S7) ---------------------------------------------
+
+/// The provider message while the remote flag keeps the chat reader parked.
+pub const CHAT_OFF_MESSAGE: &str =
+    "YouTube chat is switched off by Videorc for now. Your stream keeps going.";
+
+/// The flags in effect right now (compiled defaults until the first fetch).
+pub fn service_flags_in_effect(state: &AppState) -> crate::service_flags::YouTubeServiceFlags {
+    state.youtube_quota.flags.borrow().clone()
+}
+
+/// Apply a fetched (or failed-open) document: budget limit, remote pause, chat
+/// transport, cadences. Logs the flags in effect when they change.
+pub fn apply_service_flags(state: &AppState, flags: crate::service_flags::YouTubeServiceFlags) {
+    let changed = {
+        let previous = state.youtube_quota.flags.borrow();
+        previous.chat_transport != flags.chat_transport
+            || previous.min_poll_ms != flags.min_poll_ms
+            || previous.viewer_sample_ms != flags.viewer_sample_ms
+            || previous.daily_budget_units != flags.daily_budget_units
+            || previous.paused_until != flags.paused_until
+            || previous.source != flags.source
+    };
+    set_daily_budget_limit(state, flags.daily_budget_units);
+    apply_remote_pause(state, flags.paused_until);
+    if changed {
+        let summary = flags.summary();
+        tracing::info!("[service-flags] {summary}");
+        state.emit_log("info", summary);
+    }
+    state.youtube_quota.flags.send_replace(flags);
+}
+
+/// `Some(until)` in the future pauses every YouTube call until then with the
+/// same copy as a quota pause (the probe clears it at expiry); `None` lifts a
+/// pause this flag set earlier and leaves a quota pause alone.
+pub fn apply_remote_pause(state: &AppState, until: Option<DateTime<Utc>>) {
+    let now = Utc::now();
+    let current = *state.youtube_quota.paused.borrow();
+    let (previous_remote, arm_probe) = {
+        let mut inner = state.youtube_quota.lock();
+        let previous_remote = inner.remote_pause;
+        let arm = until.is_some_and(|until| until > now) && !inner.probe_armed;
+        if arm {
+            inner.probe_armed = true;
+        }
+        (previous_remote, arm)
+    };
+    match until.filter(|until| *until > now) {
+        Some(until) => {
+            if current == Some(until) {
+                return;
+            }
+            // A longer quota pause already set stays; the flag only extends.
+            if current.is_some_and(|existing| existing > until && previous_remote.is_none()) {
+                return;
+            }
+            state.youtube_quota.lock().remote_pause = Some(until);
+            state.youtube_quota.paused.send_replace(Some(until));
+            tracing::warn!(
+                "[youtube-quota] remote service flag pauses every YouTube call until {}",
+                until.to_rfc3339()
+            );
+            state.emit_log(
+                "warn",
+                format!(
+                    "Videorc paused YouTube calls for everyone until {} (remote service flag). YouTube chat, viewers and subscribers wait; the stream is not affected.",
+                    until.to_rfc3339()
+                ),
+            );
+            emit_status(state);
+            if arm_probe {
+                spawn_expiry_probe(state.clone());
+            }
+        }
+        None => {
+            if let Some(remote) = previous_remote
+                && current == Some(remote)
+            {
+                clear_pause(state, "the remote service flag was withdrawn");
+            } else if previous_remote.is_some() {
+                state.youtube_quota.lock().remote_pause = None;
+            }
+        }
+    }
+}
+
+/// The chat reader's poll floor: the remote `minPollMs` (≥ 5,000) or 5,000.
+pub fn chat_poll_floor_ms(state: &AppState) -> u64 {
+    state
+        .youtube_quota
+        .flags
+        .borrow()
+        .min_poll_ms
+        .max(crate::youtube_chat::MIN_POLLING_INTERVAL_MS)
+}
+
+/// The viewer sampler's cadence while a YouTube sampler runs: the remote
+/// `viewerSampleMs` (≥ 30,000) or 60 s.
+pub fn viewer_sample_interval(state: &AppState) -> Duration {
+    Duration::from_millis(
+        state
+            .youtube_quota
+            .flags
+            .borrow()
+            .viewer_sample_ms
+            .max(crate::service_flags::VIEWER_SAMPLE_FLOOR_MS),
+    )
+}
+
+/// Whether the remote flag parks the chat reader.
+pub fn chat_switched_off(state: &AppState) -> bool {
+    state.youtube_quota.flags.borrow().chat_transport
+        == crate::service_flags::ChatTransportFlag::Off
+}
+
+/// Blocks while `chatTransport` is `off`; returns at once otherwise.
+pub async fn wait_while_chat_off(state: &AppState) {
+    let mut receiver = state.youtube_quota.flags.subscribe();
+    loop {
+        let off = receiver.borrow_and_update().chat_transport
+            == crate::service_flags::ChatTransportFlag::Off;
+        if !off {
+            return;
+        }
+        if receiver.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// One `youtube-service-flags` line in the session log.
+pub fn log_flags_in_effect(state: &AppState, session_id: &str) {
+    let flags = service_flags_in_effect(state);
+    if let Ok(json) = serde_json::to_string(&flags) {
+        let _ = state.database.add_session_log(
+            session_id,
+            HealthLevel::Info,
+            crate::service_flags::SERVICE_FLAGS_LOG_CODE,
+            &json,
+            None,
+        );
     }
 }
 
@@ -1655,6 +1810,98 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn a_remote_pause_sets_the_breaker_and_its_withdrawal_lifts_only_itself() {
+        use crate::service_flags::{ChatTransportFlag, YouTubeServiceFlags};
+        let state = test_state();
+        let until = Utc::now() + chrono::Duration::hours(2);
+        let flags = YouTubeServiceFlags {
+            paused_until: Some(until),
+            daily_budget_units: Some(1_000),
+            min_poll_ms: 8_000,
+            viewer_sample_ms: 45_000,
+            ..YouTubeServiceFlags::default()
+        };
+        apply_service_flags(&state, flags.clone());
+        assert_eq!(paused_until(&state), Some(until));
+        assert!(refuse_if_paused(&state).is_err());
+        assert_eq!(budget_status(&state).limit, 1_000);
+        assert_eq!(chat_poll_floor_ms(&state), 8_000);
+        assert_eq!(viewer_sample_interval(&state), Duration::from_millis(45_000));
+        assert_eq!(service_flags_in_effect(&state), flags);
+        // The same document again changes nothing.
+        apply_service_flags(&state, flags.clone());
+        assert_eq!(paused_until(&state), Some(until));
+        // Withdrawn: the remote pause lifts, the budget falls back to compiled.
+        apply_service_flags(&state, YouTubeServiceFlags::default());
+        assert_eq!(paused_until(&state), None);
+        assert_eq!(budget_status(&state).limit, DEFAULT_DAILY_BUDGET_UNITS);
+        assert_eq!(chat_poll_floor_ms(&state), 5_000);
+        assert_eq!(viewer_sample_interval(&state), Duration::from_millis(60_000));
+
+        // A quota pause is never lifted by a flag document without a pause.
+        let quota_until = record_quota_exhausted(&state, "test");
+        apply_service_flags(&state, YouTubeServiceFlags::default());
+        assert_eq!(paused_until(&state), Some(quota_until));
+        // A remote pause shorter than the quota pause does not shorten it.
+        apply_remote_pause(&state, Some(Utc::now() + chrono::Duration::minutes(5)));
+        assert_eq!(paused_until(&state), Some(quota_until));
+        // A past pause is a no-op.
+        clear_pause(&state, "test");
+        apply_remote_pause(&state, Some(Utc::now() - chrono::Duration::minutes(5)));
+        assert_eq!(paused_until(&state), None);
+
+        // Floors hold even if a caller hands unclamped values.
+        apply_service_flags(
+            &state,
+            YouTubeServiceFlags {
+                min_poll_ms: 10,
+                viewer_sample_ms: 10,
+                chat_transport: ChatTransportFlag::Off,
+                ..YouTubeServiceFlags::default()
+            },
+        );
+        assert_eq!(chat_poll_floor_ms(&state), 5_000);
+        assert_eq!(viewer_sample_interval(&state), Duration::from_millis(30_000));
+        assert!(chat_switched_off(&state));
+    }
+
+    #[tokio::test]
+    async fn chat_off_parks_the_reader_until_the_flag_changes() {
+        use crate::service_flags::{ChatTransportFlag, YouTubeServiceFlags};
+        let state = test_state();
+        apply_service_flags(
+            &state,
+            YouTubeServiceFlags {
+                chat_transport: ChatTransportFlag::Off,
+                ..YouTubeServiceFlags::default()
+            },
+        );
+        let waiter = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                wait_while_chat_off(&state).await;
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "parked while chat is off");
+        apply_service_flags(&state, YouTubeServiceFlags::default());
+        tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("resumed")
+            .unwrap();
+        // Not off: returns at once.
+        tokio::time::timeout(Duration::from_millis(200), wait_while_chat_off(&state))
+            .await
+            .expect("no wait when chat is on");
+        // The session log line names the flags in effect (the session row is
+        // the stream's; here the call only has to be harmless without one).
+        log_flags_in_effect(&state, "session-1");
+        let json = serde_json::to_string(&service_flags_in_effect(&state)).unwrap();
+        assert!(json.contains("\"chatTransport\":\"list\""), "{json}");
+        assert!(json.contains("\"minPollMs\":5000"), "{json}");
     }
 
     #[tokio::test]

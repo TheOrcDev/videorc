@@ -643,7 +643,14 @@ pub async fn run_viewer_sampler(
             state.emit_event("stream.viewers", sample);
         }
 
-        sleep(VIEWER_SAMPLE_INTERVAL).await;
+        // Plan 094 (S7): the remote `viewerSampleMs` (≥ 30 s) sets the cadence
+        // while a YouTube sampler runs; the others keep the 60 s default.
+        let interval = if youtube.is_some() {
+            crate::youtube_quota::viewer_sample_interval(&state)
+        } else {
+            VIEWER_SAMPLE_INTERVAL
+        };
+        sleep(interval).await;
     }
 }
 

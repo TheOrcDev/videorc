@@ -92,6 +92,7 @@ mod secrets;
 mod session_audio;
 mod session_ops;
 mod session_token;
+mod service_flags;
 mod seventv;
 mod source_mask;
 mod source_registry;
@@ -561,6 +562,9 @@ async fn run_backend() -> Result<()> {
         let entitlement_state = state.clone();
         tokio::spawn(async move { refresh_account_entitlements(&entitlement_state).await });
     }
+    // Plan 094 (S7): remote service flags at startup and every 30 minutes;
+    // fails open to compiled defaults.
+    tokio::spawn(service_flags::run_service_flags_refresher(state.clone()));
     match (oauth_listener, oauth_callback_port) {
         (Some(oauth_listener), Some(oauth_port)) => {
             let oauth_app = Router::new()
