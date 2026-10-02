@@ -72,9 +72,10 @@ exists (owner checklist, item 12).
 
 ### `pnpm smoke:recording-studio` (dev app, worktrees, shared host)
 
-Not green end to end on the branch. Every stage passes on its own; in full
-runs the branch failed one native-preview timing budget each time, and so
-does main on this machine (below).
+Not green end to end on the branch. Every stage passes on its own. In full
+runs the branch failed one native-preview timing budget each time; base
+passed both of its full runs, but fails the same stage 27 budget run on its
+own here (1 of 8, below).
 
 Full runs (33 stages each):
 
