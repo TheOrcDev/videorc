@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const toastSpies = vi.hoisted(() => ({
   error: vi.fn(),
@@ -36,6 +36,7 @@ function failedSession(mode: string): SessionSummary {
 }
 
 describe('session runtime recovery', () => {
+  afterEach(() => vi.useRealTimers())
   beforeEach(() => vi.clearAllMocks())
 
   it('keeps combined record-and-stream failures attached to the local recording', () => {
@@ -147,7 +148,12 @@ describe('session runtime recovery', () => {
   // Plan 094 (S3): repeated callback results for one platform share an id, so
   // the renderer's retries update one toast; a YouTube quota block says when
   // to try again, in local time; the exhaust toast lands on the same id.
-  it('keeps one connect toast per platform and words the YouTube quota block', () => {
+  it.each([
+    [12, ''],
+    [23, 'tomorrow ']
+  ] as const)('keeps one YouTube quota connect toast from local hour %i', (hour, dayLabel) => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(2026, 9, 2, hour, 0, 0))
     const retryAt = new Date(Date.now() + 3 * 60 * 60_000)
     const base = {
       platform: 'youtube' as const,
@@ -175,7 +181,7 @@ describe('session runtime recovery', () => {
     expect([...ids]).toEqual(['oauth-callback:youtube'])
     expect(toastSpies.error.mock.calls[2][0]).toBe("Couldn't finish connecting YouTube.")
     expect(toastSpies.error.mock.calls[2][1]).toMatchObject({
-      description: `Couldn't finish connecting YouTube. Videorc's daily YouTube API limit is used up. Try again after ${retryAt.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}.`
+      description: `Couldn't finish connecting YouTube. Videorc's daily YouTube API limit is used up. Try again after ${dayLabel}${retryAt.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}.`
     })
     expect(toastSpies.error.mock.calls[3][0]).toBe("Couldn't finish connecting YouTube.")
   })

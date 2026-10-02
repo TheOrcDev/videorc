@@ -21,7 +21,7 @@ document changes nothing.
     "youtube": {
       "chatTransport": "list",
       "minPollMs": 5000,
-      "viewerSampleMs": 60000,
+      "viewerSampleMs": 120000,
       "dailyBudgetUnits": 2500,
       "pausedUntil": "2026-10-03T07:00:00Z"
     }
@@ -36,7 +36,7 @@ document changes nothing.
 | ------------------ | ------------------------------------------------------------------------ | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `chatTransport`    | `"list"` \| `"off"` \| `"stream"` (exact lowercase)                      | `list`           | `off` parks the YouTube chat reader as **Waiting** ("YouTube chat is switched off by Videorc for now. Your stream keeps going."). `stream` is read as `list` and logged until S5 (real streamList) ships. Anything else: `list`, logged.            |
 | `minPollMs`        | integer                                                                  | `5000`           | Floor 5,000. The chat reader never polls faster than this; the idle stretch (10 s after six empty pages) never goes below it.                                                                                                                       |
-| `viewerSampleMs`   | integer                                                                  | `60000`          | Floor 30,000. The viewer sampler cadence while a YouTube sampler runs.                                                                                                                                                                              |
+| `viewerSampleMs`   | integer                                                                  | `120000`          | Floor 30,000. YouTube viewer cadence only; Twitch, Kick and X remain at 60 seconds. Existing clients before Plan 096 may still apply this to the shared loop.                                                                                                                                                                              |
 | `dailyBudgetUnits` | integer                                                                  | `2500`           | Clamped to 0..=10,000. `0` switches the per-install budget (S6) off. The 80% / 95% / 100% shedding steps follow the limit.                                                                                                                          |
 | `pausedUntil`      | UTC RFC 3339 with seconds and `Z` (fractional allowed; offsets honoured) | none             | In the past: ignored. In the future: every YouTube call pauses until then with the same copy as a quota pause; the expiry probe (one `channels.list`) lifts it. Withdrawing the key lifts a pause this flag set; it never lifts a real quota pause. |
 
@@ -49,7 +49,7 @@ document changes nothing.
   (`[service-flags] failing open to compiled defaults: …`).
 - Logs the flags in effect to the backend log when they change
   (`YouTube service flags in effect (remote, fetched …): chat list, poll floor
-5000 ms, viewers every 60000 ms, daily budget 2500 units, no remote pause`)
+5000 ms, viewers every 120000 ms, daily budget 2500 units, no remote pause`)
   and to every streaming session's log as code `youtube-service-flags` (JSON).
 - A remote pause shows in the app exactly like a quota pause: the Livestream
   page YouTube row, the Stream Manager status bar and the Comments destination
@@ -113,3 +113,17 @@ and this doc says so.
 - Breaker and reader behaviour under the flags: `cargo test -p videorc-backend youtube_quota`
   and `cargo test -p videorc-backend youtube_chat`.
 - The outage drill end to end: `pnpm smoke:youtube-quota` (plan 094, S4).
+
+
+Plan 096 candidates use independent bounded provider work: a pending YouTube
+request cannot delay other platforms, and Stop drops all sampler futures.
+YouTube subscriber success reads use 300 seconds; hidden/error backoff is
+unchanged. Skipped polls never refresh observation timestamps. At 80% of the
+local soft allowance, YouTube viewer cadence is at least 120 seconds (not
+another doubling); at 95% its viewer reads stop. The 2,500 allowance remains
+per installation, with essential calls/chat reads allowed past it. It is not
+a project-wide hard limit. Chat sends reserve all 50 estimated units atomically.
+
+Streaming remains disabled until Plan 096's live protocol and billing evidence
+passes. `streamList` has no assumed zero cost. Neither a successful mock nor a
+quota increase application authorizes public activation or ingest reuse.

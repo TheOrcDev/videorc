@@ -1,6 +1,6 @@
 //! Live concurrent-viewer sampling (plan rider V1, vault "2026-07-07 -
 //! Videorc OBS Import Plan"). While a stream session runs, poll each connected
-//! platform's public count on a jittered ~30s cadence, emit the latest as a
+//! platform's public count on its own bounded cadence, emit the latest as a
 //! `stream.viewers` event, and PERSIST every sample with the session (the
 //! point is owning the data — a later cut moves it onto the video / a
 //! post-stream graph). Terminology honesty: these are concurrent VIEWERS, not
@@ -8,7 +8,7 @@
 //!
 //! Failure discipline: sampling can never degrade the stream or chat. A
 //! failed poll is a missing datum (skip the tick), with its own backoff.
-//! YouTube polls cost quota (plan 094): they run every 60 s, skip entirely
+//! YouTube polls cost quota (plan 096): they run every 120 s, skip entirely
 //! while the shared quota breaker is set, back off on a 403, and a
 //! `quotaExceeded` answer sets the breaker for every other YouTube caller.
 //!
@@ -26,19 +26,20 @@ use crate::protocol::HealthLevel;
 use crate::state::AppState;
 use crate::streaming::StreamPlatform;
 
-/// Plan 094: 60 s, not 30. Each YouTube poll costs one unit of a quota every
-/// Videorc user shares.
+/// Common cadence for Twitch, Kick and X. YouTube uses its independent
+/// service-flags interval (120 seconds by default).
 pub const VIEWER_SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
 pub const VIEWER_SAMPLE_LOG_CODE: &str = "stream-viewers";
-/// A platform's count leaves the total once it is this old: two missed polls
-/// keep the last count, a third drops it rather than freezing it. Matches the
-/// renderer's stale-chip threshold (`lib/viewer-count-view.ts`).
+/// A platform's count leaves the total once it is this old, regardless of
+/// that provider's polling cadence. Matches the renderer's stale-chip
+/// threshold (`lib/viewer-count-view.ts`).
 pub const VIEWER_FRESHNESS: Duration = Duration::from_secs(150);
 /// `sessions.viewers.list` returns at most this many samples, the latest:
 /// twenty-four hours at the 60-second cadence.
 pub const VIEWER_HISTORY_LIMIT: usize = 1_440;
 /// After a YouTube 403 that is not quota, skip this many polls, doubling per
-/// repeat up to [`YOUTUBE_MAX_SKIPPED_POLLS`] (10 minutes at 60 s).
+/// repeat up to [`YOUTUBE_MAX_SKIPPED_POLLS`]. Wall time depends on the current
+/// YouTube cadence (20 minutes of skipped deadlines at the 120-second default).
 pub const YOUTUBE_MAX_SKIPPED_POLLS: u32 = 10;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -46,6 +47,8 @@ pub const YOUTUBE_MAX_SKIPPED_POLLS: u32 = 10;
 pub struct YouTubeViewerConfig {
     pub access_token: String,
     pub broadcast_id: String,
+    /// API origin or versioned `/youtube/v3` root; accepts the chat connector
+    /// origin when the coordinator shares its local provider override.
     #[serde(default)]
     pub api_base_url: Option<String>,
     /// Renews `access_token` mid-stream (plan 055, B2); never from params.
@@ -100,15 +103,6 @@ pub fn youtube_polls_to_skip(forbidden_streak: u32) -> u32 {
 struct YouTubeViewerBackoff {
     forbidden_streak: u32,
     skip_polls: u32,
-    /// Ticks seen while the daily budget slows viewers (plan 094, S6): at
-    /// `ShedExtras` only every second tick polls (120 s at the 60 s cadence).
-    budget_ticks: u32,
-}
-
-/// Pure: whether this tick polls YouTube under the budget `step`.
-pub fn budget_tick_polls(step: crate::youtube_quota::BudgetStep, tick: u32) -> bool {
-    let stride = crate::youtube_quota::budget_viewer_poll_stride(step);
-    stride != u32::MAX && tick.is_multiple_of(stride)
 }
 
 fn count_fetch_for_status(status: reqwest::StatusCode) -> Option<CountFetch> {
@@ -188,17 +182,10 @@ async fn poll_youtube_count(
     {
         return None;
     }
-    let step = crate::youtube_quota::budget_status(state).step;
-    let tick = backoff.budget_ticks;
-    backoff.budget_ticks = backoff.budget_ticks.wrapping_add(1);
-    if !budget_tick_polls(step, tick) {
-        return None;
-    }
     if backoff.skip_polls > 0 {
         backoff.skip_polls -= 1;
         return None;
     }
-    crate::youtube_quota::record_call(state, crate::youtube_quota::YouTubeEndpoint::VideosList);
     let outcome = poll_with_renewal_outcome(state, client, token, |access_token| async move {
         fetch_youtube_count(state, client, config, &access_token).await
     })
@@ -405,24 +392,38 @@ pub fn session_viewer_history(
         .collect())
 }
 
+fn youtube_viewer_api_root(base: &str) -> String {
+    let base = base.trim_end_matches('/');
+    if base.ends_with("/youtube/v3") {
+        base.to_string()
+    } else {
+        format!("{base}/youtube/v3")
+    }
+}
+
 async fn fetch_youtube_count(
     state: &AppState,
     client: &reqwest::Client,
     config: &YouTubeViewerConfig,
     access_token: &str,
 ) -> CountFetch {
-    let base = config.api_base_url.clone().unwrap_or_else(|| {
-        format!(
-            "{}/youtube/v3",
-            crate::youtube_quota::youtube_api_base_url(None)
-        )
-    });
+    let base = youtube_viewer_api_root(&crate::youtube_quota::youtube_api_base_url(
+        config.api_base_url.as_deref(),
+    ));
     let url = format!(
         "{}/videos?part=liveStreamingDetails&id={}",
         base.trim_end_matches('/'),
         config.broadcast_id
     );
-    let Ok(response) = client.get(url).bearer_auth(access_token).send().await else {
+    let Ok(response) = crate::youtube_quota::send_attempt(
+        state,
+        crate::youtube_quota::YouTubeEndpoint::VideosList,
+        crate::youtube_quota::BudgetCall::Viewers,
+        client,
+        client.get(url).bearer_auth(access_token),
+    )
+    .await
+    else {
         return CountFetch::Count(None);
     };
     if response.status() == reqwest::StatusCode::FORBIDDEN {
@@ -575,87 +576,174 @@ pub async fn run_viewer_sampler(
     if youtube.is_none() && twitch.is_none() && x.is_none() && kick.is_none() {
         return;
     }
-    let client = reqwest::Client::new();
-    // Deterministic jitter from the session id keeps concurrent sessions from
-    // aligning their polls without needing a RNG.
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .expect("viewer HTTP client");
     let jitter_ms = (session_id.bytes().map(u64::from).sum::<u64>() % 5000) + 500;
     sleep(Duration::from_millis(jitter_ms)).await;
 
-    let mut youtube_token = youtube.as_ref().map(|config| {
-        crate::session_token::SessionToken::new(
+    // These futures are owned by this sampler, not detached tasks. Dropping
+    // the sampler cancels every pending provider request and timer together.
+    let youtube_work = async {
+        let Some(config) = youtube else { return };
+        let mut token = crate::session_token::SessionToken::new(
             config.access_token.clone(),
             config.token_source.clone(),
-        )
-    });
-    let mut youtube_backoff = YouTubeViewerBackoff::default();
-    let mut x_diagnostics = XViewerDiagnostics::default();
-    let mut twitch_token = twitch.as_ref().map(|config| {
-        crate::session_token::SessionToken::new(
-            config.access_token.clone(),
-            config.token_source.clone(),
-        )
-    });
-    let mut kick_token = kick.as_ref().map(|config| {
-        crate::session_token::SessionToken::new(
-            config.access_token.clone(),
-            config.token_source.clone(),
-        )
-    });
-    loop {
-        let mut counts: Vec<(StreamPlatform, Option<u64>)> = Vec::new();
-        let client_ref = &client;
-        if let (Some(config), Some(token)) = (youtube.as_ref(), youtube_token.as_mut()) {
-            let count =
-                poll_youtube_count(&state, &client, config, token, &mut youtube_backoff).await;
-            counts.push((StreamPlatform::Youtube, count));
-        }
-        if let (Some(config), Some(token)) = (twitch.as_ref(), twitch_token.as_mut()) {
-            let count = poll_with_renewal(&state, &client, token, |access_token| async move {
-                fetch_twitch_count(client_ref, config, &access_token).await
-            })
-            .await;
-            counts.push((StreamPlatform::Twitch, count));
-        }
-        if let (Some(config), Some(token)) = (kick.as_ref(), kick_token.as_mut()) {
-            let count = poll_with_renewal(&state, &client, token, |access_token| async move {
-                fetch_kick_count(client_ref, config, &access_token).await
-            })
-            .await;
-            counts.push((StreamPlatform::Kick, count));
-        }
-        if let Some(config) = x.as_ref() {
-            let count =
-                fetch_x_count(&state, &session_id, &client, config, &mut x_diagnostics).await;
-            counts.push((StreamPlatform::X, count));
-        }
-
-        let sample = state
-            .viewer_aggregator
-            .lock()
+        );
+        let mut backoff = YouTubeViewerBackoff::default();
+        let mut deadline = ProviderDeadline::new();
+        loop {
+            deadline.wait(&state, true).await;
+            let count = tokio::time::timeout(
+                Duration::from_secs(25),
+                poll_youtube_count(&state, &client, &config, &mut token, &mut backoff),
+            )
+            .await
             .ok()
-            .and_then(|mut aggregator| aggregator.record(&session_id, counts, chrono::Utc::now()));
-        if let Some(sample) = sample {
-            // Persist FIRST (owning the data is the point), then emit.
-            if let Ok(json) = serde_json::to_string(&sample) {
-                let _ = state.database.add_session_log(
-                    &session_id,
-                    HealthLevel::Info,
-                    VIEWER_SAMPLE_LOG_CODE,
-                    &json,
-                    None,
-                );
-            }
-            state.emit_event("stream.viewers", sample);
+            .flatten();
+            record_provider_sample(&state, &session_id, StreamPlatform::Youtube, count);
         }
+    };
+    let twitch_work = async {
+        let Some(config) = twitch else { return };
+        let mut token = crate::session_token::SessionToken::new(
+            config.access_token.clone(),
+            config.token_source.clone(),
+        );
+        let mut deadline = ProviderDeadline::new();
+        loop {
+            deadline.wait(&state, false).await;
+            let client = &client;
+            let config = &config;
+            let count = tokio::time::timeout(
+                Duration::from_secs(25),
+                poll_with_renewal(&state, client, &mut token, |access_token| async move {
+                    fetch_twitch_count(client, config, &access_token).await
+                }),
+            )
+            .await
+            .ok()
+            .flatten();
+            record_provider_sample(&state, &session_id, StreamPlatform::Twitch, count);
+        }
+    };
+    let kick_work = async {
+        let Some(config) = kick else { return };
+        let mut token = crate::session_token::SessionToken::new(
+            config.access_token.clone(),
+            config.token_source.clone(),
+        );
+        let mut deadline = ProviderDeadline::new();
+        loop {
+            deadline.wait(&state, false).await;
+            let client = &client;
+            let config = &config;
+            let count = tokio::time::timeout(
+                Duration::from_secs(25),
+                poll_with_renewal(&state, client, &mut token, |access_token| async move {
+                    fetch_kick_count(client, config, &access_token).await
+                }),
+            )
+            .await
+            .ok()
+            .flatten();
+            record_provider_sample(&state, &session_id, StreamPlatform::Kick, count);
+        }
+    };
+    let x_work = async {
+        let Some(config) = x else { return };
+        let mut diagnostics = XViewerDiagnostics::default();
+        let mut deadline = ProviderDeadline::new();
+        loop {
+            deadline.wait(&state, false).await;
+            let count = tokio::time::timeout(
+                Duration::from_secs(25),
+                fetch_x_count(&state, &session_id, &client, &config, &mut diagnostics),
+            )
+            .await
+            .ok()
+            .flatten();
+            record_provider_sample(&state, &session_id, StreamPlatform::X, count);
+        }
+    };
+    tokio::join!(youtube_work, twitch_work, kick_work, x_work);
+}
 
-        // Plan 094 (S7): the remote `viewerSampleMs` (≥ 30 s) sets the cadence
-        // while a YouTube sampler runs; the others keep the 60 s default.
-        let interval = if youtube.is_some() {
-            crate::youtube_quota::viewer_sample_interval(&state)
-        } else {
-            VIEWER_SAMPLE_INTERVAL
-        };
-        sleep(interval).await;
+fn record_provider_sample(
+    state: &AppState,
+    session_id: &str,
+    platform: StreamPlatform,
+    count: Option<u64>,
+) {
+    let sample = state
+        .viewer_aggregator
+        .lock()
+        .ok()
+        .and_then(|mut aggregator| {
+            aggregator.record(session_id, vec![(platform, count)], chrono::Utc::now())
+        });
+    if let Some(sample) = sample {
+        if let Ok(json) = serde_json::to_string(&sample) {
+            let _ = state.database.add_session_log(
+                session_id,
+                HealthLevel::Info,
+                VIEWER_SAMPLE_LOG_CODE,
+                &json,
+                None,
+            );
+        }
+        state.emit_event("stream.viewers", sample);
+    }
+}
+
+/// A provider owns its own monotonic deadline. No modulo coupling to another
+/// provider, no overlapping work, and changed flags never cause catch-up bursts.
+struct ProviderDeadline {
+    last_start: Option<tokio::time::Instant>,
+}
+impl ProviderDeadline {
+    fn new() -> Self {
+        Self { last_start: None }
+    }
+    async fn wait(&mut self, state: &AppState, youtube: bool) {
+        if let Some(last) = self.last_start {
+            let mut flags = crate::youtube_quota::subscribe_service_flags(state);
+            let mut interval = provider_interval(state, youtube);
+            let mut next = last + interval;
+            if next < tokio::time::Instant::now() {
+                next = tokio::time::Instant::now() + interval;
+            }
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep_until(next) => break,
+                    change = flags.changed(), if youtube => {
+                        if change.is_err() { break; }
+                        let updated = provider_interval(state, youtube);
+                        if updated != interval {
+                            interval = updated;
+                            next = last + interval;
+                            if next <= tokio::time::Instant::now() { next = tokio::time::Instant::now() + interval; }
+                        }
+                    }
+                }
+            }
+        }
+        self.last_start = Some(tokio::time::Instant::now());
+    }
+}
+
+fn provider_interval(state: &AppState, youtube: bool) -> Duration {
+    if !youtube {
+        return VIEWER_SAMPLE_INTERVAL;
+    }
+    let interval = crate::youtube_quota::viewer_sample_interval(state);
+    if crate::youtube_quota::budget_status(state).step
+        >= crate::youtube_quota::BudgetStep::ShedExtras
+    {
+        interval.max(Duration::from_secs(120))
+    } else {
+        interval
     }
 }
 
@@ -663,20 +751,252 @@ pub async fn run_viewer_sampler(
 mod tests {
     use super::*;
     use serde_json::json;
+    fn test_state() -> AppState {
+        AppState::new(
+            "test".into(),
+            1234,
+            tokio::sync::broadcast::channel(64).0,
+            crate::storage::Database::open_in_memory_for_tests(),
+        )
+    }
+
+    #[tokio::test]
+    async fn held_youtube_http_does_not_delay_twitch_and_stop_owns_every_reader() {
+        use axum::{
+            Router,
+            body::{Body, Bytes},
+            response::IntoResponse,
+            routing::get,
+        };
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct Held(Arc<AtomicUsize>, tokio::sync::mpsc::UnboundedSender<()>);
+        impl Drop for Held {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+                let _ = self.1.send(());
+            }
+        }
+        let active = Arc::new(AtomicUsize::new(0));
+        let opens = Arc::new(AtomicUsize::new(0));
+        let (opened, mut openings) = tokio::sync::mpsc::unbounded_channel();
+        let (closed, mut closures) = tokio::sync::mpsc::unbounded_channel();
+        let (twitch_called, mut twitch_calls) = tokio::sync::mpsc::unbounded_channel();
+        let app = Router::new()
+            .route(
+                "/youtube/v3/videos",
+                get({
+                    let active = active.clone();
+                    let opens = opens.clone();
+                    move || {
+                        let active = active.clone();
+                        let opens = opens.clone();
+                        let opened = opened.clone();
+                        let closed = closed.clone();
+                        async move {
+                            assert_eq!(
+                                active.fetch_add(1, Ordering::SeqCst),
+                                0,
+                                "YouTube requests must not overlap"
+                            );
+                            opens.fetch_add(1, Ordering::SeqCst);
+                            let held = Held(active, closed);
+                            let _ = opened.send(());
+                            Body::from_stream(futures_util::stream::poll_fn(move |_| {
+                                let _keep_alive = &held;
+                                std::task::Poll::<Option<Result<Bytes, std::io::Error>>>::Pending
+                            }))
+                            .into_response()
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/streams",
+                get(move || {
+                    let called = twitch_called.clone();
+                    async move {
+                        let _ = called.send(());
+                        axum::Json(json!({"data":[{"viewer_count":42}]}))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let mut flags = crate::service_flags::YouTubeServiceFlags::default();
+        flags.viewer_sample_ms = 110_000;
+        crate::youtube_quota::apply_service_flags(&state, flags);
+        let sampler = tokio::spawn(run_viewer_sampler(
+            state.clone(),
+            "a".into(),
+            Some(YouTubeViewerConfig {
+                access_token: "test".into(),
+                broadcast_id: "test".into(),
+                api_base_url: Some(base.clone()),
+                token_source: crate::session_token::SessionTokenSource::Fixed,
+            }),
+            Some(TwitchViewerConfig {
+                access_token: "test".into(),
+                client_id: "test".into(),
+                broadcaster_user_id: "test".into(),
+                api_base_url: Some(base),
+                token_source: crate::session_token::SessionTokenSource::Fixed,
+            }),
+            None,
+            None,
+        ));
+        async fn next_sample(
+            events: &mut tokio::sync::broadcast::Receiver<crate::protocol::ServerEvent>,
+        ) {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let event = events.recv().await.unwrap();
+                    if event.event == "stream.viewers" {
+                        assert_eq!(event.payload["total"], 42);
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("Twitch observation must not wait for YouTube");
+        }
+        next_sample(&mut events).await;
+        assert_eq!(active.load(Ordering::SeqCst), 1);
+        openings.recv().await.unwrap();
+        twitch_calls.recv().await.unwrap();
+        async fn advance(seconds: u64) {
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(seconds)).await;
+            tokio::time::resume();
+        }
+        advance(61).await;
+        next_sample(&mut events).await;
+        tokio::time::timeout(Duration::from_secs(2), closures.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        advance(50).await;
+        tokio::time::timeout(Duration::from_secs(2), openings.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        advance(10).await;
+        next_sample(&mut events).await;
+        assert_eq!(
+            active.load(Ordering::SeqCst),
+            1,
+            "YouTube remains pending at Twitch's next deadline"
+        );
+        assert_eq!(opens.load(Ordering::SeqCst), 2);
+        sampler.abort();
+        assert!(sampler.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(2), closures.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            active.load(Ordering::SeqCst),
+            0,
+            "owner cancellation closes held response"
+        );
+        advance(300).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            opens.load(Ordering::SeqCst),
+            2,
+            "stopped reader cannot reopen"
+        );
+        server.abort();
+    }
 
     #[test]
-    fn the_budget_slows_then_stops_youtube_viewer_polls() {
-        use crate::youtube_quota::BudgetStep;
-        assert!((0..4).all(|tick| budget_tick_polls(BudgetStep::Normal, tick)));
-        assert_eq!(
-            (0..4)
-                .map(|tick| budget_tick_polls(BudgetStep::ShedExtras, tick))
-                .collect::<Vec<_>>(),
-            vec![true, false, true, false],
-            "80%: every other 60 s tick, so viewers every 120 s"
-        );
-        assert!((0..4).all(|tick| !budget_tick_polls(BudgetStep::ShedViewers, tick)));
-        assert!((0..4).all(|tick| !budget_tick_polls(BudgetStep::EssentialsOnly, tick)));
+    fn youtube_viewer_root_accepts_origin_or_versioned_root() {
+        for base in [
+            "https://www.googleapis.com",
+            "https://www.googleapis.com/",
+            "https://www.googleapis.com/youtube/v3",
+            "https://www.googleapis.com/youtube/v3/",
+        ] {
+            assert_eq!(
+                youtube_viewer_api_root(base),
+                "https://www.googleapis.com/youtube/v3"
+            );
+        }
+        for base in [
+            "http://127.0.0.1:4567",
+            "http://127.0.0.1:4567/",
+            "http://127.0.0.1:4567/youtube/v3",
+            "http://127.0.0.1:4567/youtube/v3/",
+        ] {
+            assert_eq!(
+                youtube_viewer_api_root(base),
+                "http://127.0.0.1:4567/youtube/v3"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn independent_deadlines_count_two_hour_windows_without_catchup() {
+        let state = test_state();
+        let count = |youtube| {
+            let state = state.clone();
+            async move {
+                let start = tokio::time::Instant::now();
+                let mut deadline = ProviderDeadline::new();
+                let mut calls = 0;
+                loop {
+                    deadline.wait(&state, youtube).await;
+                    if tokio::time::Instant::now() - start >= Duration::from_secs(7200) {
+                        break;
+                    }
+                    calls += 1;
+                }
+                calls
+            }
+        };
+        let (youtube, other) = tokio::join!(count(true), count(false));
+        assert_eq!(youtube, 60);
+        assert_eq!(other, 120);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn changed_youtube_deadline_does_not_change_other_provider_or_double_shed_cadence() {
+        let state = test_state();
+        let mut flags = crate::service_flags::YouTubeServiceFlags::default();
+        flags.viewer_sample_ms = 30_000;
+        crate::youtube_quota::apply_service_flags(&state, flags.clone());
+        assert_eq!(provider_interval(&state, true), Duration::from_secs(30));
+        assert_eq!(provider_interval(&state, false), Duration::from_secs(60));
+        let mut deadline = ProviderDeadline::new();
+        deadline.wait(&state, true).await;
+        let waiter_state = state.clone();
+        let waiter = tokio::spawn(async move {
+            deadline.wait(&waiter_state, true).await;
+            tokio::time::Instant::now()
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(10)).await;
+        flags.viewer_sample_ms = 120_000;
+        crate::youtube_quota::apply_service_flags(&state, flags);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert!(!waiter.is_finished());
+        for _ in 0..40 {
+            crate::youtube_quota::record_call(
+                &state,
+                crate::youtube_quota::YouTubeEndpoint::LiveChatMessagesInsert,
+            );
+        }
+        assert_eq!(provider_interval(&state, true), Duration::from_secs(120));
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
     }
 
     #[test]
@@ -944,7 +1264,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let app = axum::Router::new()
-            .route("/videos", axum::routing::get(counting_videos))
+            .route("/youtube/v3/videos", axum::routing::get(counting_videos))
             .with_state(CountingVideos {
                 hits: hits.clone(),
                 status,
@@ -954,6 +1274,55 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         (format!("http://{addr}"), hits)
+    }
+
+    #[tokio::test]
+    async fn renewed_youtube_viewer_request_counts_both_http_attempts() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = axum::Router::new().route(
+            "/youtube/v3/videos",
+            axum::routing::get(|headers: axum::http::HeaderMap| async move {
+                if headers["authorization"] == "Bearer fresh" {
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(
+                            json!({"items":[{"liveStreamingDetails":{"concurrentViewers":"9"}}]}),
+                        ),
+                    )
+                } else {
+                    (
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        axum::Json(json!({"error":{}})),
+                    )
+                }
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let state = quota_test_state();
+        let config = YouTubeViewerConfig {
+            access_token: "expired".into(),
+            broadcast_id: "broadcast".into(),
+            api_base_url: Some(base),
+            token_source: crate::session_token::SessionTokenSource::scripted(vec![Ok("fresh")]),
+        };
+        let mut token = crate::session_token::SessionToken::new(
+            config.access_token.clone(),
+            config.token_source.clone(),
+        );
+        let result = poll_youtube_count(
+            &state,
+            &reqwest::Client::new(),
+            &config,
+            &mut token,
+            &mut YouTubeViewerBackoff::default(),
+        )
+        .await;
+        assert_eq!(result, Some(9));
+        assert_eq!(crate::youtube_quota::usage_snapshot(&state).total_calls, 2);
+        server.abort();
     }
 
     #[tokio::test]

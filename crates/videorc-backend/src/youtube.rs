@@ -293,6 +293,10 @@ pub fn youtube_failure_response(
         }
     };
     if error.downcast_ref::<YouTubeQuotaPaused>().is_some()
+        || matches!(
+            error.downcast_ref::<crate::youtube_quota::YouTubeNotAttempted>(),
+            Some(crate::youtube_quota::YouTubeNotAttempted::Paused)
+        )
         || crate::youtube_quota::is_quota_exhausted_error(error)
     {
         return ("youtube-quota-paused", quota_message(step).to_string());
@@ -489,120 +493,141 @@ struct YouTubeThumbnail {
 }
 
 pub async fn prepare_youtube_broadcast(
+    state: &crate::state::AppState,
     request: YouTubePrepareRequest,
     client: &reqwest::Client,
     put_secret: impl FnOnce(&str, &str) -> Result<()>,
 ) -> Result<PreparedYouTubeBroadcast> {
     let metadata = effective_youtube_metadata(&request.metadata)?;
+    let stream_key_secret_ref =
+        youtube_stream_key_secret_ref(&request.account_id, request.target_id.as_deref())?;
     let scheduled_start_time = request.scheduled_start_time.unwrap_or_else(|| {
         (Utc::now() + Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     });
     let base_url = crate::youtube_quota::youtube_api_base_url(request.api_base_url.as_deref());
 
-    let broadcast_response = client
-        .post(youtube_api_url(
-            &base_url,
-            "/youtube/v3/liveBroadcasts",
-            &[("part", "snippet,status,contentDetails")],
-        )?)
-        .bearer_auth(&request.access_token)
-        .json(&json!({
-            "snippet": {
-                "title": metadata.title,
-                "description": metadata.description,
-                "scheduledStartTime": scheduled_start_time,
-            },
-            "status": {
-                "privacyStatus": youtube_privacy(metadata.privacy),
-                "selfDeclaredMadeForKids": metadata.made_for_kids,
-            },
-            "contentDetails": {
-                "enableAutoStart": true,
-                "enableAutoStop": true,
-                // The API defaults monitor streams to enabled. With a monitor stream
-                // enabled, YouTube rejects direct ready -> live transitions; our Go
-                // Live flow waits for active ingest, then transitions directly live.
-                "monitorStream": {
-                    "enableMonitorStream": false,
+    let broadcast_response = crate::youtube_quota::send_attempt(
+        state,
+        crate::youtube_quota::YouTubeEndpoint::LiveBroadcastsInsert,
+        crate::youtube_quota::BudgetCall::GoLiveEssential,
+        client,
+        client
+            .post(youtube_api_url(
+                &base_url,
+                "/youtube/v3/liveBroadcasts",
+                &[("part", "snippet,status,contentDetails")],
+            )?)
+            .bearer_auth(&request.access_token)
+            .json(&json!({
+                "snippet": {
+                    "title": metadata.title,
+                    "description": metadata.description,
+                    "scheduledStartTime": scheduled_start_time,
                 },
-                // YouTube defaults to "normal" latency (30-60s by design). Low keeps
-                // every feature at ~10-15s glass-to-glass; ultraLow restricts
-                // resolutions and is deliberately not the default here.
-                "latencyPreference": "low",
-            },
-        }))
-        .send()
-        .await
-        .context("Could not create YouTube broadcast.")?;
-    let broadcast: YouTubeIdResponse =
-        require_youtube_success(broadcast_response, "YouTube broadcast creation failed")
-            .await?
-            .json()
-            .await
-            .context("Could not parse YouTube broadcast response.")?;
+                "status": {
+                    "privacyStatus": youtube_privacy(metadata.privacy),
+                    "selfDeclaredMadeForKids": metadata.made_for_kids,
+                },
+                "contentDetails": {
+                    "enableAutoStart": true,
+                    "enableAutoStop": true,
+                    // The API defaults monitor streams to enabled. With a monitor stream
+                    // enabled, YouTube rejects direct ready -> live transitions; our Go
+                    // Live flow waits for active ingest, then transitions directly live.
+                    "monitorStream": {
+                        "enableMonitorStream": false,
+                    },
+                    // YouTube defaults to "normal" latency (30-60s by design). Low keeps
+                    // every feature at ~10-15s glass-to-glass; ultraLow restricts
+                    // resolutions and is deliberately not the default here.
+                    "latencyPreference": "low",
+                },
+            })),
+    )
+    .await
+    .context("Could not create YouTube broadcast.")?;
+    let broadcast: YouTubeIdResponse = require_youtube_success(
+        state,
+        broadcast_response,
+        "YouTube broadcast creation failed",
+    )
+    .await?
+    .json()
+    .await
+    .context("Could not parse YouTube broadcast response.")?;
 
     // From here on a failure must roll back what was already created on the
     // channel; otherwise every failed Go Live leaves an orphaned scheduled
     // broadcast behind in YouTube Studio.
     let stream_and_bind = async {
-        let stream_response = client
-            .post(youtube_api_url(
-                &base_url,
-                "/youtube/v3/liveStreams",
-                &[("part", "snippet,cdn,contentDetails,status")],
-            )?)
-            .bearer_auth(&request.access_token)
-            .json(&json!({
-                "snippet": {
-                    "title": format!("Videorc {}", request.account_label),
-                    "description": "Created by Videorc",
-                },
-                "cdn": {
-                    "frameRate": youtube_frame_rate(request.video.fps),
-                    "ingestionType": "rtmp",
-                    // A portrait (vertical simulcast) profile is named by its
-                    // SHORT side like its landscape twin: 1080x1920 is "1080p",
-                    // not the "2160p" its height alone would select.
-                    "resolution": youtube_resolution(
-                        request.video.height.min(request.video.width),
-                    ),
-                },
-                "contentDetails": {
-                    "isReusable": true,
-                },
-            }))
-            .send()
-            .await
-            .context("Could not create YouTube stream.")?;
+        let stream_response = crate::youtube_quota::send_attempt(
+            state,
+            crate::youtube_quota::YouTubeEndpoint::LiveStreamsInsert,
+            crate::youtube_quota::BudgetCall::GoLiveEssential,
+            client,
+            client
+                .post(youtube_api_url(
+                    &base_url,
+                    "/youtube/v3/liveStreams",
+                    &[("part", "snippet,cdn,contentDetails,status")],
+                )?)
+                .bearer_auth(&request.access_token)
+                .json(&json!({
+                    "snippet": {
+                        "title": format!("Videorc {}", request.account_label),
+                        "description": "Created by Videorc",
+                    },
+                    "cdn": {
+                        "frameRate": youtube_frame_rate(request.video.fps),
+                        "ingestionType": "rtmp",
+                        // A portrait (vertical simulcast) profile is named by its
+                        // SHORT side like its landscape twin: 1080x1920 is "1080p",
+                        // not the "2160p" its height alone would select.
+                        "resolution": youtube_resolution(
+                            request.video.height.min(request.video.width),
+                        ),
+                    },
+                    "contentDetails": {
+                        "isReusable": true,
+                    },
+                })),
+        )
+        .await
+        .context("Could not create YouTube stream.")?;
         let live_stream: YouTubeLiveStreamResponse =
-            require_youtube_success(stream_response, "YouTube stream creation failed")
+            require_youtube_success(state, stream_response, "YouTube stream creation failed")
                 .await?
                 .json()
                 .await
                 .context("Could not parse YouTube stream response.")?;
 
-        let bind_response = client
-            .post(youtube_api_url(
-                &base_url,
-                "/youtube/v3/liveBroadcasts/bind",
-                &[
-                    ("id", broadcast.id.as_str()),
-                    ("part", "id,contentDetails"),
-                    ("streamId", live_stream.id.as_str()),
-                ],
-            )?)
-            .bearer_auth(&request.access_token)
-            // Parameter-only POST: Google's front end rejects requests without a
-            // Content-Length header with 411. reqwest/hyper omit the header for empty
-            // bodies (even `.body("")`), so it must be set explicitly — proven by
-            // tests/content_length_wire.rs.
-            .header(reqwest::header::CONTENT_LENGTH, "0")
-            .body("")
-            .send()
-            .await
-            .context("Could not bind YouTube broadcast to stream.")?;
+        let bind_response = crate::youtube_quota::send_attempt(
+            state,
+            crate::youtube_quota::YouTubeEndpoint::LiveBroadcastsBind,
+            crate::youtube_quota::BudgetCall::GoLiveEssential,
+            client,
+            client
+                .post(youtube_api_url(
+                    &base_url,
+                    "/youtube/v3/liveBroadcasts/bind",
+                    &[
+                        ("id", broadcast.id.as_str()),
+                        ("part", "id,contentDetails"),
+                        ("streamId", live_stream.id.as_str()),
+                    ],
+                )?)
+                .bearer_auth(&request.access_token)
+                // Parameter-only POST: Google's front end rejects requests without a
+                // Content-Length header with 411. reqwest/hyper omit the header for empty
+                // bodies (even `.body("")`), so it must be set explicitly — proven by
+                // tests/content_length_wire.rs.
+                .header(reqwest::header::CONTENT_LENGTH, "0")
+                .body(""),
+        )
+        .await
+        .context("Could not bind YouTube broadcast to stream.")?;
         let _bound: YouTubeIdResponse =
-            require_youtube_success(bind_response, "YouTube broadcast bind failed")
+            require_youtube_success(state, bind_response, "YouTube broadcast bind failed")
                 .await?
                 .json()
                 .await
@@ -614,6 +639,7 @@ pub async fn prepare_youtube_broadcast(
         Ok(live_stream) => live_stream,
         Err(error) => {
             delete_youtube_resource(
+                state,
                 client,
                 &base_url,
                 &request.access_token,
@@ -625,8 +651,6 @@ pub async fn prepare_youtube_broadcast(
         }
     };
 
-    let stream_key_secret_ref =
-        youtube_stream_key_secret_ref(&request.account_id, request.target_id.as_deref())?;
     put_secret(
         &stream_key_secret_ref,
         &live_stream.cdn.ingestion_info.stream_name,
@@ -652,26 +676,35 @@ pub async fn prepare_youtube_broadcast(
 }
 
 pub async fn list_youtube_channels(
+    state: &crate::state::AppState,
     request: YouTubeChannelListRequest,
     client: &reqwest::Client,
 ) -> Result<YouTubeChannelListResult> {
     let base_url = crate::youtube_quota::youtube_api_base_url(request.api_base_url.as_deref());
-    let channels_response = client
-        .get(youtube_api_url(
-            &base_url,
-            "/youtube/v3/channels",
-            &[("part", "snippet"), ("mine", "true"), ("maxResults", "50")],
-        )?)
-        .bearer_auth(&request.access_token)
-        .send()
-        .await
-        .context("Could not fetch YouTube channels.")?;
-    let response: YouTubeChannelListResponse =
-        require_youtube_success(channels_response, "YouTube channel list request failed")
-            .await?
-            .json()
-            .await
-            .context("Could not parse YouTube channel list response.")?;
+    let channels_response = crate::youtube_quota::send_attempt(
+        state,
+        crate::youtube_quota::YouTubeEndpoint::ChannelsList,
+        crate::youtube_quota::BudgetCall::GoLiveEssential,
+        client,
+        client
+            .get(youtube_api_url(
+                &base_url,
+                "/youtube/v3/channels",
+                &[("part", "snippet"), ("mine", "true"), ("maxResults", "50")],
+            )?)
+            .bearer_auth(&request.access_token),
+    )
+    .await
+    .context("Could not fetch YouTube channels.")?;
+    let response: YouTubeChannelListResponse = require_youtube_success(
+        state,
+        channels_response,
+        "YouTube channel list request failed",
+    )
+    .await?
+    .json()
+    .await
+    .context("Could not parse YouTube channel list response.")?;
 
     Ok(YouTubeChannelListResult {
         platform: StreamPlatform::Youtube,
@@ -706,6 +739,7 @@ pub fn select_youtube_channel(
 }
 
 pub async fn get_youtube_stream_status(
+    state: &crate::state::AppState,
     request: YouTubeStreamStatusRequest,
     client: &reqwest::Client,
 ) -> Result<YouTubeStreamStatusResult> {
@@ -714,22 +748,30 @@ pub async fn get_youtube_stream_status(
     }
 
     let base_url = crate::youtube_quota::youtube_api_base_url(request.api_base_url.as_deref());
-    let status_response = client
-        .get(youtube_api_url(
-            &base_url,
-            "/youtube/v3/liveStreams",
-            &[("part", "status"), ("id", request.stream_id.as_str())],
-        )?)
-        .bearer_auth(&request.access_token)
-        .send()
-        .await
-        .context("Could not fetch YouTube stream status.")?;
-    let response: YouTubeLiveStreamListResponse =
-        require_youtube_success(status_response, "YouTube stream status request failed")
-            .await?
-            .json()
-            .await
-            .context("Could not parse YouTube stream status response.")?;
+    let status_response = crate::youtube_quota::send_attempt(
+        state,
+        crate::youtube_quota::YouTubeEndpoint::LiveStreamsList,
+        crate::youtube_quota::BudgetCall::GoLiveEssential,
+        client,
+        client
+            .get(youtube_api_url(
+                &base_url,
+                "/youtube/v3/liveStreams",
+                &[("part", "status"), ("id", request.stream_id.as_str())],
+            )?)
+            .bearer_auth(&request.access_token),
+    )
+    .await
+    .context("Could not fetch YouTube stream status.")?;
+    let response: YouTubeLiveStreamListResponse = require_youtube_success(
+        state,
+        status_response,
+        "YouTube stream status request failed",
+    )
+    .await?
+    .json()
+    .await
+    .context("Could not parse YouTube stream status response.")?;
 
     let item = response
         .items
@@ -774,6 +816,7 @@ fn youtube_thumbnail_url(thumbnails: YouTubeChannelThumbnails) -> Option<String>
 }
 
 pub async fn transition_youtube_broadcast(
+    state: &crate::state::AppState,
     request: YouTubeBroadcastTransitionRequest,
     client: &reqwest::Client,
 ) -> Result<YouTubeBroadcastTransitionResult> {
@@ -783,29 +826,35 @@ pub async fn transition_youtube_broadcast(
 
     let base_url = crate::youtube_quota::youtube_api_base_url(request.api_base_url.as_deref());
     let status = youtube_transition_status(request.status);
-    let response = client
-        .post(youtube_api_url(
-            &base_url,
-            "/youtube/v3/liveBroadcasts/transition",
-            &[
-                ("broadcastStatus", status),
-                ("id", request.broadcast_id.as_str()),
-                ("part", "id,status"),
-            ],
-        )?)
-        .bearer_auth(&request.access_token)
-        // Parameter-only POST (see bind): Content-Length must be set explicitly.
-        .header(reqwest::header::CONTENT_LENGTH, "0")
-        .body("")
-        .send()
-        .await
-        .context("Could not transition YouTube broadcast.")?;
+    let response = crate::youtube_quota::send_attempt(
+        state,
+        crate::youtube_quota::YouTubeEndpoint::LiveBroadcastsTransition,
+        crate::youtube_quota::BudgetCall::GoLiveEssential,
+        client,
+        client
+            .post(youtube_api_url(
+                &base_url,
+                "/youtube/v3/liveBroadcasts/transition",
+                &[
+                    ("broadcastStatus", status),
+                    ("id", request.broadcast_id.as_str()),
+                    ("part", "id,status"),
+                ],
+            )?)
+            .bearer_auth(&request.access_token)
+            // Parameter-only POST (see bind): Content-Length must be set explicitly.
+            .header(reqwest::header::CONTENT_LENGTH, "0")
+            .body(""),
+    )
+    .await
+    .context("Could not transition YouTube broadcast.")?;
 
     if !response.status().is_success() {
         let status_code = response.status();
         let body = response.text().await.unwrap_or_default();
         if body.contains("redundantTransition") {
             let lifecycle_status = get_youtube_broadcast_lifecycle_status(
+                state,
                 client,
                 &base_url,
                 &request.access_token,
@@ -813,6 +862,7 @@ pub async fn transition_youtube_broadcast(
             )
             .await?;
             let lifecycle_status = confirm_youtube_lifecycle_status(
+                state,
                 client,
                 &base_url,
                 &request.access_token,
@@ -845,6 +895,7 @@ pub async fn transition_youtube_broadcast(
         .await
         .context("Could not parse YouTube broadcast transition response.")?;
     let lifecycle_status = confirm_youtube_lifecycle_status(
+        state,
         client,
         &base_url,
         &request.access_token,
@@ -865,23 +916,29 @@ pub async fn transition_youtube_broadcast(
 }
 
 async fn get_youtube_broadcast_lifecycle_status(
+    state: &crate::state::AppState,
     client: &reqwest::Client,
     base_url: &str,
     access_token: &str,
     broadcast_id: &str,
 ) -> Result<Option<String>> {
-    let response = client
-        .get(youtube_api_url(
-            base_url,
-            "/youtube/v3/liveBroadcasts",
-            &[("part", "status"), ("id", broadcast_id)],
-        )?)
-        .bearer_auth(access_token)
-        .send()
-        .await
-        .context("Could not fetch YouTube broadcast status.")?;
+    let response = crate::youtube_quota::send_attempt(
+        state,
+        crate::youtube_quota::YouTubeEndpoint::LiveBroadcastsList,
+        crate::youtube_quota::BudgetCall::GoLiveEssential,
+        client,
+        client
+            .get(youtube_api_url(
+                base_url,
+                "/youtube/v3/liveBroadcasts",
+                &[("part", "status"), ("id", broadcast_id)],
+            )?)
+            .bearer_auth(access_token),
+    )
+    .await
+    .context("Could not fetch YouTube broadcast status.")?;
     let response: YouTubeLiveBroadcastListResponse =
-        require_youtube_success(response, "YouTube broadcast status request failed")
+        require_youtube_success(state, response, "YouTube broadcast status request failed")
             .await?
             .json()
             .await
@@ -896,6 +953,7 @@ async fn get_youtube_broadcast_lifecycle_status(
 }
 
 async fn confirm_youtube_lifecycle_status(
+    state: &crate::state::AppState,
     client: &reqwest::Client,
     base_url: &str,
     access_token: &str,
@@ -916,9 +974,14 @@ async fn confirm_youtube_lifecycle_status(
         if attempt > 0 {
             tokio::time::sleep(YOUTUBE_TRANSITION_CONFIRM_POLL_DELAY).await;
         }
-        latest_status =
-            get_youtube_broadcast_lifecycle_status(client, base_url, access_token, broadcast_id)
-                .await?;
+        latest_status = get_youtube_broadcast_lifecycle_status(
+            state,
+            client,
+            base_url,
+            access_token,
+            broadcast_id,
+        )
+        .await?;
         if let Ok(status) =
             require_youtube_lifecycle_status(latest_status.clone(), requested_status)
         {
@@ -1013,6 +1076,7 @@ fn youtube_api_url(base_url: &str, path: &str, query: &[(&str, &str)]) -> Result
 /// prepare flow. Failures are logged, never propagated — the original error is
 /// what the user must see.
 async fn delete_youtube_resource(
+    state: &crate::state::AppState,
     client: &reqwest::Client,
     base_url: &str,
     access_token: &str,
@@ -1026,7 +1090,15 @@ async fn delete_youtube_resource(
             return;
         }
     };
-    match client.delete(url).bearer_auth(access_token).send().await {
+    match crate::youtube_quota::send_attempt(
+        state,
+        crate::youtube_quota::YouTubeEndpoint::LiveBroadcastsDelete,
+        crate::youtube_quota::BudgetCall::GoLiveEssential,
+        client,
+        client.delete(url).bearer_auth(access_token),
+    )
+    .await
+    {
         Ok(response) if response.status().is_success() => {
             tracing::info!("Rolled back orphaned YouTube resource {path} id redacted.");
         }
@@ -1037,6 +1109,7 @@ async fn delete_youtube_resource(
             );
         }
         Err(error) => {
+            state.emit_log("warn", format!("YouTube broadcast {id} could not be cleaned up after preparation failed. It may remain in YouTube Studio; remove it after API access resumes."));
             tracing::warn!("YouTube rollback delete for {path} failed: {error}");
         }
     }
@@ -1046,6 +1119,7 @@ async fn delete_youtube_resource(
 /// reason (liveStreamingNotEnabled, insufficientLivePermissions, quota…) in the
 /// error BODY, and dropping it leaves the user with an unfixable generic message.
 async fn require_youtube_success(
+    state: &crate::state::AppState,
     response: reqwest::Response,
     action: &str,
 ) -> Result<reqwest::Response> {
@@ -1056,7 +1130,9 @@ async fn require_youtube_success(
     let body = response.text().await.unwrap_or_default();
     // Typed (plan 094): callers classify quota/auth/permissions from the
     // reason and domain, and the Display keeps the historical text shape.
-    Err(crate::youtube_quota::YouTubeApiError::from_body(action, status, &body).into())
+    let error = crate::youtube_quota::YouTubeApiError::from_body(action, status, &body).into();
+    crate::youtube_quota::note_error(state, action, &error);
+    Err(error)
 }
 
 pub fn is_youtube_auth_error(error: &anyhow::Error) -> bool {
@@ -1135,6 +1211,14 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::*;
+    fn test_quota_state() -> crate::state::AppState {
+        crate::state::AppState::new(
+            "test".into(),
+            1234,
+            tokio::sync::broadcast::channel(64).0,
+            crate::storage::Database::open_in_memory_for_tests(),
+        )
+    }
     use crate::protocol::{VideoPreset, VideoSettings};
     use crate::streaming::{StreamPrivacy, default_stream_metadata_draft};
 
@@ -1224,6 +1308,71 @@ mod tests {
     type RequestLogs = Arc<Mutex<Vec<RequestLog>>>;
 
     #[tokio::test]
+    async fn prepare_counts_only_attempted_steps_and_quota_prevents_rollback_traffic() {
+        for (reject_first, quota_failure, expected_calls, expected_units) in [
+            (true, false, 1, 50),
+            (false, false, 3, 150),
+            (false, true, 2, 100),
+        ] {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let captured = calls.clone();
+            let app = Router::new().fallback(move |request: axum::extract::Request| {
+                let calls = captured.clone();
+                async move {
+                    let attempt = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if request.method() == reqwest::Method::DELETE { return StatusCode::NO_CONTENT.into_response(); }
+                    if attempt == 0 && !reject_first { return Json(json!({"id":"created-broadcast"})).into_response(); }
+                    (StatusCode::FORBIDDEN, Json(json!({"error":{"errors":[{"reason": if quota_failure { "quotaExceeded" } else { "forbidden" }}]}}))).into_response()
+                }
+            });
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let state = test_quota_state();
+            let mut metadata = default_stream_metadata_draft("2026-10-02T00:00:00Z".into());
+            metadata.title = "fixture".into();
+            let error = prepare_youtube_broadcast(
+                &state,
+                YouTubePrepareRequest {
+                    access_token: "fixture".into(),
+                    account_id: "channel".into(),
+                    account_label: "fixture".into(),
+                    target_id: None,
+                    metadata,
+                    video: VideoSettings {
+                        preset: VideoPreset::Stream1080p60,
+                        width: 1920,
+                        height: 1080,
+                        fps: 60,
+                        bitrate_kbps: 6000,
+                    },
+                    api_base_url: Some(base),
+                    scheduled_start_time: Some("2026-10-02T00:05:00Z".into()),
+                },
+                &reqwest::Client::new(),
+                |_, _| Ok(()),
+            )
+            .await
+            .unwrap_err();
+            assert!(format!("{error:#}").contains(if quota_failure {
+                "quotaExceeded"
+            } else {
+                "forbidden"
+            }));
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::SeqCst),
+                expected_calls
+            );
+            let usage = crate::youtube_quota::usage_snapshot(&state);
+            assert_eq!(usage.total_calls, expected_calls as u64);
+            assert_eq!(usage.total_units, expected_units);
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
     async fn failed_bind_rolls_back_the_created_broadcast() {
         async fn create_broadcast() -> impl axum::response::IntoResponse {
             Json(json!({ "id": "broadcast-123" })).into_response()
@@ -1294,7 +1443,9 @@ mod tests {
 
         let mut metadata = default_stream_metadata_draft("2026-06-03T00:00:00Z".to_string());
         metadata.title = "Rollback test".to_string();
+        let quota = test_quota_state();
         let error = prepare_youtube_broadcast(
+            &quota,
             YouTubePrepareRequest {
                 access_token: "access-token".to_string(),
                 account_id: "UC123".to_string(),
@@ -1319,6 +1470,10 @@ mod tests {
 
         // The user sees Google's actual reason, not a generic line…
         let message = format!("{error:#}");
+        assert_eq!(
+            crate::youtube_quota::usage_snapshot(&quota).total_units,
+            200
+        );
         assert!(
             message.contains("liveStreamingNotEnabled"),
             "error should carry Google's reason: {message}"
@@ -1473,6 +1628,7 @@ mod tests {
 
         let mut stored = Vec::new();
         let prepared = prepare_youtube_broadcast(
+            &test_quota_state(),
             YouTubePrepareRequest {
                 access_token: "access-token".to_string(),
                 account_id: "UC123".to_string(),
@@ -1609,6 +1765,7 @@ mod tests {
         });
 
         let result = transition_youtube_broadcast(
+            &test_quota_state(),
             YouTubeBroadcastTransitionRequest {
                 access_token: "access-token".to_string(),
                 account_id: "UC123".to_string(),
@@ -1686,7 +1843,7 @@ mod tests {
                 "items": [{
                     "id": "broadcast-123",
                     "status": {
-                        "lifeCycleStatus": "live"
+                        "lifeCycleStatus": if logs.lock().unwrap().len() < 4 { "liveStarting" } else { "live" }
                     }
                 }]
             }))
@@ -1714,7 +1871,9 @@ mod tests {
             }
         });
 
+        let quota = test_quota_state();
         let result = transition_youtube_broadcast(
+            &quota,
             YouTubeBroadcastTransitionRequest {
                 access_token: "access-token".to_string(),
                 account_id: "UC123".to_string(),
@@ -1731,7 +1890,9 @@ mod tests {
         assert_eq!(result.lifecycle_status.as_deref(), Some("live"));
 
         let logs = logs.lock().unwrap();
-        assert_eq!(logs.len(), 2);
+        assert_eq!(logs.len(), 4);
+        assert_eq!(crate::youtube_quota::usage_snapshot(&quota).total_calls, 4);
+        assert_eq!(crate::youtube_quota::usage_snapshot(&quota).total_units, 53);
         assert_eq!(logs[0].path, "/youtube/v3/liveBroadcasts/transition");
         assert_eq!(logs[1].path, "/youtube/v3/liveBroadcasts");
         assert_eq!(logs[1].query, "part=status&id=broadcast-123");
@@ -1813,6 +1974,7 @@ mod tests {
         });
 
         let result = transition_youtube_broadcast(
+            &test_quota_state(),
             YouTubeBroadcastTransitionRequest {
                 access_token: "access-token".to_string(),
                 account_id: "UC123".to_string(),
@@ -1870,6 +2032,7 @@ mod tests {
         });
 
         let error = transition_youtube_broadcast(
+            &test_quota_state(),
             YouTubeBroadcastTransitionRequest {
                 access_token: "access-token".to_string(),
                 account_id: "UC123".to_string(),
@@ -1934,6 +2097,7 @@ mod tests {
         });
 
         let result = get_youtube_stream_status(
+            &test_quota_state(),
             YouTubeStreamStatusRequest {
                 access_token: "access-token".to_string(),
                 account_id: "UC123".to_string(),
@@ -2023,6 +2187,7 @@ mod tests {
         });
 
         let result = list_youtube_channels(
+            &test_quota_state(),
             YouTubeChannelListRequest {
                 access_token: "access-token".to_string(),
                 account_id: "UC123".to_string(),
@@ -2247,6 +2412,7 @@ mod tests {
         });
 
         let error = get_youtube_stream_status(
+            &test_quota_state(),
             YouTubeStreamStatusRequest {
                 access_token: "access-token".to_string(),
                 account_id: "UC123".to_string(),

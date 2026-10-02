@@ -1,6 +1,6 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { StatsBar } from '@/components/stream-manager/stats-bar'
 import {
@@ -31,6 +31,7 @@ function provider(overrides: Partial<LiveChatProviderState> = {}): LiveChatProvi
 // only; every control lives in the status bar, inline from 640 px and folded
 // into ⋯ below it. probe:comments-window proves the real geometry.
 describe('Stream Manager status bar', () => {
+  afterEach(() => vi.useRealTimers())
   // Plan 057, D3: quiet when fine. A platform that reads and sends is its
   // icon and dot; words appear only for what chat cannot do.
   it('names a provider only by what chat cannot do there', () => {
@@ -72,7 +73,12 @@ describe('Stream Manager status bar', () => {
 
   // Plan 094: the YouTube quota pause reads inline with its local resume time
   // (the owner's stream showed "YouTube reconnecting" for 10 minutes instead).
-  it('shows the YouTube quota pause inline with when chat resumes', () => {
+  it.each([
+    [12, ''],
+    [23, 'tomorrow ']
+  ] as const)('shows the YouTube quota pause from local hour %i', (hour, dayLabel) => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(2026, 9, 2, hour, 0, 0))
     const retryAt = new Date(Date.now() + 2 * 60 * 60_000)
     const paused = provider({
       id: 'youtube',
@@ -84,7 +90,7 @@ describe('Stream Manager status bar', () => {
     const problem = providerProblem(paused)
     expect(problem).toContain('YouTube chat is paused')
     expect(problem).toContain(
-      `It resumes at ${retryAt.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}.`
+      `It resumes at ${dayLabel}${retryAt.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}.`
     )
     expect(problem).toContain('Your stream keeps going.')
     const markup = renderToStaticMarkup(

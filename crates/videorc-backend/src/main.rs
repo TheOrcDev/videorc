@@ -1962,6 +1962,7 @@ async fn complete_oauth_callback(
                     .await;
             }
             Some((checkpoint, token)) => match oauth::account_from_exchanged_token(
+                state,
                 &checkpoint,
                 &token,
                 &provider_client,
@@ -2584,11 +2585,9 @@ async fn validate_platform_accounts(state: &AppState) -> Vec<PlatformAccountVali
             ));
             continue;
         }
-        if account.platform == StreamPlatform::Youtube {
-            youtube_quota::record_call(state, youtube_quota::YouTubeEndpoint::ChannelsList);
-        }
         let mut validation =
-            oauth::validate_provider_access(account.platform, &fresh.access_token, &client).await;
+            oauth::validate_provider_access(state, account.platform, &fresh.access_token, &client)
+                .await;
         if let Err(error) = validation.as_ref() {
             youtube_quota::note_error(state, "account validation", error);
         }
@@ -2600,6 +2599,7 @@ async fn validate_platform_accounts(state: &AppState) -> Vec<PlatformAccountVali
                     account = fresh.account.clone();
                     changed = true;
                     validation = oauth::validate_provider_access(
+                        state,
                         account.platform,
                         &fresh.access_token,
                         &client,
@@ -2703,15 +2703,8 @@ async fn prepare_youtube_stream_target(
     let video = params.video;
     let target_id = params.target_id;
     let thumbnail_asset_id = metadata.thumbnail_asset_id.clone();
-    // Estimated: insert broadcast + insert stream + bind (50 each).
-    for endpoint in [
-        youtube_quota::YouTubeEndpoint::LiveBroadcastsInsert,
-        youtube_quota::YouTubeEndpoint::LiveStreamsInsert,
-        youtube_quota::YouTubeEndpoint::LiveBroadcastsBind,
-    ] {
-        youtube_quota::record_call(state, endpoint);
-    }
     let mut prepared = youtube::prepare_youtube_broadcast(
+        state,
         YouTubePrepareRequest {
             access_token: fresh.access_token.clone(),
             account_id: fresh.account.account_id.clone(),
@@ -2736,6 +2729,7 @@ async fn prepare_youtube_stream_target(
         fresh = refresh_platform_access_token_after_auth_error(state, &credential, &client, error)
             .await?;
         prepared = youtube::prepare_youtube_broadcast(
+            state,
             YouTubePrepareRequest {
                 access_token: fresh.access_token.clone(),
                 account_id: fresh.account.account_id.clone(),
@@ -2822,7 +2816,6 @@ async fn set_youtube_broadcast_thumbnail(
             Err("budgetShed".to_string())
         }
         Ok(path) => {
-            youtube_quota::record_call(state, youtube_quota::YouTubeEndpoint::ThumbnailsSet);
             let upload = async {
                 scheduled_streams_service::youtube_api(state, account_id)
                     .await?
@@ -2899,13 +2892,9 @@ async fn transition_youtube_stream_target(
     let credential = youtube_account_credentials(state, params.account_id.as_deref())?;
     let client = reqwest::Client::new();
     let mut fresh = fresh_platform_access_token(state, &credential, &client).await?;
-    // Estimated: the transition (50) plus one status confirmation read.
-    youtube_quota::record_call(
-        state,
-        youtube_quota::YouTubeEndpoint::LiveBroadcastsTransition,
-    );
-    youtube_quota::record_call(state, youtube_quota::YouTubeEndpoint::LiveBroadcastsList);
+    // Every transition and confirmation attempt is metered at its HTTP boundary.
     let mut transition = youtube::transition_youtube_broadcast(
+        state,
         YouTubeBroadcastTransitionRequest {
             access_token: fresh.access_token.clone(),
             account_id: fresh.account.account_id.clone(),
@@ -2923,6 +2912,7 @@ async fn transition_youtube_stream_target(
         fresh = refresh_platform_access_token_after_auth_error(state, &credential, &client, error)
             .await?;
         transition = youtube::transition_youtube_broadcast(
+            state,
             YouTubeBroadcastTransitionRequest {
                 access_token: fresh.access_token,
                 account_id: fresh.account.account_id,
@@ -2948,8 +2938,8 @@ async fn youtube_stream_status(
     let credential = youtube_account_credentials(state, params.account_id.as_deref())?;
     let client = reqwest::Client::new();
     let mut fresh = fresh_platform_access_token(state, &credential, &client).await?;
-    youtube_quota::record_call(state, youtube_quota::YouTubeEndpoint::LiveStreamsList);
     let mut status = youtube::get_youtube_stream_status(
+        state,
         YouTubeStreamStatusRequest {
             access_token: fresh.access_token.clone(),
             account_id: fresh.account.account_id.clone(),
@@ -2966,6 +2956,7 @@ async fn youtube_stream_status(
         fresh = refresh_platform_access_token_after_auth_error(state, &credential, &client, error)
             .await?;
         status = youtube::get_youtube_stream_status(
+            state,
             YouTubeStreamStatusRequest {
                 access_token: fresh.access_token,
                 account_id: fresh.account.account_id,
@@ -3005,8 +2996,8 @@ async fn list_youtube_channels(
     youtube_quota::refuse_if_paused(state)?;
     let client = reqwest::Client::new();
     let mut fresh = fresh_platform_access_token(state, &credential, &client).await?;
-    youtube_quota::record_call(state, youtube_quota::YouTubeEndpoint::ChannelsList);
     let mut channels = youtube::list_youtube_channels(
+        state,
         YouTubeChannelListRequest {
             access_token: fresh.access_token.clone(),
             account_id: fresh.account.account_id.clone(),
@@ -3022,6 +3013,7 @@ async fn list_youtube_channels(
         fresh = refresh_platform_access_token_after_auth_error(state, &credential, &client, error)
             .await?;
         channels = youtube::list_youtube_channels(
+            state,
             YouTubeChannelListRequest {
                 access_token: fresh.access_token,
                 account_id: fresh.account.account_id,
@@ -3042,6 +3034,7 @@ async fn select_youtube_channel_account(
     let client = reqwest::Client::new();
     let mut fresh = fresh_platform_access_token(state, &credential, &client).await?;
     let mut channels = youtube::list_youtube_channels(
+        state,
         YouTubeChannelListRequest {
             access_token: fresh.access_token.clone(),
             account_id: fresh.account.account_id.clone(),
@@ -3057,6 +3050,7 @@ async fn select_youtube_channel_account(
         fresh = refresh_platform_access_token_after_auth_error(state, &credential, &client, error)
             .await?;
         channels = youtube::list_youtube_channels(
+            state,
             YouTubeChannelListRequest {
                 access_token: fresh.access_token.clone(),
                 account_id: fresh.account.account_id.clone(),

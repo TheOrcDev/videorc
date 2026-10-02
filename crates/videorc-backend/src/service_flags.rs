@@ -45,7 +45,7 @@ pub const DAILY_BUDGET_UNITS_MAX: u64 = 10_000;
 
 /// Compiled defaults the flags start from.
 pub const DEFAULT_MIN_POLL_MS: u64 = crate::youtube_chat::MIN_POLLING_INTERVAL_MS;
-pub const DEFAULT_VIEWER_SAMPLE_MS: u64 = 60_000;
+pub const DEFAULT_VIEWER_SAMPLE_MS: u64 = 120_000;
 
 /// The chat reader transport a flag may ask for. `Stream` is not here on
 /// purpose: until S5 lands it is read as `List` and noted.
@@ -398,7 +398,7 @@ mod tests {
         assert!(flags.is_default_behaviour());
         assert_eq!(flags.chat_transport, ChatTransportFlag::List);
         assert_eq!(flags.min_poll_ms, 5_000);
-        assert_eq!(flags.viewer_sample_ms, 60_000);
+        assert_eq!(flags.viewer_sample_ms, 120_000);
         assert_eq!(flags.daily_budget_units, None);
         assert_eq!(flags.paused_until, None);
         assert!(matches!(flags.source, ServiceFlagsSource::Remote { .. }));

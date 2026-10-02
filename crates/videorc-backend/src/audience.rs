@@ -26,6 +26,7 @@ use crate::protocol::HealthLevel;
 use crate::state::AppState;
 use crate::streaming::StreamPlatform;
 
+pub const YOUTUBE_AUDIENCE_POLL_INTERVAL: Duration = Duration::from_secs(300);
 pub const AUDIENCE_POLL_INTERVAL: Duration = Duration::from_secs(120);
 /// First retry after a failed read; doubles up to [`AUDIENCE_MAX_BACKOFF`].
 pub const AUDIENCE_FIRST_BACKOFF: Duration = Duration::from_secs(240);
@@ -158,6 +159,18 @@ pub enum AudienceReading {
 }
 
 impl AudienceReading {
+    fn next_delay_for(
+        &self,
+        platform: StreamPlatform,
+        previous_backoff: Option<Duration>,
+    ) -> Duration {
+        if platform == StreamPlatform::Youtube && matches!(self, Self::Count(_)) {
+            YOUTUBE_AUDIENCE_POLL_INTERVAL
+        } else {
+            self.next_delay(previous_backoff)
+        }
+    }
+
     /// How long until the next read of this platform.
     pub fn next_delay(&self, previous_backoff: Option<Duration>) -> Duration {
         match self {
@@ -673,6 +686,7 @@ pub async fn fetch_twitch_followers(
 }
 
 pub async fn fetch_youtube_subscribers(
+    state: &AppState,
     client: &reqwest::Client,
     api_base: &str,
     access_token: &str,
@@ -681,8 +695,38 @@ pub async fn fetch_youtube_subscribers(
         "{}/channels?part=statistics&mine=true",
         api_base.trim_end_matches('/')
     );
-    let response = client.get(url).bearer_auth(access_token).send().await;
-    reading_from_response(StreamPlatform::Youtube, response, parse_youtube_subscribers).await
+    let response = match crate::youtube_quota::send_attempt(
+        state,
+        crate::youtube_quota::YouTubeEndpoint::ChannelsList,
+        crate::youtube_quota::BudgetCall::Subscribers,
+        client,
+        client.get(url).bearer_auth(access_token),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return match error.downcast_ref::<crate::youtube_quota::YouTubeNotAttempted>() {
+                Some(crate::youtube_quota::YouTubeNotAttempted::Paused) => {
+                    AudienceReading::QuotaPaused(
+                        crate::youtube_quota::SUBSCRIBERS_PAUSED_MESSAGE.into(),
+                    )
+                }
+                Some(crate::youtube_quota::YouTubeNotAttempted::Budget) => {
+                    AudienceReading::Unavailable(
+                        crate::youtube_quota::SUBSCRIBERS_SHED_MESSAGE.into(),
+                    )
+                }
+                _ => AudienceReading::Failed("Could not read YouTube subscribers.".into()),
+            };
+        }
+    };
+    reading_from_response(
+        StreamPlatform::Youtube,
+        Ok(response),
+        parse_youtube_subscribers,
+    )
+    .await
 }
 
 pub async fn fetch_x_followers_oauth2(
@@ -841,13 +885,7 @@ async fn read_source(
         Ok(token) => token,
         Err(error) => return token_error_reading(source.platform, &error).into(),
     };
-    if source.platform == StreamPlatform::Youtube {
-        crate::youtube_quota::record_call(
-            state,
-            crate::youtube_quota::YouTubeEndpoint::ChannelsList,
-        );
-    }
-    let mut reading = read_with_token(client, source.platform, &credential, &token).await;
+    let mut reading = read_with_token(state, client, source.platform, &credential, &token).await;
     if matches!(reading, AudienceReading::QuotaPaused(_)) {
         crate::youtube_quota::record_quota_exhausted(state, "subscriber count");
         return reading.into();
@@ -864,7 +902,11 @@ async fn read_source(
         .await
         {
             Ok(refreshed) => {
-                reading = read_with_token(client, source.platform, &credential, &refreshed).await;
+                reading =
+                    read_with_token(state, client, source.platform, &credential, &refreshed).await;
+                if matches!(reading, AudienceReading::QuotaPaused(_)) {
+                    crate::youtube_quota::record_quota_exhausted(state, "subscriber retry");
+                }
                 token = refreshed;
             }
             Err(error) => return token_error_reading(source.platform, &error).into(),
@@ -917,6 +959,7 @@ fn token_error_reading(platform: StreamPlatform, error: &anyhow::Error) -> Audie
 }
 
 async fn read_with_token(
+    state: &AppState,
     client: &reqwest::Client,
     platform: StreamPlatform,
     credential: &crate::storage::PlatformAccountCredentials,
@@ -942,7 +985,7 @@ async fn read_with_token(
                 "{}/youtube/v3",
                 crate::youtube_quota::youtube_api_base_url(None)
             );
-            fetch_youtube_subscribers(client, &api_base, token).await
+            fetch_youtube_subscribers(state, client, &api_base, token).await
         }
         StreamPlatform::X => {
             fetch_x_followers_oauth2(client, crate::x_live::DEFAULT_API_BASE_URL, token).await
@@ -1068,6 +1111,21 @@ pub fn start_audience(
 
 async fn run_source(state: AppState, session_id: String, source: AudienceSource) {
     let client = reqwest::Client::new();
+    run_source_loop(&state, &session_id, &source, || {
+        read_source(&state, &client, &source)
+    })
+    .await;
+}
+
+async fn run_source_loop<F, Fut>(
+    state: &AppState,
+    session_id: &str,
+    source: &AudienceSource,
+    mut read: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = SourceRead>,
+{
     // Deterministic jitter per session and platform keeps concurrent reads
     // from aligning, without a RNG.
     let jitter_ms = (session_id.bytes().map(u64::from).sum::<u64>() + source.platform as u64 * 997)
@@ -1080,28 +1138,28 @@ async fn run_source(state: AppState, session_id: String, source: AudienceSource)
             reading,
             subscribers,
             audience_scopes,
-        } = read_source(&state, &client, &source).await;
-        apply_reading(&state, &session_id, source.platform, &reading);
+        } = read().await;
+        apply_reading(state, session_id, source.platform, &reading);
         if let Some(count) = subscribers {
-            apply_subscribers(&state, &session_id, source.platform, count);
+            apply_subscribers(state, session_id, source.platform, count);
         }
         if let Some(granted) = audience_scopes {
             let now = chrono::Utc::now().to_rfc3339();
             let snapshot = state.audience.lock().ok().and_then(|mut hub| {
-                hub.apply_audience_scopes(&session_id, source.platform, granted, &now)
+                hub.apply_audience_scopes(session_id, source.platform, granted, &now)
             });
             if let Some(snapshot) = snapshot {
-                publish(&state, snapshot, false);
+                publish(state, snapshot, false);
             }
         }
         if matches!(reading, AudienceReading::QuotaPaused(_)) {
             // Park on the breaker (plan 094): no request until it clears, then
             // read again at once so the number comes back without a click.
-            crate::youtube_quota::wait_until_resumed(&state).await;
+            crate::youtube_quota::wait_until_resumed(state).await;
             backoff = None;
             continue;
         }
-        let delay = reading.next_delay(backoff);
+        let delay = reading.next_delay_for(source.platform, backoff);
         backoff = matches!(reading, AudienceReading::Failed(_)).then_some(delay);
         sleep(delay).await;
     }
@@ -1216,7 +1274,7 @@ mod tests {
         )])
         .await;
         assert_eq!(
-            fetch_youtube_subscribers(&client, &youtube, "token").await,
+            fetch_youtube_subscribers(&test_state(), &client, &youtube, "token").await,
             AudienceReading::Count(48_200)
         );
     }
@@ -1271,19 +1329,65 @@ mod tests {
         ])
         .await;
         assert_eq!(
-            fetch_youtube_subscribers(&client, &base, "token").await,
+            fetch_youtube_subscribers(&test_state(), &client, &base, "token").await,
             AudienceReading::QuotaPaused(
                 crate::youtube_quota::SUBSCRIBERS_PAUSED_MESSAGE.to_string()
             )
         );
         for _ in 0..2 {
             assert_eq!(
-                fetch_youtube_subscribers(&client, &base, "token").await,
+                fetch_youtube_subscribers(&test_state(), &client, &base, "token").await,
                 AudienceReading::NeedsReconnect(
                     "Reconnect YouTube to show subscribers.".to_string()
                 )
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn actual_source_loop_reads_24_times_in_two_hours_and_stop_cancels_it() {
+        let state = test_state();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (observed, mut readings) = tokio::sync::mpsc::unbounded_channel();
+        let count = calls.clone();
+        let task = tokio::spawn(async move {
+            let source = AudienceSource {
+                platform: StreamPlatform::Youtube,
+                account_id: None,
+            };
+            run_source_loop(&state, "test", &source, || {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                observed.send(tokio::time::Instant::now()).unwrap();
+                std::future::ready(AudienceReading::Count(123).into())
+            })
+            .await;
+        });
+        let initial = readings.recv().await.unwrap();
+        for index in 1..24 {
+            let at = readings.recv().await.unwrap();
+            assert_eq!(at - initial, Duration::from_secs(index * 300));
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 24);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 24);
+        assert_eq!(
+            AudienceReading::Count(1).next_delay_for(StreamPlatform::Twitch, None),
+            AUDIENCE_POLL_INTERVAL
+        );
+        assert_eq!(
+            AudienceReading::Count(1).next_delay_for(StreamPlatform::X, None),
+            AUDIENCE_POLL_INTERVAL
+        );
+        assert_eq!(
+            AudienceReading::Hidden.next_delay_for(StreamPlatform::Youtube, None),
+            AUDIENCE_MAX_BACKOFF
+        );
+        assert_eq!(
+            AudienceReading::Failed("test".into()).next_delay_for(StreamPlatform::Youtube, None),
+            AUDIENCE_FIRST_BACKOFF
+        );
     }
 
     #[test]
@@ -1331,7 +1435,7 @@ mod tests {
         hidden["items"][0]["statistics"]["hiddenSubscriberCount"] = json!(true);
         let (base, _) = spawn_provider(vec![(StatusCode::OK, hidden)]).await;
         assert_eq!(
-            fetch_youtube_subscribers(&client, &base, "token").await,
+            fetch_youtube_subscribers(&test_state(), &client, &base, "token").await,
             AudienceReading::Hidden
         );
     }

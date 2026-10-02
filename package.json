@@ -11,6 +11,7 @@
     "pnpm": ">=11.0.0 <12"
   },
   "scripts": {
+    "probe:youtube-efficiency": "node scripts/probe-youtube-efficiency.mjs",
     "dev": "pnpm --filter @videorc/desktop dev",
     "dev:zerocopy": "node scripts/run-with-env.mjs --platform=darwin VIDEORC_ZEROCOPY_SOURCES=1 -- pnpm --filter @videorc/desktop dev",
     "build": "pnpm --filter @videorc/desktop build",

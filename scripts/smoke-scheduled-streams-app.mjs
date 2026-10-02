@@ -11,6 +11,7 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { startScheduledStreamsFixture } from './lib/scheduled-streams-fixture.mjs'
+import { isDataApiPath, summarizeYouTubeAttempts } from './lib/fake-youtube-api.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
 const directory =
@@ -72,7 +73,9 @@ const launch = async () => {
       // fixture API never sees these.
       VIDEORC_YOUTUBE_CLIENT_ID: 'scheduled-smoke-client-id',
       VIDEORC_YOUTUBE_CLIENT_SECRET: 'scheduled-smoke-client-secret',
-      VIDEORC_SCHEDULED_STREAMS_SMOKE_URL: fixture.origin
+      VIDEORC_SCHEDULED_STREAMS_SMOKE_URL: fixture.origin,
+      // Include background viewers/profile reads in the same wire accounting.
+      VIDEORC_YOUTUBE_API_BASE_URL: fixture.origin
     }
   })
   smoke = app.connections['preview-motion-ready']
@@ -682,6 +685,28 @@ try {
       assert.ok(report.verdict.pass, report.verdict.failures.join('; '))
       console.log(`Scheduled X artifact: ${writeReports(report).mdPath}`)
     }
+    assert.equal((await request(ws, timeoutMs, 'recording.status')).state, 'idle')
+    const stoppedChat = await request(ws, timeoutMs, 'liveChat.stop', {})
+    assert.equal(stoppedChat.sessionId ?? null, null, 'viewer/chat owners stop before accounting snapshot')
+    assert.ok(
+      fixture.calls.every((call) => call.path.startsWith('/2/') || isDataApiPath(call.path)),
+      'every fixture attempt uses a recognized provider API root'
+    )
+    assert.ok(
+      fixture.calls.some((call) => call.path === '/youtube/v3/videos'),
+      'scheduled viewer polling uses the versioned YouTube API path'
+    )
+    const quota = await request(ws, timeoutMs, 'youtube.quota.status', {})
+    const usage = summarizeYouTubeAttempts(fixture.calls)
+    assert.equal(usage.unknown, 0, 'all scheduled YouTube methods have explicit costs')
+    assert.equal(
+      quota.budget.units,
+      usage.estimatedUnits,
+      'persisted usage matches every captured scheduled attempt across restart'
+    )
+    console.log(
+      `Scheduled YouTube accounting: ${usage.calls} attempts, ${usage.estimatedUnits} estimated units`
+    )
     console.log(
       'Scheduled streams smoke PASS: durable events, thumbnails, restart, recovery, cancellation, manual exact-ID start (YouTube and X) and final media artifacts.'
     )

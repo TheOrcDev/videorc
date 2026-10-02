@@ -37,6 +37,56 @@ export function isDataApiPath(pathname) {
   return pathname.startsWith('/youtube/') || pathname.startsWith('/upload/')
 }
 
+/** Published REST estimates only; OAuth is excluded and streaming is unknown. */
+export function youtubeAttemptCost(method, path) {
+  if (!isDataApiPath(path)) return null
+  const resource = path.replace(/^\/(upload\/)?youtube\/v3\//, '')
+  const reads = {
+    'liveChat/messages': 'liveChatMessages.list',
+    videos: 'videos.list',
+    channels: 'channels.list',
+    liveBroadcasts: 'liveBroadcasts.list',
+    liveStreams: 'liveStreams.list'
+  }
+  const writes = {
+    'POST liveChat/messages': 'liveChatMessages.insert',
+    'POST liveBroadcasts': 'liveBroadcasts.insert',
+    'PUT liveBroadcasts': 'liveBroadcasts.update',
+    'DELETE liveBroadcasts': 'liveBroadcasts.delete',
+    'POST liveBroadcasts/bind': 'liveBroadcasts.bind',
+    'POST liveBroadcasts/transition': 'liveBroadcasts.transition',
+    'POST liveStreams': 'liveStreams.insert',
+    'POST thumbnails/set': 'thumbnails.set'
+  }
+  const endpoint = method === 'GET' ? reads[resource] : writes[`${method} ${resource}`]
+  return endpoint
+    ? { endpoint, units: method === 'GET' ? 1 : 50 }
+    : { endpoint: 'unknown', units: null }
+}
+
+export function summarizeYouTubeAttempts(requests) {
+  const endpoints = {}
+  let units = 0
+  let calls = 0
+  let unknown = 0
+  for (const request of requests) {
+    const cost = youtubeAttemptCost(request.method, request.path)
+    if (!cost) continue
+    calls += 1
+    if (cost.units === null) {
+      unknown += 1
+      continue
+    }
+    units += cost.units
+    const row = (endpoints[cost.endpoint] ??= { calls: 0, units: 0, outcomes: {} })
+    row.calls += 1
+    row.units += cost.units
+    const outcome = String(request.status ?? 'pending')
+    row.outcomes[outcome] = (row.outcomes[outcome] ?? 0) + 1
+  }
+  return { calls, estimatedUnits: units, unknown, endpoints }
+}
+
 /**
  * Pure: one `liveChatMessages.list` page. The page token is the index of the
  * first unseen message, so a reader that keeps its token resumes exactly
@@ -114,6 +164,7 @@ export async function startFakeYouTubeApi({
     }
     requests.push(record)
     const send = (value, status = 200) => {
+      record.status = status
       const text = JSON.stringify(value)
       response
         .writeHead(status, {
