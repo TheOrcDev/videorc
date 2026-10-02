@@ -5,7 +5,8 @@ import { describe, expect, it } from 'vitest'
 import { createFrameEmitter } from '@/lib/audio/frame-source'
 import type { MeterFrame } from '@/lib/audio/types'
 import type { Device } from '@/lib/backend'
-import { micMeterInput, MicrophoneSectionView, type MeterInput } from './microphone-section'
+import { micMeterInput, type MeterInput } from '@/lib/mic-meter-input'
+import { MicrophoneSectionView } from './microphone-section'
 
 const noop = (): void => {}
 const microphones: Device[] = [

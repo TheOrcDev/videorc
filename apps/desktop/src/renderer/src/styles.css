@@ -368,9 +368,11 @@
   }
 }
 
-/* audiocn (plan 092): meter tones are Videorc tones. A healthy level is
-   chrome; colour means hot (warning) or clipping (destructive). Declared on
-   both selectors so each theme resolves the aliases against its own tokens. */
+/* audiocn (plans 092 and 093): meter and channel tones are Videorc tones. A
+   healthy level is chrome; colour means hot (warning) or clipping
+   (destructive). A pressed mute is the muted-speaker amber. Solo and monitor
+   have no Videorc use and stay neutral. Declared on both selectors so each
+   theme resolves the aliases against its own tokens. */
 :root,
 .dark {
   --meter-ok: color-mix(in oklch, var(--foreground) 80%, transparent);
@@ -379,6 +381,12 @@
   --meter-ok-foreground: var(--foreground);
   --meter-warn-foreground: var(--warning);
   --meter-clip-foreground: var(--destructive);
+  --channel-mute: var(--warning);
+  --channel-solo: var(--foreground);
+  --channel-monitor: var(--info);
+  --channel-mute-foreground: var(--warning);
+  --channel-solo-foreground: var(--foreground);
+  --channel-monitor-foreground: var(--info);
 }
 
 @theme inline {
@@ -463,13 +471,19 @@
   --color-video-ground-foreground: var(--video-ground-foreground);
   --color-video-ground-muted: var(--video-ground-muted);
 
-  /* audiocn meter tones (plan 092), aliased above. */
+  /* audiocn meter and channel tones (plans 092 and 093), aliased above. */
   --color-meter-ok: var(--meter-ok);
   --color-meter-warn: var(--meter-warn);
   --color-meter-clip: var(--meter-clip);
   --color-meter-ok-foreground: var(--meter-ok-foreground);
   --color-meter-warn-foreground: var(--meter-warn-foreground);
   --color-meter-clip-foreground: var(--meter-clip-foreground);
+  --color-channel-mute: var(--channel-mute);
+  --color-channel-solo: var(--channel-solo);
+  --color-channel-monitor: var(--channel-monitor);
+  --color-channel-mute-foreground: var(--channel-mute-foreground);
+  --color-channel-solo-foreground: var(--channel-solo-foreground);
+  --color-channel-monitor-foreground: var(--channel-monitor-foreground);
 
   /* Platform brand tints: with source icons, the only large saturated colour
      in the chrome (videorc-design). Theme-invariant. */

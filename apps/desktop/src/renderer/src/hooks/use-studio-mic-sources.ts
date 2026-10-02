@@ -1,6 +1,10 @@
 import { useMemo, useRef, useSyncExternalStore } from 'react'
 
-import { useStudioMicVisualPipeline } from '@/hooks/use-studio-mic-visual'
+import { useStudioCore, useStudioDiagnostics } from '@/hooks/use-studio'
+import {
+  useStudioMicVisualLifecycle,
+  useStudioMicVisualPipeline
+} from '@/hooks/use-studio-mic-visual'
 import type { FrameSource, MeterFrame, VisualFrame } from '@/lib/audio/types'
 import { backendAudioLevels } from '@/lib/backend-audio-levels'
 import { createBackendLevelSource } from '@/lib/backend-level-sources'
@@ -9,6 +13,9 @@ import {
   createMicVisualSource,
   type MicMeterSettings
 } from '@/lib/mic-frame-sources'
+import { meterHasNoReading, micMeterInput, type MeterInput } from '@/lib/mic-meter-input'
+import type { MicStreamFailureReason } from '@/lib/mic-stream'
+import { audioMixerMonitorLabel, type AudioMixerMonitorLabel } from '@/lib/mic-visual-gate'
 
 // Plan 092: audiocn frame sources over the workspace's visual mic pipeline.
 // Only lazy chunks (the Studio dashboard, the Studio tab, Sources) import this
@@ -51,4 +58,61 @@ export function useBackendAudioLevelsLive(): boolean {
     backendAudioLevels.isLive,
     backendAudioLevels.isLive
   )
+}
+
+function finiteOrNull(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+export type MicrophoneMeter = Readonly<{
+  meter: MeterInput
+  monitorLabel: AudioMixerMonitorLabel
+  /**
+   * Why no live level reads (plan 080 S3): set only when nothing else drives
+   * the meter and the renderer analyser, the last live input, failed.
+   */
+  unavailableReason: MicStreamFailureReason | undefined
+}>
+
+/**
+ * The selected microphone's meter input and state (plans 092 and 093), one
+ * build for the Studio Microphone section and the Sources Audio mixer. The
+ * level runs whenever either is open: the backend's levels (the warm
+ * microphone between sessions, the bus during one), then the renderer
+ * analyser, then the session's 1 Hz level.
+ */
+export function useMicrophoneMeter(): MicrophoneMeter {
+  const { captureConfig, selectedMicrophone, isSessionActive } = useStudioCore()
+  const { diagnosticStats } = useStudioDiagnostics()
+  const muted = captureConfig.audio.microphoneMuted
+  const micVisual = useStudioMicVisualLifecycle()
+  const backendLevelsLive = useBackendAudioLevelsLive()
+  const analyserSource = useStudioMicMeterSource({
+    gainDb: captureConfig.audio.microphoneGainDb,
+    muted
+  })
+  const microphoneSelected = Boolean(selectedMicrophone)
+  const liveLevel =
+    typeof diagnosticStats?.micLiveLevel === 'number' ? diagnosticStats.micLiveLevel : null
+  const meter = micMeterInput({
+    microphoneSelected,
+    muted,
+    backendSource: backendLevelsLive ? backendLevelSources.microphone : null,
+    analyserDriven: micVisual.active && !muted,
+    source: analyserSource,
+    backendPeakDb: liveLevel === null ? null : finiteOrNull(diagnosticStats?.micLivePeakDb)
+  })
+  const signalLive = !muted && (backendLevelsLive || micVisual.active || liveLevel !== null)
+  return {
+    meter,
+    monitorLabel: audioMixerMonitorLabel({
+      sessionActive: isSessionActive,
+      signalLive,
+      muted: muted && microphoneSelected
+    }),
+    unavailableReason:
+      microphoneSelected && meterHasNoReading(meter) && micVisual.status === 'unavailable'
+        ? (micVisual.reason ?? 'unknown')
+        : undefined
+  }
 }

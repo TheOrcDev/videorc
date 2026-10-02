@@ -121,7 +121,10 @@ describe('studio context invalidation boundaries', () => {
     const eagerConsumers = [
       '../components/studio/microphone-section.tsx',
       '../components/studio/session-mic-sliver.tsx',
-      '../components/ui/live-waveform.tsx'
+      '../components/studio/mic-level-meter.tsx',
+      '../components/sources/sources-audio-mixer.tsx',
+      './use-studio-mic-sources.ts',
+      '../lib/mic-meter-input.ts'
     ].map((path) => readFileSync(new URL(path, import.meta.url), 'utf8'))
 
     expect(provider).toContain("import('@/lib/browser-mic-visual-pipeline')")
