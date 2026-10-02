@@ -4289,6 +4289,12 @@ export interface LiveChatProviderState {
   lastConnectedAt?: string
   lastMessageAt?: string
   lastError?: string
+  /**
+   * While `state` is `waiting` for a known reason with a known end (the
+   * YouTube quota pause, plan 094): when the connector resumes, RFC 3339.
+   * Shown in local time; absent otherwise.
+   */
+  retryAt?: string
 }
 
 /** A rich-text fragment of a message (plain text, emote, mention, …). */
@@ -5107,6 +5113,16 @@ export interface PlatformAudience {
 export interface FollowerGain {
   at: string
   count: number
+}
+
+/**
+ * `youtube.quota` event (plan 094): the shared YouTube Data API quota breaker.
+ * `pausedUntil` is present (RFC 3339) while every YouTube call is paused and
+ * absent, never null, once they may resume. One state for the Livestream page,
+ * the Stream Manager and the Comments destination status.
+ */
+export interface YouTubeQuotaStatus {
+  pausedUntil?: string
 }
 
 /** `stream.audience` event and `stream.audience.snapshot` result (wire mirror of audience.rs). */

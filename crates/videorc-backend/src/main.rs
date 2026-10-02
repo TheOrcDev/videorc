@@ -140,6 +140,7 @@ mod x_live;
 mod x_oauth1;
 mod youtube;
 mod youtube_chat;
+mod youtube_quota;
 
 use std::convert::Infallible;
 use std::io::Write;
@@ -2475,8 +2476,31 @@ async fn validate_platform_accounts(state: &AppState) -> Vec<PlatformAccountVali
         account = fresh.account.clone();
         changed |= fresh.refreshed;
 
+        // Plan 094: no YouTube profile lookup while the quota breaker is set.
+        // The token is stored and the account stays connected; the lookup
+        // runs again on the next validation after the reset.
+        if account.platform == StreamPlatform::Youtube
+            && let Some(paused_until) = youtube_quota::paused_until(state)
+        {
+            validations.push(platform_validation(
+                &account,
+                PlatformAccountValidationState::Valid,
+                format!(
+                    "{} Validation resumes after {}.",
+                    youtube_quota::API_PAUSED_MESSAGE,
+                    paused_until.to_rfc3339()
+                ),
+            ));
+            continue;
+        }
+        if account.platform == StreamPlatform::Youtube {
+            youtube_quota::record_call(state, youtube_quota::YouTubeEndpoint::ChannelsList);
+        }
         let mut validation =
             oauth::validate_provider_access(account.platform, &fresh.access_token, &client).await;
+        if let Err(error) = validation.as_ref() {
+            youtube_quota::note_error(state, "account validation", error);
+        }
         if validation.is_err() && !fresh.refreshed {
             let validation_error = validation.expect_err("checked above");
             match refresh_platform_access_token(state, &credential, access_ref, &client).await {
@@ -2579,12 +2603,23 @@ async fn prepare_youtube_stream_target(
         anyhow::bail!("{message}");
     }
 
+    // Plan 094: the insert would fail on quota; refuse up front so the
+    // renderer can offer the stream-key path instead.
+    youtube_quota::refuse_if_paused(state)?;
     let credential = youtube_account_credentials(state, params.account_id.as_deref())?;
     let client = reqwest::Client::new();
     let mut fresh = fresh_platform_access_token(state, &credential, &client).await?;
     let video = params.video;
     let target_id = params.target_id;
     let thumbnail_asset_id = metadata.thumbnail_asset_id.clone();
+    // Estimated: insert broadcast + insert stream + bind (50 each).
+    for endpoint in [
+        youtube_quota::YouTubeEndpoint::LiveBroadcastsInsert,
+        youtube_quota::YouTubeEndpoint::LiveStreamsInsert,
+        youtube_quota::YouTubeEndpoint::LiveBroadcastsBind,
+    ] {
+        youtube_quota::record_call(state, endpoint);
+    }
     let mut prepared = youtube::prepare_youtube_broadcast(
         YouTubePrepareRequest {
             access_token: fresh.access_token.clone(),
@@ -2624,6 +2659,9 @@ async fn prepare_youtube_stream_target(
             secrets::put_secret,
         )
         .await;
+    }
+    if let Err(error) = prepared.as_ref() {
+        youtube_quota::note_error(state, "broadcast prepare", error);
     }
     let prepared = prepared?;
 
@@ -2683,16 +2721,22 @@ async fn set_youtube_broadcast_thumbnail(
             tracing::warn!("[youtube-thumbnail] managed thumbnail unavailable: {error}");
             Err("thumbnailUnavailable".to_string())
         }
+        // Plan 094: a thumbnail is the first call to shed; none while paused.
+        Ok(_) if youtube_quota::paused_until(state).is_some() => Err("quotaPaused".to_string()),
         Ok(path) => {
+            youtube_quota::record_call(state, youtube_quota::YouTubeEndpoint::ThumbnailsSet);
             let upload = async {
                 scheduled_streams_service::youtube_api(state, account_id)
                     .await?
                     .thumbnail(broadcast_id, &path, asset_id)
                     .await
             };
-            upload
-                .await
-                .map_err(|error| youtube::youtube_thumbnail_failure_code(&error))
+            upload.await.map_err(|error| {
+                if youtube_quota::note_error(state, "thumbnail upload", &error).is_some() {
+                    return "quotaPaused".to_string();
+                }
+                youtube::youtube_thumbnail_failure_code(&error)
+            })
         }
     };
     match &outcome {
@@ -2753,9 +2797,16 @@ async fn transition_youtube_stream_target(
     params: YouTubeBroadcastTransitionParams,
 ) -> anyhow::Result<YouTubeBroadcastTransitionResult> {
     refuse_scheduled_youtube_broadcast(state, &params.broadcast_id)?;
+    youtube_quota::refuse_if_paused(state)?;
     let credential = youtube_account_credentials(state, params.account_id.as_deref())?;
     let client = reqwest::Client::new();
     let mut fresh = fresh_platform_access_token(state, &credential, &client).await?;
+    // Estimated: the transition (50) plus one status confirmation read.
+    youtube_quota::record_call(
+        state,
+        youtube_quota::YouTubeEndpoint::LiveBroadcastsTransition,
+    );
+    youtube_quota::record_call(state, youtube_quota::YouTubeEndpoint::LiveBroadcastsList);
     let mut transition = youtube::transition_youtube_broadcast(
         YouTubeBroadcastTransitionRequest {
             access_token: fresh.access_token.clone(),
@@ -2785,6 +2836,9 @@ async fn transition_youtube_stream_target(
         )
         .await;
     }
+    if let Err(error) = transition.as_ref() {
+        youtube_quota::note_error(state, "broadcast transition", error);
+    }
     transition
 }
 
@@ -2792,9 +2846,11 @@ async fn youtube_stream_status(
     state: &AppState,
     params: YouTubeStreamStatusParams,
 ) -> anyhow::Result<YouTubeStreamStatusResult> {
+    youtube_quota::refuse_if_paused(state)?;
     let credential = youtube_account_credentials(state, params.account_id.as_deref())?;
     let client = reqwest::Client::new();
     let mut fresh = fresh_platform_access_token(state, &credential, &client).await?;
+    youtube_quota::record_call(state, youtube_quota::YouTubeEndpoint::LiveStreamsList);
     let mut status = youtube::get_youtube_stream_status(
         YouTubeStreamStatusRequest {
             access_token: fresh.access_token.clone(),
@@ -2822,6 +2878,9 @@ async fn youtube_stream_status(
         )
         .await;
     }
+    if let Err(error) = status.as_ref() {
+        youtube_quota::note_error(state, "stream status", error);
+    }
     status
 }
 
@@ -2845,8 +2904,10 @@ async fn list_youtube_channels(
             }],
         });
     }
+    youtube_quota::refuse_if_paused(state)?;
     let client = reqwest::Client::new();
     let mut fresh = fresh_platform_access_token(state, &credential, &client).await?;
+    youtube_quota::record_call(state, youtube_quota::YouTubeEndpoint::ChannelsList);
     let mut channels = youtube::list_youtube_channels(
         YouTubeChannelListRequest {
             access_token: fresh.access_token.clone(),
@@ -5277,6 +5338,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "resource.admin.resolve_screen_path"
         | "resource.admin.resolve_background_path"
         | "health.ping"
+        | "youtube.quota.status"
         | "scheduledStreams.capabilities"
         | "scheduledStreams.list"
         | "scheduledStreams.get"
@@ -9936,6 +9998,9 @@ async fn handle_text_message_with_role(
             let snapshot = state.audience.lock().ok().and_then(|hub| hub.snapshot());
             ServerResponse::ok(command.id, snapshot)
         }
+        // Plan 094: the shared quota breaker, for windows that open after the
+        // `youtube.quota` event fired.
+        "youtube.quota.status" => ServerResponse::ok(command.id, youtube_quota::status(state)),
         "sessions.audience.get" => {
             match serde_json::from_value::<audience::SessionAudienceParams>(command.params) {
                 Ok(params) => match audience::session_audience(&state.database, &params.session_id)
@@ -10791,11 +10856,14 @@ async fn handle_text_message_with_role(
             match serde_json::from_value::<YouTubePrepareParams>(command.params) {
                 Ok(params) => match prepare_youtube_stream_target(state, params).await {
                     Ok(prepared) => ServerResponse::ok(command.id, prepared),
-                    Err(error) => ServerResponse::error(
-                        command.id,
-                        "youtube-prepare-failed",
-                        error.to_string(),
-                    ),
+                    Err(error) => {
+                        tracing::warn!("[youtube-prepare] failed: {error:#}");
+                        let (code, message) = youtube::youtube_failure_response(
+                            &error,
+                            youtube::YouTubeFailureStep::Prepare,
+                        );
+                        ServerResponse::error(command.id, code, message)
+                    }
                 },
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
@@ -10819,14 +10887,22 @@ async fn handle_text_message_with_role(
         }
         "streamTargets.youtube.transition" => {
             match serde_json::from_value::<YouTubeBroadcastTransitionParams>(command.params) {
-                Ok(params) => match transition_youtube_stream_target(state, params).await {
-                    Ok(result) => ServerResponse::ok(command.id, result),
-                    Err(error) => ServerResponse::error(
-                        command.id,
-                        "youtube-transition-failed",
-                        error.to_string(),
-                    ),
-                },
+                Ok(params) => {
+                    let step = match params.status {
+                        youtube::YouTubeBroadcastTransitionStatus::Complete => {
+                            youtube::YouTubeFailureStep::TransitionComplete
+                        }
+                        _ => youtube::YouTubeFailureStep::TransitionLive,
+                    };
+                    match transition_youtube_stream_target(state, params).await {
+                        Ok(result) => ServerResponse::ok(command.id, result),
+                        Err(error) => {
+                            tracing::warn!("[youtube-transition] failed: {error:#}");
+                            let (code, message) = youtube::youtube_failure_response(&error, step);
+                            ServerResponse::error(command.id, code, message)
+                        }
+                    }
+                }
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }

@@ -1206,6 +1206,7 @@ mod tests {
             last_connected_at: None,
             last_message_at: None,
             last_error: None,
+            retry_at: None,
         }
     }
 

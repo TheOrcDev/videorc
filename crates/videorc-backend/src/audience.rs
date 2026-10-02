@@ -11,6 +11,10 @@
 //! Errors back off to 10 minutes and never touch chat or the stream. A count
 //! is never invented: a platform that cannot report says why instead
 //! (`capability`), and the UI hides the number.
+//!
+//! YouTube reads cost quota (plan 094): while the shared quota breaker is set
+//! the YouTube task parks without a request and resumes when it clears, and a
+//! `quotaExceeded` answer is a pause, never "Reconnect YouTube".
 
 use std::time::Duration;
 
@@ -149,6 +153,9 @@ pub enum AudienceReading {
     DeltaOnly,
     /// Transient: keep the last total and retry with backoff.
     Failed(String),
+    /// The shared YouTube quota is used up (plan 094): the task parks until
+    /// the breaker clears. Not a reconnect, not a transient failure.
+    QuotaPaused(String),
 }
 
 impl AudienceReading {
@@ -163,6 +170,9 @@ impl AudienceReading {
             Self::Hidden | Self::NeedsReconnect(_) | Self::Unavailable(_) | Self::DeltaOnly => {
                 AUDIENCE_MAX_BACKOFF
             }
+            // The task parks on the breaker instead; this is the ceiling in
+            // case it is ever slept on.
+            Self::QuotaPaused(_) => AUDIENCE_MAX_BACKOFF,
         }
     }
 }
@@ -311,6 +321,12 @@ impl AudienceHub {
             // A transient failure keeps the last total; a first read that
             // fails stays pending rather than claiming a capability.
             AudienceReading::Failed(_) => {}
+            // Paused on quota: keep the last total and say why; the task
+            // resumes by itself when the breaker clears.
+            AudienceReading::QuotaPaused(message) => {
+                entry.capability = AudienceCapability::Unavailable;
+                entry.message = Some(message.clone());
+            }
         }
         if *entry == before {
             return None;
@@ -602,6 +618,27 @@ async fn reading_from_response(
         Err(error) => return AudienceReading::Failed(format!("Request failed: {error}")),
     };
     let status = response.status();
+    if platform == StreamPlatform::Youtube && status == reqwest::StatusCode::FORBIDDEN {
+        // Plan 094: tell the shared quota apart from a refused grant. The
+        // caller (`read_source`) sets the breaker on `QuotaPaused`.
+        let body = response.text().await.unwrap_or_default();
+        let (reason, domain) = crate::youtube_quota::error_reason_and_domain_from_text(&body);
+        return match crate::youtube_quota::classify_youtube_api_error(
+            403,
+            reason.as_deref(),
+            domain.as_deref(),
+        ) {
+            crate::youtube_quota::YouTubeApiErrorClass::QuotaExhausted => {
+                AudienceReading::QuotaPaused(
+                    crate::youtube_quota::SUBSCRIBERS_PAUSED_MESSAGE.to_string(),
+                )
+            }
+            crate::youtube_quota::YouTubeApiErrorClass::RateLimited => {
+                AudienceReading::Failed("HTTP 403 rateLimitExceeded".to_string())
+            }
+            _ => AudienceReading::NeedsReconnect(reconnect_message(platform).to_string()),
+        };
+    }
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
         return AudienceReading::NeedsReconnect(reconnect_message(platform).to_string());
     }
@@ -769,6 +806,15 @@ async fn read_source(
         ))
         .into();
     };
+    // Plan 094: no YouTube read while the shared quota breaker is set.
+    if source.platform == StreamPlatform::Youtube
+        && crate::youtube_quota::paused_until(state).is_some()
+    {
+        return AudienceReading::QuotaPaused(
+            crate::youtube_quota::SUBSCRIBERS_PAUSED_MESSAGE.to_string(),
+        )
+        .into();
+    }
     let token = match crate::session_platform_access_token(
         state,
         source.platform,
@@ -781,7 +827,17 @@ async fn read_source(
         Ok(token) => token,
         Err(error) => return token_error_reading(source.platform, &error).into(),
     };
+    if source.platform == StreamPlatform::Youtube {
+        crate::youtube_quota::record_call(
+            state,
+            crate::youtube_quota::YouTubeEndpoint::ChannelsList,
+        );
+    }
     let mut reading = read_with_token(client, source.platform, &credential, &token).await;
+    if matches!(reading, AudienceReading::QuotaPaused(_)) {
+        crate::youtube_quota::record_quota_exhausted(state, "subscriber count");
+        return reading.into();
+    }
     let mut token = token;
     if matches!(reading, AudienceReading::NeedsReconnect(_)) {
         match crate::session_platform_access_token(
@@ -1018,6 +1074,13 @@ async fn run_source(state: AppState, session_id: String, source: AudienceSource)
                 publish(&state, snapshot, false);
             }
         }
+        if matches!(reading, AudienceReading::QuotaPaused(_)) {
+            // Park on the breaker (plan 094): no request until it clears, then
+            // read again at once so the number comes back without a click.
+            crate::youtube_quota::wait_until_resumed(&state).await;
+            backoff = None;
+            continue;
+        }
         let delay = reading.next_delay(backoff);
         backoff = matches!(reading, AudienceReading::Failed(_)).then_some(delay);
         sleep(delay).await;
@@ -1163,6 +1226,82 @@ mod tests {
             fetch_twitch_followers(&client, &base, "token", "client", "1").await,
             AudienceReading::Failed(_)
         ));
+    }
+
+    /// Plan 094: the owner's 2026-10-02 stream read "Reconnect YouTube to show
+    /// subscribers" on a quota 403. Quota is a pause; only a real refusal is
+    /// a reconnect.
+    #[tokio::test]
+    async fn a_youtube_quota_403_is_a_pause_not_a_reconnect() {
+        let client = reqwest::Client::new();
+        let (base, _) = spawn_provider(vec![
+            (
+                StatusCode::FORBIDDEN,
+                json!({ "error": { "code": 403, "errors": [{
+                    "reason": "quotaExceeded", "domain": "youtube.quota"
+                }] } }),
+            ),
+            (
+                StatusCode::FORBIDDEN,
+                json!({ "error": { "code": 403, "errors": [{
+                    "reason": "insufficientPermissions", "domain": "global"
+                }] } }),
+            ),
+            (StatusCode::FORBIDDEN, json!({ "status": 403 })),
+        ])
+        .await;
+        assert_eq!(
+            fetch_youtube_subscribers(&client, &base, "token").await,
+            AudienceReading::QuotaPaused(
+                crate::youtube_quota::SUBSCRIBERS_PAUSED_MESSAGE.to_string()
+            )
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                fetch_youtube_subscribers(&client, &base, "token").await,
+                AudienceReading::NeedsReconnect(
+                    "Reconnect YouTube to show subscribers.".to_string()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn a_quota_pause_keeps_the_last_total_and_says_why() {
+        let mut hub = AudienceHub::default();
+        hub.begin("s", &[StreamPlatform::Youtube], "t0");
+        hub.apply(
+            "s",
+            StreamPlatform::Youtube,
+            &AudienceReading::Count(100),
+            "t1",
+        );
+        let snapshot = hub
+            .apply(
+                "s",
+                StreamPlatform::Youtube,
+                &AudienceReading::QuotaPaused("paused".to_string()),
+                "t2",
+            )
+            .unwrap();
+        let entry = &snapshot.platforms[0];
+        assert_eq!(entry.capability, AudienceCapability::Unavailable);
+        assert_eq!(entry.total, Some(100));
+        assert_eq!(entry.message.as_deref(), Some("paused"));
+        // Resuming restores the number.
+        let resumed = hub
+            .apply(
+                "s",
+                StreamPlatform::Youtube,
+                &AudienceReading::Count(101),
+                "t3",
+            )
+            .unwrap();
+        assert_eq!(
+            resumed.platforms[0].capability,
+            AudienceCapability::Available
+        );
+        assert_eq!(resumed.platforms[0].message, None);
     }
 
     #[tokio::test]

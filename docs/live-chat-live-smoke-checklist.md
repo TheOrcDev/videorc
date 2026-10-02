@@ -106,7 +106,7 @@ OAuth with `events:subscribe` and `chat:write`.
       rate limiting messages, try again in a moment".
 - [ ] Follow the channel from the viewer account; a named follow row appears in the Stream
       Manager Activity and the Followers stat counts it (`delta-only`, no total).
-- [ ] The viewer count in the stats bar matches kick.com within one 30 s sample.
+- [ ] The viewer count in the stats bar matches kick.com within one 60 s sample.
 - [ ] Stop the stream; `GET https://api.kick.com/public/v1/events/subscriptions` with the
       account's token returns no subscriptions for the app.
 - [ ] Go live again, then Disconnect Kick; the subscriptions are gone again and the relay

@@ -8,6 +8,9 @@
 //!
 //! Failure discipline: sampling can never degrade the stream or chat. A
 //! failed poll is a missing datum (skip the tick), with its own backoff.
+//! YouTube polls cost quota (plan 094): they run every 60 s, skip entirely
+//! while the shared quota breaker is set, back off on a 403, and a
+//! `quotaExceeded` answer sets the breaker for every other YouTube caller.
 //!
 //! One total per session (plan 055, B1): the YouTube + Twitch sampler and the
 //! X sampler both feed [`ViewerAggregator`], so every emitted sample sums all
@@ -23,15 +26,20 @@ use crate::protocol::HealthLevel;
 use crate::state::AppState;
 use crate::streaming::StreamPlatform;
 
-pub const VIEWER_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
+/// Plan 094: 60 s, not 30. Each YouTube poll costs one unit of a quota every
+/// Videorc user shares.
+pub const VIEWER_SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
 pub const VIEWER_SAMPLE_LOG_CODE: &str = "stream-viewers";
 /// A platform's count leaves the total once it is this old: two missed polls
 /// keep the last count, a third drops it rather than freezing it. Matches the
 /// renderer's stale-chip threshold (`lib/viewer-count-view.ts`).
-pub const VIEWER_FRESHNESS: Duration = Duration::from_secs(75);
+pub const VIEWER_FRESHNESS: Duration = Duration::from_secs(150);
 /// `sessions.viewers.list` returns at most this many samples, the latest:
-/// twelve hours at the 30-second cadence.
+/// twenty-four hours at the 60-second cadence.
 pub const VIEWER_HISTORY_LIMIT: usize = 1_440;
+/// After a YouTube 403 that is not quota, skip this many polls, doubling per
+/// repeat up to [`YOUTUBE_MAX_SKIPPED_POLLS`] (10 minutes at 60 s).
+pub const YOUTUBE_MAX_SKIPPED_POLLS: u32 = 10;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -74,6 +82,24 @@ pub struct KickViewerConfig {
 enum CountFetch {
     Count(Option<u64>),
     Refused,
+    /// A 403 that is not the shared quota: permissions. Back off this platform.
+    Forbidden,
+}
+
+/// How many polls YouTube sits out after `forbidden_streak` 403s in a row.
+pub fn youtube_polls_to_skip(forbidden_streak: u32) -> u32 {
+    if forbidden_streak == 0 {
+        return 0;
+    }
+    2u32.saturating_pow(forbidden_streak)
+        .min(YOUTUBE_MAX_SKIPPED_POLLS)
+}
+
+/// YouTube's own backoff: skipped polls after permissions refusals.
+#[derive(Debug, Default)]
+struct YouTubeViewerBackoff {
+    forbidden_streak: u32,
+    skip_polls: u32,
 }
 
 fn count_fetch_for_status(status: reqwest::StatusCode) -> Option<CountFetch> {
@@ -95,20 +121,78 @@ where
     F: Fn(String) -> Fut,
     Fut: std::future::Future<Output = CountFetch>,
 {
+    poll_with_renewal_outcome(state, client, token, fetch)
+        .await
+        .count()
+}
+
+impl CountFetch {
+    fn count(self) -> Option<u64> {
+        match self {
+            Self::Count(count) => count,
+            Self::Refused | Self::Forbidden => None,
+        }
+    }
+}
+
+async fn poll_with_renewal_outcome<F, Fut>(
+    state: &AppState,
+    client: &reqwest::Client,
+    token: &mut crate::session_token::SessionToken,
+    fetch: F,
+) -> CountFetch
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = CountFetch>,
+{
     let access_token = token.ensure_fresh(state, client).await.to_string();
     match fetch(access_token).await {
-        CountFetch::Count(count) => count,
         CountFetch::Refused => {
-            let renewed = token
-                .renew_after_refusal(state, client)
-                .await
-                .ok()?
-                .to_string();
-            match fetch(renewed).await {
-                CountFetch::Count(count) => count,
-                CountFetch::Refused => None,
+            let Ok(renewed) = token.renew_after_refusal(state, client).await else {
+                return CountFetch::Refused;
+            };
+            match fetch(renewed.to_string()).await {
+                CountFetch::Refused => CountFetch::Refused,
+                other => other,
             }
         }
+        other => other,
+    }
+}
+
+/// One YouTube viewer poll behind the shared quota breaker (plan 094): no
+/// request while paused or while backing off a 403; a quota refusal sets the
+/// breaker; the call is counted.
+async fn poll_youtube_count(
+    state: &AppState,
+    client: &reqwest::Client,
+    config: &YouTubeViewerConfig,
+    token: &mut crate::session_token::SessionToken,
+    backoff: &mut YouTubeViewerBackoff,
+) -> Option<u64> {
+    if crate::youtube_quota::paused_until(state).is_some() {
+        return None;
+    }
+    if backoff.skip_polls > 0 {
+        backoff.skip_polls -= 1;
+        return None;
+    }
+    crate::youtube_quota::record_call(state, crate::youtube_quota::YouTubeEndpoint::VideosList);
+    let outcome = poll_with_renewal_outcome(state, client, token, |access_token| async move {
+        fetch_youtube_count(state, client, config, &access_token).await
+    })
+    .await;
+    match outcome {
+        CountFetch::Forbidden => {
+            backoff.forbidden_streak = backoff.forbidden_streak.saturating_add(1);
+            backoff.skip_polls = youtube_polls_to_skip(backoff.forbidden_streak);
+            None
+        }
+        CountFetch::Count(Some(count)) => {
+            backoff.forbidden_streak = 0;
+            Some(count)
+        }
+        CountFetch::Count(None) | CountFetch::Refused => None,
     }
 }
 
@@ -301,6 +385,7 @@ pub fn session_viewer_history(
 }
 
 async fn fetch_youtube_count(
+    state: &AppState,
     client: &reqwest::Client,
     config: &YouTubeViewerConfig,
     access_token: &str,
@@ -317,6 +402,24 @@ async fn fetch_youtube_count(
     let Ok(response) = client.get(url).bearer_auth(access_token).send().await else {
         return CountFetch::Count(None);
     };
+    if response.status() == reqwest::StatusCode::FORBIDDEN {
+        // Quota pauses every YouTube caller; any other 403 is this sampler's
+        // own problem (permissions), so only it backs off.
+        let body = response.text().await.unwrap_or_default();
+        let (reason, domain) = crate::youtube_quota::error_reason_and_domain_from_text(&body);
+        return match crate::youtube_quota::classify_youtube_api_error(
+            403,
+            reason.as_deref(),
+            domain.as_deref(),
+        ) {
+            crate::youtube_quota::YouTubeApiErrorClass::QuotaExhausted => {
+                crate::youtube_quota::record_quota_exhausted(state, "viewer count");
+                CountFetch::Count(None)
+            }
+            crate::youtube_quota::YouTubeApiErrorClass::RateLimited => CountFetch::Count(None),
+            _ => CountFetch::Forbidden,
+        };
+    }
     if let Some(outcome) = count_fetch_for_status(response.status()) {
         return outcome;
     }
@@ -461,6 +564,7 @@ pub async fn run_viewer_sampler(
             config.token_source.clone(),
         )
     });
+    let mut youtube_backoff = YouTubeViewerBackoff::default();
     let mut x_diagnostics = XViewerDiagnostics::default();
     let mut twitch_token = twitch.as_ref().map(|config| {
         crate::session_token::SessionToken::new(
@@ -478,10 +582,8 @@ pub async fn run_viewer_sampler(
         let mut counts: Vec<(StreamPlatform, Option<u64>)> = Vec::new();
         let client_ref = &client;
         if let (Some(config), Some(token)) = (youtube.as_ref(), youtube_token.as_mut()) {
-            let count = poll_with_renewal(&state, &client, token, |access_token| async move {
-                fetch_youtube_count(client_ref, config, &access_token).await
-            })
-            .await;
+            let count =
+                poll_youtube_count(&state, &client, config, token, &mut youtube_backoff).await;
             counts.push((StreamPlatform::Youtube, count));
         }
         if let (Some(config), Some(token)) = (twitch.as_ref(), twitch_token.as_mut()) {
@@ -680,11 +782,11 @@ mod tests {
         let mut aggregator = ViewerAggregator::default();
         aggregator.record("s", vec![(StreamPlatform::X, Some(30))], at(0));
         let kept = aggregator
-            .record("s", vec![(StreamPlatform::Twitch, Some(50))], at(75))
+            .record("s", vec![(StreamPlatform::Twitch, Some(50))], at(150))
             .unwrap();
-        assert_eq!(kept.total, 80, "a 75-second-old count is still fresh");
+        assert_eq!(kept.total, 80, "a 150-second-old count is still fresh");
         let dropped = aggregator
-            .record("s", vec![(StreamPlatform::Twitch, Some(50))], at(76))
+            .record("s", vec![(StreamPlatform::Twitch, Some(50))], at(151))
             .unwrap();
         assert_eq!(totals(&dropped), (50, vec![(StreamPlatform::Twitch, 50)]));
         // A failed poll keeps the last count rather than zeroing it...
@@ -695,14 +797,14 @@ mod tests {
                     (StreamPlatform::Twitch, None),
                     (StreamPlatform::X, Some(10)),
                 ],
-                at(90),
+                at(170),
             )
             .unwrap();
         assert_eq!(failed.total, 60);
         // ...and a poll that reported nothing emits nothing.
         assert!(
             aggregator
-                .record("s", vec![(StreamPlatform::Twitch, None)], at(95))
+                .record("s", vec![(StreamPlatform::Twitch, None)], at(175))
                 .is_none()
         );
     }
@@ -761,5 +863,127 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    fn quota_test_state() -> AppState {
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            crate::storage::Database::open_in_memory_for_tests(),
+        )
+    }
+
+    #[derive(Clone)]
+    struct CountingVideos {
+        hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        status: axum::http::StatusCode,
+        body: Value,
+    }
+
+    async fn counting_videos(
+        axum::extract::State(mock): axum::extract::State<CountingVideos>,
+    ) -> (axum::http::StatusCode, axum::Json<Value>) {
+        mock.hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (mock.status, axum::Json(mock.body.clone()))
+    }
+
+    async fn spawn_videos(
+        status: axum::http::StatusCode,
+        body: Value,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app = axum::Router::new()
+            .route("/videos", axum::routing::get(counting_videos))
+            .with_state(CountingVideos {
+                hits: hits.clone(),
+                status,
+                body,
+            });
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    #[tokio::test]
+    async fn youtube_polls_stop_while_the_quota_breaker_is_set_and_a_quota_403_sets_it() {
+        let state = quota_test_state();
+        let (base, hits) = spawn_videos(
+            axum::http::StatusCode::FORBIDDEN,
+            json!({ "error": { "errors": [{ "reason": "quotaExceeded", "domain": "youtube.quota" }] } }),
+        )
+        .await;
+        let config = YouTubeViewerConfig {
+            access_token: "token".to_string(),
+            broadcast_id: "bcast".to_string(),
+            api_base_url: Some(base),
+            token_source: Default::default(),
+        };
+        let client = reqwest::Client::new();
+        let mut token = crate::session_token::SessionToken::new("token", Default::default());
+        let mut backoff = YouTubeViewerBackoff::default();
+
+        // The quota 403 is a missing count that pauses every YouTube caller.
+        assert_eq!(
+            poll_youtube_count(&state, &client, &config, &mut token, &mut backoff).await,
+            None
+        );
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(crate::youtube_quota::paused_until(&state).is_some());
+        assert_eq!(
+            backoff.forbidden_streak, 0,
+            "quota is not a permissions refusal"
+        );
+
+        // While paused: zero requests.
+        for _ in 0..3 {
+            assert_eq!(
+                poll_youtube_count(&state, &client, &config, &mut token, &mut backoff).await,
+                None
+            );
+        }
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(crate::youtube_quota::usage_snapshot(&state).total_calls, 1);
+    }
+
+    #[tokio::test]
+    async fn a_permissions_403_backs_youtube_off_without_touching_the_breaker() {
+        let state = quota_test_state();
+        let (base, hits) = spawn_videos(
+            axum::http::StatusCode::FORBIDDEN,
+            json!({ "error": { "errors": [{ "reason": "forbidden", "domain": "global" }] } }),
+        )
+        .await;
+        let config = YouTubeViewerConfig {
+            access_token: "token".to_string(),
+            broadcast_id: "bcast".to_string(),
+            api_base_url: Some(base),
+            token_source: Default::default(),
+        };
+        let client = reqwest::Client::new();
+        let mut token = crate::session_token::SessionToken::new("token", Default::default());
+        let mut backoff = YouTubeViewerBackoff::default();
+        assert_eq!(
+            poll_youtube_count(&state, &client, &config, &mut token, &mut backoff).await,
+            None
+        );
+        assert_eq!(crate::youtube_quota::paused_until(&state), None);
+        assert_eq!(backoff.skip_polls, 2);
+        // Two polls sit out, then it tries again and backs off longer.
+        poll_youtube_count(&state, &client, &config, &mut token, &mut backoff).await;
+        poll_youtube_count(&state, &client, &config, &mut token, &mut backoff).await;
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        poll_youtube_count(&state, &client, &config, &mut token, &mut backoff).await;
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(backoff.skip_polls, 4);
+        assert_eq!(youtube_polls_to_skip(0), 0);
+        assert_eq!(youtube_polls_to_skip(3), 8);
+        assert_eq!(youtube_polls_to_skip(9), YOUTUBE_MAX_SKIPPED_POLLS);
     }
 }

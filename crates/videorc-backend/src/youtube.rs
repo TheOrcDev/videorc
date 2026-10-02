@@ -213,8 +213,8 @@ impl YouTubeThumbnailResult {
             Ok(()) => (YouTubeThumbnailState::Uploaded, None, None, false),
             Err(code) => {
                 let message = youtube_thumbnail_failure_message(&code).to_string();
-                // The daily limit only resets after hours; Retry would just fail.
-                let retryable = code != "uploadRateLimitExceeded";
+                // The daily limits only reset after hours; Retry would just fail.
+                let retryable = code != "uploadRateLimitExceeded" && code != "quotaPaused";
                 (
                     YouTubeThumbnailState::Error,
                     Some(code),
@@ -256,6 +256,101 @@ pub fn youtube_thumbnail_failure_code(error: &anyhow::Error) -> String {
     "thumbnailFailed".to_string()
 }
 
+/// Which Go Live step a YouTube failure belongs to, for its copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum YouTubeFailureStep {
+    Prepare,
+    TransitionLive,
+    TransitionComplete,
+}
+
+/// A failed YouTube call as the renderer receives it: a bounded code it can
+/// branch on and Videorc copy. Google's message, HTML and raw bodies never
+/// reach a toast (plan 094, S2). The quota code lets the renderer treat a
+/// failed `complete` as settled and offer the stream-key path at Go Live.
+pub fn youtube_failure_response(
+    error: &anyhow::Error,
+    step: YouTubeFailureStep,
+) -> (&'static str, String) {
+    use crate::youtube_quota::{YouTubeApiError, YouTubeApiErrorClass, YouTubeQuotaPaused};
+    let default_code = match step {
+        YouTubeFailureStep::Prepare => "youtube-prepare-failed",
+        YouTubeFailureStep::TransitionLive | YouTubeFailureStep::TransitionComplete => {
+            "youtube-transition-failed"
+        }
+    };
+    let quota_message = |step: YouTubeFailureStep| match step {
+        YouTubeFailureStep::Prepare => {
+            "YouTube's daily API limit is used up, so Videorc can't create the YouTube broadcast. Go live on YouTube with your stream key instead."
+        }
+        YouTubeFailureStep::TransitionLive => {
+            "YouTube's daily API limit is used up. YouTube takes the broadcast live on its own when your stream arrives."
+        }
+        YouTubeFailureStep::TransitionComplete => {
+            "YouTube's daily API limit is used up. YouTube ends the broadcast on its own about a minute after you stop."
+        }
+    };
+    if error.downcast_ref::<YouTubeQuotaPaused>().is_some()
+        || crate::youtube_quota::is_quota_exhausted_error(error)
+    {
+        return ("youtube-quota-paused", quota_message(step).to_string());
+    }
+    let Some(api) = error.downcast_ref::<YouTubeApiError>() else {
+        if is_youtube_auth_error(error) {
+            return (
+                default_code,
+                "Reconnect YouTube in Destinations, then retry.".to_string(),
+            );
+        }
+        // Videorc's own wording (ingest never active, status never reached…)
+        // or a transport failure: nothing from Google is in it.
+        return (default_code, format!("{error:#}"));
+    };
+    let reason = api.reason.as_deref().unwrap_or("");
+    let message = match (api.class(), reason) {
+        (_, "liveBroadcastNotFound") | (YouTubeApiErrorClass::NotFound, _) => {
+            return (
+                "youtube-broadcast-not-found",
+                "This broadcast no longer exists on YouTube.".to_string(),
+            );
+        }
+        (YouTubeApiErrorClass::AuthExpired, _) => {
+            "Reconnect YouTube in Destinations, then retry.".to_string()
+        }
+        (_, "liveStreamingNotEnabled") => {
+            "Live streaming is not enabled for this YouTube channel. Enable it in YouTube Studio, then retry.".to_string()
+        }
+        (_, "insufficientLivePermissions") | (_, "livePermissionBlocked") => {
+            "This YouTube channel can't live stream right now. Check YouTube Studio for the reason.".to_string()
+        }
+        (_, "invalidTransition") | (_, "errorStreamInactive") => {
+            "YouTube refused the transition because the stream isn't active yet. Wait for ingest, then retry.".to_string()
+        }
+        (YouTubeApiErrorClass::RateLimited, _) => {
+            "YouTube is rate limiting Videorc. Try again in a moment.".to_string()
+        }
+        (YouTubeApiErrorClass::Forbidden, _) => {
+            "YouTube refused this request for the connected account. Check the channel's live streaming permissions in YouTube Studio.".to_string()
+        }
+        (YouTubeApiErrorClass::Transient, _) => {
+            format!("YouTube answered HTTP {}. Try again in a moment.", api.status)
+        }
+        _ => {
+            let safe: String = reason
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .take(80)
+                .collect();
+            if safe.is_empty() {
+                format!("YouTube rejected the request (HTTP {}).", api.status)
+            } else {
+                format!("YouTube rejected the request ({safe}).")
+            }
+        }
+    };
+    (default_code, message)
+}
+
 pub fn youtube_thumbnail_failure_message(code: &str) -> &'static str {
     match code {
         "forbidden" => {
@@ -269,6 +364,9 @@ pub fn youtube_thumbnail_failure_message(code: &str) -> &'static str {
         }
         "thumbnailUnavailable" => "Thumbnail is unavailable. Pick it again.",
         "reconnect" => "Reconnect YouTube in Destinations, then retry.",
+        "quotaPaused" => {
+            "YouTube's daily API limit is used up, so the thumbnail was not set. The stream is not affected."
+        }
         _ => "The thumbnail was not set. The stream is not affected.",
     }
 }
@@ -735,7 +833,14 @@ pub async fn transition_youtube_broadcast(
                 message: format!("YouTube broadcast is already {status}."),
             });
         }
-        anyhow::bail!("YouTube broadcast transition failed ({status_code}): {body}");
+        // Typed (plan 094, S2): the caller maps reason/domain to Videorc copy
+        // and never forwards Google's message or HTML.
+        return Err(crate::youtube_quota::YouTubeApiError::from_body(
+            "YouTube broadcast transition failed",
+            status_code,
+            &body,
+        )
+        .into());
     }
 
     let response: YouTubeBroadcastTransitionResponse = response
@@ -952,7 +1057,9 @@ async fn require_youtube_success(
         return Ok(response);
     }
     let body = response.text().await.unwrap_or_default();
-    anyhow::bail!("{action} ({status}): {}", youtube_error_detail(&body));
+    // Typed (plan 094): callers classify quota/auth/permissions from the
+    // reason and domain, and the Display keeps the historical text shape.
+    Err(crate::youtube_quota::YouTubeApiError::from_body(action, status, &body).into())
 }
 
 pub fn is_youtube_auth_error(error: &anyhow::Error) -> bool {
@@ -963,52 +1070,6 @@ pub fn is_youtube_auth_error(error: &anyhow::Error) -> bool {
         || message.contains("invalid credentials")
         || message.contains("autherror")
         || message.contains("unauthenticated")
-}
-
-fn youtube_error_detail(body: &str) -> String {
-    #[derive(Deserialize)]
-    struct GoogleErrorEnvelope {
-        error: Option<GoogleErrorBody>,
-    }
-    #[derive(Deserialize)]
-    struct GoogleErrorBody {
-        message: Option<String>,
-        status: Option<String>,
-        errors: Option<Vec<GoogleErrorItem>>,
-    }
-    #[derive(Deserialize)]
-    struct GoogleErrorItem {
-        reason: Option<String>,
-        message: Option<String>,
-    }
-
-    if let Ok(envelope) = serde_json::from_str::<GoogleErrorEnvelope>(body)
-        && let Some(error) = envelope.error
-    {
-        let reason = error
-            .errors
-            .as_ref()
-            .and_then(|errors| errors.first())
-            .and_then(|item| item.reason.clone())
-            .or(error.status);
-        let message = error
-            .errors
-            .as_ref()
-            .and_then(|errors| errors.first())
-            .and_then(|item| item.message.clone())
-            .or(error.message)
-            .unwrap_or_else(|| "no detail".to_string());
-        return match reason {
-            Some(reason) => format!("{reason}: {message}"),
-            None => message,
-        };
-    }
-    let trimmed = body.trim();
-    if trimmed.is_empty() {
-        "no error body".to_string()
-    } else {
-        trimmed.chars().take(300).collect()
-    }
 }
 
 fn youtube_privacy(privacy: StreamPrivacy) -> &'static str {
@@ -2001,20 +2062,126 @@ mod tests {
         );
     }
 
+    /// Plan 094, S2: the owner's Stop toast carried Google's JSON and escaped
+    /// HTML. Every failure now maps to a bounded code and Videorc copy.
     #[test]
-    fn youtube_error_detail_surfaces_google_reason_and_message() {
-        let body = r#"{"error":{"code":403,"message":"The user is not enabled for live streaming.","errors":[{"message":"The user is not enabled for live streaming.","domain":"youtube.liveBroadcast","reason":"liveStreamingNotEnabled"}]}}"#;
-        assert_eq!(
-            youtube_error_detail(body),
-            "liveStreamingNotEnabled: The user is not enabled for live streaming."
+    fn youtube_failures_map_to_codes_and_videorc_copy_never_googles_text() {
+        use crate::youtube_quota::YouTubeApiError;
+        let google_html = "The request cannot be completed because you have exceeded your <a href=\"/youtube/v3/getting-started#quota\">quota</a>.";
+        let owner_body =
+            serde_json::json!({ "error": { "code": 403, "message": google_html, "errors": [{
+            "message": google_html, "domain": "youtube.quota", "reason": "quotaExceeded"
+        }] } })
+            .to_string();
+        let quota: anyhow::Error = YouTubeApiError::from_body(
+            "YouTube broadcast transition failed",
+            reqwest::StatusCode::FORBIDDEN,
+            &owner_body,
+        )
+        .into();
+        let (code, message) =
+            youtube_failure_response(&quota, YouTubeFailureStep::TransitionComplete);
+        assert_eq!(code, "youtube-quota-paused");
+        assert!(message.contains("ends the broadcast on its own"));
+        assert!(
+            !message.contains('<') && !message.contains('{'),
+            "{message}"
         );
+        let (code, message) = youtube_failure_response(&quota, YouTubeFailureStep::Prepare);
+        assert_eq!(code, "youtube-quota-paused");
+        assert!(message.contains("stream key"));
+        let (code, message) = youtube_failure_response(&quota, YouTubeFailureStep::TransitionLive);
+        assert_eq!(code, "youtube-quota-paused");
+        assert!(message.contains("on its own when your stream arrives"));
+
+        let paused: anyhow::Error = crate::youtube_quota::YouTubeQuotaPaused {
+            paused_until: chrono::Utc::now(),
+        }
+        .into();
+        assert_eq!(
+            youtube_failure_response(&paused, YouTubeFailureStep::Prepare).0,
+            "youtube-quota-paused"
+        );
+
+        let not_found: anyhow::Error = YouTubeApiError::from_body(
+            "YouTube broadcast transition failed",
+            reqwest::StatusCode::NOT_FOUND,
+            r#"{"error":{"errors":[{"reason":"liveBroadcastNotFound","domain":"youtube.liveBroadcast","message":"gone"}]}}"#,
+        )
+        .into();
+        assert_eq!(
+            youtube_failure_response(&not_found, YouTubeFailureStep::TransitionComplete),
+            (
+                "youtube-broadcast-not-found",
+                "This broadcast no longer exists on YouTube.".to_string()
+            )
+        );
+
+        let not_enabled: anyhow::Error = YouTubeApiError::from_body(
+            "YouTube broadcast creation failed",
+            reqwest::StatusCode::FORBIDDEN,
+            r#"{"error":{"errors":[{"reason":"liveStreamingNotEnabled","domain":"youtube.liveBroadcast","message":"The user is not enabled for live streaming."}]}}"#,
+        )
+        .into();
+        let (code, message) = youtube_failure_response(&not_enabled, YouTubeFailureStep::Prepare);
+        assert_eq!(code, "youtube-prepare-failed");
+        assert!(message.contains("YouTube Studio"));
+        assert!(!message.contains("The user is not enabled"));
+
+        let unknown: anyhow::Error = YouTubeApiError::from_body(
+            "YouTube broadcast transition failed",
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":{"errors":[{"reason":"someNewReason","message":"<b>raw</b>"}]}}"#,
+        )
+        .into();
+        let (_, message) =
+            youtube_failure_response(&unknown, YouTubeFailureStep::TransitionComplete);
+        assert_eq!(message, "YouTube rejected the request (someNewReason).");
+
+        let auth: anyhow::Error = YouTubeApiError::from_body(
+            "YouTube broadcast transition failed",
+            reqwest::StatusCode::UNAUTHORIZED,
+            "",
+        )
+        .into();
+        assert!(
+            youtube_failure_response(&auth, YouTubeFailureStep::TransitionLive)
+                .1
+                .contains("Reconnect YouTube")
+        );
+        // Videorc's own wording passes through unchanged.
+        let ours = anyhow::anyhow!("YouTube ingest did not become active yet.");
+        assert_eq!(
+            youtube_failure_response(&ours, YouTubeFailureStep::TransitionLive).1,
+            "YouTube ingest did not become active yet."
+        );
+    }
+
+    #[test]
+    fn youtube_rejections_surface_google_reason_and_message() {
+        use crate::youtube_quota::YouTubeApiError;
+        let body = r#"{"error":{"code":403,"message":"The user is not enabled for live streaming.","errors":[{"message":"The user is not enabled for live streaming.","domain":"youtube.liveBroadcast","reason":"liveStreamingNotEnabled"}]}}"#;
+        let error = YouTubeApiError::from_body("Action", reqwest::StatusCode::FORBIDDEN, body);
+        assert_eq!(
+            error.to_string(),
+            "Action (403 Forbidden): liveStreamingNotEnabled: The user is not enabled for live streaming."
+        );
+        assert_eq!(error.reason.as_deref(), Some("liveStreamingNotEnabled"));
 
         // Non-JSON bodies degrade to a truncated raw snippet, never an empty message.
         assert_eq!(
-            youtube_error_detail("<html>boom</html>"),
+            YouTubeApiError::from_body(
+                "Action",
+                reqwest::StatusCode::BAD_GATEWAY,
+                "<html>boom</html>"
+            )
+            .detail,
             "<html>boom</html>"
         );
-        assert_eq!(youtube_error_detail("  "), "no error body");
+        assert_eq!(
+            YouTubeApiError::from_body("Action", reqwest::StatusCode::BAD_GATEWAY, "  ").detail,
+            "no error body"
+        );
     }
 
     #[test]

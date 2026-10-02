@@ -54,10 +54,11 @@ describe('viewer count view', () => {
     expect(viewerChipDetail(sample())).toBe('youtube: 1.2k · twitch: 87')
   })
 
-  it('goes stale after 2× the sampler cadence', () => {
+  it('goes stale after two missed 60 s polls', () => {
     const at = Date.parse('2026-07-07T00:00:00Z')
     expect(viewerSampleStale(sample(), at + 60_000)).toBe(false)
-    expect(viewerSampleStale(sample(), at + 76_000)).toBe(true)
+    expect(viewerSampleStale(sample(), at + 150_000)).toBe(false)
+    expect(viewerSampleStale(sample(), at + 151_000)).toBe(true)
     expect(viewerSampleStale(sample({ at: 'garbage' }), at)).toBe(true)
   })
 })

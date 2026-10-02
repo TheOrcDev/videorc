@@ -2016,6 +2016,14 @@ describe('backend RPC contract', () => {
     ).toThrow('liveChat.emotes.set')
   })
 
+  it('accepts the youtube.quota event with and without a pause end', () => {
+    const paused = { pausedUntil: '2026-10-03T07:00:00Z' }
+    expect(validateBackendEventPayload('youtube.quota', paused)).toEqual(paused)
+    expect(validateBackendEventPayload('youtube.quota', {})).toEqual({})
+    expect(validateBackendRpcResult('youtube.quota.status', paused)).toEqual(paused)
+    expect(() => validateBackendEventPayload('youtube.quota', { pausedUntil: null })).toThrow()
+  })
+
   it('bounds unregistered method and event payloads instead of passing arbitrary values', () => {
     expect(validateBackendRpcParams('screens.rename', { screenId: '1', name: 'Demo' })).toEqual({
       screenId: '1',

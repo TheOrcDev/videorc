@@ -17,6 +17,7 @@ import type {
   CohostQuestionParams,
   ChatEmotesSettings,
   ChatEmotesSettingsPatch,
+  YouTubeQuotaStatus,
   CohostSettings,
   CohostSettingsPatch,
   CohostStartParams,
@@ -231,6 +232,7 @@ export interface BackendRpcMethodMap {
   'sessions.viewers.list': BackendRpcDefinition<SessionViewersListParams, SessionViewersPage>
   'sessions.audience.get': BackendRpcDefinition<{ sessionId: string }, AudienceSnapshot | null>
   'stream.audience.snapshot': BackendRpcDefinition<undefined, AudienceSnapshot | null>
+  'youtube.quota.status': BackendRpcDefinition<undefined, YouTubeQuotaStatus>
   'sessions.delete': BackendRpcDefinition<{ sessionIds: string[] }, SessionDeletionOperation[]>
   'sessions.delete.pending': BackendRpcDefinition<undefined, SessionDeletionOperation[]>
   'noiseCleanup.start': BackendRpcDefinition<{ sessionId: string }, NoiseCleanupJob>
@@ -291,6 +293,7 @@ export interface BackendEventMap {
   'performance.check.progress': PerformanceCheckProgress
   'performance.check.completed': PerformanceCheckState
   'liveChat.emotes': ChatEmotesSettings
+  'youtube.quota': YouTubeQuotaStatus
 }
 
 export type BackendEvent = keyof BackendEventMap
@@ -1890,6 +1893,11 @@ const chatEmotesSettingsPatchSchema = objectSchema(
   { sevenTv: optionalSchema(booleanSchema) },
   { allowUnknown: false }
 ) as RuntimeSchema<ChatEmotesSettingsPatch>
+// Plan 094: `pausedUntil` is absent, never null, when YouTube calls may run.
+const youtubeQuotaStatusSchema = objectSchema(
+  { pausedUntil: optionalSchema(timestamp) },
+  { allowUnknown: false }
+) as RuntimeSchema<YouTubeQuotaStatus>
 const cohostQuestionSchema = objectSchema(
   {
     id: boundedString,
@@ -2550,6 +2558,7 @@ const runtimeContracts = {
       { allowUnknown: false }
     )
   },
+  'youtube.quota.status': { params: undefinedSchema, result: youtubeQuotaStatusSchema },
   'sessions.audience.get': {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
     result: nullableSchema(audienceSnapshotSchema)
@@ -2680,7 +2689,8 @@ const runtimeEventSchemas = {
   'clip.marked': clipMarkedEventSchema,
   'performance.check.progress': performanceCheckProgressSchema,
   'performance.check.completed': performanceCheckStateSchema,
-  'liveChat.emotes': chatEmotesSettingsSchema
+  'liveChat.emotes': chatEmotesSettingsSchema,
+  'youtube.quota': youtubeQuotaStatusSchema
 } satisfies Record<BackendEvent, RuntimeSchema<unknown>>
 
 export function validateBackendEventPayload(event: string, payload: unknown): unknown {
