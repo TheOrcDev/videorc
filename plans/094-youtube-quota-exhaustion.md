@@ -1,6 +1,11 @@
 # Plan 094: YouTube that keeps working for streamers
 
-**Status:** PLANNED 2026-10-02. **Priority:** P0. Every Videorc user shares
+**Status:** EXECUTING 2026-10-02 on `fix/094-youtube-quota` (one PR, one
+commit per slice): S1-S4, S6 and the desktop half of S7 are built; S5 and S8
+are **BLOCKED** on live probes against YouTube with a real token (the
+project's quota is exhausted until 09:00 CEST 2026-10-03); S0 is owner-only
+and open; the wave-1 hotfix release and acceptance A1-A4 are owed. Details
+under "Execution notes" at the end. **Priority:** P0. Every Videorc user shares
 one Google Cloud project quota. One long stream can switch off YouTube chat,
 viewer counts, subscriber counts, chat send, YouTube connect and Go Live prep
 for **every** user until midnight Pacific. **Size:** L. Nine slices in three
@@ -19,15 +24,15 @@ the hotfix release uses the `videorc-release` skill.
 Every slice serves one of these guarantees, and the final acceptance checks
 each one.
 
-| #  | Guarantee                                                                                                                                                                                                                                  |
-| -- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| G1 | **The stream never depends on the API.** Once live, video and audio keep going whatever the YouTube API does. Recording and the other platforms are never blocked by YouTube.                                                                |
-| G2 | **Chat stays live for the whole stream.** A 4-hour stream reads YouTube chat with about 5 s latency or better, using ≤ 300 recurring units per 2 hours (target table below).                                                                 |
-| G3 | **Outages are calm and explained.** If the API is unavailable, the streamer sees **one** specific notice, never a storm, raw error text or endless "reconnecting". The notice says what is paused, until when (local time), and what still works. |
-| G4 | **Recovery is automatic.** When the quota resets, chat, viewers and subscribers resume by themselves, even mid-stream, with no click.                                                                                                       |
-| G5 | **There is always a way to go live.** If YouTube's API is out at Go Live, Videorc offers the stream-key path for YouTube instead of a dead end.                                                                                            |
-| G6 | **No single install can drain everyone.** Each install has a daily budget and sheds low-value calls first.                                                                                                                                  |
-| G7 | **The owner can act without a release.** Usage is visible, there is an alert before it runs out, and a remote switch can throttle every updated client.                                                                                    |
+| #   | Guarantee                                                                                                                                                                                                                                         |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| G1  | **The stream never depends on the API.** Once live, video and audio keep going whatever the YouTube API does. Recording and the other platforms are never blocked by YouTube.                                                                     |
+| G2  | **Chat stays live for the whole stream.** A 4-hour stream reads YouTube chat with about 5 s latency or better, using ≤ 300 recurring units per 2 hours (target table below).                                                                      |
+| G3  | **Outages are calm and explained.** If the API is unavailable, the streamer sees **one** specific notice, never a storm, raw error text or endless "reconnecting". The notice says what is paused, until when (local time), and what still works. |
+| G4  | **Recovery is automatic.** When the quota resets, chat, viewers and subscribers resume by themselves, even mid-stream, with no click.                                                                                                             |
+| G5  | **There is always a way to go live.** If YouTube's API is out at Go Live, Videorc offers the stream-key path for YouTube instead of a dead end.                                                                                                   |
+| G6  | **No single install can drain everyone.** Each install has a daily budget and sheds low-value calls first.                                                                                                                                        |
+| G7  | **The owner can act without a release.** Usage is visible, there is an alert before it runs out, and a remote switch can throttle every updated client.                                                                                           |
 
 ---
 
@@ -51,10 +56,10 @@ Multistream to YouTube, Twitch, Kick and X:
 
 | Time        | Event                                                                       |
 | ----------- | --------------------------------------------------------------------------- |
-| 12:55:12    | Prepare done (insert broadcast + stream + bind = 150 units)                  |
+| 12:55:12    | Prepare done (insert broadcast + stream + bind = 150 units)                 |
 | 12:55:15    | Thumbnail uploaded (50)                                                     |
 | 12:55:24    | `transition live` done (50)                                                 |
-| 13:31:11    | **Last YouTube chat message received**                                       |
+| 13:31:11    | **Last YouTube chat message received**                                      |
 | ~13:31:30   | Last good `videos.list` (viewer count gone from 13:32:50)                   |
 | 13:33:24    | Subscriber task says "Reconnect YouTube" (wrong: it was a quota 403)        |
 | 13:36-13:40 | Three sends fail with "rate-limited or exhausted quota"                     |
@@ -123,7 +128,7 @@ unit per call.
      after ingest stops.
 2. **Toast copy.**
    - `use-studio.tsx:11701` builds `Could not complete ${target.label} on
-     YouTube.` with the default label `'YouTube'` (`lib/capture.ts:529`).
+YouTube.` with the default label `'YouTube'` (`lib/capture.ts:529`).
      `:11211` has the same flaw.
    - The description is the raw body from `youtube.rs:709-738`.
 3. **Wrong subscriber copy.** `audience.rs:605-606` calls a quota 403
@@ -160,14 +165,14 @@ number based on the usage we justify, so cutting calls per stream is what
 creates headroom. These are the numbers the extension form will quote. Same
 stream: one YouTube OAuth destination, 2 hours, list = 1 unit (S0 confirms).
 
-| Call                                       | Today            | After wave 1 (S1: 5 s floor, idle → 10 s, viewers 60 s) | After S5 (streamList) | After S8 (free savings) |
-| ------------------------------------------ | ---------------- | ------------------------------------------------------- | --------------------- | ----------------------- |
-| Chat read                                  | 6,000-7,200      | ≤ 1,440                                                 | reconnects only       | reconnects only         |
-| Viewer count                               | 240              | 120                                                     | 120                   | 120                     |
-| Subscribers                                | 60               | 60                                                      | 60                    | 60                      |
-| Go Live + stop                             | ~310-370         | ~310-370                                                | ~310-370              | ~210-270                |
-| **Total (no sends)**                       | **≈6,600-7,900** | **≈1,900-2,000**                                        | **≈500-600**          | **≈400-500**            |
-| 2-hour streams/day on the default 10,000   | ~1.3             | ~5                                                      | ~16-20                | ~20-25                  |
+| Call                                     | Today            | After wave 1 (S1: 5 s floor, idle → 10 s, viewers 60 s) | After S5 (streamList) | After S8 (free savings) |
+| ---------------------------------------- | ---------------- | ------------------------------------------------------- | --------------------- | ----------------------- |
+| Chat read                                | 6,000-7,200      | ≤ 1,440                                                 | reconnects only       | reconnects only         |
+| Viewer count                             | 240              | 120                                                     | 120                   | 120                     |
+| Subscribers                              | 60               | 60                                                      | 60                    | 60                      |
+| Go Live + stop                           | ~310-370         | ~310-370                                                | ~310-370              | ~210-270                |
+| **Total (no sends)**                     | **≈6,600-7,900** | **≈1,900-2,000**                                        | **≈500-600**          | **≈400-500**            |
+| 2-hour streams/day on the default 10,000 | ~1.3             | ~5                                                      | ~16-20                | ~20-25                  |
 
 - **Chat sends cost 50 units each.** They aren't reduced, and after S5 they
   are the largest variable cost (20 sends = 1,000). The S1 counter reports
@@ -244,7 +249,7 @@ afterwards, and chat polls no more than every 5 s.
      viewers, audience, OAuth validate, prepare, transitions, thumbnails and
      send.
    - `extract_error_reason` (`youtube_chat.rs:730-739`) returns `{reason,
-     domain}`.
+domain}`.
    - `rateLimitExceeded`, `userRateLimitExceeded` and 429 stay RateLimited
      (back off, keep going).
    - Other 403s get permissions copy, not "disabled".
@@ -314,11 +319,11 @@ transition or Stop shows one human message, never blocks Record or the other
 platforms, and offers the stream-key path for YouTube.
 
 1. **Typed transition errors.** `youtube.rs:709-738` returns `{status,
-   reason, domain}` (reuse `scheduled_youtube.rs:8-13` `YouTubeRejection`).
+reason, domain}` (reuse `scheduled_youtube.rs:8-13` `YouTubeRejection`).
    Map it to Videorc copy with the `youtube_thumbnail_failure_message`
    pattern (`youtube.rs:259-274`), and never forward Google's `message`.
 2. **`complete` failing on quota, `liveBroadcastNotFound` or "already
-   complete"** is *settled*, not retained.
+   complete"** is _settled_, not retained.
    - YouTube auto-stops the broadcast (`enableAutoStop`).
    - Don't call `retainPlatformLifecycleOwner` for that class, so
      `settlePreviousPlatformLifecycle` never blocks the next start.
@@ -385,7 +390,7 @@ repeating producer anywhere can stack identical toasts.
    existing toast (sonner `id`).
    - Apply it to every toast that fires from a retry, timer, interval or
      backend event handler (`git grep -n "toast\." origin/main --
-     apps/desktop/src/renderer`, then check each caller's trigger).
+apps/desktop/src/renderer`, then check each caller's trigger).
    - Leave one-shot toasts that follow a click alone.
    - List the call sites you keyed in the PR body.
 4. **Guard on every toast description:** strip HTML tags and escaped entities
@@ -472,6 +477,7 @@ table) and chat latency ≤ 5 s.
    Save a redacted fixture in `crates/videorc-backend/tests/fixtures/` (no
    tokens; only the owner's own test messages). Docs:
    <https://developers.google.com/youtube/v3/live/docs/liveChatMessages/streamList>.
+
 2. **Incremental parser** over `reqwest` `bytes_stream()` that feeds
    `normalize_item` / `try_deliver_messages` as each response arrives.
    - Reconnect with the last `nextPageToken`, with jittered backoff.
@@ -509,8 +515,8 @@ first, with a quiet explanation.
      to 120 s;
    - at 95%, stop viewers;
    - at 100%, keep only Go Live essentials and chat read on the S1 floor.
-   Each step shows one quiet notice through `notifyOnce` ("YouTube viewer
-   count paused to save Videorc's daily YouTube limit").
+     Each step shows one quiet notice through `notifyOnce` ("YouTube viewer
+     count paused to save Videorc's daily YouTube limit").
 4. The budget never blocks a running stream or a Stop.
 
 **Tests:** ladder thresholds with fixed counters; a relaunch keeps the day's
@@ -586,13 +592,13 @@ skips `complete` with auto-stop on.
 
 ## Owner decisions
 
-| #  | Decision                                                                    | Recommended                                                                                       |
-| -- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| D1 | Chat poll floor for the `list` path                                         | **5 s.** Up to about 5 s chat delay until S5; S5 makes it real-time.                               |
-| D2 | Ship wave 1 (S1-S4) as its own hotfix release, macOS + Windows              | **Yes**: the quota is shared by every user.                                                        |
-| D3 | Per-install daily budget                                                    | **2,500 units** (about four 2-hour streams with sends after S5); remotely adjustable after S7.     |
-| D4 | Remote service flags on videorc.com (S7)                                    | **Yes**: next incident is a JSON edit, not a release.                                             |
-| D5 | Break glass: disable the old OAuth client if old versions keep draining     | **Only** if Cloud metrics a week after the hotfix still show 1 s polling.                          |
+| #   | Decision                                                                | Recommended                                                                                    |
+| --- | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| D1  | Chat poll floor for the `list` path                                     | **5 s.** Up to about 5 s chat delay until S5; S5 makes it real-time.                           |
+| D2  | Ship wave 1 (S1-S4) as its own hotfix release, macOS + Windows          | **Yes**: the quota is shared by every user.                                                    |
+| D3  | Per-install daily budget                                                | **2,500 units** (about four 2-hour streams with sends after S5); remotely adjustable after S7. |
+| D4  | Remote service flags on videorc.com (S7)                                | **Yes**: next incident is a JSON edit, not a release.                                          |
+| D5  | Break glass: disable the old OAuth client if old versions keep draining | **Only** if Cloud metrics a week after the hotfix still show 1 s polling.                      |
 
 ## Out of scope
 
@@ -626,8 +632,8 @@ skips `complete` with auto-stop on.
 ## Handoff
 
 - **Worktree:** `git worktree add ../videorc-wt-094 -b fix/094-youtube-quota
-  origin/main`. APFS-clone an idle sibling's `target` first (`cp -Rc
-  ../videorc-wt-<idle>/target ./target`) after checking `ps` for cargo on it.
+origin/main`. APFS-clone an idle sibling's `target` first (`cp -Rc
+../videorc-wt-<idle>/target ./target`) after checking `ps` for cargo on it.
 - **PRs:** wave 1 is one PR (slices as commits, push after each). Wave 2 and
   wave 3 get their own PRs; S7's videorc-web change is a separate web PR
   merged and deployed first.
@@ -636,3 +642,64 @@ skips `complete` with auto-stop on.
     session or the owner's connected dev build).
   - S0 is console-only.
   - Hotfix publishing follows the release skill's owner gates.
+
+---
+
+## Execution notes (2026-10-02, worktree `videorc-wt-094`, branch `fix/094-youtube-quota`)
+
+Owner decisions taken at the recommended defaults: D1 = 5 s floor, D3 =
+2,500 units per install per Pacific day, D4 = remote flags yes. D2 (hotfix
+release) and D5 (break glass) are still the owner's.
+
+| Slice        | State       | Commit      | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ------------ | ----------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S1           | DONE        | `35b7b83a`  | Shared classifier, app-wide breaker with the expiry probe (+0-120 s jitter, 30-minute re-arm), chat parks as Waiting with `retryAt`, 5 s floor / 10 s idle, transport fixed to `list`, viewers 60 s, usage counter persisted per Pacific day (`youtubeApiUsageDaily`), `youtube.quota` event + `youtube.quota.status`.                                                                                                                                                                                                    |
+| S2           | DONE        | `345006c5`  | Typed transition errors, settled `complete` on quota / not-found, live transition on quota is a warning, Go Live preflight refuses YouTube OAuth with the stream-key action, one paused state across the Livestream page, Stream Manager and Comments status.                                                                                                                                                                                                                                                             |
+| S3           | DONE        | `24eaac20`  | Quota during connect is terminal (`reason: youtube-quota`, `retryAt`, checkpoint cleaned up), one toast per incident (`oauth-callback:{platform}`), `notifyOnce`, the toast guard in `lib/toast.ts`, `visibleToasts={3}`.                                                                                                                                                                                                                                                                                                 |
+| S4           | DONE        | `f56eb1b0`  | Dev-only `VIDEORC_YOUTUBE_API_BASE_URL` (bare loopback only; refused in release builds, tested) through `youtube_quota::youtube_api_base_url` in every YouTube client incl. OAuth token/profile/revoke and the probe; `scripts/lib/fake-youtube-api.mjs`; `pnpm smoke:youtube-quota` (in `smoke:local-gates`, AGENTS.md); smoke RPCs `test.youtubeQuota.seedAccount` / `forceExpiry` (debug + smoke switch + override only).                                                                                              |
+| S5           | **BLOCKED** | –           | Needs the real-token `curl -N` probe of `liveChat/messages/stream` on a private broadcast (body framing, idle behaviour, end markers, error shapes, Cloud Console cost). The quota is exhausted until 09:00 CEST 2026-10-03. The fake API already serves the `/stream` route with the `list` shape so S5 can extend it. Until then `chatTransport: "stream"` is read as `list`.                                                                                                                                           |
+| S6           | DONE        | `f74798ba`  | Budget ladder (`budget_step`, `budget_allows`): 80% sheds subscribers + thumbnails and halves viewer polls (120 s), 95% stops viewers, 100% stops sends; Go Live essentials and chat read never shed. `youtube.quota` carries `budget {units, limit, step}`; one `notifyOnce` per step on the way up. Relaunch keeps the day total; the Pacific rollover starts at zero.                                                                                                                                                  |
+| S7 (desktop) | DONE        | `83401b2f`  | `service_flags.rs`: startup + every 30 minutes, fail open, clamps, past `pausedUntil` ignored, future one feeds the breaker as a remote pause (lifted when withdrawn, never lifts a quota pause), `stream` read as `list` and noted, `off` parks the reader. Flags logged on change and to the session log (`youtube-service-flags`). `docs/youtube-service-flags.md` has the keys and the incident playbook. **Web half:** videorc-web PR #67 is open, not deployed; deploy it before the desktop release that reads it. |
+| S8           | **BLOCKED** | –           | Both savings need live probes with a real token: a reused `liveStream` binding cleanly to a new broadcast, and a broadcast reaching `complete` on its own under `enableAutoStop`. Same quota block as S5.                                                                                                                                                                                                                                                                                                                 |
+| S9           | DONE        | this commit | This section, `plans/README.md`, `docs/live-chat-live-smoke-checklist.md`, `docs/youtube-service-flags.md`.                                                                                                                                                                                                                                                                                                                                                                                                               |
+
+### Deviations from the plan text
+
+- **S4, "other fake platforms still delivering":** the drill uses the real
+  session path (seeded OAuth account → stored token → `session.start` →
+  connector, sampler and audience against the fake), so no second platform's
+  chat is attached: Twitch/Kick chat need their own accounts and EventSub /
+  relay fakes. "Other platforms unaffected" is proven as the custom RTMP
+  destination's bytes advancing through the outage and a non-YouTube Go Live
+  succeeding while paused; the fake-provider fan-out itself is covered by
+  `smoke:live-chat-fake-providers`.
+- **S4, renderer toasts in scenarios c and d:** the drill drives the backend
+  RPCs (`complete` → `youtube-quota-paused`, settled; `prepare` →
+  `youtube-quota-paused` with the stream-key copy) and counts renderer toasts
+  only where the renderer reacts to backend events (the paused notice in a,
+  the connect toast in e). The renderer's own Stop/Go Live toasts and the
+  stream-key button are covered by the S2 unit and integration tests
+  (`studio-provider.integration.test.ts`, `youtube-quota.test.ts`).
+- **S4, token exchange:** the dev override also routes Google's OAuth token
+  and revoke endpoints to the fake (`/token`, `/revoke`) so the connect
+  scenario reaches the profile lookup; release builds never honour it.
+- **S6, viewer slowdown:** implemented as "poll every other 60 s tick" in the
+  shared sampler rather than a separate 120 s timer, so Twitch and Kick keep
+  their cadence.
+- **S7, `viewerSampleMs`:** applies to the shared sampler loop only while a
+  YouTube sampler runs; without YouTube the 60 s default stays.
+
+### Owed
+
+- **S0 (owner):** Cloud Console method breakdown for 2026-10-02 (proves what
+  `list` costs), the 50%/80% alerts, the quota extension form, the week of
+  metrics and D5.
+- **S5 and S8 probes** after 09:00 CEST 2026-10-03 with the owner's token and
+  a private broadcast; then re-run `smoke:youtube-quota` with the streaming
+  route.
+- **Web:** merge and deploy videorc-web PR #67 before the desktop release
+  that reads the flags; then set `{ "version": 1 }` live and confirm a dev
+  build logs `YouTube service flags in effect (remote, …)`.
+- **Hotfix release** (D2) with the `videorc-release` skill, macOS + Windows,
+  after the PR merges; changelog line as written above.
+- **Acceptance A1-A4** (owner).
