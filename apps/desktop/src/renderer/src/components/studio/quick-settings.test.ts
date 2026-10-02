@@ -127,14 +127,9 @@ describe('Studio Inputs rows (plan 080 S4)', () => {
       camera,
       systemAudio
     ])
-    expect(rowLabels(markup)).toEqual([
-      'Screen',
-      'Camera',
-      'Mic',
-      'System audio',
-      'Output',
-      'Captions'
-    ])
+    // The microphone has one home, the Microphone section above (plan 092).
+    expect(rowLabels(markup)).toEqual(['Screen', 'Camera', 'System audio', 'Output', 'Captions'])
+    expect(markup).not.toContain('Mute microphone')
     expect(markup).toContain('title="Display 2"')
     expect(markup).toContain('title="MacBook Pro Camera"')
     // The old joined trigger ("Display 2 · MacBook Pro Camera") is gone.

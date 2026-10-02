@@ -241,8 +241,9 @@ export function StudioTab(): ReactElement {
           <Suspense fallback={<MicrophoneSectionFallback />}>
             <MicrophoneSection />
           </Suspense>
-          {/* Inputs: compact mirrors of Source / Mic / Output / Captions, each
-              editing the same captureConfig and deep-linking to its page. */}
+          {/* Inputs: compact mirrors of Screen / Camera / System audio / Output
+              / Captions, each editing the same captureConfig and deep-linking
+              to its page. */}
           <QuickSettings />
           <TakeoverSection />
         </aside>
