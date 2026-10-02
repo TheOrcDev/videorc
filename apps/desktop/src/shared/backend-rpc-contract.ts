@@ -1809,7 +1809,9 @@ const oauthCallbackResultFields = {
   tokenStored: booleanSchema,
   accountConnected: booleanSchema,
   retryable: booleanSchema,
-  receivedAt: timestamp
+  receivedAt: timestamp,
+  reason: optionalSchema(stringSchema({ maxLength: 64 })),
+  retryAt: optionalSchema(timestamp)
 }
 const oauth2CallbackResultSchema = objectSchema(
   {

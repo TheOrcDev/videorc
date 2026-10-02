@@ -533,6 +533,15 @@ describe('backend RPC contract', () => {
       receivedAt: '2026-07-12T00:00:00.000Z'
     }
     expect(validateBackendEventPayload('platformAccounts.oauth.callback', event)).toEqual(event)
+    // Plan 094 (S3): a terminal YouTube connect carries its reason and retry time.
+    const quota = {
+      ...event,
+      status: 'failed',
+      retryable: false,
+      reason: 'youtube-quota',
+      retryAt: '2026-10-03T07:00:00Z'
+    }
+    expect(validateBackendEventPayload('platformAccounts.oauth.callback', quota)).toEqual(quota)
     const xOAuth1Event: OAuthCallbackResult = {
       platform: 'x',
       state: '',

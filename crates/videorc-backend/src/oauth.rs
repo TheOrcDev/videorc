@@ -215,6 +215,13 @@ pub struct OAuthCallbackResult {
     /// denial/expiry/unknown-state results are safe for Electron to acknowledge.
     pub retryable: bool,
     pub received_at: String,
+    /// A bounded machine reason for a terminal failure the renderer words
+    /// itself (plan 094: `youtube-quota`). Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// When the blocked action can be tried again (RFC 3339), with `reason`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -331,6 +338,10 @@ pub struct PendingOAuthTokenCheckpoint {
 }
 
 impl PendingOAuthTokenCheckpoint {
+    pub fn platform(&self) -> StreamPlatform {
+        self.platform
+    }
+
     pub fn secret_ref(&self) -> &str {
         &self.secret_ref
     }
@@ -1300,6 +1311,8 @@ impl OAuthSessions {
                     account_connected: false,
                     retryable: true,
                     received_at: received_at.to_rfc3339(),
+                    reason: None,
+                    retry_at: None,
                 },
                 exchange: None,
                 token_checkpoint: None,
@@ -1322,6 +1335,8 @@ impl OAuthSessions {
                     account_connected: false,
                     retryable: false,
                     received_at: received_at.to_rfc3339(),
+                    reason: None,
+                    retry_at: None,
                 },
                 exchange: None,
                 token_checkpoint: None,
@@ -1345,6 +1360,8 @@ impl OAuthSessions {
                     account_connected: false,
                     retryable: true,
                     received_at: received_at.to_rfc3339(),
+                    reason: None,
+                    retry_at: None,
                 },
                 exchange: None,
                 token_checkpoint: None,
@@ -1370,6 +1387,8 @@ impl OAuthSessions {
                     account_connected: false,
                     retryable: false,
                     received_at: received_at.to_rfc3339(),
+                    reason: None,
+                    retry_at: None,
                 },
                 exchange: None,
                 token_checkpoint: None,
@@ -1438,6 +1457,8 @@ impl OAuthSessions {
                 account_connected: false,
                 retryable: false,
                 received_at: received_at.to_rfc3339(),
+                reason: None,
+                retry_at: None,
             },
             exchange,
             token_checkpoint,

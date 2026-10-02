@@ -1,6 +1,6 @@
 import { isGlobalShortcutAction, type GlobalShortcutAction } from '../../../shared/global-shortcuts'
 export type { GlobalShortcutAction } from '../../../shared/global-shortcuts'
-import { toast } from 'sonner'
+import { toast } from '@/lib/toast'
 
 import type { DeviceStatus, GlobalShortcutsConfig, GlobalShortcutsResult } from '@/lib/backend'
 import { openSettingsTab } from '@/lib/settings-tabs'

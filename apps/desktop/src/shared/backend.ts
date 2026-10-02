@@ -1314,6 +1314,10 @@ export interface OAuthCallbackResult {
   accountConnected: boolean
   retryable: boolean
   receivedAt: string
+  /** Plan 094: a bounded reason the renderer words itself (`youtube-quota`). */
+  reason?: string
+  /** When the blocked action can be tried again (RFC 3339), with `reason`. */
+  retryAt?: string
 }
 
 export interface StreamSessionTargetHistory {

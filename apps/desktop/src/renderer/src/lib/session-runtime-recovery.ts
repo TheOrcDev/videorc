@@ -17,7 +17,10 @@ import { recordingStartupHealthToast } from '@/lib/studio-health'
 import { requestSystemAudioResume, SYSTEM_AUDIO_ECHO_TOAST_ID } from '@/lib/system-audio'
 import { isTransientBackendError, shouldToastBackendError } from '@/lib/backend-transport'
 import type { WsStatus } from '@/lib/capture'
-import { toast } from 'sonner'
+import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
+import { notifyOnce } from '@/lib/notify-once'
+import { toast } from '@/lib/toast'
+import { youtubeConnectPausedMessage } from '@/lib/youtube-quota'
 
 // Plan 083: the thumbnail warning rides this lazy runtime-toast chunk.
 export { showYouTubeThumbnailFailure, youtubeThumbnailFailure } from '@/lib/youtube-thumbnail-toast'
@@ -226,37 +229,78 @@ export function showBackendError(message: string, status: WsStatus): void {
   // reconnect window the Session badge already explains the state, so avoid a
   // wall of duplicate transport errors. A connected-state blip stays visible.
   if (!shouldToastBackendError(message, status)) return
-  toast.error(message, isTransientBackendError(message) ? { id: 'backend-transport' } : undefined)
+  if (isTransientBackendError(message)) {
+    toast.error(message, { id: 'backend-transport' })
+  } else {
+    notifyOnce(`backend-error:${message}`, 'error', message)
+  }
 }
 
 export function showXPlaybackEvent(event: XPlaybackEvent): void {
+  // One toast per playback state: the backend re-checks on a timer.
   if (event.status === 'verified') {
-    toast.success('Viewers can watch your X broadcast.', { description: event.shareUrl })
+    notifyOnce('x-playback', 'success', 'Viewers can watch your X broadcast.', {
+      description: event.shareUrl
+    })
   } else if (event.status === 'pending') {
-    toast.warning('X is still provisioning playback.', {
+    notifyOnce('x-playback', 'warning', 'X is still provisioning playback.', {
       description:
         'Viewers may see a loading spinner for a few minutes. Keep streaming. Videorc keeps checking.'
     })
   } else {
-    toast.error('X never produced playback for this broadcast.', {
+    notifyOnce('x-playback', 'error', 'X never produced playback for this broadcast.', {
       description:
         'Viewers saw a loading spinner. Your local recording is unaffected; the next Go Live uses a replacement source if this repeats.'
     })
   }
 }
 
+/**
+ * One toast per connect incident (plan 094, S3): every result for a platform
+ * shares `oauth-callback:{platform}`, so the renderer's retries update it in
+ * place instead of stacking (the owner saw about 35 "OAuth callback failed."
+ * toasts in one connect). The platform of the last result is remembered so
+ * the exhaust toast lands on the same id.
+ */
+let lastOAuthCallbackPlatform: string = 'provider'
+
+export function oauthCallbackToastId(platform?: string): string {
+  return `oauth-callback:${platform ?? 'provider'}`
+}
+
 export function showOAuthCallbackResult(result: OAuthCallbackResult): void {
+  const platform = result.platform ?? 'provider'
+  lastOAuthCallbackPlatform = platform
+  const id = oauthCallbackToastId(result.platform)
+  const platformName = result.platform ? CHAT_PLATFORM_LABELS[result.platform] : 'the account'
   if (result.status === 'success' && result.accountConnected) {
-    toast.success('Account connected.')
+    toast.success('Account connected.', { id })
   } else if (result.status === 'success' && result.platform === 'x' && result.tokenStored) {
-    toast.success(result.message ?? 'X live authorization complete.')
+    toast.success(result.message ?? 'X live authorization complete.', { id })
   } else if (result.status === 'success') {
-    toast.success('OAuth callback received.')
+    toast.success('OAuth callback received.', { id })
   } else {
-    toast.error('OAuth callback failed.', {
-      description: result.message ?? result.status ?? 'Connection could not be completed.'
-    })
+    const description =
+      result.reason === 'youtube-quota' && result.retryAt
+        ? youtubeConnectPausedMessage(result.retryAt)
+        : (result.message ?? result.status ?? 'Connection could not be completed.')
+    toast.error(`Couldn't finish connecting ${platformName}.`, { id, description })
   }
+}
+
+/** The renderer gave up retrying a provider callback (same id as the results). */
+export function showOAuthCallbackExhausted(): void {
+  toast.error(`Couldn't finish connecting ${platformLabelOrAccount(lastOAuthCallbackPlatform)}.`, {
+    id: oauthCallbackToastId(lastOAuthCallbackPlatform),
+    description:
+      'OAuth completion is still unavailable. Videorc kept the callback without acknowledging it.'
+  })
+}
+
+function platformLabelOrAccount(platform: string): string {
+  return platform in CHAT_PLATFORM_LABELS
+    ? CHAT_PLATFORM_LABELS[platform as keyof typeof CHAT_PLATFORM_LABELS]
+    : 'the account'
 }
 
 export function showSessionFinished({
@@ -401,12 +445,15 @@ function showSessionAudioNews(event: HealthEvent): void {
       action: { label: 'Resume', onClick: requestSystemAudioResume }
     })
   } else if (event.code === 'audio-output-stalled') {
-    toast.warning('Audio dropped for a moment', {
+    notifyOnce('audio-output-stalled', 'warning', 'Audio dropped for a moment', {
       description: event.message,
       duration: 12_000
     })
   } else if (event.code === 'microphone-timeline-recovered') {
-    toast.success('Microphone is back', { description: event.message, duration: 8_000 })
+    notifyOnce('microphone-timeline-recovered', 'success', 'Microphone is back', {
+      description: event.message,
+      duration: 8_000
+    })
   }
 }
 

@@ -39,7 +39,8 @@ import {
   type ReactNode,
   type SetStateAction
 } from 'react'
-import { toast } from 'sonner'
+import { notifyOnce } from '@/lib/notify-once'
+import { toast } from '@/lib/toast'
 
 import { BackendClient, BackendRequestError } from '@/backendClient'
 import {
@@ -3413,9 +3414,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     for (const target of streamTargets) {
       if (target.state === 'failed' && !toastedFailedTargets.current.has(target.targetId)) {
         toastedFailedTargets.current.add(target.targetId)
-        toast.error(`Streaming to ${target.label} stopped`, {
-          description: target.message ?? 'The other destinations keep streaming.'
-        })
+        notifyOnce(
+          `stream-target-failed:${target.targetId}`,
+          'error',
+          `Streaming to ${target.label} stopped`,
+          {
+            description: target.message ?? 'The other destinations keep streaming.'
+          }
+        )
       }
     }
   }, [streamTargets])
@@ -6609,7 +6615,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const error = payload as { message?: string }
         const message = error.message ?? 'Backend error.'
         setLastError(message)
-        toast.error(message)
+        // A backend `error` event can repeat every reconnect: one toast per text.
+        notifyOnce(`backend-error:${message}`, 'error', message)
       }),
       nextClient.on('connection.closed', () => setWsStatus('closed'))
     ]
@@ -8171,10 +8178,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               console.warn(
                 `Layout committed at revision ${status.sceneRevision}; native preview presentation proof was not observed. ${detail}`
               )
-              toast.warning('Preview verification lagged behind the layout change', {
-                description:
-                  'The layout was applied and the output is unaffected. If the preview looks stale, close and reopen it.'
-              })
+              notifyOnce(
+                'layout-preview-proof-lag',
+                'warning',
+                'Preview verification lagged behind the layout change',
+                {
+                  description:
+                    'The layout was applied and the output is unaffected. If the preview looks stale, close and reopen it.'
+                }
+              )
               return
             }
             reportError(
@@ -9268,7 +9280,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     void window.videorc?.closeNotesWindow?.().then(() => {
-      toast.warning('Notes closed for this recording', {
+      notifyOnce('notes-closed-for-recording', 'warning', 'Notes closed for this recording', {
         description: 'Notes recording overlay is disabled by VIDEORC_NOTES_RECORDING_OVERLAY=0.'
       })
     })
@@ -9284,7 +9296,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     void window.videorc?.closeCommentsWindow?.().then(() => {
-      toast.warning('Chat closed for this recording', {
+      notifyOnce('chat-closed-for-recording', 'warning', 'Chat closed for this recording', {
         description:
           'Chat window protection is unavailable and recording overlay capture is disabled by VIDEORC_COMMENTS_RECORDING_OVERLAY=0.'
       })
@@ -10761,7 +10773,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       ownedCallbackIds.delete(envelope.id)
       inFlightCallbacks.delete(envelope.id)
       exhaustedCallbackIds.add(envelope.id)
-      toast.error(
+      notifyOnce(
+        'account-callback-retry',
+        'error',
         'Account sign-in is still unavailable. Videorc kept the callback without acknowledging it.'
       )
     }
@@ -10780,7 +10794,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       retryAttempts.set(envelope.id, attempt + 1)
       if (attempt === 0) {
-        toast.error('Account sign-in is temporarily unavailable. Videorc will retry.')
+        notifyOnce(
+          'account-callback-retry',
+          'error',
+          'Account sign-in is temporarily unavailable. Videorc will retry.'
+        )
       }
       const timer = window.setTimeout(() => {
         retryTimers.delete(timer)
@@ -10892,9 +10910,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       ownedCallbackIds.delete(envelope.id)
       inFlightCallbacks.delete(envelope.id)
       exhaustedCallbackIds.add(envelope.id)
-      toast.error(
-        'OAuth completion is still unavailable. Videorc kept the callback without acknowledging it.'
-      )
+      // Plan 094 (S3): the same id as the callback results, so this updates
+      // the one connect toast instead of adding a final one.
+      void loadSessionRuntimeRecovery().then((runtime) => runtime.showOAuthCallbackExhausted())
     }
     const scheduleRetry = (envelope: OAuthCallbackEnvelope): void => {
       if (disposed) return
@@ -10906,7 +10924,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       retryAttempts.set(envelope.id, attempt + 1)
       if (attempt === 0) {
-        toast.error('OAuth completion is temporarily unavailable. Videorc will retry.')
+        notifyOnce(
+          'oauth-callback-retry',
+          'error',
+          'OAuth completion is temporarily unavailable. Videorc will retry.'
+        )
       }
       const timer = window.setTimeout(() => {
         retryTimers.delete(timer)

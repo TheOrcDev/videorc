@@ -1700,6 +1700,59 @@ fn prepare_oauth_account_transition(
     (account, superseded)
 }
 
+/// Plan 094 (S3): whether a YouTube connect must stop for the shared quota.
+/// With no `error`, this is the pre-lookup check (the breaker is already set);
+/// with a profile-lookup error, a quota refusal sets the breaker. Returns the
+/// pause end. Other platforms never block here.
+fn youtube_connect_quota_block(
+    state: &AppState,
+    platform: StreamPlatform,
+    error: Option<&anyhow::Error>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    if platform != StreamPlatform::Youtube {
+        return None;
+    }
+    match error {
+        None => youtube_quota::paused_until(state),
+        Some(error) => youtube_quota::note_error(state, "YouTube connect", error),
+    }
+}
+
+/// The terminal result for a YouTube connect blocked on quota: not retryable
+/// (a retry would spend quota and fail the same way), reason `youtube-quota`
+/// with `retryAt`, and the token checkpoint cleaned up like every other
+/// non-retryable path. The renderer words it.
+async fn finish_youtube_quota_blocked_connect(
+    state: &AppState,
+    mut result: oauth::OAuthCallbackResult,
+    callback_state: &str,
+    until: chrono::DateTime<chrono::Utc>,
+) -> oauth::OAuthCallbackResult {
+    result.status = oauth::OAuthCallbackStatus::Failed;
+    result.retryable = false;
+    result.reason = Some(YOUTUBE_QUOTA_CONNECT_REASON.to_string());
+    result.retry_at = Some(until.to_rfc3339());
+    result.message = Some(format!(
+        "{} Try connecting YouTube again after {}.",
+        youtube_quota::API_PAUSED_MESSAGE,
+        until.to_rfc3339()
+    ));
+    if let Err(cleanup_error) = state
+        .oauth
+        .finish_with_secret_cleanup(callback_state, secrets::delete_secret)
+        .await
+    {
+        result.retryable = true;
+        result.message = Some(format!(
+            "OAuth checkpoint cleanup failed and will be retried: {cleanup_error}"
+        ));
+    }
+    result
+}
+
+/// `OAuthCallbackResult.reason` for a YouTube connect blocked on quota.
+const YOUTUBE_QUOTA_CONNECT_REASON: &str = "youtube-quota";
+
 async fn complete_oauth_callback(
     state: &AppState,
     params: OAuthCompleteParams,
@@ -1883,6 +1936,17 @@ async fn complete_oauth_callback(
         };
 
         match token_and_checkpoint {
+            // Plan 094 (S3): YouTube's profile lookup spends quota. While the
+            // breaker is set, refuse before the lookup; the 10-minute callback
+            // TTL cannot wait for a reset hours away, so this is terminal.
+            Some((checkpoint, _))
+                if youtube_connect_quota_block(state, checkpoint.platform(), None).is_some() =>
+            {
+                let until = youtube_connect_quota_block(state, checkpoint.platform(), None)
+                    .expect("checked above");
+                return finish_youtube_quota_blocked_connect(state, result, &callback_state, until)
+                    .await;
+            }
             Some((checkpoint, token)) => match oauth::account_from_exchanged_token(
                 &checkpoint,
                 &token,
@@ -1952,6 +2016,17 @@ async fn complete_oauth_callback(
                     Some((account, commit, guard))
                 }
                 Err(error) => {
+                    if let Some(until) =
+                        youtube_connect_quota_block(state, checkpoint.platform(), Some(&error))
+                    {
+                        return finish_youtube_quota_blocked_connect(
+                            state,
+                            result,
+                            &callback_state,
+                            until,
+                        )
+                        .await;
+                    }
                     result.status = oauth::OAuthCallbackStatus::Failed;
                     result.retryable = true;
                     result.message = Some(format!(
@@ -2052,6 +2127,8 @@ async fn complete_x_oauth1_callback(
         account_connected: false,
         retryable: false,
         received_at,
+        reason: None,
+        retry_at: None,
     };
 
     if let Some(denied_token) = denied {
@@ -13156,6 +13233,8 @@ mod tests {
                         account_connected: attempt >= 2,
                         retryable: attempt < 2,
                         received_at: chrono::Utc::now().to_rfc3339(),
+                        reason: None,
+                        retry_at: None,
                     }
                 }
             },
@@ -13240,6 +13319,8 @@ mod tests {
                         account_connected: false,
                         retryable: attempt == 0,
                         received_at: chrono::Utc::now().to_rfc3339(),
+                        reason: None,
+                        retry_at: None,
                     }
                 }
             },
@@ -13283,6 +13364,8 @@ mod tests {
                         account_connected: false,
                         retryable: true,
                         received_at: chrono::Utc::now().to_rfc3339(),
+                        reason: None,
+                        retry_at: None,
                     }
                 }
             },
@@ -13333,6 +13416,8 @@ mod tests {
                         account_connected: attempt >= 8,
                         retryable: attempt < 8,
                         received_at: chrono::Utc::now().to_rfc3339(),
+                        reason: None,
+                        retry_at: None,
                     }
                 }
             },
@@ -19533,6 +19618,78 @@ mod tests {
         assert!(should_refresh_platform_access_token(
             &platform_account_with_status(PlatformAccountStatus::Connected, Some(near_expiry))
         ));
+    }
+
+    /// Plan 094 (S3): a quota 403 on the connect profile lookup is terminal
+    /// (reason `youtube-quota`, `retryAt`), it sets the breaker, and the next
+    /// connect is refused before any profile request. Other platforms and
+    /// other errors keep the retryable path.
+    #[tokio::test]
+    async fn youtube_connect_quota_is_terminal_and_blocks_the_next_lookup() {
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            storage::Database::open_in_memory_for_tests(),
+        );
+        let quota = anyhow::anyhow!(
+            "YouTube profile lookup failed with HTTP 403 Forbidden: quotaExceeded: The request cannot be completed because you have exceeded your quota."
+        );
+        assert_eq!(
+            youtube_connect_quota_block(&state, StreamPlatform::Youtube, None),
+            None,
+            "nothing blocks before any quota error"
+        );
+        assert_eq!(
+            youtube_connect_quota_block(&state, StreamPlatform::Twitch, Some(&quota)),
+            None
+        );
+        let until = youtube_connect_quota_block(&state, StreamPlatform::Youtube, Some(&quota))
+            .expect("quota blocks the connect");
+        assert_eq!(youtube_quota::paused_until(&state), Some(until));
+        // The second connect is refused before the lookup (no error needed).
+        assert_eq!(
+            youtube_connect_quota_block(&state, StreamPlatform::Youtube, None),
+            Some(until)
+        );
+        let other = anyhow::anyhow!("YouTube profile lookup failed with HTTP 503");
+        // A non-quota error never pretends to be quota, even while paused.
+        assert_eq!(
+            youtube_connect_quota_block(&state, StreamPlatform::Youtube, Some(&other)),
+            None
+        );
+
+        let result = finish_youtube_quota_blocked_connect(
+            &state,
+            oauth::OAuthCallbackResult {
+                platform: Some(StreamPlatform::Youtube),
+                state: "unknown-state".to_string(),
+                status: oauth::OAuthCallbackStatus::Success,
+                code_present: true,
+                error: None,
+                message: None,
+                token_stored: false,
+                account_connected: false,
+                retryable: true,
+                received_at: chrono::Utc::now().to_rfc3339(),
+                reason: None,
+                retry_at: None,
+            },
+            "unknown-state",
+            until,
+        )
+        .await;
+        assert_eq!(result.status, oauth::OAuthCallbackStatus::Failed);
+        assert!(!result.retryable);
+        assert_eq!(result.reason.as_deref(), Some("youtube-quota"));
+        assert_eq!(
+            result.retry_at.as_deref(),
+            Some(until.to_rfc3339().as_str())
+        );
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["reason"], "youtube-quota");
+        assert!(!json["message"].as_str().unwrap().contains('<'));
     }
 
     #[test]
