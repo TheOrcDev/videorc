@@ -1442,6 +1442,33 @@ mod tests {
         assert!(!page.ended);
     }
 
+    /// Plan 095, S1: the streamer's own message is the host on every platform.
+    #[test]
+    fn the_chat_owner_is_marked_owner() {
+        let response: LiveChatMessagesResponse = serde_json::from_value(json!({
+            "items": [{
+                "id": "own-1",
+                "snippet": {
+                    "type": "textMessageEvent",
+                    "displayMessage": "hi chat",
+                    "textMessageDetails": { "messageText": "hi chat" }
+                },
+                "authorDetails": {
+                    "channelId": "UC-host",
+                    "displayName": "Host",
+                    "isChatOwner": true,
+                    "isChatSponsor": true
+                }
+            }]
+        }))
+        .unwrap();
+        let page = normalize_page(response, "s1", None, "now");
+        assert_eq!(
+            page.messages[0].author_roles,
+            vec!["owner".to_string(), "member".to_string()]
+        );
+    }
+
     #[test]
     fn normalizes_super_chat_with_amount_and_paid_type() {
         let response: LiveChatMessagesResponse = serde_json::from_value(json!({
