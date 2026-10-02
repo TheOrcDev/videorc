@@ -8,6 +8,7 @@ import { join, resolve } from 'node:path'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import {
   COMMENT_HIGHLIGHT_AVATAR_RGB,
+  COMMENT_HIGHLIGHT_EMOTE_RGB,
   analyzeCommentHighlightArtifact,
   captionStimulusPngBase64,
   classifyCommentHighlightResult,
@@ -27,16 +28,27 @@ const listenerBindMs = Number(process.env.VIDEORC_COMMENT_HIGHLIGHT_LISTENER_BIN
 const basePort = Number(process.env.VIDEORC_COMMENT_HIGHLIGHT_RTMP_PORT ?? 19721)
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
-// The fake chatter's avatar (plan 095, S3). The URL is on an allowlisted CDN
-// host so main's `avatars:cache` accepts it, but it is never fetched: the smoke
-// seeds the app's avatar cache with a flat-colour PNG under the file name main
-// derives from the URL, exactly as a chat row would have cached it. The card
-// then has to read those bytes back over `avatars:read` and paint them, and
-// the analyzer looks for the colour inside the card region.
+// The fake chatter's avatar and emote (plan 095). The URLs are on allowlisted
+// CDN hosts so main's `avatars:cache` accepts them, but they are never
+// fetched: the smoke seeds the app's avatar cache with flat-colour PNGs under
+// the file names main derives from the URLs, exactly as a chat row would have
+// cached them. The card then has to read those bytes back over `avatars:read`
+// and paint them, and the analyzer looks for each colour on the card. The
+// emote is a Kick-shaped URL (no `/1.0` for the card to swap for `/3.0`) and
+// wide, like a 7TV banner emote.
 const smokeChatImages = Object.freeze({
   avatar: {
     url: 'https://yt3.ggpht.com/videorc-smoke/comment-highlight-avatar.png',
     pngBase64: commentHighlightImagePngBase64({ rgb: COMMENT_HIGHLIGHT_AVATAR_RGB })
+  },
+  emote: {
+    text: 'smokeHYPE',
+    url: 'https://files.kick.com/emotes/videorc-smoke-comment-highlight/fullsize',
+    pngBase64: commentHighlightImagePngBase64({
+      width: 256,
+      height: 128,
+      rgb: COMMENT_HIGHLIGHT_EMOTE_RGB
+    })
   }
 })
 
@@ -110,7 +122,7 @@ await runScenarioGroup({
 })
 
 console.log(
-  `Comment-highlight stream smoke PASS — stream-only and split stream artifacts contain coexisting highlight/caption pixels with the chatter's avatar on the card; both legs of a dual-orientation stream and its recording carry the card; legacy output was visible or explicitly unavailable. Evidence: ${outputDirectory}`
+  `Comment-highlight stream smoke PASS — stream-only and split stream artifacts contain coexisting highlight/caption pixels with the chatter's avatar and emote on the card; both legs of a dual-orientation stream and its recording carry the card; legacy output was visible or explicitly unavailable. Evidence: ${outputDirectory}`
 )
 
 async function runScenarioGroup({ label, scenarios, indexOffset, env = {} }) {
@@ -247,7 +259,8 @@ async function runScenario(ws, smoke, scenario, index) {
         count: 1,
         intervalMs: 25,
         includeDuplicate: false,
-        avatarUrl: smokeChatImages.avatar.url
+        avatarUrl: smokeChatImages.avatar.url,
+        emote: { text: smokeChatImages.emote.text, imageUrl: smokeChatImages.emote.url }
       }
     })
     const message = await waitForFakeComment(ws, sessionId, targetId)
@@ -333,6 +346,7 @@ async function runScenario(ws, smoke, scenario, index) {
       allowHighlightUnavailable: scenario.allowHighlightUnavailable,
       requireCaption,
       requireAvatar: true,
+      requireEmote: true,
       anchor: scenario.anchor
     })
     const artifactPath = join(scenarioDirectory, 'comment-highlight-artifact.json')
@@ -365,6 +379,7 @@ async function runScenario(ws, smoke, scenario, index) {
         highlightDisposition: highlight.disposition,
         requireCaption: false,
         requireAvatar: true,
+        requireEmote: true,
         anchor: scenario.anchor,
         // Native portrait size: the card's ~27 px text blurs out of the text
         // classifier when downscaled.
@@ -419,6 +434,7 @@ async function runScenario(ws, smoke, scenario, index) {
           highlightDisposition: highlight.disposition,
           requireCaption: false,
           requireAvatar: true,
+          requireEmote: true,
           anchor: scenario.anchor
         })
         const recordingArtifactPath = join(
@@ -522,10 +538,19 @@ async function waitForDetachedComment(smoke, message) {
   let last = null
   while (Date.now() < deadline) {
     last = await smokeCommand(smoke, 'comments-window-reader-state')
+    // An emote fragment renders as an image, so only the text fragments are
+    // expected in the window's innerText.
+    const expectedText = (message.fragments ?? []).some((fragment) => fragment.imageUrl)
+      ? message.fragments
+          .filter((fragment) => !fragment.imageUrl)
+          .map((fragment) => fragment.text)
+          .join('')
+          .trim()
+      : message.messageText
     if (
       Object.hasOwn(last.highlightPhases ?? {}, message.id) &&
       last.text?.includes(message.authorName) &&
-      last.text?.includes(message.messageText)
+      last.text?.includes(expectedText)
     ) {
       return last
     }

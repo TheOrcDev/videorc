@@ -165,7 +165,7 @@ export function commentHighlightIdentity(authorName: string, platform?: StreamPl
 
 /** Canvas `maxWidth` squeezes glyphs instead of cutting them, so an over-long
  * username is ellipsized here, keeping its head (the platform label). */
-function fitHighlightName(
+export function fitHighlightName(
   name: string,
   fontPx: number,
   maxWidthPx: number,

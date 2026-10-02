@@ -3,9 +3,16 @@
 // Layout is pure (measurement injected) so wrapping/sizing is unit-testable;
 // the canvas painter is a thin shell over it.
 
-import { commentHighlightPlatformBadge, layoutCommentHighlight } from '@/lib/comment-highlight'
+import { commentHighlightPlatformBadge } from '@/lib/comment-highlight'
+import {
+  highlightEmoteImageUrl,
+  highlightEmoteUrls,
+  highlightTokens,
+  layoutCommentHighlightTokens,
+  type HighlightEmoteSizer
+} from '@/lib/comment-highlight-layout'
 import { activityItems } from '@/lib/stream-activity'
-import type { CaptionStyleId } from '@/lib/backend'
+import type { CaptionStyleId, LiveChatMessageFragment } from '@/lib/backend'
 import { COMMENTS_HIGHLIGHT_TIMING_CONTRACT } from '../../../shared/comments-command-timing'
 
 export type CaptionTextSize = 's' | 'm' | 'l'
@@ -483,8 +490,13 @@ export type HighlightBitmap = CanvasImageSource & {
  * card renderer is unit-testable without Electron. */
 export type HighlightImageReader = (localUrl: string) => Promise<Uint8Array | null | undefined>
 
+/** Fetches a remote emote into main's allowlisted cache (`avatars:cache`)
+ * and names the local URL, or null when main refused it. */
+export type HighlightImageCacher = (remoteUrl: string) => Promise<string | null | undefined>
+
 export interface HighlightCardImageDeps {
   readImage?: HighlightImageReader
+  cacheImage?: HighlightImageCacher
   /** Decodes bytes to a bitmap; `createImageBitmap` in the app. */
   decode?: (bytes: Uint8Array) => Promise<HighlightBitmap>
   /** One line per failed image, with the reason. `console.warn` in the app. */
@@ -495,6 +507,9 @@ export interface HighlightCardImageDeps {
 
 const defaultHighlightImageReader: HighlightImageReader = (localUrl) =>
   window.videorc?.readChatAvatar?.(localUrl) ?? Promise.resolve(null)
+
+const defaultHighlightImageCacher: HighlightImageCacher = (remoteUrl) =>
+  window.videorc?.cacheChatAvatar?.(remoteUrl) ?? Promise.resolve(null)
 
 const defaultHighlightImageDecoder = (bytes: Uint8Array): Promise<HighlightBitmap> =>
   createImageBitmap(new Blob([bytes as BlobPart]))
@@ -517,27 +532,56 @@ async function decodeHighlightImage(
   localUrl: string,
   deps: Required<Pick<HighlightCardImageDeps, 'readImage' | 'decode' | 'deadlineMs'>>
 ): Promise<HighlightBitmap> {
+  return withHighlightImageDeadline(deps.deadlineMs, async () => {
+    const bytes = await deps.readImage(localUrl)
+    if (!bytes || bytes.byteLength === 0) {
+      throw new Error('main has no cached file for it')
+    }
+    return deps.decode(bytes)
+  })
+}
+
+/** Cache (if needed) and decode one emote for the card (plan 095, S4). The
+ * card asks for the sharper Twitch `/3.0`, which the chat row never cached,
+ * so this may fetch; the whole fetch + decode shares one deadline. */
+async function decodeHighlightEmote(
+  remoteUrl: string,
+  deps: Required<Pick<HighlightCardImageDeps, 'readImage' | 'cacheImage' | 'decode' | 'deadlineMs'>>
+): Promise<HighlightBitmap> {
+  return withHighlightImageDeadline(deps.deadlineMs, async () => {
+    const localUrl = await deps.cacheImage(highlightEmoteImageUrl(remoteUrl))
+    if (!localUrl) {
+      throw new Error('main did not cache it')
+    }
+    const bytes = await deps.readImage(localUrl)
+    if (!bytes || bytes.byteLength === 0) {
+      throw new Error('main has no cached file for it')
+    }
+    return deps.decode(bytes)
+  })
+}
+
+async function withHighlightImageDeadline<T>(
+  deadlineMs: number,
+  work: () => Promise<T>
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(
-      () => reject(new HighlightImageDeadlineError(deps.deadlineMs)),
-      deps.deadlineMs
-    )
+    timer = setTimeout(() => reject(new HighlightImageDeadlineError(deadlineMs)), deadlineMs)
   })
   try {
-    return await Promise.race([
-      (async () => {
-        const bytes = await deps.readImage(localUrl)
-        if (!bytes || bytes.byteLength === 0) {
-          throw new Error('main has no cached file for it')
-        }
-        return deps.decode(bytes)
-      })(),
-      deadline
-    ])
+    return await Promise.race([work(), deadline])
   } finally {
     if (timer) clearTimeout(timer)
   }
+}
+
+/** The fragments the card draws emotes from. An activity card (a sub, a
+ * raid) leads with the event line, so it stays text (plan 095, S4). */
+function commentHighlightCardFragments(
+  message: import('@/lib/backend').LiveChatMessage
+): readonly LiveChatMessageFragment[] | undefined {
+  return message.details ? undefined : message.fragments
 }
 
 function describeImageFailure(error: unknown): string {
@@ -549,9 +593,11 @@ function describeImageFailure(error: unknown): string {
  * sized for its portrait canvas (plan 074). Null when the main card fails;
  * a failed vertical card still lets the horizontal one go on stream.
  *
- * Images are decoded ONCE here and shared by both cards. A failed avatar is
- * logged once per highlight with its reason, and the card falls back to the
- * monogram. */
+ * Images are decoded ONCE here and shared by both cards: the avatar and up to
+ * HIGHLIGHT_MAX_EMOTES distinct emotes, loaded in parallel inside the avatar
+ * slice of the highlight timing contract. A failed avatar is logged once per
+ * highlight with its reason and the card falls back to the monogram; failed
+ * emotes are logged in one line and show their names as text. */
 export async function renderCommentHighlightCards(
   message: import('@/lib/backend').LiveChatMessage,
   avatarUrl: string | null,
@@ -561,23 +607,49 @@ export async function renderCommentHighlightCards(
 ): Promise<{ pngBase64: string; verticalPngBase64?: string } | null> {
   const deps = {
     readImage: imageDeps.readImage ?? defaultHighlightImageReader,
+    cacheImage: imageDeps.cacheImage ?? defaultHighlightImageCacher,
     decode: imageDeps.decode ?? defaultHighlightImageDecoder,
     deadlineMs: imageDeps.deadlineMs ?? COMMENTS_HIGHLIGHT_TIMING_CONTRACT.avatarFetchMs
   }
   const warn = imageDeps.warn ?? ((line: string) => console.warn(line))
-  const avatar = avatarUrl
-    ? await decodeHighlightImage(avatarUrl, deps).catch((error: unknown) => {
-        warn(
-          `Highlight card: ${message.platform} avatar for ${message.authorName} fell back to the monogram (${describeImageFailure(error)}).`
-        )
-        return null
-      })
-    : null
+  const text = commentHighlightCardText(message)
+  const fragments = commentHighlightCardFragments(message)
+  const tokens = highlightTokens(text, fragments)
+  const emoteNames = new Map<string, string>()
+  for (const token of tokens) {
+    if (token.kind === 'emote') emoteNames.set(token.url, token.name)
+  }
+  const emotes = new Map<string, HighlightBitmap>()
+  const emoteFailures: string[] = []
+  const [avatar] = await Promise.all([
+    avatarUrl
+      ? decodeHighlightImage(avatarUrl, deps).catch((error: unknown) => {
+          warn(
+            `Highlight card: ${message.platform} avatar for ${message.authorName} fell back to the monogram (${describeImageFailure(error)}).`
+          )
+          return null
+        })
+      : null,
+    ...highlightEmoteUrls(tokens).map(async (url) => {
+      try {
+        emotes.set(url, await decodeHighlightEmote(url, deps))
+      } catch (error) {
+        emoteFailures.push(`${emoteNames.get(url) ?? 'overlay'}: ${describeImageFailure(error)}`)
+      }
+    })
+  ])
+  if (emoteFailures.length > 0) {
+    warn(
+      `Highlight card: ${emoteFailures.length} emote(s) show as text (${emoteFailures.join('; ')}).`
+    )
+  }
   const render = (canvas: HighlightCanvas): Promise<string | null> =>
     renderCommentHighlightPng({
       authorName: message.authorName,
-      text: commentHighlightCardText(message),
+      text,
+      fragments,
       avatar,
+      emotes,
       canvasWidth: canvas.width,
       canvasHeight: canvas.height,
       platform: message.platform
@@ -593,8 +665,12 @@ export async function renderCommentHighlightCards(
 export async function renderCommentHighlightPng(params: {
   authorName: string
   text: string
+  /** Emote fragments to draw inline (plan 095, S4); omitted draws `text`. */
+  fragments?: readonly LiveChatMessageFragment[]
   /** Decoded by `renderCommentHighlightCards`; null paints the monogram. */
   avatar?: HighlightBitmap | null
+  /** Decoded emote images by fragment URL; a missing one draws its name. */
+  emotes?: ReadonlyMap<string, HighlightBitmap>
   canvasWidth: number
   /** Omitted = landscape. A portrait canvas gets the vertical-leg card. */
   canvasHeight?: number
@@ -608,7 +684,11 @@ export async function renderCommentHighlightPng(params: {
   if (!measurer) {
     return null
   }
-  const layout = layoutCommentHighlight({ ...params, measure: measurer.measure })
+  const emoteSize: HighlightEmoteSizer = (url) => {
+    const bitmap = params.emotes?.get(url)
+    return bitmap ? { width: bitmap.width, height: bitmap.height } : null
+  }
+  const layout = layoutCommentHighlightTokens({ ...params, measure: measurer.measure, emoteSize })
   if (!layout) {
     return null
   }
@@ -762,8 +842,40 @@ export async function renderCommentHighlightPng(params: {
   context.font = `400 ${metrics.textFontPx}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`
   context.fillStyle = 'rgba(244, 244, 245, 0.92)'
   const textTop = avatarY + metrics.avatarPx + metrics.rowGapPx
-  layout.textLines.forEach((line, index) => {
-    context.fillText(line, textX, textTop + metrics.lineHeightPx * index, metrics.maxTextWidthPx)
+  // With `textBaseline = 'top'` a line's glyphs centre about 0.58 em below
+  // the line top; an emote box is centred on the same axis.
+  const emoteAxisPx = metrics.textFontPx * 0.58
+  layout.lines.forEach((line, index) => {
+    const lineTop = textTop + metrics.lineHeightPx * index
+    // Consecutive words are painted as one run, so a text-only card keeps
+    // the font's own word spacing and kerning (what fillText did before).
+    let run: { xPx: number; words: string[] } | null = null
+    const flushRun = (): void => {
+      if (!run) return
+      context.fillText(
+        run.words.join(' '),
+        textX + run.xPx,
+        lineTop,
+        metrics.maxTextWidthPx - run.xPx
+      )
+      run = null
+    }
+    for (const item of line.items) {
+      if (item.kind === 'word') {
+        if (run) run.words.push(item.text)
+        else run = { xPx: item.xPx, words: [item.text] }
+        continue
+      }
+      flushRun()
+      const x = textX + item.xPx
+      const boxY = Math.round(lineTop + emoteAxisPx - item.heightPx / 2)
+      // Zero-width overlays (7TV) share the base emote's box.
+      for (const url of [item.url, ...item.overlays]) {
+        const bitmap = params.emotes?.get(url)
+        if (bitmap) context.drawImage(bitmap, x, boxY, item.widthPx, item.heightPx)
+      }
+    }
+    flushRun()
   })
   context.restore()
 
