@@ -913,6 +913,28 @@ describe('Windows stream performance modes and evidence verdicts', () => {
     assert.equal(fallback.bridge, 'mf')
     assert.equal(fallback.expectFallback, 'software-open-h264')
 
+    const quickSync = parseWindowsStreamPerformanceArgs([
+      '--calibrate',
+      '--scenario',
+      '1080p30-stream-preview',
+      '--expect-fallback',
+      'hardware-qsv'
+    ])
+    assert.equal(quickSync.bridge, 'mf')
+    assert.equal(quickSync.expectFallback, 'hardware-qsv')
+    assert.throws(
+      () =>
+        parseWindowsStreamPerformanceArgs([
+          '--calibrate',
+          '--scenario',
+          '1080p30-stream-preview',
+          '--expect-fallback',
+          'hardware-qsv',
+          '--require-bridge'
+        ]),
+      /hardware-qsv requests --bridge mf without --require-bridge/
+    )
+
     const forcedD3d11 = parseWindowsStreamPerformanceArgs([
       '--calibrate',
       '--profiles',
@@ -1420,6 +1442,26 @@ describe('Windows stream performance modes and evidence verdicts', () => {
     effectiveRaw.pipeline.effectiveBridgeOutput = 'raw-yuv420p'
     effectiveRaw.pipeline.effectiveEncodeBackend = 'software-open-h264'
     assert.match(evaluateWindowsStreamRun(effectiveRaw).failures.join('\n'), /effective bridge/)
+  })
+
+  it('requires a Quick Sync run to really encode on Quick Sync', () => {
+    const evidence = passingEvidence()
+    evidence.mode = 'calibrate'
+    evidence.pipeline = {
+      ...evidence.pipeline,
+      expectedFallback: 'hardware-qsv',
+      effectiveBridgeOutput: 'raw-yuv420p',
+      effectiveEncodeBackend: 'hardware-qsv',
+      fallbackReason: 'Media Foundation production topology probe rejected the adapter',
+      fallbackAcknowledged: true,
+      encodedFrames: 0,
+      encodedBytes: 0
+    }
+    assert.equal(evaluateWindowsStreamRun(evidence).verdict, 'PASS')
+
+    // Its own probe failed and the session landed on OpenH264: not a pass.
+    evidence.pipeline.effectiveEncodeBackend = 'software-open-h264'
+    assert.match(evaluateWindowsStreamRun(evidence).failures.join('\n'), /fallback encode backend/)
   })
 
   it('requires the named natural OpenH264 fallback path and a stable reason', () => {

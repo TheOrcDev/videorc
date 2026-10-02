@@ -59,11 +59,14 @@ export function GoLivePanel({
     platformAccounts,
     streamOutputTopologyPreflight,
     refreshStreamOutputTopology,
+    streamSharedEncodeFallbackVideo,
     streamTargets
   } = useStudioCore()
   const { diagnosticStats, streamHealth } = useStudioDiagnostics()
   const streaming = captureConfig.streaming
-  const { video } = captureConfig
+  // No separate stream encoder on this computer: the session records at the
+  // stream's profile, so show that instead of the Output setting.
+  const video = streamSharedEncodeFallbackVideo ?? captureConfig.video
   const preflightProvesSeparateOutput =
     streamOutputTopologyPreflight.state === 'ready' &&
     streamOutputTopologyPreflight.result.outputRoles.length === 2 &&
@@ -114,6 +117,7 @@ export function GoLivePanel({
         profileCompatible={!compatibility.blockingReason}
         providerPlan={providerPlan}
         recordEnabled={captureConfig.recordEnabled}
+        recordingMatchesStream={streamSharedEncodeFallbackVideo !== null}
         recordingVideo={video}
         streamHealth={currentStreamHealth}
         streamTargets={streamTargets}
@@ -140,6 +144,7 @@ export function ReadyToGoLive({
   profileCompatible,
   providerPlan,
   recordEnabled,
+  recordingMatchesStream = false,
   recordingVideo,
   preflight,
   liveOutputActive,
@@ -155,6 +160,7 @@ export function ReadyToGoLive({
   profileCompatible: boolean
   providerPlan: ProviderStreamOutputPlan
   recordEnabled: boolean
+  recordingMatchesStream?: boolean
   recordingVideo: VideoSettings
   preflight: StreamOutputTopologyPreflight
   liveOutputActive: boolean
@@ -231,7 +237,12 @@ export function ReadyToGoLive({
         ok={presetOk}
         title={quality.title}
       />
-      {showRecordingOutput ? (
+      {recordEnabled && recordingMatchesStream ? (
+        <InfoRow
+          detail={`${formatQuality(recordingVideo)} · matches the stream`}
+          label="Recording"
+        />
+      ) : showRecordingOutput ? (
         <InfoRow detail={formatQuality(recordingVideo)} label="Recording" />
       ) : null}
       {enabled.length ? (
@@ -266,7 +277,7 @@ function StreamCheckRow({
           <ChecklistRow detail="Couldn't check" label="Stream settings" ok={false} />
           <div className="flex items-center justify-between gap-2 pl-6">
             <span className="text-xs text-muted-foreground">
-              Go Live stays off until this passes.
+              Go Live checks again when you start.
             </span>
             <Button
               size="xs"
@@ -284,7 +295,7 @@ function StreamCheckRow({
     default:
       return (
         <ChecklistRow
-          detail="Not checked yet. Go Live stays off until it passes."
+          detail="Not checked yet. Go Live checks it first."
           label="Stream settings"
           ok={false}
         />

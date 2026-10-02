@@ -1395,6 +1395,8 @@ function formatEncodeBackend(backend?: string): string {
       return 'Software (MediaFoundation)'
     case 'software-open-h264':
       return 'Software (OpenH264)'
+    case 'hardware-qsv':
+      return 'Hardware (Intel Quick Sync)'
     default:
       return '--'
   }

@@ -182,10 +182,12 @@ use protocol::{
     ToolStatus,
 };
 use recording::{
-    create_preview_snapshot, current_stream_targets_snapshot, idle_status, live_preview_status,
-    preview_file_path, probe_stream_output_topology, remux_session, resume_pending_repair_jobs,
-    shutdown_capture_processes, start_live_preview, start_session, stop_live_preview,
-    stop_recording, stop_recording_with_intent, subscribe_live_preview_frames,
+    WINDOWS_H264_ENCODER_SETTING_KEY, create_preview_snapshot, current_stream_targets_snapshot,
+    encoder_preference_state, idle_status, live_preview_status, preview_file_path,
+    probe_stream_output_topology, remux_session, resume_pending_repair_jobs,
+    set_windows_h264_encoder_preference, shutdown_capture_processes, start_live_preview,
+    start_session, stop_live_preview, stop_recording, stop_recording_with_intent,
+    stream_output_topology_probe_log_line, subscribe_live_preview_frames,
     update_active_audio_processing, update_preview_frame_age,
 };
 use scene::{
@@ -536,6 +538,14 @@ async fn run_backend() -> Result<()> {
     println!("READY {}", serde_json::to_string(&ready)?);
     std::io::stdout().flush()?;
 
+    match state
+        .database
+        .load_setting::<protocol::WindowsH264EncoderPreference>(WINDOWS_H264_ENCODER_SETTING_KEY)
+    {
+        Ok(Some(preference)) => set_windows_h264_encoder_preference(preference),
+        Ok(None) => {}
+        Err(error) => tracing::warn!("Could not load the saved encoder preference: {error}"),
+    }
     state.emit_log("info", "Videorc backend ready.");
     if let Err(error) = sync_remote_discovery_file(&state) {
         state.emit_log(
@@ -5415,7 +5425,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "noiseCleanup.start"
         | "noiseCleanup.cancel"
         | "performance.check.run"
-        | "performance.check.cancel" => Some(DEFAULT_MUTATION_POLICY),
+        | "performance.check.cancel"
+        | "encoder.preference.set" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.start" | "session.stop" | "recording.stop" | "recording.start_test" => {
             Some(SessionLifecycle)
@@ -5461,6 +5472,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "scene.get"
         | "stream.output.topology.probe"
         | "performance.check.get"
+        | "encoder.preference.get"
         | "sessions.list"
         | "sessions.healthEvents.list"
         | "sessions.logs.list"
@@ -10033,14 +10045,28 @@ async fn handle_text_message_with_role(
             match serde_json::from_value::<protocol::StreamOutputTopologyProbeParams>(
                 command.params,
             ) {
-                Ok(params) => match probe_stream_output_topology(params).await {
-                    Ok(result) => ServerResponse::ok(command.id, result),
-                    Err(error) => ServerResponse::error(
-                        command.id,
-                        "stream-output-topology-probe-failed",
-                        error.to_string(),
-                    ),
-                },
+                Ok(params) => {
+                    // One line per check, so a support bundle answers "how
+                    // long did the output check take and what did it find"
+                    // without a reproduction (plan 090 B2).
+                    let started = std::time::Instant::now();
+                    let outcome = probe_stream_output_topology(params).await;
+                    state.emit_log(
+                        "info",
+                        stream_output_topology_probe_log_line(
+                            started.elapsed(),
+                            outcome.as_ref().map_err(ToString::to_string),
+                        ),
+                    );
+                    match outcome {
+                        Ok(result) => ServerResponse::ok(command.id, result),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "stream-output-topology-probe-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
@@ -10048,6 +10074,28 @@ async fn handle_text_message_with_role(
         }
         "performance.check.get" => {
             ServerResponse::ok(command.id, performance_check::current_state(state).await)
+        }
+        "encoder.preference.get" => ServerResponse::ok(command.id, encoder_preference_state()),
+        "encoder.preference.set" => {
+            match serde_json::from_value::<protocol::EncoderPreferenceSetParams>(command.params) {
+                Ok(params) => match state
+                    .database
+                    .save_setting(WINDOWS_H264_ENCODER_SETTING_KEY, &params.preference)
+                {
+                    Ok(()) => {
+                        set_windows_h264_encoder_preference(params.preference);
+                        ServerResponse::ok(command.id, encoder_preference_state())
+                    }
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "encoder-preference-not-saved",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
         }
         "performance.check.run" => {
             match serde_json::from_value::<protocol::PerformanceCheckRunParams>(command.params) {

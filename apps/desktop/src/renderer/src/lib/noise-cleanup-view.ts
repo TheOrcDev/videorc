@@ -197,19 +197,7 @@ export function withNoiseCleanupConnectionState(
   }
 }
 
-export function upsertNoiseCleanupJob(
-  jobs: readonly NoiseCleanupJob[],
-  next: NoiseCleanupJob
-): NoiseCleanupJob[] {
-  const index = jobs.findIndex((job) => job.id === next.id)
-  if (index < 0) {
-    return [...jobs, next]
-  }
-  if (jobs[index]?.updatedAt.localeCompare(next.updatedAt) > 0) {
-    return [...jobs]
-  }
-  return jobs.map((job, jobIndex) => (jobIndex === index ? next : job))
-}
+export { upsertNoiseCleanupJob } from './noise-cleanup-jobs'
 
 function view(overrides: Partial<NoiseCleanupView>): NoiseCleanupView {
   return {

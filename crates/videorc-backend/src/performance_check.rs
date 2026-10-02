@@ -66,6 +66,10 @@ pub(crate) fn full_ladder() -> Vec<VideoSettings> {
         rung(VideoPreset::StreamSafe1080p60, 1920, 1080, 60, 6_000),
         rung(VideoPreset::Tutorial1080p30, 1920, 1080, 30, 6_000),
         rung(VideoPreset::Tutorial720p30, 1280, 720, 30, 4_000),
+        // The floor (plan 090 D1). A UHD 600 class PC encoded 720p30 at 0.69x
+        // real time in software; a quarter fewer pixels than that gives it
+        // something it can hold, and the check a truthful recommendation.
+        rung(VideoPreset::Tutorial540p30, 960, 540, 30, 2_500),
     ]
 }
 
@@ -324,10 +328,30 @@ pub(crate) fn capability_key() -> String {
     capability_key_from(
         std::env::consts::OS,
         std::env::consts::ARCH,
-        &crate::recording::graphics_adapter_driver_identity(),
+        &graphics_identity_for_encoder_preference(
+            &crate::recording::graphics_adapter_driver_identity(),
+            crate::recording::windows_h264_encoder_preference().0,
+        ),
         &desktop_app_version(),
         env!("CARGO_PKG_VERSION"),
     )
+}
+
+/// A result measured on one raw-path encoder must not answer for another
+/// (plan 090 C6): choosing Quick Sync or software re-measures the machine.
+/// The default leaves the material untouched, so no existing result goes
+/// stale just because this build knows about the preference.
+pub(crate) fn graphics_identity_for_encoder_preference(
+    identity: &str,
+    preference: crate::protocol::WindowsH264EncoderPreference,
+) -> String {
+    match preference {
+        crate::protocol::WindowsH264EncoderPreference::Auto => identity.to_string(),
+        chosen => format!(
+            "{identity};h264-encoder={}",
+            crate::recording::windows_h264_encoder_preference_label(chosen)
+        ),
+    }
 }
 
 pub(crate) fn capability_key_from(
@@ -976,6 +1000,27 @@ mod tests {
     }
 
     #[test]
+    fn choosing_an_encoder_re_measures_but_the_default_keeps_existing_results() {
+        use crate::protocol::WindowsH264EncoderPreference as Preference;
+        let identity = "luid=1;pci=8086:3185:00000000:03;d3d11-driver=1";
+        let key = |preference| {
+            capability_key_from(
+                "windows",
+                "x86_64",
+                &graphics_identity_for_encoder_preference(identity, preference),
+                "0.9.126",
+                "0.9.0",
+            )
+        };
+        assert_eq!(
+            key(Preference::Auto),
+            capability_key_from("windows", "x86_64", identity, "0.9.126", "0.9.0")
+        );
+        assert_ne!(key(Preference::Auto), key(Preference::QuickSync));
+        assert_ne!(key(Preference::QuickSync), key(Preference::Software));
+    }
+
+    #[test]
     fn capability_key_changes_with_gpu_identity_and_app_version() {
         let a = capability_key_from(
             "linux",
@@ -1081,23 +1126,45 @@ mod tests {
         };
         assert_eq!(
             labels(ladder_under_ceiling(3840, 2160, 60)),
-            vec![(2160, 30), (1440, 30), (1080, 60), (1080, 30), (720, 30)]
+            vec![
+                (2160, 30),
+                (1440, 30),
+                (1080, 60),
+                (1080, 30),
+                (720, 30),
+                (540, 30)
+            ]
         );
         // The UHD 600 tester: 1440p30 selected on a 1080p display.
         assert_eq!(
             labels(ladder_under_ceiling(2560, 1440, 30)),
-            vec![(1440, 30), (1080, 30), (720, 30)]
+            vec![(1440, 30), (1080, 30), (720, 30), (540, 30)]
         );
         assert_eq!(
             labels(ladder_under_ceiling(1920, 1080, 60)),
-            vec![(1080, 60), (1080, 30), (720, 30)]
+            vec![(1080, 60), (1080, 30), (720, 30), (540, 30)]
         );
         // Portrait 1080x1920 has the pixel count of 1080p.
         assert_eq!(
             labels(ladder_under_ceiling(1080, 1920, 30)),
-            vec![(1080, 30), (720, 30)]
+            vec![(1080, 30), (720, 30), (540, 30)]
         );
-        assert_eq!(labels(ladder_under_ceiling(640, 360, 24)), vec![(720, 30)]);
+        // The floor is kept even under a smaller ceiling: the check never
+        // comes back without a recommendation.
+        assert_eq!(labels(ladder_under_ceiling(640, 360, 24)), vec![(540, 30)]);
+        // 540p30 is the floor (plan 090 D1): a PC that cannot hold 720p30 in
+        // software still gets something it measurably can.
+        let floor = full_ladder().pop().expect("floor rung");
+        assert_eq!(
+            (
+                floor.preset,
+                floor.width,
+                floor.height,
+                floor.fps,
+                floor.bitrate_kbps
+            ),
+            (VideoPreset::Tutorial540p30, 960, 540, 30, 2_500)
+        );
     }
 
     #[test]
@@ -1120,8 +1187,24 @@ mod tests {
             .map(|video| rung(video, PerformanceCheckRungVerdict::Failed))
             .collect();
         let (video, below_floor) = recommend(&all_failed).expect("floor");
-        assert_eq!((video.width, video.height, below_floor), (1280, 720, true));
+        assert_eq!((video.width, video.height, below_floor), (960, 540, true));
         assert!(recommend(&[]).is_none());
+
+        // 720p30 too heavy, 540p30 holds: a real recommendation, not a flag.
+        let held_at_the_floor: Vec<_> = ladder
+            .iter()
+            .cloned()
+            .map(|video| {
+                let verdict = if video.height == 540 {
+                    PerformanceCheckRungVerdict::Passed
+                } else {
+                    PerformanceCheckRungVerdict::Failed
+                };
+                rung(video, verdict)
+            })
+            .collect();
+        let (video, below_floor) = recommend(&held_at_the_floor).expect("floor held");
+        assert_eq!((video.width, video.height, below_floor), (960, 540, false));
     }
 
     #[test]

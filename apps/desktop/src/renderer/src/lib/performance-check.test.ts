@@ -5,18 +5,19 @@ import type {
   PerformanceCheckRungVerdict,
   VideoPreset
 } from '../../../shared/backend'
-import { videoPresets } from './capture'
+import { defaultCaptureConfig, videoPresets } from './capture'
 import {
   autoApplyPreset,
   isShippedDefaultOutput,
   isUntrustedPerformanceCheckResult,
   outputLabel,
   outputVerdict,
-  performanceCheckLine,
   performanceCheckCeiling,
   performanceCheckTooHeavyToast,
   shouldRunPerformanceCheck
 } from './performance-check'
+import { softwareStreamAdvice, streamingAtSteppedDownProfile } from './go-live-output'
+import { performanceCheckLine } from './performance-check-line'
 
 function result(
   rungs: Array<[VideoPreset, PerformanceCheckRungVerdict]>,
@@ -228,5 +229,172 @@ describe('performanceCheckTooHeavyToast', () => {
   it('stays quiet for a shipped default and for a verified selection', () => {
     expect(performanceCheckTooHeavyToast(videoPresets['tutorial-1080p30'], weak)).toBeUndefined()
     expect(performanceCheckTooHeavyToast(videoPresets['tutorial-720p30'], weak)).toBeUndefined()
+  })
+})
+
+describe('softwareStreamAdvice (plan 090)', () => {
+  const stream1080 = videoPresets['stream-safe-1080p30']
+  const fresh = (checked: PerformanceCheckResult) => ({
+    running: false,
+    stale: false,
+    result: checked
+  })
+
+  it('steps a software-encoded stream down to the output that held steady', () => {
+    expect(
+      softwareStreamAdvice({
+        streamVideo: stream1080,
+        encodeBackend: 'software-open-h264',
+        state: fresh(weak)
+      })
+    ).toEqual({
+      kind: 'step-down',
+      requested: stream1080,
+      video: videoPresets['tutorial-720p30']
+    })
+  })
+
+  it('never advises a hardware-encoded stream, Quick Sync included', () => {
+    for (const encodeBackend of [
+      'hardware-media-foundation',
+      'hardware-videotoolbox',
+      'hardware-vaapi',
+      'hardware-qsv'
+    ] as const) {
+      expect(
+        softwareStreamAdvice({ streamVideo: stream1080, encodeBackend, state: fresh(weak) })
+      ).toBeNull()
+    }
+  })
+
+  it('warns instead of stepping down when nothing held steady', () => {
+    const belowFloor = result(
+      [
+        ['tutorial-1080p30', 'failed'],
+        ['tutorial-720p30', 'failed']
+      ],
+      'tutorial-720p30',
+      true
+    )
+    expect(
+      softwareStreamAdvice({
+        streamVideo: stream1080,
+        encodeBackend: 'software-open-h264',
+        state: fresh(belowFloor)
+      })
+    ).toEqual({ kind: 'below-floor', floor: videoPresets['tutorial-720p30'] })
+  })
+
+  it('leaves a stream alone when it is verified, unmeasured, stale or portrait', () => {
+    const software = 'software-open-h264' as const
+    expect(
+      softwareStreamAdvice({
+        streamVideo: videoPresets['tutorial-720p30'],
+        encodeBackend: software,
+        state: fresh(weak)
+      })
+    ).toBeNull()
+    expect(
+      softwareStreamAdvice({
+        streamVideo: stream1080,
+        encodeBackend: software,
+        state: fresh(strong)
+      })
+    ).toBeNull()
+    expect(
+      softwareStreamAdvice({ streamVideo: stream1080, encodeBackend: software, state: undefined })
+    ).toBeNull()
+    expect(
+      softwareStreamAdvice({
+        streamVideo: stream1080,
+        encodeBackend: software,
+        state: { running: false, stale: true, result: weak }
+      })
+    ).toBeNull()
+    expect(
+      softwareStreamAdvice({
+        streamVideo: videoPresets['vertical-1080x1920'],
+        encodeBackend: software,
+        state: fresh(weak)
+      })
+    ).toBeNull()
+    expect(
+      softwareStreamAdvice({
+        streamVideo: stream1080,
+        encodeBackend: undefined,
+        state: fresh(weak)
+      })
+    ).toBeNull()
+  })
+
+  it('moves every enabled landscape destination and nothing else', () => {
+    const base = defaultCaptureConfig.streaming
+    const [first, second, third] = base.targets
+    const streaming = {
+      ...base,
+      enabled: true,
+      targets: [
+        { ...first, enabled: true, outputPreset: 'stream-youtube-1080p30' as const },
+        { ...second, enabled: true, outputOrientation: 'vertical' as const },
+        { ...third, enabled: false },
+        ...base.targets.slice(3)
+      ]
+    }
+    const stepped = streamingAtSteppedDownProfile(streaming, videoPresets['tutorial-720p30'])
+
+    expect(stepped.defaultOutputPreset).toBe('tutorial-720p30')
+    expect(stepped.defaultBitrateKbps).toBe(4000)
+    expect(stepped.targets[0]).toMatchObject({
+      outputPreset: 'tutorial-720p30',
+      outputBitrateKbps: 4000
+    })
+    // The vertical leg has its own encode; a disabled destination is untouched.
+    expect(stepped.targets[1]).toBe(streaming.targets[1])
+    expect(stepped.targets[2]).toBe(streaming.targets[2])
+    // The saved settings object is not mutated.
+    expect(streaming.targets[0].outputPreset).toBe('stream-youtube-1080p30')
+  })
+})
+
+describe('540p30 floor (plan 090 D1)', () => {
+  // The reporter's class of PC: 720p30 in software ran at 0.69x real time.
+  const floorHeld = result(
+    [
+      ['tutorial-1080p30', 'failed'],
+      ['tutorial-720p30', 'failed'],
+      ['tutorial-540p30', 'passed']
+    ],
+    'tutorial-540p30'
+  )
+
+  it('is a named preset the renderer and backend agree on', () => {
+    expect(videoPresets['tutorial-540p30']).toEqual({
+      preset: 'tutorial-540p30',
+      width: 960,
+      height: 540,
+      fps: 30,
+      bitrateKbps: 2500
+    })
+    expect(outputLabel(videoPresets['tutorial-540p30'])).toBe('540p 30')
+  })
+
+  it('moves an untouched install to it and verifies it', () => {
+    expect(autoApplyPreset(floorHeld)).toBe('tutorial-540p30')
+    expect(outputVerdict(videoPresets['tutorial-540p30'], floorHeld)).toBe('verified')
+    expect(outputVerdict(videoPresets['tutorial-720p30'], floorHeld)).toBe('too-heavy')
+  })
+
+  it('steps a software stream down to it', () => {
+    expect(
+      softwareStreamAdvice({
+        streamVideo: videoPresets['stream-safe-1080p30'],
+        encodeBackend: 'software-open-h264',
+        state: { running: false, stale: false, result: floorHeld }
+      })
+    ).toEqual({
+      kind: 'step-down',
+      requested: videoPresets['stream-safe-1080p30'],
+      video: videoPresets['tutorial-540p30']
+    })
   })
 })

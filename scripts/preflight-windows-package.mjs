@@ -108,6 +108,11 @@ if (process.platform === 'win32') {
   console.log(
     'preflight-windows-package: bundled ffmpeg capability probe passed (rtmp/rtmps/tls, h264_mf, aac, pcm_s16le, afftdn).'
   )
+  if (capabilities.optionalMissing.length) {
+    console.warn(
+      `preflight-windows-package: bundled ffmpeg lacks optional ${capabilities.optionalMissing.join(', ')}; Intel Quick Sync will be unavailable and affected PCs stay on software encoding.`
+    )
+  }
   try {
     execFileSync(
       process.execPath,

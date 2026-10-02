@@ -1,6 +1,7 @@
 import { AlertIcon, CaptionsIcon, LivestreamIcon, SuccessIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -29,10 +30,13 @@ import type {
   CommentsWriteState,
   GoLiveDestinationPreflight,
   StreamPlatform,
-  StreamPrivacy
+  StreamPrivacy,
+  VideoSettings
 } from '@/lib/backend'
 import { type EntitlementUiGate } from '@/lib/entitlement-ui'
 import type { GoLiveCaptionsReadiness } from '@/lib/captions-preflight'
+import { softwareStreamAdvice, type SoftwareStreamAdvice } from '@/lib/go-live-output'
+import { outputLabel } from '@/lib/performance-check'
 import { YOUTUBE_STREAM_KEY_LINK_LABEL, YOUTUBE_STREAM_KEY_URL } from '@/lib/youtube-quota-copy'
 
 // The Go Live confirmation flow: review destinations + metadata, resolve any
@@ -68,7 +72,22 @@ export function GoLiveConfirmationDialog({
   onContinueWithoutCaptions: () => void
   onResolveBlocker: (targetId: string, resolution: 'disable' | 'manual-rtmp') => void
 }): ReactElement {
-  const { captureConfig } = useStudioCore()
+  const {
+    captureConfig,
+    performanceCheck,
+    streamOutputTopologyPreflight,
+    streamSharedEncodeFallbackVideo
+  } = useStudioCore()
+  // What the finished check and this computer's measurement say about the
+  // stream as configured, before anything starts.
+  const streamPerformanceAdvice =
+    streamOutputTopologyPreflight.state === 'ready' && !simulcastArmed(captureConfig)
+      ? softwareStreamAdvice({
+          streamVideo: streamOutputTopologyPreflight.result.streamProfile,
+          encodeBackend: streamOutputTopologyPreflight.result.effectiveEncodeBackend,
+          state: performanceCheck
+        })
+      : null
   const scheduledTargets = captureConfig.streaming.targets.filter(
     (target) => target.enabled && target.scheduledEventId
   )
@@ -292,6 +311,12 @@ export function GoLiveConfirmationDialog({
               </div>
             ) : null}
 
+            <GoLiveOutputAdvice
+              advice={streamPerformanceAdvice}
+              recordEnabled={captureConfig.recordEnabled}
+              sharedVideo={streamSharedEncodeFallbackVideo}
+            />
+
             {partialSetup ? (
               <div className="flex flex-col gap-2 rounded-row border border-warning/35 bg-warning/10 p-3">
                 <div className="flex items-center gap-2 text-sm font-medium">
@@ -360,6 +385,61 @@ export function GoLiveConfirmationDialog({
       </DialogContent>
     </Dialog>
   )
+}
+
+/**
+ * What this computer changes about the stream before it starts (plan 090):
+ * a step-down to the output it can hold, a warning when nothing held, or the
+ * recording matching the stream. Quiet when the saved settings go out as is.
+ */
+export function GoLiveOutputAdvice({
+  advice,
+  recordEnabled,
+  sharedVideo
+}: {
+  advice: SoftwareStreamAdvice | null
+  recordEnabled: boolean
+  sharedVideo: VideoSettings | null
+}): ReactElement | null {
+  if (advice?.kind === 'below-floor') {
+    return (
+      <Alert variant="warning">
+        <AlertIcon weight="fill" />
+        <AlertTitle>This computer may not keep up</AlertTitle>
+        <AlertDescription>
+          Nothing held steady in its performance check, not even {outputLabel(advice.floor)}.
+          Viewers will likely see a stuttering picture. Close other apps, or check again in
+          Recording → Output.
+        </AlertDescription>
+      </Alert>
+    )
+  }
+  if (advice?.kind === 'step-down') {
+    return (
+      <Alert>
+        <AlertIcon weight="fill" />
+        <AlertTitle>Streaming at {outputLabel(advice.video)}</AlertTitle>
+        <AlertDescription>
+          This computer can&apos;t encode {outputLabel(advice.requested)} in real time, so this
+          session uses the largest output that held steady in its performance check
+          {recordEnabled ? ', for the recording too' : ''}. Your saved settings stay as they are.
+        </AlertDescription>
+      </Alert>
+    )
+  }
+  if (sharedVideo && recordEnabled) {
+    return (
+      <Alert>
+        <AlertIcon weight="fill" />
+        <AlertTitle>Recording will match the stream</AlertTitle>
+        <AlertDescription>
+          This computer can&apos;t encode a separate recording while streaming, so both use{' '}
+          {outputLabel(sharedVideo)} at {sharedVideo.bitrateKbps} kbps for this session.
+        </AlertDescription>
+      </Alert>
+    )
+  }
+  return null
 }
 
 export function GoLiveCaptionsStatus({

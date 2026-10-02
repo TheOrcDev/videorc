@@ -155,7 +155,7 @@ describe('Ready to go live', () => {
       })
     )
     expect(markup).toContain('Couldn&#x27;t check')
-    expect(markup).toContain('Go Live stays off until this passes.')
+    expect(markup).toContain('Go Live checks again when you start.')
     expect(markup).toContain('Retry')
     // The raw probe message is one hover away, not inline.
     expect(markup).toContain('title="ffmpeg probe exited 1"')

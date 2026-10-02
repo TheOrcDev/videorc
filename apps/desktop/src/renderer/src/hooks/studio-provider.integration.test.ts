@@ -72,6 +72,7 @@ import type {
   VideorcAccountSnapshot,
   VideorcApi
 } from '../../../shared/backend'
+import { resolveStreamOutputTopologyRequest } from '@/lib/go-live-output'
 import { BackgroundAssetsProvider } from './use-background-assets'
 import { useFrameSource } from './use-frame-source'
 import { useStudioMicVisualSource } from './use-studio-mic-sources'
@@ -80,7 +81,9 @@ import {
   StudioProvider,
   buildStreamOutputTopologyProbeParams,
   resolvedStreamingProfileEntitlementGate,
+  STREAM_OUTPUT_SPLIT_UNAVAILABLE_REASON,
   streamOutputTopologyBlockReason,
+  streamOutputTopologySplitRejected,
   streamOutputTopologyProbeRequestKey,
   useStudioAudio,
   useStudioChat,
@@ -1388,6 +1391,10 @@ class StudioBackend {
       case 'performance.check.get':
         // Measured and current: the provider must not start a check on mount.
         return this.performanceCheck
+      case 'encoder.preference.get':
+        return { preference: 'auto', quickSyncAvailable: false, envOverride: false }
+      case 'encoder.preference.set':
+        return { preference: params.preference, quickSyncAvailable: true, envOverride: false }
       default:
         return null
     }
@@ -4847,7 +4854,9 @@ describe('real StudioProvider lifecycle', () => {
         { state: 'ready', requestKey, result: splitResult },
         requestKey
       )
-    ).toContain('Use one shared provider-safe profile')
+    ).toBe(STREAM_OUTPUT_SPLIT_UNAVAILABLE_REASON)
+    // The technical probe reason stays out of the toast.
+    expect(STREAM_OUTPUT_SPLIT_UNAVAILABLE_REASON).not.toMatch(/HRESULT|Media Foundation|kbps/)
     expect(
       streamOutputTopologyBlockReason(
         { state: 'ready', requestKey: `${requestKey}:stale`, result },
@@ -4856,7 +4865,109 @@ describe('real StudioProvider lifecycle', () => {
     ).toContain('Checking')
   })
 
-  it('keeps the real Go Live action blocked until its exact topology probe resolves', async () => {
+  it('re-plans a rejected split as one shared encode at the stream profile', () => {
+    const streamVideo = {
+      preset: 'stream-safe-1080p30' as const,
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      bitrateKbps: 6000
+    }
+    const config = {
+      ...defaultCaptureConfig,
+      recordEnabled: true,
+      streamEnabled: true,
+      // The recording asks for more than the stream: the shape that used to
+      // make the user lower the bitrate by hand.
+      video: { ...streamVideo, preset: 'custom' as const, bitrateKbps: 8000 },
+      streaming: {
+        ...defaultCaptureConfig.streaming,
+        enabled: true,
+        defaultOutputPreset: streamVideo.preset,
+        defaultBitrateKbps: streamVideo.bitrateKbps,
+        enabledTargetIds: ['youtube'],
+        targets: defaultCaptureConfig.streaming.targets.map((target) =>
+          target.id === 'youtube' ? { ...target, enabled: true } : { ...target, enabled: false }
+        )
+      }
+    }
+
+    const optimistic = resolveStreamOutputTopologyRequest(
+      config,
+      config.streaming,
+      false,
+      new Set()
+    )
+    expect(optimistic.params.outputRoles).toEqual(['recording', 'stream'])
+    expect(optimistic.sharedFallbackVideo).toBeNull()
+
+    const rejected = new Set([streamOutputTopologyProbeRequestKey(optimistic.params)])
+    const shared = resolveStreamOutputTopologyRequest(config, config.streaming, false, rejected)
+    expect(shared.params.outputRoles).toEqual(['shared'])
+    expect(shared.sharedFallbackVideo).toMatchObject({
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      bitrateKbps: 6000
+    })
+    expect(shared.params.recordingProfile).toMatchObject({ bitrateKbps: 6000 })
+    expect(shared.params.streamProfile).toMatchObject({ bitrateKbps: 6000 })
+
+    // Equal profiles share one encode with nothing to announce.
+    const equal = { ...config, video: streamVideo }
+    const equalSplit = resolveStreamOutputTopologyRequest(equal, equal.streaming, false, new Set())
+    if (equalSplit.params.outputRoles.includes('stream')) {
+      const equalShared = resolveStreamOutputTopologyRequest(
+        equal,
+        equal.streaming,
+        false,
+        new Set([streamOutputTopologyProbeRequestKey(equalSplit.params)])
+      )
+      expect(equalShared.params.outputRoles).toEqual(['shared'])
+      expect(equalShared.sharedFallbackVideo).toBeNull()
+    }
+
+    // Live captions burned into the stream only need a clean recording, which
+    // one encode cannot give: that session stays blocked.
+    const captioned = {
+      ...config,
+      captions: { ...config.captions, enabled: true, burnTarget: 'stream' as const }
+    }
+    const captionedSplit = resolveStreamOutputTopologyRequest(
+      captioned,
+      captioned.streaming,
+      false,
+      new Set()
+    )
+    expect(
+      resolveStreamOutputTopologyRequest(
+        captioned,
+        captioned.streaming,
+        false,
+        new Set([streamOutputTopologyProbeRequestKey(captionedSplit.params)])
+      ).params.outputRoles
+    ).toEqual(['recording', 'stream'])
+
+    // A rejection of some other profile never changes this session's plan.
+    expect(
+      resolveStreamOutputTopologyRequest(config, config.streaming, false, new Set(['other']))
+        .sharedFallbackVideo
+    ).toBeNull()
+    expect(
+      streamOutputTopologySplitRejected({
+        outputRoles: ['recording', 'stream'],
+        effectiveBridgeOutput: 'raw-yuv420p'
+      })
+    ).toBe(true)
+    expect(
+      streamOutputTopologySplitRejected({
+        outputRoles: ['shared'],
+        effectiveBridgeOutput: 'raw-yuv420p'
+      })
+    ).toBe(false)
+  })
+
+  it('makes Go Live wait for its exact topology probe instead of refusing', async () => {
     const backend = new StudioBackend()
     backend.entitlements = premiumEntitlements
     TestWebSocket.backend = backend
@@ -4944,17 +5055,32 @@ describe('real StudioProvider lifecycle', () => {
       latest()!.core.setCaptureConfig(streamConfig)
     })
     await waitForObservation(() => latest()?.core.streamOutputTopologyPreflight.state === 'pending')
-    expect(latest()?.core.startBlockedReason).toContain('Checking the exact livestream')
+    // A check that is still running is not an error: nothing is reported and
+    // Go Live simply has not moved on yet.
+    expect(latest()?.core.startBlockedReason).toBeNull()
 
+    let startPromise: Promise<boolean> | undefined
     await act(async () => {
-      await latest()!.core.startSession()
+      startPromise = latest()!.core.startSession()
+      await Promise.resolve()
     })
-    expect(backend.sentCommands.some((command) => command.method === 'session.start')).toBe(false)
+    expect(
+      backend.sentCommands.some((command) =>
+        ['session.start', 'streamTargets.confirmation.validate'].includes(command.method)
+      )
+    ).toBe(false)
+    expect(latest()?.core.lastError).toBeNull()
 
     await act(async () => {
       releaseTopology()
-      await Promise.resolve()
+      await startPromise
     })
+    // The same click carries on to the Go Live confirmation once it answers.
+    expect(
+      backend.sentCommands.some(
+        (command) => command.method === 'streamTargets.confirmation.validate'
+      )
+    ).toBe(true)
     await waitForObservation(() => latest()?.core.streamOutputTopologyPreflight.state === 'ready')
 
     expect(latest()?.core.streamOutputTopologyPreflight).toMatchObject({
@@ -9918,6 +10044,161 @@ describe('real StudioProvider lifecycle', () => {
     expect(startCommands[0]?.params).toMatchObject({
       output: { recordEnabled: false, streamEnabled: true }
     })
+  })
+
+  it('goes live on one shared encode when the host rejects a separate stream encoder', async () => {
+    // The fake backend answers every probe with the raw path, i.e. a host
+    // with no usable hardware encoder: a split request comes back rejected.
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+
+    const base = youtubeOauthStreamCaptureConfig()
+    const streamBitrateKbps = base.streaming.defaultBitrateKbps
+    const recordingBitrateKbps = streamBitrateKbps + 2000
+    await act(async () => {
+      latest()!.core.setCaptureConfig({
+        ...base,
+        recordEnabled: true,
+        video: { ...base.video, preset: 'custom', bitrateKbps: recordingBitrateKbps }
+      })
+    })
+    // No manual bitrate matching: the rejected split re-plans by itself.
+    await waitForObservation(
+      () =>
+        latest()?.core.streamOutputTopologyPreflight.state === 'ready' &&
+        latest()?.core.streamSharedEncodeFallbackVideo !== null
+    )
+    expect(latest()?.core.startBlockedReason).toBeNull()
+    expect(latest()?.core.streamSharedEncodeFallbackVideo).toMatchObject({
+      bitrateKbps: streamBitrateKbps
+    })
+    const probes = backend.sentCommands.filter(
+      (command) => command.method === 'stream.output.topology.probe'
+    )
+    expect(probes.at(-2)?.params).toMatchObject({ outputRoles: ['recording', 'stream'] })
+    expect(probes.at(-1)?.params).toMatchObject({
+      outputRoles: ['shared'],
+      recordingProfile: { bitrateKbps: streamBitrateKbps },
+      streamProfile: { bitrateKbps: streamBitrateKbps }
+    })
+
+    await act(async () => {
+      await latest()!.core.startSession()
+    })
+    await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+
+    const start = backend.sentCommands.find((command) => command.method === 'session.start')
+    expect(start?.params).toMatchObject({
+      output: {
+        recordEnabled: true,
+        streamEnabled: true,
+        video: { bitrateKbps: streamBitrateKbps }
+      }
+    })
+    // The saved Output setting is untouched; only this session shares.
+    expect(latest()?.core.captureConfig.video.bitrateKbps).toBe(recordingBitrateKbps)
+    expect(latest()?.core.lastError).toBeNull()
+  })
+
+  it('steps a software-encoded stream down to what this computer measurably holds', async () => {
+    // The fake backend answers every probe with the raw path and OpenH264.
+    // The saved performance check says 1080p30 is too heavy and 720p30 held.
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    backend.performanceCheck = {
+      running: false,
+      stale: false,
+      result: {
+        capabilityKey: 'performance-check-v2:test',
+        checkedAt: now,
+        appVersion: '0.9.126',
+        durationMs: 12_000,
+        recommended: videoPresets['tutorial-720p30'],
+        belowFloor: false,
+        rungs: [
+          {
+            video: videoPresets['tutorial-1080p30'],
+            verdict: 'failed',
+            reasons: ['encoder-below-realtime']
+          },
+          { video: videoPresets['tutorial-720p30'], verdict: 'passed', reasons: [] }
+        ]
+      }
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openYouTubeGoLiveConfirmation(latest)
+    await waitForObservation(() => latest()?.core.performanceCheck?.result !== undefined)
+
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+
+    const prepare = backend.sentCommands.find(
+      (command) => command.method === 'streamTargets.youtube.prepare'
+    )
+    expect(prepare?.params).toMatchObject({ video: { width: 1280, height: 720, fps: 30 } })
+    const start = backend.sentCommands.find((command) => command.method === 'session.start')
+    expect(start?.params).toMatchObject({
+      output: { streamEnabled: true },
+      streaming: {
+        defaultOutputPreset: 'tutorial-720p30',
+        defaultBitrateKbps: 4000,
+        targets: expect.arrayContaining([
+          expect.objectContaining({
+            id: 'youtube',
+            outputPreset: 'tutorial-720p30',
+            outputBitrateKbps: 4000
+          })
+        ])
+      }
+    })
+    // Only the session moved. The saved destination settings are untouched.
+    expect(latest()?.core.captureConfig.streaming.defaultOutputPreset).toBe('stream-safe-1080p30')
+    expect(latest()?.core.lastError).toBeNull()
   })
 
   it('drops pending microphone edits without warning when the capture session ended', async () => {

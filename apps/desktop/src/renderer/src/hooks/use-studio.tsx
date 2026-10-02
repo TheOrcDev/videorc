@@ -135,6 +135,7 @@ import {
   performanceCheckTooHeavyToast,
   shouldRunPerformanceCheck
 } from '@/lib/performance-check'
+import type * as GoLiveOutput from '@/lib/go-live-output'
 import {
   decideCancelGoLiveConfirmation,
   decideContinueGoLiveWithReadyDestinations,
@@ -274,8 +275,10 @@ import type {
   PreviewSupervisorState,
   PreviewWindowMode,
   PreviewWindowState,
+  EncoderPreferenceState,
   PerformanceCheckProgress,
   PerformanceCheckState,
+  WindowsH264EncoderPreference,
   PreviewLiveStatus,
   PlatformAccount,
   PlatformAccountValidation,
@@ -383,7 +386,7 @@ import {
 import { commentCanHighlight, CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import { applyCohostState, cohostErrorToast, cohostHighlightMessageId } from '@/lib/cohost-state'
 import { entitlementDisabledReason } from '@/lib/entitlements'
-import { upsertNoiseCleanupJob } from '@/lib/noise-cleanup-view'
+import { upsertNoiseCleanupJob } from '@/lib/noise-cleanup-jobs'
 import {
   applyLiveChatMessages,
   applyLiveChatProviderStatus,
@@ -694,20 +697,37 @@ export function streamOutputTopologyProbeRequestKey(
   })
 }
 
+/** The host proved it cannot run a separate encoded stream role. */
+export function streamOutputTopologySplitRejected(
+  result: Pick<StreamOutputTopologyProbeResult, 'outputRoles' | 'effectiveBridgeOutput'>
+): boolean {
+  return result.outputRoles.includes('stream') && result.effectiveBridgeOutput === 'raw-yuv420p'
+}
+
+// The technical reason (probe stage, HRESULT) stays in Livestream → Technical
+// details; a toast only says what the user can do.
+export const STREAM_OUTPUT_SPLIT_UNAVAILABLE_REASON =
+  "This computer can't encode the recording and the livestream separately. Use the same quality for every destination, set captions to burn into both or neither, or turn off recording, then go live."
+
+// The shared-encode re-plan and the Go Live output settling (plan 090) live
+// in a chunk loaded with the first rejected split or the first Go Live, so the
+// startup bundle does not carry them. A split is only ever marked rejected
+// after this chunk loaded, so the topology memo reads it synchronously.
+let goLiveOutputChunk: typeof GoLiveOutput | null = null
+
+async function loadGoLiveOutput(): Promise<typeof GoLiveOutput> {
+  goLiveOutputChunk ??= await import('@/lib/go-live-output')
+  return goLiveOutputChunk
+}
+
 export function streamOutputTopologyBlockReason(
   preflight: StreamOutputTopologyPreflight,
   requestKey: string
 ): string | null {
   if (preflight.state === 'ready' && preflight.requestKey === requestKey) {
-    if (
-      preflight.result.outputRoles.includes('stream') &&
-      preflight.result.effectiveBridgeOutput === 'raw-yuv420p'
-    ) {
-      return `A separate encoded livestream output is unavailable${
-        preflight.result.fallbackReason ? `: ${preflight.result.fallbackReason}` : '.'
-      } Use one shared provider-safe profile at 6000 kbps or lower before going live.`
-    }
-    return null
+    return streamOutputTopologySplitRejected(preflight.result)
+      ? STREAM_OUTPUT_SPLIT_UNAVAILABLE_REASON
+      : null
   }
   if (preflight.state === 'failed' && preflight.requestKey === requestKey) {
     return `Livestream output check failed: ${preflight.message}`
@@ -715,7 +735,7 @@ export function streamOutputTopologyBlockReason(
   return 'Checking the exact livestream output path before Go Live.'
 }
 
-function streamOutputTopologyResultMatchesRequest(
+export function streamOutputTopologyResultMatchesRequest(
   result: StreamOutputTopologyProbeResult,
   params: StreamOutputTopologyProbeParams
 ): boolean {
@@ -740,7 +760,7 @@ function sameExactVideoSettings(left: VideoSettings, right: VideoSettings): bool
   return left.preset === right.preset && sameTopologyVideoProfile(left, right)
 }
 
-function sameTopologyVideoProfile(left: VideoSettings, right: VideoSettings): boolean {
+export function sameTopologyVideoProfile(left: VideoSettings, right: VideoSettings): boolean {
   return (
     left.width === right.width &&
     left.height === right.height &&
@@ -1023,6 +1043,8 @@ export type StudioContextValue = {
   streamTargets: StreamTargetRuntime[]
   streamOutputTopologyPreflight: StreamOutputTopologyPreflight
   refreshStreamOutputTopology: () => Promise<void>
+  /** The profile a record+stream session will share when no separate stream encoder exists. */
+  streamSharedEncodeFallbackVideo: VideoSettings | null
   captureRecoveryStatus: CaptureRecoveryStatus
   captureRecoveryRetryPending: boolean
   retryCaptureRecovery: () => Promise<void>
@@ -1192,6 +1214,9 @@ export type StudioContextValue = {
   applyVideoPreset: (preset: VideoPreset, options?: { kind?: 'recording' | 'streaming' }) => void
   /** What this computer measured; undefined until the backend answered. */
   performanceCheck: PerformanceCheckState | undefined
+  /** Windows raw-path encoder choice; null until the backend answers. */
+  encoderPreference: EncoderPreferenceState | null
+  setEncoderPreference: (preference: WindowsH264EncoderPreference) => Promise<void>
   performanceCheckProgress: PerformanceCheckProgress | null
   runPerformanceCheck: () => Promise<void>
   applyRtmpPreset: (preset: RtmpPreset) => void
@@ -2954,6 +2979,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const commitStreamOutputTopologyPreflight = useCallback((next: StreamOutputTopologyPreflight) => {
     streamOutputTopologyPreflightRef.current = next
     setStreamOutputTopologyPreflight(next)
+  }, [])
+  // Declared up here because the Go Live output plan reads it (plan 090 D2);
+  // the check itself is driven further down.
+  const [performanceCheck, setPerformanceCheck] = useState<PerformanceCheckState>()
+  // Split requests this backend has rejected. The ref is the synchronous
+  // authority for an in-progress Go Live; the state re-plans the idle check.
+  const [rejectedStreamOutputSplitKeys, setRejectedStreamOutputSplitKeys] = useState<
+    ReadonlySet<string>
+  >(() => new Set())
+  const rejectedStreamOutputSplitKeysRef = useRef<ReadonlySet<string>>(
+    rejectedStreamOutputSplitKeys
+  )
+  const streamOutputTopologySessionResultsRef = useRef(
+    new Map<string, StreamOutputTopologyProbeResult>()
+  )
+  const commitRejectedStreamOutputSplitKeys = useCallback((next: ReadonlySet<string>) => {
+    rejectedStreamOutputSplitKeysRef.current = next
+    setRejectedStreamOutputSplitKeys(next)
   }, [])
   const [goLivePreflight, setGoLivePreflight] = useState<GoLivePreflight | null>(null)
   const [goLiveConfirmationOpen, setGoLiveConfirmationOpen] = useState(false)
@@ -9696,17 +9739,30 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     return () => window.removeEventListener('videorc:resume-system-audio', resume)
   }, [])
 
-  const currentStreamOutputTopologyRequest = useMemo(
-    () =>
-      captureConfig.streamEnabled
-        ? buildStreamOutputTopologyProbeParams(
-            captureConfig,
-            captureConfig.streaming,
-            suppressCaptionsForSession
-          )
-        : null,
-    [captureConfig, suppressCaptionsForSession]
-  )
+  const currentStreamOutputTopology =
+    useMemo((): GoLiveOutput.StreamOutputTopologyRequest | null => {
+      if (!captureConfig.streamEnabled) {
+        return null
+      }
+      if (rejectedStreamOutputSplitKeys.size > 0 && goLiveOutputChunk) {
+        return goLiveOutputChunk.resolveStreamOutputTopologyRequest(
+          captureConfig,
+          captureConfig.streaming,
+          suppressCaptionsForSession,
+          rejectedStreamOutputSplitKeys
+        )
+      }
+      return {
+        params: buildStreamOutputTopologyProbeParams(
+          captureConfig,
+          captureConfig.streaming,
+          suppressCaptionsForSession
+        ),
+        sharedFallbackVideo: null
+      }
+    }, [captureConfig, rejectedStreamOutputSplitKeys, suppressCaptionsForSession])
+  const currentStreamOutputTopologyRequest = currentStreamOutputTopology?.params ?? null
+  const streamSharedEncodeFallbackVideo = currentStreamOutputTopology?.sharedFallbackVideo ?? null
   const currentStreamOutputTopologyRequestKey = currentStreamOutputTopologyRequest
     ? streamOutputTopologyProbeRequestKey(currentStreamOutputTopologyRequest)
     : null
@@ -9744,10 +9800,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         .requestTyped('stream.output.topology.probe', params, {
           signal: controller.signal
         })
-        .then((result) => {
+        .then(async (result) => {
           if (!streamOutputTopologyResultMatchesRequest(result, params)) {
             throw new Error(
               'Backend returned a livestream output verdict for a different output configuration.'
+            )
+          }
+          const splitRejected = streamOutputTopologySplitRejected(result)
+          if (splitRejected) {
+            // The re-plan reads the Go Live chunk; load it before the
+            // rejection reaches the topology memo.
+            await loadGoLiveOutput()
+          }
+          if (
+            clientRef.current === client &&
+            splitRejected &&
+            !rejectedStreamOutputSplitKeysRef.current.has(requestKey)
+          ) {
+            // Committed with the verdict below (one render), so a rejected
+            // split re-plans as a shared encode without flashing a blocker.
+            commitRejectedStreamOutputSplitKeys(
+              new Set(rejectedStreamOutputSplitKeysRef.current).add(requestKey)
             )
           }
           if (
@@ -9788,7 +9861,58 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       return promise
     },
-    [client, commitStreamOutputTopologyPreflight, wsStatus]
+    [client, commitRejectedStreamOutputSplitKeys, commitStreamOutputTopologyPreflight, wsStatus]
+  )
+
+  // Go Live waits for the output check instead of refusing while it runs,
+  // takes the shared-encode fallback when the host rejects the split, and
+  // steps a software-encoded stream down to what this computer measurably
+  // holds. The logic lives in a chunk loaded on the first Go Live, so the
+  // startup bundle does not carry it.
+  const settleStreamOutputTopology = useCallback(
+    async (streaming: StreamingSettings): Promise<GoLiveOutput.GoLiveSessionOutput> => {
+      const { settleGoLiveSessionOutput } = await loadGoLiveOutput()
+      return settleGoLiveSessionOutput({
+        captureConfig,
+        streaming,
+        suppressCaptionsForSession,
+        performanceCheck,
+        rejectedSplitKeys: () => rejectedStreamOutputSplitKeysRef.current,
+        noteRejectedSplit: (requestKey) => {
+          if (!rejectedStreamOutputSplitKeysRef.current.has(requestKey)) {
+            commitRejectedStreamOutputSplitKeys(
+              new Set(rejectedStreamOutputSplitKeysRef.current).add(requestKey)
+            )
+          }
+        },
+        isSavedRequest: (requestKey) => {
+          const slot = streamOutputTopologyPreflightRef.current
+          return (
+            requestKey === currentStreamOutputTopologyRequestKey ||
+            (slot.state !== 'not-requested' && slot.requestKey === requestKey) ||
+            streamOutputTopologyProbeInFlightRef.current?.requestKey === requestKey
+          )
+        },
+        probeSaved: probeStreamOutputTopology,
+        sessionResults: streamOutputTopologySessionResultsRef.current,
+        request: (params) => {
+          if (!client || wsStatus !== 'connected') {
+            return Promise.reject(new Error('Backend socket is not connected.'))
+          }
+          return client.requestTyped('stream.output.topology.probe', params)
+        }
+      })
+    },
+    [
+      captureConfig,
+      client,
+      commitRejectedStreamOutputSplitKeys,
+      currentStreamOutputTopologyRequestKey,
+      performanceCheck,
+      probeStreamOutputTopology,
+      suppressCaptionsForSession,
+      wsStatus
+    ]
   )
 
   useEffect(() => {
@@ -9801,6 +9925,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       streamOutputTopologyProbeGenerationRef.current += 1
       streamOutputTopologyProbeInFlightRef.current?.controller.abort()
       streamOutputTopologyProbeInFlightRef.current = null
+      // A reconnect may be a different backend build: ask again.
+      streamOutputTopologySessionResultsRef.current.clear()
       if (streamOutputTopologyPreflightRef.current.state !== 'not-requested') {
         commitStreamOutputTopologyPreflight({ state: 'not-requested' })
       }
@@ -9833,8 +9959,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (!currentStreamOutputTopologyRequest) {
       throw new Error('Enable livestreaming before checking the output path.')
     }
-    await probeStreamOutputTopology(currentStreamOutputTopologyRequest, { force: true })
-  }, [currentStreamOutputTopologyRequest, probeStreamOutputTopology])
+    // Retry re-asks for the separate role from scratch; a rejection is not
+    // remembered past an explicit re-check.
+    commitRejectedStreamOutputSplitKeys(new Set())
+    streamOutputTopologySessionResultsRef.current.clear()
+    await probeStreamOutputTopology(
+      buildStreamOutputTopologyProbeParams(
+        captureConfig,
+        captureConfig.streaming,
+        suppressCaptionsForSession
+      ),
+      { force: true }
+    )
+  }, [
+    captureConfig,
+    commitRejectedStreamOutputSplitKeys,
+    currentStreamOutputTopologyRequest,
+    probeStreamOutputTopology,
+    suppressCaptionsForSession
+  ])
 
   // Every mic surface edits the same captureConfig. Mirror that one source of
   // truth into the active backend-owned native audio session, scoped by the
@@ -11114,7 +11257,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (!health.ffmpeg.available) {
       return health.ffmpeg.message ?? 'FFmpeg is not available.'
     }
-    if (captureConfig.streamEnabled && currentStreamOutputTopologyRequestKey) {
+    // Only a finished verdict blocks here. A check that is still running or
+    // failed is settled when Go Live is pressed: the start waits for it.
+    if (
+      captureConfig.streamEnabled &&
+      currentStreamOutputTopologyRequestKey &&
+      streamOutputTopologyPreflight.state === 'ready'
+    ) {
       const topologyReason = streamOutputTopologyBlockReason(
         streamOutputTopologyPreflight,
         currentStreamOutputTopologyRequestKey
@@ -12028,14 +12177,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           setLastError(null)
           noteSessionStartAttempt()
           streamingForStart = streamingOverride ?? null
+          let sessionCaptureConfig = captureConfig
           if (streamingForStart) {
-            await probeStreamOutputTopology(
-              buildStreamOutputTopologyProbeParams(
-                captureConfig,
-                streamingForStart,
-                suppressCaptionsForSession
-              )
-            )
+            const output = await settleStreamOutputTopology(streamingForStart)
+            if (output.reason) {
+              throw new Error(output.reason)
+            }
+            streamingForStart = output.streaming
+            sessionCaptureConfig = {
+              ...captureConfig,
+              video: output.video,
+              streaming: output.streaming
+            }
+            const notice = (await loadGoLiveOutput()).goLiveSessionOutputNotice(output)
+            if (notice) {
+              toast.info(notice.title, {
+                id: 'stream-output-adjusted',
+                description: notice.description
+              })
+            }
           }
           setStreamHealth(null)
           setStreamTargets([])
@@ -12101,7 +12261,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             )
           }
           const sessionParams = buildStartSessionParams({
-            captureConfig,
+            captureConfig: sessionCaptureConfig,
             scene: sceneWithBackground,
             sceneEditMode,
             settings,
@@ -12111,11 +12271,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             ...sessionParams.output,
             ...(outputDirectory ? { outputDirectoryCapability: outputDirectory.capabilityId } : {})
           }
-          const nextSessionParams: StartSessionParams = streamingOverride
+          const nextSessionParams: StartSessionParams = streamingForStart
             ? {
                 ...sessionParams,
                 output: { ...authorizedOutput, streamEnabled: true },
-                streaming: streamingOverride
+                streaming: streamingForStart
               }
             : {
                 ...sessionParams,
@@ -12326,7 +12486,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       client,
       isSessionActive,
       noteSessionStartAttempt,
-      probeStreamOutputTopology,
       refreshSessions,
       reportError,
       reportSessionStartFailure,
@@ -12336,6 +12495,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       settleClaimedPlatformLifecycleOwner,
       settlePreparedPlatformLifecycle,
       settlePreviousPlatformLifecycle,
+      settleStreamOutputTopology,
       startBlockedReason,
       suppressCaptionsForSession,
       validatePlatformAccountsForClient
@@ -12344,7 +12504,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   runStartSessionRef.current = runStartSession
 
   const prepareOauthTargetsForGoLive = useCallback(
-    async (confirmedPreflight?: GoLivePreflight): Promise<GoLivePartialSetup> => {
+    async (
+      confirmedPreflight?: GoLivePreflight,
+      // What this session will really send (plan 090): a broadcast prepared
+      // at the saved profile would advertise a size the stream never reaches.
+      sessionOutput?: Pick<GoLiveOutput.GoLiveSessionOutput, 'video' | 'streaming'>
+    ): Promise<GoLivePartialSetup> => {
       if (!client) {
         throw new Error('Backend socket is not connected.')
       }
@@ -12352,6 +12517,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         throw new Error('The previous livestream providers still need cleanup before Go Live.')
       }
 
+      const outputVideo = sessionOutput?.video ?? captureConfig.video
+      const outputStreaming = sessionOutput?.streaming ?? captureConfig.streaming
+      const outputTarget = (target: StreamTargetSettings): StreamTargetSettings =>
+        outputStreaming.targets.find((candidate) => candidate.id === target.id) ?? target
       let nextStreaming = captureConfig.streaming
       const failures: GoLiveSetupFailure[] = []
       for (const target of captureConfig.streaming.targets.filter(
@@ -12397,9 +12566,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                     targetId: target.id,
                     video: coerceVideoToOrientation(
                       streamOutputVideoForTarget(
-                        captureConfig.video,
-                        captureConfig.streaming,
-                        target
+                        outputVideo,
+                        outputStreaming,
+                        outputTarget(target)
                       ),
                       target.outputOrientation ?? 'horizontal'
                     )
@@ -12415,7 +12584,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                   video:
                     target.outputOrientation === 'vertical'
                       ? coerceVideoToOrientation(captureConfig.video, 'vertical')
-                      : captureConfig.video
+                      : outputVideo
                 })
             const completionKey = JSON.stringify([prepared.accountId, prepared.broadcastId])
             youtubeCompletionInFlightByBroadcastRef.current.delete(completionKey)
@@ -12501,9 +12670,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                     targetId: target.id,
                     video: coerceVideoToOrientation(
                       streamOutputVideoForTarget(
-                        captureConfig.video,
-                        captureConfig.streaming,
-                        target
+                        outputVideo,
+                        outputStreaming,
+                        outputTarget(target)
                       ),
                       target.outputOrientation ?? 'horizontal'
                     )
@@ -12661,6 +12830,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setGoLivePartialSetup(null)
       setSuppressCaptionsForSession(false)
       setGoLiveConfirmationPending(true)
+      // Settle the output check before anything is prepared on a platform.
+      const topology = await settleStreamOutputTopology(captureConfig.streaming)
+      if (topology.reason) {
+        throw new Error(topology.reason)
+      }
       if (streamMetadataDraft) {
         const saved = await client.request<StreamMetadataDraft>(
           'streamTargets.metadata.update',
@@ -12709,6 +12883,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     isSessionActive,
     reportError,
     settlePreviousPlatformLifecycle,
+    settleStreamOutputTopology,
     startBlockedReason,
     streamMetadataDraft
   ])
@@ -12813,7 +12988,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
           return
         }
-        const setup = await prepareOauthTargetsForGoLive(preflight)
+        // Settled before anything is created on a platform, so a refused
+        // start leaves no broadcast behind and a prepared one advertises the
+        // profile this session will send.
+        const sessionOutput = await settleStreamOutputTopology(captureConfig.streaming)
+        if (sessionOutput.reason) {
+          throw new Error(sessionOutput.reason)
+        }
+        const setup = await prepareOauthTargetsForGoLive(preflight, sessionOutput)
         const setupDecision = decidePreparedGoLiveSetup(setup)
         if (setupDecision.kind === 'no-ready-destinations') {
           throw new Error('No livestream destinations are ready after platform setup.')
@@ -12855,6 +13037,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     prepareOauthTargetsForGoLive,
     reportSessionStartFailure,
     runStartSession,
+    settleStreamOutputTopology,
     startRequestPending,
     streamMetadataDraft
   ])
@@ -13512,7 +13695,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   // Performance check. The backend owns the measurement; this only decides
   // when to ask for one and whether its verdict may move the output.
-  const [performanceCheck, setPerformanceCheck] = useState<PerformanceCheckState>()
+  const [encoderPreference, setEncoderPreferenceState] = useState<EncoderPreferenceState | null>(
+    null
+  )
   const [performanceCheckProgress, setPerformanceCheckProgress] =
     useState<PerformanceCheckProgress | null>(null)
   const performanceCheckAutoRunRef = useRef(false)
@@ -13591,8 +13776,32 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       .then(commitPerformanceCheck)
       // An older backend has no such method; the Output panel just stays quiet.
       .catch(() => undefined)
+    void client
+      .requestTyped('encoder.preference.get')
+      .then(setEncoderPreferenceState)
+      .catch(() => undefined)
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe())
   }, [client, commitPerformanceCheck, wsStatus])
+
+  // Plan 090 C5: which encoder the Windows fallback path may use. A change
+  // invalidates both things measured under the old choice: the output check
+  // and this computer's performance result.
+  const setEncoderPreference = useCallback(
+    async (preference: WindowsH264EncoderPreference) => {
+      if (!client) {
+        return
+      }
+      setEncoderPreferenceState(await client.requestTyped('encoder.preference.set', { preference }))
+      if (captureConfigRef.current.streamEnabled) {
+        void refreshStreamOutputTopology().catch(() => undefined)
+      }
+      void client
+        .requestTyped('performance.check.get')
+        .then(commitPerformanceCheck)
+        .catch(() => undefined)
+    },
+    [client, commitPerformanceCheck, refreshStreamOutputTopology]
+  )
 
   // Measure once per machine, after the app has settled. Packaged builds only:
   // dev sessions and smokes start captures immediately and use the button.
@@ -14557,6 +14766,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       streamTargets,
       streamOutputTopologyPreflight,
       refreshStreamOutputTopology,
+      streamSharedEncodeFallbackVideo,
       sessions,
       sessionsNextCursor,
       sessionsLoadingMore,
@@ -14653,6 +14863,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       patchVideo,
       applyVideoPreset,
       performanceCheck,
+      encoderPreference,
+      setEncoderPreference,
       performanceCheckProgress,
       runPerformanceCheck,
       applyRtmpPreset,
@@ -14788,6 +15000,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       streamTargets,
       streamOutputTopologyPreflight,
       refreshStreamOutputTopology,
+      streamSharedEncodeFallbackVideo,
       sessions,
       sessionsNextCursor,
       sessionsLoadingMore,
@@ -14884,6 +15097,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       patchVideo,
       applyVideoPreset,
       performanceCheck,
+      encoderPreference,
+      setEncoderPreference,
       performanceCheckProgress,
       runPerformanceCheck,
       applyRtmpPreset,

@@ -100,7 +100,7 @@ use crate::protocol::{
     Scene, SceneConfigParams, SceneSourceKind, SessionStopParams, SideBySideCameraSide,
     StartSessionParams, StreamHealth, StreamOutputBridge, StreamOutputTopologyProbeParams,
     StreamOutputTopologyProbeResult, StreamOutputTopologyProbeState, StreamOutputTopologyRole,
-    StreamScreen, VideoPreset, VideoSettings,
+    StreamScreen, VideoPreset, VideoSettings, WindowsH264EncoderPreference,
 };
 use crate::recording_finalization::{
     FINALIZATION_STATE_FAILED, FINALIZATION_STATE_FINALIZED, FINALIZATION_STATE_FINALIZING,
@@ -1904,9 +1904,11 @@ fn owned_pcm_silent_drain_policy(
     owned_pcm: bool,
     owned_bridge: bool,
 ) -> bool {
+    // The policy belongs to the raw path's shape (FFmpeg encodes the piped
+    // frames and owns the mux), not to which FFmpeg encoder does it.
     windows
         && video_output == EncoderBridgeVideoOutput::RawYuv420p
-        && encoder == FfmpegH264Platform::WindowsSoftware
+        && (encoder == FfmpegH264Platform::WindowsSoftware || encoder.is_windows_qsv())
         && owned_pcm
         && owned_bridge
 }
@@ -3984,14 +3986,12 @@ async fn start_session_with_timeline(
     initial_diagnostics.encoder_bridge_encoded_output_input_subtype =
         windows_encoded_bridge_decision.input_subtype.clone();
     initial_diagnostics.encoder_bridge_encoded_output_fallback_reason =
-        windows_encoded_bridge_decision
-            .fallback_reason
-            .clone()
-            .or_else(|| {
-                windows_encoded_bridge_decision
-                    .encoder_selection_fallback_reason
-                    .clone()
-            });
+        combined_output_fallback_reason(
+            windows_encoded_bridge_decision.fallback_reason.clone(),
+            windows_encoded_bridge_decision
+                .encoder_selection_fallback_reason
+                .clone(),
+        );
     initial_diagnostics.recording_protected = use_encoder_bridge;
     #[cfg(target_os = "windows")]
     {
@@ -12079,6 +12079,19 @@ enum FfmpegH264Platform {
     LinuxSoftware,
     WindowsHardware,
     WindowsSoftware,
+    /// Intel Quick Sync through FFmpeg `h264_qsv` on the raw path, with the
+    /// driver's own low-power choice (plan 090 C).
+    WindowsQsv,
+    /// The same encoder with low-power mode off: what older Intel chips need
+    /// (OBS only turns low-power on for Arc and newer, and retries without
+    /// it when the driver rejects the settings).
+    WindowsQsvStandardPower,
+}
+
+impl FfmpegH264Platform {
+    fn is_windows_qsv(self) -> bool {
+        matches!(self, Self::WindowsQsv | Self::WindowsQsvStandardPower)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12382,6 +12395,15 @@ fn ffmpeg_h264_encoder(platform: FfmpegH264Platform) -> FfmpegH264Encoder {
             pix_fmt: "yuv420p",
             backend: EncodeBackend::SoftwareOpenH264,
         },
+        FfmpegH264Platform::WindowsQsv | FfmpegH264Platform::WindowsQsvStandardPower => {
+            FfmpegH264Encoder {
+                codec: "h264_qsv",
+                // System-memory NV12: the raw path hands FFmpeg CPU frames, the
+                // same shape OBS falls back to when it cannot share textures.
+                pix_fmt: "nv12",
+                backend: EncodeBackend::HardwareQsv,
+            }
+        }
     }
 }
 
@@ -12432,6 +12454,401 @@ fn windows_media_foundation_hardware_probe_args(video: &VideoSettings) -> Vec<St
 }
 #[cfg(target_os = "windows")]
 const WINDOWS_MEDIA_FOUNDATION_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Tester and smoke override for the Windows raw-path encoder; wins over the
+/// saved setting. Mirrors `VIDEORC_LINUX_H264_ENCODER`.
+pub(crate) const WINDOWS_H264_ENCODER_ENV: &str = "VIDEORC_WINDOWS_H264_ENCODER";
+pub const WINDOWS_H264_ENCODER_SETTING_KEY: &str = "windows_h264_encoder_preference";
+
+static WINDOWS_H264_ENCODER_PREFERENCE: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0);
+
+fn windows_h264_encoder_preference_code(preference: WindowsH264EncoderPreference) -> u8 {
+    match preference {
+        WindowsH264EncoderPreference::Auto => 0,
+        WindowsH264EncoderPreference::QuickSync => 1,
+        WindowsH264EncoderPreference::Software => 2,
+    }
+}
+
+pub(crate) fn windows_h264_encoder_preference_label(
+    preference: WindowsH264EncoderPreference,
+) -> &'static str {
+    match preference {
+        WindowsH264EncoderPreference::Auto => "auto",
+        WindowsH264EncoderPreference::QuickSync => "quick-sync",
+        WindowsH264EncoderPreference::Software => "software",
+    }
+}
+
+/// `None` when the value is unset or blank; an unknown value is an error so
+/// a typo in a tester's environment is never silently "auto".
+pub(crate) fn parse_windows_h264_encoder_preference(
+    value: Option<&str>,
+) -> std::result::Result<Option<WindowsH264EncoderPreference>, String> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(None),
+        Some("auto") => Ok(Some(WindowsH264EncoderPreference::Auto)),
+        Some("quick-sync" | "qsv") => Ok(Some(WindowsH264EncoderPreference::QuickSync)),
+        Some("software" | "openh264") => Ok(Some(WindowsH264EncoderPreference::Software)),
+        Some(value) => Err(format!(
+            "{WINDOWS_H264_ENCODER_ENV} must be auto, quick-sync, or software; got {value}"
+        )),
+    }
+}
+
+/// The saved preference. `WINDOWS_H264_ENCODER_ENV` still overrides it.
+pub fn set_windows_h264_encoder_preference(preference: WindowsH264EncoderPreference) {
+    WINDOWS_H264_ENCODER_PREFERENCE.store(
+        windows_h264_encoder_preference_code(preference),
+        Ordering::Relaxed,
+    );
+}
+
+/// The effective preference and whether the environment decided it.
+pub(crate) fn windows_h264_encoder_preference() -> (WindowsH264EncoderPreference, bool) {
+    match parse_windows_h264_encoder_preference(
+        std::env::var(WINDOWS_H264_ENCODER_ENV).ok().as_deref(),
+    ) {
+        Ok(Some(preference)) => return (preference, true),
+        Ok(None) => {}
+        Err(reason) => tracing::warn!("{reason}; using the saved encoder preference"),
+    }
+    let saved = match WINDOWS_H264_ENCODER_PREFERENCE.load(Ordering::Relaxed) {
+        1 => WindowsH264EncoderPreference::QuickSync,
+        2 => WindowsH264EncoderPreference::Software,
+        _ => WindowsH264EncoderPreference::Auto,
+    };
+    (saved, false)
+}
+
+/// What the Settings control shows: the effective preference, whether this
+/// PC can use Quick Sync at all, and whether the environment decided it.
+pub fn encoder_preference_state() -> crate::protocol::EncoderPreferenceState {
+    let (preference, env_override) = windows_h264_encoder_preference();
+    crate::protocol::EncoderPreferenceState {
+        preference,
+        quick_sync_available: windows_quick_sync_adapter_present(),
+        env_override,
+    }
+}
+
+/// The one line a support bundle needs to explain an output check: how long
+/// it took, what was asked, and what it decided (plan 090 B2). No secrets:
+/// profiles and encoder names only.
+pub fn stream_output_topology_probe_log_line(
+    elapsed: std::time::Duration,
+    outcome: std::result::Result<&StreamOutputTopologyProbeResult, String>,
+) -> String {
+    let elapsed_ms = elapsed.as_millis();
+    match outcome {
+        Ok(result) => {
+            let profile = |video: &VideoSettings| {
+                format!(
+                    "{}x{}@{} {}kbps",
+                    video.width, video.height, video.fps, video.bitrate_kbps
+                )
+            };
+            let roles = result
+                .output_roles
+                .iter()
+                .map(|role| match role {
+                    StreamOutputTopologyRole::Shared => "shared",
+                    StreamOutputTopologyRole::Recording => "recording",
+                    StreamOutputTopologyRole::Stream => "stream",
+                })
+                .collect::<Vec<_>>()
+                .join("+");
+            format!(
+                "Livestream output check finished in {elapsed_ms}ms: roles={roles} stream={}{} path={} encoder={} probe={}{}",
+                profile(&result.stream_profile),
+                result
+                    .recording_profile
+                    .as_ref()
+                    .map(|recording| format!(" recording={}", profile(recording)))
+                    .unwrap_or_default(),
+                match result.effective_bridge_output {
+                    StreamOutputBridge::RawYuv420p => "raw-yuv420p",
+                    StreamOutputBridge::VideoToolboxH264AnnexB => "videotoolbox-h264-annexb",
+                    StreamOutputBridge::VideoToolboxH264MpegTs => "videotoolbox-h264-mpegts",
+                    StreamOutputBridge::WindowsMediaFoundationH264MpegTs => {
+                        "windows-media-foundation-h264-mpegts"
+                    }
+                },
+                encode_backend_label(Some(result.effective_encode_backend)),
+                match result.probe_state {
+                    StreamOutputTopologyProbeState::NotRequired => "not-required",
+                    StreamOutputTopologyProbeState::Passed => "passed",
+                    StreamOutputTopologyProbeState::Rejected => "rejected",
+                    StreamOutputTopologyProbeState::Unsupported => "unsupported",
+                },
+                result
+                    .fallback_reason
+                    .as_deref()
+                    .map(|reason| format!(" reason={reason}"))
+                    .unwrap_or_default(),
+            )
+        }
+        Err(error) => format!("Livestream output check failed after {elapsed_ms}ms: {error}"),
+    }
+}
+
+/// Intel's PCI vendor id inside `graphics_adapter_driver_identity` material.
+fn graphics_identity_has_intel_adapter(identity: &str) -> bool {
+    identity
+        .split('|')
+        .any(|adapter| adapter.contains(";pci=8086:"))
+}
+
+/// Quick Sync is only ever offered on Windows with an Intel adapter, the same
+/// gate OBS uses before it registers its Quick Sync encoders.
+pub(crate) fn windows_quick_sync_adapter_present() -> bool {
+    cfg!(target_os = "windows")
+        && graphics_identity_has_intel_adapter(&graphics_adapter_driver_identity())
+}
+
+/// What the Quick Sync tier decided for one raw-path session (plan 090 C).
+#[cfg(any(test, target_os = "windows"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WindowsQsvVerdict {
+    /// The preference does not ask for Quick Sync: nothing changes.
+    NotRequested,
+    NoIntelAdapter,
+    Passed(FfmpegH264Platform),
+    Rejected(String),
+}
+
+/// The raw-path encoder a verdict selects, or `None` to leave the decision
+/// as the pre-090 OpenH264 fallback.
+#[cfg(any(test, target_os = "windows"))]
+fn select_windows_raw_path_encoder(
+    verdict: &WindowsQsvVerdict,
+) -> Option<ResolvedFfmpegH264Encoder> {
+    let software = |reason: String| {
+        let mut encoder =
+            ResolvedFfmpegH264Encoder::for_platform(FfmpegH264Platform::WindowsSoftware);
+        encoder.fallback_reason = Some(reason);
+        encoder
+    };
+    match verdict {
+        WindowsQsvVerdict::NotRequested => None,
+        WindowsQsvVerdict::NoIntelAdapter => Some(software(
+            "Intel Quick Sync was selected, but this PC has no Intel graphics adapter; using the OpenH264 software encoder."
+                .to_string(),
+        )),
+        WindowsQsvVerdict::Passed(platform) => {
+            Some(ResolvedFfmpegH264Encoder::for_platform(*platform))
+        }
+        WindowsQsvVerdict::Rejected(reason) => Some(software(format!(
+            "Intel Quick Sync was selected but its check failed ({reason}); using the OpenH264 software encoder."
+        ))),
+    }
+}
+
+/// Only the raw path is FFmpeg-encoded. A session on the Media Foundation
+/// bridge never reaches Quick Sync, whatever the preference says.
+#[cfg(any(test, target_os = "windows"))]
+fn apply_windows_raw_path_encoder(
+    decision: &mut WindowsEncodedBridgeDecision,
+    verdict: &WindowsQsvVerdict,
+) {
+    if decision.effective != EncoderBridgeVideoOutput::RawYuv420p {
+        return;
+    }
+    let Some(encoder) = select_windows_raw_path_encoder(verdict) else {
+        return;
+    };
+    decision.effective_encode_backend = encoder.backend();
+    decision.encoder_selection_fallback_reason = encoder.fallback_reason.clone();
+    decision.fallback_ffmpeg_encoder = encoder;
+}
+
+/// Hard limit for one Quick Sync probe process. OBS kills its own Quick Sync
+/// test process after 10 s for the same reason: a driver that hangs must
+/// read as "not available", never hang the app.
+#[cfg(target_os = "windows")]
+const WINDOWS_QSV_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Two seconds of frames at 30 fps: enough for the encoder to initialise,
+/// run its rate control and flush, which three frames do not prove.
+#[cfg(any(test, target_os = "windows"))]
+const WINDOWS_QSV_PROBE_FRAMES: u32 = 60;
+
+/// The session's own H.264 arguments for the Quick Sync platform at the
+/// session's profile, through the same record+stream tee shape the Media
+/// Foundation probe uses. This proves the encoder starts with these exact
+/// settings; whether it keeps up in real time is the performance check's job.
+#[cfg(any(test, target_os = "windows"))]
+fn windows_qsv_probe_args(video: &VideoSettings, platform: FfmpegH264Platform) -> Vec<String> {
+    let mut args = vec![
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-f".to_string(),
+        "lavfi".to_string(),
+        "-i".to_string(),
+        format!(
+            "color=c=black:s={}x{}:r={}",
+            video.width.max(1),
+            video.height.max(1),
+            video.fps.max(1)
+        ),
+        "-frames:v".to_string(),
+        WINDOWS_QSV_PROBE_FRAMES.to_string(),
+        "-an".to_string(),
+    ];
+    append_h264_encoding_args_for_platform(
+        &mut args,
+        video,
+        platform,
+        true,
+        LinuxVaapiArgProfile::Standard,
+        false,
+    );
+    let null_device = if cfg!(target_os = "windows") {
+        "NUL"
+    } else {
+        "/dev/null"
+    };
+    args.extend(tee_output_args(format!(
+        "[f=matroska:onfail=abort]{null_device}|[f=flv:onfail=ignore:flvflags=no_duration_filesize]{null_device}"
+    )));
+    args
+}
+
+/// Runs one probe process to completion or kills it at the deadline.
+#[cfg(any(test, target_os = "windows"))]
+async fn run_windows_qsv_probe(
+    ffmpeg_path: &str,
+    args: &[String],
+    deadline: Duration,
+) -> std::result::Result<(), String> {
+    let mut command = Command::new(ffmpeg_path);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        // Dropping the timed-out future kills and reaps the owned child.
+        .kill_on_drop(true);
+    match timeout(deadline, command.output()).await {
+        Err(_) => Err(format!(
+            "the encoder did not answer within {} s",
+            deadline.as_secs()
+        )),
+        Ok(Err(error)) => Err(format!("FFmpeg could not start: {error}")),
+        Ok(Ok(output)) if output.status.success() => Ok(()),
+        Ok(Ok(output)) => Err(bounded_stream_output_topology_fallback_reason(&format!(
+            "{}: {}",
+            match output.status.code() {
+                Some(code) => format!("exit code {code}"),
+                None => "terminated".to_string(),
+            },
+            String::from_utf8_lossy(&output.stderr)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        ))),
+    }
+}
+
+/// The driver's default first, then once more with low-power off. The
+/// session encodes with exactly the step that passed.
+#[cfg(any(test, target_os = "windows"))]
+const WINDOWS_QSV_LADDER: [FfmpegH264Platform; 2] = [
+    FfmpegH264Platform::WindowsQsv,
+    FfmpegH264Platform::WindowsQsvStandardPower,
+];
+
+#[cfg(any(test, target_os = "windows"))]
+async fn walk_windows_qsv_ladder<Probe, Outcome>(
+    mut probe: Probe,
+) -> std::result::Result<FfmpegH264Platform, String>
+where
+    Probe: FnMut(FfmpegH264Platform) -> Outcome,
+    Outcome: std::future::Future<Output = std::result::Result<(), String>>,
+{
+    let mut rejections = Vec::new();
+    for platform in WINDOWS_QSV_LADDER {
+        match probe(platform).await {
+            Ok(()) => return Ok(platform),
+            Err(reason) => rejections.push(format!(
+                "{}: {reason}",
+                if platform == FfmpegH264Platform::WindowsQsv {
+                    "default"
+                } else {
+                    "low-power off"
+                }
+            )),
+        }
+    }
+    Err(rejections.join("; "))
+}
+
+/// One Quick Sync decision per backend lifetime per FFmpeg binary, adapter +
+/// driver and profile: the topology probe RPC and session start both resolve
+/// through here, and a rejecting PC must not pay for the ladder twice.
+#[cfg(target_os = "windows")]
+static WINDOWS_QSV_DECISIONS: std::sync::OnceLock<
+    StdMutex<std::collections::HashMap<String, std::result::Result<FfmpegH264Platform, String>>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "windows")]
+async fn windows_qsv_verdict(
+    ffmpeg_path: &str,
+    video: &VideoSettings,
+    graphics_adapter_driver_identity: &str,
+) -> WindowsQsvVerdict {
+    if windows_h264_encoder_preference().0 != WindowsH264EncoderPreference::QuickSync {
+        return WindowsQsvVerdict::NotRequested;
+    }
+    if !graphics_identity_has_intel_adapter(graphics_adapter_driver_identity) {
+        return WindowsQsvVerdict::NoIntelAdapter;
+    }
+    let probe_key = windows_media_foundation_probe_key(ffmpeg_path, video);
+    let key = format!("{probe_key:?}|{graphics_adapter_driver_identity}");
+    let decisions = WINDOWS_QSV_DECISIONS.get_or_init(|| StdMutex::new(Default::default()));
+    let cached = decisions
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&key).cloned());
+    let resolved = match cached {
+        Some(resolved) => resolved,
+        None => {
+            let started = Instant::now();
+            let resolved =
+                walk_windows_qsv_ladder(|platform| {
+                    let args = windows_qsv_probe_args(video, platform);
+                    async move {
+                        run_windows_qsv_probe(ffmpeg_path, &args, WINDOWS_QSV_PROBE_TIMEOUT).await
+                    }
+                })
+                .await;
+            tracing::info!(
+                "Quick Sync probe for {}x{}@{} {}kbps finished in {}ms: {}",
+                video.width,
+                video.height,
+                video.fps,
+                video.bitrate_kbps,
+                started.elapsed().as_millis(),
+                match &resolved {
+                    Ok(FfmpegH264Platform::WindowsQsvStandardPower) =>
+                        "passed with low-power off".to_string(),
+                    Ok(_) => "passed".to_string(),
+                    Err(reason) => format!("rejected ({reason})"),
+                }
+            );
+            if let Ok(mut cache) = decisions.lock() {
+                cache.insert(key, resolved.clone());
+            }
+            resolved
+        }
+    };
+    match resolved {
+        Ok(platform) => WindowsQsvVerdict::Passed(platform),
+        Err(reason) => WindowsQsvVerdict::Rejected(reason),
+    }
+}
 
 /// The real-args VAAPI probe (Plan 052): the session's own H.264 arguments
 /// for the VAAPI platform at the acceptance profile, fed through the bridge's
@@ -12855,6 +13272,25 @@ fn append_h264_encoding_args_for_platform_with_timing(
                 "1".to_string(),
             ]);
         }
+        FfmpegH264Platform::WindowsQsv | FfmpegH264Platform::WindowsQsvStandardPower => {
+            // Starts from OBS's Quick Sync defaults (plugins/obs-qsv11):
+            // balanced target usage and an async depth of 4. Rate control is
+            // CBR because the shared tail below pins -b:v == -maxrate with a
+            // 2x buffer, which is what OBS uses too. No B-frames is our own
+            // choice (OBS defaults to 3): the raw path's `-shortest` audio
+            // sync and the provider GOP rules assume none, as on VAAPI.
+            args.extend([
+                "-preset".to_string(),
+                "medium".to_string(),
+                "-async_depth".to_string(),
+                "4".to_string(),
+                "-bf".to_string(),
+                "0".to_string(),
+            ]);
+            if platform == FfmpegH264Platform::WindowsQsvStandardPower {
+                args.extend(["-low_power".to_string(), "0".to_string()]);
+            }
+        }
     }
     // Spec-valid High profile/level (the recording-quality audit caught the
     // encoders' auto picks under-leveling 60fps streams). Media Foundation
@@ -12905,11 +13341,16 @@ fn append_h264_encoding_args_for_platform_with_timing(
     // the VUI itself; h264_vaapi on the bundled FFmpeg does NOT carry
     // primaries/transfer from the context options (Plan 0002, run 04 proves
     // the bsf alone fixes the tags), so the VAAPI arm rewrites too.
+    // h264_qsv is rewritten too: whether a given Intel driver writes the VUI
+    // from the context options is not something we can check without the
+    // hardware, and the rewrite is a no-op when it already did.
     if matches!(
         platform,
         FfmpegH264Platform::LinuxSoftware
             | FfmpegH264Platform::WindowsSoftware
             | FfmpegH264Platform::LinuxVaapi
+            | FfmpegH264Platform::WindowsQsv
+            | FfmpegH264Platform::WindowsQsvStandardPower
     ) {
         args.extend(h264_bt709_vui_rewrite_bsf_args());
     }
@@ -12994,6 +13435,7 @@ fn encode_backend_label(backend: Option<EncodeBackend>) -> &'static str {
         Some(EncodeBackend::HardwareMediaFoundation) => "hardware-media-foundation",
         Some(EncodeBackend::SoftwareMediaFoundation) => "software-media-foundation",
         Some(EncodeBackend::SoftwareOpenH264) => "software-open-h264",
+        Some(EncodeBackend::HardwareQsv) => "hardware-qsv",
         Some(EncodeBackend::SoftwareX264) => "software-x264",
         None => "unknown",
     }
@@ -14372,7 +14814,12 @@ async fn resolve_windows_recordable_video(
     let requested = params.output.video.clone();
     let identity = graphics_adapter_driver_identity();
     let key = (
-        identity.clone(),
+        // A verdict measured under one encoder preference must not answer
+        // for another: Quick Sync changes what "no usable GPU encoder" means.
+        format!(
+            "{identity}|h264={}",
+            windows_h264_encoder_preference_label(windows_h264_encoder_preference().0)
+        ),
         ffmpeg_path.to_string(),
         requested.width,
         requested.height,
@@ -14383,6 +14830,22 @@ async fn resolve_windows_recordable_video(
         .get_or_init(|| StdMutex::new(std::collections::HashMap::new()));
     if let Some(cached) = cache.lock().ok().and_then(|cache| cache.get(&key).cloned()) {
         return Some(cached);
+    }
+
+    // A passing Quick Sync tier encodes the requested canvas on the GPU, so
+    // the software cap below does not apply to it.
+    if matches!(
+        windows_qsv_verdict(ffmpeg_path, &requested, &identity).await,
+        WindowsQsvVerdict::Passed(_)
+    ) {
+        let selected = WindowsRecordableVideo {
+            video: requested,
+            reason: None,
+        };
+        if let Ok(mut cache) = cache.lock() {
+            cache.insert(key, selected.clone());
+        }
+        return Some(selected);
     }
 
     // The selector is synchronous; run the async topology probe per candidate
@@ -14458,6 +14921,20 @@ async fn resolve_windows_encoded_bridge_decision(
     );
     decision.encoder_selection_fallback_reason = resolved_encoder.fallback_reason.clone();
     decision.fallback_ffmpeg_encoder = resolved_encoder;
+    // Quick Sync is a tier of the raw path only, tried after the Media
+    // Foundation decision so a PC whose bridge works never probes it.
+    #[cfg(target_os = "windows")]
+    if decision.effective == EncoderBridgeVideoOutput::RawYuv420p
+        && let Some(profile) = plan.profiles.first()
+    {
+        let verdict = windows_qsv_verdict(
+            ffmpeg_path,
+            &profile.video,
+            &graphics_adapter_driver_identity,
+        )
+        .await;
+        apply_windows_raw_path_encoder(&mut decision, &verdict);
+    }
     Ok(decision)
 }
 
@@ -14536,10 +15013,27 @@ pub async fn probe_stream_output_topology(
         effective_bridge_output: stream_output_bridge(decision.effective),
         effective_encode_backend: decision.effective_encode_backend,
         probe_state: decision.probe_state,
-        fallback_reason: decision
-            .fallback_reason
-            .or(decision.encoder_selection_fallback_reason),
+        fallback_reason: combined_output_fallback_reason(
+            decision.fallback_reason,
+            decision.encoder_selection_fallback_reason,
+        ),
     })
+}
+
+/// Why the session is not on its requested path. When the bridge was rejected
+/// AND the chosen raw-path encoder also fell back (Quick Sync asked for, its
+/// check failed), both are reported, encoder first so the bound keeps it:
+/// "why am I on software after choosing Quick Sync" is the question asked.
+fn combined_output_fallback_reason(
+    bridge: Option<String>,
+    encoder_selection: Option<String>,
+) -> Option<String> {
+    match (bridge, encoder_selection) {
+        (Some(bridge), Some(encoder)) => Some(bounded_stream_output_topology_fallback_reason(
+            &format!("{encoder} {bridge}"),
+        )),
+        (bridge, encoder) => bridge.or(encoder),
+    }
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -14625,6 +15119,76 @@ impl MediaFoundationProbeRejections {
     }
 }
 
+/// One overall limit for the blocking Media Foundation hardware probe (plan
+/// 090 B1). Its stages have their own event timeouts, but a COM call into a
+/// broken driver can block outside all of them, and the renderer's output
+/// check then never gets an answer. Above the slowest full ladder measured
+/// on a rejecting PC (about 20 s on a UHD 600).
+#[cfg(target_os = "windows")]
+const WINDOWS_MF_HARDWARE_PROBE_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Probe threads that outlived their deadline and are still inside the
+/// driver. They cannot be cancelled, so new probes are refused while one is
+/// stuck instead of stacking another blocked thread per click.
+#[cfg(target_os = "windows")]
+static WINDOWS_MF_WEDGED_PROBES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(any(test, target_os = "windows"))]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Debug)]
+enum BlockingProbeOutcome<T> {
+    Finished(T),
+    /// The probe is still running after the deadline; it has been abandoned.
+    TimedOut,
+    /// An earlier abandoned probe is still running; this one never started.
+    Refused,
+    Panicked(String),
+}
+
+/// Runs a blocking probe on the blocking pool with a deadline it cannot
+/// overrun from the caller's point of view. `wedged` counts abandoned probes
+/// until their thread finally returns.
+#[cfg(any(test, target_os = "windows"))]
+async fn blocking_probe_with_deadline<T, Probe>(
+    wedged: &'static std::sync::atomic::AtomicUsize,
+    deadline: Duration,
+    probe: Probe,
+) -> BlockingProbeOutcome<T>
+where
+    T: Send + 'static,
+    Probe: FnOnce() -> T + Send + 'static,
+{
+    const RUNNING: u8 = 0;
+    const FINISHED: u8 = 1;
+    const ABANDONED: u8 = 2;
+    if wedged.load(Ordering::Acquire) > 0 {
+        return BlockingProbeOutcome::Refused;
+    }
+    let phase = Arc::new(std::sync::atomic::AtomicU8::new(RUNNING));
+    let probe_phase = phase.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let result = probe();
+        if probe_phase.swap(FINISHED, Ordering::AcqRel) == ABANDONED {
+            wedged.fetch_sub(1, Ordering::AcqRel);
+        }
+        result
+    });
+    match timeout(deadline, task).await {
+        Ok(Ok(result)) => BlockingProbeOutcome::Finished(result),
+        Ok(Err(error)) => BlockingProbeOutcome::Panicked(error.to_string()),
+        Err(_) => {
+            if phase
+                .compare_exchange(RUNNING, ABANDONED, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                wedged.fetch_add(1, Ordering::AcqRel);
+            }
+            BlockingProbeOutcome::TimedOut
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 static WINDOWS_MF_PROBE_REJECTIONS: std::sync::OnceLock<StdMutex<MediaFoundationProbeRejections>> =
     std::sync::OnceLock::new();
@@ -14666,16 +15230,40 @@ async fn probe_windows_native_encoded_bridge(
     {
         bail!("{reason} (remembered from an earlier probe)");
     }
-    let probe = match tokio::task::spawn_blocking(move || probe_hardware_encoder(config))
-        .await
-        .context("Media Foundation hardware probe thread panicked")?
+    let probe = match blocking_probe_with_deadline(
+        &WINDOWS_MF_WEDGED_PROBES,
+        WINDOWS_MF_HARDWARE_PROBE_DEADLINE,
+        move || probe_hardware_encoder(config),
+    )
+    .await
     {
-        Ok(probe) => probe,
-        Err(error) => {
+        BlockingProbeOutcome::Finished(Ok(probe)) => probe,
+        BlockingProbeOutcome::Finished(Err(error)) => {
             if let Ok(mut cache) = rejections.lock() {
                 cache.insert(rejection_key, format!("{error:#}"), Instant::now());
             }
             return Err(error);
+        }
+        BlockingProbeOutcome::Panicked(error) => {
+            bail!("Media Foundation hardware probe thread panicked: {error}");
+        }
+        // Both are remembered like any other rejection, so session start
+        // takes the fallback encoder instead of waiting on the driver again.
+        outcome @ (BlockingProbeOutcome::TimedOut | BlockingProbeOutcome::Refused) => {
+            let reason = if matches!(outcome, BlockingProbeOutcome::TimedOut) {
+                format!(
+                    "Media Foundation hardware probe stage=deadline: the GPU encoder did not answer within {} s",
+                    WINDOWS_MF_HARDWARE_PROBE_DEADLINE.as_secs()
+                )
+            } else {
+                "Media Foundation hardware probe stage=deadline: an earlier GPU encoder check is still stuck in the driver"
+                    .to_string()
+            };
+            tracing::warn!("{reason}");
+            if let Ok(mut cache) = rejections.lock() {
+                cache.insert(rejection_key, reason.clone(), Instant::now());
+            }
+            bail!("{reason}");
         }
     };
     let key = windows_native_encoded_probe_key(
@@ -16973,7 +17561,10 @@ fn bridge_recording_video_filter_for_encoder(
         // Stamp the frames too, so the software encoder's input carries the
         // same BT.709 video-range facts the output tags and the VUI rewrite
         // claim (the legacy composed graph does the same via setparams).
-        FfmpegH264Platform::LinuxSoftware | FfmpegH264Platform::WindowsSoftware => {
+        FfmpegH264Platform::LinuxSoftware
+        | FfmpegH264Platform::WindowsSoftware
+        | FfmpegH264Platform::WindowsQsv
+        | FfmpegH264Platform::WindowsQsvStandardPower => {
             ",setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"
         }
         _ => "",
@@ -20021,6 +20612,13 @@ fn enabled_streaming_targets(params: &StartSessionParams) -> Vec<&StreamTargetSe
 
 fn video_preset_defaults(preset: VideoPreset) -> VideoSettings {
     match preset {
+        VideoPreset::Tutorial540p30 => VideoSettings {
+            preset,
+            width: 960,
+            height: 540,
+            fps: 30,
+            bitrate_kbps: 2500,
+        },
         VideoPreset::Tutorial720p30 => VideoSettings {
             preset,
             width: 1280,
@@ -22962,6 +23560,502 @@ mod tests {
             reason.len(),
             STREAM_OUTPUT_TOPOLOGY_FALLBACK_REASON_MAX_BYTES
         );
+    }
+
+    fn qsv_test_video() -> VideoSettings {
+        VideoSettings {
+            preset: VideoPreset::StreamSafe1080p30,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6_000,
+        }
+    }
+
+    fn rejected_media_foundation_decision() -> WindowsEncodedBridgeDecision {
+        select_windows_encoded_bridge_decision(
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            "stream-output-topology-v1:test".to_string(),
+            Some(MediaFoundationTopologyProbe::Rejected {
+                reason: "stage=process-output HRESULT=0x8000FFFF".to_string(),
+            }),
+            EncodeBackend::SoftwareOpenH264,
+        )
+    }
+
+    #[test]
+    fn windows_h264_encoder_preference_parses_known_values_and_refuses_typos() {
+        assert_eq!(parse_windows_h264_encoder_preference(None), Ok(None));
+        assert_eq!(parse_windows_h264_encoder_preference(Some("  ")), Ok(None));
+        assert_eq!(
+            parse_windows_h264_encoder_preference(Some("auto")),
+            Ok(Some(WindowsH264EncoderPreference::Auto))
+        );
+        for value in ["quick-sync", "qsv", " qsv "] {
+            assert_eq!(
+                parse_windows_h264_encoder_preference(Some(value)),
+                Ok(Some(WindowsH264EncoderPreference::QuickSync)),
+                "{value}"
+            );
+        }
+        for value in ["software", "openh264"] {
+            assert_eq!(
+                parse_windows_h264_encoder_preference(Some(value)),
+                Ok(Some(WindowsH264EncoderPreference::Software)),
+                "{value}"
+            );
+        }
+        let error = parse_windows_h264_encoder_preference(Some("quicksync")).unwrap_err();
+        assert!(error.contains(WINDOWS_H264_ENCODER_ENV), "{error}");
+        assert!(error.contains("quicksync"), "{error}");
+    }
+
+    #[test]
+    fn quick_sync_is_only_offered_for_an_intel_adapter() {
+        let material = |vendor_id: u32| {
+            windows_graphics_adapter_driver_identity_material(vec![
+                WindowsGraphicsAdapterDriverIdentity {
+                    adapter_luid: 0xcbb5,
+                    vendor_id,
+                    device_id: 0x3185,
+                    subsystem_id: 0,
+                    revision: 3,
+                    driver_version: 1,
+                },
+            ])
+            .unwrap()
+        };
+        assert!(graphics_identity_has_intel_adapter(&material(0x8086)));
+        assert!(!graphics_identity_has_intel_adapter(&material(0x10de)));
+        assert!(!graphics_identity_has_intel_adapter(&material(0x1002)));
+        // A device id of 8086 on another vendor's adapter is not an Intel GPU.
+        assert!(!graphics_identity_has_intel_adapter(
+            "luid=0000000000000001;pci=10de:8086:00000000:00;d3d11-driver=0000000000000001"
+        ));
+        assert!(!graphics_identity_has_intel_adapter(
+            "platform=macos;windows-adapter-driver=not-applicable"
+        ));
+    }
+
+    #[test]
+    fn quick_sync_arguments_follow_the_obs_defaults_without_b_frames() {
+        let video = qsv_test_video();
+        let args_for = |platform| {
+            let mut args = Vec::new();
+            append_h264_encoding_args_for_platform(
+                &mut args,
+                &video,
+                platform,
+                true,
+                LinuxVaapiArgProfile::Standard,
+                false,
+            );
+            args
+        };
+
+        let default = args_for(FfmpegH264Platform::WindowsQsv);
+        assert_eq!(arg_value(&default, "-c:v"), Some("h264_qsv"));
+        assert_eq!(arg_value(&default, "-pix_fmt"), Some("nv12"));
+        assert_eq!(arg_value(&default, "-preset"), Some("medium"));
+        assert_eq!(arg_value(&default, "-async_depth"), Some("4"));
+        assert_eq!(arg_value(&default, "-bf"), Some("0"));
+        // CBR: target and max are the same rate with a 2x buffer.
+        assert_eq!(arg_value(&default, "-b:v"), Some("6000k"));
+        assert_eq!(arg_value(&default, "-maxrate"), Some("6000k"));
+        assert_eq!(arg_value(&default, "-bufsize"), Some("12000k"));
+        assert_eq!(arg_value(&default, "-g"), Some("60"));
+        // The driver picks low-power itself on the first rung.
+        assert_eq!(arg_value(&default, "-low_power"), None);
+        assert!(
+            arg_value(&default, "-bsf:v").is_some_and(|bsf| bsf.starts_with("h264_metadata=")),
+            "{default:?}"
+        );
+        // OpenH264-only options must never reach Quick Sync.
+        assert_eq!(arg_value(&default, "-rc_mode"), None);
+        assert_eq!(arg_value(&default, "-allow_skip_frames"), None);
+
+        let standard_power = args_for(FfmpegH264Platform::WindowsQsvStandardPower);
+        assert_eq!(arg_value(&standard_power, "-low_power"), Some("0"));
+        assert_eq!(arg_value(&standard_power, "-c:v"), Some("h264_qsv"));
+
+        assert_eq!(
+            ffmpeg_h264_encoder(FfmpegH264Platform::WindowsQsv).backend,
+            EncodeBackend::HardwareQsv
+        );
+        assert_eq!(
+            encode_backend_label(Some(EncodeBackend::HardwareQsv)),
+            "hardware-qsv"
+        );
+    }
+
+    #[test]
+    fn quick_sync_probe_uses_the_session_arguments_at_the_session_profile() {
+        let video = qsv_test_video();
+        let args = windows_qsv_probe_args(&video, FfmpegH264Platform::WindowsQsvStandardPower);
+        assert_eq!(
+            arg_value(&args, "-i"),
+            Some("color=c=black:s=1920x1080:r=30")
+        );
+        assert_eq!(
+            arg_value(&args, "-frames:v"),
+            Some(WINDOWS_QSV_PROBE_FRAMES.to_string().as_str())
+        );
+        assert_eq!(arg_value(&args, "-c:v"), Some("h264_qsv"));
+        assert_eq!(arg_value(&args, "-low_power"), Some("0"));
+        assert_eq!(arg_value(&args, "-f"), Some("lavfi"));
+        assert!(
+            args.iter().any(|arg| arg.contains("f=matroska")),
+            "{args:?}"
+        );
+        assert!(args.iter().any(|arg| arg.contains("f=flv")), "{args:?}");
+    }
+
+    #[tokio::test]
+    async fn quick_sync_ladder_retries_once_with_low_power_off() {
+        let attempts = std::cell::RefCell::new(Vec::new());
+        let passed_first = walk_windows_qsv_ladder(|platform| {
+            attempts.borrow_mut().push(platform);
+            async { Ok(()) }
+        })
+        .await;
+        assert_eq!(passed_first, Ok(FfmpegH264Platform::WindowsQsv));
+        assert_eq!(*attempts.borrow(), vec![FfmpegH264Platform::WindowsQsv]);
+
+        attempts.borrow_mut().clear();
+        let passed_second = walk_windows_qsv_ladder(|platform| {
+            attempts.borrow_mut().push(platform);
+            async move {
+                if platform == FfmpegH264Platform::WindowsQsv {
+                    Err("unsupported".to_string())
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+        assert_eq!(
+            passed_second,
+            Ok(FfmpegH264Platform::WindowsQsvStandardPower)
+        );
+        assert_eq!(attempts.borrow().len(), 2);
+
+        let rejected = walk_windows_qsv_ladder(|_| async { Err("no runtime".to_string()) }).await;
+        let reason = rejected.unwrap_err();
+        assert!(reason.contains("default: no runtime"), "{reason}");
+        assert!(reason.contains("low-power off: no runtime"), "{reason}");
+    }
+
+    #[cfg(unix)]
+    struct TempProbeDirectory(PathBuf);
+
+    #[cfg(unix)]
+    impl TempProbeDirectory {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("videorc-qsv-probe-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for TempProbeDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(unix)]
+    fn fake_ffmpeg(directory: &Path, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = directory.join("fake-ffmpeg");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn quick_sync_probe_reports_pass_failure_and_kills_a_hung_encoder() {
+        let directory = TempProbeDirectory::new();
+        let args = vec!["-hide_banner".to_string()];
+
+        let passing = fake_ffmpeg(directory.path(), "exit 0");
+        assert_eq!(
+            run_windows_qsv_probe(&passing, &args, Duration::from_secs(5)).await,
+            Ok(())
+        );
+
+        let failing = fake_ffmpeg(
+            directory.path(),
+            "echo 'Error creating a MFX session: -9.' >&2\nexit 187",
+        );
+        let reason = run_windows_qsv_probe(&failing, &args, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(reason.contains("exit code 187"), "{reason}");
+        assert!(reason.contains("MFX session"), "{reason}");
+        assert!(!reason.contains('\n'), "{reason}");
+
+        // A driver that never answers reads as unavailable within the
+        // deadline; `exec` makes the sleeping process the owned child, so
+        // dropping the timed-out future kills it rather than a wrapper.
+        let hanging = fake_ffmpeg(directory.path(), "exec sleep 600");
+        let started = Instant::now();
+        let reason = run_windows_qsv_probe(&hanging, &args, Duration::from_millis(200))
+            .await
+            .unwrap_err();
+        assert!(reason.contains("did not answer"), "{reason}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        let missing = directory.path().join("no-such-ffmpeg");
+        let reason =
+            run_windows_qsv_probe(&missing.to_string_lossy(), &args, Duration::from_secs(5))
+                .await
+                .unwrap_err();
+        assert!(reason.contains("could not start"), "{reason}");
+    }
+
+    #[test]
+    fn quick_sync_is_a_tier_of_the_raw_path_only() {
+        // Media Foundation rejected, Quick Sync passed: the raw path encodes
+        // on the Intel chip and diagnostics say so.
+        let mut decision = rejected_media_foundation_decision();
+        apply_windows_raw_path_encoder(
+            &mut decision,
+            &WindowsQsvVerdict::Passed(FfmpegH264Platform::WindowsQsvStandardPower),
+        );
+        assert_eq!(decision.effective, EncoderBridgeVideoOutput::RawYuv420p);
+        assert_eq!(
+            decision.effective_encode_backend,
+            EncodeBackend::HardwareQsv
+        );
+        assert_eq!(
+            decision.fallback_ffmpeg_encoder.platform,
+            FfmpegH264Platform::WindowsQsvStandardPower
+        );
+        assert_eq!(decision.encoder_selection_fallback_reason, None);
+        // The Media Foundation rejection stays on record.
+        assert!(decision.fallback_reason.is_some());
+
+        // Preference not asking for it: today's OpenH264 fallback, untouched.
+        let mut untouched = rejected_media_foundation_decision();
+        apply_windows_raw_path_encoder(&mut untouched, &WindowsQsvVerdict::NotRequested);
+        assert_eq!(
+            untouched.effective_encode_backend,
+            EncodeBackend::SoftwareOpenH264
+        );
+        assert_eq!(
+            untouched.fallback_ffmpeg_encoder.platform,
+            FfmpegH264Platform::WindowsSoftware
+        );
+        assert_eq!(untouched.encoder_selection_fallback_reason, None);
+
+        // Asked for but rejected, or no Intel adapter: software, with the
+        // reason kept for diagnostics.
+        for (verdict, expected) in [
+            (
+                WindowsQsvVerdict::Rejected("default: exit code 187".to_string()),
+                "exit code 187",
+            ),
+            (
+                WindowsQsvVerdict::NoIntelAdapter,
+                "no Intel graphics adapter",
+            ),
+        ] {
+            let mut decision = rejected_media_foundation_decision();
+            apply_windows_raw_path_encoder(&mut decision, &verdict);
+            assert_eq!(
+                decision.effective_encode_backend,
+                EncodeBackend::SoftwareOpenH264
+            );
+            assert_eq!(
+                decision.fallback_ffmpeg_encoder.platform,
+                FfmpegH264Platform::WindowsSoftware
+            );
+            let reason = decision.encoder_selection_fallback_reason.unwrap();
+            assert!(reason.contains(expected), "{reason}");
+            assert!(reason.contains("OpenH264"), "{reason}");
+        }
+
+        // A working Media Foundation bridge never reaches Quick Sync.
+        let mut hardware = select_windows_encoded_bridge_decision(
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            "stream-output-topology-v1:test".to_string(),
+            Some(MediaFoundationTopologyProbe::Passed {
+                encoder_identity: "hardware-encoder".to_string(),
+                input_subtype: "NV12".to_string(),
+                bitrate_overrides: WindowsEncodedBridgeBitrateOverrides::default(),
+            }),
+            EncodeBackend::SoftwareOpenH264,
+        );
+        apply_windows_raw_path_encoder(
+            &mut hardware,
+            &WindowsQsvVerdict::Passed(FfmpegH264Platform::WindowsQsv),
+        );
+        assert_eq!(
+            hardware.effective,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+        );
+        assert_eq!(
+            hardware.effective_encode_backend,
+            EncodeBackend::HardwareMediaFoundation
+        );
+        assert_eq!(
+            hardware.fallback_ffmpeg_encoder.platform,
+            FfmpegH264Platform::WindowsSoftware
+        );
+    }
+
+    #[test]
+    fn output_check_log_line_names_duration_roles_and_verdict() {
+        let video = qsv_test_video();
+        let result = StreamOutputTopologyProbeResult {
+            capability_key: "stream-output-topology-v1:test".to_string(),
+            stream_profile: video.clone(),
+            recording_profile: Some(video),
+            output_roles: vec![
+                StreamOutputTopologyRole::Recording,
+                StreamOutputTopologyRole::Stream,
+            ],
+            requested_bridge_output: StreamOutputBridge::WindowsMediaFoundationH264MpegTs,
+            effective_bridge_output: StreamOutputBridge::RawYuv420p,
+            effective_encode_backend: EncodeBackend::HardwareQsv,
+            probe_state: StreamOutputTopologyProbeState::Rejected,
+            fallback_reason: Some("stage=process-output HRESULT=0x8000FFFF".to_string()),
+        };
+        let line = stream_output_topology_probe_log_line(
+            std::time::Duration::from_millis(18_250),
+            Ok(&result),
+        );
+        for expected in [
+            "finished in 18250ms",
+            "roles=recording+stream",
+            "stream=1920x1080@30 6000kbps",
+            "recording=1920x1080@30 6000kbps",
+            "path=raw-yuv420p",
+            "encoder=hardware-qsv",
+            "probe=rejected",
+            "reason=stage=process-output HRESULT=0x8000FFFF",
+        ] {
+            assert!(line.contains(expected), "{expected}: {line}");
+        }
+
+        let failed = stream_output_topology_probe_log_line(
+            std::time::Duration::from_millis(40),
+            Err("H.264 encoding is unsupported on this platform".to_string()),
+        );
+        assert!(failed.contains("failed after 40ms"), "{failed}");
+        assert!(failed.contains("unsupported"), "{failed}");
+    }
+
+    #[test]
+    fn a_failed_quick_sync_choice_is_reported_beside_the_bridge_rejection() {
+        let bridge = "Media Foundation shared output probe rejected 1920x1080@30 6000kbps";
+        let encoder = "Intel Quick Sync was selected but its check failed (default: exit code 187); using the OpenH264 software encoder.";
+        let both =
+            combined_output_fallback_reason(Some(bridge.to_string()), Some(encoder.to_string()))
+                .unwrap();
+        assert!(both.starts_with("Intel Quick Sync was selected"), "{both}");
+        assert!(
+            both.contains("Media Foundation shared output probe"),
+            "{both}"
+        );
+        assert!(both.len() <= STREAM_OUTPUT_TOPOLOGY_FALLBACK_REASON_MAX_BYTES);
+
+        // The encoder reason survives the bound even behind a long rejection.
+        let long =
+            combined_output_fallback_reason(Some("x".repeat(2_000)), Some(encoder.to_string()))
+                .unwrap();
+        assert!(long.contains("exit code 187"), "{long}");
+        assert!(long.len() <= STREAM_OUTPUT_TOPOLOGY_FALLBACK_REASON_MAX_BYTES);
+
+        assert_eq!(
+            combined_output_fallback_reason(Some(bridge.to_string()), None).as_deref(),
+            Some(bridge)
+        );
+        assert_eq!(
+            combined_output_fallback_reason(None, Some(encoder.to_string())).as_deref(),
+            Some(encoder)
+        );
+        assert_eq!(combined_output_fallback_reason(None, None), None);
+    }
+
+    #[test]
+    fn raw_path_stop_drain_applies_to_every_ffmpeg_encoded_windows_session() {
+        for encoder in [
+            FfmpegH264Platform::WindowsSoftware,
+            FfmpegH264Platform::WindowsQsv,
+            FfmpegH264Platform::WindowsQsvStandardPower,
+        ] {
+            assert!(
+                owned_pcm_silent_drain_policy(
+                    true,
+                    EncoderBridgeVideoOutput::RawYuv420p,
+                    encoder,
+                    true,
+                    true
+                ),
+                "{encoder:?}"
+            );
+        }
+        assert!(!owned_pcm_silent_drain_policy(
+            true,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            FfmpegH264Platform::WindowsQsv,
+            true,
+            true
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_probe_deadline_abandons_a_stuck_probe_and_refuses_to_stack_another() {
+        static WEDGED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+        let finished =
+            blocking_probe_with_deadline(&WEDGED, Duration::from_secs(5), || 7_u32).await;
+        assert!(matches!(finished, BlockingProbeOutcome::Finished(7)));
+        assert_eq!(WEDGED.load(Ordering::Acquire), 0);
+
+        // A probe stuck in the driver: the caller gets an answer at the
+        // deadline while the thread stays blocked on the release channel.
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let (entered_tx, entered) = oneshot::channel::<()>();
+        let stuck = blocking_probe_with_deadline(&WEDGED, Duration::from_millis(100), move || {
+            let _ = entered_tx.send(());
+            let _ = blocked.recv();
+        })
+        .await;
+        assert!(matches!(stuck, BlockingProbeOutcome::TimedOut));
+        entered.await.expect("the stuck probe started");
+        assert_eq!(WEDGED.load(Ordering::Acquire), 1);
+
+        // A second check while the first is still stuck never starts.
+        let started = Arc::new(AtomicBool::new(false));
+        let started_flag = started.clone();
+        let refused = blocking_probe_with_deadline(&WEDGED, Duration::from_secs(5), move || {
+            started_flag.store(true, Ordering::Release);
+        })
+        .await;
+        assert!(matches!(refused, BlockingProbeOutcome::Refused));
+        assert!(!started.load(Ordering::Acquire));
+
+        // Once the driver finally returns, probing is allowed again.
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while WEDGED.load(Ordering::Acquire) != 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the abandoned probe never returned"
+            );
+            tokio::task::yield_now().await;
+        }
+        let recovered =
+            blocking_probe_with_deadline(&WEDGED, Duration::from_secs(5), || "ok").await;
+        assert!(matches!(recovered, BlockingProbeOutcome::Finished("ok")));
     }
 
     #[test]
@@ -27476,6 +28570,9 @@ mod tests {
             }
             FfmpegH264Platform::LinuxVaapi | FfmpegH264Platform::LinuxSoftware => {
                 unreachable!("test defaults never select a Linux runtime encoder")
+            }
+            FfmpegH264Platform::WindowsQsv | FfmpegH264Platform::WindowsQsvStandardPower => {
+                unreachable!("Quick Sync is only selected by its own probe, never by default")
             }
         }
     }
