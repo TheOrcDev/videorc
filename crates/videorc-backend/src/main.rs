@@ -5399,6 +5399,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         }),
 
         COMMAND_LANE_SMOKE_BLOCK_METHOD
+        | "test.youtubeQuota.forceExpiry"
+        | "test.youtubeQuota.seedAccount"
         | "noiseCleanup.start"
         | "noiseCleanup.cancel"
         | "performance.check.run"
@@ -8329,6 +8331,113 @@ async fn handle_text_message_with_role(
                         "activeGeneration": active_generation,
                     }),
                 )
+            }
+        }
+        // Plan 094 (S4): the quota-outage drill. Debug builds only, admitted
+        // through the explicit smoke RPC switch, and only while the dev-only
+        // `VIDEORC_YOUTUBE_API_BASE_URL` points YouTube at a local fake, so no
+        // seeded token or forced expiry can ever reach Google.
+        #[cfg(debug_assertions)]
+        "test.youtubeQuota.forceExpiry" => {
+            if youtube_quota::youtube_api_base_url_override().is_none() {
+                ServerResponse::error(
+                    command.id,
+                    "youtube-quota-smoke-disabled",
+                    format!(
+                        "{} must point at a local fake for the quota smoke hooks.",
+                        youtube_quota::YOUTUBE_API_BASE_URL_ENV
+                    ),
+                )
+            } else if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "The quota expiry hook does not accept parameters.",
+                )
+            } else {
+                match youtube_quota::force_expiry_for_smoke(state) {
+                    Some(previous) => ServerResponse::ok(
+                        command.id,
+                        serde_json::json!({ "forced": true, "previousPausedUntil": previous.to_rfc3339() }),
+                    ),
+                    None => ServerResponse::error(
+                        command.id,
+                        "youtube-quota-not-paused",
+                        "YouTube is not paused; nothing to expire.",
+                    ),
+                }
+            }
+        }
+        #[cfg(debug_assertions)]
+        "test.youtubeQuota.seedAccount" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct SeedParams {
+                access_token: String,
+                #[serde(default)]
+                account_id: Option<String>,
+                #[serde(default)]
+                account_label: Option<String>,
+            }
+            if youtube_quota::youtube_api_base_url_override().is_none() {
+                ServerResponse::error(
+                    command.id,
+                    "youtube-quota-smoke-disabled",
+                    format!(
+                        "{} must point at a local fake before a YouTube account can be seeded.",
+                        youtube_quota::YOUTUBE_API_BASE_URL_ENV
+                    ),
+                )
+            } else {
+                match serde_json::from_value::<SeedParams>(command.params) {
+                    Ok(params) if params.access_token.trim().is_empty() => {
+                        ServerResponse::error(
+                            command.id,
+                            "invalid-params",
+                            "accessToken is required.",
+                        )
+                    }
+                    Ok(params) => {
+                        let account_id = params
+                            .account_id
+                            .unwrap_or_else(|| "youtube-quota-smoke-channel".to_string());
+                        let token_secret_ref = format!("youtube-quota-smoke:{account_id}:access");
+                        let seeded = secrets::put_secret(&token_secret_ref, &params.access_token)
+                            .and_then(|()| {
+                                state.database.upsert_platform_account(UpsertPlatformAccount {
+                                    platform: StreamPlatform::Youtube,
+                                    account_id: account_id.clone(),
+                                    account_label: params
+                                        .account_label
+                                        .unwrap_or_else(|| "Quota smoke channel".to_string()),
+                                    account_handle: None,
+                                    avatar_url: None,
+                                    scopes: vec![live_chat::YOUTUBE_CHAT_SCOPE.to_string()],
+                                    token_secret_ref: Some(token_secret_ref),
+                                    refresh_token_secret_ref: None,
+                                    stream_key_secret_ref: None,
+                                    expires_at: None,
+                                    status: PlatformAccountStatus::Connected,
+                                })
+                            });
+                        match seeded {
+                            Ok(account) => {
+                                if let Ok(accounts) = state.database.list_platform_accounts() {
+                                    state.emit_event("platformAccounts.changed", accounts);
+                                }
+                                ServerResponse::ok(command.id, account)
+                            }
+                            Err(error) => ServerResponse::error(
+                                command.id,
+                                "youtube-quota-seed-failed",
+                                error.to_string(),
+                            ),
+                        }
+                    }
+                    Err(error) => {
+                        ServerResponse::error(command.id, "invalid-params", error.to_string())
+                    }
+                }
             }
         }
         #[cfg(debug_assertions)]

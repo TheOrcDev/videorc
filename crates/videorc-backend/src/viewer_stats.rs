@@ -390,10 +390,12 @@ async fn fetch_youtube_count(
     config: &YouTubeViewerConfig,
     access_token: &str,
 ) -> CountFetch {
-    let base = config
-        .api_base_url
-        .as_deref()
-        .unwrap_or("https://www.googleapis.com/youtube/v3");
+    let base = config.api_base_url.clone().unwrap_or_else(|| {
+        format!(
+            "{}/youtube/v3",
+            crate::youtube_quota::youtube_api_base_url(None)
+        )
+    });
     let url = format!(
         "{}/videos?part=liveStreamingDetails&id={}",
         base.trim_end_matches('/'),

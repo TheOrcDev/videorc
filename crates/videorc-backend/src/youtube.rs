@@ -8,7 +8,6 @@ use std::time::Duration as StdDuration;
 use crate::protocol::VideoSettings;
 use crate::streaming::{StreamMetadataDraft, StreamPlatform, StreamPrivacy};
 
-const YOUTUBE_API_BASE_URL: &str = "https://www.googleapis.com";
 const YOUTUBE_TRANSITION_CONFIRM_POLL_ATTEMPTS: usize = 30;
 const YOUTUBE_TRANSITION_CONFIRM_POLL_DELAY: StdDuration = StdDuration::from_secs(1);
 
@@ -492,9 +491,7 @@ pub async fn prepare_youtube_broadcast(
     let scheduled_start_time = request.scheduled_start_time.unwrap_or_else(|| {
         (Utc::now() + Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     });
-    let base_url = request
-        .api_base_url
-        .unwrap_or_else(|| YOUTUBE_API_BASE_URL.to_string());
+    let base_url = crate::youtube_quota::youtube_api_base_url(request.api_base_url.as_deref());
 
     let broadcast_response = client
         .post(youtube_api_url(
@@ -652,9 +649,7 @@ pub async fn list_youtube_channels(
     request: YouTubeChannelListRequest,
     client: &reqwest::Client,
 ) -> Result<YouTubeChannelListResult> {
-    let base_url = request
-        .api_base_url
-        .unwrap_or_else(|| YOUTUBE_API_BASE_URL.to_string());
+    let base_url = crate::youtube_quota::youtube_api_base_url(request.api_base_url.as_deref());
     let channels_response = client
         .get(youtube_api_url(
             &base_url,
@@ -712,9 +707,7 @@ pub async fn get_youtube_stream_status(
         anyhow::bail!("A YouTube stream ID is required.");
     }
 
-    let base_url = request
-        .api_base_url
-        .unwrap_or_else(|| YOUTUBE_API_BASE_URL.to_string());
+    let base_url = crate::youtube_quota::youtube_api_base_url(request.api_base_url.as_deref());
     let status_response = client
         .get(youtube_api_url(
             &base_url,
@@ -782,9 +775,7 @@ pub async fn transition_youtube_broadcast(
         anyhow::bail!("A YouTube broadcast ID is required.");
     }
 
-    let base_url = request
-        .api_base_url
-        .unwrap_or_else(|| YOUTUBE_API_BASE_URL.to_string());
+    let base_url = crate::youtube_quota::youtube_api_base_url(request.api_base_url.as_deref());
     let status = youtube_transition_status(request.status);
     let response = client
         .post(youtube_api_url(

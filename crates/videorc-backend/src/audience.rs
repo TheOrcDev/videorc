@@ -33,7 +33,6 @@ pub const AUDIENCE_MAX_BACKOFF: Duration = Duration::from_secs(600);
 pub const AUDIENCE_LOG_CODE: &str = "stream-audience";
 
 const TWITCH_API_BASE: &str = "https://api.twitch.tv/helix";
-const YOUTUBE_API_BASE: &str = "https://www.googleapis.com/youtube/v3";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -923,7 +922,13 @@ async fn read_with_token(
             )
             .await
         }
-        StreamPlatform::Youtube => fetch_youtube_subscribers(client, YOUTUBE_API_BASE, token).await,
+        StreamPlatform::Youtube => {
+            let api_base = format!(
+                "{}/youtube/v3",
+                crate::youtube_quota::youtube_api_base_url(None)
+            );
+            fetch_youtube_subscribers(client, &api_base, token).await
+        }
         StreamPlatform::X => {
             fetch_x_followers_oauth2(client, crate::x_live::DEFAULT_API_BASE_URL, token).await
         }

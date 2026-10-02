@@ -33,7 +33,6 @@ use crate::live_chat::{
 use crate::state::AppState;
 use crate::streaming::StreamPlatform;
 
-const YOUTUBE_API_BASE_URL: &str = "https://www.googleapis.com";
 const LIVE_CHAT_MESSAGES_PATH: &str = "/youtube/v3/liveChat/messages";
 const LIVE_CHAT_MESSAGES_STREAM_PATH: &str = "/youtube/v3/liveChat/messages/stream";
 const LIVE_BROADCASTS_PATH: &str = "/youtube/v3/liveBroadcasts";
@@ -164,7 +163,7 @@ async fn send_youtube_chat_message_classified(
     live_chat_id: &str,
     text: &str,
 ) -> Result<ProviderSendReceipt, YouTubeSendFailure> {
-    let base = api_base_url.unwrap_or(YOUTUBE_API_BASE_URL);
+    let base = crate::youtube_quota::youtube_api_base_url(api_base_url);
     let response = client
         .post(format!(
             "{}{LIVE_CHAT_MESSAGES_PATH}",
@@ -949,10 +948,7 @@ pub async fn run_youtube_chat_connector(
     config: YouTubeChatConfig,
 ) {
     let client = reqwest::Client::new();
-    let base_url = config
-        .api_base_url
-        .clone()
-        .unwrap_or_else(|| YOUTUBE_API_BASE_URL.to_string());
+    let base_url = crate::youtube_quota::youtube_api_base_url(config.api_base_url.as_deref());
     let target_id = config.target_id.clone();
     let mut token = crate::session_token::SessionToken::new(
         config.access_token.clone(),

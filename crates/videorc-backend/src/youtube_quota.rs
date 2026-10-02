@@ -49,6 +49,80 @@ const DEFAULT_PROBE_JITTER_MAX_MS: u64 = 120_000;
 /// task that never ran must not pause YouTube forever.
 const PROBE_GRACE: chrono::Duration = chrono::Duration::minutes(10);
 const YOUTUBE_API_BASE_URL: &str = "https://www.googleapis.com";
+/// Dev-only: point every YouTube Data API client (prepare, bind, transitions,
+/// chat read and send, viewers, subscribers, OAuth token and profile calls,
+/// the quota probe) at one local fake, for `pnpm smoke:youtube-quota` (plan
+/// 094, S4). Only a bare loopback origin is accepted, and packaged (release)
+/// builds refuse it outright: a stray variable can never redirect a token.
+pub const YOUTUBE_API_BASE_URL_ENV: &str = "VIDEORC_YOUTUBE_API_BASE_URL";
+
+// --- API base URL ---------------------------------------------------------------
+
+/// Pure: the override a build honours for `VIDEORC_YOUTUBE_API_BASE_URL`.
+/// Release builds refuse any value; debug builds accept a bare
+/// `http://127.0.0.1:<port>` origin and nothing else.
+pub fn resolve_youtube_api_base_url_override(
+    dev_build: bool,
+    value: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if !dev_build {
+        return Err(format!(
+            "{YOUTUBE_API_BASE_URL_ENV} is refused in packaged builds; YouTube calls go to {YOUTUBE_API_BASE_URL}."
+        ));
+    }
+    let url = reqwest::Url::parse(value)
+        .map_err(|error| format!("{YOUTUBE_API_BASE_URL_ENV} is not a URL: {error}"))?;
+    if url.scheme() != "http"
+        || url.host_str() != Some("127.0.0.1")
+        || url.port().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(format!(
+            "{YOUTUBE_API_BASE_URL_ENV} must be a bare loopback origin such as http://127.0.0.1:4321."
+        ));
+    }
+    Ok(Some(value.trim_end_matches('/').to_string()))
+}
+
+/// The dev-only override in effect for this process, resolved once. Logs once
+/// when the variable is set but not honoured.
+pub fn youtube_api_base_url_override() -> Option<String> {
+    static RESOLVED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    RESOLVED
+        .get_or_init(|| {
+            let value = std::env::var(YOUTUBE_API_BASE_URL_ENV).ok();
+            match resolve_youtube_api_base_url_override(cfg!(debug_assertions), value.as_deref()) {
+                Ok(Some(base)) => {
+                    tracing::warn!(
+                        "[youtube-quota] dev override: every YouTube API call goes to {base}"
+                    );
+                    Some(base)
+                }
+                Ok(None) => None,
+                Err(why) => {
+                    tracing::warn!("[youtube-quota] {why}");
+                    None
+                }
+            }
+        })
+        .clone()
+}
+
+/// The YouTube Data API origin a caller should use: its explicit override
+/// (tests), else the dev-only env override, else Google.
+pub fn youtube_api_base_url(explicit: Option<&str>) -> String {
+    explicit
+        .map(|base| base.trim_end_matches('/').to_string())
+        .or_else(youtube_api_base_url_override)
+        .unwrap_or_else(|| YOUTUBE_API_BASE_URL.to_string())
+}
 
 /// The provider message while chat is parked. The renderer appends "It
 /// resumes at 09:00. Your stream keeps going." from `retryAt` (plan 094, S2).
@@ -634,6 +708,32 @@ pub(crate) fn configure_probe(
     inner.probe_access_token = access_token;
 }
 
+/// Smoke hook (plan 094, S4; debug builds only, admitted through the explicit
+/// smoke RPC switch): make the current pause expire now, with no probe jitter,
+/// so the expiry probe fires at once against the fake API. Returns the pause
+/// end it replaced, or `None` when YouTube was not paused.
+#[cfg(debug_assertions)]
+pub(crate) fn force_expiry_for_smoke(state: &AppState) -> Option<DateTime<Utc>> {
+    let previous = (*state.youtube_quota.paused.borrow())?;
+    let arm_probe = {
+        let mut inner = state.youtube_quota.lock();
+        inner.probe_jitter_max_ms = Some(0);
+        let arm = !inner.probe_armed;
+        inner.probe_armed = true;
+        arm
+    };
+    state.youtube_quota.paused.send_replace(Some(Utc::now()));
+    tracing::warn!(
+        "[youtube-quota] smoke: pause forced to expire now (was {})",
+        previous.to_rfc3339()
+    );
+    emit_status(state);
+    if arm_probe {
+        spawn_expiry_probe(state.clone());
+    }
+    Some(previous)
+}
+
 /// Test hook: lift the breaker as the probe would.
 #[cfg(test)]
 pub(crate) fn clear_for_tests(state: &AppState) {
@@ -722,10 +822,7 @@ async fn probe_once(state: &AppState) -> ProbeVerdict {
     let (base, scripted_token) = {
         let inner = state.youtube_quota.lock();
         (
-            inner
-                .api_base_url
-                .clone()
-                .unwrap_or_else(|| YOUTUBE_API_BASE_URL.to_string()),
+            youtube_api_base_url(inner.api_base_url.as_deref()),
             inner.probe_access_token.clone(),
         )
     };
@@ -921,6 +1018,48 @@ mod tests {
             classify_youtube_api_error(503, None, None),
             YouTubeApiErrorClass::Transient
         );
+    }
+
+    #[test]
+    fn the_api_base_url_override_is_loopback_only_and_refused_in_release_builds() {
+        assert_eq!(
+            resolve_youtube_api_base_url_override(true, Some("http://127.0.0.1:4321")),
+            Ok(Some("http://127.0.0.1:4321".to_string()))
+        );
+        assert_eq!(
+            resolve_youtube_api_base_url_override(true, Some(" http://127.0.0.1:4321/ ")),
+            Ok(Some("http://127.0.0.1:4321".to_string()))
+        );
+        assert_eq!(resolve_youtube_api_base_url_override(true, None), Ok(None));
+        assert_eq!(resolve_youtube_api_base_url_override(true, Some("  ")), Ok(None));
+        for bad in [
+            "https://127.0.0.1:4321",
+            "http://localhost:4321",
+            "http://127.0.0.1",
+            "http://127.0.0.1:4321/youtube",
+            "http://127.0.0.1:4321/?x=1",
+            "http://user@127.0.0.1:4321",
+            "https://www.googleapis.com",
+            "not a url",
+        ] {
+            assert!(
+                resolve_youtube_api_base_url_override(true, Some(bad)).is_err(),
+                "{bad} must be refused"
+            );
+        }
+        // Packaged builds never honour the variable, loopback or not.
+        let refused = resolve_youtube_api_base_url_override(false, Some("http://127.0.0.1:4321"))
+            .expect_err("release refuses the override");
+        assert!(refused.contains("refused in packaged builds"), "{refused}");
+        assert_eq!(resolve_youtube_api_base_url_override(false, None), Ok(None));
+        // An explicit per-call base always wins; Google is the default.
+        assert_eq!(
+            youtube_api_base_url(Some("http://127.0.0.1:9/")),
+            "http://127.0.0.1:9"
+        );
+        if std::env::var(YOUTUBE_API_BASE_URL_ENV).is_err() {
+            assert_eq!(youtube_api_base_url(None), YOUTUBE_API_BASE_URL);
+        }
     }
 
     #[test]
