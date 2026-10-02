@@ -2281,6 +2281,7 @@ pub async fn obtain_provider_token(
 }
 
 pub async fn account_from_exchanged_token<F>(
+    state: &crate::state::AppState,
     checkpoint: &PendingOAuthTokenCheckpoint,
     token: &ExchangedOAuthToken,
     client: &reqwest::Client,
@@ -2291,6 +2292,7 @@ where
 {
     validate_exchanged_token(checkpoint, token)?;
     let profile = fetch_provider_profile(
+        state,
         checkpoint.platform,
         &checkpoint.profile_url,
         &checkpoint.client_id,
@@ -2342,7 +2344,14 @@ where
     let token =
         exchange_authorization_code(exchange, authorization_code, code_verifier, client).await?;
     let checkpoint = pending_token_checkpoint("compatibility-wrapper", exchange);
-    account_from_exchanged_token(&checkpoint, &token, client, put_secrets).await
+    account_from_exchanged_token(
+        &test_quota_state(),
+        &checkpoint,
+        &token,
+        client,
+        put_secrets,
+    )
+    .await
 }
 
 pub async fn refresh_provider_token(
@@ -2412,6 +2421,7 @@ pub async fn refresh_provider_token(
 }
 
 pub async fn validate_provider_access(
+    state: &crate::state::AppState,
     platform: StreamPlatform,
     access_token: &str,
     client: &reqwest::Client,
@@ -2421,6 +2431,7 @@ pub async fn validate_provider_access(
     }
     let config = provider_config(platform)?;
     fetch_provider_profile(
+        state,
         platform,
         &config.profile_url,
         &config.client_id,
@@ -2432,6 +2443,7 @@ pub async fn validate_provider_access(
 }
 
 async fn fetch_provider_profile(
+    state: &crate::state::AppState,
     platform: StreamPlatform,
     profile_url: &str,
     client_id: &str,
@@ -2444,7 +2456,19 @@ async fn fetch_provider_profile(
     } else {
         request
     };
-    let response = request.send().await.with_context(|| {
+    let response = if platform == StreamPlatform::Youtube {
+        crate::youtube_quota::send_attempt(
+            state,
+            crate::youtube_quota::YouTubeEndpoint::ChannelsList,
+            crate::youtube_quota::BudgetCall::GoLiveEssential,
+            client,
+            request,
+        )
+        .await
+    } else {
+        request.send().await.map_err(anyhow::Error::from)
+    }
+    .with_context(|| {
         format!(
             "Could not fetch {} account profile",
             stream_platform_label(platform)
@@ -2453,6 +2477,16 @@ async fn fetch_provider_profile(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
+        if platform == StreamPlatform::Youtube {
+            let error = crate::youtube_quota::YouTubeApiError::from_body(
+                "YouTube profile lookup failed",
+                status,
+                &body,
+            )
+            .into();
+            crate::youtube_quota::note_error(state, "account profile", &error);
+            return Err(error);
+        }
         if let Some(detail) = provider_error_detail(&body) {
             anyhow::bail!(
                 "{} profile lookup failed with HTTP {status}: {detail}",
@@ -3991,6 +4025,7 @@ mod tests {
         checkpoint.profile_url = format!("http://{address}/stalled-profile");
         let guard = sessions.lock_platform_finalization(StreamPlatform::X).await;
         let error = account_from_exchanged_token(
+            &test_quota_state(),
             &checkpoint,
             &ExchangedOAuthToken {
                 platform: StreamPlatform::X,
@@ -5927,4 +5962,14 @@ mod tests {
                 .is_empty()
         );
     }
+}
+
+#[cfg(test)]
+fn test_quota_state() -> crate::state::AppState {
+    crate::state::AppState::new(
+        "test".into(),
+        1234,
+        tokio::sync::broadcast::channel(64).0,
+        crate::storage::Database::open_in_memory_for_tests(),
+    )
 }

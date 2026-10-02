@@ -13,6 +13,7 @@ pub struct YouTubeRejection {
 }
 
 pub struct YouTubeEvents {
+    pub quota_state: crate::state::AppState,
     pub client: Client,
     pub token: String,
     pub base: String,
@@ -22,12 +23,23 @@ pub struct YouTubeEvents {
     )>,
 }
 impl YouTubeEvents {
+    fn note_quota(&self, http_status: u16, body: &Value) {
+        use crate::youtube_quota::*;
+        let (reason, domain) = error_reason_and_domain(body);
+        if classify_youtube_api_error(http_status, reason.as_deref(), domain.as_deref())
+            == YouTubeApiErrorClass::QuotaExhausted
+        {
+            record_quota_exhausted(&self.quota_state, "scheduled YouTube request");
+        }
+    }
+
     async fn send(
         &self,
         request: reqwest::RequestBuilder,
         read: bool,
+        endpoint: crate::youtube_quota::YouTubeEndpoint,
     ) -> Result<reqwest::Response> {
-        self.send_with_refresh(request, read, || async {
+        self.send_with_refresh(request, read, endpoint, || async {
             let Some((state, credential)) = &self.refresh_context else {
                 return Ok(None);
             };
@@ -48,6 +60,7 @@ impl YouTubeEvents {
         &self,
         request: reqwest::RequestBuilder,
         read: bool,
+        endpoint: crate::youtube_quota::YouTubeEndpoint,
         refresh: F,
     ) -> Result<reqwest::Response>
     where
@@ -58,14 +71,27 @@ impl YouTubeEvents {
         let mut refreshed = false;
         let mut read_retries = 0;
         loop {
-            let response = request
+            let request = request
                 .try_clone()
                 .context("Provider request is not replayable")?
-                .bearer_auth(&token)
-                .send()
-                .await;
+                .bearer_auth(&token);
+            let response = crate::youtube_quota::send_attempt(
+                &self.quota_state,
+                endpoint,
+                if endpoint == crate::youtube_quota::YouTubeEndpoint::ThumbnailsSet {
+                    crate::youtube_quota::BudgetCall::Thumbnail
+                } else {
+                    crate::youtube_quota::BudgetCall::GoLiveEssential
+                },
+                &self.client,
+                request,
+            )
+            .await;
             let response = match response {
                 Ok(response) => response,
+                Err(error) if error.is::<crate::youtube_quota::YouTubeNotAttempted>() => {
+                    return Err(error);
+                }
                 Err(_) if read && read_retries < 2 => {
                     read_retries += 1;
                     tokio::time::sleep(Duration::from_millis(200 * read_retries)).await;
@@ -149,7 +175,8 @@ impl YouTubeEvents {
         query: &[(&str, &str)],
         body: Option<Value>,
     ) -> Result<Value> {
-        let url = reqwest::Url::parse_with_params(&format!("{}{}", self.base, path), query)?;
+        let url = reqwest::Url::parse_with_params(&format!("{}{}", self.base, path), query)
+            .map_err(|_| crate::youtube_quota::YouTubeNotAttempted::Invalid)?;
         let mut request = self
             .client
             .request(method.clone(), url)
@@ -161,7 +188,19 @@ impl YouTubeEvents {
                 .header(reqwest::header::CONTENT_LENGTH, "0")
                 .body("");
         }
-        let response = self.send(request, method == Method::GET).await?;
+        use crate::youtube_quota::YouTubeEndpoint::*;
+        let endpoint = match (method.as_str(), path) {
+            ("GET", "/youtube/v3/liveBroadcasts") => LiveBroadcastsList,
+            ("POST", "/youtube/v3/liveBroadcasts") => LiveBroadcastsInsert,
+            ("PUT", "/youtube/v3/liveBroadcasts") => LiveBroadcastsUpdate,
+            ("DELETE", "/youtube/v3/liveBroadcasts") => LiveBroadcastsDelete,
+            ("POST", "/youtube/v3/liveBroadcasts/bind") => LiveBroadcastsBind,
+            ("POST", "/youtube/v3/liveBroadcasts/transition") => LiveBroadcastsTransition,
+            ("GET", "/youtube/v3/liveStreams") => LiveStreamsList,
+            ("POST", "/youtube/v3/liveStreams") => LiveStreamsInsert,
+            _ => return Err(crate::youtube_quota::YouTubeNotAttempted::Invalid.into()),
+        };
+        let response = self.send(request, method == Method::GET, endpoint).await?;
         let status = response.status();
         if status == reqwest::StatusCode::NO_CONTENT {
             return Ok(Value::Null);
@@ -169,6 +208,7 @@ impl YouTubeEvents {
         let parsed = response.json::<Value>().await;
         if !status.is_success() {
             let body = parsed.unwrap_or(Value::Null);
+            self.note_quota(status.as_u16(), &body);
             // Only the provider's bounded reason code is retained, never raw
             // bodies, URLs, tokens or ingest credentials.
             let reason = body
@@ -311,11 +351,13 @@ impl YouTubeEvents {
                     .header(reqwest::header::CONTENT_TYPE, format)
                     .body(bytes),
                 false,
+                crate::youtube_quota::YouTubeEndpoint::ThumbnailsSet,
             )
             .await?;
         if !result.status().is_success() {
             let status = result.status().as_u16();
             let body = result.json::<Value>().await.unwrap_or(Value::Null);
+            self.note_quota(status, &body);
             return Err(YouTubeRejection {
                 status,
                 reason: thumbnail_rejection_reason(&body),
@@ -494,6 +536,7 @@ mod tests {
         std::fs::write(&path, &png).unwrap();
 
         let api = YouTubeEvents {
+            quota_state: test_quota_state(),
             client: Client::new(),
             token: "fixture".into(),
             base: format!("http://127.0.0.1:{port}"),
@@ -578,6 +621,7 @@ mod tests {
         });
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let api = YouTubeEvents {
+            quota_state: test_quota_state(),
             client: Client::new(),
             token: "expired".into(),
             base: format!("http://127.0.0.1:{port}"),
@@ -588,6 +632,7 @@ mod tests {
             .send_with_refresh(
                 api.client.post(&api.base).body("thumbnail bytes"),
                 false,
+                crate::youtube_quota::YouTubeEndpoint::ThumbnailsSet,
                 || async {
                     refreshes.fetch_add(1, Ordering::SeqCst);
                     Ok(Some("refreshed".into()))
@@ -597,15 +642,32 @@ mod tests {
             .unwrap();
         assert_eq!(result.status(), reqwest::StatusCode::OK);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            crate::youtube_quota::usage_snapshot(&api.quota_state).total_units,
+            100
+        );
         assert_eq!(refreshes.load(Ordering::SeqCst), 1);
         let result = api
-            .send_with_refresh(api.client.post(&api.base).body("create"), false, || async {
-                Ok(Some("still-expired".into()))
-            })
+            .send_with_refresh(
+                api.client.post(&api.base).body("create"),
+                false,
+                crate::youtube_quota::YouTubeEndpoint::LiveBroadcastsInsert,
+                || async { Ok(Some("still-expired".into())) },
+            )
             .await
             .unwrap();
         assert_eq!(result.status(), reqwest::StatusCode::UNAUTHORIZED);
         assert_eq!(calls.load(Ordering::SeqCst), 4);
         server.abort();
     }
+}
+
+#[cfg(test)]
+fn test_quota_state() -> crate::state::AppState {
+    crate::state::AppState::new(
+        "test".into(),
+        1234,
+        tokio::sync::broadcast::channel(64).0,
+        crate::storage::Database::open_in_memory_for_tests(),
+    )
 }

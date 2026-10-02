@@ -4,7 +4,11 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
-import { FAKE_YOUTUBE_ACCESS_TOKEN, startFakeYouTubeApi } from './lib/fake-youtube-api.mjs'
+import {
+  FAKE_YOUTUBE_ACCESS_TOKEN,
+  startFakeYouTubeApi,
+  summarizeYouTubeAttempts
+} from './lib/fake-youtube-api.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -431,6 +435,17 @@ try {
     `e: connect while paused → failed/retryable=false/reason=${callback.reason}, 0 profile requests, ${connectToasts} toast (still ${connectToastsLater} after 6 s)`
   )
   console.log(`[quota] ${results.at(-1)}`)
+
+  const attempts = summarizeYouTubeAttempts(fake.requests)
+  const quota = await request(ws, timeoutMs, 'youtube.quota.status', {})
+  assert(attempts.unknown === 0, `unpriced fake requests: ${JSON.stringify(attempts)}`)
+  assert(
+    quota.budget.units === attempts.estimatedUnits,
+    `accounting differs: backend=${quota.budget.units}, wire=${JSON.stringify(attempts)}`
+  )
+  results.push(
+    `accounting: ${attempts.calls} attempts, ${attempts.estimatedUnits} estimated units match wire capture`
+  )
 
   console.log(
     `YouTube quota drill smoke PASS\n${results.map((line) => `  ${line}`).join('\n')}\nEvidence: ${outputDirectory}`

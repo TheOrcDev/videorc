@@ -104,6 +104,7 @@ pub async fn youtube_api(state: &AppState, account_id: &str) -> Result<YouTubeEv
         && let Some(base) = smoke_api_base()?
     {
         return Ok(YouTubeEvents {
+            quota_state: state.clone(),
             client: reqwest::Client::new(),
             token: "local-fixture-only".into(),
             base,
@@ -119,6 +120,7 @@ pub async fn youtube_api(state: &AppState, account_id: &str) -> Result<YouTubeEv
         .build()?;
     let fresh = crate::fresh_platform_access_token(state, &credential, &client).await?;
     Ok(YouTubeEvents {
+        quota_state: state.clone(),
         client,
         token: fresh.access_token,
         base: crate::youtube_quota::youtube_api_base_url(None),
@@ -420,8 +422,9 @@ fn settle_operation_result(
             operation.state = "complete".into();
         }
         Err(error) => {
-            let definite_rejection =
-                provider_rejection(&error).is_some_and(|(_, status, _)| status < 500);
+            let definite_rejection = provider_rejection(&error)
+                .is_some_and(|(_, status, _)| status < 500)
+                || error.is::<crate::youtube_quota::YouTubeNotAttempted>();
             if operation.stage == "creating-event" && definite_rejection {
                 event.create_uncertain = false;
             }
@@ -1866,6 +1869,7 @@ mod tests {
         });
         (
             YouTubeEvents {
+                quota_state: state(),
                 client: reqwest::Client::new(),
                 token: "fixture".into(),
                 base: format!("http://127.0.0.1:{port}"),
@@ -1947,6 +1951,100 @@ mod tests {
         assert!(crate::refuse_scheduled_youtube_broadcast(&state, "scheduled-broadcast").is_err());
         assert!(crate::refuse_scheduled_youtube_broadcast(&state, "instant-broadcast").is_ok());
     }
+    #[tokio::test]
+    async fn quota_blocked_creation_is_unsent_and_can_retry_without_adoption() {
+        let (mut api, fixture, handle) = fixture().await;
+        let state = state();
+        api.quota_state = state.clone();
+        let (mut event, mutation, mut operation) = reserve(&state, event());
+        crate::youtube_quota::record_quota_exhausted(&state, "test");
+        let result = execute_provider(
+            &state,
+            "schedule",
+            &mutation,
+            &mut event,
+            &mut operation,
+            &api,
+            |_, _| Ok(()),
+        )
+        .await;
+        assert!(
+            result
+                .as_ref()
+                .unwrap_err()
+                .is::<crate::youtube_quota::YouTubeNotAttempted>()
+        );
+        settle_operation_result(&mut event, &mut operation, result);
+        assert!(!event.create_uncertain);
+        assert_eq!(event.operation_state, "needs-retry");
+        assert!(fixture.lock().unwrap().calls.is_empty());
+        assert_eq!(crate::youtube_quota::usage_snapshot(&state).total_calls, 0);
+        crate::youtube_quota::clear_for_tests(&state);
+        execute_provider(
+            &state,
+            "schedule",
+            &mutation,
+            &mut event,
+            &mut operation,
+            &api,
+            |_, _| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert!(event.provider_event_id.is_some());
+        assert_eq!(fixture.lock().unwrap().calls.len(), 1);
+        assert_eq!(crate::youtube_quota::usage_snapshot(&state).total_units, 50);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn invalid_local_create_request_does_not_require_reconciliation() {
+        let (mut api, fixture, handle) = fixture().await;
+        let state = state();
+        api.quota_state = state.clone();
+        api.base = "invalid URL".into();
+        let (mut event, mutation, mut operation) = reserve(&state, event());
+        let result = execute_provider(
+            &state,
+            "schedule",
+            &mutation,
+            &mut event,
+            &mut operation,
+            &api,
+            |_, _| Ok(()),
+        )
+        .await;
+        assert!(
+            result
+                .as_ref()
+                .unwrap_err()
+                .is::<crate::youtube_quota::YouTubeNotAttempted>()
+        );
+        settle_operation_result(&mut event, &mut operation, result);
+        assert!(!event.create_uncertain);
+        assert_eq!(event.operation_state, "needs-retry");
+        assert!(fixture.lock().unwrap().calls.is_empty());
+        assert_eq!(crate::youtube_quota::usage_snapshot(&state).total_units, 0);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn every_bounded_read_retry_is_counted() {
+        let (api, fixture, handle) = fixture().await;
+        fixture.lock().unwrap().rate_limit_reads = 2;
+        api.get("not-created").await.unwrap();
+        assert_eq!(fixture.lock().unwrap().calls.len(), 3);
+        assert_eq!(
+            crate::youtube_quota::usage_snapshot(&api.quota_state).total_calls,
+            3
+        );
+        assert_eq!(
+            crate::youtube_quota::usage_snapshot(&api.quota_state).total_units,
+            3
+        );
+        handle.abort();
+    }
+
     #[tokio::test]
     async fn scheduled_creation_is_metadata_only_and_manual() {
         let (api, fixture, handle) = fixture().await;

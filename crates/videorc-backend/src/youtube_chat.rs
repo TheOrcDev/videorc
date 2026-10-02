@@ -97,9 +97,16 @@ pub async fn send_youtube_chat_message(
     live_chat_id: &str,
     text: &str,
 ) -> Result<ProviderSendReceipt, String> {
-    send_youtube_chat_message_classified(client, api_base_url, access_token, live_chat_id, text)
-        .await
-        .map_err(|failure| failure.message)
+    send_youtube_chat_message_classified(
+        &test_quota_state(),
+        client,
+        api_base_url,
+        access_token,
+        live_chat_id,
+        text,
+    )
+    .await
+    .map_err(|failure| failure.message)
 }
 
 /// The send behind the shared quota breaker (plan 094): nothing goes out while
@@ -123,11 +130,8 @@ pub async fn send_youtube_chat_message_guarded(
     {
         return Err(crate::youtube_quota::SEND_SHED_MESSAGE.to_string());
     }
-    crate::youtube_quota::record_call(
-        state,
-        crate::youtube_quota::YouTubeEndpoint::LiveChatMessagesInsert,
-    );
     match send_youtube_chat_message_classified(
+        state,
         client,
         api_base_url,
         access_token,
@@ -164,24 +168,46 @@ impl From<String> for YouTubeSendFailure {
 }
 
 async fn send_youtube_chat_message_classified(
+    state: &AppState,
     client: &reqwest::Client,
     api_base_url: Option<&str>,
     access_token: &str,
     live_chat_id: &str,
     text: &str,
 ) -> Result<ProviderSendReceipt, YouTubeSendFailure> {
+    if live_chat_id.trim().is_empty() || text.trim().is_empty() {
+        return Err("A live chat and non-empty message are required."
+            .to_string()
+            .into());
+    }
     let base = crate::youtube_quota::youtube_api_base_url(api_base_url);
-    let response = client
+    let request = client
         .post(format!(
             "{}{LIVE_CHAT_MESSAGES_PATH}",
             base.trim_end_matches('/')
         ))
         .query(&[("part", "snippet")])
         .bearer_auth(access_token)
-        .json(&chat_send_body(live_chat_id, text))
-        .send()
-        .await
-        .map_err(|error| format!("Could not reach YouTube: {error}"))?;
+        .json(&chat_send_body(live_chat_id, text));
+    let response = crate::youtube_quota::send_attempt(
+        state,
+        crate::youtube_quota::YouTubeEndpoint::LiveChatMessagesInsert,
+        crate::youtube_quota::BudgetCall::ChatSend,
+        client,
+        request,
+    )
+    .await
+    .map_err(|error| {
+        match error.downcast_ref::<crate::youtube_quota::YouTubeNotAttempted>() {
+            Some(crate::youtube_quota::YouTubeNotAttempted::Paused) => {
+                crate::youtube_quota::SEND_PAUSED_MESSAGE.to_string()
+            }
+            Some(crate::youtube_quota::YouTubeNotAttempted::Budget) => {
+                crate::youtube_quota::SEND_SHED_MESSAGE.to_string()
+            }
+            _ => format!("Could not reach YouTube: {error}"),
+        }
+    })?;
     let status = response.status();
     let retry_after = response
         .headers()
@@ -885,6 +911,7 @@ async fn extract_error_reason(response: reqwest::Response) -> (Option<String>, O
 }
 
 async fn fetch_chat_page(
+    state: &AppState,
     client: &reqwest::Client,
     base_url: &str,
     access_token: &str,
@@ -894,12 +921,15 @@ async fn fetch_chat_page(
 ) -> std::result::Result<LiveChatMessagesResponse, FetchError> {
     let url = chat_messages_url(base_url, transport, live_chat_id, page_token)
         .map_err(|_| FetchError::Network)?;
-    let response = client
-        .get(url)
-        .bearer_auth(access_token)
-        .send()
-        .await
-        .map_err(|_| FetchError::Network)?;
+    let response = crate::youtube_quota::send_attempt(
+        state,
+        crate::youtube_quota::YouTubeEndpoint::LiveChatMessagesList,
+        crate::youtube_quota::BudgetCall::ChatRead,
+        client,
+        client.get(url).bearer_auth(access_token),
+    )
+    .await
+    .map_err(|_| FetchError::Network)?;
     let status = response.status();
     if status.is_success() {
         response
@@ -918,6 +948,7 @@ async fn fetch_chat_page(
 
 /// Resolve a broadcast's `liveChatId` via `liveBroadcasts.list?part=snippet&id=...`.
 pub async fn resolve_live_chat_id(
+    state: &AppState,
     client: &reqwest::Client,
     base_url: &str,
     access_token: &str,
@@ -932,12 +963,15 @@ pub async fn resolve_live_chat_id(
     url.query_pairs_mut()
         .append_pair("part", "snippet")
         .append_pair("id", broadcast_id);
-    let response = client
-        .get(url)
-        .bearer_auth(access_token)
-        .send()
-        .await
-        .context("Could not resolve YouTube live chat id.")?;
+    let response = crate::youtube_quota::send_attempt(
+        state,
+        crate::youtube_quota::YouTubeEndpoint::LiveBroadcastsList,
+        crate::youtube_quota::BudgetCall::ChatRead,
+        client,
+        client.get(url).bearer_auth(access_token),
+    )
+    .await
+    .context("Could not resolve YouTube live chat id.")?;
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
@@ -1032,11 +1066,9 @@ pub async fn run_youtube_chat_connector(
                 park_while_off().await;
                 park(crate::youtube_quota::CHAT_PAUSED_MESSAGE).await;
                 let access_token = token.ensure_fresh(&state, &client).await.to_string();
-                crate::youtube_quota::record_call(
-                    &state,
-                    crate::youtube_quota::YouTubeEndpoint::LiveBroadcastsList,
-                );
-                match resolve_live_chat_id(&client, &base_url, &access_token, broadcast_id).await {
+                match resolve_live_chat_id(&state, &client, &base_url, &access_token, broadcast_id)
+                    .await
+                {
                     Ok(live_chat_id) => break live_chat_id,
                     Err(error) => {
                         if crate::youtube_quota::note_error(&state, "chat id lookup", &error)
@@ -1118,11 +1150,8 @@ pub async fn run_youtube_chat_connector(
             continue;
         }
         let access_token = token.ensure_fresh(&state, &client).await.to_string();
-        crate::youtube_quota::record_call(
-            &state,
-            crate::youtube_quota::YouTubeEndpoint::LiveChatMessagesList,
-        );
         match fetch_chat_page(
+            &state,
             &client,
             &base_url,
             &access_token,
@@ -2188,6 +2217,7 @@ mod tests {
         });
 
         let resolved = resolve_live_chat_id(
+            &test_quota_state(),
             &reqwest::Client::new(),
             &format!("http://{address}"),
             "token",
@@ -2235,6 +2265,7 @@ mod tests {
         let client = reqwest::Client::new();
         let base_url = format!("http://{address}");
         let first = fetch_chat_page(
+            &test_quota_state(),
             &client,
             &base_url,
             "token",
@@ -2247,6 +2278,7 @@ mod tests {
         assert_eq!(first.next_page_token.as_deref(), Some("resume-1"));
 
         let second = fetch_chat_page(
+            &test_quota_state(),
             &client,
             &base_url,
             "token",
@@ -2284,6 +2316,7 @@ mod tests {
         });
 
         let error = fetch_chat_page(
+            &test_quota_state(),
             &reqwest::Client::new(),
             &format!("http://{address}"),
             "token",
@@ -2479,4 +2512,14 @@ mod tests {
         assert!(crate::youtube_quota::paused_until(&state).is_some());
         assert_eq!(crate::youtube_quota::usage_snapshot(&state).sends.units, 50);
     }
+}
+
+#[cfg(test)]
+fn test_quota_state() -> AppState {
+    AppState::new(
+        "test".into(),
+        1234,
+        tokio::sync::broadcast::channel(64).0,
+        crate::storage::Database::open_in_memory_for_tests(),
+    )
 }

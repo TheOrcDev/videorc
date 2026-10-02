@@ -166,7 +166,13 @@ pub fn error_reason_and_domain(body: &Value) -> (Option<String>, Option<String>)
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
+            .map(|value| {
+                value
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '.' || *c == '_')
+                    .take(80)
+                    .collect()
+            })
     };
     (field("reason"), field("domain"))
 }
@@ -340,6 +346,8 @@ pub enum YouTubeEndpoint {
     ChannelsList,
     LiveBroadcastsList,
     LiveBroadcastsInsert,
+    LiveBroadcastsUpdate,
+    LiveBroadcastsDelete,
     LiveBroadcastsBind,
     LiveBroadcastsTransition,
     LiveStreamsList,
@@ -356,6 +364,8 @@ impl YouTubeEndpoint {
             Self::ChannelsList => "channels.list",
             Self::LiveBroadcastsList => "liveBroadcasts.list",
             Self::LiveBroadcastsInsert => "liveBroadcasts.insert",
+            Self::LiveBroadcastsUpdate => "liveBroadcasts.update",
+            Self::LiveBroadcastsDelete => "liveBroadcasts.delete",
             Self::LiveBroadcastsBind => "liveBroadcasts.bind",
             Self::LiveBroadcastsTransition => "liveBroadcasts.transition",
             Self::LiveStreamsList => "liveStreams.list",
@@ -374,6 +384,8 @@ impl YouTubeEndpoint {
             | Self::LiveStreamsList => 1,
             Self::LiveChatMessagesInsert
             | Self::LiveBroadcastsInsert
+            | Self::LiveBroadcastsUpdate
+            | Self::LiveBroadcastsDelete
             | Self::LiveBroadcastsBind
             | Self::LiveBroadcastsTransition
             | Self::LiveStreamsInsert
@@ -577,6 +589,7 @@ pub fn budget_allows(step: BudgetStep, call: BudgetCall) -> bool {
 
 /// Pure: at [`BudgetStep::ShedExtras`] viewers poll every other tick (120 s at
 /// the 60 s cadence).
+#[cfg(test)]
 pub fn budget_viewer_poll_stride(step: BudgetStep) -> u32 {
     match step {
         BudgetStep::Normal => 1,
@@ -703,8 +716,8 @@ fn paused_until_at(state: &AppState, now: DateTime<Utc>) -> Option<DateTime<Utc>
         "[youtube-quota] pause lapsed at {} without a probe verdict; allowing YouTube calls again",
         until.to_rfc3339()
     );
-    clear_pause(state, "the probe never reported");
-    None
+    clear_pause_matching(state, until, "the probe never reported");
+    *state.youtube_quota.paused.borrow()
 }
 
 pub fn status(state: &AppState) -> YouTubeQuotaStatus {
@@ -788,6 +801,7 @@ pub fn set_daily_budget_limit(state: &AppState, limit: Option<u64>) {
 }
 
 fn note_budget_step_change(state: &AppState, status: &YouTubeBudgetStatus) {
+    state.youtube_quota.flags.send_modify(|_| {});
     let line = budget_step_log_line(status.step, status.units, status.limit);
     tracing::info!("[youtube-quota] {line}");
     state.emit_log(
@@ -829,9 +843,9 @@ fn record_quota_exhausted_at(state: &AppState, source: &str, now: DateTime<Utc>)
         let until = pause_target(now, inner.last_expiry);
         let arm_probe = !inner.probe_armed;
         inner.probe_armed = true;
+        state.youtube_quota.paused.send_replace(Some(until));
         (until, arm_probe)
     };
-    state.youtube_quota.paused.send_replace(Some(until));
     tracing::warn!(
         "[youtube-quota] {source}: YouTube's daily API quota is used up; pausing every YouTube call until {}",
         until.to_rfc3339()
@@ -854,13 +868,17 @@ fn emit_status(state: &AppState) {
     state.emit_event(YOUTUBE_QUOTA_EVENT, status(state));
 }
 
-fn clear_pause(state: &AppState, why: &str) {
-    let was_paused = state.youtube_quota.paused.send_replace(None).is_some();
-    {
+fn clear_pause_matching(state: &AppState, expected: DateTime<Utc>, why: &str) -> bool {
+    let was_paused = {
         let mut inner = state.youtube_quota.lock();
+        if *state.youtube_quota.paused.borrow() != Some(expected) {
+            return false;
+        }
+        let was_paused = state.youtube_quota.paused.send_replace(None).is_some();
         inner.last_expiry = Some(Utc::now());
         inner.remote_pause = None;
-    }
+        was_paused
+    };
     if was_paused {
         tracing::info!("[youtube-quota] pause cleared: {why}");
         state.emit_log(
@@ -871,18 +889,48 @@ fn clear_pause(state: &AppState, why: &str) {
         );
         emit_status(state);
     }
+    was_paused
 }
 
-/// Re-arm after the probe itself hit quota: Google's reset was late.
-fn rearm_short(state: &AppState) -> DateTime<Utc> {
-    let until = Utc::now() + REARM_PAUSE;
-    state.youtube_quota.paused.send_replace(Some(until));
-    tracing::warn!(
-        "[youtube-quota] the reset probe hit quota again; paused until {}",
-        until.to_rfc3339()
-    );
+/// Apply a probe result only to the exact pause it observed. Remote changes
+/// while token renewal or HTTP is pending own a new deadline; an old result
+/// must never clear or shorten it. Publication shares admission's lock.
+fn apply_probe_verdict(state: &AppState, expected: DateTime<Utc>, verdict: ProbeVerdict) -> bool {
+    let cleared = {
+        let mut inner = state.youtube_quota.lock();
+        if *state.youtube_quota.paused.borrow() != Some(expected) {
+            return false;
+        }
+        match &verdict {
+            ProbeVerdict::Deferred => return false,
+            ProbeVerdict::Available(_) => {
+                state.youtube_quota.paused.send_replace(None);
+                inner.last_expiry = Some(Utc::now());
+                inner.remote_pause = None;
+                inner.probe_armed = false;
+                true
+            }
+            ProbeVerdict::StillExhausted => {
+                state
+                    .youtube_quota
+                    .paused
+                    .send_replace(Some(Utc::now() + REARM_PAUSE));
+                inner.remote_pause = None;
+                false
+            }
+        }
+    };
+    match verdict {
+        ProbeVerdict::Available(why) => {
+            tracing::info!("[youtube-quota] reset probe cleared its pause: {why}")
+        }
+        ProbeVerdict::StillExhausted => tracing::warn!(
+            "[youtube-quota] reset probe hit quota again; rearmed for thirty minutes"
+        ),
+        ProbeVerdict::Deferred => unreachable!(),
+    }
     emit_status(state);
-    until
+    cleared
 }
 
 /// Blocks until the breaker is clear. Callers park here instead of exiting, so
@@ -895,8 +943,10 @@ pub async fn wait_until_resumed(state: &AppState) {
             None => return,
             Some(until) if Utc::now() >= until + PROBE_GRACE => {
                 // Fail open, as `paused_until` does, rather than wait forever.
-                clear_pause(state, "the probe never reported");
-                return;
+                if clear_pause_matching(state, until, "the probe never reported") {
+                    return;
+                }
+                continue;
             }
             Some(until) => {
                 let deadline = (until + PROBE_GRACE - Utc::now())
@@ -953,7 +1003,10 @@ pub(crate) fn force_expiry_for_smoke(state: &AppState) -> Option<DateTime<Utc>> 
 /// Test hook: lift the breaker as the probe would.
 #[cfg(test)]
 pub(crate) fn clear_for_tests(state: &AppState) {
-    clear_pause(state, "test");
+    let current = *state.youtube_quota.paused.borrow();
+    if let Some(until) = current {
+        clear_pause_matching(state, until, "test");
+    }
 }
 
 /// Test hook: set the breaker to lift at `until` without a quota error.
@@ -987,7 +1040,13 @@ fn spawn_expiry_probe(state: AppState) {
 async fn run_expiry_probe(state: AppState) {
     let mut receiver = state.youtube_quota.paused.subscribe();
     loop {
-        let Some(until) = *receiver.borrow_and_update() else {
+        let current = *receiver.borrow_and_update();
+        let Some(until) = current else {
+            let mut inner = state.youtube_quota.lock();
+            if state.youtube_quota.paused.borrow().is_some() {
+                continue;
+            }
+            inner.probe_armed = false;
             break;
         };
         let jitter_max = state
@@ -1008,23 +1067,15 @@ async fn run_expiry_probe(state: AppState) {
                 }
             }
         }
-        if receiver.borrow_and_update().is_none() {
+        let verdict = probe_once(&state, until).await;
+        if apply_probe_verdict(&state, until, verdict) {
             break;
         }
-        match probe_once(&state).await {
-            ProbeVerdict::Available(why) => {
-                clear_pause(&state, &why);
-                break;
-            }
-            ProbeVerdict::StillExhausted => {
-                rearm_short(&state);
-            }
-        }
     }
-    state.youtube_quota.lock().probe_armed = false;
 }
 
 enum ProbeVerdict {
+    Deferred,
     Available(String),
     StillExhausted,
 }
@@ -1033,8 +1084,14 @@ enum ProbeVerdict {
 /// No account, a network failure or a non-quota error all mean the quota is
 /// not what is blocking YouTube: the breaker lifts and callers see the real
 /// error themselves.
-async fn probe_once(state: &AppState) -> ProbeVerdict {
-    let client = reqwest::Client::new();
+async fn probe_once(state: &AppState, expected: DateTime<Utc>) -> ProbeVerdict {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return ProbeVerdict::Available("could not construct reset probe client".into()),
+    };
     let (base, scripted_token) = {
         let inner = state.youtube_quota.lock();
         (
@@ -1065,8 +1122,24 @@ async fn probe_once(state: &AppState) -> ProbeVerdict {
         "{}/youtube/v3/channels?part=id&mine=true",
         base.trim_end_matches('/')
     );
-    record_call(state, YouTubeEndpoint::ChannelsList);
-    let response = match client.get(url).bearer_auth(&token).send().await {
+    let request = match client.get(url).bearer_auth(&token).build() {
+        Ok(request) => request,
+        Err(_) => return ProbeVerdict::Available("invalid reset probe request".into()),
+    };
+    let change = {
+        let mut inner = state.youtube_quota.lock();
+        if !inner.probe_armed
+            || *state.youtube_quota.paused.borrow() != Some(expected)
+            || Utc::now() < expected
+        {
+            return ProbeVerdict::Deferred;
+        }
+        record_locked(state, &mut inner, YouTubeEndpoint::ChannelsList)
+    };
+    if let Some(status) = change {
+        note_budget_step_change(state, &status);
+    }
+    let response = match client.execute(request).await {
         Ok(response) => response,
         Err(error) => {
             return ProbeVerdict::Available(format!("probe could not reach YouTube: {error}"));
@@ -1092,27 +1165,111 @@ pub fn note_error(state: &AppState, source: &str, error: &anyhow::Error) -> Opti
 
 // --- Counter plumbing -------------------------------------------------------------
 
-/// Count one Data API call (made or attempted: a rejected call still costs).
-pub fn record_call(state: &AppState, endpoint: YouTubeEndpoint) {
-    let now = Utc::now();
-    let (daily, step_change) = {
+/// A refusal before HTTP execution. Scheduler journals must distinguish this
+/// from an ambiguous response to an attempted non-idempotent write.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum YouTubeNotAttempted {
+    #[error("YouTube request was invalid and was not sent.")]
+    Invalid,
+    #[error("{API_PAUSED_MESSAGE}")]
+    Paused,
+    #[error("YouTube request paused to save this installation's daily soft allowance.")]
+    Budget,
+}
+
+/// Validate the builder before admission. Each invocation represents exactly
+/// one HTTP attempt; retries call this again. No lock crosses network I/O.
+pub async fn send_attempt(
+    state: &AppState,
+    endpoint: YouTubeEndpoint,
+    priority: BudgetCall,
+    client: &reqwest::Client,
+    request: reqwest::RequestBuilder,
+) -> anyhow::Result<reqwest::Response> {
+    let request = request.build().map_err(|_| YouTubeNotAttempted::Invalid)?;
+    admit_attempt(state, endpoint, priority)?;
+    let mut response = client.execute(request).await?;
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    let mut builder = axum::http::Response::builder()
+        .status(status)
+        .version(response.version());
+    *builder.headers_mut().expect("valid response builder") = response.headers().clone();
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len().saturating_add(chunk.len()) > 65_536 {
+            anyhow::bail!("YouTube error response exceeded the bounded diagnostic limit");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let error =
+        YouTubeApiError::from_body(endpoint.name(), status, &String::from_utf8_lossy(&body));
+    if error.class() == YouTubeApiErrorClass::QuotaExhausted {
+        record_quota_exhausted(state, endpoint.name());
+    }
+    // Preserve typed caller-specific handling (thumbnail prefixes, redundant
+    // transitions, scheduler rejections), after the shared breaker is set.
+    Ok(reqwest::Response::from(builder.body(body)?))
+}
+
+pub fn admit_attempt(
+    state: &AppState,
+    endpoint: YouTubeEndpoint,
+    priority: BudgetCall,
+) -> Result<(), YouTubeNotAttempted> {
+    // Resolve an expired fail-open pause before locking. Recheck the watch
+    // under the same lock that publishes quota/remote pauses.
+    let _ = paused_until(state);
+    let change = {
         let mut inner = state.youtube_quota.lock();
+        if state.youtube_quota.paused.borrow().is_some() {
+            return Err(YouTubeNotAttempted::Paused);
+        }
         inner.ensure_daily_loaded(state);
-        let before = inner.budget_status_at(now).step;
-        inner.usage.record(endpoint, now);
-        let after = inner.budget_status_at(now);
-        (
-            inner.usage.daily.clone(),
-            (after.step != before).then_some(after),
-        )
+        let before = inner.budget_status_at(Utc::now());
+        if !budget_allows(before.step, priority)
+            || (priority == BudgetCall::ChatSend
+                && before.limit != 0
+                && before.units.saturating_add(endpoint.units()) > before.limit)
+        {
+            return Err(YouTubeNotAttempted::Budget);
+        }
+        record_locked(state, &mut inner, endpoint)
     };
+    if let Some(status) = change {
+        note_budget_step_change(state, &status);
+    }
+    Ok(())
+}
+
+fn record_locked(
+    state: &AppState,
+    inner: &mut QuotaInner,
+    endpoint: YouTubeEndpoint,
+) -> Option<YouTubeBudgetStatus> {
+    inner.ensure_daily_loaded(state);
+    let now = Utc::now();
+    let before = inner.budget_status_at(now).step;
+    inner.usage.record(endpoint, now);
+    // SQLite writes are synchronous. Persist under the admission lock so an
+    // older snapshot cannot overwrite a newer total on another thread.
     if let Err(error) = state
         .database
-        .save_setting(YOUTUBE_API_USAGE_SETTING_KEY, &daily)
+        .save_setting(YOUTUBE_API_USAGE_SETTING_KEY, &inner.usage.daily)
     {
         tracing::warn!("[youtube-quota] could not persist the daily usage total: {error}");
     }
-    if let Some(status) = step_change {
+    let after = inner.budget_status_at(now);
+    (after.step != before).then_some(after)
+}
+
+/// Test setup for budget positions. Production must enter request admission.
+#[cfg(test)]
+pub fn record_call(state: &AppState, endpoint: YouTubeEndpoint) {
+    let change = record_locked(state, &mut state.youtube_quota.lock(), endpoint);
+    if let Some(status) = change {
         note_budget_step_change(state, &status);
     }
 }
@@ -1230,8 +1387,11 @@ pub fn apply_remote_pause(state: &AppState, until: Option<DateTime<Utc>>) {
             if current.is_some_and(|existing| existing > until && previous_remote.is_none()) {
                 return;
             }
-            state.youtube_quota.lock().remote_pause = Some(until);
-            state.youtube_quota.paused.send_replace(Some(until));
+            {
+                let mut inner = state.youtube_quota.lock();
+                inner.remote_pause = Some(until);
+                state.youtube_quota.paused.send_replace(Some(until));
+            }
             tracing::warn!(
                 "[youtube-quota] remote service flag pauses every YouTube call until {}",
                 until.to_rfc3339()
@@ -1252,7 +1412,7 @@ pub fn apply_remote_pause(state: &AppState, until: Option<DateTime<Utc>>) {
             if let Some(remote) = previous_remote
                 && current == Some(remote)
             {
-                clear_pause(state, "the remote service flag was withdrawn");
+                clear_pause_matching(state, remote, "the remote service flag was withdrawn");
             } else if previous_remote.is_some() {
                 state.youtube_quota.lock().remote_pause = None;
             }
@@ -1271,7 +1431,7 @@ pub fn chat_poll_floor_ms(state: &AppState) -> u64 {
 }
 
 /// The viewer sampler's cadence while a YouTube sampler runs: the remote
-/// `viewerSampleMs` (≥ 30,000) or 60 s.
+/// `viewerSampleMs` (≥ 30,000) or 120 s; only YouTube uses this interval.
 pub fn viewer_sample_interval(state: &AppState) -> Duration {
     Duration::from_millis(
         state
@@ -1733,6 +1893,110 @@ mod tests {
         assert_eq!(budget_status(&relaunched).step, BudgetStep::EssentialsOnly);
     }
 
+    #[tokio::test]
+    async fn admission_refusals_are_not_attempts_and_final_send_is_atomic() {
+        let state = test_state();
+        set_daily_budget_limit(&state, Some(51));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let workers = (0..2)
+            .map(|_| {
+                let state = state.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    admit_attempt(
+                        &state,
+                        YouTubeEndpoint::LiveChatMessagesInsert,
+                        BudgetCall::ChatSend,
+                    )
+                    .is_ok()
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        assert_eq!(
+            workers
+                .into_iter()
+                .map(|worker| usize::from(worker.join().unwrap()))
+                .sum::<usize>(),
+            1
+        );
+        assert_eq!(daily_usage(&state).units, 50);
+        assert!(matches!(
+            admit_attempt(
+                &state,
+                YouTubeEndpoint::LiveChatMessagesInsert,
+                BudgetCall::ChatSend
+            ),
+            Err(YouTubeNotAttempted::Budget)
+        ));
+        assert_eq!(usage_snapshot(&state).total_calls, 1);
+        // Essential calls still pass a soft limit. This is not a hard cap.
+        admit_attempt(
+            &state,
+            YouTubeEndpoint::LiveBroadcastsTransition,
+            BudgetCall::GoLiveEssential,
+        )
+        .unwrap();
+        record_quota_exhausted(&state, "test");
+        assert!(matches!(
+            admit_attempt(
+                &state,
+                YouTubeEndpoint::LiveBroadcastsDelete,
+                BudgetCall::GoLiveEssential
+            ),
+            Err(YouTubeNotAttempted::Paused)
+        ));
+        assert_eq!(usage_snapshot(&state).total_calls, 2);
+    }
+
+    #[test]
+    fn concurrent_attempts_persist_the_latest_total_in_order() {
+        let state = test_state();
+        let workers = (0..8)
+            .map(|_| {
+                let state = state.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..20 {
+                        admit_attempt(
+                            &state,
+                            YouTubeEndpoint::LiveChatMessagesList,
+                            BudgetCall::ChatRead,
+                        )
+                        .unwrap();
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let persisted: YouTubeApiDailyUsage = state
+            .database
+            .load_setting(YOUTUBE_API_USAGE_SETTING_KEY)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.calls, 160);
+        assert_eq!(persisted.units, 160);
+        assert_eq!(persisted, daily_usage(&state));
+    }
+
+    #[tokio::test]
+    async fn invalid_request_builder_spends_nothing() {
+        let state = test_state();
+        let client = reqwest::Client::new();
+        let result = send_attempt(
+            &state,
+            YouTubeEndpoint::ChannelsList,
+            BudgetCall::GoLiveEssential,
+            &client,
+            client.get("not a URL"),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(usage_snapshot(&state).total_calls, 0);
+    }
+
     #[test]
     fn daily_total_persists_in_the_database() {
         let state = test_state();
@@ -1791,6 +2055,121 @@ mod tests {
         while !done() {
             assert!(std::time::Instant::now() < deadline, "timed out");
             tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_boundary_preserves_error_bodies_and_headers_and_pauses_before_next_attempt() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/error", listener.local_addr().unwrap());
+        let router = Router::new().route(
+            "/error",
+            axum::routing::get(
+                |axum::extract::Query(query): axum::extract::Query<
+                    std::collections::HashMap<String, String>,
+                >| async move {
+                    let kind = query.get("kind").unwrap().as_str();
+                    let (status, body) = match kind {
+                        "rate" => (StatusCode::TOO_MANY_REQUESTS, "not JSON".to_string()),
+                        "permission" => (
+                            StatusCode::FORBIDDEN,
+                            json!({"error":{"errors":[{"reason":"forbidden"}]}}).to_string(),
+                        ),
+                        _ => (StatusCode::FORBIDDEN, quota_body().to_string()),
+                    };
+                    (status, [("retry-after", "3")], body)
+                },
+            ),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let state = test_state();
+        let client = reqwest::Client::new();
+        for kind in ["rate", "permission", "quota"] {
+            let response = send_attempt(
+                &state,
+                YouTubeEndpoint::ChannelsList,
+                BudgetCall::GoLiveEssential,
+                &client,
+                client.get(&url).query(&[("kind", kind)]),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.headers()["retry-after"], "3");
+            let body = response.text().await.unwrap();
+            assert!(!body.is_empty());
+            assert_eq!(paused_until(&state).is_some(), kind == "quota");
+        }
+        assert_eq!(usage_snapshot(&state).total_calls, 3);
+        assert!(
+            send_attempt(
+                &state,
+                YouTubeEndpoint::ChannelsList,
+                BudgetCall::GoLiveEssential,
+                &client,
+                client.get(&url)
+            )
+            .await
+            .unwrap_err()
+            .is::<YouTubeNotAttempted>()
+        );
+        assert_eq!(usage_snapshot(&state).total_calls, 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn held_probe_verdict_cannot_clear_or_shorten_a_new_remote_pause() {
+        for quota in [false, true] {
+            let state = test_state();
+            let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
+            let release = std::sync::Arc::new(tokio::sync::Notify::new());
+            let gate = release.clone();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let app = Router::new().route(
+                "/youtube/v3/channels",
+                get(move || {
+                    let started = started.clone();
+                    let gate = gate.clone();
+                    async move {
+                        let _ = started.send(());
+                        gate.notified().await;
+                        if quota {
+                            (StatusCode::FORBIDDEN, Json(quota_body()))
+                        } else {
+                            (StatusCode::OK, Json(json!({"items":[{"id":"fixture"}]})))
+                        }
+                    }
+                }),
+            );
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            configure_probe(&state, Some(base), 0, Some("fixture".into()));
+            let deadline = Utc::now();
+            {
+                let mut inner = state.youtube_quota.lock();
+                inner.probe_armed = true;
+                state.youtube_quota.paused.send_replace(Some(deadline));
+            }
+            let pending = {
+                let state = state.clone();
+                tokio::spawn(async move { probe_once(&state, deadline).await })
+            };
+            tokio::time::timeout(Duration::from_secs(2), starts.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let later = Utc::now() + chrono::Duration::hours(4);
+            apply_remote_pause(&state, Some(later));
+            release.notify_one();
+            let verdict = pending.await.unwrap();
+            assert!(!apply_probe_verdict(&state, deadline, verdict));
+            assert_eq!(paused_until(&state), Some(later));
+            assert!(state.youtube_quota.lock().probe_armed);
+            assert_eq!(usage_snapshot(&state).total_calls, 1);
+            server.abort();
         }
     }
 
@@ -1875,7 +2254,7 @@ mod tests {
         assert_eq!(chat_poll_floor_ms(&state), 5_000);
         assert_eq!(
             viewer_sample_interval(&state),
-            Duration::from_millis(60_000)
+            Duration::from_millis(120_000)
         );
 
         // A quota pause is never lifted by a flag document without a pause.
@@ -1886,7 +2265,7 @@ mod tests {
         apply_remote_pause(&state, Some(Utc::now() + chrono::Duration::minutes(5)));
         assert_eq!(paused_until(&state), Some(quota_until));
         // A past pause is a no-op.
-        clear_pause(&state, "test");
+        clear_for_tests(&state);
         apply_remote_pause(&state, Some(Utc::now() - chrono::Duration::minutes(5)));
         assert_eq!(paused_until(&state), None);
 
@@ -1959,10 +2338,17 @@ mod tests {
         };
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!waiter.is_finished(), "still parked while paused");
-        clear_pause(&state, "test");
+        clear_for_tests(&state);
         tokio::time::timeout(Duration::from_secs(2), waiter)
             .await
             .expect("resumed")
             .unwrap();
     }
+}
+
+/// Subscribe before waiting so an owner interval change wakes a quiet timer.
+pub fn subscribe_service_flags(
+    state: &AppState,
+) -> watch::Receiver<crate::service_flags::YouTubeServiceFlags> {
+    state.youtube_quota.flags.subscribe()
 }

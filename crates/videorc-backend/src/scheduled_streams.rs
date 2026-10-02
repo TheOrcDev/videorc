@@ -328,7 +328,20 @@ pub fn sanitized_error_for(provider: &str, error: &anyhow::Error) -> ScheduleErr
     }
     let reason = rejection.map(|(_, _, reason)| reason).unwrap_or("");
     let status = rejection.map(|(_, status, _)| status);
-    let (code, message) = if reason == "liveStreamingNotEnabled" {
+    let (code, message) = if matches!(
+        error.downcast_ref::<crate::youtube_quota::YouTubeNotAttempted>(),
+        Some(crate::youtube_quota::YouTubeNotAttempted::Invalid)
+    ) {
+        (
+            "provider",
+            "YouTube request could not be prepared and was not sent.",
+        )
+    } else if error.is::<crate::youtube_quota::YouTubeNotAttempted>() {
+        (
+            "quota",
+            "YouTube request was not sent because its API allowance is paused. Retry when it resumes.",
+        )
+    } else if reason == "liveStreamingNotEnabled" {
         (
             "enable-live",
             "Enable live streaming for this channel in YouTube Studio, then retry.",
