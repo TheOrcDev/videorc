@@ -3696,6 +3696,94 @@ describe('real StudioProvider lifecycle', () => {
     })
   })
 
+  // Plan 095 S5: Go Live leaves recordEnabled on, and the backend reports a
+  // record+stream session as `recording` with a stream URL. It is on air (the
+  // Stream Manager opens, the X reminder fires) and it still saves a file.
+  it('treats Go Live (record+stream) as live and still announces the saved recording', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const openCommentsWindow = vi.fn(async () => undefined)
+    Object.assign(api, { openCommentsWindow })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify({ openStreamManagerOnLive: true }))
+    localStorage.setItem(
+      STORAGE_KEYS.captureConfig,
+      JSON.stringify({
+        ...defaultCaptureConfig,
+        recordEnabled: true,
+        streamEnabled: true,
+        streaming: {
+          ...defaultCaptureConfig.streaming,
+          enabled: true,
+          enabledTargetIds: ['x'],
+          targets: defaultCaptureConfig.streaming.targets.map((target) =>
+            target.id === 'x' ? { ...target, enabled: true, authMode: 'manual-rtmp' } : target
+          )
+        }
+      } satisfies CaptureConfig)
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    vi.clearAllMocks()
+
+    const xReminderCalls = (): number =>
+      toastSpies.info.mock.calls.filter(([message]) =>
+        String(message).startsWith('X feed is connected')
+      ).length
+    const goLive: RecordingStatus = {
+      state: 'recording',
+      sessionId: 'go-live-session',
+      startedAt: now,
+      streamUrl: 'rtmp://127.0.0.1/live/***',
+      message: 'Running both session.'
+    }
+    const pushStatus = async (status: RecordingStatus): Promise<void> => {
+      await act(async () => {
+        backend.sockets[0]?.onmessage?.({
+          data: JSON.stringify({ event: 'recording.status', payload: status })
+        })
+        await Promise.resolve()
+      })
+    }
+
+    await pushStatus(goLive)
+    await waitForObservation(() => latest()?.recording.recording.sessionId === 'go-live-session')
+    await waitForObservation(() => openCommentsWindow.mock.calls.length === 1)
+    expect(xReminderCalls()).toBe(1)
+
+    // A running tick repeats the state: no second window, no second reminder.
+    await pushStatus({ ...goLive, message: 'Still running.' })
+    await waitForObservation(() => latest()?.recording.recording.message === 'Still running.')
+    expect(openCommentsWindow).toHaveBeenCalledTimes(1)
+    expect(xReminderCalls()).toBe(1)
+
+    await pushStatus({
+      state: 'idle',
+      sessionId: 'go-live-session',
+      outputPath: '/recordings/go-live-session.mp4',
+      durationMs: 65_000,
+      message: 'Saved.'
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+    await waitForObservation(() => toastSpies.success.mock.calls.length === 1)
+    expect(toastSpies.success).toHaveBeenCalledWith(
+      'Recording saved',
+      expect.objectContaining({ duration: 12000 })
+    )
+  })
+
   it('saves complete visual scenes, applies one atomic target and preserves independent builtin framing', async () => {
     const backend = new StudioBackend()
     TestWebSocket.backend = backend

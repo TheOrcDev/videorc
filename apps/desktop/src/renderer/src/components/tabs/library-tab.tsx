@@ -55,6 +55,7 @@ import {
   SelectValue
 } from '@/components/ui/select'
 import { useWorkspaceNav } from '@/components/workspace-nav'
+import { useSessionElapsedMs } from '@/hooks/use-session-elapsed'
 import { useStudioCore, useStudioRecording, useStudioRecordingState } from '@/hooks/use-studio'
 import type { FileAssessment, GateStatus, SessionSummary } from '@/lib/backend'
 import {
@@ -575,7 +576,7 @@ function LibraryRow({
       </span>
       <div>
         {live ? (
-          <StatusDot pulse label={liveSessionLabel(recording.state)} tone="error" />
+          <StatusDot pulse label={liveSessionLabel(recording)} tone="error" />
         ) : finalizing ? (
           <Badge variant="outline">
             <SpinnerIcon className="animate-spin" data-icon="inline-start" />
@@ -601,11 +602,13 @@ function LibraryRow({
   )
 }
 
+/** Ticks from the session's start: running statuses carry no duration. */
 function LiveSessionDuration(): ReactElement {
   const { recording } = useStudioRecording()
+  const elapsedMs = useSessionElapsedMs(recording.startedAt) ?? recording.durationMs
   return (
     <span className="text-xs text-muted-foreground tabular-nums">
-      {typeof recording.durationMs === 'number' ? durationMsLabel(recording.durationMs) : '-'}
+      {typeof elapsedMs === 'number' ? durationMsLabel(elapsedMs) : '-'}
     </span>
   )
 }

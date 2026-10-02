@@ -15,11 +15,14 @@ import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
 import { CohostPresenceDot } from '@/components/cohost-status'
 import { GroupedList } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
+import { StatusBadge } from '@/components/status-badge'
 import { SessionRuntimeAlert } from '@/components/studio/session-runtime-alert'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import { useWorkspaceNav } from '@/components/workspace-nav'
+import { useSessionElapsedMs } from '@/hooks/use-session-elapsed'
 import {
   useStudioChat,
   useStudioCore,
@@ -30,7 +33,15 @@ import { cohostPresenceView } from '@/lib/cohost-presence'
 import type { SessionRuntimeNotice } from '@/lib/session-runtime-notice'
 import type { SessionStartFailure } from '@/lib/session-start-failure'
 import type { SettingsTabId } from '@/lib/settings-tabs'
-import { outputSummary, sessionClockLabel, streamingSummary } from '@/lib/studio-session-view'
+import {
+  outputSummary,
+  sessionAlsoRecords,
+  sessionClockLabel,
+  sessionStatusLabel,
+  sessionStatusTone,
+  streamingSummary,
+  type SessionStatusView
+} from '@/lib/studio-session-view'
 
 /**
  * The session transport (plan 050 S12): status, clock, and Record / Stream /
@@ -44,6 +55,7 @@ export function SessionTransport({
   active,
   canStop,
   stopLabel,
+  stopTitle,
   startRequestPending,
   recordBlockedReason,
   liveStreamBlockedReason,
@@ -55,6 +67,8 @@ export function SessionTransport({
   active: boolean
   canStop: boolean
   stopLabel: string
+  /** Why Stop does more than its label says ("Also stops the recording"). */
+  stopTitle?: string
   startRequestPending: boolean
   recordBlockedReason: string | null
   liveStreamBlockedReason: string | null
@@ -80,6 +94,7 @@ export function SessionTransport({
             className="flex-1"
             disabled={!canStop}
             size="lg"
+            title={stopTitle}
             variant="destructive"
             onClick={onStop}
           >
@@ -118,14 +133,50 @@ export function SessionTransport({
   )
 }
 
+/**
+ * The session status pill. An on-air session reads "Streaming" in the live
+ * tone, and adds a quiet "Rec" when it also records: Go Live is record+stream,
+ * which the backend reports as `recording` (plan 095 S5). data hook: the
+ * backend-resilience and captions smokes read the pill, never the Rec chip.
+ */
+export function SessionStatusPill({
+  recording,
+  wsStatus
+}: {
+  recording: SessionStatusView
+  wsStatus: string
+}): ReactElement {
+  return (
+    <>
+      <span data-videorc-session-status>
+        <StatusBadge
+          tone={sessionStatusTone(recording, wsStatus)}
+          value={sessionStatusLabel(recording, wsStatus)}
+        />
+      </span>
+      {wsStatus === 'connected' && sessionAlsoRecords(recording) ? (
+        <Badge
+          data-slot="session-also-recording"
+          title="Also recording a local file"
+          variant="outline"
+        >
+          Rec
+        </Badge>
+      ) : null}
+    </>
+  )
+}
+
+/** Ticks from the session's start: running statuses carry no duration. */
 function SessionClock(): ReactElement {
   const { recording } = useStudioRecording()
+  const elapsedMs = useSessionElapsedMs(recording.startedAt)
   return (
     <span
       className="min-w-11 text-right text-sm font-medium text-foreground tabular-nums"
       data-slot="session-clock"
     >
-      {sessionClockLabel(recording.durationMs)}
+      {sessionClockLabel(elapsedMs ?? recording.durationMs)}
     </span>
   )
 }

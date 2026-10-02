@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 
+import { CHAT_AVATAR_MAX_BYTES } from '../shared/chat-avatar-bytes'
 import { COMMENTS_HIGHLIGHT_TIMING_CONTRACT } from '../shared/comments-command-timing'
 
 // Chat avatar caching policy (Comments window upgrade S1). Renderers never
@@ -17,8 +18,10 @@ const AVATAR_ALLOWED_HOST_SUFFIXES = [
   // Twitch profile images, and chat emotes (plan 055, S10: the Stream
   // Manager renders them from fragments through this same cache)
   'static-cdn.jtvnw.net',
-  // X profile images (broadcast.chat authors)
+  // X profile images (broadcast.chat authors), and X's default avatars for
+  // accounts that never uploaded one (plan 095)
   'pbs.twimg.com',
+  'abs.twimg.com',
   // Kick profile pictures (plan 063) and chat emotes (plan 085:
   // files.kick.com/emotes/<id>/fullsize)
   'files.kick.com',
@@ -53,8 +56,9 @@ export function avatarPruneDelayMs(lastPruneAtMs: number | null, nowMs: number):
 
 /** Refuse to store avatars past this size. Matches the web's account-avatar
  * upload cap (2 MB) — the old 512 KB desktop cap silently monogrammed any
- * avatar the web happily accepted. */
-export const AVATAR_MAX_BYTES = 2 * 1024 * 1024
+ * avatar the web happily accepted. The same cap bounds the bytes the
+ * highlight card reads back over IPC (`shared/chat-avatar-bytes.ts`). */
+export const AVATAR_MAX_BYTES = CHAT_AVATAR_MAX_BYTES
 
 /** Avatar decoration is best-effort and owns only its explicit slice of the
  * end-to-end highlight relay budget. A stalled CDN therefore cannot consume

@@ -4,6 +4,7 @@ import { confirmedSourceSelection } from '@/lib/source-selection-confirmed'
 import type { LiveSourceSelectionState } from '@/lib/live-source-selection'
 import { globalShortcutLayout, nextEligibleLayout } from '../../../shared/global-shortcuts'
 import { clipMarkedToast } from '../../../shared/clip-marks'
+import { sessionIsLive } from '../../../shared/capture-state'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
 import { useScenePresets } from '@/hooks/use-scene-presets'
 import {
@@ -1355,7 +1356,9 @@ export type StudioCoreContextValue = Omit<
 >
 
 export type StudioRecordingStateContextValue = {
-  recording: Pick<RecordingStatus, 'state' | 'sessionId'>
+  /** `streamUrl` tells a record+stream session (Go Live) from a recording:
+   * the backend reports both as `recording` (plan 095 S5). */
+  recording: Pick<RecordingStatus, 'state' | 'sessionId' | 'streamUrl'>
 }
 
 export type StudioRecordingContextValue = Pick<StudioContextValue, 'recording'>
@@ -5444,10 +5447,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   // X is the one destination where a connected RTMP feed is NOT live yet: the
   // user must start a Broadcast in Media Studio Producer attached to their
-  // source. Remind them the moment the stream goes up, once per session.
+  // source. Remind them the moment the stream goes up, once per session. Go
+  // Live records too, and the backend calls that `recording` (plan 095 S5).
   const xProducerReminderShownRef = useRef(false)
+  const recordingLive = sessionIsLive(recording)
   useEffect(() => {
-    if (recording.state !== 'streaming') {
+    if (!recordingLive) {
       if (recording.state === 'idle' || recording.state === 'failed') {
         xProducerReminderShownRef.current = false
       }
@@ -5473,7 +5478,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         onClick: () => void window.videorc?.openOAuthUrl?.('https://studio.x.com')
       }
     })
-  }, [recording.state])
+  }, [recording.state, recordingLive])
 
   useEffect(() => {
     audioMeterSampleGenerationRef.current += 1
@@ -6001,6 +6006,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         bootstrapGuard.mark('sessions')
         const incomingStatus = payload as RecordingStatus
         const previousState = recordingRef.current.state ?? lastRecordingStateRef.current
+        const previouslyLive = sessionIsLive(recordingRef.current)
         const previousSessionId =
           recordingRef.current.sessionId ?? lastRecordingSessionIdRef.current
         const exactTerminalSessionId =
@@ -6070,10 +6076,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           clearSessionRuntimeState()
           void refreshSessions(nextClient)
         }
-        // "Open Stream Manager when I go live" (plan 055, decision 6).
+        // "Open Stream Manager when I go live" (plan 055, decision 6). Go Live
+        // is record+stream, which the backend reports as `recording` with a
+        // stream URL (plan 095 S5).
         if (
-          status.state === 'streaming' &&
-          previousState !== 'streaming' &&
+          sessionIsLive(status) &&
+          !previouslyLive &&
           settingsRef.current.openStreamManagerOnLive
         ) {
           void openCommentsWindowRef.current().catch(() => undefined)
@@ -14455,8 +14463,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [audioMeter, audioMeterLoading, meterLevel]
   )
   const recordingStateValue = useMemo<StudioRecordingStateContextValue>(
-    () => ({ recording: { state: recording.state, sessionId: recording.sessionId } }),
-    [recording.sessionId, recording.state]
+    () => ({
+      recording: {
+        state: recording.state,
+        sessionId: recording.sessionId,
+        streamUrl: recording.streamUrl
+      }
+    }),
+    [recording.sessionId, recording.state, recording.streamUrl]
   )
   const recordingValue = useMemo<StudioRecordingContextValue>(() => ({ recording }), [recording])
   const previewValue = useMemo<StudioPreviewContextValue>(

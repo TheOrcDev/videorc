@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { tmpdir } from 'node:os'
@@ -6,9 +7,12 @@ import { join, resolve } from 'node:path'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
 import {
+  COMMENT_HIGHLIGHT_AVATAR_RGB,
+  COMMENT_HIGHLIGHT_EMOTE_RGB,
   analyzeCommentHighlightArtifact,
   captionStimulusPngBase64,
   classifyCommentHighlightResult,
+  commentHighlightImagePngBase64,
   formatCommentHighlightArtifactSummary
 } from './lib/comment-highlight-artifact.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
@@ -24,6 +28,30 @@ const listenerBindMs = Number(process.env.VIDEORC_COMMENT_HIGHLIGHT_LISTENER_BIN
 const basePort = Number(process.env.VIDEORC_COMMENT_HIGHLIGHT_RTMP_PORT ?? 19721)
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
+// The fake chatter's avatar and emote (plan 095). The URLs are on allowlisted
+// CDN hosts so main's `avatars:cache` accepts them, but they are never
+// fetched: the smoke seeds the app's avatar cache with flat-colour PNGs under
+// the file names main derives from the URLs, exactly as a chat row would have
+// cached them. The card then has to read those bytes back over `avatars:read`
+// and paint them, and the analyzer looks for each colour on the card. The
+// emote is a Kick-shaped URL (no `/1.0` for the card to swap for `/3.0`) and
+// wide, like a 7TV banner emote.
+const smokeChatImages = Object.freeze({
+  avatar: {
+    url: 'https://yt3.ggpht.com/videorc-smoke/comment-highlight-avatar.png',
+    pngBase64: commentHighlightImagePngBase64({ rgb: COMMENT_HIGHLIGHT_AVATAR_RGB })
+  },
+  emote: {
+    text: 'smokeHYPE',
+    url: 'https://files.kick.com/emotes/videorc-smoke-comment-highlight/fullsize',
+    pngBase64: commentHighlightImagePngBase64({
+      width: 256,
+      height: 128,
+      rgb: COMMENT_HIGHLIGHT_EMOTE_RGB
+    })
+  }
+})
+
 const streamSafe1080p30 = Object.freeze({
   preset: 'stream-safe-1080p30',
   width: 1920,
@@ -63,6 +91,10 @@ const modernScenarios = [
     fps: 30,
     streamProfile: streamSafe1080p30,
     verticalLeg: { width: 720, height: 1280 },
+    // The recording shares the primary leg with the horizontal stream here
+    // (highlight_overlay_leg_plan), so the card and its images must be in
+    // the recording too (plan 095).
+    expectHighlightInRecording: true,
     allowHighlightUnavailable: false
   }
 ]
@@ -90,11 +122,15 @@ await runScenarioGroup({
 })
 
 console.log(
-  `Comment-highlight stream smoke PASS — stream-only and split stream artifacts contain coexisting highlight/caption pixels; both legs of a dual-orientation stream carry the card; legacy output was visible or explicitly unavailable. Evidence: ${outputDirectory}`
+  `Comment-highlight stream smoke PASS — stream-only and split stream artifacts contain coexisting highlight/caption pixels with the chatter's avatar and emote on the card; both legs of a dual-orientation stream and its recording carry the card; legacy output was visible or explicitly unavailable. Evidence: ${outputDirectory}`
 )
 
 async function runScenarioGroup({ label, scenarios, indexOffset, env = {} }) {
   const groupStateDirectory = join(outputDirectory, `${label}-app-state`)
+  const userDataDirectory = join(groupStateDirectory, 'user-data')
+  for (const image of Object.values(smokeChatImages)) {
+    seedCachedChatImage(userDataDirectory, image)
+  }
   const launched = await launchDevApp({
     requiredMarkers: ['backend-ready', 'preview-motion-ready'],
     timeoutMs,
@@ -103,7 +139,7 @@ async function runScenarioGroup({ label, scenarios, indexOffset, env = {} }) {
       VIDEORC_SMOKE_STATE_DIR: outputDirectory,
       VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
       VIDEORC_APP_DATA_DIR: join(groupStateDirectory, 'app-data'),
-      VIDEORC_USER_DATA_DIR: join(groupStateDirectory, 'user-data'),
+      VIDEORC_USER_DATA_DIR: userDataDirectory,
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
       VIDEORC_COMMENTS_WINDOW: '1',
       VIDEORC_DISABLE_AUTO_PREVIEW: '1',
@@ -222,7 +258,9 @@ async function runScenario(ws, smoke, scenario, index) {
         targetId,
         count: 1,
         intervalMs: 25,
-        includeDuplicate: false
+        includeDuplicate: false,
+        avatarUrl: smokeChatImages.avatar.url,
+        emote: { text: smokeChatImages.emote.text, imageUrl: smokeChatImages.emote.url }
       }
     })
     const message = await waitForFakeComment(ws, sessionId, targetId)
@@ -307,6 +345,8 @@ async function runScenario(ws, smoke, scenario, index) {
       highlightDisposition: highlight.disposition,
       allowHighlightUnavailable: scenario.allowHighlightUnavailable,
       requireCaption,
+      requireAvatar: true,
+      requireEmote: true,
       anchor: scenario.anchor
     })
     const artifactPath = join(scenarioDirectory, 'comment-highlight-artifact.json')
@@ -338,6 +378,8 @@ async function runScenario(ws, smoke, scenario, index) {
         ffmpegPath,
         highlightDisposition: highlight.disposition,
         requireCaption: false,
+        requireAvatar: true,
+        requireEmote: true,
         anchor: scenario.anchor,
         // Native portrait size: the card's ~27 px text blurs out of the text
         // classifier when downscaled.
@@ -386,6 +428,32 @@ async function runScenario(ws, smoke, scenario, index) {
           `[${scenario.label}] local recording quality failed: ${recordingQuality.verdict.failures.join('; ')} (report: ${recordingPaths.mdPath})`
         )
       }
+      if (scenario.expectHighlightInRecording) {
+        const recordingArtifact = await analyzeCommentHighlightArtifact(recordingPath, {
+          ffmpegPath,
+          highlightDisposition: highlight.disposition,
+          requireCaption: false,
+          requireAvatar: true,
+          requireEmote: true,
+          anchor: scenario.anchor
+        })
+        const recordingArtifactPath = join(
+          scenarioDirectory,
+          'comment-highlight-artifact-recording.json'
+        )
+        writeFileSync(
+          recordingArtifactPath,
+          JSON.stringify({ scenario, highlight, artifact: recordingArtifact }, null, 2)
+        )
+        console.log(
+          `[${scenario.label}:recording] ${formatCommentHighlightArtifactSummary(recordingArtifact)}`
+        )
+        if (!recordingArtifact.pass) {
+          throw new Error(
+            `[${scenario.label}] recording comment-highlight artifact gate failed: ${recordingArtifact.failures.join('; ')} (report: ${recordingArtifactPath})`
+          )
+        }
+      }
     }
   } finally {
     await stopCaptionStimulus?.()
@@ -398,6 +466,23 @@ async function runScenario(ws, smoke, scenario, index) {
     await stopRtmpListener(listener)
     await stopRtmpListener(verticalListener)
   }
+}
+
+/** Mirrors `avatarCacheFileName` in apps/desktop/src/main/avatar-cache.ts:
+ * sha256(url) (32 hex) plus the extension from the URL path, `.img` otherwise. */
+function cachedChatImageFileName(url) {
+  const hash = createHash('sha256').update(url).digest('hex').slice(0, 32)
+  const path = new URL(url).pathname.toLowerCase()
+  const extension = ['.png', '.jpg', '.jpeg', '.webp', '.gif'].find((candidate) =>
+    path.endsWith(candidate)
+  )
+  return `${hash}${extension ?? '.img'}`
+}
+
+function seedCachedChatImage(userDataDirectory, { url, pngBase64 }) {
+  const directory = join(userDataDirectory, 'avatar-cache')
+  mkdirSync(directory, { recursive: true })
+  writeFileSync(join(directory, cachedChatImageFileName(url)), Buffer.from(pngBase64, 'base64'))
 }
 
 function startCaptionOverlayStimulus(ws, { width, height, intervalMs }) {
@@ -453,10 +538,19 @@ async function waitForDetachedComment(smoke, message) {
   let last = null
   while (Date.now() < deadline) {
     last = await smokeCommand(smoke, 'comments-window-reader-state')
+    // An emote fragment renders as an image, so only the text fragments are
+    // expected in the window's innerText.
+    const expectedText = (message.fragments ?? []).some((fragment) => fragment.imageUrl)
+      ? message.fragments
+          .filter((fragment) => !fragment.imageUrl)
+          .map((fragment) => fragment.text)
+          .join('')
+          .trim()
+      : message.messageText
     if (
       Object.hasOwn(last.highlightPhases ?? {}, message.id) &&
       last.text?.includes(message.authorName) &&
-      last.text?.includes(message.messageText)
+      last.text?.includes(expectedText)
     ) {
       return last
     }

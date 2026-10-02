@@ -8,6 +8,7 @@ import type {
   StreamTargetsSnapshot,
   ViewerSample
 } from './backend'
+import { sessionIsLive } from './capture-state'
 
 /**
  * The Stream Manager's live data (plan 055, D7). The main renderer, which
@@ -107,9 +108,13 @@ function forSession(
   return { ...emptyLiveDashboardState(updatedAt), sessionId, session: state.session }
 }
 
-/** `null` for `starting` and `stopping`: the session keeps its last state. */
+/**
+ * `null` for `starting` and `stopping`: the session keeps its last state. Go
+ * Live is a record+stream session, which the backend reports as `recording`
+ * with a `streamUrl`: it is on air all the same (plan 095 S5).
+ */
 function sessionStateOf(status: RecordingStatus): LiveDashboardSessionState | null {
-  if (status.state === 'streaming') return 'live'
+  if (sessionIsLive(status)) return 'live'
   if (status.state === 'recording') return 'recording'
   if (status.state === 'idle' || status.state === 'failed') return 'off-air'
   return null

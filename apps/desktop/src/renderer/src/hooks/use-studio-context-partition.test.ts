@@ -164,10 +164,14 @@ describe('studio context invalidation boundaries', () => {
     )
   })
 
-  it('preserves core provider identity across elapsed-time and preview telemetry updates', async () => {
+  // Running `recording.status` ticks carry no durationMs (the backend sends it
+  // only in the terminal status), so the session clock ticks locally from
+  // startedAt (plan 095 S5). A tick still replaces the volatile recording
+  // value, and must not reach core or recording-state consumers.
+  it('preserves core provider identity across recording status ticks and preview telemetry', async () => {
     const core = { wsStatus: 'connected' } as StudioCoreContextValue
     const observedCoreValues: StudioCoreContextValue[] = []
-    const observedRecordingDurations: Array<number | undefined> = []
+    const observedRecordingMessages: Array<string | undefined> = []
     const observedPreviewAges: Array<number | undefined> = []
     let coreRenderCount = 0
     let recordingStateRenderCount = 0
@@ -180,7 +184,7 @@ describe('studio context invalidation boundaries', () => {
     })
     const VolatileConsumer = memo(function VolatileConsumer() {
       volatileRenderCount += 1
-      observedRecordingDurations.push(useStudioRecording().recording.durationMs)
+      observedRecordingMessages.push(useStudioRecording().recording.message)
       observedPreviewAges.push(useStudioPreview().previewCameraStatus.frameAgeMs)
       return null
     })
@@ -190,14 +194,24 @@ describe('studio context invalidation boundaries', () => {
       return null
     })
 
-    function Harness({ durationMs, frameAgeMs }: { durationMs: number; frameAgeMs: number }) {
+    const streamUrl = 'rtmp://live.twitch.tv/app/***'
+    const startedAt = '2026-10-02T18:00:00.000Z'
+    function Harness({ tick, frameAgeMs }: { tick: number; frameAgeMs: number }) {
       const recordingState = useMemo<StudioRecordingStateContextValue>(
-        () => ({ recording: { state: 'recording', sessionId: 'active-session' } }),
+        () => ({ recording: { state: 'recording', sessionId: 'active-session', streamUrl } }),
         []
       )
       const recording = useMemo<StudioRecordingContextValue>(
-        () => ({ recording: { state: 'recording', message: 'Recording', durationMs } }),
-        [durationMs]
+        () => ({
+          recording: {
+            state: 'recording',
+            sessionId: 'active-session',
+            streamUrl,
+            startedAt,
+            message: `Running both session (${tick}).`
+          }
+        }),
+        [tick]
       )
       const preview = useMemo<StudioPreviewContextValue>(
         () => ({
@@ -252,15 +266,15 @@ describe('studio context invalidation boundaries', () => {
     try {
       await act(async () => {
         root = createRoot(testDom.container)
-        root.render(createElement(Harness, { durationMs: 1_000, frameAgeMs: 16 }))
+        root.render(createElement(Harness, { tick: 1, frameAgeMs: 16 }))
       })
       const initialCore = observedCoreValues.at(-1)
 
       await act(async () => {
-        root?.render(createElement(Harness, { durationMs: 2_000, frameAgeMs: 16 }))
+        root?.render(createElement(Harness, { tick: 2, frameAgeMs: 16 }))
       })
       await act(async () => {
-        root?.render(createElement(Harness, { durationMs: 2_000, frameAgeMs: 33 }))
+        root?.render(createElement(Harness, { tick: 2, frameAgeMs: 33 }))
       })
 
       expect(coreRenderCount).toBe(1)
@@ -268,7 +282,11 @@ describe('studio context invalidation boundaries', () => {
       expect(observedCoreValues).toEqual([initialCore])
       expect(initialCore).toBe(core)
       expect(volatileRenderCount).toBe(3)
-      expect(observedRecordingDurations).toEqual([1_000, 2_000, 2_000])
+      expect(observedRecordingMessages).toEqual([
+        'Running both session (1).',
+        'Running both session (2).',
+        'Running both session (2).'
+      ])
       expect(observedPreviewAges).toEqual([16, 16, 33])
     } finally {
       await act(async () => root?.unmount())

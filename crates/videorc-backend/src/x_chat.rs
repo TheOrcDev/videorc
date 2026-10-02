@@ -421,9 +421,12 @@ async fn run_x_chat_session(
         let page = relay.read(Some(&cursor), &config.broadcast_id).await?;
         ensure_active_session(state, session_id, session_generation).await?;
         for event in page.events {
-            let Some(chat_message) =
-                relay_event_to_message(event, session_id, config.target_id.as_deref())
-            else {
+            let Some(chat_message) = relay_event_to_message(
+                event,
+                session_id,
+                config.target_id.as_deref(),
+                &credentials.user_id,
+            ) else {
                 continue;
             };
             if chat_message.event_type == LiveChatEventType::Follow
@@ -711,6 +714,23 @@ fn non_empty(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// XAA hands out the `_normal` (48 px) profile image. The on-stream highlight
+/// card draws the avatar at ~60 px on a 1080p canvas, so ask for X's
+/// `_400x400` variant at ingest instead (plan 095, S3). Only the size suffix
+/// right before the extension changes; anything else is left alone.
+fn sharpen_x_avatar_url(url: String) -> String {
+    let Some((base, extension)) = url.rsplit_once('.') else {
+        return url;
+    };
+    if extension.contains('/') || !extension.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return url;
+    }
+    match base.strip_suffix("_normal") {
+        Some(stem) => format!("{stem}_400x400.{extension}"),
+        None => url,
+    }
+}
+
 fn https_url(value: Option<&Value>) -> Option<String> {
     value
         .and_then(Value::as_str)
@@ -734,10 +754,15 @@ fn relay_affiliation(value: Option<&Value>) -> Option<LiveChatAuthorAffiliation>
     })
 }
 
+/// `host_user_id` is the connected account's X id (the OAuth 1.0a one that
+/// creates the broadcast). XAA has no host flag, so the streamer's own
+/// messages are recognised by author id and marked `owner` (plan 095, S1),
+/// like YouTube `isChatOwner` and the Twitch/Kick broadcaster badges.
 fn relay_event_to_message(
     event: RelayEvent,
     session_id: &str,
     target_id: Option<&str>,
+    host_user_id: &str,
 ) -> Option<LiveChatMessage> {
     let provider_message_id = non_empty(Some(event.message_id))?;
     match event.kind.as_deref() {
@@ -765,6 +790,15 @@ fn relay_event_to_message(
     // closest thing to when the comment was posted.
     let now = chrono::Utc::now().to_rfc3339();
     let published_at = non_empty(event.received_at).unwrap_or_else(|| now.clone());
+    let author_id = non_empty(event.author.id);
+    let host_user_id = host_user_id.trim();
+    let mut author_roles = Vec::new();
+    if !host_user_id.is_empty() && author_id.as_deref() == Some(host_user_id) {
+        author_roles.push("owner".to_string());
+    }
+    if event.is_subscriber {
+        author_roles.push("member".to_string());
+    }
     Some(LiveChatMessage {
         id: live_chat_message_id(
             session_id,
@@ -776,17 +810,14 @@ fn relay_event_to_message(
         platform: StreamPlatform::X,
         target_id: target_id.map(ToOwned::to_owned),
         session_id: session_id.to_string(),
-        author_id: non_empty(event.author.id),
+        author_id,
         author_name,
         author_avatar_url: non_empty(event.author.avatar_url)
-            .filter(|url| url.starts_with("https://")),
+            .filter(|url| url.starts_with("https://"))
+            .map(sharpen_x_avatar_url),
         author_badges: Vec::new(),
         author_affiliation: relay_affiliation(event.author.affiliation.as_ref()),
-        author_roles: if event.is_subscriber {
-            vec!["member".to_string()]
-        } else {
-            Vec::new()
-        },
+        author_roles,
         published_at,
         received_at: now,
         message_text: event.text,
@@ -830,7 +861,9 @@ fn follow_event_to_message(
         author_id: Some(author_id),
         message_text: format!("{author_name} followed"),
         author_name,
-        author_avatar_url: non_empty(author.avatar_url).filter(|url| url.starts_with("https://")),
+        author_avatar_url: non_empty(author.avatar_url)
+            .filter(|url| url.starts_with("https://"))
+            .map(sharpen_x_avatar_url),
         author_badges: Vec::new(),
         author_roles: Vec::new(),
         published_at: non_empty(received_at).unwrap_or_else(|| now.clone()),
@@ -881,6 +914,8 @@ mod tests {
         FollowRejected,
         /// The first page carries a comment and two follows by one person.
         DeliverFollows,
+        /// The first page carries a viewer comment and the host's own one.
+        DeliverHost,
         HangRead,
         WaitForRelease,
     }
@@ -1017,6 +1052,14 @@ mod tests {
                 // The same person twice: an unfollow and a refollow.
                 events.push(follow_relay_event("-7953119945885597316", "555"));
                 events.push(follow_relay_event("-7953119945885597317", "555"));
+            }
+            if state.mode == MockMode::DeliverHost {
+                // The streamer's own send, echoed back by XAA (plan 095).
+                let mut host = relay_event("message-host");
+                host["author"]["id"] = json!(X_USER_ID);
+                host["author"]["username"] = json!("orcdev");
+                host["isSubscriber"] = json!(false);
+                events.push(host);
             }
             return (
                 StatusCode::OK,
@@ -1342,7 +1385,7 @@ mod tests {
                 "author": { "name": "Dom", "affiliation": affiliation }
             }))
             .unwrap();
-            relay_event_to_message(event, "session-1", None)
+            relay_event_to_message(event, "session-1", None, X_USER_ID)
                 .expect("the comment survives")
                 .author_affiliation
         };
@@ -1375,16 +1418,38 @@ mod tests {
     }
 
     #[test]
+    fn x_avatars_are_sharpened_to_400x400_at_ingest() {
+        assert_eq!(
+            sharpen_x_avatar_url("https://pbs.twimg.com/profile_images/1/a_normal.jpg".into()),
+            "https://pbs.twimg.com/profile_images/1/a_400x400.jpg"
+        );
+        assert_eq!(
+            sharpen_x_avatar_url("https://pbs.twimg.com/profile_images/1/a_normal.png".into()),
+            "https://pbs.twimg.com/profile_images/1/a_400x400.png"
+        );
+        // Already sharp, no size suffix, or no extension: unchanged.
+        for untouched in [
+            "https://pbs.twimg.com/profile_images/1/a_400x400.jpg",
+            "https://pbs.twimg.com/profile_images/1/a.jpg",
+            "https://abs.twimg.com/sticky/default_profile_images/default_profile_normal",
+            "https://pbs.twimg.com/profile_images/1/a_normal.jpg?x=1",
+        ] {
+            assert_eq!(sharpen_x_avatar_url(untouched.into()), untouched);
+        }
+    }
+
+    #[test]
     fn relay_event_maps_to_a_comment_row() {
         let event: RelayEvent = serde_json::from_value(relay_event("2090000000000000004")).unwrap();
-        let message = relay_event_to_message(event, "session-1", Some("x-target")).unwrap();
+        let message =
+            relay_event_to_message(event, "session-1", Some("x-target"), X_USER_ID).unwrap();
         assert_eq!(message.provider_message_id, "2090000000000000004");
         assert_eq!(message.platform, StreamPlatform::X);
         assert_eq!(message.author_name, "Viewer Name");
         assert_eq!(message.author_id.as_deref(), Some("1461047860854759434"));
         assert_eq!(
             message.author_avatar_url.as_deref(),
-            Some("https://pbs.twimg.com/profile_images/1/a_normal.jpg")
+            Some("https://pbs.twimg.com/profile_images/1/a_400x400.jpg")
         );
         assert_eq!(message.author_roles, vec!["member".to_string()]);
         assert_eq!(
@@ -1400,7 +1465,7 @@ mod tests {
 
         let sparse: RelayEvent =
             serde_json::from_value(json!({ "messageId": "m2", "text": "hi" })).unwrap();
-        let message = relay_event_to_message(sparse, "session-1", None).unwrap();
+        let message = relay_event_to_message(sparse, "session-1", None, X_USER_ID).unwrap();
         assert_eq!(message.author_name, "X viewer");
         assert!(message.author_avatar_url.is_none());
         assert!(message.author_roles.is_empty());
@@ -1412,7 +1477,7 @@ mod tests {
             "author": { "username": "viewer", "avatarUrl": "http://insecure/a.jpg" }
         }))
         .unwrap();
-        let message = relay_event_to_message(handle_only, "session-1", None).unwrap();
+        let message = relay_event_to_message(handle_only, "session-1", None, X_USER_ID).unwrap();
         assert_eq!(message.author_name, "viewer");
         assert!(message.author_avatar_url.is_none());
 
@@ -1421,13 +1486,62 @@ mod tests {
             json!({ "messageId": " ", "text": "hi" }),
         ] {
             let event: RelayEvent = serde_json::from_value(blank).unwrap();
-            assert!(relay_event_to_message(event, "session-1", None).is_none());
+            assert!(relay_event_to_message(event, "session-1", None, X_USER_ID).is_none());
         }
+    }
+
+    /// Plan 095, S1: XAA has no host flag, so the connected account's own
+    /// messages are matched by exact author id and marked `owner` ("Host").
+    #[test]
+    fn the_hosts_own_messages_are_marked_owner_by_exact_author_id() {
+        let roles = |author: Value, is_subscriber: bool, host_user_id: &str| {
+            let event: RelayEvent = serde_json::from_value(json!({
+                "messageId": "m1",
+                "text": "hi",
+                "isSubscriber": is_subscriber,
+                "author": author
+            }))
+            .unwrap();
+            relay_event_to_message(event, "session-1", None, host_user_id)
+                .expect("the comment survives")
+                .author_roles
+        };
+
+        assert_eq!(
+            roles(json!({ "id": X_USER_ID }), false, X_USER_ID),
+            vec!["owner".to_string()]
+        );
+        // Ids are trimmed on both sides, never prefix- or loosely matched.
+        assert_eq!(
+            roles(
+                json!({ "id": format!(" {X_USER_ID} ") }),
+                false,
+                " 742673143 "
+            ),
+            vec!["owner".to_string()]
+        );
+        assert!(roles(json!({ "id": "1461047860854759434" }), false, X_USER_ID).is_empty());
+        assert!(roles(json!({ "id": "74267314" }), false, X_USER_ID).is_empty());
+        assert!(roles(json!({ "id": "7426731430" }), false, X_USER_ID).is_empty());
+        // No author id, or no known host id, is never the host.
+        assert!(roles(json!({ "name": "Dom" }), false, X_USER_ID).is_empty());
+        assert!(roles(json!({ "id": "  " }), false, X_USER_ID).is_empty());
+        assert!(roles(json!({ "id": X_USER_ID }), false, "").is_empty());
+        assert!(roles(json!({ "id": "  " }), false, "  ").is_empty());
+        // `owner` first, like Twitch, then the subscriber `member`.
+        assert_eq!(
+            roles(json!({ "id": X_USER_ID }), true, X_USER_ID),
+            vec!["owner".to_string(), "member".to_string()]
+        );
+        assert_eq!(
+            roles(json!({ "id": "1461047860854759434" }), true, X_USER_ID),
+            vec!["member".to_string()]
+        );
     }
 
     #[tokio::test]
     async fn bind_subscribe_read_flow_delivers_a_comment() {
-        let server = spawn_mock_server(MockMode::Deliver, Vec::new()).await;
+        let server = spawn_mock_server(MockMode::DeliverHost, Vec::new()).await;
         let state = test_state();
         let session_generation = start_test_session(&state, "session-1").await;
 
@@ -1438,6 +1552,7 @@ mod tests {
             mock_config(&server),
         ));
         let message = wait_for_message(&state, "message-1").await;
+        let host_message = wait_for_message(&state, "message-host").await;
         let provider =
             wait_for_provider_state(&state, LiveChatProviderConnectionState::Connected).await;
         connector.abort();
@@ -1445,7 +1560,29 @@ mod tests {
 
         assert_eq!(message.session_id, "session-1");
         assert_eq!(message.author_name, "Viewer Name");
+        assert_eq!(message.author_roles, vec!["member".to_string()]);
         assert_eq!(provider.message, "X live chat connected.");
+
+        // Plan 095, S1: the streamer's own message (author id = the
+        // connected account) is stored as the host, like the other platforms.
+        assert_eq!(host_message.author_id.as_deref(), Some(X_USER_ID));
+        assert_eq!(host_message.author_roles, vec!["owner".to_string()]);
+        let persisted = state
+            .database
+            .list_live_chat_messages("session-1")
+            .unwrap()
+            .into_iter()
+            .find(|message| message.provider_message_id == "message-host")
+            .expect("the host message is persisted");
+        assert_eq!(persisted.author_roles, vec!["owner".to_string()]);
+        let persisted_viewer = state
+            .database
+            .list_live_chat_messages("session-1")
+            .unwrap()
+            .into_iter()
+            .find(|message| message.provider_message_id == "message-1")
+            .expect("the viewer message is persisted");
+        assert_eq!(persisted_viewer.author_roles, vec!["member".to_string()]);
 
         // Only a one-shot signed header is handed to the relay, never a token.
         let authorizations = server.state.bind_authorizations.lock().await;
@@ -1540,7 +1677,7 @@ mod tests {
         assert_eq!(follow.author_id.as_deref(), Some("555"));
         assert_eq!(
             follow.author_avatar_url.as_deref(),
-            Some("https://pbs.twimg.com/profile_images/5/fan_normal.jpg")
+            Some("https://pbs.twimg.com/profile_images/5/fan_400x400.jpg")
         );
         assert_eq!(
             follow.details,
@@ -1643,16 +1780,21 @@ mod tests {
     #[test]
     fn relay_follow_rows_parse_and_unknown_kinds_are_skipped() {
         let follow: RelayEvent = serde_json::from_value(follow_relay_event("-1", "555")).unwrap();
-        let message = relay_event_to_message(follow, "session-1", Some("x-target")).unwrap();
+        let message =
+            relay_event_to_message(follow, "session-1", Some("x-target"), X_USER_ID).unwrap();
         assert_eq!(message.event_type, LiveChatEventType::Follow);
         assert_eq!(message.message_text, "New Fan followed");
         assert_eq!(message.provider_message_id, "follow:-1");
 
         let mut insecure = follow_relay_event("-2", "556");
         insecure["author"]["avatarUrl"] = json!("http://pbs.twimg.com/a.jpg");
-        let message =
-            relay_event_to_message(serde_json::from_value(insecure).unwrap(), "session-1", None)
-                .unwrap();
+        let message = relay_event_to_message(
+            serde_json::from_value(insecure).unwrap(),
+            "session-1",
+            None,
+            X_USER_ID,
+        )
+        .unwrap();
         assert!(message.author_avatar_url.is_none());
 
         let mut anonymous = follow_relay_event("-3", "557");
@@ -1661,13 +1803,14 @@ mod tests {
             relay_event_to_message(
                 serde_json::from_value(anonymous).unwrap(),
                 "session-1",
-                None
+                None,
+                X_USER_ID,
             )
             .is_none()
         );
         let mystery: RelayEvent =
             serde_json::from_value(json!({ "kind": "mystery", "messageId": "m" })).unwrap();
-        assert!(relay_event_to_message(mystery, "session-1", None).is_none());
+        assert!(relay_event_to_message(mystery, "session-1", None, X_USER_ID).is_none());
     }
 
     #[tokio::test]

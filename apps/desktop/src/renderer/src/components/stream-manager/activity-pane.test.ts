@@ -5,9 +5,11 @@ import { describe, expect, it } from 'vitest'
 import {
   ActivityPane,
   activityCapabilityNote,
+  activityHighlight,
+  activityRowActions,
   activityRowShowsPerson
 } from '@/components/stream-manager/activity-pane'
-import type { LiveChatProviderState } from '@/lib/backend'
+import type { CommentHighlightState, LiveChatProviderState } from '@/lib/backend'
 import type { ActivityItem } from '@/lib/stream-activity'
 
 const provider = (platform: 'twitch' | 'youtube'): LiveChatProviderState => ({
@@ -206,5 +208,145 @@ describe('activityCapabilityNote for X', () => {
     expect(note('2026-09-28T10:00:00Z', '2026-09-28T10:30:00Z')).toBe(
       "X doesn't share tips. New X followers show as a count."
     )
+  })
+})
+
+// Plan 095, S2: Activity says what is on stream, with chat's own badge.
+describe('ActivityPane on stream', () => {
+  const rows: ActivityItem[] = [
+    {
+      id: 'follow',
+      kind: 'follow',
+      filter: 'follows',
+      platform: 'x',
+      name: 'New Fan',
+      line: 'Followed',
+      short: 'Follow',
+      at: '2026-09-24T10:00:00Z',
+      messageId: 'm-follow'
+    },
+    {
+      id: 'sub',
+      kind: 'subscription',
+      filter: 'support',
+      platform: 'twitch',
+      name: 'morgaesis',
+      line: 'Resubscribed for 14 months at Tier 1',
+      short: 'Resub · 14 months',
+      at: '2026-09-24T10:00:10Z',
+      messageId: 'm-sub'
+    },
+    {
+      id: 'destination',
+      kind: 'destination-failed',
+      filter: 'destinations',
+      platform: 'youtube',
+      name: 'YouTube',
+      line: 'YouTube failed',
+      short: 'Failed',
+      at: '2026-09-24T10:00:20Z'
+    }
+  ]
+  const live = (messageId: string): CommentHighlightState => ({
+    generation: 3,
+    phase: 'live',
+    messageId
+  })
+  const render = (props: Partial<Parameters<typeof ActivityPane>[0]>): string =>
+    renderToStaticMarkup(
+      createElement(ActivityPane, {
+        items: rows,
+        providers: [provider('twitch')],
+        nowMs: Date.parse('2026-09-24T10:01:00Z'),
+        onShowOnStream: () => undefined,
+        ...props
+      })
+    )
+  const rowOf = (markup: string, id: string): string => {
+    const at = markup.indexOf(`data-activity-id="${id}"`)
+    expect(at).toBeGreaterThan(-1)
+    const start = markup.lastIndexOf('<li', at)
+    return markup.slice(start, markup.indexOf('</li>', at))
+  }
+  // Selected = a full-row bg-accent block, not only the hover one.
+  const selected = (row: string): boolean =>
+    (row.match(/^<li class="([^"]*)"/)?.[1] ?? '').split(' ').includes('bg-accent')
+
+  it('shows On stream on the live row only, as a full-row selection', () => {
+    const markup = render({ highlightState: live('m-follow'), liveHighlightId: 'm-follow' })
+    const follow = rowOf(markup, 'follow')
+    expect(follow).toContain('data-highlight-phase="live"')
+    expect(follow).toContain('data-slot="activity-highlight"')
+    expect(follow).toMatch(/data-variant="success"[^>]*>On stream</)
+    expect(follow).not.toMatch(/data-variant="live"/)
+    expect(selected(follow)).toBe(true)
+    expect(rowOf(markup, 'sub')).toContain('data-highlight-phase="idle"')
+    expect(rowOf(markup, 'sub')).not.toContain('On stream')
+    expect(selected(rowOf(markup, 'sub'))).toBe(false)
+    expect(markup.match(/On stream/g)).toHaveLength(1)
+  })
+
+  it('shows Applying… and Failed (with the reason on hover) on the matching row', () => {
+    const applying = render({ highlightApplyingId: 'm-sub' })
+    expect(rowOf(applying, 'sub')).toContain('data-highlight-phase="applying"')
+    expect(rowOf(applying, 'sub')).toMatch(/data-variant="secondary"[^>]*>Applying…</)
+    expect(rowOf(applying, 'follow')).not.toContain('Applying')
+
+    const failed = render({
+      highlightFailure: { messageId: 'm-follow', reason: 'The stream is not live.' }
+    })
+    expect(rowOf(failed, 'follow')).toContain('data-highlight-phase="failed"')
+    expect(rowOf(failed, 'follow')).toMatch(
+      /data-variant="destructive"[^>]*title="The stream is not live\."[^>]*>Failed</
+    )
+    expect(rowOf(failed, 'sub')).not.toContain('Failed<')
+    // A failed row is not a selected row.
+    expect(selected(rowOf(failed, 'follow'))).toBe(false)
+  })
+
+  it('never badges a row without a chat message behind it', () => {
+    const markup = render({ highlightState: live('m-follow'), liveHighlightId: 'm-follow' })
+    const destination = rowOf(markup, 'destination')
+    expect(destination).not.toContain('data-highlight-phase')
+    expect(destination).not.toContain('activity-highlight')
+    const item = rows[2]!
+    expect(activityHighlight(item, { highlightApplyingId: 'destination' })).toEqual({
+      phase: 'idle'
+    })
+  })
+
+  it('is idle for a different message or an idle slot', () => {
+    expect(activityHighlight(rows[0]!, { highlightState: live('m-sub') })).toEqual({
+      phase: 'idle'
+    })
+    expect(
+      activityHighlight(rows[0]!, {
+        highlightState: { generation: 4, phase: 'idle', messageId: 'm-follow' }
+      })
+    ).toEqual({ phase: 'idle', reason: undefined })
+    expect(activityHighlight(rows[0]!, {})).toEqual({ phase: 'idle' })
+    const markup = render({ highlightState: { generation: 4, phase: 'idle' } })
+    expect(markup).not.toContain('activity-highlight')
+    expect(markup).not.toContain('data-highlight-phase="live"')
+  })
+
+  it('flips Show on stream to Remove from stream while the row is live', () => {
+    const onShowOnStream = (): void => undefined
+    const show = (phase: 'idle' | 'applying' | 'live' | 'failed') =>
+      activityRowActions(rows[0]!, { phase }, { onShowOnStream }).find(
+        (action) => action.id === 'show'
+      )
+    expect(show('idle')?.label).toBe('Show on stream')
+    expect(show('failed')?.label).toBe('Show on stream')
+    expect(show('live')?.label).toBe('Remove from stream')
+    expect(show('applying')?.disabled).toBe(true)
+    expect(show('live')?.disabled).toBe(false)
+    // No chat message behind it, or no live window: nothing to show.
+    expect(
+      activityRowActions(rows[2]!, { phase: 'idle' }, { onShowOnStream }).map(({ id }) => id)
+    ).not.toContain('show')
+    expect(activityRowActions(rows[0]!, { phase: 'live' }, {}).map(({ id }) => id)).toEqual([
+      'copy'
+    ])
   })
 })

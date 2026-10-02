@@ -32,6 +32,7 @@ import type {
 import type { LiveDashboardState } from './live-dashboard'
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { COMMENT_HIGHLIGHT_ANCHORS, DOCK_SLOTS, LAYOUT_PRESET_VALUES } from './backend'
+import { CHAT_AVATAR_MAX_BYTES, chatAvatarBytesWithinCap } from './chat-avatar-bytes'
 import {
   arraySchema,
   booleanSchema,
@@ -72,6 +73,7 @@ export const electronInvokeApiMethods = {
   'backgrounds:asset-exists': 'backgroundAssetExists',
   'backgrounds:bundled-assets': 'getBundledBackgroundAssets',
   'avatars:cache': 'cacheChatAvatar',
+  'avatars:read': 'readChatAvatar',
   'account:begin-sign-in': 'beginAccountSignIn',
   'account:refresh': 'refreshAccount',
   'account:sign-out': 'signOutAccount',
@@ -391,6 +393,22 @@ function invokeContract(
 }
 
 const pathSchema = stringSchema({ minLength: 1, maxLength: 32_768 })
+/** One cached chat image as bytes (plan 095, S3): null when main has no such
+ * managed file, otherwise a non-empty Uint8Array within the 2 MB cache cap.
+ * Bounded structured-clone values exclude typed arrays, so this is explicit. */
+const chatAvatarBytesSchema = runtimeSchema<Uint8Array | null>(
+  `null or image bytes of at most ${CHAT_AVATAR_MAX_BYTES} bytes`,
+  (value, path) => {
+    if (value === null) return null
+    if (!(value instanceof Uint8Array) || !chatAvatarBytesWithinCap(value.byteLength)) {
+      throw new RuntimeSchemaError(
+        path,
+        `null or image bytes of at most ${CHAT_AVATAR_MAX_BYTES} bytes`
+      )
+    }
+    return value
+  }
+)
 const boundedIdentifier = stringSchema({ minLength: 1, maxLength: 1024 })
 const boundedStatusText = stringSchema({ maxLength: 16_384 })
 const nonNegativeSafeIntegerSchema = runtimeSchema<number>(
@@ -999,6 +1017,7 @@ const specificRuntimeInvokeContracts = {
   'resource:trash-session-deletion': invokeContract(tupleSchema([boundedIdentifier])),
   'system:check-directory': invokeContract(tupleSchema([boundedIdentifier])),
   'backgrounds:asset-exists': invokeContract(tupleSchema([boundedIdentifier])),
+  'avatars:read': invokeContract(tupleSchema([boundedIdentifier]), chatAvatarBytesSchema),
   'global-shortcuts:set': invokeContract(tupleSchema([globalShortcutsSchema])),
   'shortcut-recorder:set-armed': invokeContract(
     tupleSchema([booleanSchema]),

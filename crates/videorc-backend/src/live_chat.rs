@@ -1624,6 +1624,22 @@ pub struct FakeChatConfig {
     /// has, with structured details (the Stream Manager smoke, plan 055).
     #[serde(default)]
     pub events: bool,
+    /// Give every fake message this author avatar (the comment-highlight
+    /// smoke proves the avatar reaches the on-stream card, plan 095).
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    /// End every fake message with this emote as an image fragment, the way
+    /// Twitch, Kick and 7TV deliver one (the same smoke proves it is drawn
+    /// on the card, plan 095).
+    #[serde(default)]
+    pub emote: Option<FakeChatEmote>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FakeChatEmote {
+    pub text: String,
+    pub image_url: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -3205,6 +3221,24 @@ async fn run_fake_connector(
             .await;
         }
         let mut message = fake_message(&session_id, platform, config.target_id.as_deref(), seq);
+        message.author_avatar_url = config.avatar_url.clone();
+        if let Some(emote) = &config.emote {
+            message.fragments = vec![
+                LiveChatMessageFragment {
+                    fragment_type: "text".to_string(),
+                    text: format!("{} ", message.message_text),
+                    image_url: None,
+                    zero_width: false,
+                },
+                LiveChatMessageFragment {
+                    fragment_type: "emote".to_string(),
+                    text: emote.text.clone(),
+                    image_url: Some(emote.image_url.clone()),
+                    zero_width: false,
+                },
+            ];
+            message.message_text = format!("{} {}", message.message_text, emote.text);
+        }
         if config.out_of_order && seq == 1 {
             let earlier = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
             message.published_at = earlier.clone();

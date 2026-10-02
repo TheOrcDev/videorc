@@ -6,11 +6,22 @@ import {
   recordingQuality,
   sessionMode,
   isSessionTransportActive,
+  sessionAlsoRecords,
   sessionClockLabel,
+  sessionElapsedMs,
+  sessionIsLive,
   sessionStatusLabel,
   sessionStatusTone,
+  sessionStopControl,
   streamingSummary
 } from './studio-session-view'
+
+const STREAM_URL = 'rtmp://live.twitch.tv/app/***'
+// Go Live leaves recordEnabled on: the backend reports record+stream as
+// `recording`, and only stream-only as `streaming` (plan 095 S5).
+const recordOnly = { state: 'recording', sessionId: 's' }
+const streamOnly = { state: 'streaming', sessionId: 's', streamUrl: STREAM_URL }
+const recordAndStream = { state: 'recording', sessionId: 's', streamUrl: STREAM_URL }
 
 describe('sessionMode', () => {
   it('names each record/stream combination', () => {
@@ -60,33 +71,83 @@ describe('streamingSummary', () => {
   })
 })
 
+describe('sessionIsLive', () => {
+  it('is on air for stream-only and record+stream, never for a recording', () => {
+    expect(sessionIsLive(streamOnly)).toBe(true)
+    expect(sessionIsLive(recordAndStream)).toBe(true)
+    expect(sessionIsLive(recordOnly)).toBe(false)
+    expect(sessionIsLive({ state: 'recording', streamUrl: '' })).toBe(false)
+  })
+  it('is never on air outside a running state, stream URL or not', () => {
+    for (const state of ['idle', 'starting', 'stopping', 'failed']) {
+      expect(sessionIsLive({ state, streamUrl: STREAM_URL })).toBe(false)
+    }
+  })
+  it('marks only record+stream as also recording', () => {
+    expect(sessionAlsoRecords(recordAndStream)).toBe(true)
+    expect(sessionAlsoRecords(streamOnly)).toBe(false)
+    expect(sessionAlsoRecords(recordOnly)).toBe(false)
+  })
+})
+
 describe('sessionStatusLabel / sessionStatusTone', () => {
   it('maps known states to label + tone', () => {
-    expect(sessionStatusLabel('idle')).toBe('Ready')
-    expect(sessionStatusTone('idle')).toBe('good')
-    expect(sessionStatusLabel('recording')).toBe('Recording')
-    expect(sessionStatusTone('recording')).toBe('error')
-    expect(sessionStatusTone('streaming')).toBe('good')
-    expect(sessionStatusTone('starting')).toBe('warn')
-    expect(sessionStatusLabel('failed')).toBe('Failed')
+    expect(sessionStatusLabel({ state: 'idle' })).toBe('Ready')
+    expect(sessionStatusTone({ state: 'idle' })).toBe('good')
+    expect(sessionStatusLabel({ state: 'recording' })).toBe('Recording')
+    expect(sessionStatusTone({ state: 'recording' })).toBe('error')
+    expect(sessionStatusTone({ state: 'starting' })).toBe('warn')
+    expect(sessionStatusLabel({ state: 'failed' })).toBe('Failed')
+  })
+  it('reads Streaming in the live tone for every on-air session (plan 095 S5)', () => {
+    expect(sessionStatusLabel(recordOnly, 'connected')).toBe('Recording')
+    expect(sessionStatusTone(recordOnly, 'connected')).toBe('error')
+    expect(sessionStatusLabel(streamOnly, 'connected')).toBe('Streaming')
+    expect(sessionStatusTone(streamOnly, 'connected')).toBe('live')
+    // Go Live: the owner saw "Recording" here on 2026-10-02.
+    expect(sessionStatusLabel(recordAndStream, 'connected')).toBe('Streaming')
+    expect(sessionStatusTone(recordAndStream, 'connected')).toBe('live')
   })
   it('capitalizes and stays neutral for unknown states', () => {
-    expect(sessionStatusLabel('paused')).toBe('Paused')
-    expect(sessionStatusTone('paused')).toBe('neutral')
+    expect(sessionStatusLabel({ state: 'paused' })).toBe('Paused')
+    expect(sessionStatusTone({ state: 'paused' })).toBe('neutral')
   })
   // F-014: a dead backend socket must override every session state — the app
   // used to zombie with a green Ready badge after a backend crash.
   it('reports Backend offline over any state when the socket is down', () => {
-    for (const state of ['idle', 'recording', 'streaming', 'failed']) {
-      expect(sessionStatusLabel(state, 'failed')).toBe('Backend offline')
-      expect(sessionStatusTone(state, 'failed')).toBe('error')
-      expect(sessionStatusLabel(state, 'closed')).toBe('Backend offline')
+    for (const status of [
+      { state: 'idle' },
+      recordOnly,
+      streamOnly,
+      recordAndStream,
+      { state: 'failed' }
+    ]) {
+      expect(sessionStatusLabel(status, 'failed')).toBe('Backend offline')
+      expect(sessionStatusTone(status, 'failed')).toBe('error')
+      expect(sessionStatusLabel(status, 'closed')).toBe('Backend offline')
     }
-    expect(sessionStatusLabel('idle', 'connected')).toBe('Ready')
-    expect(sessionStatusTone('idle', 'connected')).toBe('good')
+    expect(sessionStatusLabel({ state: 'idle' }, 'connected')).toBe('Ready')
+    expect(sessionStatusTone({ state: 'idle' }, 'connected')).toBe('good')
     // Boot-time connecting is calm, not alarming.
-    expect(sessionStatusLabel('idle', 'waiting')).toBe('Connecting…')
-    expect(sessionStatusTone('idle', 'connecting')).toBe('warn')
+    expect(sessionStatusLabel({ state: 'idle' }, 'waiting')).toBe('Connecting…')
+    expect(sessionStatusTone({ state: 'idle' }, 'connecting')).toBe('warn')
+  })
+})
+
+describe('sessionStopControl', () => {
+  it('ends a livestream, and says when that also stops the recording (plan 095 S5)', () => {
+    expect(sessionStopControl(recordOnly, false)).toEqual({ label: 'Stop recording' })
+    expect(sessionStopControl(streamOnly, false)).toEqual({ label: 'End livestream' })
+    expect(sessionStopControl(recordAndStream, false)).toEqual({
+      label: 'End livestream',
+      title: 'Also stops the recording'
+    })
+  })
+  it('keeps the in-flight labels', () => {
+    expect(sessionStopControl(recordAndStream, true)).toEqual({ label: 'Stopping…' })
+    expect(sessionStopControl({ state: 'stopping', streamUrl: STREAM_URL }, false)).toEqual({
+      label: 'Force stop'
+    })
   })
 })
 
@@ -100,6 +161,27 @@ describe('isSessionTransportActive', () => {
     for (const state of ['idle', 'failed', 'unknown']) {
       expect(isSessionTransportActive(state)).toBe(false)
     }
+  })
+})
+
+describe('sessionElapsedMs', () => {
+  const startedAt = '2026-10-02T18:00:00.000Z'
+  const startedMs = Date.parse(startedAt)
+
+  it('counts from the session start (plan 095 S5)', () => {
+    expect(sessionElapsedMs(startedAt, startedMs)).toBe(0)
+    expect(sessionElapsedMs(startedAt, startedMs + 61_000)).toBe(61_000)
+    expect(sessionClockLabel(sessionElapsedMs(startedAt, startedMs + 61_000))).toBe('1:01')
+  })
+  it('clamps a start in the future to 0', () => {
+    expect(sessionElapsedMs(startedAt, startedMs - 5_000)).toBe(0)
+  })
+  it('is undefined for missing or invalid input', () => {
+    expect(sessionElapsedMs(undefined, startedMs)).toBeUndefined()
+    expect(sessionElapsedMs(null, startedMs)).toBeUndefined()
+    expect(sessionElapsedMs('', startedMs)).toBeUndefined()
+    expect(sessionElapsedMs('not a date', startedMs)).toBeUndefined()
+    expect(sessionElapsedMs(startedAt, Number.NaN)).toBeUndefined()
   })
 })
 
