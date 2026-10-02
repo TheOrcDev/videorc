@@ -1,7 +1,7 @@
 # Plan 095: Highlight card emotes and avatars, Activity "On stream", X host
 
 **Status:** PLANNED 2026-10-02. **Priority:** P1. All four are visible to the
-owner or viewers during a live stream. **Size:** M, 4 slices. **Planned
+owner or viewers during a live stream. **Size:** M, 5 slices. **Planned
 against:** `origin/main` `b4bb692e` (same card, highlight and chat code as the
 installed 0.9.126). The shared checkout is on an old branch, so work in a
 fresh worktree off `origin/main`. **Owner route:** Implementation (fit 8;
@@ -249,6 +249,109 @@ Owner by-eye check on a live stream (see Acceptance).
 
 ---
 
+## S5: Go Live says "Streaming", and the session clock ticks (owner report, same day)
+
+Owner: "When I click Go Live, the confirmation message says Recording
+instead of Streaming. The timer does not work." Both causes are proven on
+origin/main `b4bb692e`. The fix is renderer only. **Model lane:** `opus-4.8`
+with the `videorc-design` skill.
+
+**Bug 1, the label: Go Live is a record+stream session, and the app
+reports record+stream as "Recording".**
+
+- The inspector **Stream** button (`session-panel.tsx:103-113` →
+  `studio-tab.tsx:131-142` `handleLiveStream`) sets `streamEnabled: true` and
+  leaves `recordEnabled`, which defaults to true (`lib/capture.ts:1246`).
+- The backend reports `state: 'streaming'` only for stream-only sessions
+  (`recording.rs:5310-5316`, `running_state()` `:2443-2450`,
+  `main.rs:11774-11782`).
+- So the pill next to the clock reads **"Recording"** in red
+  (`studio-tab.tsx:159-173` → `studio-session-view.ts:107-145`), and the stop
+  button says "Stop recording" (`studio-tab.tsx:148-154`).
+- The same mapping causes three more bugs:
+  - The Stream Manager shows a "Recording" chip instead of ON AIR and hides
+    stream health and the viewers row (`shared/live-dashboard.ts:110-116`,
+    `stream-manager-stats.ts:189-193, 277`).
+  - **"Open Stream Manager when I go live" never fires**
+    (`use-studio.tsx:6052-6059`).
+  - The X manual-RTMP "start the Broadcast" reminder never fires
+    (`use-studio.tsx:5428-5450`).
+- It isn't a regression. It became prominent when plan 050 (`09568cc5`,
+  0.9.102) put the pill at the top of the inspector.
+
+**Bug 2, the timer: the inspector clock has shown a frozen 0:00 since
+0.9.102.**
+
+- `SessionClock` (`session-panel.tsx:121-131`) renders
+  `sessionClockLabel(recording.durationMs)`.
+- The backend sends `duration_ms: None` in every *running* status
+  (`recording.rs:2438`, `main.rs:11797`); only the terminal status has it.
+- Nothing re-renders the clock on an interval.
+- The Library live row has the same bug (`LiveSessionDuration`,
+  `library-tab.tsx:604-611`, shows "-").
+- The Stream Manager clock works (it ticks from `startedAt`,
+  `stream-manager.tsx:269-276`).
+
+**Steps:**
+
+1. **Live predicate.** Add a pure predicate in `studio-session-view.ts`:
+   `sessionIsLive({ state, streamUrl }) = state === 'streaming' ||
+   (state === 'recording' && Boolean(streamUrl))`. `streamUrl` is already in
+   the running status and the contract (`backend-rpc-contract.ts:448-461`),
+   so no backend or contract change is needed. Expose `streamUrl` (or a
+   derived `live`) on the slim recording-state context
+   (`use-studio.tsx:1347-1349`, `14391-14394`).
+2. **Use the predicate everywhere listed above:**
+   - Pill: **"Streaming"** in the live tone. When the session also records,
+     add a quiet secondary Badge "Rec" beside it (follow the design skill;
+     the `live` variant is right here because this *is* on air).
+   - Stop button: **"End livestream"**, with tooltip "Also stops the
+     recording" when recording.
+   - `sessionStateOf` in `live-dashboard.ts`, so the Stream Manager shows
+     ON AIR, health and viewers.
+   - The `openStreamManagerOnLive` trigger.
+   - The X reminder.
+   - Account-menu dot label and the Library live row label.
+3. **Do NOT change the backend to report Streaming for record+stream.**
+   `lastSessionActivityRef` (`use-studio.tsx:4354-4357`) would become
+   `'live-stream'`, and `showSessionFinished` returns early unless the
+   activity is `'recording'` (`session-runtime-recovery.ts:284-300`). That
+   would silently drop the "Recording saved" toast after a record+stream
+   session. Add a test that pins the toast for record+stream.
+4. **Ticking clock.**
+   - Add a pure `sessionElapsedMs(startedAt, nowMs)`: invalid or missing
+     input gives `undefined`, negative values clamp to 0.
+   - `SessionClock` keeps its own `nowMs` state with a 1 s `setInterval`
+     keyed on `recording.startedAt`. Keep it local to the component so the
+     provider partition (`use-studio.tsx:1911-1915`) doesn't re-render the
+     tree every second.
+   - Do the same for `LiveSessionDuration`.
+   - Fix the docstring at `studio-session-view.ts:80-83`.
+
+**Tests:**
+
+- `studio-session-view.test.ts`: predicate, label and tone for record-only,
+  stream-only and record+stream; the elapsed helper.
+- `live-dashboard.test.ts`: `{ state: 'recording', streamUrl }` → `'live'`.
+- `stream-manager-stats.test.ts`: record+stream gives ON AIR plus the health
+  stat.
+- A happy-dom component test (`// @vitest-environment happy-dom`): render
+  `SessionTransport` with `startedAt`, use fake timers, advance 61 s, and
+  expect "1:01".
+- The "Recording saved" toast still fires after a record+stream session.
+- Update the partition test that assumes `durationMs` updates
+  (`use-studio-context-partition.test.ts:175-263`).
+- Re-check `scripts/smoke-captions-live-app.mjs:620-632`: it expects the pill
+  to read "Recording". Update it if that session streams.
+
+**Gates:** `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm --filter
+@videorc/desktop test`, `pnpm build` (renderer budget). This touches the
+session-start triggers, so also run `pnpm smoke:record-latency`. By-eye in the
+dev app: Go Live (record+stream) shows "Streaming" + Rec, the clock ticks,
+and Stream Manager opens if the setting is on and shows ON AIR.
+
+---
+
 ## Out of scope
 
 - YouTube custom emoji images (the backend doesn't fetch YouTube's emoji data).
@@ -272,6 +375,9 @@ Owner by-eye check on a live stream (see Acceptance).
 3. Highlight a follow from Activity. The row shows "On stream", the menu says
    "Remove from stream", and the state clears after about 10 s.
 4. Send from Stream Manager. The X echo shows "Host".
+5. Go Live (record+stream). The inspector says "Streaming" with Rec, the
+   clock ticks, Stream Manager shows ON AIR and opens automatically if that
+   setting is on.
 
 ## Handoff
 

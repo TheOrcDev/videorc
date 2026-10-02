@@ -281,6 +281,18 @@ describe('renderer security policy', () => {
     expect(AUXILIARY_API_KEYS.captions).not.toContain('cacheChatAvatar')
   })
 
+  it('lets only main and the Comments window read cached image bytes (plan 095)', () => {
+    // The highlight card decodes avatars and emotes from bytes; the cache
+    // directory stays main-owned and only its managed file names resolve.
+    expect(roleCanInvokeChannel('main', 'avatars:read')).toBe(true)
+    expect(roleCanInvokeChannel('comments', 'avatars:read')).toBe(true)
+    expect(roleCanInvokeChannel('notes', 'avatars:read')).toBe(false)
+    expect(roleCanInvokeChannel('captions', 'avatars:read')).toBe(false)
+    expect(AUXILIARY_API_KEYS.comments).toContain('readChatAvatar')
+    expect(AUXILIARY_API_KEYS.notes).not.toContain('readChatAvatar')
+    expect(AUXILIARY_API_KEYS.captions).not.toContain('readChatAvatar')
+  })
+
   it('keeps the retired glass wallpaper feed out of every window (plan 050)', () => {
     // Real vibrancy replaced the blurred-wallpaper underlay; no window may
     // reach the old System Events wallpaper feed.

@@ -273,6 +273,7 @@ import {
   redactAvatarFetchError,
   withAvatarFetchDeadline
 } from './avatar-cache'
+import { chatAvatarBytesWithinCap, managedAvatarFileName } from '../shared/chat-avatar-bytes'
 import { installContextMenu } from './context-menu'
 import {
   DARK_GLASS_COATS,
@@ -13160,6 +13161,25 @@ function resolveManagedAvatarFile(fileName: string): string | null {
   return resolveRegularFileInsideRoot(avatarCacheDirectory(), fileName)
 }
 
+// The highlight card decodes cached avatars and emotes from BYTES (plan 095,
+// S3): the renderer cannot fetch the CORS-less videorc-asset: scheme, and a
+// videorc-asset: <img> would taint its OffscreenCanvas. Only a managed cache
+// file name is accepted (shared/chat-avatar-bytes.ts), resolved inside the
+// cache directory with the protocol's own symlink/realpath checks, and bounded
+// by the same 2 MB cap as the fetch. Null, never a throw, for anything else.
+function readChatAvatar(localUrl: unknown): Uint8Array | null {
+  const fileName = managedAvatarFileName(localUrl)
+  if (!fileName) return null
+  const resolved = resolveManagedAvatarFile(fileName)
+  if (!resolved) return null
+  try {
+    if (!chatAvatarBytesWithinCap(statSync(resolved).size)) return null
+    return new Uint8Array(readFileSync(resolved))
+  } catch {
+    return null
+  }
+}
+
 // Stream-takeover screen images live in the backend-managed Screens dir; the
 // renderer addresses them by bare basename through the same scoped protocol
 // (raw file:// subresource loads are blocked and branded every upload
@@ -13704,6 +13724,7 @@ app.whenReady().then(async () => {
     backgroundAssetFileExists(assetId)
   )
   secureIpcHandle('avatars:cache', (_event, url: unknown) => cacheChatAvatar(url))
+  secureIpcHandle('avatars:read', (_event, localUrl: unknown) => readChatAvatar(localUrl))
   secureIpcHandle('oauth:open-url', (_event, authUrl: string) => openOAuthUrl(authUrl))
   secureIpcHandle('oauth:callback-redirect-uri', (_event, platform?: string) =>
     oauthCallbackRedirectUri(platform)

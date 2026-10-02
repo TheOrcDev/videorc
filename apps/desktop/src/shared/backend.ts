@@ -3907,6 +3907,10 @@ export interface VideorcApi {
   /** Fetch-and-cache a chat avatar from an allowlisted platform CDN; returns a
    * local videorc-asset:// URL or null (disallowed host / fetch failure). */
   cacheChatAvatar: (url: string) => Promise<string | null>
+  /** The bytes of one cached image (`videorc-asset://avatar/...`) for the
+   * highlight card to decode with `createImageBitmap` (plan 095, S3): null
+   * when the URL names no managed cache file or it is over the 2 MB cap. */
+  readChatAvatar: (localUrl: string) => Promise<Uint8Array | null>
   /** Correlated Comments-window command relay; the main renderer owns the backend socket. */
   sendCommentHighlight: (command: CommentHighlightCommand) => Promise<CommentHighlightState>
   onCommentHighlightRequest: (callback: (command: CommentHighlightCommand) => void) => () => void

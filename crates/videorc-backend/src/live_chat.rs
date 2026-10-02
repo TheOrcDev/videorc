@@ -1597,6 +1597,10 @@ pub struct FakeChatConfig {
     /// has, with structured details (the Stream Manager smoke, plan 055).
     #[serde(default)]
     pub events: bool,
+    /// Give every fake message this author avatar (the comment-highlight
+    /// smoke proves the avatar reaches the on-stream card, plan 095).
+    #[serde(default)]
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -3136,6 +3140,7 @@ async fn run_fake_connector(
             .await;
         }
         let mut message = fake_message(&session_id, platform, config.target_id.as_deref(), seq);
+        message.author_avatar_url = config.avatar_url.clone();
         if config.out_of_order && seq == 1 {
             let earlier = (chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339();
             message.published_at = earlier.clone();

@@ -8,7 +8,10 @@ import { describe, it } from 'node:test'
 import {
   CAPTION_MARKER_RGB,
   COMMENT_HIGHLIGHT_ANCHORS,
+  COMMENT_HIGHLIGHT_AVATAR_RGB,
+  COMMENT_HIGHLIGHT_EMOTE_RGB,
   COMMENT_HIGHLIGHT_MARKER_RGB,
+  commentHighlightImagePngBase64,
   commentHighlightCardRegion,
   countCommentHighlightAnchoredFrames,
   mirrorCommentHighlightAnchor,
@@ -272,6 +275,102 @@ describe('comment highlight artifact gate', () => {
       'highlight-unavailable'
     )
     assert.equal(classifyCommentHighlightResult({ active: true }), 'unknown')
+  })
+
+  it('proves the avatar and the emote reached the card only by their colours (plan 095)', () => {
+    // A monogram card: dark glass and text, none of either image colour.
+    const monogram = Buffer.concat([
+      markerFrame({ highlight: true }),
+      markerFrame({ highlight: true })
+    ])
+    const monogramMetrics = measureCommentHighlightArtifactRgb(monogram, {
+      width,
+      height,
+      anchor: 'top-left'
+    })
+    const monogramVerdict = evaluateCommentHighlightArtifactMetrics(monogramMetrics, {
+      highlightDisposition: 'live',
+      requireCaption: false,
+      requireAvatar: true,
+      requireEmote: true,
+      minMarkerPixelRatio: 0.1,
+      minMarkerFrames: 2
+    })
+    assert.equal(monogramVerdict.pass, false)
+    assert.match(
+      monogramVerdict.failures.join('\n'),
+      /avatar colour appeared in the card in 0 frame/
+    )
+    assert.match(
+      monogramVerdict.failures.join('\n'),
+      /emote colour appeared in the card in 0 frame/
+    )
+
+    // A card with one avatar pixel and one emote pixel on the anchored edge,
+    // where the avatar sits (outside the 8%-inset card region).
+    const imaged = () => {
+      const rgb = markerFrame({ highlight: true })
+      const region = commentHighlightCardRegion('top-left', { width, height }, { toEdge: true })
+      assert.equal(region.xStart, 0)
+      assert.equal(region.yStart, 0)
+      const paint = (column, color) => {
+        const offset = (region.yStart * width + region.xStart + column) * 3
+        rgb[offset] = color[0]
+        rgb[offset + 1] = color[1]
+        rgb[offset + 2] = color[2]
+      }
+      paint(0, COMMENT_HIGHLIGHT_AVATAR_RGB)
+      paint(1, COMMENT_HIGHLIGHT_EMOTE_RGB)
+      return rgb
+    }
+    const imagedMetrics = measureCommentHighlightArtifactRgb(Buffer.concat([imaged(), imaged()]), {
+      width,
+      height,
+      anchor: 'top-left'
+    })
+    const imagedVerdict = evaluateCommentHighlightArtifactMetrics(imagedMetrics, {
+      highlightDisposition: 'live',
+      requireCaption: false,
+      requireAvatar: true,
+      requireEmote: true,
+      minMarkerPixelRatio: 0.1,
+      minMarkerFrames: 2
+    })
+    assert.equal(imagedVerdict.pass, true, imagedVerdict.failures.join('\n'))
+    assert.equal(imagedVerdict.observations.avatarFrames, 2)
+    assert.equal(imagedVerdict.observations.emoteFrames, 2)
+
+    // Neither classifier fires on the other markers, the test pattern's pink
+    // line or yellow marker, white text, or the monogram grey.
+    const unrelated = Buffer.alloc(width * height * 3)
+    const distractors = [
+      COMMENT_HIGHLIGHT_MARKER_RGB,
+      CAPTION_MARKER_RGB,
+      [220, 92, 180],
+      [255, 245, 80],
+      [235, 235, 235],
+      [58, 58, 60],
+      [0, 0, 191],
+      [0, 191, 0]
+    ]
+    distractors.forEach((color, index) => fillRows(unrelated, index, index + 1, color))
+    const unrelatedMetrics = measureCommentHighlightArtifactRgb(unrelated, {
+      width,
+      height,
+      anchor: 'top-left'
+    })
+    assert.equal(unrelatedMetrics.maxHighlightAvatarPixelRatio, 0)
+    assert.equal(unrelatedMetrics.maxHighlightEmotePixelRatio, 0)
+  })
+
+  it('builds a flat PNG for the smoke avatar cache', () => {
+    const png = Buffer.from(
+      commentHighlightImagePngBase64({ rgb: COMMENT_HIGHLIGHT_AVATAR_RGB }),
+      'base64'
+    )
+    assert.deepEqual([...png.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    assert.equal(png.readUInt32BE(16), 128)
+    assert.equal(png.readUInt32BE(20), 128)
   })
 
   it('builds deterministic valid PNG marker stimuli', () => {

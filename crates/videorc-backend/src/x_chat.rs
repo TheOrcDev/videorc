@@ -714,6 +714,23 @@ fn non_empty(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// XAA hands out the `_normal` (48 px) profile image. The on-stream highlight
+/// card draws the avatar at ~60 px on a 1080p canvas, so ask for X's
+/// `_400x400` variant at ingest instead (plan 095, S3). Only the size suffix
+/// right before the extension changes; anything else is left alone.
+fn sharpen_x_avatar_url(url: String) -> String {
+    let Some((base, extension)) = url.rsplit_once('.') else {
+        return url;
+    };
+    if extension.contains('/') || !extension.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return url;
+    }
+    match base.strip_suffix("_normal") {
+        Some(stem) => format!("{stem}_400x400.{extension}"),
+        None => url,
+    }
+}
+
 fn https_url(value: Option<&Value>) -> Option<String> {
     value
         .and_then(Value::as_str)
@@ -796,7 +813,8 @@ fn relay_event_to_message(
         author_id,
         author_name,
         author_avatar_url: non_empty(event.author.avatar_url)
-            .filter(|url| url.starts_with("https://")),
+            .filter(|url| url.starts_with("https://"))
+            .map(sharpen_x_avatar_url),
         author_badges: Vec::new(),
         author_affiliation: relay_affiliation(event.author.affiliation.as_ref()),
         author_roles,
@@ -843,7 +861,9 @@ fn follow_event_to_message(
         author_id: Some(author_id),
         message_text: format!("{author_name} followed"),
         author_name,
-        author_avatar_url: non_empty(author.avatar_url).filter(|url| url.starts_with("https://")),
+        author_avatar_url: non_empty(author.avatar_url)
+            .filter(|url| url.starts_with("https://"))
+            .map(sharpen_x_avatar_url),
         author_badges: Vec::new(),
         author_roles: Vec::new(),
         published_at: non_empty(received_at).unwrap_or_else(|| now.clone()),
@@ -1397,6 +1417,27 @@ mod tests {
     }
 
     #[test]
+    fn x_avatars_are_sharpened_to_400x400_at_ingest() {
+        assert_eq!(
+            sharpen_x_avatar_url("https://pbs.twimg.com/profile_images/1/a_normal.jpg".into()),
+            "https://pbs.twimg.com/profile_images/1/a_400x400.jpg"
+        );
+        assert_eq!(
+            sharpen_x_avatar_url("https://pbs.twimg.com/profile_images/1/a_normal.png".into()),
+            "https://pbs.twimg.com/profile_images/1/a_400x400.png"
+        );
+        // Already sharp, no size suffix, or no extension: unchanged.
+        for untouched in [
+            "https://pbs.twimg.com/profile_images/1/a_400x400.jpg",
+            "https://pbs.twimg.com/profile_images/1/a.jpg",
+            "https://abs.twimg.com/sticky/default_profile_images/default_profile_normal",
+            "https://pbs.twimg.com/profile_images/1/a_normal.jpg?x=1",
+        ] {
+            assert_eq!(sharpen_x_avatar_url(untouched.into()), untouched);
+        }
+    }
+
+    #[test]
     fn relay_event_maps_to_a_comment_row() {
         let event: RelayEvent = serde_json::from_value(relay_event("2090000000000000004")).unwrap();
         let message =
@@ -1407,7 +1448,7 @@ mod tests {
         assert_eq!(message.author_id.as_deref(), Some("1461047860854759434"));
         assert_eq!(
             message.author_avatar_url.as_deref(),
-            Some("https://pbs.twimg.com/profile_images/1/a_normal.jpg")
+            Some("https://pbs.twimg.com/profile_images/1/a_400x400.jpg")
         );
         assert_eq!(message.author_roles, vec!["member".to_string()]);
         assert_eq!(
@@ -1635,7 +1676,7 @@ mod tests {
         assert_eq!(follow.author_id.as_deref(), Some("555"));
         assert_eq!(
             follow.author_avatar_url.as_deref(),
-            Some("https://pbs.twimg.com/profile_images/5/fan_normal.jpg")
+            Some("https://pbs.twimg.com/profile_images/5/fan_400x400.jpg")
         );
         assert_eq!(
             follow.details,

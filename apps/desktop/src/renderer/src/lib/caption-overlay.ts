@@ -6,6 +6,7 @@
 import { commentHighlightPlatformBadge, layoutCommentHighlight } from '@/lib/comment-highlight'
 import { activityItems } from '@/lib/stream-activity'
 import type { CaptionStyleId } from '@/lib/backend'
+import { COMMENTS_HIGHLIGHT_TIMING_CONTRACT } from '../../../shared/comments-command-timing'
 
 export type CaptionTextSize = 's' | 'm' | 'l'
 export type CaptionPosition = 'top' | 'bottom'
@@ -471,21 +472,112 @@ export function commentHighlightCardText(message: import('@/lib/backend').LiveCh
 
 type HighlightCanvas = { width: number; height: number }
 
+/** A decoded image the card paints: an ImageBitmap in the app, any sized
+ * CanvasImageSource in tests. */
+export type HighlightBitmap = CanvasImageSource & {
+  readonly width: number
+  readonly height: number
+}
+
+/** Reads one cached image's bytes from main (`avatars:read`). Injected so the
+ * card renderer is unit-testable without Electron. */
+export type HighlightImageReader = (localUrl: string) => Promise<Uint8Array | null | undefined>
+
+export interface HighlightCardImageDeps {
+  readImage?: HighlightImageReader
+  /** Decodes bytes to a bitmap; `createImageBitmap` in the app. */
+  decode?: (bytes: Uint8Array) => Promise<HighlightBitmap>
+  /** One line per failed image, with the reason. `console.warn` in the app. */
+  warn?: (message: string) => void
+  /** Every image for one card pair must decode within this slice. */
+  deadlineMs?: number
+}
+
+const defaultHighlightImageReader: HighlightImageReader = (localUrl) =>
+  window.videorc?.readChatAvatar?.(localUrl) ?? Promise.resolve(null)
+
+const defaultHighlightImageDecoder = (bytes: Uint8Array): Promise<HighlightBitmap> =>
+  createImageBitmap(new Blob([bytes as BlobPart]))
+
+class HighlightImageDeadlineError extends Error {
+  constructor(deadlineMs: number) {
+    super(`not decoded within ${deadlineMs} ms`)
+    this.name = 'HighlightImageDeadlineError'
+  }
+}
+
+/**
+ * Decode one cached image (`videorc-asset://avatar/<file>`) for the card.
+ * The bytes come from main over IPC: the renderer cannot `fetch` the scheme
+ * (no CORS; the owner's cards showed monograms on every platform, plan 095),
+ * and a `videorc-asset:` <img> would taint the canvas so `convertToBlob`
+ * throws. Rejects with the reason; the caller decides the fallback.
+ */
+async function decodeHighlightImage(
+  localUrl: string,
+  deps: Required<Pick<HighlightCardImageDeps, 'readImage' | 'decode' | 'deadlineMs'>>
+): Promise<HighlightBitmap> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new HighlightImageDeadlineError(deps.deadlineMs)),
+      deps.deadlineMs
+    )
+  })
+  try {
+    return await Promise.race([
+      (async () => {
+        const bytes = await deps.readImage(localUrl)
+        if (!bytes || bytes.byteLength === 0) {
+          throw new Error('main has no cached file for it')
+        }
+        return deps.decode(bytes)
+      })(),
+      deadline
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+function describeImageFailure(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 /** The card for the leg horizontal viewers watch and, when the backend reports
  * a vertical simulcast leg (`comments.highlight.canvases`), a second card
  * sized for its portrait canvas (plan 074). Null when the main card fails;
- * a failed vertical card still lets the horizontal one go on stream. */
+ * a failed vertical card still lets the horizontal one go on stream.
+ *
+ * Images are decoded ONCE here and shared by both cards. A failed avatar is
+ * logged once per highlight with its reason, and the card falls back to the
+ * monogram. */
 export async function renderCommentHighlightCards(
   message: import('@/lib/backend').LiveChatMessage,
   avatarUrl: string | null,
   stream: HighlightCanvas,
-  vertical?: HighlightCanvas
+  vertical?: HighlightCanvas,
+  imageDeps: HighlightCardImageDeps = {}
 ): Promise<{ pngBase64: string; verticalPngBase64?: string } | null> {
+  const deps = {
+    readImage: imageDeps.readImage ?? defaultHighlightImageReader,
+    decode: imageDeps.decode ?? defaultHighlightImageDecoder,
+    deadlineMs: imageDeps.deadlineMs ?? COMMENTS_HIGHLIGHT_TIMING_CONTRACT.avatarFetchMs
+  }
+  const warn = imageDeps.warn ?? ((line: string) => console.warn(line))
+  const avatar = avatarUrl
+    ? await decodeHighlightImage(avatarUrl, deps).catch((error: unknown) => {
+        warn(
+          `Highlight card: ${message.platform} avatar for ${message.authorName} fell back to the monogram (${describeImageFailure(error)}).`
+        )
+        return null
+      })
+    : null
   const render = (canvas: HighlightCanvas): Promise<string | null> =>
     renderCommentHighlightPng({
       authorName: message.authorName,
       text: commentHighlightCardText(message),
-      avatarUrl,
+      avatar,
       canvasWidth: canvas.width,
       canvasHeight: canvas.height,
       platform: message.platform
@@ -501,7 +593,8 @@ export async function renderCommentHighlightCards(
 export async function renderCommentHighlightPng(params: {
   authorName: string
   text: string
-  avatarUrl: string | null
+  /** Decoded by `renderCommentHighlightCards`; null paints the monogram. */
+  avatar?: HighlightBitmap | null
   canvasWidth: number
   /** Omitted = landscape. A portrait canvas gets the vertical-leg card. */
   canvasHeight?: number
@@ -572,20 +665,9 @@ export async function renderCommentHighlightPng(params: {
     Math.PI * 2
   )
   context.clip()
-  let avatarDrawn = false
-  if (params.avatarUrl) {
-    try {
-      const response = await fetch(params.avatarUrl)
-      if (response.ok) {
-        const bitmap = await createImageBitmap(await response.blob())
-        context.drawImage(bitmap, avatarX, avatarY, metrics.avatarPx, metrics.avatarPx)
-        avatarDrawn = true
-      }
-    } catch {
-      // Monogram fallback below.
-    }
-  }
-  if (!avatarDrawn) {
+  if (params.avatar) {
+    context.drawImage(params.avatar, avatarX, avatarY, metrics.avatarPx, metrics.avatarPx)
+  } else {
     context.fillStyle = 'rgba(255, 255, 255, 0.12)'
     context.fillRect(avatarX, avatarY, metrics.avatarPx, metrics.avatarPx)
     context.font = canvasFont(Math.round(metrics.avatarPx * 0.42))
