@@ -13,9 +13,8 @@ not use and why, are `plans/092-audiocn-audio-components.md` (meters) and
 | ----------------------------------------------------------------------------------------------- | --------------------------- | ----------------------------------------------------------------------------- |
 | `core`                                                                                          | `lib/audio/*.ts` (11 files) | Used by every item below                                                      |
 | `use-frame-source`, `use-clip-hold`, `use-audio-config`, `use-visibility`, `use-reduced-motion` | `hooks/`                    | Dependencies of the components (`use-reduced-motion` also serves the sidebar) |
-| `level-meter` with `db-scale`, `db-readout`, `clip-indicator`                                   | `components/ui/`            | Studio Microphone section (the level under the picker)                        |
+| `level-meter` with `db-scale`, `db-readout`, `clip-indicator`                                   | `components/ui/`            | Studio Microphone section and the Sources strips (`MicLevelMeter`)            |
 | `bar-visualizer`                                                                                | `components/ui/`            | Session mic sliver                                                            |
-| `live-waveform`                                                                                 | `components/ui/`            | Quick Settings mic preview                                                    |
 | `channel-strip`, `mixer`                                                                        | `components/ui/`            | Sources Audio mixer: one strip per source (plan 093)                          |
 | `fader`                                                                                         | `components/ui/`            | Sources: Microphone Gain, System audio Level                                  |
 | `parameter-slider`                                                                              | `components/ui/`            | Sources: Microphone Sync                                                      |
@@ -63,13 +62,14 @@ adapters that live outside the eager bundle:
 
 - `lib/mic-frame-sources.ts` turns the visual mic pipeline into audiocn frame sources: `createMicMeterSource` (peak and RMS with the configured mic gain added, silence while muted) and `createMicVisualSource` (bands and level history, raw).
 - `hooks/use-studio-mic-sources.ts` returns one stable source per pipeline. Only lazy chunks (the Studio dashboard, the Studio tab, Sources) import it.
+- `useMicrophoneMeter()` (same module) builds the microphone meter's input and state once, for the Studio Microphone section and the Sources strip; `lib/mic-meter-input.ts` holds the pure choice (`micMeterInput`, `systemAudioMeterInput`) and `components/studio/mic-level-meter.tsx` draws it.
 - The Studio microphone meter runs whenever Studio is open, from the backend's own `audio.levels`, about 20 a second with the configured gain applied: from the session bus during a session (which also carries System audio and the mix as written), and from the warm microphone between sessions (microphone only, no `sessionId`). `lib/backend-audio-levels.ts` keeps them outside React (eager, no dependencies); `lib/backend-level-sources.ts` turns them into meter sources and reads the -120 dBFS wire floor as silence.
 - Where the backend has no standby microphone (no CoreAudio, or Keep microphone warm off), the renderer analyser drives the meter; during a session the 1 Hz `diagnostics.stats` level is the last fallback, as a plain value with `vu` ballistics so one step a second glides.
 
 ## Updating
 
-1. From `apps/desktop`, look first: `pnpm dlx shadcn@4.21.1 add @audiocn/level-meter @audiocn/bar-visualizer @audiocn/live-waveform @audiocn/channel-strip @audiocn/mixer @audiocn/fader @audiocn/parameter-slider @audiocn/channel-toggle --dry-run --diff`.
-2. Then install. The CLI asks per colliding file and ignores piped answers, so install with `--overwrite` and restore what Videorc owns: `badge.tsx` (a `channel-strip` dependency; the CLI's shadcn badge would replace the glass-chip badge) and `styles.css` (next step). Any file outside the installed list: stop and look with `--dry-run --diff`.
+1. From `apps/desktop`, look first: `pnpm dlx shadcn@4.21.1 add @audiocn/level-meter @audiocn/bar-visualizer @audiocn/channel-strip @audiocn/mixer @audiocn/fader @audiocn/parameter-slider @audiocn/channel-toggle --dry-run --diff`.
+2. Then install. The CLI asks per colliding file and ignores piped answers, so install with `--overwrite` (`use-reduced-motion.ts` and `bar-visualizer.tsx` are audiocn's own) and restore what Videorc owns: `badge.tsx` (a `channel-strip` dependency; the CLI's shadcn badge would replace the glass-chip badge) and `styles.css` (next step). Any file outside the installed list: stop and look with `--dry-run --diff`.
 3. Back at the repo root (the remaining steps run there): undo the CLI's CSS (`git checkout -- apps/desktop/src/renderer/src/styles.css`), remove any `cn` package it adds to `apps/desktop/package.json`, then `pnpm install`.
 4. Run `pnpm exec prettier --write` on the changed files and review the diff.
 5. Run `pnpm typecheck`, `pnpm lint` (stage first: the em-dash gate reads `git ls-files`), `pnpm format:check`, `pnpm --filter @videorc/desktop test`, `pnpm build && pnpm check:renderer-assets`.
@@ -86,6 +86,9 @@ adapters that live outside the eager bundle:
 - The Mix strip (`MixerMaster`): removed by the owner on 2026-10-02.
 - `audio-device-select`: Base-only Select API; `SourceSelect` stays the one
   picker.
+- `live-waveform`: adopted by plan 092 for the Sources mic preview, removed by
+  plan 093 (2026-10-02). The Sources microphone strip's level meter replaced
+  the preview, and nothing else drew a waveform.
 - `audio-player`, `track-list`, `sound-pad`, `waveform`, `spectrum`, the
   smooth and electric visualizers, every block, and the Web Audio hooks.
 

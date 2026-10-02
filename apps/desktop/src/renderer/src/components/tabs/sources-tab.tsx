@@ -1,61 +1,20 @@
-import {
-  CameraIcon,
-  CheckIcon,
-  DesktopIcon,
-  DisplayIcon,
-  ResetIcon,
-  SpeakerOffIcon,
-  SpeakerOnIcon,
-  SyncIcon,
-  UploadIcon,
-  WarningIcon,
-  WaveformIcon
-} from '@/components/icons'
-import { useRef, useState, type ReactElement } from 'react'
+import { CameraIcon, DisplayIcon, SyncIcon, UploadIcon, WarningIcon } from '@/components/icons'
+import { useState, type ReactElement } from 'react'
 
 import { PageStack } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
+import { SourcesAudioMixer } from '@/components/sources/sources-audio-mixer'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { SourceSelect } from '@/components/source-select'
-import { MicPickerPreview } from '@/components/studio/mic-picker-preview'
 import { StatusBadge, type StatusTone } from '@/components/status-badge'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Badge } from '@/components/ui/badge'
-import { PowerSlider } from '@/components/power-slider'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
-import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioCore, useStudioDiagnostics, useStudioPreview } from '@/hooks/use-studio'
 import { cameraFormatShortfall, cameraFormatShortfallMessage } from '@/lib/camera-format-shortfall'
-import {
-  MICROPHONE_SYNC_OFFSET_MAX_MS,
-  MICROPHONE_SYNC_OFFSET_MIN_MS,
-  applyAudioSyncRecommendation,
-  buildCameraSources,
-  buildCaptureSources,
-  buildMicrophoneSources,
-  capturePickerDevices,
-  microphonePickerDevices,
-  audioSyncCalibrationState,
-  normalizeMicrophoneSyncOffsetMs,
-  parseAudioSyncRecommendationJson,
-  resetAudioSyncCalibration,
-  type AudioSyncRecommendationReport
-} from '@/lib/capture'
-import {
-  SYSTEM_AUDIO_GAIN_DB_DEFAULT,
-  SYSTEM_AUDIO_GAIN_DB_MAX,
-  SYSTEM_AUDIO_GAIN_DB_MIN,
-  type SourceSelection
-} from '@/lib/backend'
+import { buildCameraSources, buildCaptureSources, capturePickerDevices } from '@/lib/capture'
+import type { SourceSelection } from '@/lib/backend'
 import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
-import {
-  systemAudioDevice,
-  requestSystemAudioResume,
-  systemAudioIssueCopy,
-  systemAudioSwitchView,
-  type SystemAudioSwitchView
-} from '@/lib/system-audio'
 
 // Live chip for a capture source (UI rewrite V3): what the preview pipeline says
 // about the source RIGHT NOW. A live source whose newest frame is old is reported
@@ -120,7 +79,6 @@ export function SourcesTab(): ReactElement {
     captureConfig,
     setCaptureConfig,
     refreshBackend,
-    selectedMicrophone,
     isSessionActive,
     layoutSwitchPending,
     sourceDeviceSwitchPending,
@@ -131,11 +89,8 @@ export function SourcesTab(): ReactElement {
     revealPermissionTarget,
     runtimeInfo,
     mediaAccess,
-    wsStatus,
-    systemAudioConfirmed,
-    systemAudioIssue
+    wsStatus
   } = useStudioCore()
-  const { openSettings } = useWorkspaceNav()
   const { previewCameraStatus, previewScreenStatus } = useStudioPreview()
   const { diagnosticStats } = useStudioDiagnostics()
   // Q6 (plan 022): explicit select states while device discovery is pending.
@@ -146,7 +101,6 @@ export function SourcesTab(): ReactElement {
     : null
   const captureDevices = capturePickerDevices(deviceList.devices)
   const cameras = deviceList.devices.filter((device) => device.kind === 'camera')
-  const microphones = microphonePickerDevices(deviceList.devices)
   const hasCapturePermissionRequired = captureDevices.some(
     (device) => device.status === 'permission-required'
   )
@@ -166,20 +120,7 @@ export function SourcesTab(): ReactElement {
   })
   const capturePermissionTargetName =
     runtimeInfo?.capturePermissionTargetName ?? runtimeInfo?.permissionTargetName ?? 'Videorc'
-  const [syncRecommendation, setSyncRecommendation] =
-    useState<AudioSyncRecommendationReport | null>(null)
-  const [syncCalibrationMessage, setSyncCalibrationMessage] = useState<string | null>(null)
-  const [showSyncStimulusInstructions, setShowSyncStimulusInstructions] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
-  const syncMeasurementInputRef = useRef<HTMLInputElement | null>(null)
-  const syncCalibration = audioSyncCalibrationState(syncRecommendation, captureConfig.audio)
-  const systemAudio = systemAudioSwitchView({
-    device: systemAudioDevice(deviceList),
-    requested: captureConfig.audio.systemAudioEnabled,
-    sessionActive: isSessionActive,
-    confirmed: systemAudioConfirmed,
-    issue: systemAudioIssue
-  })
 
   const selectedCaptureId = captureConfig.sources.screenId ?? captureConfig.sources.windowId
 
@@ -194,45 +135,6 @@ export function SourcesTab(): ReactElement {
   }
   const applyCameraSource = (cameraId: string | undefined): void => {
     void switchSourceDeviceLive('camera', cameraSourcesForDevice(cameraId))
-  }
-
-  const importSyncMeasurementFile = async (file: File | null): Promise<void> => {
-    if (!file) {
-      return
-    }
-
-    const parsed = parseAudioSyncRecommendationJson(await file.text())
-    if (!parsed.ok) {
-      setSyncRecommendation(null)
-      setSyncCalibrationMessage(parsed.error)
-      return
-    }
-
-    const nextState = audioSyncCalibrationState(parsed.recommendation, captureConfig.audio)
-    setSyncRecommendation(parsed.recommendation)
-    setSyncCalibrationMessage(`${nextState.measuredLagLabel}. ${nextState.detail}`)
-  }
-
-  const applySyncRecommendation = (): void => {
-    if (!syncRecommendation) {
-      return
-    }
-
-    setCaptureConfig((current) => ({
-      ...current,
-      audio: applyAudioSyncRecommendation(current.audio, syncRecommendation)
-    }))
-    if (syncCalibration.recommendedOffsetMs != null) {
-      setSyncCalibrationMessage(`Applied ${syncCalibration.recommendedOffsetMs} ms sync offset.`)
-    }
-  }
-
-  const resetSyncCalibration = (): void => {
-    setCaptureConfig((current) => ({
-      ...current,
-      audio: resetAudioSyncCalibration(current.audio)
-    }))
-    setSyncCalibrationMessage('Reset microphone sync to structural default.')
   }
 
   return (
@@ -421,290 +323,7 @@ export function SourcesTab(): ReactElement {
         ) : null}
       </PanelSection>
 
-      <PanelSection
-        description="Live input meter with manual source gain. No automatic processing is applied."
-        icon={WaveformIcon}
-        title="Audio mixer"
-      >
-        <SourceSelect
-          allowNone
-          devices={microphones}
-          disabled={Boolean(sourceSwitchReason('microphone'))}
-          description={<SourceSwitchStatus kind="microphone" />}
-          selectedName={captureConfig.sources.microphoneName}
-          discoveryPending={discoveryPending}
-          label="Microphone"
-          value={captureConfig.sources.microphoneId}
-          onChange={(microphoneId) =>
-            void switchSourceDeviceLive(
-              'microphone',
-              buildMicrophoneSources(captureConfig.sources, microphones, microphoneId)
-            )
-          }
-        />
-        {/* See-before-you-pick: live waveform of the selected mic (shared with
-            the Quick Settings popover). */}
-        <MicPickerPreview deviceName={selectedMicrophone?.name} />
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          {captureConfig.audio.microphoneMuted ? (
-            <SpeakerOffIcon className="size-4" weight="duotone" />
-          ) : (
-            <SpeakerOnIcon className="size-4" weight="duotone" />
-          )}
-          {selectedMicrophone ? selectedMicrophone.name : 'No microphone selected'}
-        </div>
-        <div className="grid gap-2 rounded-row border border-border bg-foreground/[0.03] px-3 py-2">
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-xs font-medium text-muted-foreground">Mute</span>
-            <Switch
-              checked={captureConfig.audio.microphoneMuted}
-              size="sm"
-              onCheckedChange={(microphoneMuted) =>
-                setCaptureConfig((current) => ({
-                  ...current,
-                  audio: { ...current.audio, microphoneMuted }
-                }))
-              }
-            />
-          </div>
-          <PowerSlider
-            bipolar
-            label="Gain"
-            max={24}
-            min={-24}
-            numericInput
-            suffix=" dB"
-            value={captureConfig.audio.microphoneGainDb}
-            onChange={(microphoneGainDb) =>
-              setCaptureConfig((current) => ({
-                ...current,
-                audio: { ...current.audio, microphoneGainDb }
-              }))
-            }
-          />
-          <div className="grid gap-2">
-            <PowerSlider
-              bipolar
-              label="Sync"
-              largeStep={5}
-              max={MICROPHONE_SYNC_OFFSET_MAX_MS}
-              min={MICROPHONE_SYNC_OFFSET_MIN_MS}
-              numericInput
-              suffix=" ms"
-              value={captureConfig.audio.microphoneSyncOffsetMs}
-              onChange={(microphoneSyncOffsetMs) =>
-                setCaptureConfig((current) => ({
-                  ...current,
-                  audio: {
-                    ...current.audio,
-                    microphoneSyncOffsetMs: normalizeMicrophoneSyncOffsetMs(microphoneSyncOffsetMs),
-                    microphoneSyncOffsetUserSet: true
-                  }
-                }))
-              }
-            />
-            <div className="grid gap-2 border-t border-border pt-2">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <Badge
-                  variant={
-                    syncCalibration.status === 'recommended'
-                      ? 'warning'
-                      : syncCalibration.status === 'unavailable'
-                        ? 'outline'
-                        : 'secondary'
-                  }
-                >
-                  {syncCalibration.measuredLagLabel}
-                </Badge>
-                <div className="flex flex-wrap items-center gap-2">
-                  <Button
-                    size="xs"
-                    type="button"
-                    variant="outline"
-                    onClick={() => setShowSyncStimulusInstructions((open) => !open)}
-                  >
-                    <WaveformIcon data-icon="inline-start" />
-                    Stimulus
-                  </Button>
-                  <Button
-                    size="xs"
-                    type="button"
-                    variant="outline"
-                    onClick={() => syncMeasurementInputRef.current?.click()}
-                  >
-                    <UploadIcon data-icon="inline-start" />
-                    Import JSON
-                  </Button>
-                  <Button
-                    disabled={!syncCalibration.canApply}
-                    size="xs"
-                    type="button"
-                    variant="secondary"
-                    onClick={applySyncRecommendation}
-                  >
-                    <CheckIcon data-icon="inline-start" />
-                    Apply
-                  </Button>
-                  <Button size="xs" type="button" variant="ghost" onClick={resetSyncCalibration}>
-                    <ResetIcon data-icon="inline-start" />
-                    Reset
-                  </Button>
-                </div>
-              </div>
-              <input
-                ref={syncMeasurementInputRef}
-                accept="application/json,.json"
-                className="hidden"
-                type="file"
-                onChange={(event) => {
-                  void importSyncMeasurementFile(event.currentTarget.files?.[0] ?? null)
-                  event.currentTarget.value = ''
-                }}
-              />
-              <p className="text-xs text-muted-foreground">
-                {syncCalibrationMessage ?? syncCalibration.detail}
-              </p>
-              {showSyncStimulusInstructions ? (
-                <div className="grid gap-1 rounded-chip border border-border/70 bg-background p-2 font-mono text-[11px] leading-5 text-muted-foreground">
-                  <span>
-                    pnpm measure:av-sync --make-fixture /tmp/videorc-sync.mp4 --seconds 120
-                  </span>
-                  <span>pnpm measure:av-sync &lt;recording-or-evidence.json&gt; --json</span>
-                </div>
-              ) : null}
-            </div>
-          </div>
-        </div>
-        {systemAudio.visible ? (
-          <SystemAudioSettings
-            gainDb={captureConfig.audio.systemAudioGainDb}
-            macOS={runtimeInfo?.platform === 'darwin'}
-            view={systemAudio}
-            onEnabledChange={(systemAudioEnabled) =>
-              setCaptureConfig((current) => ({
-                ...current,
-                audio: { ...current.audio, systemAudioEnabled }
-              }))
-            }
-            onGainChange={(systemAudioGainDb) =>
-              setCaptureConfig((current) => ({
-                ...current,
-                audio: { ...current.audio, systemAudioGainDb }
-              }))
-            }
-            echoGuard={captureConfig.audio.systemAudioEchoGuard !== false}
-            onEchoGuardChange={(systemAudioEchoGuard) =>
-              setCaptureConfig((current) => ({
-                ...current,
-                audio: { ...current.audio, systemAudioEchoGuard }
-              }))
-            }
-            onOpenPermissions={() => openSettings('permissions')}
-            onResume={requestSystemAudioResume}
-          />
-        ) : null}
-      </PanelSection>
+      <SourcesAudioMixer />
     </PageStack>
-  )
-}
-
-/** System audio (plan 069): the switch, its level, and the one fact people need. */
-export function SystemAudioSettings({
-  view,
-  gainDb,
-  macOS,
-  echoGuard,
-  onEnabledChange,
-  onGainChange,
-  onEchoGuardChange,
-  onOpenPermissions,
-  onResume
-}: {
-  view: SystemAudioSwitchView
-  gainDb: number
-  macOS: boolean
-  /** Plan 076: pause System audio when it carries the stream back. */
-  echoGuard: boolean
-  onEnabledChange: (enabled: boolean) => void
-  onGainChange: (gainDb: number) => void
-  onEchoGuardChange: (enabled: boolean) => void
-  onOpenPermissions: () => void
-  onResume: () => void
-}): ReactElement {
-  return (
-    <div
-      className="grid gap-2 rounded-row border border-border bg-foreground/[0.03] px-3 py-2"
-      data-videorc-system-audio-settings
-    >
-      <div className="flex items-center justify-between gap-3">
-        <span className="flex min-w-0 items-center gap-2 text-sm font-medium">
-          <DesktopIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
-          <span className="truncate">System audio</span>
-        </span>
-        <span className="flex shrink-0 items-center gap-2.5">
-          {view.permissionRequired ? null : (
-            <span className="text-xs text-muted-foreground">{view.stateLabel}</span>
-          )}
-          <Switch
-            aria-label="System audio"
-            checked={view.checked}
-            disabled={view.disabled}
-            size="sm"
-            onCheckedChange={onEnabledChange}
-          />
-        </span>
-      </div>
-      <p className="text-xs text-muted-foreground">
-        Everything your computer plays, except Videorc, including your own stream if it is open in a
-        browser tab: mute that tab, because headphones don't stop it. Use headphones so your mic
-        doesn't pick up your speakers.
-        {macOS ? " Your Mac's volume and mute don't change what's recorded." : null}
-      </p>
-      <div className="flex items-center justify-between gap-3">
-        <span className="min-w-0 text-xs text-muted-foreground">
-          Pause System audio if your stream echoes back
-        </span>
-        <Switch
-          aria-label="Pause System audio if your stream echoes back"
-          checked={echoGuard}
-          disabled={view.permissionRequired}
-          size="sm"
-          onCheckedChange={onEchoGuardChange}
-        />
-      </div>
-      <PowerSlider
-        bipolar
-        defaultValue={SYSTEM_AUDIO_GAIN_DB_DEFAULT}
-        disabled={view.permissionRequired}
-        label="Level"
-        max={SYSTEM_AUDIO_GAIN_DB_MAX}
-        min={SYSTEM_AUDIO_GAIN_DB_MIN}
-        numericInput
-        suffix=" dB"
-        value={gainDb}
-        onChange={onGainChange}
-      />
-      {view.permissionRequired || (view.issue === 'unavailable' && macOS) ? (
-        <div className="flex items-center justify-between gap-2 text-xs text-warning">
-          <span className="min-w-0">
-            {view.permissionRequired
-              ? 'Needs Screen Recording permission'
-              : systemAudioIssueCopy('unavailable')}
-          </span>
-          <Button className="shrink-0" size="xs" variant="ghost" onClick={onOpenPermissions}>
-            Open Settings
-          </Button>
-        </div>
-      ) : view.issue === 'echo' ? (
-        <div className="flex items-center justify-between gap-2 text-xs text-warning">
-          <span className="min-w-0">{systemAudioIssueCopy('echo')}</span>
-          <Button className="shrink-0" size="xs" variant="ghost" onClick={onResume}>
-            Resume
-          </Button>
-        </div>
-      ) : view.issue ? (
-        <span className="text-xs text-warning">{systemAudioIssueCopy(view.issue)}</span>
-      ) : null}
-    </div>
   )
 }
