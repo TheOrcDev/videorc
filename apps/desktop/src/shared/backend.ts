@@ -3456,6 +3456,13 @@ export interface RuntimeInfo {
     kind: 'material' | 'mica' | 'solid'
     reason: string | null
     paintCheck: 'pending' | 'painted' | 'blank' | 'unknown' | 'skipped'
+    /**
+     * Plan 091: how the macOS material is drawn on the main window (`clear`
+     * is the stripped, neutral blur), null without a material, and the style
+     * `VIDEORC_GLASS_STYLE` asked for.
+     */
+    style: 'clear' | 'material' | null
+    styleRequested: 'clear' | 'material'
   }
   isPackaged: boolean
   permissionTargetName: string

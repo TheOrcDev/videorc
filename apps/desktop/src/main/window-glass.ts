@@ -1,12 +1,17 @@
-// One window material for every Videorc window (plan 050, D1).
+// One window material for every Videorc window (plan 050, D1; plan 091).
 //
 // Real macOS vibrancy: an NSVisualEffectView blurring what sits behind the
 // window. A 2026-09-23 region-capture probe showed it transmits on Electron 39
 // / macOS 26 in the real Videorc window; the June 2026 "materials paint
-// opaque" premise no longer reproduces. Every window's chrome (material,
-// backing, title bar, traffic lights) is decided here and nowhere else, so the
-// windows stay one family and a future material (e.g. macOS 26's
-// NSGlassEffectView, not exposed by Electron 39) is a one-file change.
+// opaque" premise no longer reproduces. Since plan 091 the material is clear
+// glass: the native addon re-classes Electron's own vibrancy view and strips
+// AppKit's tint, wallpaper tinting and saturation boost, leaving a neutral
+// 60 pt blur (Ghostex's look), so the renderer's covers decide the whole
+// tone. `VIDEORC_GLASS_STYLE=material` keeps AppKit's own look as the A/B
+// control for one release. Every window's chrome (material, style, backing,
+// title bar, traffic lights) is decided here and nowhere else, so the windows
+// stay one family and a future material (e.g. macOS 26's NSGlassEffectView,
+// not exposed by Electron 39) is a one-file change.
 
 import type { BrowserWindow, BrowserWindowConstructorOptions } from 'electron'
 
@@ -85,6 +90,31 @@ function glassMaterialFrom(value: string | undefined): GlassMaterial | null {
   return trimmed && (GLASS_MATERIALS as readonly string[]).includes(trimmed)
     ? (trimmed as GlassMaterial)
     : null
+}
+
+/**
+ * How the macOS material is drawn (plan 091). `material` is AppKit's own
+ * look: a grey or white tint, wallpaper tinting and a saturation boost over
+ * its blur. `clear` is Ghostex's strip, run by the native addon on Electron's
+ * own vibrancy view: nothing but a neutral blur of the desktop, so the window
+ * coats decide the whole tone.
+ */
+export type GlassStyle = 'clear' | 'material'
+
+/**
+ * Clear glass is the default (plan 091, S1). `VIDEORC_GLASS_STYLE=material`
+ * keeps the plan 050 look, AppKit's own tint and saturation, as the A/B
+ * control for one release.
+ */
+export const DEFAULT_GLASS_STYLE: GlassStyle = 'clear'
+
+/** Ghostex's blur: 60 pt, wide enough that desktop detail never reads as noise under a tint. */
+export const CLEAR_GLASS_BLUR_RADIUS = 60
+
+/** `VIDEORC_GLASS_STYLE`: `clear` or `material`; anything else keeps the default. */
+export function resolveGlassStyle(value: string | undefined): GlassStyle {
+  const trimmed = value?.trim().toLowerCase()
+  return trimmed === 'clear' || trimmed === 'material' ? trimmed : DEFAULT_GLASS_STYLE
 }
 
 export function resolveGlassMode(environment: GlassEnvironment): GlassMode {
@@ -201,6 +231,14 @@ export interface AppliedGlass {
   appearance: GlassAppearance
   /** Why the appearance pin is unavailable, when it is. */
   appearanceNote?: string
+  /**
+   * How the material is drawn (plan 091): `clear` once the addon has run the
+   * strip on this window, `material` for AppKit's own look, and null where
+   * there is no macOS material (solid, Mica).
+   */
+  style: GlassStyle | null
+  /** Why a requested `clear` style stayed `material`, when it did. */
+  styleNote?: string
 }
 
 const appliedGlassByWindow = new WeakMap<BrowserWindow, AppliedGlass>()

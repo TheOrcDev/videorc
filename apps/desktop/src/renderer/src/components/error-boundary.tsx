@@ -25,7 +25,7 @@ export class AppErrorBoundary extends Component<{ children: ReactNode }, { error
     }
     return (
       <div className="flex h-screen items-center justify-center text-foreground">
-        <div className="flex max-w-md flex-col gap-3 rounded-panel border glass-float p-5">
+        <div className="flex max-w-md flex-col gap-3 rounded-panel border glass-float-dialog p-5">
           <h1 className="text-sm font-medium">Something broke in the interface</h1>
           <p className="text-[13px] text-muted-foreground">
             {this.state.error.message || 'An unexpected rendering error occurred.'}

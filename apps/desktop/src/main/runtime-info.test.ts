@@ -251,7 +251,9 @@ describe('runtime info helpers', () => {
     const windowGlass = {
       kind: 'solid',
       reason: 'paint-check-blank',
-      paintCheck: 'blank'
+      paintCheck: 'blank',
+      style: null,
+      styleRequested: 'material'
     } as const
     expect(buildRuntimeInfo({ ...base, windowGlass }).windowGlass).toEqual(windowGlass)
   })

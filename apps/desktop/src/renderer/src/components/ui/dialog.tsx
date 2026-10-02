@@ -51,12 +51,12 @@ function DialogContent({
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          // Glass panel (videorc-design): near-opaque popover surface with the
-          // panel-tier radius and the layered shadow + hairline ring,
+          // The dialog tier of the float glass (videorc-design, plan 091 D6):
+          // flat and opaque, the panel-tier radius, a rim and a drop shadow,
           // fade+scale from 0.98 in ~100ms. NO backdrop-filter here: CSS
           // backdrop blur wedges the renderer compositor on the vibrancy
           // window (blank app until restart; bisected 2026-06-12).
-          'fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-5 rounded-panel border glass-float p-5 text-sm text-popover-foreground duration-100 outline-none sm:max-w-md data-open:animate-in data-open:fade-in-0 data-open:zoom-in-[0.98] data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-[0.98]',
+          'fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-5 rounded-panel border glass-float-dialog p-5 text-sm text-popover-foreground duration-100 outline-none sm:max-w-md data-open:animate-in data-open:fade-in-0 data-open:zoom-in-[0.98] data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-[0.98]',
           className
         )}
         {...props}
