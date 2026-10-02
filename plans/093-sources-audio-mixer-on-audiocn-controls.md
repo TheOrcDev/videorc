@@ -685,6 +685,11 @@ Only on the owner's yes. Recording-output work: own commits, own gates.
   gaps around unused rows).
 - **S4:** `docs/acceptance/2026-10-02-sources-audio-mixer.md`, this section,
   the index row.
+- **Review fixes** `0b552fe8` (a read-only review of the branch): the shortcut
+  tooltip's Radix trigger overwrote the System audio Switch's `data-state`,
+  so On and Off drew the same track; a Sync reset left Calibrate's last
+  "Applied ..." line; an sr-only `MixerTitle` repeated the section heading
+  for screen readers. All three fixed, the first with a failing test first.
 
 Numbers: eager raw 1,991,814 to 1,991,859 (+45, the entry's lazy chunk map);
 Sources chunk 9.8 to 45.8 KB gzip; 2,545 desktop tests green.
