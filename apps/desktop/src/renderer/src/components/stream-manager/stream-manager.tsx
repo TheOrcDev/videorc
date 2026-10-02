@@ -7,7 +7,7 @@ import {
   type ReactElement,
   type RefObject
 } from 'react'
-import { toast } from 'sonner'
+import { toast } from '@/lib/toast'
 
 import { CohostListenPrompt, CohostPane } from '@/components/cohost-pane'
 import { CohostListeningIndicator, CohostStatus } from '@/components/cohost-status'

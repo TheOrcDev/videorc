@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import ReactDOM from 'react-dom/client'
-import { toast } from 'sonner'
+import { toast } from '@/lib/toast'
 
 import { AppErrorBoundary } from '@/components/error-boundary'
 import { StreamManager } from '@/components/stream-manager/stream-manager'
@@ -513,7 +513,7 @@ function CommentsWindowApp(): ReactElement {
       />
       {/* sonner needs its own host here because this is a separate React root;
           with no theme provider it follows prefers-color-scheme, like the page. */}
-      <Toaster offset={{ bottom: 16, right: 16 }} position="bottom-right" />
+      <Toaster offset={{ bottom: 16, right: 16 }} position="bottom-right" visibleToasts={3} />
     </WindowFrame>
   )
 }

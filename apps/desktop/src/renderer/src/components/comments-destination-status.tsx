@@ -10,6 +10,7 @@ import type {
 import type { ChatSendFailure } from '@/lib/chat-send'
 import type { CohostState } from '@/lib/backend'
 import { cohostChipView } from '@/lib/cohost-view'
+import { waitingProviderMessage } from '@/lib/youtube-quota-copy'
 
 function providerStateLabel(state: LiveChatProviderConnectionState): string {
   switch (state) {
@@ -65,10 +66,18 @@ function providerStatusLabel(provider: LiveChatProviderState): string {
 // mismatch is at least visible.
 export function providerBadgeTitle(provider: LiveChatProviderState): string {
   const identity = provider.accountLabel ? `Reading chat as ${provider.accountLabel}.` : ''
-  if (provider.message && identity) {
-    return `${provider.message} · ${identity}`
+  // Plan 094: a parked connector (the YouTube quota pause) names its resume time.
+  const message = waitingProviderMessage(provider)
+  if (message && identity) {
+    return `${message} · ${identity}`
   }
-  return provider.message || identity
+  return message || identity
+}
+
+/** The badge word for a parked connector: "Paused" when it resumes on its own. */
+function providerBadgeLabel(provider: LiveChatProviderState): string {
+  if (provider.state === 'waiting' && provider.retryAt) return 'Paused'
+  return providerStatusLabel(provider)
 }
 
 /**
@@ -193,7 +202,7 @@ export function CommentsDestinationStatus({
           <ChatPlatformIcon decorative platform={provider.platform} />
           {CHAT_PLATFORM_LABELS[provider.platform]}
           <span aria-hidden>·</span>
-          {providerStatusLabel(provider)}
+          {providerBadgeLabel(provider)}
         </Badge>
       ))}
       <CohostStatusChip state={cohostState} />

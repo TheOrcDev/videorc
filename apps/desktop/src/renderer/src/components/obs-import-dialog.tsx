@@ -6,7 +6,7 @@ import {
   WarningIcon
 } from '@/components/icons'
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
-import { toast } from 'sonner'
+import { toast } from '@/lib/toast'
 
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
 import { useStudioCore } from '@/hooks/use-studio'

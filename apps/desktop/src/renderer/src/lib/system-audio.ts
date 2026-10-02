@@ -1,4 +1,4 @@
-import { toast } from 'sonner'
+import { toast } from '@/lib/toast'
 
 import type { Device, DeviceList, DeviceStatus } from '@/lib/backend'
 import type { SystemAudioIssue } from '@/lib/system-audio-session'

@@ -74,6 +74,30 @@ describe('comments destination status', () => {
     )
   })
 
+  // Plan 094: the YouTube quota pause is "Paused" with its local resume time,
+  // never "Waiting" with no end or "Reconnecting" forever.
+  it('shows a parked YouTube provider as Paused with its resume time', () => {
+    const retryAt = new Date(Date.now() + 60 * 60_000)
+    const paused = provider('youtube', {
+      state: 'waiting',
+      read: 'waiting-for-broadcast-context',
+      message: "YouTube chat is paused: Videorc's daily YouTube API limit is used up.",
+      retryAt: retryAt.toISOString(),
+      accountLabel: 'OrcDev'
+    })
+    const title = providerBadgeTitle(paused)
+    expect(title).toContain('It resumes at ')
+    expect(title).toContain(
+      retryAt.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+    )
+    expect(title).toContain('Your stream keeps going. · Reading chat as OrcDev.')
+    const markup = renderToStaticMarkup(
+      createElement(CommentsDestinationStatus, { providers: [paused] })
+    )
+    expect(markup).toContain('Paused')
+    expect(markup).not.toContain('Waiting')
+  })
+
   it('renders provider and failure status with the shared badge contract', () => {
     const providerMarkup = renderToStaticMarkup(
       createElement(CommentsDestinationStatus, { providers })

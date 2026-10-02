@@ -20,7 +20,7 @@ import {
   WaveformMutedIcon
 } from '@/components/icons'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
-import { toast } from 'sonner'
+import { toast } from '@/lib/toast'
 
 import { PageHeader } from '@/components/page'
 import { StatusDot } from '@/components/status-dot'
