@@ -1,8 +1,12 @@
 # Plan 093: a console-style Audio mixer on Sources, built from audiocn controls
 
-**Status:** PLANNED 2026-10-02. Not started. Owner request: "use components
-from audiocn.dev, like fader, parameter slider, pan control, channel toggle,
-volume control, so the Sources page looks professional." **Priority:** P2. No
+**Status:** EXECUTED 2026-10-02, in review: S1 to S4 on
+`plan/093-sources-audio-controls` (one Videorc PR); S0 waits for the owner to
+merge audiocn PR #2 (the controls were installed from a local build of that
+merge, see "Execution notes"); Phase P not built (D1 default: not now). Owner
+request: "use components from audiocn.dev, like fader, parameter slider, pan
+control, channel toggle, volume control, so the Sources page looks
+professional." **Priority:** P2. No
 bug; the Sources audio panel is the least finished surface in the app (see the
 screenshot notes under "Sources today"). **Size:** M: one audiocn
 prerequisite (S0), four Videorc slices (S1 to S4), and Phase P (real pan, a
@@ -660,4 +664,59 @@ Only on the owner's yes. Recording-output work: own commits, own gates.
 
 ## Execution notes
 
-(Empty until execution starts.)
+### What was done (2026-10-02)
+
+- **S0:** audiocn's gates ran green on the merge PR #2 will produce (main
+  `f53bfe6` + `d4dfc0a`, built locally as `136c574`): 321 tests, typecheck
+  (after `next build` writes `next-env.d.ts`), Ultracite, `next build`. The
+  merge itself was refused by this session's permission rules, so it is the
+  owner's to do.
+- **S1** `d8f6ecc9`: `channel-strip`, `mixer`, `fader`, `parameter-slider`,
+  `channel-toggle` installed from that local registry build. Every shared
+  file (`lib/audio/*`, `use-audio-config`, `db-scale`) came out
+  byte-identical to the plan 092 copies after Prettier. Channel tokens back;
+  Base UI fence; docs and the design skill. Eager raw unchanged.
+- **S2** `33a541b4`: the microphone strip, Sync on the parameter slider,
+  Calibrate. `useMicrophoneMeter` and `MicLevelMeter` are shared with the
+  Studio Microphone section.
+- **S3** `b41e6eed`: System audio as the second strip, its meter fed by the
+  bus only while a session mixes it.
+- **By-eye fix** `a0696fa4`: dead space around the strips (the Mixer grid's
+  gaps around unused rows).
+- **S4:** `docs/acceptance/2026-10-02-sources-audio-mixer.md`, this section,
+  the index row.
+
+Numbers: eager raw 1,991,814 to 1,991,859 (+45, the entry's lazy chunk map);
+Sources chunk 9.8 to 45.8 KB gzip; 2,545 desktop tests green.
+
+### Deviations from the plan, and why
+
+1. **Installed from a local build, not audiocn.dev** (STOP 1). The merge of
+   PR #2 was not this session's to make, and audiocn.dev still serves the
+   pre-U1 files. The installed files are what the merge will serve, byte for
+   byte after Prettier; no local patches.
+2. **The waveform preview and `live-waveform` are deleted, not kept.** The
+   plan said Quick Settings keeps `MicPickerPreview`; it does not use it.
+   Sources was its only user, so the component and the vendored file went
+   with it. Its plan 080 copy moved to `lib/mic-meter-input.ts` as
+   `micLevelUnavailableCopy` ("level" for "preview"), still shown when no
+   live level reads.
+3. **Accessible names.** The meters are "Microphone level" and "System
+   audio level", so the faders are "Microphone gain" and "System audio
+   gain" (the plan had "System audio level" for both).
+4. **The strip's state line** is the monitor label the Studio section
+   already computes (Live, Monitoring, Muted, Idle), plus "No microphone".
+5. **`sources-tab.test.ts` moved** to
+   `components/sources/sources-audio-mixer.test.ts` with the component.
+6. **Perf probe:** `smoke:preview-performance` with the mic visuals fails
+   identically on the branch and on main in fresh worktrees (no Microphone or
+   Screen Recording grant for their binaries: no selectable microphone, no
+   preview frames), so no CPU comparison could be made here; it is owed on a
+   granted build (acceptance record).
+
+### Owed
+
+- Merge audiocn PR #2, then check the five new files against audiocn.dev and
+  record the merge commit in `docs/audiocn.md`.
+- The owner checklist in the acceptance record (packaged build, live mic).
+- D1 (pan) and D2 (volume) answers; Phase P only on a yes.
