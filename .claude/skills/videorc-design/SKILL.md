@@ -105,7 +105,7 @@ Coats and surfaces
   Ghostex's web-modal recipe), each a 1 px rim (white 10% · black 10%) and
   a drop shadow, no sheen and no highlight:
   - popup `--glass-float` (menus, selects, popovers, hover cards, chart
-    tooltips, toasts): black `#232324` (the solid plus 6% then 3% white,
+    tooltips, toasts): black `#222224` (the solid plus 6% then 3% white,
     `color-mix` in sRGB) · porcelain `oklch(0.99 0 0)`;
   - dialog `--glass-float-dialog` (dialogs, the palette, the error panel):
     black `#1C1C1D` · porcelain;

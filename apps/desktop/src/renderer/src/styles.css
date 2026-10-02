@@ -254,7 +254,7 @@
   /* Dark floating glass (plan 091 D6): Ghostex's lifts over the solid,
      mixed in sRGB. A dialog (and the palette) is the solid plus 6% white,
      about #1C1C1D; a popup (menus, selects, popovers, hover cards, chart
-     tooltips, toasts) adds 3% more, about #232324; a tooltip sits on the
+     tooltips, toasts) adds 3% more, about #222224; a tooltip sits on the
      solid itself. Deliberately darker than the glass over a bright desktop:
      a fixed tone whatever is behind (probe:ui-glass --surfaces). */
   --glass-float-dialog: color-mix(in srgb, oklch(1 0 0) 6%, var(--glass-solid));
