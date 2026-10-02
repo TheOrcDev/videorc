@@ -2057,11 +2057,12 @@ const clipMarkSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<ClipMark>
-// Plan 092 Phase C: a level reading in dBFS, floored at -120 by the backend.
+// Plan 092 Phase C: a level reading in dBFS, kept within -120..+48 by the
+// backend (a hot input with gain can pass full scale).
 const audioLevelReadingSchema = objectSchema(
   {
-    peakDb: numberSchema({ min: -120, max: 24 }),
-    rmsDb: numberSchema({ min: -120, max: 24 })
+    peakDb: numberSchema({ min: -120, max: 48 }),
+    rmsDb: numberSchema({ min: -120, max: 48 })
   },
   { allowUnknown: false }
 )

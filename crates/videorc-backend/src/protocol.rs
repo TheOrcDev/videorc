@@ -1474,9 +1474,13 @@ pub struct WarmMicrophoneStatus {
 /// Plan 092 Phase C: the floor of a level reading. JSON cannot carry
 /// -Infinity, so digital silence reads as this many dBFS.
 pub const AUDIO_LEVEL_FLOOR_DB: f32 = -120.0;
+/// Plan 092 Phase C: the top of a level reading. The processed microphone can
+/// pass full scale (up to +24 dB of gain on a hot input); a cap keeps every
+/// reading inside the renderer's schema instead of dropping the event.
+pub const AUDIO_LEVEL_CEILING_DB: f32 = 48.0;
 
 /// Plan 092 Phase C: one level-meter reading over the last `audio.levels`
-/// window, in dBFS, floored at `AUDIO_LEVEL_FLOOR_DB`.
+/// window, in dBFS, between `AUDIO_LEVEL_FLOOR_DB` and `AUDIO_LEVEL_CEILING_DB`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioLevelReading {
@@ -1499,9 +1503,11 @@ impl AudioLevelReading {
         } else {
             AUDIO_LEVEL_FLOOR_DB
         };
+        // The guards above floor zero and NaN windows, so neither value is NaN
+        // here; the clamp floors near-silence and caps a hot input.
         Self {
-            peak_db: peak_db.max(AUDIO_LEVEL_FLOOR_DB),
-            rms_db: rms_db.max(AUDIO_LEVEL_FLOOR_DB),
+            peak_db: peak_db.clamp(AUDIO_LEVEL_FLOOR_DB, AUDIO_LEVEL_CEILING_DB),
+            rms_db: rms_db.clamp(AUDIO_LEVEL_FLOOR_DB, AUDIO_LEVEL_CEILING_DB),
         }
     }
 }
@@ -4835,7 +4841,9 @@ impl ServerEvent {
 mod tests {
     #[test]
     fn audio_level_readings_floor_silence_and_omit_missing_sources() {
-        use super::{AUDIO_LEVEL_FLOOR_DB, AudioLevelReading, AudioLevelsEvent};
+        use super::{
+            AUDIO_LEVEL_CEILING_DB, AUDIO_LEVEL_FLOOR_DB, AudioLevelReading, AudioLevelsEvent,
+        };
         // Digital silence never reaches the wire as -Infinity.
         assert_eq!(
             AudioLevelReading::from_window(0.0, 0.0),
@@ -4843,6 +4851,15 @@ mod tests {
                 peak_db: AUDIO_LEVEL_FLOOR_DB,
                 rms_db: AUDIO_LEVEL_FLOOR_DB
             }
+        );
+        // A hot input past full scale is capped, and a NaN window reads as silence.
+        assert_eq!(
+            AudioLevelReading::from_window(1000.0, 1.0e6).peak_db,
+            AUDIO_LEVEL_CEILING_DB
+        );
+        assert_eq!(
+            AudioLevelReading::from_window(0.5, f64::NAN).rms_db,
+            AUDIO_LEVEL_FLOOR_DB
         );
         // A full-scale sine: peak 0 dBFS, RMS 3.01 dB below.
         let sine = AudioLevelReading::from_window(1.0, 0.5);

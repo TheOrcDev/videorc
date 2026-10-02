@@ -2237,7 +2237,7 @@ export interface AudioMeterResult {
 /** Plan 092 Phase C: digital silence on the `audio.levels` wire (JSON has no -Infinity). */
 export const AUDIO_LEVEL_FLOOR_DB = -120
 
-/** Plan 092 Phase C: one level reading over the last window, dBFS, floored. */
+/** Plan 092 Phase C: one level reading over the last window, dBFS, within -120..+48. */
 export interface AudioLevelReading {
   peakDb: number
   rmsDb: number
