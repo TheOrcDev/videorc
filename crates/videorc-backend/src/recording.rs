@@ -8069,7 +8069,7 @@ fn audio_levels_event(
     levels: crate::session_audio::BusLevels,
 ) -> Option<crate::protocol::AudioLevelsEvent> {
     (!levels.is_empty()).then(|| crate::protocol::AudioLevelsEvent {
-        session_id: session_id.to_string(),
+        session_id: Some(session_id.to_string()),
         microphone: levels.microphone,
         system_audio: levels.system_audio,
         master: levels.master,
@@ -21341,7 +21341,7 @@ mod tests {
             },
         )
         .expect("an event");
-        assert_eq!(event.session_id, "session-1");
+        assert_eq!(event.session_id.as_deref(), Some("session-1"));
         assert_eq!(event.microphone, Some(reading));
         assert_eq!(event.system_audio, None);
         assert_eq!(event.master_clipped_samples, 3);

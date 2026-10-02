@@ -2245,11 +2245,14 @@ export interface AudioLevelReading {
 
 /**
  * Plan 092 Phase C: `audio.levels`, about 20 a second while a session's audio
- * bus runs. Post-gain and post-mute: what the recording and the stream get. A
- * source with no samples in the window is omitted.
+ * bus runs, or while the warm microphone stands by between sessions
+ * (microphone only, no `sessionId`). Readings carry the configured gain: what
+ * the recording and the stream get. A source with no samples in the window is
+ * omitted.
  */
 export interface AudioLevelsEvent {
-  sessionId: string
+  /** The session whose bus measured the levels; absent for the standby microphone. */
+  sessionId?: string
   microphone?: AudioLevelReading
   systemAudio?: AudioLevelReading
   /** The mix written to the recording and the stream. */

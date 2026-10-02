@@ -1513,13 +1513,17 @@ impl AudioLevelReading {
 }
 
 /// Plan 092 Phase C: the `audio.levels` event, about 20 times a second while a
-/// session's audio bus runs. Readings are post-gain and post-mute: what the
-/// recording and the stream get. A source with no samples in the window is
-/// omitted (never null).
+/// session's audio bus runs, or while the warm microphone stands by between
+/// sessions (microphone only, no session). Readings carry the configured gain
+/// (and the session's mute): what the recording and the stream get. A source
+/// with no samples in the window is omitted (never null).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioLevelsEvent {
-    pub session_id: String,
+    /// The session whose bus measured the levels; absent for the standby
+    /// microphone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub microphone: Option<AudioLevelReading>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4867,7 +4871,7 @@ mod tests {
         assert!((sine.rms_db + 3.0103).abs() < 1.0e-3, "{sine:?}");
         // Sources without samples are omitted, never null (the serde-null trap).
         let event = AudioLevelsEvent {
-            session_id: "session-1".into(),
+            session_id: Some("session-1".into()),
             microphone: Some(sine),
             system_audio: None,
             master: None,
@@ -4877,6 +4881,18 @@ mod tests {
             serde_json::to_value(&event).unwrap(),
             serde_json::json!({
                 "sessionId": "session-1",
+                "microphone": { "peakDb": sine.peak_db, "rmsDb": sine.rms_db },
+                "masterClippedSamples": 0
+            })
+        );
+        // The standby microphone has no session: the key is omitted, not null.
+        let standby = AudioLevelsEvent {
+            session_id: None,
+            ..event
+        };
+        assert_eq!(
+            serde_json::to_value(&standby).unwrap(),
+            serde_json::json!({
                 "microphone": { "peakDb": sine.peak_db, "rmsDb": sine.rms_db },
                 "masterClippedSamples": 0
             })

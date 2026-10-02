@@ -319,6 +319,13 @@ pub struct AudioCaptureStats {
     // error — frames keep counting while the track holds nothing. This is the
     // truthful "did the mic capture any sound at all" signal (plan 021 F3).
     session_peak_milli: AtomicU64,
+    // Plan 092: the level window the Studio's microphone meter reads while the
+    // warm microphone stands by (no session bus runs then). The loudest sample
+    // and the loudest per-callback RMS since the last read, in micro-units so
+    // quiet rooms keep their resolution down to -120 dBFS. The callback only
+    // raises them (`fetch_max`); the sampler reads and clears them.
+    window_peak_micro: AtomicU64,
+    window_rms_micro: AtomicU64,
     // Coverage must use the same window as the counters. The FIFO writer resets the
     // counters after discarding audio captured before the first video frame, and stop
     // freezes them before FFmpeg finishes flushing. Tracking that exact window avoids
@@ -347,6 +354,22 @@ impl AudioCaptureStats {
 
     pub fn live_peak(&self) -> f32 {
         self.live_peak_milli.load(Ordering::Relaxed) as f32 / 1000.0
+    }
+
+    /// Records one callback's raw peak and RMS into the standby level window.
+    /// Lock-free, so the realtime callback may call it.
+    pub(crate) fn record_level_window(&self, peak: f32, rms: f32) {
+        let micro = |value: f32| (value.clamp(0.0, 4.0) * 1_000_000.0) as u64;
+        self.window_peak_micro
+            .fetch_max(micro(peak), Ordering::Relaxed);
+        self.window_rms_micro
+            .fetch_max(micro(rms), Ordering::Relaxed);
+    }
+
+    /// The loudest peak and RMS (linear) since the last call, then clears both.
+    pub(crate) fn take_level_window(&self) -> (f32, f32) {
+        let take = |cell: &AtomicU64| cell.swap(0, Ordering::Relaxed) as f32 / 1_000_000.0;
+        (take(&self.window_peak_micro), take(&self.window_rms_micro))
     }
 
     pub fn session_peak(&self) -> f32 {
@@ -1247,6 +1270,17 @@ fn start_platform_audio_source(
             let frame_count = frame.samples.len() / usize::from(NATIVE_AUDIO_CHANNELS);
             frame_cursor = frame_cursor.saturating_add(frame_count as u64);
             callback_stats.record_captured_frames(frame_count as u64);
+            // Plan 092: the standby meter's window. One pass, no allocation.
+            let (peak, sum_squares) = frame
+                .samples
+                .iter()
+                .fold((0.0_f32, 0.0_f32), |(peak, sum), sample| {
+                    (peak.max(sample.abs()), sum + sample * sample)
+                });
+            if !frame.samples.is_empty() {
+                let rms = (sum_squares / frame.samples.len() as f32).sqrt();
+                callback_stats.record_level_window(peak, rms);
+            }
 
             match sender.try_send(frame) {
                 Ok(()) => {}

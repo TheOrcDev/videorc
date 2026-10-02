@@ -102,7 +102,11 @@ describe('backend RPC contract', () => {
     expect(
       validateBackendEventPayload('audio.levels', { sessionId: 's', masterClippedSamples: 0 })
     ).toEqual({ sessionId: 's', masterClippedSamples: 0 })
+    // The standby microphone between sessions carries no session.
+    const standby = { microphone: { peakDb: -30, rmsDb: -36 }, masterClippedSamples: 0 }
+    expect(validateBackendEventPayload('audio.levels', standby)).toEqual(standby)
     for (const malformed of [
+      { ...levels, sessionId: null },
       { ...levels, microphone: { peakDb: -12, rmsDb: -20, extra: 1 } },
       { ...levels, microphone: { peakDb: -200, rmsDb: -20 } },
       { ...levels, microphone: { peakDb: 60, rmsDb: -20 } },

@@ -2069,7 +2069,8 @@ const audioLevelReadingSchema = objectSchema(
 
 const audioLevelsEventSchema = objectSchema(
   {
-    sessionId: boundedString,
+    // Absent while the warm microphone stands by between sessions.
+    sessionId: optionalSchema(boundedString),
     microphone: optionalSchema(audioLevelReadingSchema),
     systemAudio: optionalSchema(audioLevelReadingSchema),
     master: optionalSchema(audioLevelReadingSchema),
