@@ -1,4 +1,10 @@
-import { DesktopIcon, MicrophoneIcon, SpeakerOffIcon, SpeakerOnIcon } from '@/components/icons'
+import {
+  DesktopIcon,
+  MicrophoneIcon,
+  SpeakerOffIcon,
+  SpeakerOnIcon,
+  WaveformIcon
+} from '@/components/icons'
 import type { ReactElement, ReactNode } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
@@ -19,7 +25,11 @@ import { Mixer, MixerChannels } from '@/components/ui/mixer'
 import { Switch } from '@/components/ui/switch'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioAudio, useStudioCore, useStudioDiagnostics } from '@/hooks/use-studio'
-import { useStudioMicMeterSource } from '@/hooks/use-studio-mic-sources'
+import {
+  backendLevelSources,
+  useBackendAudioLevelsLive,
+  useStudioMicMeterSource
+} from '@/hooks/use-studio-mic-sources'
 import { useStudioMicVisualLifecycle } from '@/hooks/use-studio-mic-visual'
 import { SILENCE_DB } from '@/lib/audio/decibels'
 import type { FrameSource, MeterFrame } from '@/lib/audio/types'
@@ -63,9 +73,10 @@ export function audioMixerSignalLive(
 }
 
 /**
- * What drives a strip's meter, readout and clip light: the live analyser
- * source, or one plain reading (the backend's 1 Hz level, a "Check level"
- * sample, silence while muted, or NaN when there is nothing to read yet).
+ * What drives a strip's meter, readout and clip light: a live source (the
+ * backend's 20 Hz levels during a session, or the renderer analyser), or one
+ * plain reading (the backend's 1 Hz level, a "Check level" sample, silence
+ * while muted, or NaN when there is nothing to read yet).
  */
 export type MeterInput =
   | Readonly<{ kind: 'source'; source: FrameSource<MeterFrame> }>
@@ -76,12 +87,15 @@ const SILENCE: MeterInput = Object.freeze({ kind: 'value', peakDb: SILENCE_DB })
 
 /**
  * The mic meter's input, in priority order. Every path reads the level the
- * recording gets: the analyser source adds the configured gain, and the
- * backend values are already post-gain.
+ * recording gets: the backend measures it on the bus (plan 092 Phase C), the
+ * analyser source adds the configured gain, and the 1 Hz backend values are
+ * post-gain too.
  */
 export function micMeterInput(input: {
   microphoneSelected: boolean
   muted: boolean
+  /** The backend's 20 Hz bus level while a session runs. */
+  backendSource: FrameSource<MeterFrame> | null
   analyserDriven: boolean
   source: FrameSource<MeterFrame>
   /** The running session's 1 Hz level. */
@@ -91,6 +105,7 @@ export function micMeterInput(input: {
 }): MeterInput {
   if (!input.microphoneSelected) return NO_READING
   if (input.muted) return SILENCE
+  if (input.backendSource) return { kind: 'source', source: input.backendSource }
   if (input.analyserDriven) return { kind: 'source', source: input.source }
   if (input.backendPeakDb !== null) return { kind: 'value', peakDb: input.backendPeakDb }
   if (input.sampledPeakDb !== null) return { kind: 'value', peakDb: input.sampledPeakDb }
@@ -111,10 +126,11 @@ function finiteOrNull(value: number | null | undefined): number | null {
  * meter adds the configured gain, so it reads what the recording gets. The
  * backend stays the capture and health authority: its 1 Hz post-gain level,
  * or the on-demand "Check level" sample, drives the meter whenever the
- * analyser cannot open the device. System audio has a strip only where
- * capture exists (a permanent "Unavailable" badge read as a broken app,
- * #375), with its level from the backend's 1 Hz stats while a session mixes
- * it.
+ * analyser cannot open the device. During a session the backend's own bus
+ * levels (plan 092 Phase C, about 20 a second) take over every strip, and a
+ * Mix strip shows what the recording and the stream get. System audio has a
+ * strip only where capture exists (a permanent "Unavailable" badge read as a
+ * broken app, #375), with its level from the session while it is mixed.
  */
 export function AudioMixer(): ReactElement {
   const {
@@ -135,6 +151,8 @@ export function AudioMixer(): ReactElement {
 
   const muted = captureConfig.audio.microphoneMuted
   const micVisual = useStudioMicVisualLifecycle()
+  // Levels from the bus itself: only while this session's bus is sending them.
+  const backendLevelsLive = useBackendAudioLevelsLive() && isSessionActive
   const micMeterSource = useStudioMicMeterSource({
     gainDb: captureConfig.audio.microphoneGainDb,
     muted
@@ -160,10 +178,11 @@ export function AudioMixer(): ReactElement {
     meterStatus,
     microphoneAccess?.state === 'device-issue'
   )
-  const signalLive = audioMixerSignalLive(muted, micVisual.active, liveLevel)
+  const signalLive = audioMixerSignalLive(muted, micVisual.active || backendLevelsLive, liveLevel)
   const meter = micMeterInput({
     microphoneSelected: Boolean(selectedMicrophone),
     muted,
+    backendSource: backendLevelsLive ? backendLevelSources.microphone : null,
     analyserDriven: micVisual.active && !muted,
     source: micMeterSource,
     backendPeakDb: liveLevel === null ? null : finiteOrNull(diagnosticStats?.micLivePeakDb),
@@ -225,10 +244,12 @@ export function AudioMixer(): ReactElement {
             }
           />
           <SystemAudioMixerRow
+            backendSource={backendLevelsLive ? backendLevelSources.systemAudio : null}
             diagnosticStats={diagnosticStats}
             macOS={runtimeInfo?.platform === 'darwin'}
             onOpenPermissions={() => openSettings('permissions')}
           />
+          {backendLevelsLive ? <MixStripView source={backendLevelSources.master} /> : null}
         </MixerChannels>
       </Mixer>
     </PanelSection>
@@ -243,12 +264,15 @@ function StripMeterRow({
   input,
   label,
   meterAttribute,
-  clipAttribute
+  clipAttribute,
+  showClipCount = false
 }: {
   input: MeterInput
   label: string
   meterAttribute: string
   clipAttribute?: string
+  /** Count separate clips beside the light (the Mix strip). */
+  showClipCount?: boolean
 }): ReactElement {
   const live = input.kind === 'source'
   const meterData = { [meterAttribute]: '' }
@@ -277,7 +301,7 @@ function StripMeterRow({
       </ChannelStripMeter>
       <ChannelStripValue className="gap-1.5">
         {live ? (
-          <ClipIndicator source={input.source} {...clipData} />
+          <ClipIndicator showCount={showClipCount} source={input.source} {...clipData} />
         ) : (
           <ClipIndicator clipping={input.peakDb >= CLIP_THRESHOLD_DB} {...clipData} />
         )}
@@ -431,10 +455,13 @@ export function MicrophoneStripView({
  * switch where the user put it and says what happened, without a toast.
  */
 function SystemAudioMixerRow({
+  backendSource,
   diagnosticStats,
   macOS,
   onOpenPermissions
 }: {
+  /** The session's 20 Hz bus level (plan 092 Phase C), when it is sending. */
+  backendSource: FrameSource<MeterFrame> | null
   diagnosticStats: DiagnosticStats | null | undefined
   macOS: boolean
   onOpenPermissions: () => void
@@ -459,6 +486,7 @@ function SystemAudioMixerRow({
   return (
     <SystemAudioMixerRowView
       peakDb={view.meter ? finiteOrNull(diagnosticStats?.systemAudioLivePeakDb) : null}
+      source={backendSource}
       macOS={macOS}
       view={view}
       onEnabledChange={(systemAudioEnabled) =>
@@ -477,14 +505,17 @@ function SystemAudioMixerRow({
 export function SystemAudioMixerRowView({
   view,
   peakDb,
+  source = null,
   macOS,
   onEnabledChange,
   onOpenPermissions,
   onResume
 }: {
   view: SystemAudioSwitchView
-  /** The backend's post-gain System audio peak while the session mixes it. */
+  /** The backend's post-gain System audio peak while the session mixes it (1 Hz). */
   peakDb: number | null
+  /** The same level about 20 times a second, preferred while the bus sends it. */
+  source?: FrameSource<MeterFrame> | null
   /** Settings > Permissions can only help on macOS (the Screen Recording grant). */
   macOS: boolean
   onEnabledChange: (enabled: boolean) => void
@@ -552,12 +583,40 @@ export function SystemAudioMixerRowView({
       </ChannelStripHeader>
       {view.meter ? (
         <StripMeterRow
-          input={{ kind: 'value', peakDb: peakDb ?? Number.NaN }}
+          input={
+            source ? { kind: 'source', source } : { kind: 'value', peakDb: peakDb ?? Number.NaN }
+          }
           label="System audio level"
           meterAttribute="data-videorc-system-audio-visualizer"
         />
       ) : null}
       {notice ? <ChannelStripNotice className={NOTICE_CLASS}>{notice}</ChannelStripNotice> : null}
+    </ChannelStrip>
+  )
+}
+
+/**
+ * The Mix strip (plan 092 Phase C): the chunk the bus writes, which is what
+ * the recording and the stream get, with a count of clips. Shown only while a
+ * session's bus sends levels.
+ */
+export function MixStripView({ source }: { source: FrameSource<MeterFrame> }): ReactElement {
+  return (
+    <ChannelStrip className={STRIP_CLASS} data-videorc-mix-strip="" variant="ghost">
+      <ChannelStripHeader>
+        <WaveformIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
+        <ChannelStripTitle className="min-w-0 flex-1">Mix</ChannelStripTitle>
+        <ChannelStripActions>
+          <span className="text-xs text-muted-foreground">Recorded and streamed</span>
+        </ChannelStripActions>
+      </ChannelStripHeader>
+      <StripMeterRow
+        clipAttribute="data-videorc-mix-clip"
+        input={{ kind: 'source', source }}
+        label="Mix level"
+        meterAttribute="data-videorc-mix-meter"
+        showClipCount
+      />
     </ChannelStrip>
   )
 }

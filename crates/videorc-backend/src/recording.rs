@@ -160,6 +160,11 @@ const SESSION_START_SHUTDOWN_MESSAGE: &str =
     "Capture session start rejected because backend shutdown is already in progress.";
 /// How often the live mic-stats sampler reads CoreAudio counters during a recording.
 const NATIVE_AUDIO_SAMPLE_INTERVAL: Duration = Duration::from_millis(1000);
+/// Plan 092 Phase C: how often the `audio.levels` sampler sends the bus's
+/// level readings (about 20 times a second, the renderer analyser's rate).
+const AUDIO_LEVELS_INTERVAL: Duration = Duration::from_millis(50);
+/// Level ticks between checks that the session is still the active one.
+const AUDIO_LEVELS_LIVENESS_TICKS: u32 = 20;
 /// Silent-mic health check (plan 021 F3): how deep into a recording the mic may
 /// stay silent before the session gets a truthful warning, and the session-peak
 /// floor below which a track counts as silence (TCC-unauthorized processes get
@@ -5498,6 +5503,10 @@ async fn start_session_with_timeline(
             state.clone(),
             session_id.clone(),
         ));
+        tokio::spawn(stream_audio_levels_during_recording(
+            state.clone(),
+            session_id.clone(),
+        ));
         // Orcle's listen intent (plan 068): wanted before this capture, it
         // resumes now. Off the recording path; it never fails or delays it.
         let listen_state = state.clone();
@@ -8012,6 +8021,60 @@ struct SessionMonitorContext {
     ffmpeg_stderr_monitor: Option<tokio::task::JoinHandle<()>>,
     output_path: Option<PathBuf>,
     post_recording_gate: PostRecordingGate,
+}
+
+/// Plan 092 Phase C: while this session is the active recording, send the bus's
+/// post-gain level readings (microphone, system audio, the written mix) about 20
+/// times a second as `audio.levels`. It reads through a cloned bus handle, so
+/// the hot path never takes the recording lock, and checks once a second that
+/// the session is still the active one. A window with no samples sends nothing.
+async fn stream_audio_levels_during_recording(state: AppState, session_id: String) {
+    let handle = {
+        let recording = state.recording.lock().await;
+        match recording.as_ref() {
+            Some(active) if active.session_id == session_id => active
+                .native_audio
+                .as_ref()
+                .map(|audio| audio.switch_handle()),
+            _ => None,
+        }
+    };
+    let Some(handle) = handle else {
+        return;
+    };
+    let mut ticker = tokio::time::interval(AUDIO_LEVELS_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut ticks: u32 = 0;
+    loop {
+        ticker.tick().await;
+        ticks = ticks.wrapping_add(1);
+        if ticks.is_multiple_of(AUDIO_LEVELS_LIVENESS_TICKS) {
+            let recording = state.recording.lock().await;
+            if !recording
+                .as_ref()
+                .is_some_and(|active| active.session_id == session_id)
+            {
+                return;
+            }
+        }
+        if let Some(event) = audio_levels_event(&session_id, handle.take_levels()) {
+            state.emit_event("audio.levels", event);
+        }
+    }
+}
+
+/// The `audio.levels` payload for one window; None when the bus had no samples.
+fn audio_levels_event(
+    session_id: &str,
+    levels: crate::session_audio::BusLevels,
+) -> Option<crate::protocol::AudioLevelsEvent> {
+    (!levels.is_empty()).then(|| crate::protocol::AudioLevelsEvent {
+        session_id: session_id.to_string(),
+        microphone: levels.microphone,
+        system_audio: levels.system_audio,
+        master: levels.master,
+        master_clipped_samples: levels.master_clipped_samples,
+    })
 }
 
 /// Live mic-stats sampler: while this session is the active recording, periodically read
@@ -21257,6 +21320,32 @@ pub type LivePreviewSlot = Arc<Mutex<LivePreviewState>>;
 mod tests {
     use super::*;
     use crate::capture_input::AVFOUNDATION_VIDEO_PIXEL_FORMAT;
+
+    #[test]
+    fn audio_levels_event_skips_empty_windows_and_carries_the_session() {
+        assert_eq!(
+            audio_levels_event("session-1", crate::session_audio::BusLevels::default()),
+            None
+        );
+        let reading = crate::protocol::AudioLevelReading {
+            peak_db: -12.0,
+            rms_db: -20.0,
+        };
+        let event = audio_levels_event(
+            "session-1",
+            crate::session_audio::BusLevels {
+                microphone: Some(reading),
+                system_audio: None,
+                master: Some(reading),
+                master_clipped_samples: 3,
+            },
+        )
+        .expect("an event");
+        assert_eq!(event.session_id, "session-1");
+        assert_eq!(event.microphone, Some(reading));
+        assert_eq!(event.system_audio, None);
+        assert_eq!(event.master_clipped_samples, 3);
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn shutdown_and_partial_start_share_signal_all_absolute_deadline_path() {

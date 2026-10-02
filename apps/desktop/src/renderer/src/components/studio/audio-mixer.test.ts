@@ -10,6 +10,7 @@ import {
   audioMixerSignalLive,
   micMeterInput,
   MicrophoneStripView,
+  MixStripView,
   SystemAudioMixerRowView,
   type MeterInput
 } from './audio-mixer'
@@ -169,6 +170,7 @@ describe('micMeterInput (plan 092)', () => {
   const base = {
     microphoneSelected: true,
     muted: false,
+    backendSource: null,
     analyserDriven: false,
     source,
     backendPeakDb: null,
@@ -185,6 +187,18 @@ describe('micMeterInput (plan 092)', () => {
       peakDb: -20
     })
     expect(micMeterInput({ ...base, sampledPeakDb: -30 })).toEqual({ kind: 'value', peakDb: -30 })
+  })
+
+  it('prefers the session bus levels over the analyser, once the backend sends them', () => {
+    const backendSource = createFrameEmitter<MeterFrame>()
+    expect(micMeterInput({ ...base, backendSource, analyserDriven: true })).toEqual({
+      kind: 'source',
+      source: backendSource
+    })
+    expect(micMeterInput({ ...base, backendSource, muted: true })).toEqual({
+      kind: 'value',
+      peakDb: Number.NEGATIVE_INFINITY
+    })
   })
 
   it('reads silence while muted, and nothing at all without a microphone or a reading', () => {
@@ -282,5 +296,47 @@ describe('Microphone strip (plan 092)', () => {
     const markup = render({ notice: 'permission', permissionLabel: 'Enable microphone' })
     expect(markup).toContain('Microphone permission is required before levels can be read.')
     expect(markup).toContain('Enable microphone')
+  })
+})
+
+describe('Mix strip (plan 092 Phase C)', () => {
+  it('meters the written mix with a counting clip light', () => {
+    const markup = renderToStaticMarkup(
+      createElement(MixStripView, { source: createFrameEmitter<MeterFrame>() })
+    )
+    expect(markup).toContain('data-videorc-mix-strip')
+    expect(markup).toContain('>Mix<')
+    expect(markup).toContain('Recorded and streamed')
+    expect(markup).toMatch(
+      /role="meter"[^>]*data-videorc-mix-meter=""|data-videorc-mix-meter=""[^>]*role="meter"/
+    )
+    expect(markup).toContain('data-slot="clip-indicator-count"')
+  })
+})
+
+describe('System audio strip on bus levels (plan 092 Phase C)', () => {
+  it('meters from the 20 Hz source while the session mixes it', () => {
+    const view = systemAudioSwitchView({
+      device: { status: 'available' },
+      requested: true,
+      sessionActive: true,
+      confirmed: true,
+      issue: null
+    })
+    const noop = (): void => {}
+    const markup = renderToStaticMarkup(
+      createElement(SystemAudioMixerRowView, {
+        view,
+        peakDb: -14.5,
+        source: createFrameEmitter<MeterFrame>(),
+        macOS: true,
+        onEnabledChange: noop,
+        onOpenPermissions: noop,
+        onResume: noop
+      })
+    )
+    expect(markup).toContain('data-videorc-system-audio-visualizer')
+    // A live source reads its own frames: no stale 1 Hz value in the readout.
+    expect(markup).not.toContain('\u221214.5 dB')
   })
 })

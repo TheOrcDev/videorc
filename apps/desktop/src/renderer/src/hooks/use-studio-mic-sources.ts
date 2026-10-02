@@ -1,7 +1,9 @@
-import { useMemo, useRef } from 'react'
+import { useMemo, useRef, useSyncExternalStore } from 'react'
 
 import { useStudioMicVisualPipeline } from '@/hooks/use-studio-mic-visual'
 import type { FrameSource, MeterFrame, VisualFrame } from '@/lib/audio/types'
+import { backendAudioLevels } from '@/lib/backend-audio-levels'
+import { createBackendLevelSource } from '@/lib/backend-level-sources'
 import {
   createMicMeterSource,
   createMicVisualSource,
@@ -29,4 +31,24 @@ export function useStudioMicMeterSource(settings: MicMeterSettings): FrameSource
 export function useStudioMicVisualSource(): FrameSource<VisualFrame> {
   const pipeline = useStudioMicVisualPipeline()
   return useMemo(() => createMicVisualSource(pipeline), [pipeline])
+}
+
+/**
+ * Plan 092 Phase C: the backend's post-gain levels during a session, one
+ * stable source per bus tap: the processed microphone, the gained system
+ * audio, and the mix as written.
+ */
+export const backendLevelSources = Object.freeze({
+  microphone: createBackendLevelSource(backendAudioLevels, 'microphone'),
+  systemAudio: createBackendLevelSource(backendAudioLevels, 'systemAudio'),
+  master: createBackendLevelSource(backendAudioLevels, 'master')
+})
+
+/** True while the backend's `audio.levels` keep arriving (a session's bus is running). */
+export function useBackendAudioLevelsLive(): boolean {
+  return useSyncExternalStore(
+    backendAudioLevels.subscribeLive,
+    backendAudioLevels.isLive,
+    backendAudioLevels.isLive
+  )
 }

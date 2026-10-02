@@ -1,5 +1,6 @@
 import type {
   AudienceSnapshot,
+  AudioLevelsEvent,
   SessionSources,
   SourceSwitchParams,
   BackendHealth,
@@ -268,6 +269,7 @@ export type BackendRpcResult<TMethod extends BackendRpcMethod> =
   BackendRpcMethodMap[TMethod]['result']
 
 export interface BackendEventMap {
+  'audio.levels': AudioLevelsEvent
   'scheduledStreams.changed': ScheduledStreamEvent
   'devices.changed': DeviceList
   'entitlements.updated': EntitlementsSnapshot
@@ -2055,6 +2057,26 @@ const clipMarkSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<ClipMark>
+// Plan 092 Phase C: a level reading in dBFS, floored at -120 by the backend.
+const audioLevelReadingSchema = objectSchema(
+  {
+    peakDb: numberSchema({ min: -120, max: 24 }),
+    rmsDb: numberSchema({ min: -120, max: 24 })
+  },
+  { allowUnknown: false }
+)
+
+const audioLevelsEventSchema = objectSchema(
+  {
+    sessionId: boundedString,
+    microphone: optionalSchema(audioLevelReadingSchema),
+    systemAudio: optionalSchema(audioLevelReadingSchema),
+    master: optionalSchema(audioLevelReadingSchema),
+    masterClippedSamples: nonNegativeInteger
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AudioLevelsEvent>
+
 const clipMarkedEventSchema = objectSchema(
   {
     sessionId: boundedString,
@@ -2635,6 +2657,7 @@ export const runtimeValidatedBackendRpcMethods = Object.freeze(
 )
 
 const runtimeEventSchemas = {
+  'audio.levels': audioLevelsEventSchema,
   'scheduledStreams.changed': boundedBackendPayloadSchema,
   'devices.changed': deviceListSchema,
   'entitlements.updated': entitlementsSchema,

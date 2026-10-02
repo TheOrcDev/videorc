@@ -195,6 +195,7 @@ import {
 import type {
   AccountCallbackEnvelope,
   AiCapabilities,
+  AudioLevelsEvent,
   CohostActionCommand,
   CohostAuthorParams,
   CohostEnableCommand,
@@ -341,6 +342,7 @@ import {
   normalizeCommentHighlightAnchor,
   offCohostState
 } from '@/lib/backend'
+import { backendAudioLevels } from '@/lib/backend-audio-levels'
 import {
   appendCaptionLine,
   captionDwellMs,
@@ -6234,6 +6236,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('diagnostics.stats', (payload) => {
         bootstrapGuard.mark('diagnostics')
         commitDiagnosticStatsThrottled(payload as DiagnosticStats)
+      }),
+      // Plan 092 Phase C: about 20 a second during a session. Kept out of React
+      // state; the mixer's level sources read the store directly.
+      nextClient.on('audio.levels', (payload) => {
+        backendAudioLevels.publish(payload as AudioLevelsEvent)
       }),
       nextClient.on('capture.recovery.status', (payload) => {
         commitCaptureRecoveryStatus(payload as CaptureRecoveryStatus, generation)

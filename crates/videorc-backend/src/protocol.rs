@@ -1471,6 +1471,61 @@ pub struct WarmMicrophoneStatus {
     pub armed_for_ms: Option<u64>,
 }
 
+/// Plan 092 Phase C: the floor of a level reading. JSON cannot carry
+/// -Infinity, so digital silence reads as this many dBFS.
+pub const AUDIO_LEVEL_FLOOR_DB: f32 = -120.0;
+
+/// Plan 092 Phase C: one level-meter reading over the last `audio.levels`
+/// window, in dBFS, floored at `AUDIO_LEVEL_FLOOR_DB`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioLevelReading {
+    /// The loudest sample in the window.
+    pub peak_db: f32,
+    /// The RMS of every sample in the window.
+    pub rms_db: f32,
+}
+
+impl AudioLevelReading {
+    /// A reading from a window's loudest sample and mean square (linear).
+    pub fn from_window(peak: f32, mean_square: f64) -> Self {
+        let peak_db = if peak > 0.0 {
+            20.0 * peak.log10()
+        } else {
+            AUDIO_LEVEL_FLOOR_DB
+        };
+        let rms_db = if mean_square > 0.0 {
+            (10.0 * mean_square.log10()) as f32
+        } else {
+            AUDIO_LEVEL_FLOOR_DB
+        };
+        Self {
+            peak_db: peak_db.max(AUDIO_LEVEL_FLOOR_DB),
+            rms_db: rms_db.max(AUDIO_LEVEL_FLOOR_DB),
+        }
+    }
+}
+
+/// Plan 092 Phase C: the `audio.levels` event, about 20 times a second while a
+/// session's audio bus runs. Readings are post-gain and post-mute: what the
+/// recording and the stream get. A source with no samples in the window is
+/// omitted (never null).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioLevelsEvent {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone: Option<AudioLevelReading>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_audio: Option<AudioLevelReading>,
+    /// The mix written to the recording and the stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master: Option<AudioLevelReading>,
+    /// Samples the mix clipped since the previous event.
+    #[serde(default)]
+    pub master_clipped_samples: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioMeterResult {
@@ -4778,6 +4833,39 @@ impl ServerEvent {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn audio_level_readings_floor_silence_and_omit_missing_sources() {
+        use super::{AUDIO_LEVEL_FLOOR_DB, AudioLevelReading, AudioLevelsEvent};
+        // Digital silence never reaches the wire as -Infinity.
+        assert_eq!(
+            AudioLevelReading::from_window(0.0, 0.0),
+            AudioLevelReading {
+                peak_db: AUDIO_LEVEL_FLOOR_DB,
+                rms_db: AUDIO_LEVEL_FLOOR_DB
+            }
+        );
+        // A full-scale sine: peak 0 dBFS, RMS 3.01 dB below.
+        let sine = AudioLevelReading::from_window(1.0, 0.5);
+        assert!(sine.peak_db.abs() < 1.0e-6, "{sine:?}");
+        assert!((sine.rms_db + 3.0103).abs() < 1.0e-3, "{sine:?}");
+        // Sources without samples are omitted, never null (the serde-null trap).
+        let event = AudioLevelsEvent {
+            session_id: "session-1".into(),
+            microphone: Some(sine),
+            system_audio: None,
+            master: None,
+            master_clipped_samples: 0,
+        };
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            serde_json::json!({
+                "sessionId": "session-1",
+                "microphone": { "peakDb": sine.peak_db, "rmsDb": sine.rms_db },
+                "masterClippedSamples": 0
+            })
+        );
+    }
+
     #[test]
     fn scene_editor_draft_params_round_trip_with_renderer_handle_ids() {
         let wire = serde_json::json!({
