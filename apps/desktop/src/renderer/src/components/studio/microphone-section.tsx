@@ -2,7 +2,6 @@ import type { ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { SourceSelect } from '@/components/source-select'
-import { DbReadout } from '@/components/ui/db-readout'
 import { LevelMeter } from '@/components/ui/level-meter'
 import { useStudioCore, useStudioDiagnostics } from '@/hooks/use-studio'
 import {
@@ -18,9 +17,9 @@ import { buildMicrophoneSources, microphonePickerDevices } from '@/lib/capture'
 import { audioMixerMonitorLabel, type AudioMixerMonitorLabel } from '@/lib/mic-visual-gate'
 
 /**
- * What drives the meter and its readout: a live source (the backend's levels
- * about 20 times a second, or the renderer analyser), or one plain reading
- * (the session's 1 Hz level, silence while muted, NaN when nothing reads).
+ * What drives the meter: a live source (the backend's levels about 20 times a
+ * second, or the renderer analyser), or one plain reading (the session's 1 Hz
+ * level, silence while muted, NaN when nothing reads).
  */
 export type MeterInput =
   | Readonly<{ kind: 'source'; source: FrameSource<MeterFrame> }>
@@ -154,7 +153,9 @@ export function MicrophoneSectionView({
         value={value}
         onChange={onChange}
       />
-      <div className="flex items-center gap-3" data-videorc-mic-level="">
+      {/* Exactly the picker's width: the meter alone. It still names its level
+          in dB to screen readers (aria-valuetext). */}
+      <div className="flex items-center" data-videorc-mic-level="">
         {live ? (
           <LevelMeter
             aria-label="Microphone level"
@@ -176,11 +177,6 @@ export function MicrophoneSectionView({
             peakDb={meter.peakDb}
             variant="segmented"
           />
-        )}
-        {live ? (
-          <DbReadout className="text-xs text-muted-foreground" source={meter.source} />
-        ) : (
-          <DbReadout className="text-xs text-muted-foreground" value={meter.peakDb} />
         )}
         {/* Live / Muted / Idle for screen readers (and the perf probe), not on screen. */}
         <span className="sr-only" data-videorc-mic-monitor-state={monitorLabel.toLowerCase()}>

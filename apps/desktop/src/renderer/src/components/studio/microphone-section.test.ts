@@ -87,10 +87,17 @@ describe('Microphone section (plan 092)', () => {
     }
   })
 
-  it('reads the level in dB with a typographic minus, silence and no reading', () => {
-    expect(render({ kind: 'value', peakDb: -12 })).toContain('−12.0 dB')
-    expect(render({ kind: 'value', peakDb: Number.NEGATIVE_INFINITY })).toContain('−∞ dB')
-    expect(render({ kind: 'value', peakDb: Number.NaN })).toContain('-- dB')
+  it('spans the picker with the meter alone: no readout beside it', () => {
+    for (const meter of [
+      { kind: 'value', peakDb: -12 } as const,
+      { kind: 'source', source: createFrameEmitter<MeterFrame>() } as const
+    ]) {
+      const markup = render(meter)
+      expect(markup).not.toContain('data-slot="db-readout"')
+      expect(markup).not.toContain(' dB<')
+      // The meter takes the whole row, which is the picker's width.
+      expect(markup).toMatch(/class="[^"]*\bflex-1\b[^"]*"[^>]*data-slot="level-meter"/)
+    }
   })
 
   it('names the signal state for screen readers and the perf probe, off screen', () => {
