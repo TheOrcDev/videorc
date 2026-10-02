@@ -22,14 +22,14 @@
 // is therefore measured unfocused, the state Chat and Captions live in during
 // a stream; the material is `visualEffectState: 'active'` either way.
 //
-// --surfaces adds the floating glass (plan 072) on main and chat: the real
-// `glass-float` utility painted over a text-free patch of the window and over
-// app text (sidebar rows, Stream Manager filters), scored by
-// scripts/lib/float-glass-checks.mjs (lift over the window glass, text
+// --surfaces adds the floating glass (plan 072; plan 091 S3) on main and
+// chat: the real float utilities (the popup, dialog and tooltip tiers)
+// painted over a text-free patch of the window and over app text (sidebar
+// rows, Stream Manager filters), scored by scripts/lib/float-glass-checks.mjs
+// (a fixed tone against the computed colour whatever is behind, opaque, text
 // contrast, no bleed of the text underneath). The old near-opaque popover
-// coat is measured beside it as an ungated control, so the report shows the slab the
-// gate exists to catch. The primitives' use of the utility is pinned by the
-// renderer guard tests.
+// coat is measured beside them as an ungated control. The primitives' use of
+// the utilities is pinned by the renderer guard tests.
 //
 // Plan 091 (the clear glass, VIDEORC_GLASS_STYLE=clear) adds two metrics on
 // every window with a page, gated whenever the app reports that style was
@@ -452,11 +452,21 @@ async function setCoats(devtoolsHost, role, zero) {
   return true
 }
 
-// Paints a probe surface over `rect` (window points) in the role's page:
-// `float` is the real glass-float utility, `control` the old popover coat,
-// `leak` the utility at a 97% coat (the translucency that let white tab
-// labels read through the hover card before the coat went opaque), `frost`
-// a bare CSS backdrop-filter with no coat at all (plan 072 S0's question).
+// The float tiers the gate measures (plan 091 D6): the utility each paints
+// and the real primitives that carry it.
+const SURFACE_TIERS = {
+  float: 'glass-float',
+  dialog: 'glass-float-dialog',
+  tooltip: 'glass-float-tooltip'
+}
+
+// Paints a probe surface over `rect` (window points) in the role's page and
+// returns its computed background colour: `float`, `dialog` and `tooltip`
+// are the real utilities (the popup, dialog and tooltip tiers), `control`
+// the old popover coat, `leak` the popup tier at a 97% coat (the
+// translucency that let white tab labels read through the hover card before
+// the coat went opaque), `frost` a bare CSS backdrop-filter with no coat at
+// all (plan 072 S0's question).
 async function showSurface(devtoolsHost, role, bounds, rect, kind, theme) {
   const target = await pageTarget(devtoolsHost, role)
   if (!target) throw new Error(`No CDP target for ${role}; cannot paint a floating surface.`)
@@ -464,9 +474,10 @@ async function showSurface(devtoolsHost, role, bounds, rect, kind, theme) {
     rect,
     boundsWidth: bounds.width,
     kind,
+    utility: SURFACE_TIERS[kind] ?? SURFACE_TIERS.float,
     coat: OLD_POPOVER_COAT[theme]
   })
-  await cdpEvaluate(
+  return cdpEvaluate(
     target.webSocketDebuggerUrl,
     `(() => {
       const spec = ${spec};
@@ -477,7 +488,7 @@ async function showSurface(devtoolsHost, role, bounds, rect, kind, theme) {
       el.className =
         spec.kind === 'control' ? 'rounded-lg border'
         : spec.kind === 'frost' ? 'rounded-lg'
-        : 'rounded-lg border glass-float';
+        : 'rounded-lg border ' + spec.utility;
       Object.assign(el.style, {
         position: 'fixed', zIndex: '2147483647', pointerEvents: 'none',
         left: spec.rect.x * scale + 'px', top: spec.rect.y * scale + 'px',
@@ -493,7 +504,7 @@ async function showSurface(devtoolsHost, role, bounds, rect, kind, theme) {
         el.style.webkitBackdropFilter = 'blur(24px)';
       }
       document.body.appendChild(el);
-      return true;
+      return getComputedStyle(el).backgroundColor;
     })()`
   )
 }
@@ -554,36 +565,45 @@ function regionAt(file, bounds, rect) {
   return { mean: regionMean(image, pixels), sharpness: laplacianVariance(image, pixels) }
 }
 
-// Floating glass on one role: the patch over every backdrop without the
-// surface (the window shots already taken), with glass-float, and with the
-// old coat; then the bleed of the role's app text through it.
-async function measureSurfaces(smoke, devtoolsHost, theme, role, windowFiles, bounds) {
+// Floating glass on one role: each tier painted over the patch, shot over
+// every backdrop and scored against its own computed colour (tone), its
+// spread (opaque) and the text tokens; the old popover coat rides along as
+// an ungated control; then the bleed of the role's app text through the
+// popup tier.
+async function measureSurfaces(smoke, devtoolsHost, theme, role, bounds) {
   const results = []
   const patch = centredRect(SAMPLES[role][0].rect(bounds), 160, 18)
   const surfaceRect = growRect(patch, SURFACE_OVERHANG, bounds)
-  const windowMeans = Object.fromEntries(
-    BACKDROPS.map((variant) => [variant, regionAt(windowFiles[variant], bounds, patch).mean])
-  )
-  const means = {}
-  for (const kind of ['float', 'control']) {
-    await showSurface(devtoolsHost, role, bounds, surfaceRect, kind, theme)
-    means[kind] = {}
+  const text = TEXT[theme]
+  const scored = {}
+  for (const kind of ['float', 'dialog', 'tooltip', 'control']) {
+    const computed = await showSurface(devtoolsHost, role, bounds, surfaceRect, kind, theme)
+    await sleep(300)
+    const surfaceMeans = {}
     for (const variant of BACKDROPS) {
       const { raised, file } = await shoot(smoke, theme, role, variant, `${kind}-`)
-      means[kind][variant] = regionAt(file, raised.bounds, patch).mean
+      surfaceMeans[variant] = regionAt(file, raised.bounds, patch).mean
+    }
+    scored[kind] = {
+      computed,
+      ...evaluateFloatPatch({ surfaceMeans, text, expected: parseCssColor(computed) })
     }
   }
-  const text = TEXT[theme]
-  const float = evaluateFloatPatch({ theme, windowMeans, surfaceMeans: means.float, text })
-  const control = evaluateFloatPatch({ theme, windowMeans, surfaceMeans: means.control, text })
-  results.push({
-    theme,
-    role,
-    sample: 'float-patch',
-    metrics: { ...float.metrics, controlLiftMin: control.metrics.liftMin },
-    checks: float.checks,
-    pass: float.pass
-  })
+  for (const kind of ['float', 'dialog', 'tooltip']) {
+    results.push({
+      theme,
+      role,
+      sample: `${kind}-patch`,
+      metrics: {
+        utility: SURFACE_TIERS[kind],
+        computed: scored[kind].computed,
+        ...scored[kind].metrics,
+        ...(kind === 'float' ? { controlTone: scored.control.metrics.tone } : {})
+      },
+      checks: scored[kind].checks,
+      pass: scored[kind].pass
+    })
+  }
 
   const textRect = await appTextRect(devtoolsHost, role, bounds)
   if (textRect) {
@@ -1061,9 +1081,7 @@ async function main() {
           if (frost) report.results.push(frost)
         }
         if (surfaces && SURFACE_ROLES.has(role)) {
-          report.results.push(
-            ...(await measureSurfaces(smoke, devtoolsHost, theme, role, files, bounds))
-          )
+          report.results.push(...(await measureSurfaces(smoke, devtoolsHost, theme, role, bounds)))
           await showSurface(
             devtoolsHost,
             role,

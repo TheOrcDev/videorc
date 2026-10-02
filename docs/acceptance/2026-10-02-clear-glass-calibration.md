@@ -427,3 +427,70 @@ parity population grew to 1.79 (the dark coats are now a hair further from
 neutral), still under the ≤ 4 gate. WindowServer read 66.5% in this run,
 an outlier against the 47–52% of every other run today; nothing in the
 tree changed between them but a token, so it is session noise.
+
+## S3: floats, Ghostex's flat lift
+
+The floating surfaces follow Ghostex's web-modal recipe (plan 091 D6): flat,
+opaque tiers of the solid, mixed in sRGB with `color-mix`, a 1 px rim and
+the drop shadow; the sheen gradient and the top highlight are gone in both
+themes. Dark: the dialog tier (`glass-float-dialog`: dialogs, the ⌘K
+palette, the error panel) is the solid plus 6% white, the popup tier
+(`glass-float`: menus, selects, popovers, hover cards, chart tooltips,
+toasts) adds 3% more, the tooltip tier (`glass-float-tooltip`) is the solid
+itself; the rim is white 10%. Light keeps `oklch(0.99 0 0)` for every tier
+with a black 10% rim. `--popover` still follows `--glass-float`, so a stray
+`bg-popover` lands on the popup tier and the guard stays. Toasts keep the
+#501 rule: the type colours the icon only.
+
+The float gate (`scripts/lib/float-glass-checks.mjs`, `--surfaces`) drops
+plan 072's "lift over the window glass" band: the dark floats are now
+deliberately darker than the glass over a bright desktop. In its place a
+fixed-tone check: each tier is painted over the probe patch, shot over the
+five backdrops, and the capture must sit within **4 RGB steps** of the
+colour the page computes for it (`getComputedStyle` through CDP). A neutral
+opaque tone reaches the display unchanged, which S1's parity run had
+already shown (the sRGB prediction of the neutral coats matched the
+captures within 1.5 steps), so the comparison needs no backdrop reference;
+the opaque check (spread ≤ 0.01 L across the backdrops) guards the
+"whatever is behind" half. Contrast ≥ 7 / 4.5 and the bleed check are
+unchanged. The old 92% popover coat rides along as an ungated control.
+
+`--gate --surfaces --themes=dark,light`, all five roles (what
+`smoke:local-gates` runs): every window sample and every float sample
+passes.
+
+| theme | tier    | computed                                   | tone |     L | primary | secondary | control tone |
+| ----- | ------- | ------------------------------------------ | ---: | ----: | ------: | --------: | -----------: |
+| dark  | popup   | `color(srgb 0.1347 0.1348 0.1416)` #222224 | 0.52 | 0.253 |   14.58 |      6.17 |         6.42 |
+| dark  | dialog  | `color(srgb 0.1080 0.1080 0.1151)` #1C1C1D | 0.74 | 0.227 |   15.63 |      6.62 |              |
+| dark  | tooltip | `oklch(0.16 0.004 286)` #0D0D0F            | 0.92 | 0.160 |   17.83 |      7.55 |              |
+| light | popup   | `oklch(0.99 0 0)`                          | 0.62 | 0.991 |   18.53 |      6.60 |         4.58 |
+| light | dialog  | `oklch(0.99 0 0)`                          | 0.62 | 0.991 |   18.53 |      6.60 |              |
+| light | tooltip | `oklch(0.99 0 0)`                          | 0.62 | 0.991 |   18.53 |      6.60 |              |
+
+The main and Stream Manager windows read the same to the hundredth. Tone
+population 0.52–0.92 against the ≤ 4 gate (4x margin); the old coat, a
+translucent 92%, reads 6.42 dark / 4.58 light and fails it, as it should.
+Bleed through the popup tier: 0 in every window and theme (the 97% leak
+control 0.71–2.13). Lightningcss keeps the `color-mix` expressions verbatim
+(it writes the white as `oklch(100% 0 0)`); Chromium resolves them to
+`color(srgb …)`. Eager renderer bytes: 1,993,904 raw / 385,146 gzip.
+WindowServer with the five windows up: 50.6%.
+
+### By eye
+
+A scratch script (not committed) drove the dev app through CDP and the
+smoke commands, never activating it, over the photo backdrop in both
+themes: the ⌘K palette (the dialog tier through `CommandDialog`'s
+`DialogContent`), a success and an error toast raised through Vite's own
+`sonner` dep, a tooltip on the real `glass-float-tooltip` utility, and the
+Stream Manager's "Supporters this stream" hover card. The palette is a flat
+`#1C1C1D` panel with its rim and shadow; the toasts are flat popups whose
+type colours the icon only; the hover card is the popup tier over glass
+that shows the desktop through. Two surfaces could not be opened in the
+empty test profile: the Go Live dialog (the Stream button toasts a setup
+hint without a destination) and, with it, a Select inside a dialog (the
+Schedule dialog's "Schedule on …" buttons need provider capabilities the
+profile lacks). The Library tab has no tooltip trigger without an item, so
+the tooltip capture is the utility on a synthetic element. The captures stay
+local.

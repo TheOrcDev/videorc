@@ -550,3 +550,10 @@ Evidence: `docs/acceptance/2026-10-02-clear-glass-calibration.md`.
   themes; the dark rows now sit on the table (work L 0.330 / 0.146 over
   white / black, sidebar 0.282) and secondary contrast reads 4.76:1 at 83%.
   No cover moved.
+- **S3 (2026-10-02).** D6 as written, with `color-mix(in srgb, …)` from
+  the solid: dark dialog `#1C1C1D`, popup `#232324` (reads `#222224` from
+  the solid's exact OKLCH), tooltip the solid; light `oklch(0.99 0 0)`; rim
+  10%; no sheen, no highlight; toasts colour the icon only. The float gate
+  replaces plan 072's lift band with a fixed-tone check (≤ 4 RGB steps from
+  the computed colour, population 0.52–0.92), keeps opaque, contrast and
+  bleed, and `--gate --surfaces` passes on all five windows in both themes.
