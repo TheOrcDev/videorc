@@ -173,6 +173,8 @@ export const DbReadout = ({
     if (!source) {
       return
     }
+    // The first tick always writes, whatever the span shows now.
+    shownRef.current = null
     const ticker = createTicker(() => tick(), intervalMs)
     wakeRef.current = ticker.wake
     ticker.wake()
@@ -182,8 +184,12 @@ export const DbReadout = ({
     }
   }, [intervalMs, source])
 
+  // The ticker writes text React does not know about. Switching between a
+  // source and a value swaps the span, so a value never shows the last live
+  // level and a returning source starts from a fresh first paint.
   return (
     <span
+      key={source ? 'source' : 'value'}
       className={cn(
         'inline-block min-w-(--db-readout-width) text-end font-mono tabular-nums',
         className

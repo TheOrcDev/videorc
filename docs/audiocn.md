@@ -19,7 +19,7 @@ use and why, is `plans/092-audiocn-audio-components.md`.
 
 Renderer paths are relative to `apps/desktop/src/renderer/src/`.
 
-Installed from: audiocn `221100c` (branch `fix/videorc-adoption`, the plan
+Installed from: audiocn `a847315` (branch `fix/videorc-adoption`, the plan
 092 U1 fixes, audiocn PR #2), served from a local build of that commit. Once
 that PR is merged, audiocn.dev serves the same files.
 
@@ -44,7 +44,7 @@ adapters that live outside the eager bundle:
 
 1. From `apps/desktop`: `pnpm dlx shadcn@4.21.1 add @audiocn/level-meter @audiocn/mixer @audiocn/bar-visualizer @audiocn/live-waveform`.
 2. Answer the prompts: `use-reduced-motion.ts` **Yes**, `badge.tsx` **No** (it would replace the glass-chip badge), `bar-visualizer.tsx` and `live-waveform.tsx` **Yes**. Any other prompt: stop and look with `--dry-run --diff`.
-3. Undo the CLI's CSS (`git checkout -- apps/desktop/src/renderer/src/styles.css`), remove the `cn` package it adds to `apps/desktop/package.json`, then `pnpm install`.
+3. Back at the repo root (the remaining steps run there): undo the CLI's CSS (`git checkout -- apps/desktop/src/renderer/src/styles.css`), remove the `cn` package it adds to `apps/desktop/package.json`, then `pnpm install`.
 4. Run `pnpm exec prettier --write` on the changed files and review the diff.
 5. Run `pnpm typecheck`, `pnpm lint` (stage first: the em-dash gate reads `git ls-files`), `pnpm format:check`, `pnpm --filter @videorc/desktop test`, `pnpm build && pnpm check:renderer-assets`.
 6. Record the audiocn commit above.
