@@ -10,7 +10,7 @@ import type {
 import type { ChatSendFailure } from '@/lib/chat-send'
 import type { CohostState } from '@/lib/backend'
 import { cohostChipView } from '@/lib/cohost-view'
-import { waitingProviderMessage } from '@/lib/youtube-quota'
+import { waitingProviderMessage } from '@/lib/youtube-quota-copy'
 
 function providerStateLabel(state: LiveChatProviderConnectionState): string {
   switch (state) {

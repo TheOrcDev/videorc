@@ -180,9 +180,12 @@ struct WireYouTube {
 }
 
 fn integer(value: &serde_json::Value) -> Option<i64> {
-    value
-        .as_i64()
-        .or_else(|| value.as_f64().filter(|f| f.fract() == 0.0).map(|f| f as i64))
+    value.as_i64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|f| f.fract() == 0.0)
+            .map(|f| f as i64)
+    })
 }
 
 /// Parse and clamp one document. `Err` means "fail open to compiled defaults"
@@ -233,9 +236,9 @@ pub fn parse_service_flags(body: &str, now: DateTime<Utc>) -> Result<YouTubeServ
                     "minPollMs {ms} clamped to the {MIN_POLL_FLOOR_MS} ms floor"
                 ));
             }
-            None => flags
-                .notes
-                .push(format!("minPollMs {value} is not an integer; keeping the default")),
+            None => flags.notes.push(format!(
+                "minPollMs {value} is not an integer; keeping the default"
+            )),
         }
     }
     if let Some(value) = youtube.viewer_sample_ms {
@@ -272,10 +275,7 @@ pub fn parse_service_flags(body: &str, now: DateTime<Utc>) -> Result<YouTubeServ
         }
     }
     if let Some(value) = youtube.paused_until {
-        match value
-            .as_str()
-            .map(DateTime::parse_from_rfc3339)
-        {
+        match value.as_str().map(DateTime::parse_from_rfc3339) {
             Some(Ok(until)) => {
                 let until = until.with_timezone(&Utc);
                 if until > now {
@@ -306,10 +306,7 @@ pub async fn fetch_service_flags(
     base_url: &str,
     now: DateTime<Utc>,
 ) -> Result<YouTubeServiceFlags, String> {
-    let url = format!(
-        "{}{SERVICE_FLAGS_PATH}",
-        base_url.trim_end_matches('/')
-    );
+    let url = format!("{}{SERVICE_FLAGS_PATH}", base_url.trim_end_matches('/'));
     let response = client
         .get(&url)
         .send()
@@ -368,10 +365,10 @@ pub async fn run_service_flags_refresher(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::Router;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use axum::routing::get;
-    use axum::Router;
     use serde_json::json;
 
     fn now() -> DateTime<Utc> {
@@ -476,11 +473,9 @@ mod tests {
         assert_eq!(stream.notes.len(), 1);
         assert!(stream.notes[0].contains("streamList is not built yet"));
         // Exact lowercase only.
-        let shouting = parse_service_flags(
-            r#"{"version":1,"youtube":{"chatTransport":"OFF"}}"#,
-            now(),
-        )
-        .unwrap();
+        let shouting =
+            parse_service_flags(r#"{"version":1,"youtube":{"chatTransport":"OFF"}}"#, now())
+                .unwrap();
         assert_eq!(shouting.chat_transport, ChatTransportFlag::List);
         assert_eq!(shouting.notes.len(), 1);
         let off = parse_service_flags(r#"{"version":1,"youtube":{"chatTransport":"off"}}"#, now())
@@ -527,7 +522,10 @@ mod tests {
     fn unreadable_or_foreign_documents_fail_open() {
         assert!(parse_service_flags("", now()).is_err());
         assert!(parse_service_flags("<html>502</html>", now()).is_err());
-        assert!(parse_service_flags(r#"{"youtube":{}}"#, now()).is_err(), "no version");
+        assert!(
+            parse_service_flags(r#"{"youtube":{}}"#, now()).is_err(),
+            "no version"
+        );
         assert!(parse_service_flags(r#"{"version":2}"#, now()).is_err());
         assert!(parse_service_flags(r#"{"version":"1"}"#, now()).is_err());
         assert!(parse_service_flags(r#"{"version":0}"#, now()).is_err());
@@ -559,10 +557,16 @@ mod tests {
     async fn fetching_fails_open_on_non_200_and_parses_a_good_answer() {
         let client = reqwest::Client::new();
         let broken = spawn_flags_server(StatusCode::INTERNAL_SERVER_ERROR, "boom".into()).await;
-        let error = fetch_service_flags(&client, &broken, now()).await.unwrap_err();
+        let error = fetch_service_flags(&client, &broken, now())
+            .await
+            .unwrap_err();
         assert!(error.contains("HTTP 500"), "{error}");
         let redirecting = spawn_flags_server(StatusCode::TEMPORARY_REDIRECT, String::new()).await;
-        assert!(fetch_service_flags(&client, &redirecting, now()).await.is_err());
+        assert!(
+            fetch_service_flags(&client, &redirecting, now())
+                .await
+                .is_err()
+        );
         let unreachable = fetch_service_flags(&client, "http://127.0.0.1:9", now())
             .await
             .unwrap_err();

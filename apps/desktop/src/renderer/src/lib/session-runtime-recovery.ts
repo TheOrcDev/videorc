@@ -20,10 +20,44 @@ import type { WsStatus } from '@/lib/capture'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import { notifyOnce } from '@/lib/notify-once'
 import { toast } from '@/lib/toast'
-import { youtubeConnectPausedMessage } from '@/lib/youtube-quota'
+import type { StreamPlatform, YouTubeQuotaStatus } from '@/lib/backend'
+import {
+  youtubeBroadcastToast,
+  youtubeBudgetNotice,
+  youtubeBudgetStepToAnnounce,
+  youtubeConnectPausedMessage
+} from '@/lib/youtube-quota-copy'
 
 // Plan 083: the thumbnail warning rides this lazy runtime-toast chunk.
 export { showYouTubeThumbnailFailure, youtubeThumbnailFailure } from '@/lib/youtube-thumbnail-toast'
+// Plan 094: so does every piece of YouTube quota copy the Studio provider shows.
+export { youtubeGoLivePausedMessage } from '@/lib/youtube-quota-copy'
+
+/** "Couldn't start/end the YouTube broadcast." with the destination named only when it adds something. */
+export function showYouTubeBroadcastToast(
+  step: 'start' | 'end',
+  target: { id: string; label: string; platform: StreamPlatform },
+  message: string
+): void {
+  const broadcastToast = youtubeBroadcastToast(step, target, message)
+  toast.warning(broadcastToast.title, {
+    id: `youtube-broadcast-${step}:${target.id}`,
+    description: broadcastToast.description
+  })
+}
+
+/** One quiet notice per daily-budget step reached (plan 094, S6), never on the way down. */
+export function showYouTubeBudgetStep(
+  previous: YouTubeQuotaStatus | null | undefined,
+  status: YouTubeQuotaStatus
+): void {
+  const reached = youtubeBudgetStepToAnnounce(previous, status)
+  const notice = reached ? youtubeBudgetNotice(reached) : null
+  if (!reached || !notice) return
+  notifyOnce(`youtube-budget:${reached}`, 'info', notice.title, {
+    description: notice.description
+  })
+}
 
 const WORKSPACE_NAVIGATE_EVENT = 'videorc:navigate-workspace'
 const RECORDING_STOPPED_UNEXPECTEDLY_TOAST_ID = 'recording-stopped-unexpectedly'

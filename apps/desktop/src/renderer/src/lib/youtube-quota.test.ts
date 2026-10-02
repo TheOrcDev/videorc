@@ -13,7 +13,7 @@ import {
   youtubeBudgetStepToAnnounce,
   youtubeGoLivePausedMessage,
   youtubeQuotaPausedUntil
-} from '@/lib/youtube-quota'
+} from '@/lib/youtube-quota-copy'
 
 const localTime = (date: Date): string =>
   date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })

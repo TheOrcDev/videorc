@@ -752,7 +752,11 @@ fn normalize_page(
 /// [`IDLE_EMPTY_PAGES`] empty pages in a row the poll stretches to
 /// [`IDLE_POLLING_INTERVAL_MS`], and snaps back on the next message.
 pub fn next_poll_delay_ms(server_interval_ms: Option<u64>, empty_pages_in_a_row: u32) -> u64 {
-    next_poll_delay_ms_with_floor(server_interval_ms, empty_pages_in_a_row, MIN_POLLING_INTERVAL_MS)
+    next_poll_delay_ms_with_floor(
+        server_interval_ms,
+        empty_pages_in_a_row,
+        MIN_POLLING_INTERVAL_MS,
+    )
 }
 
 /// The same with the remote `minPollMs` floor (plan 094, S7): never below the
@@ -1903,7 +1907,11 @@ mod tests {
         // Plan 094 (S7): a remote floor only ever slows the reader down.
         assert_eq!(next_poll_delay_ms_with_floor(Some(1_000), 0, 8_000), 8_000);
         assert_eq!(next_poll_delay_ms_with_floor(Some(9_000), 0, 8_000), 9_000);
-        assert_eq!(next_poll_delay_ms_with_floor(Some(1_000), 0, 10), 5_000, "never below 5 s");
+        assert_eq!(
+            next_poll_delay_ms_with_floor(Some(1_000), 0, 10),
+            5_000,
+            "never below 5 s"
+        );
         assert_eq!(
             next_poll_delay_ms_with_floor(Some(1_000), IDLE_EMPTY_PAGES, 8_000),
             10_000

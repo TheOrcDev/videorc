@@ -14,7 +14,7 @@ import {
   YOUTUBE_STREAM_KEY_LINK_LABEL,
   YOUTUBE_STREAM_KEY_URL,
   youtubeDestinationPausedMessage
-} from '@/lib/youtube-quota'
+} from '@/lib/youtube-quota-copy'
 import { PlatformGlyph } from '@/components/platform-glyph'
 import { StatusBadge } from '@/components/status-badge'
 import { StatusDot } from '@/components/status-dot'

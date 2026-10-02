@@ -534,9 +534,12 @@ pub enum BudgetStep {
 /// What a caller is about to spend quota on, in priority order (highest first).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BudgetCall {
-    /// Prepare, bind, transitions, stream status: never shed.
+    /// Prepare, bind, transitions, stream status: never shed, so production
+    /// never has to ask; named so the ladder's tests state the guarantee.
+    #[allow(dead_code)]
     GoLiveEssential,
-    /// `liveChatMessages.list` on the floor: never shed.
+    /// `liveChatMessages.list` on the floor: never shed (same as above).
+    #[allow(dead_code)]
     ChatRead,
     ChatSend,
     Viewers,
@@ -1118,7 +1121,9 @@ pub fn usage_snapshot(state: &AppState) -> YouTubeApiUsageSnapshot {
     state.youtube_quota.lock().usage.snapshot()
 }
 
-/// The persisted Pacific-day total the budget counts against.
+/// The persisted Pacific-day total the budget counts against (the budget
+/// reads it through `budget_status`; this is the test's view of it).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn daily_usage(state: &AppState) -> YouTubeApiDailyUsage {
     let mut inner = state.youtube_quota.lock();
     inner.ensure_daily_loaded(state);
@@ -1190,7 +1195,13 @@ pub fn apply_service_flags(state: &AppState, flags: crate::service_flags::YouTub
     if changed {
         let summary = flags.summary();
         tracing::info!("[service-flags] {summary}");
-        state.emit_log("info", summary);
+        // A document that throttles anyone is worth a warning in the log.
+        let level = if flags.is_default_behaviour() {
+            "info"
+        } else {
+            "warn"
+        };
+        state.emit_log(level, summary);
     }
     state.youtube_quota.flags.send_replace(flags);
 }
@@ -1381,7 +1392,10 @@ mod tests {
             Ok(Some("http://127.0.0.1:4321".to_string()))
         );
         assert_eq!(resolve_youtube_api_base_url_override(true, None), Ok(None));
-        assert_eq!(resolve_youtube_api_base_url_override(true, Some("  ")), Ok(None));
+        assert_eq!(
+            resolve_youtube_api_base_url_override(true, Some("  ")),
+            Ok(None)
+        );
         for bad in [
             "https://127.0.0.1:4321",
             "http://localhost:4321",
@@ -1607,20 +1621,34 @@ mod tests {
         assert_eq!(budget_step(2_499, limit), ShedViewers);
         assert_eq!(budget_step(2_500, limit), EssentialsOnly);
         assert_eq!(budget_step(90_000, limit), EssentialsOnly);
-        assert_eq!(budget_step(90_000, 0), Normal, "a zero limit switches the budget off");
+        assert_eq!(
+            budget_step(90_000, 0),
+            Normal,
+            "a zero limit switches the budget off"
+        );
         // Smaller remote limits move the thresholds with them.
         assert_eq!(budget_step(80, 100), ShedExtras);
         assert_eq!(budget_step(79, 100), Normal);
 
         for step in [Normal, ShedExtras, ShedViewers, EssentialsOnly] {
-            assert!(budget_allows(step, GoLiveEssential), "{step:?} never blocks Go Live");
-            assert!(budget_allows(step, ChatRead), "{step:?} never blocks chat read");
+            assert!(
+                budget_allows(step, GoLiveEssential),
+                "{step:?} never blocks Go Live"
+            );
+            assert!(
+                budget_allows(step, ChatRead),
+                "{step:?} never blocks chat read"
+            );
         }
         assert!(budget_allows(Normal, Subscribers) && budget_allows(Normal, Thumbnail));
         assert!(!budget_allows(ShedExtras, Subscribers));
         assert!(!budget_allows(ShedExtras, Thumbnail));
         assert!(budget_allows(ShedExtras, Viewers));
-        assert_eq!(budget_viewer_poll_stride(ShedExtras), 2, "viewers every 120 s");
+        assert_eq!(
+            budget_viewer_poll_stride(ShedExtras),
+            2,
+            "viewers every 120 s"
+        );
         assert!(budget_allows(ShedExtras, ChatSend));
         assert!(!budget_allows(ShedViewers, Viewers));
         assert!(budget_allows(ShedViewers, ChatSend));
@@ -1671,7 +1699,10 @@ mod tests {
             Some(BudgetStep::ShedViewers)
         );
         assert_eq!(budget_refuses(&relaunched, BudgetCall::ChatRead), None);
-        assert_eq!(budget_refuses(&relaunched, BudgetCall::GoLiveEssential), None);
+        assert_eq!(
+            budget_refuses(&relaunched, BudgetCall::GoLiveEssential),
+            None
+        );
         // One send (50 units) crosses 100%: the step changes once, the status
         // event carries the budget, and sends are now refused.
         let mut events = relaunched.events.subscribe();
@@ -1829,7 +1860,10 @@ mod tests {
         assert!(refuse_if_paused(&state).is_err());
         assert_eq!(budget_status(&state).limit, 1_000);
         assert_eq!(chat_poll_floor_ms(&state), 8_000);
-        assert_eq!(viewer_sample_interval(&state), Duration::from_millis(45_000));
+        assert_eq!(
+            viewer_sample_interval(&state),
+            Duration::from_millis(45_000)
+        );
         assert_eq!(service_flags_in_effect(&state), flags);
         // The same document again changes nothing.
         apply_service_flags(&state, flags.clone());
@@ -1839,7 +1873,10 @@ mod tests {
         assert_eq!(paused_until(&state), None);
         assert_eq!(budget_status(&state).limit, DEFAULT_DAILY_BUDGET_UNITS);
         assert_eq!(chat_poll_floor_ms(&state), 5_000);
-        assert_eq!(viewer_sample_interval(&state), Duration::from_millis(60_000));
+        assert_eq!(
+            viewer_sample_interval(&state),
+            Duration::from_millis(60_000)
+        );
 
         // A quota pause is never lifted by a flag document without a pause.
         let quota_until = record_quota_exhausted(&state, "test");
@@ -1864,7 +1901,10 @@ mod tests {
             },
         );
         assert_eq!(chat_poll_floor_ms(&state), 5_000);
-        assert_eq!(viewer_sample_interval(&state), Duration::from_millis(30_000));
+        assert_eq!(
+            viewer_sample_interval(&state),
+            Duration::from_millis(30_000)
+        );
         assert!(chat_switched_off(&state));
     }
 

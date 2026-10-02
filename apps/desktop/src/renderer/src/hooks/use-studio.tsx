@@ -47,10 +47,6 @@ import {
   YOUTUBE_QUOTA_PAUSED_CODE,
   isSettledYouTubeCompletionError,
   isYouTubeQuotaPausedError,
-  youtubeBroadcastToast,
-  youtubeBudgetNotice,
-  youtubeBudgetStepToAnnounce,
-  youtubeGoLivePausedMessage,
   youtubeQuotaPausedUntil
 } from '@/lib/youtube-quota'
 import type {
@@ -6533,16 +6529,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
       nextClient.on('youtube.quota', (payload) => {
         const status = payload as YouTubeQuotaStatus
-        // Plan 094 (S6): one quiet notice per budget step, on the way up only.
-        const reached = youtubeBudgetStepToAnnounce(youtubeQuotaRef.current, status)
-        const notice = reached ? youtubeBudgetNotice(reached) : null
-        if (reached && notice) {
-          notifyOnce(`youtube-budget:${reached}`, 'info', notice.title, {
-            description: notice.description
-          })
-        }
+        const previous = youtubeQuotaRef.current
         youtubeQuotaRef.current = status
         setYoutubeQuota(status)
+        // Plan 094 (S6): one quiet notice per budget step, on the way up only.
+        void loadSessionRuntimeRecovery().then((runtime) => {
+          if (generationIsCurrent()) runtime.showYouTubeBudgetStep(previous, status)
+        })
       }),
       nextClient.on('platformAccounts.oauth.callback', (result) => {
         void loadSessionRuntimeRecovery().then((runtime) => {
@@ -11271,11 +11264,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               })
             })
           )
-          const broadcastToast = youtubeBroadcastToast('start', target, message)
-          toast.warning(broadcastToast.title, {
-            id: `youtube-broadcast-start:${target.id}`,
-            description: broadcastToast.description
-          })
+          ;(await loadSessionRuntimeRecovery()).showYouTubeBroadcastToast('start', target, message)
         }
       }
     },
@@ -11764,11 +11753,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               streaming: patchPreparedStreamTarget(current.streaming, target.id, { status })
             })
           )
-          const broadcastToast = youtubeBroadcastToast('end', target, message)
-          toast.warning(broadcastToast.title, {
-            id: `youtube-broadcast-end:${target.id}`,
-            description: broadcastToast.description
-          })
+          ;(await loadSessionRuntimeRecovery()).showYouTubeBroadcastToast('end', target, message)
         }
       }
 
@@ -12384,7 +12369,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             if (pausedUntil) {
               throw new BackendRequestError(
                 YOUTUBE_QUOTA_PAUSED_CODE,
-                youtubeGoLivePausedMessage(pausedUntil)
+                (await loadSessionRuntimeRecovery()).youtubeGoLivePausedMessage(pausedUntil)
               )
             }
             const scheduledAttemptId = target.scheduledEventId ? crypto.randomUUID() : undefined

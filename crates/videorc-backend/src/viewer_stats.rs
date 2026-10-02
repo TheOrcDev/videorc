@@ -108,7 +108,7 @@ struct YouTubeViewerBackoff {
 /// Pure: whether this tick polls YouTube under the budget `step`.
 pub fn budget_tick_polls(step: crate::youtube_quota::BudgetStep, tick: u32) -> bool {
     let stride = crate::youtube_quota::budget_viewer_poll_stride(step);
-    stride != u32::MAX && tick % stride == 0
+    stride != u32::MAX && tick.is_multiple_of(stride)
 }
 
 fn count_fetch_for_status(status: reqwest::StatusCode) -> Option<CountFetch> {
@@ -183,6 +183,11 @@ async fn poll_youtube_count(
         return None;
     }
     // Plan 094 (S6): the daily budget slows viewers at 80% and stops them at 95%.
+    if crate::youtube_quota::budget_refuses(state, crate::youtube_quota::BudgetCall::Viewers)
+        .is_some()
+    {
+        return None;
+    }
     let step = crate::youtube_quota::budget_status(state).step;
     let tick = backoff.budget_ticks;
     backoff.budget_ticks = backoff.budget_ticks.wrapping_add(1);

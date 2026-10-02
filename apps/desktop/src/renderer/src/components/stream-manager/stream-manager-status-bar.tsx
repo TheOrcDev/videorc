@@ -21,7 +21,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import type { AudienceSnapshot, CommentHighlightAnchor, LiveChatProviderState } from '@/lib/backend'
 import { ABOVE_NARROW, COMPACT_LABEL, NARROW_ONLY } from '@/lib/stream-manager-layout'
-import { waitingProviderMessage } from '@/lib/youtube-quota'
+import { waitingProviderMessage } from '@/lib/youtube-quota-copy'
 import { cn } from '@/lib/utils'
 
 // The Stream Manager's status bar (plan 055, D6): each provider's chat state

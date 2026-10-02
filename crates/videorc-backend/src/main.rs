@@ -89,10 +89,10 @@ mod scheduled_x;
 mod scheduled_youtube;
 mod screen_capture;
 mod secrets;
+mod service_flags;
 mod session_audio;
 mod session_ops;
 mod session_token;
-mod service_flags;
 mod seventv;
 mod source_mask;
 mod source_registry;
@@ -2805,8 +2805,9 @@ async fn set_youtube_broadcast_thumbnail(
         // Plan 094: a thumbnail is the first call to shed; none while paused
         // and none once the daily budget (S6) reaches 80%.
         Ok(_) if youtube_quota::paused_until(state).is_some() => Err("quotaPaused".to_string()),
-        Ok(_) if youtube_quota::budget_refuses(state, youtube_quota::BudgetCall::Thumbnail)
-            .is_some() =>
+        Ok(_)
+            if youtube_quota::budget_refuses(state, youtube_quota::BudgetCall::Thumbnail)
+                .is_some() =>
         {
             Err("budgetShed".to_string())
         }
@@ -8400,13 +8401,11 @@ async fn handle_text_message_with_role(
                 )
             } else {
                 match serde_json::from_value::<SeedParams>(command.params) {
-                    Ok(params) if params.access_token.trim().is_empty() => {
-                        ServerResponse::error(
-                            command.id,
-                            "invalid-params",
-                            "accessToken is required.",
-                        )
-                    }
+                    Ok(params) if params.access_token.trim().is_empty() => ServerResponse::error(
+                        command.id,
+                        "invalid-params",
+                        "accessToken is required.",
+                    ),
                     Ok(params) => {
                         let account_id = params
                             .account_id
@@ -8414,21 +8413,23 @@ async fn handle_text_message_with_role(
                         let token_secret_ref = format!("youtube-quota-smoke:{account_id}:access");
                         let seeded = secrets::put_secret(&token_secret_ref, &params.access_token)
                             .and_then(|()| {
-                                state.database.upsert_platform_account(UpsertPlatformAccount {
-                                    platform: StreamPlatform::Youtube,
-                                    account_id: account_id.clone(),
-                                    account_label: params
-                                        .account_label
-                                        .unwrap_or_else(|| "Quota smoke channel".to_string()),
-                                    account_handle: None,
-                                    avatar_url: None,
-                                    scopes: vec![live_chat::YOUTUBE_CHAT_SCOPE.to_string()],
-                                    token_secret_ref: Some(token_secret_ref),
-                                    refresh_token_secret_ref: None,
-                                    stream_key_secret_ref: None,
-                                    expires_at: None,
-                                    status: PlatformAccountStatus::Connected,
-                                })
+                                state
+                                    .database
+                                    .upsert_platform_account(UpsertPlatformAccount {
+                                        platform: StreamPlatform::Youtube,
+                                        account_id: account_id.clone(),
+                                        account_label: params
+                                            .account_label
+                                            .unwrap_or_else(|| "Quota smoke channel".to_string()),
+                                        account_handle: None,
+                                        avatar_url: None,
+                                        scopes: vec![live_chat::YOUTUBE_CHAT_SCOPE.to_string()],
+                                        token_secret_ref: Some(token_secret_ref),
+                                        refresh_token_secret_ref: None,
+                                        stream_key_secret_ref: None,
+                                        expires_at: None,
+                                        status: PlatformAccountStatus::Connected,
+                                    })
                             });
                         match seeded {
                             Ok(account) => {
