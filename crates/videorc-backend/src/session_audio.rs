@@ -7974,6 +7974,14 @@ mod mix_tests {
             )
             .await;
             bus.wait_for_frames(96_000).await;
+            // The reader holds a chunk before the bus advances its cursor
+            // past it (the cursor moves after the chunk's bookkeeping), so
+            // also wait for the cursor that `identical_until` reads.
+            wait_until(
+                || bus.session.status().sample_cursor >= 96_000,
+                "the bus cursor at 96000 frames",
+            )
+            .await;
             // Timing is judged up to the drain: the drain itself discards
             // the microphone's buffered playout (it is capture that ended).
             let before = bus.session.status();
