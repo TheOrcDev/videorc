@@ -201,7 +201,9 @@ export function SourcesAudioMixer(): ReactElement {
           )
         }
       />
-      <Mixer maxDb={0} minDb={-60}>
+      {/* gap-0: only the channels area is used; the empty header, separator
+          and master rows would each add the grid's gap. */}
+      <Mixer className="gap-0" maxDb={0} minDb={-60}>
         <MixerTitle className="sr-only">Audio mixer</MixerTitle>
         <MixerChannels className="gap-0 divide-y divide-border" scrollable={false}>
           <MicrophoneChannel
@@ -295,7 +297,7 @@ export function MicrophoneChannel({
   onSyncChange: (offsetMs: number, reason: ParameterChangeReason) => void
 }): ReactElement {
   return (
-    <div className="flex flex-col gap-3 py-3" data-videorc-mic-channel="">
+    <div className="flex flex-col gap-3 py-3 first:pt-0 last:pb-0" data-videorc-mic-channel="">
       <ChannelStrip className="p-0" dimmed={!microphoneSelected} muted={muted} variant="ghost">
         <ChannelStripHeader>
           <MicrophoneIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
@@ -576,7 +578,10 @@ export function SystemAudioSettings({
   onResume: () => void
 }): ReactElement {
   return (
-    <div className="flex flex-col gap-3 py-3" data-videorc-system-audio-settings="">
+    <div
+      className="flex flex-col gap-3 py-3 first:pt-0 last:pb-0"
+      data-videorc-system-audio-settings=""
+    >
       <ChannelStrip className="p-0" disabled={view.permissionRequired} variant="ghost">
         <ChannelStripHeader>
           <DesktopIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
