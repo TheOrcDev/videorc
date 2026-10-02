@@ -1314,6 +1314,10 @@ export interface OAuthCallbackResult {
   accountConnected: boolean
   retryable: boolean
   receivedAt: string
+  /** Plan 094: a bounded reason the renderer words itself (`youtube-quota`). */
+  reason?: string
+  /** When the blocked action can be tried again (RFC 3339), with `reason`. */
+  retryAt?: string
 }
 
 export interface StreamSessionTargetHistory {
@@ -4293,6 +4297,12 @@ export interface LiveChatProviderState {
   lastConnectedAt?: string
   lastMessageAt?: string
   lastError?: string
+  /**
+   * While `state` is `waiting` for a known reason with a known end (the
+   * YouTube quota pause, plan 094): when the connector resumes, RFC 3339.
+   * Shown in local time; absent otherwise.
+   */
+  retryAt?: string
 }
 
 /** A rich-text fragment of a message (plain text, emote, mention, …). */
@@ -5111,6 +5121,34 @@ export interface PlatformAudience {
 export interface FollowerGain {
   at: string
   count: number
+}
+
+/**
+ * `youtube.quota` event (plan 094): the shared YouTube Data API quota breaker.
+ * `pausedUntil` is present (RFC 3339) while every YouTube call is paused and
+ * absent, never null, once they may resume. One state for the Livestream page,
+ * the Stream Manager and the Comments destination status.
+ */
+export interface YouTubeQuotaStatus {
+  pausedUntil?: string
+  /** The per-install daily budget (plan 094, S6); always sent by current backends. */
+  budget?: YouTubeQuotaBudget
+}
+
+/**
+ * How much of this install's daily YouTube budget is spent, highest step last.
+ * `shed-extras` (80%): no subscribers or thumbnails, viewers every 2 minutes;
+ * `shed-viewers` (95%): no viewers; `essentials-only` (100%): Go Live, Stop
+ * and chat read only. Never blocks a running stream.
+ */
+export type YouTubeQuotaBudgetStep = 'normal' | 'shed-extras' | 'shed-viewers' | 'essentials-only'
+
+export interface YouTubeQuotaBudget {
+  /** Estimated units spent this Pacific day. */
+  units: number
+  /** The budget in effect; 0 means the budget is off. */
+  limit: number
+  step: YouTubeQuotaBudgetStep
 }
 
 /** `stream.audience` event and `stream.audience.snapshot` result (wire mirror of audience.rs). */

@@ -100,6 +100,11 @@ pub struct LiveChatProviderState {
     pub last_message_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// While `state` is `Waiting` for a known reason with a known end (the
+    /// YouTube quota pause, plan 094): when the connector resumes, RFC 3339.
+    /// Absent otherwise; the renderer formats it in local time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<String>,
 }
 
 /// A rich-text fragment of a message (plain text, emote, mention, …) for faithful rendering.
@@ -370,6 +375,7 @@ fn provider_state_from_capability(capability: ChatCapability) -> LiveChatProvide
         last_connected_at: None,
         last_message_at: None,
         last_error: None,
+        retry_at: None,
     }
 }
 
@@ -1303,6 +1309,9 @@ impl LiveChatCoordinator {
         }) {
             provider.state = connection;
             provider.message = message.to_string();
+            if connection != LiveChatProviderConnectionState::Waiting {
+                provider.retry_at = None;
+            }
             provider.read = match connection {
                 LiveChatProviderConnectionState::Connecting
                 | LiveChatProviderConnectionState::Reconnecting => CommentsReadState::Connecting,
@@ -1326,6 +1335,24 @@ impl LiveChatCoordinator {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// When a `Waiting` provider resumes on its own (plan 094: the YouTube
+    /// quota pause). Cleared by the next non-waiting transition.
+    pub fn set_provider_retry_at(
+        &mut self,
+        platform: StreamPlatform,
+        target_id: Option<&str>,
+        retry_at: Option<String>,
+    ) {
+        if let Some(provider) = self.providers.iter_mut().find(|provider| {
+            provider.platform == platform
+                && target_id
+                    .map(|target_id| provider.target_id.as_deref() == Some(target_id))
+                    .unwrap_or(true)
+        }) {
+            provider.retry_at = retry_at;
         }
     }
 
@@ -1805,7 +1832,15 @@ where
             session_generation,
             youtube,
         ));
-        state.live_chat.lock().await.attach_task(handle);
+        // Plan 094: the YouTube API usage summary every 10 minutes; the stop
+        // path logs the last one.
+        let usage = tokio::spawn(crate::youtube_quota::run_usage_reporter(
+            state.clone(),
+            params.session_id.clone(),
+        ));
+        let mut coordinator = state.live_chat.lock().await;
+        coordinator.attach_task(handle);
+        coordinator.attach_task(usage);
     }
     // Viewer sampler (plan rider V1): same session, same credentials as the
     // chat connectors, same abort-on-stop lifecycle. Polling failures are
@@ -2005,6 +2040,7 @@ where
             last_connected_at: None,
             last_message_at: None,
             last_error: None,
+            retry_at: None,
         });
     provider.target_id = params.target_id.clone();
     provider.id = comments_destination_id(StreamPlatform::X, provider.target_id.as_deref());
@@ -2347,7 +2383,7 @@ async fn execute_send_live_chat_message(
                     async move {
                         let outcome = timeout(CHAT_SEND_TIMEOUT, async {
                             let sender = with_current_sender_token(&state, &client, sender).await;
-                            send_to_destination(&client, sender, &text).await
+                            send_to_destination(&state, &client, sender, &text).await
                         })
                         .await;
                         (destination_id, outcome)
@@ -2514,6 +2550,7 @@ async fn with_current_sender_token(
 }
 
 async fn send_to_destination(
+    state: &AppState,
     client: &reqwest::Client,
     sender: ChatSenderConfig,
     text: &str,
@@ -2525,7 +2562,10 @@ async fn send_to_destination(
             live_chat_id: Some(live_chat_id),
             ..
         } => {
-            crate::youtube_chat::send_youtube_chat_message(
+            // Plan 094: a send costs 50 units; none goes out while the quota
+            // breaker is set, and a quota refusal sets it.
+            crate::youtube_chat::send_youtube_chat_message_guarded(
+                state,
                 client,
                 api_base_url.as_deref(),
                 &access_token,
@@ -2642,6 +2682,9 @@ where
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     let kick_cleanup = {
         let mut coordinator = state.live_chat.lock().await;
+        if let Some(session_id) = coordinator.session_id() {
+            crate::youtube_quota::log_usage_summary(state, session_id, "session end");
+        }
         let kick_cleanup = coordinator.kick_cleanup_account();
         coordinator.stop_session();
         kick_cleanup
@@ -2689,6 +2732,7 @@ where
     let stopped = {
         let mut coordinator = state.live_chat.lock().await;
         if coordinator.session_id() == Some(expected_session_id) {
+            crate::youtube_quota::log_usage_summary(state, expected_session_id, "session end");
             let kick_cleanup = coordinator.kick_cleanup_account();
             coordinator.stop_session();
             Some(kick_cleanup)
@@ -3043,7 +3087,30 @@ pub(crate) async fn set_provider_and_emit(
         (expected_session_id, expected_generation),
         platform,
         target_id,
-        connection,
+        (connection, None),
+        message,
+        (std::future::ready(()), std::future::ready(())),
+    )
+    .await
+}
+
+/// `Waiting` with a known resume time: the provider parks until `retry_at`
+/// (plan 094, the YouTube quota pause) and the renderer shows the local time.
+pub(crate) async fn set_provider_waiting_and_emit(
+    state: &AppState,
+    expected_session_id: &str,
+    expected_generation: u64,
+    platform: StreamPlatform,
+    target_id: Option<&str>,
+    message: &str,
+    retry_at: &str,
+) -> bool {
+    set_provider_and_emit_with_hooks(
+        state,
+        (expected_session_id, expected_generation),
+        platform,
+        target_id,
+        (LiveChatProviderConnectionState::Waiting, Some(retry_at)),
         message,
         (std::future::ready(()), std::future::ready(())),
     )
@@ -3055,7 +3122,7 @@ async fn set_provider_and_emit_with_hooks<F, G>(
     expected_owner: (&str, u64),
     platform: StreamPlatform,
     target_id: Option<&str>,
-    connection: LiveChatProviderConnectionState,
+    transition: (LiveChatProviderConnectionState, Option<&str>),
     message: &str,
     hooks: (F, G),
 ) -> bool
@@ -3063,6 +3130,7 @@ where
     F: std::future::Future<Output = ()>,
     G: std::future::Future<Output = ()>,
 {
+    let (connection, retry_at) = transition;
     let (expected_session_id, expected_generation) = expected_owner;
     let (before_mutation, before_emit) = hooks;
     before_mutation.await;
@@ -3085,6 +3153,7 @@ where
             return false;
         }
         coordinator.set_provider_status(platform, target_id, connection, message, &now);
+        coordinator.set_provider_retry_at(platform, target_id, retry_at.map(str::to_string));
         coordinator
             .providers
             .iter()
@@ -3670,6 +3739,7 @@ mod tests {
             last_connected_at: None,
             last_message_at: None,
             last_error: None,
+            retry_at: None,
         }
     }
 
@@ -3691,6 +3761,7 @@ mod tests {
             last_connected_at: Some("2026-07-10T00:00:00Z".to_string()),
             last_message_at: None,
             last_error: None,
+            retry_at: None,
         }
     }
 
@@ -4273,6 +4344,7 @@ mod tests {
             last_connected_at: None,
             last_message_at: None,
             last_error: None,
+            retry_at: None,
         });
 
         let snapshot = coordinator.snapshot("now".to_string());
@@ -5015,7 +5087,7 @@ mod tests {
                 ("session-a", session_generation),
                 StreamPlatform::Youtube,
                 Some("shared-target"),
-                LiveChatProviderConnectionState::Reconnecting,
+                (LiveChatProviderConnectionState::Reconnecting, None),
                 "Transient connection loss.",
                 (std::future::ready(()), async move {
                     let _ = captured_tx.send(());
@@ -5072,7 +5144,7 @@ mod tests {
                 ("shared-session", original_generation),
                 StreamPlatform::Youtube,
                 Some("shared-target"),
-                LiveChatProviderConnectionState::Reconnecting,
+                (LiveChatProviderConnectionState::Reconnecting, None),
                 "Old connector retry.",
                 (
                     async move {
@@ -5658,6 +5730,16 @@ mod tests {
         assert_eq!(capability.write, CommentsWriteState::Ready);
     }
 
+    fn test_state_for_send() -> AppState {
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            crate::storage::Database::open_in_memory_for_tests(),
+        )
+    }
+
     #[tokio::test]
     async fn x_send_enforces_the_140_char_platform_cap_before_any_network() {
         // The shared composer allows 200 chars; X caps at 140. The X leg must
@@ -5665,6 +5747,7 @@ mod tests {
         let client = reqwest::Client::new();
         let long_message = "x".repeat(141);
         let error = send_to_destination(
+            &test_state_for_send(),
             &client,
             ChatSenderConfig::X {
                 broadcast_id: "1AbCdEfGhIjKl".to_string(),
@@ -5681,6 +5764,7 @@ mod tests {
         // Within the cap but with no stored X Live credentials, the arm must
         // fail on authorization — proving credentials resolve per send.
         let error = send_to_destination(
+            &test_state_for_send(),
             &client,
             ChatSenderConfig::X {
                 broadcast_id: "1AbCdEfGhIjKl".to_string(),

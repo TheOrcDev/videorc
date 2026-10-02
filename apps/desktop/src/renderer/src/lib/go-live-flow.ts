@@ -5,6 +5,8 @@ export type GoLiveSetupFailure = {
   platform: StreamTargetSettings['platform']
   label: string
   message: string
+  /** Plan 094 (G5): the dialog offers this resolution inline (YouTube's API paused). */
+  fallback?: 'manual-rtmp'
 }
 
 export type GoLivePartialSetup = {

@@ -533,6 +533,15 @@ describe('backend RPC contract', () => {
       receivedAt: '2026-07-12T00:00:00.000Z'
     }
     expect(validateBackendEventPayload('platformAccounts.oauth.callback', event)).toEqual(event)
+    // Plan 094 (S3): a terminal YouTube connect carries its reason and retry time.
+    const quota = {
+      ...event,
+      status: 'failed',
+      retryable: false,
+      reason: 'youtube-quota',
+      retryAt: '2026-10-03T07:00:00Z'
+    }
+    expect(validateBackendEventPayload('platformAccounts.oauth.callback', quota)).toEqual(quota)
     const xOAuth1Event: OAuthCallbackResult = {
       platform: 'x',
       state: '',
@@ -2014,6 +2023,31 @@ describe('backend RPC contract', () => {
     expect(() =>
       validateBackendRpcParams('liveChat.emotes.set', { sevenTv: true, bttv: true })
     ).toThrow('liveChat.emotes.set')
+  })
+
+  it('accepts the youtube.quota event with and without a pause end', () => {
+    const paused = { pausedUntil: '2026-10-03T07:00:00Z' }
+    expect(validateBackendEventPayload('youtube.quota', paused)).toEqual(paused)
+    expect(validateBackendEventPayload('youtube.quota', {})).toEqual({})
+    expect(validateBackendRpcResult('youtube.quota.status', paused)).toEqual(paused)
+    expect(() => validateBackendEventPayload('youtube.quota', { pausedUntil: null })).toThrow()
+    // Plan 094 (S6): the per-install budget rides along, every step named.
+    const budgeted = { budget: { units: 2000, limit: 2500, step: 'shed-extras' } }
+    expect(validateBackendEventPayload('youtube.quota', budgeted)).toEqual(budgeted)
+    expect(validateBackendRpcResult('youtube.quota.status', { ...paused, ...budgeted })).toEqual({
+      ...paused,
+      ...budgeted
+    })
+    expect(() =>
+      validateBackendEventPayload('youtube.quota', {
+        budget: { units: 1, limit: 2500, step: 'panic' }
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendEventPayload('youtube.quota', {
+        budget: { units: -1, limit: 2500, step: 'normal' }
+      })
+    ).toThrow()
   })
 
   it('bounds unregistered method and event payloads instead of passing arbitrary values', () => {

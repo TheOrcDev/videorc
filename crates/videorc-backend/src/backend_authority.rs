@@ -137,6 +137,11 @@ fn renderer_smoke_method(method: &str) -> bool {
             | "test.captureRecovery.injectScreenDeliveryDegradation"
             | "test.captureRecovery.cameraCadenceEvidence"
             | "test.captureRecovery.screenCadenceEvidence"
+            // Plan 094 (S4): the quota drill seeds a fake-API YouTube account
+            // and forces the breaker's expiry from the renderer-role smoke
+            // socket; the handler also requires the loopback API override.
+            | "test.youtubeQuota.forceExpiry"
+            | "test.youtubeQuota.seedAccount"
     )
 }
 
@@ -290,6 +295,8 @@ mod tests {
             "test.captureRecovery.injectScreenDeliveryDegradation",
             "test.captureRecovery.cameraCadenceEvidence",
             "test.captureRecovery.screenCadenceEvidence",
+            "test.youtubeQuota.forceExpiry",
+            "test.youtubeQuota.seedAccount",
         ] {
             assert_eq!(
                 authorize_backend_method(BackendRole::Renderer, method, false),
@@ -322,6 +329,8 @@ mod tests {
             "test.captureRecovery.injectScreenDeliveryDegradation",
             "test.captureRecovery.cameraCadenceEvidence",
             "test.captureRecovery.screenCadenceEvidence",
+            "test.youtubeQuota.forceExpiry",
+            "test.youtubeQuota.seedAccount",
         ] {
             assert_eq!(
                 authorize_backend_method(BackendRole::Admin, method, false),

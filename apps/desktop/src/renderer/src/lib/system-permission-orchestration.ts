@@ -1,4 +1,4 @@
-import { toast } from 'sonner'
+import { toast } from '@/lib/toast'
 
 import type { BackendClient } from '@/backendClient'
 import type { WsStatus } from '@/lib/capture'

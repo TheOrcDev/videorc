@@ -76,7 +76,7 @@ export interface DestinationEvent {
   at: string
 }
 
-/** 60 minutes of 30-second viewer samples. */
+/** 60 minutes of viewer samples (60 s cadence since plan 094; 30 s before). */
 export const VIEWER_HISTORY_POINTS = 120
 export const VIEWER_HISTORY_WINDOW_MS = 60 * 60_000
 /** Health arrives at most every 2 s; keep 10 minutes. */

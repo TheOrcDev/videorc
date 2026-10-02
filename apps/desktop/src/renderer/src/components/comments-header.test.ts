@@ -70,6 +70,34 @@ describe('Stream Manager status bar', () => {
     expect(markup).toContain('relay is down')
   })
 
+  // Plan 094: the YouTube quota pause reads inline with its local resume time
+  // (the owner's stream showed "YouTube reconnecting" for 10 minutes instead).
+  it('shows the YouTube quota pause inline with when chat resumes', () => {
+    const retryAt = new Date(Date.now() + 2 * 60 * 60_000)
+    const paused = provider({
+      id: 'youtube',
+      platform: 'youtube',
+      state: 'waiting',
+      message: "YouTube chat is paused: Videorc's daily YouTube API limit is used up.",
+      retryAt: retryAt.toISOString()
+    })
+    const problem = providerProblem(paused)
+    expect(problem).toContain('YouTube chat is paused')
+    expect(problem).toContain(
+      `It resumes at ${retryAt.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}.`
+    )
+    expect(problem).toContain('Your stream keeps going.')
+    const markup = renderToStaticMarkup(
+      createElement(StreamManagerStatusBar, {
+        providers: [paused],
+        audience: null,
+        alwaysOnTop: false
+      })
+    )
+    expect(markup).toContain('data-slot="chat-state-problem"')
+    expect(markup).toContain('It resumes at')
+  })
+
   it('offers the Twitch reconnect when follow alerts need the opt-in scopes', () => {
     const title = providerCapabilityTitle(provider(), {
       sessionId: 's',

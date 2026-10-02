@@ -40,9 +40,16 @@ import {
   type ReactNode,
   type SetStateAction
 } from 'react'
-import { toast } from 'sonner'
+import { notifyOnce } from '@/lib/notify-once'
+import { toast } from '@/lib/toast'
 
 import { BackendClient, BackendRequestError } from '@/backendClient'
+import {
+  YOUTUBE_QUOTA_PAUSED_CODE,
+  isSettledYouTubeCompletionError,
+  isYouTubeQuotaPausedError,
+  youtubeQuotaPausedUntil
+} from '@/lib/youtube-quota'
 import type {
   GlobalShortcutAction,
   GlobalShortcutContext,
@@ -333,6 +340,7 @@ import type {
   XPublishResult,
   YouTubeBroadcastTransitionResult,
   YouTubeChannel,
+  YouTubeQuotaStatus,
   YouTubeStreamStatusResult,
   SetCommentHighlightParams,
   ViewerSample
@@ -1037,6 +1045,8 @@ export type StudioContextValue = {
   kickCategories: KickCategory[]
   kickCategorySearchPending: boolean
   xNativeCapability: XNativeLiveCapability | null
+  /** Plan 094: the shared YouTube API quota breaker; `pausedUntil` while paused. */
+  youtubeQuota: YouTubeQuotaStatus
   xNativeCapabilityLoading: boolean
   /** Read-only live-chat snapshot for the studio comments panel, driven by liveChat.* events. */
   liveChatSnapshot: LiveChatSnapshot
@@ -2094,6 +2104,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [kickCategorySearchPending, setKickCategorySearchPending] = useState(false)
   const [xNativeCapability, setXNativeCapability] = useState<XNativeLiveCapability | null>(null)
   const [xNativeCapabilityLoading, setXNativeCapabilityLoading] = useState(false)
+  // Plan 094: one shared paused state for every YouTube Data API caller. The
+  // backend owns it; the event clears it ({} = not paused) on its own.
+  const [youtubeQuota, setYoutubeQuota] = useState<YouTubeQuotaStatus>({})
+  const youtubeQuotaRef = useRef<YouTubeQuotaStatus>({})
+  youtubeQuotaRef.current = youtubeQuota
   const refreshEntitlementsForClient = useCallback(
     async (activeClient: BackendClient): Promise<EntitlementsSnapshot> => {
       let refresh = entitlementRefreshInFlightRef.current
@@ -3400,9 +3415,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     for (const target of streamTargets) {
       if (target.state === 'failed' && !toastedFailedTargets.current.has(target.targetId)) {
         toastedFailedTargets.current.add(target.targetId)
-        toast.error(`Streaming to ${target.label} stopped`, {
-          description: target.message ?? 'The other destinations keep streaming.'
-        })
+        notifyOnce(
+          `stream-target-failed:${target.targetId}`,
+          'error',
+          `Streaming to ${target.label} stopped`,
+          {
+            description: target.message ?? 'The other destinations keep streaming.'
+          }
+        )
       }
     }
   }, [streamTargets])
@@ -6515,6 +6535,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             runtime.showYouTubeThumbnailFailure(nextClient, failure)
         })
       }),
+      nextClient.on('youtube.quota', (payload) => {
+        const status = payload as YouTubeQuotaStatus
+        const previous = youtubeQuotaRef.current
+        youtubeQuotaRef.current = status
+        setYoutubeQuota(status)
+        // Plan 094 (S6): one quiet notice per budget step, on the way up only.
+        void loadSessionRuntimeRecovery().then((runtime) => {
+          if (generationIsCurrent()) runtime.showYouTubeBudgetStep(previous, status)
+        })
+      }),
       nextClient.on('platformAccounts.oauth.callback', (result) => {
         void loadSessionRuntimeRecovery().then((runtime) => {
           if (generationIsCurrent()) runtime.showOAuthCallbackResult(result)
@@ -6598,7 +6628,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const error = payload as { message?: string }
         const message = error.message ?? 'Backend error.'
         setLastError(message)
-        toast.error(message)
+        // A backend `error` event can repeat every reconnect: one toast per text.
+        notifyOnce(`backend-error:${message}`, 'error', message)
       }),
       nextClient.on('connection.closed', () => setWsStatus('closed'))
     ]
@@ -6758,6 +6789,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // validation. A slow or failing provider network call must not hold
         // devices, recording, or preview in the loading state.
         setHealth(nextHealth)
+        // Plan 094: a window that opens mid-pause still shows the paused state.
+        void nextClient
+          .request<YouTubeQuotaStatus>('youtube.quota.status')
+          .then((status) => {
+            if (generationIsCurrent()) setYoutubeQuota(status)
+          })
+          .catch(() => undefined)
         if (entitlementsRevisionRef.current === entitlementsRevisionAtBootstrapStart) {
           commitEntitlementsSnapshot(nextEntitlements)
         }
@@ -8153,10 +8191,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               console.warn(
                 `Layout committed at revision ${status.sceneRevision}; native preview presentation proof was not observed. ${detail}`
               )
-              toast.warning('Preview verification lagged behind the layout change', {
-                description:
-                  'The layout was applied and the output is unaffected. If the preview looks stale, close and reopen it.'
-              })
+              notifyOnce(
+                'layout-preview-proof-lag',
+                'warning',
+                'Preview verification lagged behind the layout change',
+                {
+                  description:
+                    'The layout was applied and the output is unaffected. If the preview looks stale, close and reopen it.'
+                }
+              )
               return
             }
             reportError(
@@ -9250,7 +9293,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     void window.videorc?.closeNotesWindow?.().then(() => {
-      toast.warning('Notes closed for this recording', {
+      notifyOnce('notes-closed-for-recording', 'warning', 'Notes closed for this recording', {
         description: 'Notes recording overlay is disabled by VIDEORC_NOTES_RECORDING_OVERLAY=0.'
       })
     })
@@ -9266,7 +9309,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     void window.videorc?.closeCommentsWindow?.().then(() => {
-      toast.warning('Chat closed for this recording', {
+      notifyOnce('chat-closed-for-recording', 'warning', 'Chat closed for this recording', {
         description:
           'Chat window protection is unavailable and recording overlay capture is disabled by VIDEORC_COMMENTS_RECORDING_OVERLAY=0.'
       })
@@ -10743,7 +10786,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       ownedCallbackIds.delete(envelope.id)
       inFlightCallbacks.delete(envelope.id)
       exhaustedCallbackIds.add(envelope.id)
-      toast.error(
+      notifyOnce(
+        'account-callback-retry',
+        'error',
         'Account sign-in is still unavailable. Videorc kept the callback without acknowledging it.'
       )
     }
@@ -10762,7 +10807,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       retryAttempts.set(envelope.id, attempt + 1)
       if (attempt === 0) {
-        toast.error('Account sign-in is temporarily unavailable. Videorc will retry.')
+        notifyOnce(
+          'account-callback-retry',
+          'error',
+          'Account sign-in is temporarily unavailable. Videorc will retry.'
+        )
       }
       const timer = window.setTimeout(() => {
         retryTimers.delete(timer)
@@ -10874,9 +10923,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       ownedCallbackIds.delete(envelope.id)
       inFlightCallbacks.delete(envelope.id)
       exhaustedCallbackIds.add(envelope.id)
-      toast.error(
-        'OAuth completion is still unavailable. Videorc kept the callback without acknowledging it.'
-      )
+      // Plan 094 (S3): the same id as the callback results, so this updates
+      // the one connect toast instead of adding a final one.
+      void loadSessionRuntimeRecovery().then((runtime) => runtime.showOAuthCallbackExhausted())
     }
     const scheduleRetry = (envelope: OAuthCallbackEnvelope): void => {
       if (disposed) return
@@ -10888,7 +10937,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       retryAttempts.set(envelope.id, attempt + 1)
       if (attempt === 0) {
-        toast.error('OAuth completion is temporarily unavailable. Videorc will retry.')
+        notifyOnce(
+          'oauth-callback-retry',
+          'error',
+          'OAuth completion is temporarily unavailable. Videorc will retry.'
+        )
       }
       const timer = window.setTimeout(() => {
         retryTimers.delete(timer)
@@ -11205,20 +11258,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             return
           }
           const message = error instanceof Error ? error.message : String(error)
+          // Plan 094: on quota the broadcast still goes live by itself
+          // (enableAutoStart) once ingest arrives; say so instead of "review".
+          const quotaPaused = isYouTubeQuotaPausedError(error)
           setCaptureConfig((current) =>
             bridgeStreamingToLegacy({
               ...current,
               streaming: patchPreparedStreamTarget(current.streaming, target.id, {
                 status: {
                   state: 'warning',
-                  message: `YouTube go-live needs review: ${message}`
+                  message: quotaPaused ? message : `YouTube go-live needs review: ${message}`
                 }
               })
             })
           )
-          toast.warning(`Could not transition ${target.label} live on YouTube.`, {
-            description: message
-          })
+          ;(await loadSessionRuntimeRecovery()).showYouTubeBroadcastToast('start', target, message)
         }
       }
     },
@@ -11688,27 +11742,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           )
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
-          complete = false
-          nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
-            status: {
-              state: 'warning',
-              message: `YouTube cleanup needs review: ${message}`
-            }
-          })
+          // Plan 094 (bug 1): a `complete` refused on quota, or for a broadcast
+          // that no longer exists, is settled. YouTube ends the broadcast on
+          // its own (enableAutoStop); retaining it would block every later
+          // Record and Go Live until the reset. Network and 5xx keep the
+          // retain-and-retry path.
+          const settled = isSettledYouTubeCompletionError(error)
+          if (!settled) {
+            complete = false
+          }
+          const status = settled
+            ? { state: 'stopped' as const, message }
+            : { state: 'warning' as const, message: `YouTube cleanup needs review: ${message}` }
+          nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, { status })
           setCaptureConfig((current) =>
             bridgeStreamingToLegacy({
               ...current,
-              streaming: patchPreparedStreamTarget(current.streaming, target.id, {
-                status: {
-                  state: 'warning',
-                  message: `YouTube cleanup needs review: ${message}`
-                }
-              })
+              streaming: patchPreparedStreamTarget(current.streaming, target.id, { status })
             })
           )
-          toast.warning(`Could not complete ${target.label} on YouTube.`, {
-            description: message
-          })
+          ;(await loadSessionRuntimeRecovery()).showYouTubeBroadcastToast('end', target, message)
         }
       }
 
@@ -12317,6 +12370,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               })
               continue
             }
+            // Plan 094 (G5): prepare would fail on the insert while YouTube's
+            // quota is out. Refuse before spending anything and offer the
+            // stream-key path; every other destination and recording proceed.
+            const pausedUntil = youtubeQuotaPausedUntil(youtubeQuotaRef.current)
+            if (pausedUntil) {
+              throw new BackendRequestError(
+                YOUTUBE_QUOTA_PAUSED_CODE,
+                (await loadSessionRuntimeRecovery()).youtubeGoLivePausedMessage(pausedUntil)
+              )
+            }
             const scheduledAttemptId = target.scheduledEventId ? crypto.randomUUID() : undefined
             const prepared = target.scheduledEventId
               ? await (
@@ -12470,16 +12533,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
+          const quotaPaused = isYouTubeQuotaPausedError(error)
           failures.push({
             targetId: target.id,
             platform: target.platform,
             label: target.label,
-            message
+            message,
+            ...(quotaPaused ? { fallback: 'manual-rtmp' as const } : {})
           })
           nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
             enabled: false,
             status: {
-              state: 'failed',
+              // A paused API is not this destination failing: warning, not failed.
+              state: quotaPaused ? 'warning' : 'failed',
               message
             }
           })
@@ -14510,6 +14576,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       kickCategorySearchPending,
       xNativeCapability,
       xNativeCapabilityLoading,
+      youtubeQuota,
       clearLiveChat,
       captionsStatus,
       captionLines,
@@ -14740,6 +14807,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       kickCategorySearchPending,
       xNativeCapability,
       xNativeCapabilityLoading,
+      youtubeQuota,
       clearLiveChat,
       captionsStatus,
       captionLines,

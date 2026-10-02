@@ -1111,6 +1111,8 @@ pub struct AppState {
     pub viewer_aggregator: Arc<std::sync::Mutex<crate::viewer_stats::ViewerAggregator>>,
     /// Follower and subscriber counts per platform for the session (plan 055, S3).
     pub audience: Arc<std::sync::Mutex<crate::audience::AudienceHub>>,
+    /// The shared YouTube Data API quota breaker and usage counter (plan 094).
+    pub youtube_quota: crate::youtube_quota::YouTubeQuotaSlot,
     /// Serializes mid-session OAuth refreshes (plan 055, B2).
     pub platform_token_refresh: Arc<tokio::sync::Mutex<()>>,
     /// In-memory product-account session override (deep-link sign-in / Sign out).
@@ -1306,6 +1308,7 @@ impl AppState {
             live_chat_persistence: LiveChatPersistence::new(database.clone()),
             viewer_aggregator: Arc::default(),
             audience: Arc::default(),
+            youtube_quota: crate::youtube_quota::new_youtube_quota_slot(),
             platform_token_refresh: Arc::default(),
             database,
             remote_control: std::sync::Arc::new(StdMutex::new(

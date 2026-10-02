@@ -121,7 +121,7 @@ pub async fn youtube_api(state: &AppState, account_id: &str) -> Result<YouTubeEv
     Ok(YouTubeEvents {
         client,
         token: fresh.access_token,
-        base: "https://www.googleapis.com".into(),
+        base: crate::youtube_quota::youtube_api_base_url(None),
         refresh_context: if fresh.refreshed {
             None
         } else {

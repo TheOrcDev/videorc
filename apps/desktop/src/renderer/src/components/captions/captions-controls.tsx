@@ -6,7 +6,7 @@ import {
   RefreshIcon
 } from '@/components/icons'
 import type { ReactElement } from 'react'
-import { toast } from 'sonner'
+import { toast } from '@/lib/toast'
 
 import { PanelSection } from '@/components/panel-section'
 import { StatusBadge, type StatusTone } from '@/components/status-badge'

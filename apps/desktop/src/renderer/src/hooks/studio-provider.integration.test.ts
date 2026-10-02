@@ -410,6 +410,8 @@ class StudioBackend {
   terminalRecordingStatusOnMethodEmitted = false
   youtubePrepareCount = 0
   youtubeCompleteFailuresRemaining = 0
+  /** Plan 094: `complete` refused by the backend's quota breaker (coded). */
+  youtubeCompleteQuotaFailuresRemaining = 0
   xPrepareCount = 0
   xPrepareFailuresRemaining = 0
   xPublishCount = 0
@@ -1119,6 +1121,15 @@ class StudioBackend {
         if (params.status === 'complete' && this.youtubeCompleteFailuresRemaining > 0) {
           this.youtubeCompleteFailuresRemaining -= 1
           throw new Error('Temporary YouTube completion failure.')
+        }
+        if (params.status === 'complete' && this.youtubeCompleteQuotaFailuresRemaining > 0) {
+          this.youtubeCompleteQuotaFailuresRemaining -= 1
+          throw Object.assign(
+            new Error(
+              "YouTube's daily API limit is used up. YouTube ends the broadcast on its own about a minute after you stop."
+            ),
+            { code: 'youtube-quota-paused' }
+          )
         }
         return {
           platform: 'youtube',
@@ -8507,6 +8518,75 @@ describe('real StudioProvider lifecycle', () => {
     ).toHaveLength(2)
     expect(backend.youtubePrepareCount).toBe(1)
     expect(latest()?.core.goLiveConfirmationOpen).toBe(true)
+  })
+
+  // Plan 094 (bug 1): the owner's failed `complete` on quota was retained and
+  // every later Record retried it ("Finish cleaning up the previous livestream
+  // providers before starting again") until midnight Pacific. YouTube ends the
+  // broadcast itself (enableAutoStop), so a quota refusal is settled.
+  it('settles a quota-refused completion so the next start never retries it', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    backend.sessionStartError = 'The encoder rejected this start.'
+    backend.youtubeCompleteQuotaFailuresRemaining = 1
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openYouTubeGoLiveConfirmation(latest)
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+
+    const completions = (): number =>
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      ).length
+    expect(backend.youtubePrepareCount).toBe(1)
+    expect(completions()).toBe(1)
+    const youtubeTarget = latest()!.core.captureConfig.streaming.targets.find(
+      (target) => target.platform === 'youtube'
+    )
+    expect(youtubeTarget?.status?.state).toBe('stopped')
+    expect(youtubeTarget?.status?.message).toContain('ends the broadcast on its own')
+
+    // A recording-only start proceeds at once: no completion retry, no
+    // "finish cleaning up" error.
+    backend.sessionStartError = null
+    await act(async () => {
+      latest()!.core.setCaptureConfig({
+        ...latest()!.core.captureConfig,
+        recordEnabled: true,
+        streamEnabled: false
+      })
+    })
+    await act(async () => {
+      await latest()!.core.startSession()
+    })
+    expect(completions()).toBe(1)
+    expect(latest()?.core.lastError ?? null).toBeNull()
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'session.start')
+    ).toHaveLength(2)
   })
 
   it('retains cancelled partial-setup cleanup and retries it before preparing again', async () => {
