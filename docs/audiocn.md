@@ -19,7 +19,7 @@ use and why, is `plans/092-audiocn-audio-components.md`.
 
 Renderer paths are relative to `apps/desktop/src/renderer/src/`.
 
-Installed from: audiocn `a847315` (branch `fix/videorc-adoption`, the plan
+Installed from: audiocn `d4dfc0a` (branch `fix/videorc-adoption`, the plan
 092 U1 fixes, audiocn PR #2), served from a local build of that commit. Once
 that PR is merged, audiocn.dev serves the same files.
 

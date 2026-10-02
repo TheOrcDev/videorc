@@ -7,6 +7,7 @@ import {
 } from '@/components/icons'
 import type { ReactElement, ReactNode } from 'react'
 
+import { GroupedList } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { Button } from '@/components/ui/button'
 import {
@@ -46,11 +47,22 @@ import {
 } from '@/lib/system-audio'
 import { cn } from '@/lib/utils'
 
-/** The strip surface: a row on the panel, as the mixer rows were before audiocn. */
-const STRIP_CLASS = 'rounded-row border bg-foreground/[0.03] p-3'
-/** Notices keep Videorc's text-only styling: no tinted fill behind them. */
+/** A strip is one row of the mixer's grouped list, which draws the surface. */
+const STRIP_CLASS = 'px-3 py-2'
+/**
+ * Every strip's value column is the same width (clip light, a clip count on
+ * the Mix strip, and "−88.8 dB"), so the meters start and end at the same x.
+ * The clip light sits at the meter's end and the readout at the right edge.
+ */
+const VALUE_CLASS = 'w-28 justify-between gap-1.5'
+/** Stacked under its title (a narrow strip), the meter starts where the title does. */
+const METER_CLASS = 'pl-6 @xl/channel-strip:pl-0'
+/**
+ * The footer line: text-only like Videorc's other notices (no tinted fill),
+ * indented to the title past the 16 px icon and its 8 px gap.
+ */
 const NOTICE_CLASS =
-  'flex-col items-stretch gap-2 rounded-none bg-transparent p-0 text-muted-foreground'
+  'justify-between gap-3 rounded-none bg-transparent p-0 pl-6 text-muted-foreground'
 
 export type AudioMixerNotice = 'permission' | 'silent' | 'no-frames' | 'device-issue'
 
@@ -202,54 +214,57 @@ export function AudioMixer(): ReactElement {
       <Mixer
         aria-label="Audio mixer"
         aria-labelledby={undefined}
-        className="flex flex-col [--mixer-gap:0.75rem]"
+        className="[--channel-strip-header-width:18rem]"
       >
+        {/* One grouped list: the strips are like things, split by hairlines. */}
         <MixerChannels scrollable={false}>
-          <MicrophoneStripView
-            checkLevel={
-              !isSessionActive && !signalLive
-                ? {
-                    disabled: !selectedMicrophone || audioMeterLoading,
-                    loading: audioMeterLoading,
-                    onCheck: () => void sampleAudioMeter()
-                  }
-                : null
-            }
-            deviceDetail={microphoneAccess?.detail}
-            deviceName={selectedMicrophone?.name}
-            meter={meter}
-            monitorLabel={audioMixerMonitorLabel({
-              sessionActive: isSessionActive,
-              signalLive,
-              muted: muted && Boolean(selectedMicrophone)
-            })}
-            muted={muted}
-            notice={notice}
-            permissionLabel={
-              microphonePermissionAction === 'request-media-access'
-                ? 'Enable microphone'
-                : 'Open settings'
-            }
-            signalLive={signalLive}
-            warmReady={!isSessionActive && Boolean(warmMicrophone?.armed)}
-            onPermission={() => void handleSystemPermission('microphone')}
-            onToggleMute={
-              selectedMicrophone
-                ? () =>
-                    setCaptureConfig((current) => ({
-                      ...current,
-                      audio: { ...current.audio, microphoneMuted: !current.audio.microphoneMuted }
-                    }))
-                : null
-            }
-          />
-          <SystemAudioMixerRow
-            backendSource={backendLevelsLive ? backendLevelSources.systemAudio : null}
-            diagnosticStats={diagnosticStats}
-            macOS={runtimeInfo?.platform === 'darwin'}
-            onOpenPermissions={() => openSettings('permissions')}
-          />
-          {backendLevelsLive ? <MixStripView source={backendLevelSources.master} /> : null}
+          <GroupedList>
+            <MicrophoneStripView
+              checkLevel={
+                !isSessionActive && !signalLive
+                  ? {
+                      disabled: !selectedMicrophone || audioMeterLoading,
+                      loading: audioMeterLoading,
+                      onCheck: () => void sampleAudioMeter()
+                    }
+                  : null
+              }
+              deviceDetail={microphoneAccess?.detail}
+              deviceName={selectedMicrophone?.name}
+              meter={meter}
+              monitorLabel={audioMixerMonitorLabel({
+                sessionActive: isSessionActive,
+                signalLive,
+                muted: muted && Boolean(selectedMicrophone)
+              })}
+              muted={muted}
+              notice={notice}
+              permissionLabel={
+                microphonePermissionAction === 'request-media-access'
+                  ? 'Enable microphone'
+                  : 'Open settings'
+              }
+              signalLive={signalLive}
+              warmReady={!isSessionActive && Boolean(warmMicrophone?.armed)}
+              onPermission={() => void handleSystemPermission('microphone')}
+              onToggleMute={
+                selectedMicrophone
+                  ? () =>
+                      setCaptureConfig((current) => ({
+                        ...current,
+                        audio: { ...current.audio, microphoneMuted: !current.audio.microphoneMuted }
+                      }))
+                  : null
+              }
+            />
+            <SystemAudioMixerRow
+              backendSource={backendLevelsLive ? backendLevelSources.systemAudio : null}
+              diagnosticStats={diagnosticStats}
+              macOS={runtimeInfo?.platform === 'darwin'}
+              onOpenPermissions={() => openSettings('permissions')}
+            />
+            {backendLevelsLive ? <MixStripView source={backendLevelSources.master} /> : null}
+          </GroupedList>
         </MixerChannels>
       </Mixer>
     </PanelSection>
@@ -279,7 +294,7 @@ function StripMeterRow({
   const clipData = clipAttribute ? { [clipAttribute]: '' } : {}
   return (
     <>
-      <ChannelStripMeter>
+      <ChannelStripMeter className={METER_CLASS}>
         {live ? (
           <LevelMeter
             aria-label={label}
@@ -299,7 +314,7 @@ function StripMeterRow({
           />
         )}
       </ChannelStripMeter>
-      <ChannelStripValue className="gap-1.5">
+      <ChannelStripValue className={VALUE_CLASS}>
         {live ? (
           <ClipIndicator showCount={showClipCount} source={input.source} {...clipData} />
         ) : (
@@ -308,6 +323,22 @@ function StripMeterRow({
         {live ? <DbReadout source={input.source} /> : <DbReadout value={input.peakDb} />}
       </ChannelStripValue>
     </>
+  )
+}
+
+/** A strip's footer line: what to know on the left, what to do on the right. */
+function StripFooter({
+  actions = null,
+  children
+}: {
+  actions?: ReactNode
+  children: ReactNode
+}): ReactElement {
+  return (
+    <ChannelStripNotice className={NOTICE_CLASS}>
+      <div className="flex min-w-0 flex-col gap-0.5">{children}</div>
+      {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
+    </ChannelStripNotice>
   )
 }
 
@@ -342,9 +373,10 @@ export function MicrophoneStripView({
   /** Null when no microphone is selected: there is nothing to mute. */
   onToggleMute: (() => void) | null
 }): ReactElement {
-  const footer: ReactNode[] = []
+  const footerText: ReactNode[] = []
+  const footerActions: ReactNode[] = []
   if (warmReady) {
-    footer.push(
+    footerText.push(
       <p
         key="warm"
         className="text-xs text-muted-foreground/70"
@@ -355,32 +387,19 @@ export function MicrophoneStripView({
       </p>
     )
   }
-  if (checkLevel) {
-    footer.push(
-      <div key="check" className="flex items-center justify-between gap-2">
-        <Button
-          className="shrink-0"
-          disabled={checkLevel.disabled}
-          size="xs"
-          variant="outline"
-          onClick={checkLevel.onCheck}
-        >
-          {checkLevel.loading ? 'Checking…' : 'Check level'}
-        </Button>
-      </div>
-    )
-  }
   if (notice === 'permission') {
-    footer.push(
-      <div key="notice" className="flex items-center justify-between gap-2 text-xs text-warning">
-        <span>Microphone permission is required before levels can be read.</span>
-        <Button size="xs" variant="outline" onClick={onPermission}>
-          {permissionLabel}
-        </Button>
-      </div>
+    footerText.push(
+      <span key="notice" className="text-xs text-warning">
+        Microphone permission is required before levels can be read.
+      </span>
+    )
+    footerActions.push(
+      <Button key="permission" size="xs" variant="outline" onClick={onPermission}>
+        {permissionLabel}
+      </Button>
     )
   } else if (notice === 'silent' || notice === 'no-frames') {
-    footer.push(
+    footerText.push(
       <span key="notice" className="text-xs text-warning">
         {notice === 'silent'
           ? 'The mic delivered only silence on the last check.'
@@ -388,10 +407,23 @@ export function MicrophoneStripView({
       </span>
     )
   } else if (notice === 'device-issue') {
-    footer.push(
+    footerText.push(
       <span key="notice" className="text-xs text-warning">
         {deviceDetail}
       </span>
+    )
+  }
+  if (checkLevel) {
+    footerActions.push(
+      <Button
+        key="check"
+        disabled={checkLevel.disabled}
+        size="xs"
+        variant="outline"
+        onClick={checkLevel.onCheck}
+      >
+        {checkLevel.loading ? 'Checking…' : 'Check level'}
+      </Button>
     )
   }
 
@@ -442,8 +474,10 @@ export function MicrophoneStripView({
         label="Microphone level"
         meterAttribute="data-videorc-mic-visualizer"
       />
-      {footer.length > 0 ? (
-        <ChannelStripNotice className={NOTICE_CLASS}>{footer}</ChannelStripNotice>
+      {footerText.length > 0 || footerActions.length > 0 ? (
+        <StripFooter actions={footerActions.length > 0 ? footerActions : null}>
+          {footerText}
+        </StripFooter>
       ) : null}
     </ChannelStrip>
   )
@@ -526,25 +560,33 @@ export function SystemAudioMixerRowView({
   const stateLabel = view.meter ? 'Live' : view.stateLabel
   const notice =
     view.permissionRequired || (view.issue === 'unavailable' && macOS) ? (
-      <div className="flex items-center justify-between gap-2 text-xs text-warning">
-        <span className="min-w-0">
+      <StripFooter
+        actions={
+          <Button size="xs" variant="ghost" onClick={onOpenPermissions}>
+            Open Settings
+          </Button>
+        }
+      >
+        <span className="text-xs text-warning">
           {view.permissionRequired
             ? 'Needs Screen Recording permission'
             : systemAudioIssueCopy('unavailable')}
         </span>
-        <Button className="shrink-0" size="xs" variant="ghost" onClick={onOpenPermissions}>
-          Open Settings
-        </Button>
-      </div>
+      </StripFooter>
     ) : view.issue === 'echo' ? (
-      <div className="flex items-center justify-between gap-2 text-xs text-warning">
-        <span className="min-w-0">{systemAudioIssueCopy('echo')}</span>
-        <Button className="shrink-0" size="xs" variant="ghost" onClick={onResume}>
-          Resume
-        </Button>
-      </div>
+      <StripFooter
+        actions={
+          <Button size="xs" variant="ghost" onClick={onResume}>
+            Resume
+          </Button>
+        }
+      >
+        <span className="text-xs text-warning">{systemAudioIssueCopy('echo')}</span>
+      </StripFooter>
     ) : view.issue ? (
-      <span className="text-xs text-warning">{systemAudioIssueCopy(view.issue)}</span>
+      <StripFooter>
+        <span className="text-xs text-warning">{systemAudioIssueCopy(view.issue)}</span>
+      </StripFooter>
     ) : null
 
   return (
@@ -590,7 +632,7 @@ export function SystemAudioMixerRowView({
           meterAttribute="data-videorc-system-audio-visualizer"
         />
       ) : null}
-      {notice ? <ChannelStripNotice className={NOTICE_CLASS}>{notice}</ChannelStripNotice> : null}
+      {notice}
     </ChannelStrip>
   )
 }

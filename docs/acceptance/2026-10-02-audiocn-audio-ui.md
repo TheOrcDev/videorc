@@ -10,7 +10,7 @@ Microphone grant, so nothing here saw a live microphone.
 | Item | Value |
 | --- | --- |
 | Branch | `feat/092-audiocn-audio-ui` (worktree `../videorc-wt-092`), from `origin/main` `a8637877` |
-| audiocn | `a847315` on `fix/videorc-adoption` (plan 092 U1), installed from a local build of that commit |
+| audiocn | `d4dfc0a` on `fix/videorc-adoption` (plan 092 U1), installed from a local build of that commit |
 | Machine | Apple Silicon Mac, macOS, arm64 Node 24.6 |
 | Dev app grants | Screen Recording yes (native preview ran); Microphone **no** for this worktree's Electron binary (TCC is per binary) |
 
