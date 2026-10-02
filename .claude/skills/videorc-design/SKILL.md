@@ -408,6 +408,7 @@ confirming a routine interaction the user just watched succeed.
 | Menus / popovers          | `DropdownMenu` / `Popover` on `glass-float`     |
 | Toasts                    | sonner on `glass-float`; type colours the icon  |
 | Audio levels              | audiocn meters (`docs/audiocn.md`)              |
+| Audio controls            | audiocn strips on Sources (`docs/audiocn.md`)   |
 
 Missing a primitive? Install it through the shadcn CLI (see the shadcn skill);
 do not hand-roll it.
@@ -423,3 +424,5 @@ do not hand-roll it.
 - DON'T use `backdrop-filter` outside `glass-float`, `bg-popover`,
   `cursor-pointer`, raw colour literals, or ad-hoc radii and pills.
 - DON'T add a font, a component library, or a direct icon-package import.
+- DON'T ship an audio control with nothing behind it: no pan, solo, monitor
+  or player volume until the backend can do it (plan 093).
