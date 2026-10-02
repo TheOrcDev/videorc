@@ -814,6 +814,21 @@ async fn read_source(
         )
         .into();
     }
+    // Plan 094 (S6): subscribers are the first call the daily budget sheds.
+    // Unavailable is re-read slowly, so the number comes back once the
+    // Pacific day rolls over.
+    if source.platform == StreamPlatform::Youtube
+        && crate::youtube_quota::budget_refuses(
+            state,
+            crate::youtube_quota::BudgetCall::Subscribers,
+        )
+        .is_some()
+    {
+        return AudienceReading::Unavailable(
+            crate::youtube_quota::SUBSCRIBERS_SHED_MESSAGE.to_string(),
+        )
+        .into();
+    }
     let token = match crate::session_platform_access_token(
         state,
         source.platform,

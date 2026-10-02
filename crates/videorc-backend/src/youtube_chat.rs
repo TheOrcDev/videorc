@@ -116,6 +116,13 @@ pub async fn send_youtube_chat_message_guarded(
     if crate::youtube_quota::paused_until(state).is_some() {
         return Err(crate::youtube_quota::SEND_PAUSED_MESSAGE.to_string());
     }
+    // Plan 094 (S6): at 100% of the daily budget only Go Live essentials and
+    // chat read keep calling; a send costs 50 units.
+    if crate::youtube_quota::budget_refuses(state, crate::youtube_quota::BudgetCall::ChatSend)
+        .is_some()
+    {
+        return Err(crate::youtube_quota::SEND_SHED_MESSAGE.to_string());
+    }
     crate::youtube_quota::record_call(
         state,
         crate::youtube_quota::YouTubeEndpoint::LiveChatMessagesInsert,

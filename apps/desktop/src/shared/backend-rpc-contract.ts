@@ -1896,8 +1896,16 @@ const chatEmotesSettingsPatchSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<ChatEmotesSettingsPatch>
 // Plan 094: `pausedUntil` is absent, never null, when YouTube calls may run.
+const youtubeQuotaBudgetSchema = objectSchema(
+  {
+    units: nonNegativeInteger,
+    limit: nonNegativeInteger,
+    step: enumSchema(['normal', 'shed-extras', 'shed-viewers', 'essentials-only'])
+  },
+  { allowUnknown: false }
+)
 const youtubeQuotaStatusSchema = objectSchema(
-  { pausedUntil: optionalSchema(timestamp) },
+  { pausedUntil: optionalSchema(timestamp), budget: optionalSchema(youtubeQuotaBudgetSchema) },
   { allowUnknown: false }
 ) as RuntimeSchema<YouTubeQuotaStatus>
 const cohostQuestionSchema = objectSchema(

@@ -2798,8 +2798,14 @@ async fn set_youtube_broadcast_thumbnail(
             tracing::warn!("[youtube-thumbnail] managed thumbnail unavailable: {error}");
             Err("thumbnailUnavailable".to_string())
         }
-        // Plan 094: a thumbnail is the first call to shed; none while paused.
+        // Plan 094: a thumbnail is the first call to shed; none while paused
+        // and none once the daily budget (S6) reaches 80%.
         Ok(_) if youtube_quota::paused_until(state).is_some() => Err("quotaPaused".to_string()),
+        Ok(_) if youtube_quota::budget_refuses(state, youtube_quota::BudgetCall::Thumbnail)
+            .is_some() =>
+        {
+            Err("budgetShed".to_string())
+        }
         Ok(path) => {
             youtube_quota::record_call(state, youtube_quota::YouTubeEndpoint::ThumbnailsSet);
             let upload = async {

@@ -1,4 +1,9 @@
-import type { LiveChatProviderState, StreamPlatform, YouTubeQuotaStatus } from '@/lib/backend'
+import type {
+  LiveChatProviderState,
+  StreamPlatform,
+  YouTubeQuotaBudgetStep,
+  YouTubeQuotaStatus
+} from '@/lib/backend'
 import { BackendRequestError } from '@/backendClient'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 
@@ -121,4 +126,56 @@ export function youtubeBroadcastToast(
         : "Couldn't end the YouTube broadcast.",
     description: named
   }
+}
+
+// --- Per-install daily budget (plan 094, S6) --------------------------------------
+
+const BUDGET_STEP_ORDER: readonly YouTubeQuotaBudgetStep[] = [
+  'normal',
+  'shed-extras',
+  'shed-viewers',
+  'essentials-only'
+]
+
+/** The quiet notice for a step the budget just reached; null for `normal`. */
+export function youtubeBudgetNotice(
+  step: YouTubeQuotaBudgetStep
+): { title: string; description: string } | null {
+  switch (step) {
+    case 'shed-extras':
+      return {
+        title: "YouTube subscriber count paused to save Videorc's daily YouTube limit.",
+        description:
+          'Thumbnails are skipped too and the YouTube viewer count updates every 2 minutes. Chat and your stream are not affected.'
+      }
+    case 'shed-viewers':
+      return {
+        title: "YouTube viewer count paused to save Videorc's daily YouTube limit.",
+        description:
+          'Chat keeps reading and your stream is not affected. Everything resumes tomorrow.'
+      }
+    case 'essentials-only':
+      return {
+        title: "YouTube extras paused for today to save Videorc's daily YouTube limit.",
+        description:
+          'Chat keeps reading, and Go Live and Stop still work. Sending to YouTube chat, viewer and subscriber counts resume tomorrow.'
+      }
+    case 'normal':
+      return null
+  }
+}
+
+/**
+ * Which step to announce when the budget moves from `previous` to `next`:
+ * only a climb (more shedding) is news, and only once per step. A reset to
+ * `normal` (new Pacific day, a raised remote limit) is silent.
+ */
+export function youtubeBudgetStepToAnnounce(
+  previous: YouTubeQuotaStatus | null | undefined,
+  next: YouTubeQuotaStatus | null | undefined
+): YouTubeQuotaBudgetStep | null {
+  const after = next?.budget?.step
+  if (!after || after === 'normal') return null
+  const before = previous?.budget?.step ?? 'normal'
+  return BUDGET_STEP_ORDER.indexOf(after) > BUDGET_STEP_ORDER.indexOf(before) ? after : null
 }

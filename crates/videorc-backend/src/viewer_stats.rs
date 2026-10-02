@@ -100,6 +100,15 @@ pub fn youtube_polls_to_skip(forbidden_streak: u32) -> u32 {
 struct YouTubeViewerBackoff {
     forbidden_streak: u32,
     skip_polls: u32,
+    /// Ticks seen while the daily budget slows viewers (plan 094, S6): at
+    /// `ShedExtras` only every second tick polls (120 s at the 60 s cadence).
+    budget_ticks: u32,
+}
+
+/// Pure: whether this tick polls YouTube under the budget `step`.
+pub fn budget_tick_polls(step: crate::youtube_quota::BudgetStep, tick: u32) -> bool {
+    let stride = crate::youtube_quota::budget_viewer_poll_stride(step);
+    stride != u32::MAX && tick % stride == 0
 }
 
 fn count_fetch_for_status(status: reqwest::StatusCode) -> Option<CountFetch> {
@@ -171,6 +180,13 @@ async fn poll_youtube_count(
     backoff: &mut YouTubeViewerBackoff,
 ) -> Option<u64> {
     if crate::youtube_quota::paused_until(state).is_some() {
+        return None;
+    }
+    // Plan 094 (S6): the daily budget slows viewers at 80% and stops them at 95%.
+    let step = crate::youtube_quota::budget_status(state).step;
+    let tick = backoff.budget_ticks;
+    backoff.budget_ticks = backoff.budget_ticks.wrapping_add(1);
+    if !budget_tick_polls(step, tick) {
         return None;
     }
     if backoff.skip_polls > 0 {
@@ -635,6 +651,21 @@ pub async fn run_viewer_sampler(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_budget_slows_then_stops_youtube_viewer_polls() {
+        use crate::youtube_quota::BudgetStep;
+        assert!((0..4).all(|tick| budget_tick_polls(BudgetStep::Normal, tick)));
+        assert_eq!(
+            (0..4)
+                .map(|tick| budget_tick_polls(BudgetStep::ShedExtras, tick))
+                .collect::<Vec<_>>(),
+            vec![true, false, true, false],
+            "80%: every other 60 s tick, so viewers every 120 s"
+        );
+        assert!((0..4).all(|tick| !budget_tick_polls(BudgetStep::ShedViewers, tick)));
+        assert!((0..4).all(|tick| !budget_tick_polls(BudgetStep::EssentialsOnly, tick)));
+    }
 
     #[test]
     fn parses_youtube_concurrent_viewers_string() {

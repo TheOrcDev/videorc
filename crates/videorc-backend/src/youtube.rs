@@ -213,7 +213,10 @@ impl YouTubeThumbnailResult {
             Err(code) => {
                 let message = youtube_thumbnail_failure_message(&code).to_string();
                 // The daily limits only reset after hours; Retry would just fail.
-                let retryable = code != "uploadRateLimitExceeded" && code != "quotaPaused";
+                let retryable = !matches!(
+                    code.as_str(),
+                    "uploadRateLimitExceeded" | "quotaPaused" | "budgetShed"
+                );
                 (
                     YouTubeThumbnailState::Error,
                     Some(code),
@@ -365,6 +368,9 @@ pub fn youtube_thumbnail_failure_message(code: &str) -> &'static str {
         "reconnect" => "Reconnect YouTube in Destinations, then retry.",
         "quotaPaused" => {
             "YouTube's daily API limit is used up, so the thumbnail was not set. The stream is not affected."
+        }
+        "budgetShed" => {
+            "The thumbnail was skipped to save Videorc's daily YouTube limit. The stream is not affected."
         }
         _ => "The thumbnail was not set. The stream is not affected.",
     }

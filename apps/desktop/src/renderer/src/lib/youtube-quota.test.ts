@@ -9,6 +9,8 @@ import {
   isYouTubeQuotaPausedError,
   waitingProviderMessage,
   youtubeBroadcastToast,
+  youtubeBudgetNotice,
+  youtubeBudgetStepToAnnounce,
   youtubeGoLivePausedMessage,
   youtubeQuotaPausedUntil
 } from '@/lib/youtube-quota'
@@ -119,5 +121,39 @@ describe('youtube quota copy (plan 094)', () => {
     expect(youtubeGoLivePausedMessage(until, now)).toBe(
       `YouTube's API is paused until ${localTime(until)}, so Videorc can't create the YouTube broadcast. Go live on YouTube with your stream key instead.`
     )
+  })
+  it('announces each budget step once, on the way up only (plan 094, S6)', () => {
+    const at = (step: 'normal' | 'shed-extras' | 'shed-viewers' | 'essentials-only') => ({
+      budget: { units: 0, limit: 2500, step }
+    })
+    expect(youtubeBudgetStepToAnnounce(undefined, at('shed-extras'))).toBe('shed-extras')
+    expect(youtubeBudgetStepToAnnounce(at('normal'), at('shed-viewers'))).toBe('shed-viewers')
+    expect(youtubeBudgetStepToAnnounce(at('shed-extras'), at('essentials-only'))).toBe(
+      'essentials-only'
+    )
+    // The same step again, a payload without a budget, or a step down: silent.
+    expect(youtubeBudgetStepToAnnounce(at('shed-extras'), at('shed-extras'))).toBeNull()
+    expect(youtubeBudgetStepToAnnounce(at('shed-extras'), {})).toBeNull()
+    expect(youtubeBudgetStepToAnnounce(at('essentials-only'), at('normal'))).toBeNull()
+    expect(youtubeBudgetStepToAnnounce(at('shed-viewers'), at('shed-extras'))).toBeNull()
+    expect(youtubeBudgetStepToAnnounce(undefined, at('normal'))).toBeNull()
+  })
+
+  it('words the budget steps as what is paused and what still works', () => {
+    expect(youtubeBudgetNotice('normal')).toBeNull()
+    expect(youtubeBudgetNotice('shed-extras')?.title).toBe(
+      "YouTube subscriber count paused to save Videorc's daily YouTube limit."
+    )
+    expect(youtubeBudgetNotice('shed-viewers')?.title).toBe(
+      "YouTube viewer count paused to save Videorc's daily YouTube limit."
+    )
+    const essentials = youtubeBudgetNotice('essentials-only')
+    expect(essentials?.title).toContain('paused for today')
+    expect(essentials?.description).toContain('Go Live and Stop still work')
+    for (const step of ['shed-extras', 'shed-viewers', 'essentials-only'] as const) {
+      const notice = youtubeBudgetNotice(step)
+      expect(notice?.description).not.toMatch(/<|{"error"/)
+      expect(notice?.description).toMatch(/not affected|still work/)
+    }
   })
 })

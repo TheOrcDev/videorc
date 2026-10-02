@@ -2031,6 +2031,23 @@ describe('backend RPC contract', () => {
     expect(validateBackendEventPayload('youtube.quota', {})).toEqual({})
     expect(validateBackendRpcResult('youtube.quota.status', paused)).toEqual(paused)
     expect(() => validateBackendEventPayload('youtube.quota', { pausedUntil: null })).toThrow()
+    // Plan 094 (S6): the per-install budget rides along, every step named.
+    const budgeted = { budget: { units: 2000, limit: 2500, step: 'shed-extras' } }
+    expect(validateBackendEventPayload('youtube.quota', budgeted)).toEqual(budgeted)
+    expect(validateBackendRpcResult('youtube.quota.status', { ...paused, ...budgeted })).toEqual({
+      ...paused,
+      ...budgeted
+    })
+    expect(() =>
+      validateBackendEventPayload('youtube.quota', {
+        budget: { units: 1, limit: 2500, step: 'panic' }
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendEventPayload('youtube.quota', {
+        budget: { units: -1, limit: 2500, step: 'normal' }
+      })
+    ).toThrow()
   })
 
   it('bounds unregistered method and event payloads instead of passing arbitrary values', () => {

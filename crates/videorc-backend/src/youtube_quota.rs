@@ -504,10 +504,123 @@ pub struct YouTubeApiUsageSnapshot {
     pub day: YouTubeApiDailyUsage,
 }
 
+// --- Per-install daily budget (plan 094, S6) -------------------------------------
+
+/// Owner decision D3: one install may spend this many estimated units per
+/// Pacific day before it sheds its least valuable calls. S7's remote flag
+/// (`youtube.dailyBudgetUnits`) overrides it; 0 switches the budget off.
+pub const DEFAULT_DAILY_BUDGET_UNITS: u64 = 2_500;
+/// At this share of the budget subscribers and thumbnails stop and viewers
+/// slow to every other poll (120 s).
+pub const BUDGET_SHED_EXTRAS_PERCENT: u64 = 80;
+/// At this share viewers stop too.
+pub const BUDGET_SHED_VIEWERS_PERCENT: u64 = 95;
+
+/// How much of the day's budget is spent, highest first. Each step sheds the
+/// least valuable calls; Go Live essentials and chat read on the floor are
+/// never shed, and the budget never blocks a running stream or a Stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BudgetStep {
+    Normal,
+    /// ≥ 80%: no subscribers, no thumbnails, viewers every 120 s.
+    ShedExtras,
+    /// ≥ 95%: no viewers either.
+    ShedViewers,
+    /// ≥ 100%: Go Live essentials and chat read only (no sends).
+    EssentialsOnly,
+}
+
+/// What a caller is about to spend quota on, in priority order (highest first).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetCall {
+    /// Prepare, bind, transitions, stream status: never shed.
+    GoLiveEssential,
+    /// `liveChatMessages.list` on the floor: never shed.
+    ChatRead,
+    ChatSend,
+    Viewers,
+    Subscribers,
+    Thumbnail,
+}
+
+/// Pure: the ladder step for `units` spent of `limit`. A limit of 0 means the
+/// budget is off.
+pub fn budget_step(units: u64, limit: u64) -> BudgetStep {
+    if limit == 0 {
+        return BudgetStep::Normal;
+    }
+    let percent = units.saturating_mul(100) / limit;
+    if units >= limit {
+        BudgetStep::EssentialsOnly
+    } else if percent >= BUDGET_SHED_VIEWERS_PERCENT {
+        BudgetStep::ShedViewers
+    } else if percent >= BUDGET_SHED_EXTRAS_PERCENT {
+        BudgetStep::ShedExtras
+    } else {
+        BudgetStep::Normal
+    }
+}
+
+/// Pure: whether `call` may go out at `step`.
+pub fn budget_allows(step: BudgetStep, call: BudgetCall) -> bool {
+    match call {
+        BudgetCall::GoLiveEssential | BudgetCall::ChatRead => true,
+        BudgetCall::ChatSend => step < BudgetStep::EssentialsOnly,
+        BudgetCall::Viewers => step < BudgetStep::ShedViewers,
+        BudgetCall::Subscribers | BudgetCall::Thumbnail => step < BudgetStep::ShedExtras,
+    }
+}
+
+/// Pure: at [`BudgetStep::ShedExtras`] viewers poll every other tick (120 s at
+/// the 60 s cadence).
+pub fn budget_viewer_poll_stride(step: BudgetStep) -> u32 {
+    match step {
+        BudgetStep::Normal => 1,
+        BudgetStep::ShedExtras => 2,
+        BudgetStep::ShedViewers | BudgetStep::EssentialsOnly => u32::MAX,
+    }
+}
+
+pub const SEND_SHED_MESSAGE: &str =
+    "YouTube chat send is paused for today to save Videorc's daily YouTube limit.";
+pub const SUBSCRIBERS_SHED_MESSAGE: &str =
+    "YouTube subscribers paused to save Videorc's daily YouTube limit.";
+
+/// The budget as the renderer sees it inside `youtube.quota`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct YouTubeBudgetStatus {
+    /// Estimated units this install spent this Pacific day.
+    pub units: u64,
+    /// The budget in effect (0 = off).
+    pub limit: u64,
+    pub step: BudgetStep,
+}
+
+/// The step-change line for the backend and session logs.
+fn budget_step_log_line(step: BudgetStep, units: u64, limit: u64) -> String {
+    let what = match step {
+        BudgetStep::Normal => "every YouTube call is allowed again",
+        BudgetStep::ShedExtras => {
+            "YouTube subscribers and thumbnails are paused and viewer counts slow to every 2 minutes"
+        }
+        BudgetStep::ShedViewers => "YouTube viewer counts are paused too",
+        BudgetStep::EssentialsOnly => {
+            "only Go Live, Stop and chat reading keep calling YouTube; chat send is paused"
+        }
+    };
+    format!(
+        "YouTube daily budget: ~{units} of {limit} units spent this Pacific day; {what}. The stream is not affected."
+    )
+}
+
 // --- Breaker state --------------------------------------------------------------
 
 #[derive(Debug, Default)]
 struct QuotaInner {
+    /// S7's remote `youtube.dailyBudgetUnits`; `None` keeps the compiled default.
+    budget_limit_override: Option<u64>,
     /// When the last pause expired (the probe cleared it or it lapsed).
     last_expiry: Option<DateTime<Utc>>,
     /// A probe task is sleeping towards the current pause.
@@ -559,6 +672,10 @@ impl YouTubeQuota {
 pub struct YouTubeQuotaStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_until: Option<String>,
+    /// The per-install daily budget (S6). Always sent by this backend; optional
+    /// on the wire so an older payload still parses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<YouTubeBudgetStatus>,
 }
 
 /// While the breaker is set: when it lifts. `None` means YouTube calls may go
@@ -583,7 +700,95 @@ fn paused_until_at(state: &AppState, now: DateTime<Utc>) -> Option<DateTime<Utc>
 pub fn status(state: &AppState) -> YouTubeQuotaStatus {
     YouTubeQuotaStatus {
         paused_until: paused_until(state).map(|until| until.to_rfc3339()),
+        budget: Some(budget_status(state)),
     }
+}
+
+// --- Budget plumbing ---------------------------------------------------------------
+
+impl QuotaInner {
+    fn budget_limit(&self) -> u64 {
+        self.budget_limit_override
+            .unwrap_or(DEFAULT_DAILY_BUDGET_UNITS)
+    }
+
+    /// Loads the persisted day total once per process.
+    fn ensure_daily_loaded(&mut self, state: &AppState) {
+        if self.daily_loaded {
+            return;
+        }
+        self.daily_loaded = true;
+        if let Ok(Some(saved)) = state
+            .database
+            .load_setting::<YouTubeApiDailyUsage>(YOUTUBE_API_USAGE_SETTING_KEY)
+        {
+            self.usage.daily = saved;
+        }
+    }
+
+    /// Units spent on the Pacific day of `now`; a stored total from an earlier
+    /// day counts as zero (the rollover happens on the next recorded call).
+    fn daily_units_at(&self, now: DateTime<Utc>) -> u64 {
+        if self.usage.daily.day == pacific_day(now) {
+            self.usage.daily.units
+        } else {
+            0
+        }
+    }
+
+    fn budget_status_at(&self, now: DateTime<Utc>) -> YouTubeBudgetStatus {
+        let units = self.daily_units_at(now);
+        let limit = self.budget_limit();
+        YouTubeBudgetStatus {
+            units,
+            limit,
+            step: budget_step(units, limit),
+        }
+    }
+}
+
+/// This install's budget position right now.
+pub fn budget_status(state: &AppState) -> YouTubeBudgetStatus {
+    let mut inner = state.youtube_quota.lock();
+    inner.ensure_daily_loaded(state);
+    inner.budget_status_at(Utc::now())
+}
+
+/// `Some(step)` when the budget sheds `call` right now; `None` lets it go out.
+/// Go Live essentials and chat read always get `None`.
+pub fn budget_refuses(state: &AppState, call: BudgetCall) -> Option<BudgetStep> {
+    let step = budget_status(state).step;
+    (!budget_allows(step, call)).then_some(step)
+}
+
+/// S7: the remote `youtube.dailyBudgetUnits` (0 = off); `None` restores the
+/// compiled default. Publishes `youtube.quota` when the step changes.
+pub fn set_daily_budget_limit(state: &AppState, limit: Option<u64>) {
+    let (before, after) = {
+        let mut inner = state.youtube_quota.lock();
+        inner.ensure_daily_loaded(state);
+        let now = Utc::now();
+        let before = inner.budget_status_at(now);
+        inner.budget_limit_override = limit;
+        (before, inner.budget_status_at(now))
+    };
+    if before != after {
+        note_budget_step_change(state, &after);
+    }
+}
+
+fn note_budget_step_change(state: &AppState, status: &YouTubeBudgetStatus) {
+    let line = budget_step_log_line(status.step, status.units, status.limit);
+    tracing::info!("[youtube-quota] {line}");
+    state.emit_log(
+        if status.step == BudgetStep::Normal {
+            "info"
+        } else {
+            "warn"
+        },
+        line,
+    );
+    emit_status(state);
 }
 
 /// Refuse a YouTube call while paused, with the typed error callers map to copy.
@@ -879,19 +1084,16 @@ pub fn note_error(state: &AppState, source: &str, error: &anyhow::Error) -> Opti
 /// Count one Data API call (made or attempted: a rejected call still costs).
 pub fn record_call(state: &AppState, endpoint: YouTubeEndpoint) {
     let now = Utc::now();
-    let daily = {
+    let (daily, step_change) = {
         let mut inner = state.youtube_quota.lock();
-        if !inner.daily_loaded {
-            inner.daily_loaded = true;
-            if let Ok(Some(saved)) = state
-                .database
-                .load_setting::<YouTubeApiDailyUsage>(YOUTUBE_API_USAGE_SETTING_KEY)
-            {
-                inner.usage.daily = saved;
-            }
-        }
+        inner.ensure_daily_loaded(state);
+        let before = inner.budget_status_at(now).step;
         inner.usage.record(endpoint, now);
-        inner.usage.daily.clone()
+        let after = inner.budget_status_at(now);
+        (
+            inner.usage.daily.clone(),
+            (after.step != before).then_some(after),
+        )
     };
     if let Err(error) = state
         .database
@@ -899,27 +1101,20 @@ pub fn record_call(state: &AppState, endpoint: YouTubeEndpoint) {
     {
         tracing::warn!("[youtube-quota] could not persist the daily usage total: {error}");
     }
+    if let Some(status) = step_change {
+        note_budget_step_change(state, &status);
+    }
 }
 
 pub fn usage_snapshot(state: &AppState) -> YouTubeApiUsageSnapshot {
     state.youtube_quota.lock().usage.snapshot()
 }
 
-/// The persisted Pacific-day total, for S6's budget (its only caller today
-/// is the test).
-#[cfg_attr(not(test), allow(dead_code))]
+/// The persisted Pacific-day total the budget counts against.
 pub fn daily_usage(state: &AppState) -> YouTubeApiDailyUsage {
-    let inner = state.youtube_quota.lock();
-    if inner.daily_loaded {
-        return inner.usage.daily.clone();
-    }
-    drop(inner);
-    state
-        .database
-        .load_setting::<YouTubeApiDailyUsage>(YOUTUBE_API_USAGE_SETTING_KEY)
-        .ok()
-        .flatten()
-        .unwrap_or_default()
+    let mut inner = state.youtube_quota.lock();
+    inner.ensure_daily_loaded(state);
+    inner.usage.daily.clone()
 }
 
 /// One summary line in the backend log and the session log.
@@ -1242,6 +1437,114 @@ mod tests {
         // A second report while paused is idempotent.
         assert_eq!(record_quota_exhausted(&state, "again"), until);
         assert_eq!(status(&state).paused_until, Some(until.to_rfc3339()));
+    }
+
+    #[test]
+    fn the_budget_ladder_sheds_the_least_valuable_calls_first() {
+        use BudgetCall::*;
+        use BudgetStep::*;
+        let limit = DEFAULT_DAILY_BUDGET_UNITS;
+        assert_eq!(budget_step(0, limit), Normal);
+        assert_eq!(budget_step(1_999, limit), Normal);
+        assert_eq!(budget_step(2_000, limit), ShedExtras, "80% of 2,500");
+        assert_eq!(budget_step(2_374, limit), ShedExtras);
+        assert_eq!(budget_step(2_375, limit), ShedViewers, "95% of 2,500");
+        assert_eq!(budget_step(2_499, limit), ShedViewers);
+        assert_eq!(budget_step(2_500, limit), EssentialsOnly);
+        assert_eq!(budget_step(90_000, limit), EssentialsOnly);
+        assert_eq!(budget_step(90_000, 0), Normal, "a zero limit switches the budget off");
+        // Smaller remote limits move the thresholds with them.
+        assert_eq!(budget_step(80, 100), ShedExtras);
+        assert_eq!(budget_step(79, 100), Normal);
+
+        for step in [Normal, ShedExtras, ShedViewers, EssentialsOnly] {
+            assert!(budget_allows(step, GoLiveEssential), "{step:?} never blocks Go Live");
+            assert!(budget_allows(step, ChatRead), "{step:?} never blocks chat read");
+        }
+        assert!(budget_allows(Normal, Subscribers) && budget_allows(Normal, Thumbnail));
+        assert!(!budget_allows(ShedExtras, Subscribers));
+        assert!(!budget_allows(ShedExtras, Thumbnail));
+        assert!(budget_allows(ShedExtras, Viewers));
+        assert_eq!(budget_viewer_poll_stride(ShedExtras), 2, "viewers every 120 s");
+        assert!(budget_allows(ShedExtras, ChatSend));
+        assert!(!budget_allows(ShedViewers, Viewers));
+        assert!(budget_allows(ShedViewers, ChatSend));
+        assert!(!budget_allows(EssentialsOnly, ChatSend));
+        assert!(!budget_allows(EssentialsOnly, Viewers));
+    }
+
+    #[tokio::test]
+    async fn the_budget_reads_the_persisted_day_total_and_resets_on_the_pacific_rollover() {
+        let state = test_state();
+        let today = Utc::now();
+        // Yesterday's total is persisted (a relaunch after a heavy day).
+        state
+            .database
+            .save_setting(
+                YOUTUBE_API_USAGE_SETTING_KEY,
+                &YouTubeApiDailyUsage {
+                    day: pacific_day(today - chrono::Duration::days(1)),
+                    calls: 50,
+                    units: 2_450,
+                },
+            )
+            .unwrap();
+        // A new Pacific day starts at zero even before any call is recorded.
+        let fresh = budget_status(&state);
+        assert_eq!(fresh.units, 0);
+        assert_eq!(fresh.step, BudgetStep::Normal);
+        assert_eq!(fresh.limit, DEFAULT_DAILY_BUDGET_UNITS);
+
+        // Today's total persisted by a previous process is honoured on relaunch.
+        let relaunched = test_state();
+        relaunched
+            .database
+            .save_setting(
+                YOUTUBE_API_USAGE_SETTING_KEY,
+                &YouTubeApiDailyUsage {
+                    day: pacific_day(today),
+                    calls: 49,
+                    units: 2_450,
+                },
+            )
+            .unwrap();
+        let status = budget_status(&relaunched);
+        assert_eq!(status.units, 2_450);
+        assert_eq!(status.step, BudgetStep::ShedViewers);
+        assert_eq!(
+            budget_refuses(&relaunched, BudgetCall::Viewers),
+            Some(BudgetStep::ShedViewers)
+        );
+        assert_eq!(budget_refuses(&relaunched, BudgetCall::ChatRead), None);
+        assert_eq!(budget_refuses(&relaunched, BudgetCall::GoLiveEssential), None);
+        // One send (50 units) crosses 100%: the step changes once, the status
+        // event carries the budget, and sends are now refused.
+        let mut events = relaunched.events.subscribe();
+        record_call(&relaunched, YouTubeEndpoint::LiveChatMessagesInsert);
+        let event = loop {
+            let event = events.recv().await.unwrap();
+            if event.event == YOUTUBE_QUOTA_EVENT {
+                break event;
+            }
+        };
+        assert_eq!(event.payload["budget"]["step"], json!("essentials-only"));
+        assert_eq!(event.payload["budget"]["units"], json!(2_500));
+        assert_eq!(event.payload["budget"]["limit"], json!(2_500));
+        assert!(event.payload.get("pausedUntil").is_none());
+        assert_eq!(
+            budget_refuses(&relaunched, BudgetCall::ChatSend),
+            Some(BudgetStep::EssentialsOnly)
+        );
+        assert_eq!(daily_usage(&relaunched).units, 2_500);
+
+        // S7's remote limit re-evaluates the step at once; 0 switches it off.
+        set_daily_budget_limit(&relaunched, Some(10_000));
+        assert_eq!(budget_status(&relaunched).step, BudgetStep::Normal);
+        set_daily_budget_limit(&relaunched, Some(0));
+        assert_eq!(budget_status(&relaunched).limit, 0);
+        assert_eq!(budget_refuses(&relaunched, BudgetCall::ChatSend), None);
+        set_daily_budget_limit(&relaunched, None);
+        assert_eq!(budget_status(&relaunched).step, BudgetStep::EssentialsOnly);
     }
 
     #[test]

@@ -48,6 +48,8 @@ import {
   isSettledYouTubeCompletionError,
   isYouTubeQuotaPausedError,
   youtubeBroadcastToast,
+  youtubeBudgetNotice,
+  youtubeBudgetStepToAnnounce,
   youtubeGoLivePausedMessage,
   youtubeQuotaPausedUntil
 } from '@/lib/youtube-quota'
@@ -6530,7 +6532,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         })
       }),
       nextClient.on('youtube.quota', (payload) => {
-        setYoutubeQuota(payload as YouTubeQuotaStatus)
+        const status = payload as YouTubeQuotaStatus
+        // Plan 094 (S6): one quiet notice per budget step, on the way up only.
+        const reached = youtubeBudgetStepToAnnounce(youtubeQuotaRef.current, status)
+        const notice = reached ? youtubeBudgetNotice(reached) : null
+        if (reached && notice) {
+          notifyOnce(`youtube-budget:${reached}`, 'info', notice.title, {
+            description: notice.description
+          })
+        }
+        youtubeQuotaRef.current = status
+        setYoutubeQuota(status)
       }),
       nextClient.on('platformAccounts.oauth.callback', (result) => {
         void loadSessionRuntimeRecovery().then((runtime) => {
