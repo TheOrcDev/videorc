@@ -13,6 +13,19 @@ export function isActiveRecordingState(state: RecordingState): boolean {
   return ACTIVE_CAPTURE_STATES.has(state)
 }
 
+/**
+ * Whether the running session is on air (plan 095 S5). Go Live records too,
+ * and the backend reports a record+stream session as `recording`: only a
+ * stream-only session reads `streaming`. A running status carries `streamUrl`
+ * exactly when the session streams.
+ */
+export function sessionIsLive(status: {
+  state?: string | null
+  streamUrl?: string | null
+}): boolean {
+  return status.state === 'streaming' || (status.state === 'recording' && Boolean(status.streamUrl))
+}
+
 export function captureStateBlocksInterruption(
   state: MainCaptureState,
   backendConnected: boolean

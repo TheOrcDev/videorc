@@ -536,6 +536,36 @@ describe('stats bar items (plan 057)', () => {
     expect(items[0]).toMatchObject({ value: '12:03', badge: 'recording' })
   })
 
+  // Plan 095 S5: Go Live records too, and the backend reports record+stream as
+  // `recording`. Its stream URL puts it ON AIR, with health and viewers.
+  it('shows Go Live (record+stream) as ON AIR with viewers and stream health', () => {
+    const goLive = reduceDashboardRecording(
+      emptyLiveDashboardState(at(0)),
+      { state: 'recording', sessionId: 's', startedAt: at(0), streamUrl: 'rtmp://x/***' },
+      at(0)
+    )
+    const dashboard = reduceDashboardHealth(
+      goLive,
+      { sessionId: 's', bitrateKbps: 6000, fps: 60, droppedFrames: 0, createdAt: at(30) },
+      at(30)
+    )
+    const items = statItems({
+      dashboard,
+      viewerSample: null,
+      messages: [],
+      providers: [provider('twitch')],
+      nowMs: T0 + 723_000
+    })
+    expect(ids(items).slice(0, 3)).toEqual(['session', 'viewers', 'health'])
+    expect(find(items, 'session')).toMatchObject({
+      value: '12:03',
+      badge: 'live',
+      description: 'On air for 12:03'
+    })
+    expect(find(items, 'viewers')).toMatchObject({ value: '–' })
+    expect(find(items, 'health')).toMatchObject({ value: '6,000 kbps', tone: 'good' })
+  })
+
   it('summarises a finished session in History', () => {
     const items = statItems({
       dashboard: null,

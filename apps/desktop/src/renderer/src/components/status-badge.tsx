@@ -3,18 +3,21 @@ import type { ReactElement } from 'react'
 
 import { cn } from '@/lib/utils'
 
-export type StatusTone = 'good' | 'warn' | 'error' | 'neutral'
+export type StatusTone = 'good' | 'warn' | 'error' | 'live' | 'neutral'
 
-const toneClass: Record<Exclude<StatusTone, 'error'>, string> = {
+const toneClass: Record<StatusTone, string> = {
   good: 'tone-success',
   warn: 'tone-warning',
+  error: 'tone-destructive',
+  live: 'tone-live',
   neutral: 'tone-neutral'
 }
 
 /**
  * The status pill (plan 050, D9): a round glass chip. The label and value stay
  * monochrome; the tone glows in the dot, or in the leading icon when there is
- * one. An error tints the whole chip instead: it has to interrupt.
+ * one. An error or an on-air session tints the whole chip instead: it has to
+ * interrupt.
  */
 export function StatusBadge({
   label,
@@ -27,16 +30,15 @@ export function StatusBadge({
   tone?: StatusTone
   icon?: AppIcon
 }): ReactElement {
-  const emphasis = tone === 'error'
+  const emphasis = tone === 'error' || tone === 'live'
   return (
     <span
       data-slot="status-badge"
       data-tone={tone}
       className={cn(
         'inline-flex h-[22px] w-fit shrink-0 items-center gap-1.5 overflow-hidden rounded-full border px-2.5 text-xs leading-none font-medium whitespace-nowrap',
-        emphasis
-          ? 'glass-chip-tinted tone-destructive'
-          : `glass-chip text-foreground ${toneClass[tone]}`
+        emphasis ? 'glass-chip-tinted' : 'glass-chip text-foreground',
+        toneClass[tone]
       )}
     >
       {LeadingIcon ? (

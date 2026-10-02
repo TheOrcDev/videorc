@@ -4,10 +4,14 @@ import { lazy, Suspense, useEffect, useState, type ReactElement } from 'react'
 import { GoLiveConfirmationDialog } from '@/components/go-live-dialog'
 import { PanelSection } from '@/components/panel-section'
 import { PreviewStage } from '@/components/preview-stage'
-import { StatusBadge } from '@/components/status-badge'
 import { QuickSettings } from '@/components/studio/quick-settings'
 import { SessionMicSliver } from '@/components/studio/session-mic-sliver'
-import { SessionPanel, SessionTransport, TakeoverSection } from '@/components/studio/session-panel'
+import {
+  SessionPanel,
+  SessionStatusPill,
+  SessionTransport,
+  TakeoverSection
+} from '@/components/studio/session-panel'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import type { StudioPanel, WorkspaceTab } from '@/components/workspace-nav'
@@ -22,11 +26,7 @@ import { goLiveEntitlementGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import type { SettingsTabId } from '@/lib/settings-tabs'
 import { studioHealth } from '@/lib/studio-health'
-import {
-  isSessionTransportActive,
-  sessionStatusLabel,
-  sessionStatusTone
-} from '@/lib/studio-session-view'
+import { isSessionTransportActive, sessionStopControl } from '@/lib/studio-session-view'
 
 const StudioDashboardBottomRow = lazy(async () => ({
   default: (await import('@/components/studio/studio-dashboard-bottom-row'))
@@ -145,17 +145,13 @@ export function StudioTab(): ReactElement {
     void stopSession()
   }
 
-  const stopLabel = stopRequestPending
-    ? 'Stopping…'
-    : recording.state === 'stopping'
-      ? 'Force stop'
-      : recording.state === 'streaming'
-        ? 'End livestream'
-        : 'Stop recording'
+  // Go Live is record+stream, which the backend reports as `recording`: the
+  // stream URL is what makes it on air (plan 095 S5).
+  const stopControl = sessionStopControl(recording, stopRequestPending)
 
-  // data hook: the backend-resilience and captions smokes read this badge.
-  // It rides the inspector's transport block, so it exists in every preview
-  // mode, docked included, and the mic sliver shares its one home.
+  // The status pill rides the inspector's transport block, so it exists in
+  // every preview mode, docked included, and the mic sliver shares its one
+  // home.
   const sessionStatus = (
     <span className="flex items-center gap-1.5">
       <SessionMicSliver
@@ -163,12 +159,7 @@ export function StudioTab(): ReactElement {
         muted={captureConfig.audio.microphoneMuted}
         sessionActive={active}
       />
-      <span data-videorc-session-status>
-        <StatusBadge
-          tone={sessionStatusTone(recording.state, wsStatus)}
-          value={sessionStatusLabel(recording.state, wsStatus)}
-        />
-      </span>
+      <SessionStatusPill recording={recording} wsStatus={wsStatus} />
     </span>
   )
 
@@ -216,7 +207,8 @@ export function StudioTab(): ReactElement {
             recordBlockedReason={recordBlockedReason}
             startRequestPending={startRequestPending}
             status={sessionStatus}
-            stopLabel={stopLabel}
+            stopLabel={stopControl.label}
+            stopTitle={stopControl.title}
             onLiveStream={handleLiveStream}
             onRecord={handleRecord}
             onStop={handleStop}
