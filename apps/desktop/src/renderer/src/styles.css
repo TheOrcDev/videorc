@@ -15,19 +15,27 @@
 /*
  * Videorc design tokens (.claude/skills/videorc-design, v2: the window family).
  * Two columns of the SAME design: dark is the default and reference
- * expression, light is its structural twin. Every window sits on the real OS
- * material; the body wears one window coat and content panes add one content
- * coat. Chrome is monochrome: hairlines, three text tiers, glass chips. Colour
- * carries meaning only: live/destructive (red), success, warning, info, and
- * the vivid source icons. There is no coloured action accent.
+ * expression, light is its structural twin. Every window sits on clear glass
+ * (the OS blur, stripped of its tint by the native addon; plan 091) under
+ * one cover per region of the theme's solid tone: the body paints the
+ * lighter cover, the sidebar and the content panes add their deltas. Chrome
+ * is monochrome: hairlines, three text tiers, glass chips. Colour carries
+ * meaning only: live/destructive (red), success, warning, info, and the
+ * vivid source icons. There is no coloured action accent.
  *
  * Token contract: reach for these utilities, not raw values:
- *   Coats      bg-glass-window (body) · bg-glass-sidebar (the sidebar) ·
- *              bg-glass-content (content panes) · glass-float (every
- *              floating surface: menus, popovers, hover cards, tooltips,
- *              dialogs, toasts; plan 072). One cover per region (plan 091):
- *              the sidebar is the heavier one. Never stack a third coat,
- *              never backdrop-filter.
+ *   Covers     --glass-base (the solid's oklch components) with
+ *              --glass-cover-sidebar / --glass-cover-work per theme and
+ *              platform (plan 091 D3/D5); the coats below are derived from
+ *              them (D4), never set by hand.
+ *   Coats      bg-glass-window (body) · bg-glass-sidebar (the sidebar, the
+ *              heavier region) · bg-glass-content (content panes). Never
+ *              stack a third coat, never backdrop-filter.
+ *   Floats     glass-float (the popup tier: menus, selects, popovers, hover
+ *              cards, chart tooltips, toasts) · glass-float-dialog (dialogs,
+ *              the palette, the error panel) · glass-float-tooltip. Flat,
+ *              opaque tiers of the solid with a rim and a drop shadow (plan
+ *              072, plan 091 D6).
  *   Text tiers text-foreground (primary) · text-muted-foreground (secondary) ·
  *              text-subtle (tertiary). Three tiers, nothing else.
  *   Radius     rounded-panel (12px: containers, dialogs) · rounded-row (8px:

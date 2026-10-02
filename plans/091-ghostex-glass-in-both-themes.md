@@ -1,7 +1,10 @@
 # Plan 091: Ghostex glass: a clean blur under one tint per region, dark and light
 
-Status: planned 2026-10-02 against `origin/main` `a8637877` (0.9.126). Not
-started. Priority P2 (owner-requested look), effort M, 5 slices (S0 to S4).
+Status: **EXECUTED 2026-10-02, in review** on `plan/091-clear-glass` against
+`origin/main` `a8637877` (0.9.126): S0 to S4 landed (see the implementation
+record at the end), the owner's by-eye acceptance and the D8 light-mode
+decision are owed. Priority P2 (owner-requested look), effort M, 5 slices
+(S0 to S4).
 Owner route: **UI/Product Design**, fit 9. Model lane: **`fable-5`**. The work
 spans the Rust addon, Electron main, renderer tokens and the probe, and the
 glass has rested on two wrong premises before: plan 050's "materials paint

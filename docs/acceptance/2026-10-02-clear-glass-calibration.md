@@ -494,3 +494,33 @@ Schedule dialog's "Schedule on …" buttons need provider capabilities the
 profile lacks). The Library tab has no tooltip trigger without an item, so
 the tooltip capture is the utility on a synthetic element. The captures stay
 local.
+
+## Where it landed (plan 091, end of S4)
+
+The tree as it goes to review, measured by `probe:ui-glass --gate
+--surfaces --themes=dark,light` on all five windows:
+
+| what                             | dark                               | light                              |
+| -------------------------------- | ---------------------------------- | ---------------------------------- |
+| material                         | clear glass, 60 pt, neutral ≤ 1.5  | clear glass, 60 pt, neutral ≤ 1.5  |
+| base                             | `#0D0D0F` (`0.16 0.004 286`)       | `#FAFAFB` (`0.985 0.001 286`)      |
+| covers sidebar / work            | 0.88 / 0.83                        | 0.93 / 0.86                        |
+| work area over white / black, L  | 0.330 / 0.146 (plan 0.333 / 0.150) | 0.988 / 0.879 (plan 0.995 / 0.879) |
+| sidebar over white, L            | 0.282 (plan 0.286)                 | 0.988                              |
+| secondary contrast, worst        | 4.76 (work)                        | 4.70 (work)                        |
+| transmission                     | 38–55                              | 22–45                              |
+| ghostexParity, worst             | 1.79                               | 1.06                               |
+| floats: popup / dialog / tooltip | `#222224` / `#1C1C1D` / `#0D0D0F`  | `oklch(0.99 0 0)` for all three    |
+| float tone, worst                | 0.92                               | 0.62                               |
+| float secondary contrast, worst  | 6.17                               | 6.60                               |
+| bleed through a float            | 0                                  | 0                                  |
+| WindowServer, five windows       | 50–52%                             | (same run)                         |
+
+Owed: the owner's by-eye pass side by side with Ghostex (dark and light;
+bright, dark and colourful wallpapers; focused and unfocused; Mission
+Control), Reduce Transparency and Increase Contrast with the real system
+switches, the three focus-stealing preview and comments probes, a look on
+the Windows box (Mica is unchanged by design), the D8 light-mode decision,
+and `pnpm smoke:packaged:native-preview` (it opens the preview through the
+product path and calls `restore-window` without `focus: false`, so it
+activates the app).

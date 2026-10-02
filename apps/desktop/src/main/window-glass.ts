@@ -1,12 +1,17 @@
-// One window material for every Videorc window (plan 050, D1).
+// One window material for every Videorc window (plan 050, D1; plan 091).
 //
 // Real macOS vibrancy: an NSVisualEffectView blurring what sits behind the
 // window. A 2026-09-23 region-capture probe showed it transmits on Electron 39
 // / macOS 26 in the real Videorc window; the June 2026 "materials paint
-// opaque" premise no longer reproduces. Every window's chrome (material,
-// backing, title bar, traffic lights) is decided here and nowhere else, so the
-// windows stay one family and a future material (e.g. macOS 26's
-// NSGlassEffectView, not exposed by Electron 39) is a one-file change.
+// opaque" premise no longer reproduces. Since plan 091 the material is clear
+// glass: the native addon re-classes Electron's own vibrancy view and strips
+// AppKit's tint, wallpaper tinting and saturation boost, leaving a neutral
+// 60 pt blur (Ghostex's look), so the renderer's covers decide the whole
+// tone. `VIDEORC_GLASS_STYLE=material` keeps AppKit's own look as the A/B
+// control for one release. Every window's chrome (material, style, backing,
+// title bar, traffic lights) is decided here and nowhere else, so the windows
+// stay one family and a future material (e.g. macOS 26's NSGlassEffectView,
+// not exposed by Electron 39) is a one-file change.
 
 import type { BrowserWindow, BrowserWindowConstructorOptions } from 'electron'
 
