@@ -1,3 +1,4 @@
+import { gainToDb } from './audio/decibels'
 import type { MediaAccessStatus } from './backend'
 import type { MicVisualFrameBuffer } from './mic-visual-frame'
 import { amplitudeToDb, approachMeterLevel, dbToMeterLevel, gatedDbToMeterLevel } from './mic-meter'
@@ -28,11 +29,7 @@ export type MicVisualFrameSnapshot = Readonly<{
 
 /** Caller-owned mutable read buffer. Reuse it for every analyser notification. */
 export type { MicVisualFrameBuffer } from './mic-visual-frame'
-export {
-  createMicVisualFrameBuffer,
-  resampleMicVisualLevels,
-  resampleMicVisualLevelsInto
-} from './mic-visual-frame'
+export { createMicVisualFrameBuffer } from './mic-visual-frame'
 
 export type MicVisualAnalyserLike = {
   fftSize: number
@@ -204,6 +201,8 @@ export function createMicVisualPipeline<S extends MicMediaStreamLike>(
     historyStart: number
     historyLength: number
     peakDb: number | null
+    peakDbfs: number
+    rmsDbfs: number
     hasData: boolean
   }
   type ActiveSession = {
@@ -297,6 +296,8 @@ export function createMicVisualPipeline<S extends MicMediaStreamLike>(
         historyStart: 0,
         historyLength: 0,
         peakDb: null,
+        peakDbfs: Number.NEGATIVE_INFINITY,
+        rmsDbfs: Number.NEGATIVE_INFINITY,
         hasData: false
       }
       const sampleFrame = (elapsedMs: number): void => {
@@ -328,6 +329,8 @@ export function createMicVisualPipeline<S extends MicMediaStreamLike>(
         )
         advanceBandLevelsInto(sessionFrame.bands, bandTargets, elapsedMs)
         sessionFrame.peakDb = amplitudeToDb(peak)
+        sessionFrame.peakDbfs = gainToDb(peak)
+        sessionFrame.rmsDbfs = gainToDb(rms)
         sessionFrame.hasData = true
       }
       const session: ActiveSession = {
@@ -519,6 +522,8 @@ export function createMicVisualPipeline<S extends MicMediaStreamLike>(
       target.historyStart = 0
       target.historyLength = 0
       target.peakDb = null
+      target.peakDbfs = Number.NEGATIVE_INFINITY
+      target.rmsDbfs = Number.NEGATIVE_INFINITY
       return target
     }
 
@@ -530,6 +535,8 @@ export function createMicVisualPipeline<S extends MicMediaStreamLike>(
     target.historyStart = source.historyStart
     target.historyLength = source.historyLength
     target.peakDb = source.peakDb
+    target.peakDbfs = source.peakDbfs
+    target.rmsDbfs = source.rmsDbfs
     return target
   }
 

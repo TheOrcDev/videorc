@@ -51,7 +51,8 @@ export function PanelSection({
               <div className="text-xs text-muted-foreground">{description}</div>
             ) : null}
           </div>
-          {action ? <div className="flex shrink-0 items-center gap-2">{action}</div> : null}
+          {/* As tall as the title line, so a 28 px button or a switch centres on it. */}
+          {action ? <div className="flex h-5 shrink-0 items-center gap-2">{action}</div> : null}
         </header>
       ) : null}
       <div className={cn('flex flex-col gap-3', contentClassName)}>{children}</div>

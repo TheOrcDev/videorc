@@ -1,192 +1,232 @@
-import { forwardRef, memo, useEffect, useMemo, useRef, useState, type HTMLAttributes } from 'react'
+'use client'
 
+import { useCallback, useEffect, useImperativeHandle, useRef } from 'react'
+import type { ComponentProps, CSSProperties, Ref, RefObject } from 'react'
+
+import { useAudioConfig } from '@/hooks/use-audio-config'
+import { useFrameSource } from '@/hooks/use-frame-source'
+import { useReducedMotion } from '@/hooks/use-reduced-motion'
+import { useVisibility } from '@/hooks/use-visibility'
+import { createBarLevels } from '@/lib/audio/bar-levels'
+import type { BarIdle, BarLevelsOptions } from '@/lib/audio/bar-levels'
+import { createFrameTask, createPainterClock } from '@/lib/audio/frame-loop'
+import type { FrameSource, Orientation, VisualFrame } from '@/lib/audio/types'
 import { cn } from '@/lib/utils'
 
+const DEFAULT_BAR_COUNT = 24
+const DEFAULT_MIN_LEVEL = 0.08
+const REDUCED_MOTION_INTERVAL_MS = 250
+
+export interface BarVisualizerActions {
+  /** Paint levels (0..1) directly. They are resampled to the bar count. */
+  paint: (levels: ArrayLike<number>) => void
+}
+
+export interface BarVisualizerProps extends ComponentProps<'div'> {
+  /** A visual source; the bars follow its frequency bands. */
+  source?: FrameSource<VisualFrame> | null
+  /** Levels, 0..1, for declarative use. */
+  levels?: ArrayLike<number>
+  /** Number of bars. Bands are resampled to fit. Default 24. */
+  barCount?: number
+  /** Where bars grow from. Default `center`. */
+  align?: 'center' | 'start' | 'end'
+  /** Symmetric around the middle bar. Default false. */
+  mirrored?: boolean
+  /** Resting bar size, 0..1. Default 0.08. */
+  minLevel?: number
+  /** What the bars do with no signal. Default `static`. */
+  idle?: BarIdle
+  /** Runs a sweep animation, for connecting or thinking states. Default false. */
+  loading?: boolean
+  orientation?: Orientation
+  actionsRef?: Ref<BarVisualizerActions>
+}
+
+const ALIGN_CLASS = {
+  center: 'items-center',
+  end: 'items-end',
+  start: 'items-start'
+} as const
+
+interface BarPainterOptions extends BarLevelsOptions {
+  bars: (HTMLSpanElement | null)[]
+  input: RefObject<ArrayLike<number> | null>
+  root: RefObject<HTMLElement | null>
+  visible: RefObject<boolean>
+}
+
+const noop = () => {
+  // Nothing to wake before the painter starts.
+}
+
 /**
- * Vendored from ElevenLabs UI (ui.elevenlabs.io, registry item `bar-visualizer`)
- * and adapted for Videorc:
- * - bars render in `currentColor` so the parent's text token drives the tone
- *   (chrome when live, muted when idle, warning when silent) — no hardcoded
- *   palette, per the videorc-design "color is information" rule;
- * - the container ships unstyled (no bg/radius/padding) — content sits
- *   directly on the glass panel;
- * - `useBarAnimator` no longer runs a rAF loop for single-frame sequences
- *   (the `speaking`/undefined states used by the mixer), keeping idle CPU at
- *   baseline; multi-frame state animations still animate.
- * Audio analysis is intentionally absent: StudioMicVisualProvider owns the
- * sole analyser and callers pass normalized levels.
+ * Paints bars outside React, with release smoothing and idle animations.
+ * Returns true while it needs another frame: static bars that have settled,
+ * or bars off screen, cost no frames until new levels wake them.
  */
+const createBarPainter = (options: BarPainterOptions) => {
+  const { bars, reducedMotion } = options
+  const barLevels = createBarLevels(options)
+  const shown = new Float32Array(options.barCount).fill(-1)
+  const clock = createPainterClock()
+  let lastPaintMs = Number.NEGATIVE_INFINITY
+  let activeShown: boolean | null = null
 
-export type AgentState = 'connecting' | 'initializing' | 'listening' | 'speaking' | 'thinking'
+  return (frameMs: number): boolean => {
+    // Hidden: sleep. Coming back into view wakes the painter.
+    if (!options.visible.current) {
+      return false
+    }
+    const nowMs = clock(frameMs)
+    if (reducedMotion && nowMs - lastPaintMs < REDUCED_MOTION_INTERVAL_MS) {
+      return true
+    }
+    lastPaintMs = nowMs
+    const active = barLevels.step(nowMs, options.input.current)
+    if (active !== activeShown) {
+      activeShown = active
+      options.root.current?.toggleAttribute('data-active', active)
+    }
 
-function generateConnectingSequenceBar(columns: number): number[][] {
-  const seq: number[][] = []
-  for (let x = 0; x < columns; x++) {
-    seq.push([x, columns - 1 - x])
+    for (const [index, value] of barLevels.levels.entries()) {
+      if (Math.abs(value - (shown[index] ?? -1)) > 0.002) {
+        shown[index] = value
+        bars[index]?.style.setProperty('--bar-level', value.toFixed(4))
+      }
+    }
+    return !barLevels.settled
   }
-  return seq
 }
 
-function generateListeningSequenceBar(columns: number): number[][] {
-  const center = Math.floor(columns / 2)
-  return [[center], [-1]]
-}
+export const BarVisualizer = ({
+  source,
+  levels,
+  barCount = DEFAULT_BAR_COUNT,
+  align = 'center',
+  mirrored = false,
+  minLevel = DEFAULT_MIN_LEVEL,
+  idle = 'static',
+  loading = false,
+  orientation: orientationProp,
+  actionsRef,
+  className,
+  ref,
+  ...props
+}: BarVisualizerProps) => {
+  const config = useAudioConfig()
+  const orientation = orientationProp ?? config.orientation ?? 'horizontal'
+  const reducedMotion = useReducedMotion()
+  const barsRef = useRef<(HTMLSpanElement | null)[]>([])
+  const inputRef = useRef<ArrayLike<number> | null>(null)
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  // Wakes the painter when new levels arrive. Settled bars sleep.
+  const wakeRef = useRef<() => void>(noop)
+  const visibleRef = useVisibility(rootRef, (visible) => {
+    if (visible) {
+      wakeRef.current()
+    }
+  })
 
-/** Highlighted bar indices for the current state; animates only multi-frame sequences. */
-export function useBarAnimator(
-  state: AgentState | undefined,
-  columns: number,
-  interval: number
-): number[] {
-  const indexRef = useRef(0)
-  const [currentFrame, setCurrentFrame] = useState<number[]>([])
+  const paint = useCallback((next: ArrayLike<number>) => {
+    inputRef.current = next
+    wakeRef.current()
+  }, [])
 
-  const sequence = useMemo(() => {
-    if (state === 'thinking' || state === 'listening') {
-      return generateListeningSequenceBar(columns)
+  useFrameSource(source, (frame) => {
+    inputRef.current = frame.bands
+    wakeRef.current()
+  })
+
+  // Clear only when levels go from set to unset, so the bars fall instead of
+  // freezing, without wiping levels painted through the handle on re-runs.
+  const hadLevelsRef = useRef(false)
+  useEffect(() => {
+    if (levels) {
+      inputRef.current = levels
+      hadLevelsRef.current = true
+    } else if (hadLevelsRef.current) {
+      inputRef.current = null
+      hadLevelsRef.current = false
     }
-    if (state === 'connecting' || state === 'initializing') {
-      return generateConnectingSequenceBar(columns)
-    }
-    if (state === undefined || state === 'speaking') {
-      return [new Array(columns).fill(0).map((_, idx) => idx)]
-    }
-    return [[]]
-  }, [state, columns])
+    wakeRef.current()
+  }, [levels])
+
+  useImperativeHandle(actionsRef, () => ({ paint }), [paint])
 
   useEffect(() => {
-    indexRef.current = 0
-    setCurrentFrame(sequence[0] ?? [])
-    // Single-frame sequences (speaking/idle) need no animation loop — keeping
-    // a rAF alive for them would burn idle CPU for a static highlight.
-    if (sequence.length <= 1) {
-      return
-    }
-
-    let frameId = 0
-    let startTime = performance.now()
-
-    const animate = (time: number): void => {
-      if (time - startTime >= interval) {
-        indexRef.current = (indexRef.current + 1) % sequence.length
-        setCurrentFrame(sequence[indexRef.current] ?? [])
-        startTime = time
+    const task = createFrameTask(
+      createBarPainter({
+        barCount,
+        bars: barsRef.current,
+        idle,
+        input: inputRef,
+        loading,
+        minLevel,
+        mirrored,
+        reducedMotion,
+        root: rootRef,
+        visible: visibleRef
+      })
+    )
+    wakeRef.current = task.wake
+    const root = rootRef.current
+    return () => {
+      wakeRef.current = noop
+      task.stop()
+      if (root) {
+        delete root.dataset.active
       }
-      frameId = requestAnimationFrame(animate)
     }
+  }, [barCount, idle, loading, minLevel, mirrored, reducedMotion, visibleRef])
 
-    frameId = requestAnimationFrame(animate)
-    return () => cancelAnimationFrame(frameId)
-  }, [interval, sequence])
-
-  return currentFrame
-}
-
-export interface BarVisualizerProps extends HTMLAttributes<HTMLDivElement> {
-  /** Voice/meter state driving highlight animation; `speaking` lights every bar. */
-  state?: AgentState
-  /** Number of bars to display. */
-  barCount?: number
-  /** Explicit normalized levels from a central analyser or honest fallback. */
-  levels?: number[]
-  /** Min/max bar height as a percentage of the container. */
-  minHeight?: number
-  maxHeight?: number
-  /** Align bars from center instead of bottom. */
-  centerAlign?: boolean
-}
-
-/** Paint levels without routing analyser frames through React reconciliation. */
-export function paintBarVisualizer(
-  element: HTMLDivElement | null,
-  levels: readonly number[],
-  options: { minHeight?: number; maxHeight?: number } = {}
-): void {
-  if (!element) return
-  const minHeight = options.minHeight ?? 20
-  const maxHeight = options.maxHeight ?? 100
-  for (let index = 0; index < element.children.length; index += 1) {
-    const bar = element.children.item(index)
-    if (!(bar instanceof HTMLElement)) continue
-    const level = levels[index] ?? 0
-    bar.style.height = `${Math.min(maxHeight, Math.max(minHeight, level * 100 + 5))}%`
-  }
-}
-
-const BarVisualizerComponent = forwardRef<HTMLDivElement, BarVisualizerProps>(
-  (
-    {
-      state,
-      barCount = 15,
-      levels,
-      minHeight = 20,
-      maxHeight = 100,
-      centerAlign = false,
-      className,
-      ...props
+  const setRootRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      rootRef.current = node
+      if (typeof ref === 'function') {
+        ref(node)
+      } else if (ref) {
+        ref.current = node
+      }
     },
-    ref
-  ) => {
-    const volumeBands = useMemo(
-      () => levels ?? new Array<number>(barCount).fill(0),
-      [barCount, levels]
-    )
+    [ref]
+  )
 
-    const highlightedIndices = useBarAnimator(
-      state,
-      barCount,
-      state === 'connecting'
-        ? 2000 / barCount
-        : state === 'thinking'
-          ? 150
-          : state === 'listening'
-            ? 500
-            : 1000
-    )
+  const horizontal = orientation === 'horizontal'
 
-    return (
-      <div
-        ref={ref}
-        className={cn(
-          'relative flex h-16 w-full justify-center gap-1 overflow-hidden',
-          centerAlign ? 'items-center' : 'items-end',
-          className
-        )}
-        data-state={state}
-        {...props}
-      >
-        {volumeBands.map((volume, index) => (
-          <Bar
-            key={index}
-            heightPct={Math.min(maxHeight, Math.max(minHeight, volume * 100 + 5))}
-            isHighlighted={highlightedIndices?.includes(index) ?? false}
-          />
-        ))}
-      </div>
-    )
-  }
-)
-
-// Bars paint in currentColor: the parent's text token is the single tone knob.
-// Height changes are NOT CSS-transitioned: band updates arrive faster than any
-// transition would finish, so a height transition perpetually restarts and
-// burns style/layout work — the analyser's own 0.8 smoothing already smooths
-// the motion. Only the highlight opacity transitions.
-const Bar = memo<{ heightPct: number; isHighlighted: boolean }>(({ heightPct, isHighlighted }) => (
-  <div
-    className={cn(
-      'min-w-1 max-w-2 flex-1 rounded-full bg-current transition-opacity duration-150',
-      isHighlighted ? 'opacity-90' : 'opacity-30'
-    )}
-    data-highlighted={isHighlighted}
-    style={{ height: `${heightPct}%` }}
-  />
-))
-
-Bar.displayName = 'Bar'
-BarVisualizerComponent.displayName = 'BarVisualizerComponent'
-
-const BarVisualizer = memo(BarVisualizerComponent)
-BarVisualizer.displayName = 'BarVisualizer'
-
-export { BarVisualizer }
+  return (
+    <div
+      aria-label="Audio visualizer"
+      className={cn(
+        'flex justify-center gap-(--bar-gap) [--bar-gap:0.1875rem] [--bar-radius:9999px] [--bar-width:0.375rem]',
+        horizontal ? 'h-16 w-full flex-row' : 'h-full w-16 flex-col',
+        ALIGN_CLASS[align],
+        className
+      )}
+      data-loading={loading ? '' : undefined}
+      data-orientation={orientation}
+      data-slot="bar-visualizer"
+      role="img"
+      {...props}
+      ref={setRootRef}
+    >
+      {Array.from({ length: barCount }, (_, index) => (
+        <span
+          className={cn(
+            'rounded-(--bar-radius) bg-current',
+            horizontal
+              ? 'h-[calc(var(--bar-level)*100%)] max-w-(--bar-width) min-w-0 flex-1'
+              : 'max-h-(--bar-width) min-h-0 w-[calc(var(--bar-level)*100%)] flex-1'
+          )}
+          data-index={index}
+          data-slot="bar-visualizer-bar"
+          key={`bar-${index}`}
+          ref={(node) => {
+            barsRef.current[index] = node
+          }}
+          style={{ '--bar-level': minLevel } as CSSProperties}
+        />
+      ))}
+    </div>
+  )
+}

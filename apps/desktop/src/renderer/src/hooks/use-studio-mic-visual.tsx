@@ -2,7 +2,6 @@ import {
   createContext,
   useContext,
   useEffect,
-  useRef,
   useState,
   useSyncExternalStore,
   type ReactElement,
@@ -14,7 +13,6 @@ import { useDocumentVisible } from '@/hooks/use-document-visible'
 import { useStudioCore } from '@/hooks/use-studio'
 import { micVisualAnalyserEnabled } from '@/lib/mic-visual-gate'
 import { warmMicrophoneWanted } from '@/lib/warm-microphone-gate'
-import { createMicVisualFrameBuffer, type MicVisualFrameBuffer } from '@/lib/mic-visual-frame'
 import type {
   MicVisualLifecycleSnapshot,
   MicVisualPipeline,
@@ -22,7 +20,6 @@ import type {
 } from '@/lib/mic-visual-pipeline'
 
 const StudioMicVisualContext = createContext<MicVisualPipeline | undefined>(undefined)
-const PEAK_LABEL_INTERVAL_MS = 250
 const IDLE_LIFECYCLE: MicVisualLifecycleSnapshot = Object.freeze({
   status: 'idle',
   active: false
@@ -44,6 +41,8 @@ const IDLE_PIPELINE: MicVisualPipeline = Object.freeze({
     target.historyStart = 0
     target.historyLength = 0
     target.peakDb = null
+    target.peakDbfs = Number.NEGATIVE_INFINITY
+    target.rmsDbfs = Number.NEGATIVE_INFINITY
     return target
   },
   getPeakDb: () => null,
@@ -191,7 +190,8 @@ export function MicVisualPipelineProvider({
   )
 }
 
-function useStudioMicVisualPipeline(): MicVisualPipeline {
+/** The workspace's visual mic pipeline (the idle one while nothing is open). */
+export function useStudioMicVisualPipeline(): MicVisualPipeline {
   const pipeline = useContext(StudioMicVisualContext)
   if (!pipeline) {
     throw new Error('Studio microphone visuals must be used within StudioMicVisualProvider')
@@ -207,85 +207,4 @@ export function useStudioMicVisualLifecycle(): MicVisualLifecycleSnapshot {
     pipeline.getLifecycleSnapshot,
     pipeline.getLifecycleSnapshot
   )
-}
-
-/**
- * Delivers analyser frames imperatively. Updating the painter never changes
- * React state, so any number of bars/canvases can share the clock without a
- * component render per frame.
- */
-export function useStudioMicVisualPainter(paint: (frame: MicVisualFrameBuffer) => void): void {
-  const pipeline = useStudioMicVisualPipeline()
-  const paintRef = useRef(paint)
-  const frameBufferRef = useRef<MicVisualFrameBuffer | null>(null)
-  if (!frameBufferRef.current) {
-    frameBufferRef.current = createMicVisualFrameBuffer()
-  }
-  paintRef.current = paint
-
-  useEffect(() => {
-    const releaseDemand = pipeline.retain()
-    const frameBuffer = frameBufferRef.current
-    if (!frameBuffer) return releaseDemand
-    const paintCurrentFrame = (): void => paintRef.current(pipeline.readFrame(frameBuffer))
-    paintCurrentFrame()
-    const unsubscribe = pipeline.subscribeFrame(paintCurrentFrame)
-    return () => {
-      unsubscribe()
-      releaseDemand()
-    }
-  }, [pipeline])
-}
-
-/** Peak label/clip state is React-owned, but commits at most four times a second. */
-export function useStudioMicVisualPeakDb(): number | null {
-  const pipeline = useStudioMicVisualPipeline()
-  const [peakDb, setPeakDb] = useState<number | null>(null)
-
-  useEffect(() => {
-    const releaseDemand = pipeline.retain()
-    let timer: ReturnType<typeof setTimeout> | null = null
-    let pendingPeakDb: number | null = null
-    let lastCommitAt = Number.NEGATIVE_INFINITY
-
-    const commit = (): void => {
-      timer = null
-      lastCommitAt = performance.now()
-      const next = pendingPeakDb
-      pendingPeakDb = null
-      setPeakDb((current) => (Object.is(current, next) ? current : next))
-    }
-
-    const collect = (): void => {
-      const next = pipeline.getPeakDb()
-      if (next === null) {
-        pendingPeakDb = null
-        if (timer) {
-          clearTimeout(timer)
-          timer = null
-        }
-        lastCommitAt = Number.NEGATIVE_INFINITY
-        setPeakDb((current) => (current === null ? current : null))
-        return
-      }
-
-      pendingPeakDb = pendingPeakDb === null ? next : Math.max(pendingPeakDb, next)
-      const remaining = PEAK_LABEL_INTERVAL_MS - (performance.now() - lastCommitAt)
-      if (remaining <= 0) {
-        commit()
-      } else if (!timer) {
-        timer = setTimeout(commit, remaining)
-      }
-    }
-
-    collect()
-    const unsubscribe = pipeline.subscribeFrame(collect)
-    return () => {
-      unsubscribe()
-      if (timer) clearTimeout(timer)
-      releaseDemand()
-    }
-  }, [pipeline])
-
-  return peakDb
 }

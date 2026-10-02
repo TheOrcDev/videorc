@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import { useTrafficLightGutter } from '@/components/window-frame'
 import { useModifierHeld } from '@/hooks/use-modifier-held'
-import { usePrefersReducedMotion } from '@/hooks/use-reduced-motion'
+import { useReducedMotion } from '@/hooks/use-reduced-motion'
 import { displayKeyGlyph } from '@/lib/platform'
 import { shortcutChipProps } from '@/lib/shortcut-overlay'
 import { useUpdater } from '@/hooks/use-updater'
@@ -175,7 +175,7 @@ export function Sidebar({
   // app keyboard-first; this keeps it quiet too).
   const shortcutVisible = useModifierHeld(platform)
   // The cascade is an inline delay, so no CSS variant can drop it for us.
-  const reducedMotion = usePrefersReducedMotion()
+  const reducedMotion = useReducedMotion()
   const trafficLightGutter = useTrafficLightGutter()
 
   return (

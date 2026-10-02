@@ -88,6 +88,36 @@ const idleCapturePressureDiagnostics = {
 } satisfies Pick<DiagnosticStats, (typeof requiredCapturePressureDiagnosticFields)[number]>
 
 describe('backend RPC contract', () => {
+  it('validates audio.levels and rejects malformed readings (plan 092 Phase C)', () => {
+    const levels = {
+      sessionId: 'session-1',
+      microphone: { peakDb: -12.5, rmsDb: -20 },
+      master: { peakDb: -1, rmsDb: -9 },
+      masterClippedSamples: 3
+    }
+    expect(validateBackendEventPayload('audio.levels', levels)).toEqual(levels)
+    // Gain can push the processed microphone past full scale.
+    const hot = { ...levels, microphone: { peakDb: 25.5, rmsDb: 12 } }
+    expect(validateBackendEventPayload('audio.levels', hot)).toEqual(hot)
+    expect(
+      validateBackendEventPayload('audio.levels', { sessionId: 's', masterClippedSamples: 0 })
+    ).toEqual({ sessionId: 's', masterClippedSamples: 0 })
+    // The standby microphone between sessions carries no session.
+    const standby = { microphone: { peakDb: -30, rmsDb: -36 }, masterClippedSamples: 0 }
+    expect(validateBackendEventPayload('audio.levels', standby)).toEqual(standby)
+    for (const malformed of [
+      { ...levels, sessionId: null },
+      { ...levels, microphone: { peakDb: -12, rmsDb: -20, extra: 1 } },
+      { ...levels, microphone: { peakDb: -200, rmsDb: -20 } },
+      { ...levels, microphone: { peakDb: 60, rmsDb: -20 } },
+      { ...levels, microphone: null },
+      { ...levels, masterClippedSamples: -1 },
+      { ...levels, unknown: true }
+    ]) {
+      expect(() => validateBackendEventPayload('audio.levels', malformed)).toThrow()
+    }
+  })
+
   it('accepts redacted recovery candidates and rejects ingest credentials in renderer results', () => {
     const candidate = {
       candidateKind: 'ingest',

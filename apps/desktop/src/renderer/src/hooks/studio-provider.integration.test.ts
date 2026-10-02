@@ -73,11 +73,9 @@ import type {
   VideorcApi
 } from '../../../shared/backend'
 import { BackgroundAssetsProvider } from './use-background-assets'
-import {
-  StudioMicVisualProvider,
-  useStudioMicVisualLifecycle,
-  useStudioMicVisualPainter
-} from './use-studio-mic-visual'
+import { useFrameSource } from './use-frame-source'
+import { useStudioMicVisualSource } from './use-studio-mic-sources'
+import { StudioMicVisualProvider, useStudioMicVisualLifecycle } from './use-studio-mic-visual'
 import {
   StudioProvider,
   buildStreamOutputTopologyProbeParams,
@@ -1522,9 +1520,9 @@ type StudioObservation = {
   recording: StudioRecordingContextValue
 }
 
-/** A mixer-like consumer: paints frames (which retains analyser demand) and reports lifecycle. */
+/** A mixer-like consumer: reads frames (which retains analyser demand) and reports lifecycle. */
 function MicVisualProbe({ observe }: { observe: (active: boolean) => void }): null {
-  useStudioMicVisualPainter(() => undefined)
+  useFrameSource(useStudioMicVisualSource(), () => undefined)
   const lifecycle = useStudioMicVisualLifecycle()
   useEffect(() => observe(lifecycle.active), [lifecycle.active, observe])
   return null

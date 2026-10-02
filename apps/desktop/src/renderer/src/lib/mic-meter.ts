@@ -1,32 +1,20 @@
-// Pure math for the live microphone meter: dBFS mapping, broadcast-style
-// ballistics (fast attack, slower decay, peak hold), and backend-device →
-// WebAudio device matching by label. No WebAudio, no DOM — unit-testable.
-// The WebAudio side lives in hooks/use-mic-level-meter.ts.
+// Pure math the visual microphone pipeline owns: the band calibration's dBFS
+// mapping and noise gate, the per-band attack and decay, and backend-device →
+// WebAudio device matching by label. No WebAudio, no DOM: unit-testable.
+// Level meters, readouts, clip lights and their ballistics are audiocn's
+// (lib/audio, plan 092); this file keeps only what the analyser's bands need.
 
-export const MIC_METER_FLOOR_DB = -60
+import { DEFAULT_MIN_DB } from './audio/decibels'
+
+/** The bottom of every meter range: audiocn's default, -60 dBFS. */
+export const MIC_METER_FLOOR_DB = DEFAULT_MIN_DB
 /**
- * Noise gate for every VISUAL meter path (analyser bands and the coarse
- * fallback hump): room tone sits around -70..-55 dBFS on an ungated input and
- * must paint as silence, not as a third of a bar. Below this the bar is at
- * floor; at/above it the dBFS → level mapping is untouched.
+ * Noise gate for the analyser's band visuals: room tone sits around
+ * -70..-55 dBFS on an ungated input and must paint as silence, not as a third
+ * of a bar. Below this the bar is at floor; at/above it the dBFS → level
+ * mapping is untouched.
  */
 export const MIC_METER_GATE_DB = -55
-
-export function samplesRmsAndPeak(samples: Float32Array): { rms: number; peak: number } {
-  if (samples.length === 0) {
-    return { rms: 0, peak: 0 }
-  }
-  let sumSquares = 0
-  let peak = 0
-  for (const sample of samples) {
-    const magnitude = Math.abs(sample)
-    if (magnitude > peak) {
-      peak = magnitude
-    }
-    sumSquares += sample * sample
-  }
-  return { rms: Math.sqrt(sumSquares / samples.length), peak }
-}
 
 export function amplitudeToDb(amplitude: number): number {
   if (amplitude <= 0) {
@@ -38,28 +26,6 @@ export function amplitudeToDb(amplitude: number): number {
 /** Linear-in-dB meter position over the floor..0 dBFS window, clamped to 0..1. */
 export function dbToMeterLevel(db: number, floorDb: number = MIC_METER_FLOOR_DB): number {
   return Math.min(1, Math.max(0, (db - floorDb) / -floorDb))
-}
-
-export interface BackendMeterReading {
-  /** 0..1 on the meter's dB scale. */
-  level: number
-  peakDb: number | null
-}
-
-/**
- * A meter reading from the backend's 1 Hz stats (the system audio row, plan
- * 069): its level when sent, else one derived from the peak; null when the
- * backend sent neither, so the UI never invents a level.
- */
-export function backendMeterReading(
-  level: number | null | undefined,
-  peakDb: number | null | undefined
-): BackendMeterReading | null {
-  const peak = typeof peakDb === 'number' && Number.isFinite(peakDb) ? peakDb : null
-  if (typeof level === 'number' && Number.isFinite(level)) {
-    return { level: Math.min(1, Math.max(0, level)), peakDb: peak }
-  }
-  return peak === null ? null : { level: dbToMeterLevel(peak), peakDb: peak }
 }
 
 /** dBFS → meter level with the shared noise gate: below the gate reads as floor. */
@@ -74,45 +40,17 @@ export function gatedDbToMeterLevel(
   return dbToMeterLevel(db, floorDb)
 }
 
-/** Meter level (floor..0 dBFS, linear-in-dB) back through the shared gate. */
-export function gateMeterLevel(
-  level: number,
-  gateDb: number = MIC_METER_GATE_DB,
-  floorDb: number = MIC_METER_FLOOR_DB
-): number {
-  const clamped = Math.min(1, Math.max(0, level))
-  return clamped < dbToMeterLevel(gateDb, floorDb) ? 0 : clamped
-}
-
-export type MeterBallisticsState = {
-  /** Smoothed bar position (0..1). */
-  level: number
-  /** Peak-hold marker position (0..1). */
-  peakLevel: number
-  /** Timestamp (ms) until which the held peak may not decay. */
-  peakHeldUntilMs: number
-}
-
-export const INITIAL_METER_BALLISTICS: MeterBallisticsState = {
-  level: 0,
-  peakLevel: 0,
-  peakHeldUntilMs: 0
-}
-
 export type MeterBallisticsOptions = {
   attackMs: number
   decayMs: number
-  peakHoldMs: number
-  peakDecayMs: number
 }
 
 export const DEFAULT_METER_BALLISTICS: MeterBallisticsOptions = {
   // Fast rise so a spoken syllable registers on the next frame; slower fall so
-  // the bar reads as motion instead of flicker (broadcast PPM-ish feel).
+  // the bar reads as motion instead of flicker (broadcast PPM-ish feel). The
+  // same times as audiocn's `peak` ballistics.
   attackMs: 15,
-  decayMs: 350,
-  peakHoldMs: 1200,
-  peakDecayMs: 600
+  decayMs: 350
 }
 
 function approach(current: number, target: number, elapsedMs: number, tauMs: number): number {
@@ -123,10 +61,9 @@ function approach(current: number, target: number, elapsedMs: number, tauMs: num
 }
 
 /**
- * Bar-only ballistics (no peak state, no allocation): fast attack toward a
- * louder target, slow decay toward a quieter one. The analyser pipeline runs
- * this per band on its 48 ms clock; advanceMeterBallistics layers peak hold on
- * top of the same curve.
+ * Band ballistics (no peak state, no allocation): fast attack toward a louder
+ * target, slow decay toward a quieter one. The analyser pipeline runs this per
+ * band on its 48 ms clock.
  */
 export function approachMeterLevel(
   current: number,
@@ -139,27 +76,6 @@ export function approachMeterLevel(
   return approach(current, target, elapsedMs, rising ? options.attackMs : options.decayMs)
 }
 
-export function advanceMeterBallistics(
-  state: MeterBallisticsState,
-  targetLevel: number,
-  elapsedMs: number,
-  nowMs: number,
-  options: MeterBallisticsOptions = DEFAULT_METER_BALLISTICS
-): MeterBallisticsState {
-  const target = Math.min(1, Math.max(0, targetLevel))
-  const level = approachMeterLevel(state.level, target, elapsedMs, options)
-
-  let peakLevel = state.peakLevel
-  let peakHeldUntilMs = state.peakHeldUntilMs
-  if (target >= peakLevel) {
-    peakLevel = target
-    peakHeldUntilMs = nowMs + options.peakHoldMs
-  } else if (nowMs >= peakHeldUntilMs) {
-    peakLevel = Math.max(level, approach(peakLevel, level, elapsedMs, options.peakDecayMs))
-  }
-  return { level, peakLevel, peakHeldUntilMs }
-}
-
 function normalizeDeviceName(name: string): string {
   return name.trim().toLowerCase()
 }
@@ -167,7 +83,7 @@ function normalizeDeviceName(name: string): string {
 /**
  * Match the backend's selected microphone (CoreAudio/dshow name) to a WebAudio
  * input by label: exact normalized match first, then containment either way.
- * Returns undefined when nothing matches — callers fall back to the default
+ * Returns undefined when nothing matches: callers fall back to the default
  * input rather than metering a device the user did not select.
  */
 export function matchMicrophoneDeviceId(
@@ -189,45 +105,4 @@ export function matchMicrophoneDeviceId(
     const label = normalizeDeviceName(input.label)
     return label.length > 0 && (label.includes(wanted) || wanted.includes(label))
   })?.deviceId
-}
-
-export const MIC_CLIP_THRESHOLD_DB = -1
-export const MIC_CLIP_HOLD_MS = 1500
-
-/**
- * Clip-hold deadline: a peak at/above the clip threshold arms (or extends)
- * the indicator for MIC_CLIP_HOLD_MS; quieter peaks leave the running
- * deadline untouched so a brief hot transient stays visible.
- */
-export function advanceClipHoldDeadline(
-  deadline: number,
-  peakDb: number | null,
-  now: number
-): number {
-  if (peakDb !== null && peakDb >= MIC_CLIP_THRESHOLD_DB) {
-    return now + MIC_CLIP_HOLD_MS
-  }
-  return deadline
-}
-
-/**
- * Deterministic band heights for the coarse fallback meter paths (backend
- * 1 Hz level, on-demand sample): a center-weighted hump scaled by the real
- * level — never fake noise. The center band equals the level exactly.
- *
- * `level` is the backend's linear-in-dB meter position over -60..0 dBFS
- * (audio.rs db_to_level) — the SAME scale the analyser bands use
- * (gatedDbToMeterLevel), so a swap between the two paths changes only the
- * spectral shape, never the height. The shared gate applies here too.
- */
-export function fallbackBandLevels(level: number, bands: number): number[] {
-  if (bands <= 0) {
-    return []
-  }
-  const clamped = gateMeterLevel(level)
-  const center = (bands - 1) / 2
-  return Array.from({ length: bands }, (_, index) => {
-    const distance = center === 0 ? 0 : Math.abs(index - center) / center
-    return clamped * (1 - 0.6 * distance)
-  })
 }

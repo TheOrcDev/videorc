@@ -2,23 +2,17 @@ import {
   type AppIcon,
   CameraIcon,
   CaptionsIcon,
-  ChevronDownIcon,
   DesktopIcon,
   DisplayIcon,
-  MicrophoneIcon,
-  RecordIcon,
-  SpeakerOffIcon,
-  SpeakerOnIcon
+  RecordIcon
 } from '@/components/icons'
 import type { ReactElement, ReactNode } from 'react'
 
 import { GroupedList } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
-import { SourceSelect } from '@/components/source-select'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { Button } from '@/components/ui/button'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
   Select,
   SelectContent,
@@ -38,9 +32,7 @@ import { cloudAiUploadGate } from '@/lib/entitlement-ui'
 import {
   buildCameraSources,
   buildCaptureSources,
-  buildMicrophoneSources,
   capturePickerDevices,
-  microphonePickerDevices,
   layoutPresetOrientation,
   resolutionOptionsForOrientation
 } from '@/lib/capture'
@@ -83,18 +75,13 @@ function compactCaptionsStatus(
   }
 }
 
-// An inspector value: borderless, right-aligned, and it highlights like a row
-// control (plan 050, D4).
-const TRIGGER_CLASS =
-  'flex h-control w-full min-w-0 items-center justify-end gap-1.5 rounded-chip px-2 text-sm hover:bg-accent data-[state=open]:bg-accent'
-
 /**
  * Inputs (SD2): the Studio inspector's grouped rows mirroring the controls
- * that own their own pages: Source, Mic, Output, Captions. They edit the SAME
- * captureConfig via the shared builders / setters (one state). Device and
- * preset source edits use the shared session controller; mic mute remains
- * live-safe. Scene switching lives in the Scenes gallery, and the live mic VU
- * in the mixer.
+ * that own their own pages: Screen, Camera, System audio, Output, Captions.
+ * They edit the SAME captureConfig via the shared builders / setters (one
+ * state). Device and preset source edits use the shared session controller.
+ * Scene switching lives in the Scenes gallery; the microphone and its live
+ * level live in the Microphone section above (plan 092), so no Mic row here.
  */
 export function QuickSettings(): ReactElement {
   const {
@@ -106,7 +93,6 @@ export function QuickSettings(): ReactElement {
     deviceList,
     selectedCaptureDevice,
     selectedCamera,
-    selectedMicrophone,
     patchVideo,
     isSessionActive,
     entitlements,
@@ -132,10 +118,7 @@ export function QuickSettings(): ReactElement {
 
   const captureDevices = capturePickerDevices(deviceList.devices)
   const cameras = deviceList.devices.filter((device) => device.kind === 'camera')
-  const microphones = microphonePickerDevices(deviceList.devices)
   const selectedCaptureId = captureConfig.sources.screenId ?? captureConfig.sources.windowId
-  const muted = captureConfig.audio.microphoneMuted
-  const MuteIcon = muted ? SpeakerOffIcon : SpeakerOnIcon
   // Resolution options mirror the Output tab (recording-tab.tsx) and follow
   // the Studio mode — vertical mode offers only portrait canvases (the mode
   // toggle is the one home for orientation).
@@ -150,7 +133,7 @@ export function QuickSettings(): ReactElement {
   // F-015: the synthetic diagnostic source replaces the screen, so say so
   // instead of claiming "No screen". Plan 080 S4: screen and camera are two
   // rows, so neither name is truncated to fit beside the other; a saved
-  // device that is missing keeps its saved name, as the Mic row does.
+  // device that is missing keeps its saved name.
   const screenSummary = captureConfig.sources.testPattern
     ? 'Test pattern'
     : (selectedCaptureDevice?.name ??
@@ -214,60 +197,6 @@ export function QuickSettings(): ReactElement {
               )
             }
           />
-        </InspectorRow>
-
-        {/* MIC — confirmed source selection and live mute. */}
-        <InspectorRow icon={MicrophoneIcon} label="Mic">
-          <Popover>
-            <PopoverTrigger className={TRIGGER_CLASS}>
-              <span className="min-w-0 truncate text-right font-medium">
-                {selectedMicrophone?.name ??
-                  captureConfig.sources.microphoneName ??
-                  'No microphone'}
-              </span>
-              {selectedMicrophone && muted ? (
-                <SpeakerOffIcon className="size-3.5 shrink-0 text-warning" weight="fill" />
-              ) : null}
-              <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground" />
-            </PopoverTrigger>
-            <PopoverContent align="start" className="flex w-72 flex-col gap-3 p-3">
-              <SourceSelect
-                allowNone
-                discoveryPending={discoveryPending}
-                devices={microphones}
-                disabled={Boolean(sourceSwitchReason('microphone'))}
-                description={<SourceSwitchStatus kind="microphone" />}
-                selectedName={captureConfig.sources.microphoneName}
-                label="Microphone"
-                value={captureConfig.sources.microphoneId}
-                onChange={(microphoneId) =>
-                  void switchSourceDeviceLive(
-                    'microphone',
-                    buildMicrophoneSources(captureConfig.sources, microphones, microphoneId)
-                  )
-                }
-              />
-              {selectedMicrophone || isSessionActive || captureConfig.sources.microphoneId ? (
-                <Button
-                  aria-pressed={muted}
-                  size="sm"
-                  variant="outline"
-                  onClick={() =>
-                    setCaptureConfig((current) => ({
-                      ...current,
-                      audio: { ...current.audio, microphoneMuted: !current.audio.microphoneMuted }
-                    }))
-                  }
-                >
-                  <MuteIcon
-                    className={muted ? 'text-warning' : undefined}
-                    data-icon="inline-start"
-                  />
-                  {muted ? 'Unmute microphone' : 'Mute microphone'}
-                </Button>
-              ) : null}
-            </PopoverContent>
-          </Popover>
         </InspectorRow>
 
         {/* SYSTEM AUDIO: plan 069 On/Off, live-safe; hidden where unsupported. */}
