@@ -2234,6 +2234,33 @@ export interface AudioMeterResult {
   message?: string
 }
 
+/** Plan 092 Phase C: digital silence on the `audio.levels` wire (JSON has no -Infinity). */
+export const AUDIO_LEVEL_FLOOR_DB = -120
+
+/** Plan 092 Phase C: one level reading over the last window, dBFS, within -120..+48. */
+export interface AudioLevelReading {
+  peakDb: number
+  rmsDb: number
+}
+
+/**
+ * Plan 092 Phase C: `audio.levels`, about 20 a second while a session's audio
+ * bus runs, or while the warm microphone stands by between sessions
+ * (microphone only, no `sessionId`). Readings carry the configured gain: what
+ * the recording and the stream get. A source with no samples in the window is
+ * omitted.
+ */
+export interface AudioLevelsEvent {
+  /** The session whose bus measured the levels; absent for the standby microphone. */
+  sessionId?: string
+  microphone?: AudioLevelReading
+  systemAudio?: AudioLevelReading
+  /** The mix written to the recording and the stream. */
+  master?: AudioLevelReading
+  /** Samples the mix clipped since the previous event. */
+  masterClippedSamples: number
+}
+
 export interface AudioMeterSampleSnapshot {
   microphoneId?: string
   result: AudioMeterResult

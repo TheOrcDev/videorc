@@ -119,7 +119,7 @@ describe('studio context invalidation boundaries', () => {
   it('keeps the microphone analyser runtime behind a demand-loaded boundary', () => {
     const provider = readFileSync(new URL('./use-studio-mic-visual.tsx', import.meta.url), 'utf8')
     const eagerConsumers = [
-      '../components/studio/audio-mixer.tsx',
+      '../components/studio/microphone-section.tsx',
       '../components/studio/session-mic-sliver.tsx',
       '../components/ui/live-waveform.tsx'
     ].map((path) => readFileSync(new URL(path, import.meta.url), 'utf8'))
@@ -148,7 +148,9 @@ describe('studio context invalidation boundaries', () => {
     )
 
     expect(source).toContain("await import('@/components/studio/studio-dashboard-bottom-row')")
-    expect(source).not.toContain("from '@/components/studio/audio-mixer'")
+    // The Microphone section brings audiocn's meters: its own lazy chunk.
+    expect(source).toContain("await import('@/components/studio/microphone-section')")
+    expect(source).not.toContain("from '@/components/studio/microphone-section'")
     expect(source).not.toContain("from '@/components/studio/scenes-gallery'")
     expect(source).toMatch(/<Suspense fallback=\{<StudioDashboardBottomRowFallback \/>\}>/)
   })

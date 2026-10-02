@@ -4794,6 +4794,7 @@ fn websocket_event_is_coalescible(event: &str) -> bool {
             | "preview.live.status"
             | "stream.health"
             | "stream.viewers"
+            | "audio.levels"
     )
 }
 

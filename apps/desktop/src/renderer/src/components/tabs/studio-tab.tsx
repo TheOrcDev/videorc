@@ -32,6 +32,10 @@ const StudioDashboardBottomRow = lazy(async () => ({
   default: (await import('@/components/studio/studio-dashboard-bottom-row'))
     .StudioDashboardBottomRow
 }))
+// The meter brings audiocn: its own chunk, so the inspector paints first.
+const MicrophoneSection = lazy(async () => ({
+  default: (await import('@/components/studio/microphone-section')).MicrophoneSection
+}))
 
 export function StudioTab(): ReactElement {
   const studio = useStudioCore()
@@ -187,15 +191,15 @@ export function StudioTab(): ReactElement {
       />
 
       {/* The Studio bench: the preview pane leads, and the inspector (the
-          transport, session facts, inputs, takeover) sits beside it, split by
-          a hairline. Hard
+          transport, session facts, microphone, inputs, takeover) sits beside
+          it, split by a hairline. Hard
           blocks surface inside the Session section, never as a yellow top
           banner (post-0.9.4 fix batch F8). */}
       <div className="grid min-h-full lg:grid-cols-[minmax(0,1fr)_minmax(0,20rem)]">
         <div className="min-w-0 lg:border-r">
           <StudioPreviewPanel />
-          {/* Scenes, the vertical leg, and the mixer: deferred so the launch
-              surface paints its preview and transport first. */}
+          {/* Scenes and the vertical leg: deferred so the launch surface
+              paints its preview and transport first. */}
           <Suspense fallback={<StudioDashboardBottomRowFallback />}>
             <StudioDashboardBottomRow />
           </Suspense>
@@ -232,8 +236,14 @@ export function StudioTab(): ReactElement {
             onDismissStartFailure={dismissSessionStartFailure}
             onRetryStart={retrySessionStart}
           />
-          {/* Inputs: compact mirrors of Source / Mic / Output / Captions, each
-              editing the same captureConfig and deep-linking to its page. */}
+          {/* The microphone and its live level, between Session and Inputs
+              (owner call, 2026-10-02): a check that runs all the time. */}
+          <Suspense fallback={<MicrophoneSectionFallback />}>
+            <MicrophoneSection />
+          </Suspense>
+          {/* Inputs: compact mirrors of Screen / Camera / System audio / Output
+              / Captions, each editing the same captureConfig and deep-linking
+              to its page. */}
           <QuickSettings />
           <TakeoverSection />
         </aside>
@@ -248,10 +258,17 @@ function StudioDashboardBottomRowFallback(): ReactElement {
       <PanelSection title="Scenes">
         <div className="h-24 rounded-row bg-foreground/[0.04]" />
       </PanelSection>
-      <PanelSection title="Audio mixer">
-        <div className="h-24 rounded-row bg-foreground/[0.04]" />
-      </PanelSection>
     </div>
+  )
+}
+
+/** The Microphone section's height while its chunk loads: the picker and the meter row. */
+function MicrophoneSectionFallback(): ReactElement {
+  return (
+    <PanelSection title="Microphone">
+      <div className="h-control rounded-chip bg-foreground/[0.04]" />
+      <div className="h-4 rounded-chip bg-foreground/[0.04]" />
+    </PanelSection>
   )
 }
 

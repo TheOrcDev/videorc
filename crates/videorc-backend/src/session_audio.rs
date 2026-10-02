@@ -1019,6 +1019,85 @@ pub struct AudioObservation {
 #[cfg(test)]
 type CaptionObserver = Arc<dyn Fn(&AudioFrame) + Send + Sync>;
 
+/// Plan 092 Phase C: one chunk's contribution to a level meter.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct ChunkLevels {
+    peak: f32,
+    sum_squares: f64,
+    samples: u64,
+}
+
+impl ChunkLevels {
+    fn of(samples: &[f32]) -> Self {
+        let mut peak = 0.0_f32;
+        let mut sum_squares = 0.0_f64;
+        for sample in samples {
+            peak = peak.max(sample.abs());
+            sum_squares += f64::from(*sample) * f64::from(*sample);
+        }
+        Self {
+            peak,
+            sum_squares,
+            samples: samples.len() as u64,
+        }
+    }
+}
+
+/// Plan 092 Phase C: a level meter's window, filled every chunk by the bus and
+/// drained by the `audio.levels` sampler: the loudest sample and the sum of
+/// squares since the last read.
+#[derive(Debug, Clone, Copy, Default)]
+struct LevelWindow {
+    peak: f32,
+    sum_squares: f64,
+    samples: u64,
+}
+
+impl LevelWindow {
+    fn add(&mut self, chunk: ChunkLevels) {
+        self.peak = self.peak.max(chunk.peak);
+        self.sum_squares += chunk.sum_squares;
+        self.samples += chunk.samples;
+    }
+
+    /// The reading since the last take, and an empty window; None without samples.
+    fn take(&mut self) -> Option<crate::protocol::AudioLevelReading> {
+        let window = std::mem::take(self);
+        (window.samples > 0).then(|| {
+            crate::protocol::AudioLevelReading::from_window(
+                window.peak,
+                window.sum_squares / window.samples as f64,
+            )
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct BusLevelWindows {
+    microphone: LevelWindow,
+    system: LevelWindow,
+    master: LevelWindow,
+    master_clipped_samples: u64,
+}
+
+/// Plan 092 Phase C: the bus's level readings since the previous take.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BusLevels {
+    /// The processed microphone (gain and mute applied), before any sum.
+    pub microphone: Option<crate::protocol::AudioLevelReading>,
+    /// The gained system-audio contribution, while it is mixed.
+    pub system_audio: Option<crate::protocol::AudioLevelReading>,
+    /// The chunk as written: what the recording and the stream get.
+    pub master: Option<crate::protocol::AudioLevelReading>,
+    pub master_clipped_samples: u64,
+}
+
+impl BusLevels {
+    pub fn is_empty(&self) -> bool {
+        self.microphone.is_none() && self.system_audio.is_none() && self.master.is_none()
+    }
+}
+
 struct AudioShared {
     owner_present: bool,
     retiring: Vec<(String, tokio::sync::watch::Receiver<ProducerCompletion>)>,
@@ -1033,6 +1112,7 @@ struct AudioShared {
     system: SystemShared,
     system_stats: Arc<AudioCaptureStats>,
     mix_clipped_samples: u64,
+    levels: BusLevelWindows,
     #[cfg(test)]
     caption_observer: Option<CaptionObserver>,
     #[cfg(test)]
@@ -1431,6 +1511,20 @@ impl SessionAudio {
 }
 
 impl AudioSwitchHandle {
+    /// Plan 092 Phase C: the level readings since the previous call, emptying
+    /// the windows. The `audio.levels` sampler holds this handle, so reading
+    /// levels never takes the recording lock.
+    pub fn take_levels(&self) -> BusLevels {
+        let mut shared = self.shared.lock().unwrap_or_else(|p| p.into_inner());
+        let levels = &mut shared.levels;
+        BusLevels {
+            microphone: levels.microphone.take(),
+            system_audio: levels.system.take(),
+            master: levels.master.take(),
+            master_clipped_samples: std::mem::take(&mut levels.master_clipped_samples),
+        }
+    }
+
     fn request_silent_drain(&self) -> bool {
         // Share the source-commit linearization point: a racing handoff either
         // completes before this freeze or observes draining and cannot commit.
@@ -1750,6 +1844,7 @@ pub fn attach_prepared_with(
         system: SystemShared::default(),
         system_stats: Arc::new(AudioCaptureStats::default()),
         mix_clipped_samples: 0,
+        levels: BusLevelWindows::default(),
         #[cfg(test)]
         caption_observer: None,
         #[cfg(test)]
@@ -4409,17 +4504,28 @@ fn run_bus_owned(
         // The microphone tap (captions, Orcle voice activity, the mic meter)
         // is the processed microphone chunk as written, before any sum
         // (decision 5). Without a system slot it is the written chunk itself.
-        let (stale_from, microphone_samples, mixed) = match outcome {
-            ChunkOutcome::Microphone(written) => (written.stale_from, written.samples, None),
+        // Plan 092 Phase C: the written chunk is what the recording and the
+        // stream get, so it feeds the master meter.
+        let (stale_from, microphone_samples, mixed, master_levels) = match outcome {
+            ChunkOutcome::Microphone(written) => {
+                let master = ChunkLevels::of(&written.samples);
+                (written.stale_from, written.samples, None, master)
+            }
             ChunkOutcome::Mixed(mixed) => {
                 limiter = mixed.limiter;
+                let master = ChunkLevels::of(&mixed.written.samples);
                 (
                     mixed.written.stale_from,
                     mixed.microphone,
                     Some((mixed.system, mixed.clipped_samples)),
+                    master,
                 )
             }
         };
+        let microphone_levels = ChunkLevels::of(&microphone_samples);
+        let system_levels = mixed
+            .as_ref()
+            .map(|(system_samples, _)| ChunkLevels::of(system_samples));
         diagnostics.max_write_stall = diagnostics.max_write_stall.max(write_started.elapsed());
         if let Some(slot) = system.as_mut() {
             let cursor = timeline.cursor();
@@ -4522,7 +4628,13 @@ fn run_bus_owned(
             shared.status.counters = after;
             if let Some((_, clipped)) = mixed.as_ref() {
                 shared.mix_clipped_samples += clipped;
+                shared.levels.master_clipped_samples += clipped;
             }
+            shared.levels.microphone.add(microphone_levels);
+            if let Some(system_levels) = system_levels {
+                shared.levels.system.add(system_levels);
+            }
+            shared.levels.master.add(master_levels);
         }
         if draining.load(Ordering::Acquire) {
             cancel_drain_observation(&mut observe);
@@ -6611,6 +6723,72 @@ mod mix_tests {
     use super::*;
     use sha2::{Digest, Sha256};
 
+    #[test]
+    fn level_windows_keep_the_loudest_sample_and_the_rms_until_taken() {
+        let mut window = LevelWindow::default();
+        assert_eq!(window.take(), None, "no samples, no reading");
+        window.add(ChunkLevels::of(&[0.5, -0.5, 0.5, -0.5]));
+        window.add(ChunkLevels::of(&[0.25, -1.0, 0.0, 0.0]));
+        let reading = window.take().expect("a reading");
+        assert!(
+            reading.peak_db.abs() < 1.0e-6,
+            "peak is the loudest sample: {reading:?}"
+        );
+        let mean_square = (4.0 * 0.25 + 0.0625 + 1.0) / 8.0_f64;
+        assert!(
+            (reading.rms_db - (10.0 * mean_square.log10()) as f32).abs() < 1.0e-4,
+            "{reading:?}"
+        );
+        assert_eq!(window.take(), None, "taking empties the window");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn level_windows_read_the_mic_before_the_sum_and_the_mix_as_written() {
+        let epoch = Instant::now() + Duration::from_millis(100);
+        let microphone = signal_packets(epoch, 0, 96_000, 512, |_| (0.6, 0.6));
+        let bus = start_bus(
+            epoch,
+            Some(microphone),
+            AudioProcessingSettings::default(),
+            system_options(),
+        )
+        .await;
+        let system = bus.session.system_audio();
+        let producer = prepare_system(
+            &system,
+            signal_packets(epoch, 0, 96_000, 960, |_| (0.7, -0.3)),
+            quiet_failure(),
+        )
+        .await;
+        bus.session.attach_system(producer).await.unwrap();
+        let levels_handle = bus.session.switch_handle();
+        // Let the attach ramp settle, then read one steady window.
+        bus.wait_for_frames(36_000).await;
+        let _ = levels_handle.take_levels();
+        bus.wait_for_frames(60_000).await;
+        let levels = levels_handle.take_levels();
+        let _ = bus.finish();
+
+        let microphone = levels.microphone.expect("a microphone reading");
+        let mic_db = 20.0 * 0.6_f32.log10();
+        assert!((microphone.peak_db - mic_db).abs() < 0.05, "{levels:?}");
+        assert!((microphone.rms_db - mic_db).abs() < 0.05, "{levels:?}");
+        let system_audio = levels.system_audio.expect("a system-audio reading");
+        assert!(
+            (system_audio.peak_db - 20.0 * 0.7_f32.log10()).abs() < 0.05,
+            "the system reading is its gained contribution: {levels:?}"
+        );
+        let master = levels.master.expect("a master reading");
+        assert!(
+            master.peak_db <= 20.0 * LIMITER_CEILING.log10() + 0.01,
+            "the mix never passes the limiter ceiling: {levels:?}"
+        );
+        assert!(
+            levels.master_clipped_samples > 0,
+            "the sum clipped: {levels:?}"
+        );
+    }
+
     const FIXTURE_FRAMES: usize = 480_000; // 10 s at 48 kHz.
     const FIXTURE_PACKET: usize = 512;
     /// SHA-256 of the first 10 s the pre-S2 bus wrote for `fixture_sample`
@@ -7796,6 +7974,14 @@ mod mix_tests {
             )
             .await;
             bus.wait_for_frames(96_000).await;
+            // The reader holds a chunk before the bus advances its cursor
+            // past it (the cursor moves after the chunk's bookkeeping), so
+            // also wait for the cursor that `identical_until` reads.
+            wait_until(
+                || bus.session.status().sample_cursor >= 96_000,
+                "the bus cursor at 96000 frames",
+            )
+            .await;
             // Timing is judged up to the drain: the drain itself discards
             // the microphone's buffered playout (it is capture that ended).
             let before = bus.session.status();

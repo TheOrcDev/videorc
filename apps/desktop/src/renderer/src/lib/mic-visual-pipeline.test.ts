@@ -6,8 +6,6 @@ import {
   advanceBandLevelsInto,
   createMicVisualFrameBuffer,
   createMicVisualPipeline,
-  resampleMicVisualLevels,
-  resampleMicVisualLevelsInto,
   spectrumBandTargetsInto,
   type MicVisualAnalyserLike,
   type MicVisualAudioContextLike,
@@ -398,7 +396,7 @@ describe('createMicVisualPipeline', () => {
     expect(harness.frames).toHaveLength(2)
   })
 
-  it('reuses caller-owned frame and resample buffers while snapshots stay stable', async () => {
+  it('reuses caller-owned frame buffers while snapshots stay stable', async () => {
     const harness = pipelineHarness()
     const pipeline = retainedPipeline(harness.dependencies)
     pipeline.configure({
@@ -410,7 +408,6 @@ describe('createMicVisualPipeline', () => {
 
     const frameBuffer = createMicVisualFrameBuffer()
     const bands = frameBuffer.bands
-    const resampled = new Array<number>(5).fill(0)
     let historyRing: Float32Array | undefined
     for (let index = 1; index <= 80; index += 1) {
       harness.frames.at(-1)?.(index * 48)
@@ -418,7 +415,6 @@ describe('createMicVisualPipeline', () => {
       expect(frameBuffer.bands).toBe(bands)
       historyRing ??= frameBuffer.historyRing
       expect(frameBuffer.historyRing).toBe(historyRing)
-      expect(resampleMicVisualLevelsInto(frameBuffer.bands, resampled)).toBe(resampled)
     }
 
     expect(historyRing).toBeInstanceOf(Float32Array)
@@ -617,6 +613,11 @@ describe('createMicVisualPipeline level feel', () => {
     expect(spoken.bands[band]).toBeLessThanOrEqual(dbToMeterLevel(-12))
     expect(spoken.peakDb).toBeCloseTo(-12, 0)
     expect(spoken.bands.filter((level) => level > 0)).toHaveLength(1)
+    // Level meters read the same block in true dBFS (plan 092): the sine's
+    // peak, and its RMS 3.01 dB below.
+    const meter = pipeline.readFrame(createMicVisualFrameBuffer())
+    expect(meter.peakDbfs).toBeCloseTo(-12, 0)
+    expect(meter.rmsDbfs).toBeCloseTo(-15.01, 0)
 
     // Back to silence: the bar decays instead of snapping — still most of the
     // way up after one tick, near floor only after ~1 s.
@@ -628,14 +629,11 @@ describe('createMicVisualPipeline level feel', () => {
     for (let count = 0; count < 20; count += 1) tick()
     expect(pipeline.getFrameSnapshot().bands[band]).toBeLessThan(0.05)
     expect(pipeline.getFrameSnapshot().peakDb).toBe(-60)
-  })
-})
-
-describe('resampleMicVisualLevels', () => {
-  it('adapts the shared spectrum to each visual without another analyser', () => {
-    expect(resampleMicVisualLevels([0, 1, 0, 1], 2)).toEqual([0.5, 0.5])
-    expect(resampleMicVisualLevels([0, 1], 5)).toEqual([0, 0.25, 0.5, 0.75, 1])
-    expect(resampleMicVisualLevels([], 3)).toEqual([0, 0, 0])
+    // The label floors silence at -60; the meter reading never floors, so a
+    // gain added later cannot lift digital silence into a level.
+    const silent = pipeline.readFrame(createMicVisualFrameBuffer())
+    expect(silent.peakDbfs).toBe(Number.NEGATIVE_INFINITY)
+    expect(silent.rmsDbfs).toBe(Number.NEGATIVE_INFINITY)
   })
 })
 
