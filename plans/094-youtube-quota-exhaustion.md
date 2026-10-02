@@ -1,5 +1,38 @@
 # Plan 094: YouTube that keeps working for streamers
 
+## Reconciled 2026-10-02 — remaining work moves to Plan 096
+
+Checked against desktop `origin/main` `aac79ab4` (PR #535 merged). S1–S4,
+the S6 soft budget and desktop S7 are implemented. Web S7 merged in
+videorc-web PR #67. The application for 1,000,000 total YouTube units/day
+was submitted successfully; approval remains pending. The 50% and 80% project
+alerts were configured on 2026-10-02; the owner supplied evidence that the
+closure notification arrived. Live billing attribution and open-notification
+delivery remain unverified. This does not establish installed-client adoption
+or live acceptance.
+
+[Plan 096: YouTube quota efficiency](096-youtube-quota-efficiency.md) now owns
+the unimplemented streaming-chat reader (S5), compatible ingest reuse from
+S8, complete request accounting, independent statistics timers, measurements,
+monitoring and release acceptance. Execute that plan for the remaining work.
+Keep the shipped outage behavior and its tests.
+
+Corrections to the historical plan below:
+
+- `liveChatMessages.list` has a published cost of 1 unit; streaming-method
+  billing must be measured and must not be described as free.
+- The 2,500-unit allowance is a per-install **soft** budget. Reads and
+  essential calls continue beyond it; it cannot guarantee project protection.
+- The merged baseline misses scheduling and some retry/confirmation costs,
+  and its remote viewer interval affects the shared sampler. Plan 096's
+  candidate implements complete request accounting and independent provider
+  polling; its linked evidence records verification and outstanding gates.
+- Retain explicit broadcast completion. Omitting it for auto-stop is deferred.
+- Original S5/S8 targets and the implementation/release status below describe
+  the earlier planning snapshot, not completed provider validation.
+
+## Original execution snapshot
+
 **Status:** EXECUTING 2026-10-02 on `fix/094-youtube-quota` (one PR, one
 commit per slice): S1-S4, S6 and the desktop half of S7 are built; S5 and S8
 are **BLOCKED** on live probes against YouTube with a real token (the
