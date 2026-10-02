@@ -5,28 +5,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createFrameEmitter } from '@/lib/audio/frame-source'
 import type { MeterFrame } from '@/lib/audio/types'
-import { MicrophoneStripView, type MeterInput } from './audio-mixer'
+import type { Device } from '@/lib/backend'
+import { MicrophoneSectionView, type MeterInput } from './microphone-section'
 
 let root: Root
 let container: HTMLDivElement
 const noop = (): void => {}
+const microphones: Device[] = [
+  { id: 'mic-1', name: 'Studio Mic', kind: 'microphone', status: 'available' }
+]
 
 async function render(meter: MeterInput, muted = false): Promise<void> {
   await act(async () =>
     root.render(
-      createElement(MicrophoneStripView, {
-        deviceName: 'Studio Mic',
-        muted,
-        monitorLabel: muted ? 'Muted' : 'Live',
-        signalLive: !muted,
+      createElement(MicrophoneSectionView, {
+        devices: microphones,
+        value: 'mic-1',
+        selectedName: 'Studio Mic',
+        disabled: false,
+        discoveryPending: false,
         meter,
-        warmReady: false,
-        checkLevel: null,
-        notice: null,
-        permissionLabel: 'Open settings',
-        deviceDetail: undefined,
-        onPermission: noop,
-        onToggleMute: noop
+        monitorLabel: muted ? 'Muted' : 'Live',
+        onChange: noop
       })
     )
   )
@@ -51,7 +51,7 @@ afterEach(async () => {
   vi.useRealTimers()
 })
 
-describe('Microphone strip readout across mute (plan 092)', () => {
+describe('Microphone section readout across mute (plan 092)', () => {
   it('reads silence once muted, never the last live level', async () => {
     const source = createFrameEmitter<MeterFrame>()
     await render({ kind: 'source', source })
@@ -61,7 +61,7 @@ describe('Microphone strip readout across mute (plan 092)', () => {
     })
     expect(readout()?.textContent).toBe('−18.0 dB')
 
-    // Muting swaps the live source for a silent value in the same strip.
+    // Muting swaps the live source for a silent value in the same meter.
     await render({ kind: 'value', peakDb: Number.NEGATIVE_INFINITY }, true)
     expect(readout()?.textContent).toBe('−∞ dB')
     expect(readout()?.hasAttribute('data-silent')).toBe(true)

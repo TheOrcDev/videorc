@@ -32,7 +32,8 @@ export default function SearchableSourceSelect({
   placeholder,
   discoveryPending = false,
   description,
-  disabled = false
+  disabled = false,
+  labelHidden = false
 }: {
   label: string
   devices: Device[]
@@ -47,6 +48,7 @@ export default function SearchableSourceSelect({
   discoveryPending?: boolean
   description?: ReactNode
   disabled?: boolean
+  labelHidden?: boolean
 }): ReactElement {
   const id = useId()
   const [open, setOpen] = useState(false)
@@ -64,7 +66,9 @@ export default function SearchableSourceSelect({
   }
   return (
     <Field>
-      <FieldLabel htmlFor={id}>{label}</FieldLabel>
+      <FieldLabel className={labelHidden ? 'sr-only' : undefined} htmlFor={id}>
+        {label}
+      </FieldLabel>
       <Popover
         open={open}
         onOpenChange={(next) => {

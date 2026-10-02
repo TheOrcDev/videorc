@@ -17,10 +17,7 @@ const BASE_UI_RESTRICTION = {
     "Base UI is audiocn's primitive layer; Videorc UI uses Radix. Only files installed from @audiocn may import it (docs/audiocn.md)."
 }
 
-const AUDIOCN_BASE_UI_FILES = [
-  'apps/desktop/src/renderer/src/components/ui/channel-strip.tsx',
-  'apps/desktop/src/renderer/src/components/ui/clip-indicator.tsx'
-]
+const AUDIOCN_BASE_UI_FILES = ['apps/desktop/src/renderer/src/components/ui/clip-indicator.tsx']
 
 export default tseslint.config(
   {
