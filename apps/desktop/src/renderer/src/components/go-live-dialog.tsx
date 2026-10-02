@@ -33,6 +33,7 @@ import type {
 } from '@/lib/backend'
 import { type EntitlementUiGate } from '@/lib/entitlement-ui'
 import type { GoLiveCaptionsReadiness } from '@/lib/captions-preflight'
+import { YOUTUBE_STREAM_KEY_LINK_LABEL, YOUTUBE_STREAM_KEY_URL } from '@/lib/youtube-quota'
 
 // The Go Live confirmation flow: review destinations + metadata, resolve any
 // error-severity blockers, then start the livestream. Extracted from StudioTab
@@ -299,8 +300,33 @@ export function GoLiveConfirmationDialog({
                 </div>
                 <ul className="grid gap-1.5 text-sm text-muted-foreground">
                   {partialSetup.failures.map((failure) => (
-                    <li key={failure.targetId}>
-                      {platformLabel(failure.platform)}: {failure.label} - {failure.message}
+                    <li key={failure.targetId} className="flex flex-col gap-1.5">
+                      <span>
+                        {platformLabel(failure.platform)}: {failure.label} - {failure.message}
+                      </span>
+                      {failure.fallback === 'manual-rtmp' ? (
+                        // Plan 094 (G5): YouTube's API is paused, so the key path
+                        // is the way to go live. The destination flips to its
+                        // stream key; the key itself comes from YouTube Studio.
+                        <span className="flex flex-wrap items-center gap-2">
+                          <Button
+                            disabled={pending}
+                            size="sm"
+                            variant="outline"
+                            onClick={() => onResolveBlocker(failure.targetId, 'manual-rtmp')}
+                          >
+                            Use stream key
+                          </Button>
+                          <Button
+                            className="h-auto p-0 text-xs"
+                            size="sm"
+                            variant="link"
+                            onClick={() => openExternalUrl(YOUTUBE_STREAM_KEY_URL)}
+                          >
+                            {YOUTUBE_STREAM_KEY_LINK_LABEL}
+                          </Button>
+                        </span>
+                      ) : null}
                     </li>
                   ))}
                 </ul>
