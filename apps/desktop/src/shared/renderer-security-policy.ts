@@ -46,6 +46,9 @@ export const IPC_INVOKE_ROLES = {
   // The detached Comments window renders the same chat rows as Studio; without
   // this it could only ever draw monograms. Main still owns the host allowlist.
   'avatars:cache': MAIN_AND_COMMENTS,
+  // The highlight card reads cached avatar/emote bytes (plan 095, S3): main
+  // renders the card, and the Stream Manager shares the cache it fills.
+  'avatars:read': MAIN_AND_COMMENTS,
   'oauth:open-url': MAIN_ONLY,
   'oauth:callback-redirect-uri': MAIN_ONLY,
   'oauth:callbacks-list': MAIN_ONLY,

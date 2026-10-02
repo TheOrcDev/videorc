@@ -15,6 +15,15 @@ export const COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS = Object.freeze({
 
 export const COMMENT_HIGHLIGHT_MARKER_RGB = Object.freeze([255, 82, 45])
 export const CAPTION_MARKER_RGB = Object.freeze([45, 231, 170])
+/** The smoke's fake chatter avatar and emote (plan 095): flat colours the
+ * synthetic test pattern (grey ramp, white and pink lines, a yellow marker),
+ * the monogram (grey on glass) and the two markers above never produce, so
+ * their presence inside the card region proves the image reached the card. */
+export const COMMENT_HIGHLIGHT_AVATAR_RGB = Object.freeze([30, 90, 255])
+export const COMMENT_HIGHLIGHT_EMOTE_RGB = Object.freeze([120, 255, 40])
+/** A 60 px avatar on a 1080p card is ~0.5% of the card region once sampled at
+ * 640x360; a 48 px emote ~0.3%. A monogram card has 0 of either colour. */
+export const COMMENT_HIGHLIGHT_MIN_IMAGE_PIXEL_RATIO = 0.0008
 
 export function classifyCommentHighlightResult(result) {
   if (result?.phase === 'live') return 'live'
@@ -49,7 +58,11 @@ export const DEFAULT_COMMENT_HIGHLIGHT_ANCHOR = 'bottom-left'
  * the card in half the frame. */
 export function commentHighlightCardRegion(
   anchor = DEFAULT_COMMENT_HIGHLIGHT_ANCHOR,
-  { width, height }
+  { width, height },
+  // The avatar sits on the card's NEAR edge (4% margin plus padding), so the
+  // image scan (plan 095) runs from the anchored edge itself; the portrait
+  // vertical band already clears the platform UI and keeps its start.
+  { toEdge = false } = {}
 ) {
   if (!COMMENT_HIGHLIGHT_ANCHORS.includes(anchor)) {
     throw new Error(`Unknown comment highlight anchor: ${anchor}`)
@@ -58,7 +71,7 @@ export function commentHighlightCardRegion(
   const top = anchor.startsWith('top-')
   const span = (size, fromStart, vertical = false) => {
     const [nearFraction, farFraction] =
-      portrait && vertical ? (top ? [0.06, 0.26] : [0.2, 0.4]) : [0.08, 0.62]
+      portrait && vertical ? (top ? [0.06, 0.26] : [0.2, 0.4]) : [toEdge ? 0 : 0.08, 0.62]
     const near = Math.round(size * nearFraction)
     const far = Math.round(size * farFraction)
     const start = fromStart ? near : size - far
@@ -113,6 +126,7 @@ export function measureCommentHighlightArtifactRgb(
   const topPixels = width * topEnd
   const bottomPixels = width * (height - bottomStart)
   const region = commentHighlightCardRegion(anchor, { width, height })
+  const imageRegion = commentHighlightCardRegion(anchor, { width, height }, { toEdge: true })
   const cardPixels = (region.xEnd - region.xStart) * (region.yEnd - region.yStart)
   // The deterministic highlight marker is judged in the anchor's vertical half.
   const highlightMarkerPixelsTotal = region.top ? topPixels : bottomPixels
@@ -124,6 +138,8 @@ export function measureCommentHighlightArtifactRgb(
     let captionMarkerPixels = 0
     let highlightCardDarkPixels = 0
     let highlightCardTextPixels = 0
+    let highlightAvatarPixels = 0
+    let highlightEmotePixels = 0
 
     for (let y = 0; y < height; y += 1) {
       const rowStart = frameStart + y * width * 3
@@ -145,6 +161,15 @@ export function measureCommentHighlightArtifactRgb(
           if (isHighlightCardDarkPixel(red, green, blue)) highlightCardDarkPixels += 1
           if (isHighlightCardTextPixel(red, green, blue)) highlightCardTextPixels += 1
         }
+        if (
+          y >= imageRegion.yStart &&
+          y < imageRegion.yEnd &&
+          x >= imageRegion.xStart &&
+          x < imageRegion.xEnd
+        ) {
+          if (isHighlightAvatarPixel(red, green, blue)) highlightAvatarPixels += 1
+          if (isHighlightEmotePixel(red, green, blue)) highlightEmotePixels += 1
+        }
       }
     }
 
@@ -154,6 +179,10 @@ export function measureCommentHighlightArtifactRgb(
       captionMarkerPixels,
       highlightCardDarkPixels,
       highlightCardTextPixels,
+      highlightAvatarPixels,
+      highlightEmotePixels,
+      highlightAvatarPixelRatio: cardPixels > 0 ? highlightAvatarPixels / cardPixels : 0,
+      highlightEmotePixelRatio: cardPixels > 0 ? highlightEmotePixels / cardPixels : 0,
       highlightMarkerPixelRatio:
         highlightMarkerPixelsTotal > 0 ? highlightMarkerPixels / highlightMarkerPixelsTotal : 0,
       captionMarkerPixelRatio: bottomPixels > 0 ? captionMarkerPixels / bottomPixels : 0,
@@ -167,6 +196,7 @@ export function measureCommentHighlightArtifactRgb(
     sampleHeight: height,
     anchor,
     cardRegion: region,
+    imageRegion,
     sampledFrames,
     topPixels,
     bottomPixels,
@@ -175,7 +205,9 @@ export function measureCommentHighlightArtifactRgb(
     maxHighlightMarkerPixelRatio: maxFrameRatio(frames, 'highlightMarkerPixelRatio'),
     maxCaptionMarkerPixelRatio: maxFrameRatio(frames, 'captionMarkerPixelRatio'),
     maxHighlightCardDarkPixelRatio: maxFrameRatio(frames, 'highlightCardDarkPixelRatio'),
-    maxHighlightCardTextPixelRatio: maxFrameRatio(frames, 'highlightCardTextPixelRatio')
+    maxHighlightCardTextPixelRatio: maxFrameRatio(frames, 'highlightCardTextPixelRatio'),
+    maxHighlightAvatarPixelRatio: maxFrameRatio(frames, 'highlightAvatarPixelRatio'),
+    maxHighlightEmotePixelRatio: maxFrameRatio(frames, 'highlightEmotePixelRatio')
   }
 }
 
@@ -187,15 +219,25 @@ export function evaluateCommentHighlightArtifactMetrics(
     // Dual-orientation sessions refuse stream-burned captions, so their
     // artifacts prove the card alone.
     requireCaption = true,
+    // Plan 095: the fake chatter's avatar and emote must reach the card.
+    requireAvatar = false,
+    requireEmote = false,
     minMarkerPixelRatio = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.minMarkerPixelRatio,
     minMarkerFrames = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.minMarkerFrames,
     minCardDarkPixelRatio = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.minCardDarkPixelRatio,
-    minCardTextPixelRatio = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.minCardTextPixelRatio
+    minCardTextPixelRatio = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.minCardTextPixelRatio,
+    minImagePixelRatio = COMMENT_HIGHLIGHT_MIN_IMAGE_PIXEL_RATIO
   } = {}
 ) {
   const failures = []
   const warnings = []
   const frames = Array.isArray(metrics?.frames) ? metrics.frames : []
+  const avatarFrames = frames.filter(
+    (frame) => (frame.highlightAvatarPixelRatio ?? 0) >= minImagePixelRatio
+  ).length
+  const emoteFrames = frames.filter(
+    (frame) => (frame.highlightEmotePixelRatio ?? 0) >= minImagePixelRatio
+  ).length
   const markerHighlightFrames = frames.filter(
     (frame) => (frame.highlightMarkerPixelRatio ?? 0) >= minMarkerPixelRatio
   ).length
@@ -243,6 +285,16 @@ export function evaluateCommentHighlightArtifactMetrics(
         `comment-highlight: highlight and caption markers coexisted in ${coexistFrames} frame(s), expected at least ${minMarkerFrames}`
       )
     }
+    if (requireAvatar && avatarFrames < minMarkerFrames) {
+      failures.push(
+        `comment-highlight: the avatar colour appeared in the card in ${avatarFrames} frame(s), expected at least ${minMarkerFrames} (a monogram card has none)`
+      )
+    }
+    if (requireEmote && emoteFrames < minMarkerFrames) {
+      failures.push(
+        `comment-highlight: the emote colour appeared in the card in ${emoteFrames} frame(s), expected at least ${minMarkerFrames} (an emote drawn as text has none)`
+      )
+    }
   } else if (highlightDisposition === 'highlight-unavailable') {
     if (!allowHighlightUnavailable) {
       failures.push('comment-highlight: highlight-unavailable is allowed only for the legacy path')
@@ -264,14 +316,17 @@ export function evaluateCommentHighlightArtifactMetrics(
       minMarkerPixelRatio,
       minMarkerFrames,
       minCardDarkPixelRatio,
-      minCardTextPixelRatio
+      minCardTextPixelRatio,
+      minImagePixelRatio
     },
     observations: {
       highlightFrames,
       markerHighlightFrames,
       renderedCardFrames,
       captionFrames,
-      coexistFrames
+      coexistFrames,
+      avatarFrames,
+      emoteFrames
     },
     metrics
   }
@@ -284,6 +339,8 @@ export async function analyzeCommentHighlightArtifact(
     highlightDisposition,
     allowHighlightUnavailable = false,
     requireCaption = true,
+    requireAvatar = false,
+    requireEmote = false,
     sampleWidth = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.sampleWidth,
     sampleHeight = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.sampleHeight,
     sampleFps = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.sampleFps,
@@ -309,6 +366,8 @@ export async function analyzeCommentHighlightArtifact(
     highlightDisposition,
     allowHighlightUnavailable,
     requireCaption,
+    requireAvatar,
+    requireEmote,
     minMarkerPixelRatio,
     minMarkerFrames,
     minCardDarkPixelRatio,
@@ -347,7 +406,8 @@ export function formatCommentHighlightArtifactSummary(report) {
     `disposition=${report?.disposition ?? 'unknown'} frames=${metrics.sampledFrames ?? 0} ` +
     `highlight=${observations.highlightFrames ?? 0} (card=${observations.renderedCardFrames ?? 0}, marker=${observations.markerHighlightFrames ?? 0}) ` +
     `captions=${observations.captionFrames ?? 0} ` +
-    `coexist=${observations.coexistFrames ?? 0}` +
+    `coexist=${observations.coexistFrames ?? 0} ` +
+    `avatar=${observations.avatarFrames ?? 0} emote=${observations.emoteFrames ?? 0}` +
     (report?.anchor ? ` anchor=${report.anchor} anchored=${observations.anchoredFrames ?? 0}` : '')
   )
 }
@@ -388,6 +448,14 @@ export function commentHighlightStimulusPngBase64({ width = 1920, height = 220 }
     height * 0.13,
     [210, 216, 226, 240]
   )
+  return encodeRgbaPngBase64(width, height, rgba)
+}
+
+/** A flat image for the smoke's avatar cache: the fake chatter's avatar or
+ * emote (plan 095). A square by default; `width` x `height` for a wide emote. */
+export function commentHighlightImagePngBase64({ width = 128, height = 128, rgb }) {
+  const rgba = Buffer.alloc(width * height * 4)
+  drawRgbaRect(rgba, width, height, 0, 0, width, height, [...rgb, 255])
   return encodeRgbaPngBase64(width, height, rgba)
 }
 
@@ -439,6 +507,21 @@ function isCaptionMarkerPixel(red, green, blue) {
     blue <= 225 &&
     green - red >= 70 &&
     green - blue >= 20
+  )
+}
+
+function isHighlightAvatarPixel(red, green, blue) {
+  return red <= 110 && green >= 40 && green <= 150 && blue >= 200 && blue - green >= 80
+}
+
+function isHighlightEmotePixel(red, green, blue) {
+  return (
+    red >= 60 &&
+    red <= 170 &&
+    green >= 200 &&
+    blue <= 110 &&
+    green - red >= 60 &&
+    green - blue >= 120
   )
 }
 

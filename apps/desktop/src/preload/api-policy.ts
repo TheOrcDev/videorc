@@ -16,6 +16,7 @@ export const AUXILIARY_API_KEYS = {
   ],
   comments: [
     'cacheChatAvatar',
+    'readChatAvatar',
     'sendCommentHighlight',
     'getCommentHighlightState',
     'onCommentHighlightState',

@@ -6,11 +6,16 @@
 //! into provider status transitions — never a stream failure. Messages are fed into the
 //! `LiveChatCoordinator` through the shared deliver/provider-status helpers.
 //!
-//! Transport: the connector requests the `liveChatMessages/stream` (`streamList`) endpoint
-//! first and falls back to `liveChatMessages` (`list`) on transient failure; both honour the
-//! server's `pollingIntervalMillis`. The `streamList` long-poll body optimisation (holding
-//! one connection open) is a latency improvement deferred past V1 — the polling form here
-//! produces identical normalized output and is the acceptance-critical path.
+//! Transport (plan 094, S1): the connector polls `liveChatMessages` (`list`) and never
+//! flips transport on an error. The `streamList` URL stays for S5, which reads the
+//! streamed body incrementally; the old "request `stream`, parse it as one JSON page"
+//! path could not work and burned the shared quota at one call per second.
+//!
+//! Quota discipline: every page costs 1 unit of a quota shared by every Videorc user.
+//! Polls never run faster than [`MIN_POLLING_INTERVAL_MS`], stretch to
+//! [`IDLE_POLLING_INTERVAL_MS`] after [`IDLE_EMPTY_PAGES`] empty pages, and a
+//! `quotaExceeded` answer parks the reader (`Waiting` with `retryAt`) through the shared
+//! breaker in `youtube_quota` until the reset, then resumes from its page token.
 
 use std::time::Duration;
 
@@ -28,12 +33,15 @@ use crate::live_chat::{
 use crate::state::AppState;
 use crate::streaming::StreamPlatform;
 
-const YOUTUBE_API_BASE_URL: &str = "https://www.googleapis.com";
 const LIVE_CHAT_MESSAGES_PATH: &str = "/youtube/v3/liveChat/messages";
 const LIVE_CHAT_MESSAGES_STREAM_PATH: &str = "/youtube/v3/liveChat/messages/stream";
 const LIVE_BROADCASTS_PATH: &str = "/youtube/v3/liveBroadcasts";
 const DEFAULT_POLLING_INTERVAL_MS: u64 = 5_000;
-const MIN_POLLING_INTERVAL_MS: u64 = 1_000;
+/// Plan 094, D1: never poll faster than every 5 s (one shared project quota).
+pub const MIN_POLLING_INTERVAL_MS: u64 = 5_000;
+/// After [`IDLE_EMPTY_PAGES`] empty pages in a row the poll stretches to this.
+pub const IDLE_POLLING_INTERVAL_MS: u64 = 10_000;
+pub const IDLE_EMPTY_PAGES: u32 = 6;
 const MAX_BACKOFF_MS: u64 = 30_000;
 
 /// Start config for the YouTube connector (an internal/session-aware `liveChat.start` field).
@@ -79,6 +87,9 @@ pub fn chat_send_body(live_chat_id: &str, text: &str) -> serde_json::Value {
 /// documented insert route is `POST /youtube/v3/liveChat/messages`, which is
 /// the reader's `list` path. The resource is named `liveChatMessages`, but
 /// `/youtube/v3/liveChatMessages` is not a route (Google answers HTML 404).
+/// Test seam for the unguarded send; production goes through
+/// [`send_youtube_chat_message_guarded`].
+#[cfg(test)]
 pub async fn send_youtube_chat_message(
     client: &reqwest::Client,
     api_base_url: Option<&str>,
@@ -86,7 +97,80 @@ pub async fn send_youtube_chat_message(
     live_chat_id: &str,
     text: &str,
 ) -> Result<ProviderSendReceipt, String> {
-    let base = api_base_url.unwrap_or(YOUTUBE_API_BASE_URL);
+    send_youtube_chat_message_classified(client, api_base_url, access_token, live_chat_id, text)
+        .await
+        .map_err(|failure| failure.message)
+}
+
+/// The send behind the shared quota breaker (plan 094): nothing goes out while
+/// YouTube is paused, every attempt is counted, and a quota refusal pauses
+/// every other YouTube caller too.
+pub async fn send_youtube_chat_message_guarded(
+    state: &AppState,
+    client: &reqwest::Client,
+    api_base_url: Option<&str>,
+    access_token: &str,
+    live_chat_id: &str,
+    text: &str,
+) -> Result<ProviderSendReceipt, String> {
+    if crate::youtube_quota::paused_until(state).is_some() {
+        return Err(crate::youtube_quota::SEND_PAUSED_MESSAGE.to_string());
+    }
+    // Plan 094 (S6): at 100% of the daily budget only Go Live essentials and
+    // chat read keep calling; a send costs 50 units.
+    if crate::youtube_quota::budget_refuses(state, crate::youtube_quota::BudgetCall::ChatSend)
+        .is_some()
+    {
+        return Err(crate::youtube_quota::SEND_SHED_MESSAGE.to_string());
+    }
+    crate::youtube_quota::record_call(
+        state,
+        crate::youtube_quota::YouTubeEndpoint::LiveChatMessagesInsert,
+    );
+    match send_youtube_chat_message_classified(
+        client,
+        api_base_url,
+        access_token,
+        live_chat_id,
+        text,
+    )
+    .await
+    {
+        Ok(receipt) => Ok(receipt),
+        Err(failure) => {
+            if failure.quota_exhausted {
+                crate::youtube_quota::record_quota_exhausted(state, "chat send");
+            }
+            Err(failure.message)
+        }
+    }
+}
+
+/// A failed send: the user-facing message, and whether it was the shared
+/// quota (so the caller can set the breaker).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct YouTubeSendFailure {
+    pub message: String,
+    pub quota_exhausted: bool,
+}
+
+impl From<String> for YouTubeSendFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            quota_exhausted: false,
+        }
+    }
+}
+
+async fn send_youtube_chat_message_classified(
+    client: &reqwest::Client,
+    api_base_url: Option<&str>,
+    access_token: &str,
+    live_chat_id: &str,
+    text: &str,
+) -> Result<ProviderSendReceipt, YouTubeSendFailure> {
+    let base = crate::youtube_quota::youtube_api_base_url(api_base_url);
     let response = client
         .post(format!(
             "{}{LIVE_CHAT_MESSAGES_PATH}",
@@ -135,6 +219,28 @@ fn classify_youtube_send_error(
     status: reqwest::StatusCode,
     body: Option<&Value>,
     retry_after: Option<&str>,
+) -> YouTubeSendFailure {
+    let (reason, domain) = body
+        .map(crate::youtube_quota::error_reason_and_domain)
+        .unwrap_or((None, None));
+    if crate::youtube_quota::classify_youtube_api_error(
+        status.as_u16(),
+        reason.as_deref(),
+        domain.as_deref(),
+    ) == crate::youtube_quota::YouTubeApiErrorClass::QuotaExhausted
+    {
+        return YouTubeSendFailure {
+            message: crate::youtube_quota::SEND_PAUSED_MESSAGE.to_string(),
+            quota_exhausted: true,
+        };
+    }
+    classify_youtube_send_error_message(status, body, retry_after).into()
+}
+
+fn classify_youtube_send_error_message(
+    status: reqwest::StatusCode,
+    body: Option<&Value>,
+    retry_after: Option<&str>,
 ) -> String {
     let provider_code = body
         .and_then(|body| body.pointer("/error/errors/0/reason"))
@@ -163,15 +269,10 @@ fn classify_youtube_send_error(
         {
             "YouTube live chat has ended for this broadcast.".to_string()
         }
-        403 if normalized_code.contains("quota")
-            || normalized_code.contains("ratelimit")
-            || normalized_message.contains("quota")
+        403 if normalized_code.contains("ratelimit")
             || normalized_message.contains("rate limit") =>
         {
-            format!(
-                "YouTube rate-limited or exhausted quota for the send{}.",
-                retry_suffix()
-            )
+            format!("YouTube rate-limited the send{}.", retry_suffix())
         }
         403 if matches!(
             normalized_code.as_str(),
@@ -196,9 +297,11 @@ fn classify_youtube_send_error(
     }
 }
 
-/// Which `liveChatMessages` endpoint a request targets.
+/// Which `liveChatMessages` endpoint a request targets. The connector uses
+/// `List`; `StreamList` is the S5 path and only its URL is built today.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum YouTubeChatTransport {
+    #[cfg_attr(not(test), allow(dead_code))]
     StreamList,
     List,
 }
@@ -472,7 +575,13 @@ struct YouTubeChatPage {
 enum YouTubeChatErrorKind {
     Disabled,
     Ended,
+    /// Too fast: back off, keep polling.
     RateLimited,
+    /// The project's daily quota is used up (plan 094): park through the
+    /// shared breaker until the reset, then resume from the page token.
+    QuotaExhausted,
+    /// Another 403: permissions, not "chat disabled".
+    Forbidden,
     InvalidPageToken,
     AuthExpired,
     Transient,
@@ -624,10 +733,7 @@ fn normalize_page(
             .items
             .iter()
             .any(|item| item.snippet.message_type.as_deref() == Some("chatEndedEvent"));
-    let polling_interval_ms = response
-        .polling_interval_millis
-        .unwrap_or(DEFAULT_POLLING_INTERVAL_MS)
-        .max(MIN_POLLING_INTERVAL_MS);
+    let polling_interval_ms = next_poll_delay_ms(response.polling_interval_millis, 0);
     let messages = response
         .items
         .iter()
@@ -641,28 +747,61 @@ fn normalize_page(
     }
 }
 
-/// Map an HTTP status + YouTube error `reason` to a reaction. 403/404/quota are provider
-/// statuses, not crashes — the stream keeps running even when chat cannot.
-fn classify_status(status: u16, reason: Option<&str>) -> YouTubeChatErrorKind {
-    match status {
-        401 => YouTubeChatErrorKind::AuthExpired,
-        403 => match reason {
+/// The delay before the next `list` poll (plan 094, D1). The server's
+/// `pollingIntervalMillis` is honoured when larger than the floor; after
+/// [`IDLE_EMPTY_PAGES`] empty pages in a row the poll stretches to
+/// [`IDLE_POLLING_INTERVAL_MS`], and snaps back on the next message.
+pub fn next_poll_delay_ms(server_interval_ms: Option<u64>, empty_pages_in_a_row: u32) -> u64 {
+    next_poll_delay_ms_with_floor(
+        server_interval_ms,
+        empty_pages_in_a_row,
+        MIN_POLLING_INTERVAL_MS,
+    )
+}
+
+/// The same with the remote `minPollMs` floor (plan 094, S7): never below the
+/// compiled 5 s floor, and the idle stretch never below the remote floor.
+pub fn next_poll_delay_ms_with_floor(
+    server_interval_ms: Option<u64>,
+    empty_pages_in_a_row: u32,
+    floor_ms: u64,
+) -> u64 {
+    let floor_ms = floor_ms.max(MIN_POLLING_INTERVAL_MS);
+    let floor = if empty_pages_in_a_row >= IDLE_EMPTY_PAGES {
+        IDLE_POLLING_INTERVAL_MS.max(floor_ms)
+    } else {
+        floor_ms
+    };
+    server_interval_ms
+        .unwrap_or(DEFAULT_POLLING_INTERVAL_MS)
+        .max(floor)
+}
+
+/// Map an HTTP status + YouTube error `reason`/`domain` to a reaction. 403/404/quota are
+/// provider statuses, not crashes — the stream keeps running even when chat cannot.
+fn classify_status(
+    status: u16,
+    reason: Option<&str>,
+    domain: Option<&str>,
+) -> YouTubeChatErrorKind {
+    use crate::youtube_quota::YouTubeApiErrorClass;
+    match crate::youtube_quota::classify_youtube_api_error(status, reason, domain) {
+        YouTubeApiErrorClass::QuotaExhausted => YouTubeChatErrorKind::QuotaExhausted,
+        YouTubeApiErrorClass::RateLimited => YouTubeChatErrorKind::RateLimited,
+        YouTubeApiErrorClass::AuthExpired if status == 401 => YouTubeChatErrorKind::AuthExpired,
+        YouTubeApiErrorClass::AuthExpired | YouTubeApiErrorClass::Forbidden => match reason {
             Some("liveChatDisabled") => YouTubeChatErrorKind::Disabled,
             Some("liveChatEnded") => YouTubeChatErrorKind::Ended,
-            Some("rateLimitExceeded") | Some("quotaExceeded") | Some("userRateLimitExceeded") => {
-                YouTubeChatErrorKind::RateLimited
-            }
-            _ => YouTubeChatErrorKind::Disabled,
+            _ => YouTubeChatErrorKind::Forbidden,
         },
-        400 => match reason {
+        YouTubeApiErrorClass::BadRequest => match reason {
             Some("pageTokenInvalid") | Some("invalidPageToken") => {
                 YouTubeChatErrorKind::InvalidPageToken
             }
             _ => YouTubeChatErrorKind::Transient,
         },
-        404 => YouTubeChatErrorKind::Ended,
-        429 => YouTubeChatErrorKind::RateLimited,
-        _ => YouTubeChatErrorKind::Transient,
+        YouTubeApiErrorClass::NotFound => YouTubeChatErrorKind::Ended,
+        YouTubeApiErrorClass::Transient => YouTubeChatErrorKind::Transient,
     }
 }
 
@@ -685,6 +824,16 @@ fn provider_reaction(
             LiveChatProviderConnectionState::Reconnecting,
             "YouTube live chat is rate limited; backing off.",
             false,
+        ),
+        YouTubeChatErrorKind::QuotaExhausted => (
+            LiveChatProviderConnectionState::Waiting,
+            crate::youtube_quota::CHAT_PAUSED_MESSAGE,
+            false,
+        ),
+        YouTubeChatErrorKind::Forbidden => (
+            LiveChatProviderConnectionState::Failed,
+            "YouTube refused live chat for this account. Check the channel's live chat permissions, or reconnect YouTube.",
+            true,
         ),
         YouTubeChatErrorKind::InvalidPageToken => (
             LiveChatProviderConnectionState::Reconnecting,
@@ -727,15 +876,12 @@ fn chat_messages_url(
     Ok(url)
 }
 
-async fn extract_error_reason(response: reqwest::Response) -> Option<String> {
-    let body = response.json::<Value>().await.ok()?;
-    body.get("error")?
-        .get("errors")?
-        .as_array()?
-        .first()?
-        .get("reason")?
-        .as_str()
-        .map(ToOwned::to_owned)
+/// `(reason, domain)` of Google's error envelope; `(None, None)` for HTML bodies.
+async fn extract_error_reason(response: reqwest::Response) -> (Option<String>, Option<String>) {
+    match response.json::<Value>().await {
+        Ok(body) => crate::youtube_quota::error_reason_and_domain(&body),
+        Err(_) => (None, None),
+    }
 }
 
 async fn fetch_chat_page(
@@ -761,10 +907,11 @@ async fn fetch_chat_page(
             .await
             .map_err(|_| FetchError::Network)
     } else {
-        let reason = extract_error_reason(response).await;
+        let (reason, domain) = extract_error_reason(response).await;
         Err(FetchError::Api(classify_status(
             status.as_u16(),
             reason.as_deref(),
+            domain.as_deref(),
         )))
     }
 }
@@ -785,14 +932,23 @@ pub async fn resolve_live_chat_id(
     url.query_pairs_mut()
         .append_pair("part", "snippet")
         .append_pair("id", broadcast_id);
-    let response: LiveBroadcastListResponse = client
+    let response = client
         .get(url)
         .bearer_auth(access_token)
         .send()
         .await
-        .context("Could not resolve YouTube live chat id.")?
-        .error_for_status()
-        .context("YouTube broadcast lookup failed.")?
+        .context("Could not resolve YouTube live chat id.")?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(crate::youtube_quota::YouTubeApiError::from_body(
+            "YouTube broadcast lookup failed",
+            status,
+            &body,
+        )
+        .into());
+    }
+    let response: LiveBroadcastListResponse = response
         .json()
         .await
         .context("Could not parse YouTube broadcast lookup.")?;
@@ -814,24 +970,80 @@ pub async fn run_youtube_chat_connector(
     config: YouTubeChatConfig,
 ) {
     let client = reqwest::Client::new();
-    let base_url = config
-        .api_base_url
-        .clone()
-        .unwrap_or_else(|| YOUTUBE_API_BASE_URL.to_string());
+    let base_url = crate::youtube_quota::youtube_api_base_url(config.api_base_url.as_deref());
     let target_id = config.target_id.clone();
     let mut token = crate::session_token::SessionToken::new(
         config.access_token.clone(),
         config.token_source.clone(),
     );
 
+    // Park while the remote `chatTransport: off` flag is set (plan 094, S7):
+    // Waiting with a clear message, no request, back by itself on the next
+    // flag refresh.
+    let park_while_off = || {
+        let state = state.clone();
+        let session_id = session_id.clone();
+        let target_id = target_id.clone();
+        async move {
+            if crate::youtube_quota::chat_switched_off(&state) {
+                set_provider_and_emit(
+                    &state,
+                    &session_id,
+                    session_generation,
+                    StreamPlatform::Youtube,
+                    target_id.as_deref(),
+                    LiveChatProviderConnectionState::Waiting,
+                    crate::youtube_quota::CHAT_OFF_MESSAGE,
+                )
+                .await;
+                crate::youtube_quota::wait_while_chat_off(&state).await;
+                return true;
+            }
+            false
+        }
+    };
+    // Park while the shared breaker is set (plan 094): chat says it is waiting
+    // and until when, spends nothing, and comes back by itself.
+    let park = |message: &'static str| {
+        let state = state.clone();
+        let session_id = session_id.clone();
+        let target_id = target_id.clone();
+        async move {
+            if let Some(until) = crate::youtube_quota::paused_until(&state) {
+                crate::live_chat::set_provider_waiting_and_emit(
+                    &state,
+                    &session_id,
+                    session_generation,
+                    StreamPlatform::Youtube,
+                    target_id.as_deref(),
+                    message,
+                    &until.to_rfc3339(),
+                )
+                .await;
+                crate::youtube_quota::wait_until_resumed(&state).await;
+            }
+        }
+    };
+
     let resolved = match config.live_chat_id.clone() {
         Some(id) => Some(id),
         None => match &config.broadcast_id {
-            Some(broadcast_id) => {
+            Some(broadcast_id) => loop {
+                park_while_off().await;
+                park(crate::youtube_quota::CHAT_PAUSED_MESSAGE).await;
                 let access_token = token.ensure_fresh(&state, &client).await.to_string();
+                crate::youtube_quota::record_call(
+                    &state,
+                    crate::youtube_quota::YouTubeEndpoint::LiveBroadcastsList,
+                );
                 match resolve_live_chat_id(&client, &base_url, &access_token, broadcast_id).await {
-                    Ok(live_chat_id) => live_chat_id,
+                    Ok(live_chat_id) => break live_chat_id,
                     Err(error) => {
+                        if crate::youtube_quota::note_error(&state, "chat id lookup", &error)
+                            .is_some()
+                        {
+                            continue;
+                        }
                         set_provider_and_emit(
                             &state,
                             &session_id,
@@ -845,7 +1057,7 @@ pub async fn run_youtube_chat_connector(
                         return;
                     }
                 }
-            }
+            },
             None => None,
         },
     };
@@ -883,16 +1095,33 @@ pub async fn run_youtube_chat_connector(
     )
     .await;
 
-    let mut transport = YouTubeChatTransport::StreamList;
+    // S5 replaces this with a real streamList reader. Until then the transport
+    // is fixed: no error ever flips it (plan 094, S1 item 6).
+    let transport = YouTubeChatTransport::List;
     let mut page_token: Option<String> = None;
     let mut backoff_ms = MIN_POLLING_INTERVAL_MS;
+    let mut empty_pages_in_a_row: u32 = 0;
     let mut connected = false;
     // One renewal per refusal: a second refusal right after it means the
     // account itself must be reconnected (plan 055, B2).
     let mut renewed_since_success = false;
 
     loop {
+        if park_while_off().await {
+            connected = false;
+            continue;
+        }
+        if crate::youtube_quota::paused_until(&state).is_some() {
+            park(crate::youtube_quota::CHAT_PAUSED_MESSAGE).await;
+            // Resumed: the page token still points at the next unseen page.
+            connected = false;
+            continue;
+        }
         let access_token = token.ensure_fresh(&state, &client).await.to_string();
+        crate::youtube_quota::record_call(
+            &state,
+            crate::youtube_quota::YouTubeEndpoint::LiveChatMessagesList,
+        );
         match fetch_chat_page(
             &client,
             &base_url,
@@ -906,6 +1135,7 @@ pub async fn run_youtube_chat_connector(
             Ok(response) => {
                 renewed_since_success = false;
                 let now = chrono::Utc::now().to_rfc3339();
+                let server_interval_ms = response.polling_interval_millis;
                 let page = normalize_page(response, &session_id, target_id.as_deref(), &now);
                 if !connected {
                     connected = true;
@@ -920,6 +1150,16 @@ pub async fn run_youtube_chat_connector(
                     )
                     .await;
                 }
+                if page.messages.is_empty() {
+                    empty_pages_in_a_row = empty_pages_in_a_row.saturating_add(1);
+                } else {
+                    empty_pages_in_a_row = 0;
+                }
+                let delay_ms = next_poll_delay_ms_with_floor(
+                    server_interval_ms,
+                    empty_pages_in_a_row,
+                    crate::youtube_quota::chat_poll_floor_ms(&state),
+                );
                 if let Err(error) =
                     try_deliver_messages(&state, session_generation, page.messages).await
                 {
@@ -941,7 +1181,7 @@ pub async fn run_youtube_chat_connector(
                     // Do not advance the provider cursor past a page that was
                     // rejected by durable persistence. The next poll requests
                     // the same page and the restored de-dup state accepts it.
-                    sleep(Duration::from_millis(page.polling_interval_ms)).await;
+                    sleep(Duration::from_millis(delay_ms)).await;
                     continue;
                 }
                 page_token = page.next_page_token;
@@ -959,13 +1199,21 @@ pub async fn run_youtube_chat_connector(
                     .await;
                     return;
                 }
-                sleep(Duration::from_millis(page.polling_interval_ms)).await;
+                sleep(Duration::from_millis(delay_ms)).await;
             }
             Err(error) => {
                 let kind = match error {
                     FetchError::Api(kind) => kind,
                     FetchError::Network => YouTubeChatErrorKind::Transient,
                 };
+                if kind == YouTubeChatErrorKind::QuotaExhausted {
+                    // Set the breaker for every YouTube caller, then park. The
+                    // page token is kept: the reader resumes where it stopped.
+                    crate::youtube_quota::record_quota_exhausted(&state, "chat read");
+                    park(crate::youtube_quota::CHAT_PAUSED_MESSAGE).await;
+                    connected = false;
+                    continue;
+                }
                 if kind == YouTubeChatErrorKind::AuthExpired {
                     if !renewed_since_success
                         && token.renew_after_refusal(&state, &client).await.is_ok()
@@ -1001,10 +1249,6 @@ pub async fn run_youtube_chat_connector(
                 }
                 if kind == YouTubeChatErrorKind::InvalidPageToken {
                     page_token = None;
-                }
-                // streamList may be unavailable for this broadcast — drop to list polling.
-                if transport == YouTubeChatTransport::StreamList {
-                    transport = YouTubeChatTransport::List;
                 }
                 connected = false;
                 sleep(Duration::from_millis(backoff_ms)).await;
@@ -1283,9 +1527,10 @@ mod tests {
         });
         let error = classify_youtube_send_error(StatusCode::NOT_FOUND, Some(&body), None);
         assert_eq!(
-            error,
+            error.message,
             "YouTube live chat isn't available for this broadcast (it may have ended)."
         );
+        assert!(!error.quota_exhausted);
     }
 
     #[test]
@@ -1293,7 +1538,7 @@ mod tests {
         // A non-JSON 404 is Google saying the route does not exist (our bug),
         // not a missing chat; keep the raw status so it stays diagnosable.
         let error = classify_youtube_send_error(StatusCode::NOT_FOUND, None, None);
-        assert_eq!(error, "YouTube send failed (404 Not Found).");
+        assert_eq!(error.message, "YouTube send failed (404 Not Found).");
     }
 
     #[tokio::test]
@@ -1376,7 +1621,7 @@ mod tests {
             }
         });
         assert_eq!(
-            classify_youtube_send_error(StatusCode::FORBIDDEN, Some(&disabled), None),
+            classify_youtube_send_error(StatusCode::FORBIDDEN, Some(&disabled), None).message,
             "YouTube live chat is disabled for this broadcast."
         );
 
@@ -1387,20 +1632,35 @@ mod tests {
             }
         });
         assert_eq!(
-            classify_youtube_send_error(StatusCode::FORBIDDEN, Some(&ended), None),
+            classify_youtube_send_error(StatusCode::FORBIDDEN, Some(&ended), None).message,
             "YouTube live chat has ended for this broadcast."
         );
 
         let quota = json!({
             "error": {
                 "message": "Quota exhausted.",
-                "errors": [{ "reason": "quotaExceeded" }]
+                "errors": [{ "reason": "quotaExceeded", "domain": "youtube.quota" }]
             }
         });
         let quota_error =
             classify_youtube_send_error(StatusCode::FORBIDDEN, Some(&quota), Some("30"));
-        assert!(quota_error.contains("quota"));
-        assert!(quota_error.contains("retry after 30s"));
+        assert!(quota_error.quota_exhausted);
+        assert_eq!(
+            quota_error.message,
+            crate::youtube_quota::SEND_PAUSED_MESSAGE
+        );
+
+        let rate = json!({
+            "error": {
+                "message": "Too fast.",
+                "errors": [{ "reason": "rateLimitExceeded", "domain": "usageLimits" }]
+            }
+        });
+        let rate_error =
+            classify_youtube_send_error(StatusCode::FORBIDDEN, Some(&rate), Some("30"));
+        assert!(!rate_error.quota_exhausted);
+        assert!(rate_error.message.contains("rate-limited"));
+        assert!(rate_error.message.contains("retry after 30s"));
 
         let auth = json!({
             "error": {
@@ -1410,12 +1670,13 @@ mod tests {
         });
         assert!(
             classify_youtube_send_error(StatusCode::FORBIDDEN, Some(&auth), None)
+                .message
                 .contains("Reconnect YouTube")
         );
 
         let unknown = json!({ "error": { "message": "Broadcast owner disabled posting." } });
         let unknown_error =
-            classify_youtube_send_error(StatusCode::FORBIDDEN, Some(&unknown), None);
+            classify_youtube_send_error(StatusCode::FORBIDDEN, Some(&unknown), None).message;
         assert!(unknown_error.contains("Broadcast owner disabled posting"));
         assert!(!unknown_error.contains("Reconnect YouTube"));
     }
@@ -1436,10 +1697,38 @@ mod tests {
         assert_eq!(message.event_type, LiveChatEventType::Message);
         assert_eq!(message.author_roles, vec!["moderator".to_string()]);
         assert!(!message.is_deleted);
-        // The server poll interval is preserved, and the resume token is threaded out.
-        assert_eq!(page.polling_interval_ms, 3000);
+        // The 5 s floor wins over the server's 3 s (plan 094, D1), and the
+        // resume token is threaded out.
+        assert_eq!(page.polling_interval_ms, MIN_POLLING_INTERVAL_MS);
         assert_eq!(page.next_page_token.as_deref(), Some("tok-2"));
         assert!(!page.ended);
+    }
+
+    /// Plan 095, S1: the streamer's own message is the host on every platform.
+    #[test]
+    fn the_chat_owner_is_marked_owner() {
+        let response: LiveChatMessagesResponse = serde_json::from_value(json!({
+            "items": [{
+                "id": "own-1",
+                "snippet": {
+                    "type": "textMessageEvent",
+                    "displayMessage": "hi chat",
+                    "textMessageDetails": { "messageText": "hi chat" }
+                },
+                "authorDetails": {
+                    "channelId": "UC-host",
+                    "displayName": "Host",
+                    "isChatOwner": true,
+                    "isChatSponsor": true
+                }
+            }]
+        }))
+        .unwrap();
+        let page = normalize_page(response, "s1", None, "now");
+        assert_eq!(
+            page.messages[0].author_roles,
+            vec!["owner".to_string(), "member".to_string()]
+        );
     }
 
     #[test]
@@ -1550,30 +1839,59 @@ mod tests {
     #[test]
     fn classifies_disabled_ended_quota_token_and_auth_errors() {
         assert_eq!(
-            classify_status(403, Some("liveChatDisabled")),
+            classify_status(403, Some("liveChatDisabled"), Some("youtube.liveChat")),
             YouTubeChatErrorKind::Disabled
         );
         assert_eq!(
-            classify_status(403, Some("liveChatEnded")),
+            classify_status(403, Some("liveChatEnded"), None),
             YouTubeChatErrorKind::Ended
         );
         assert_eq!(
-            classify_status(403, Some("rateLimitExceeded")),
+            classify_status(403, Some("rateLimitExceeded"), Some("usageLimits")),
             YouTubeChatErrorKind::RateLimited
         );
         assert_eq!(
-            classify_status(429, None),
+            classify_status(403, Some("userRateLimitExceeded"), None),
+            YouTubeChatErrorKind::RateLimited
+        );
+        // Plan 094: quota is its own kind, never "too fast" and never "disabled".
+        assert_eq!(
+            classify_status(403, Some("quotaExceeded"), Some("youtube.quota")),
+            YouTubeChatErrorKind::QuotaExhausted
+        );
+        assert_eq!(
+            classify_status(403, Some("dailyLimitExceeded"), None),
+            YouTubeChatErrorKind::QuotaExhausted
+        );
+        assert_eq!(
+            classify_status(403, Some("brandNewReason"), Some("youtube.quota")),
+            YouTubeChatErrorKind::QuotaExhausted
+        );
+        // Any other 403 is a permissions problem, not "chat disabled".
+        assert_eq!(
+            classify_status(403, Some("forbidden"), Some("global")),
+            YouTubeChatErrorKind::Forbidden
+        );
+        assert_eq!(
+            classify_status(403, None, None),
+            YouTubeChatErrorKind::Forbidden
+        );
+        assert_eq!(
+            classify_status(429, None, None),
             YouTubeChatErrorKind::RateLimited
         );
         assert_eq!(
-            classify_status(400, Some("pageTokenInvalid")),
+            classify_status(400, Some("pageTokenInvalid"), None),
             YouTubeChatErrorKind::InvalidPageToken
         );
         assert_eq!(
-            classify_status(401, None),
+            classify_status(401, None, None),
             YouTubeChatErrorKind::AuthExpired
         );
-        assert_eq!(classify_status(503, None), YouTubeChatErrorKind::Transient);
+        assert_eq!(
+            classify_status(503, None, None),
+            YouTubeChatErrorKind::Transient
+        );
     }
 
     #[test]
@@ -1581,9 +1899,54 @@ mod tests {
         assert!(provider_reaction(YouTubeChatErrorKind::Disabled).2);
         assert!(provider_reaction(YouTubeChatErrorKind::Ended).2);
         assert!(provider_reaction(YouTubeChatErrorKind::AuthExpired).2);
+        assert!(provider_reaction(YouTubeChatErrorKind::Forbidden).2);
         assert!(!provider_reaction(YouTubeChatErrorKind::RateLimited).2);
         assert!(!provider_reaction(YouTubeChatErrorKind::Transient).2);
         assert!(!provider_reaction(YouTubeChatErrorKind::InvalidPageToken).2);
+        let (state, message, stop) = provider_reaction(YouTubeChatErrorKind::QuotaExhausted);
+        assert_eq!(state, LiveChatProviderConnectionState::Waiting);
+        assert_eq!(message, crate::youtube_quota::CHAT_PAUSED_MESSAGE);
+        assert!(!stop);
+        assert!(
+            !provider_reaction(YouTubeChatErrorKind::Forbidden)
+                .1
+                .contains("disabled")
+        );
+    }
+
+    #[test]
+    fn poll_floor_is_five_seconds_and_stretches_after_six_empty_pages() {
+        // The server asks for 1 s; the floor wins.
+        assert_eq!(next_poll_delay_ms(Some(1_000), 0), 5_000);
+        assert_eq!(next_poll_delay_ms(None, 0), 5_000);
+        // A larger server interval is honoured.
+        assert_eq!(next_poll_delay_ms(Some(7_500), 0), 7_500);
+        // Empty pages stretch the poll after six in a row, and a message snaps it back.
+        let sequence: Vec<u64> = (0..8u32)
+            .map(|empty_pages| next_poll_delay_ms(Some(1_000), empty_pages))
+            .collect();
+        assert_eq!(
+            sequence,
+            vec![5_000, 5_000, 5_000, 5_000, 5_000, 5_000, 10_000, 10_000]
+        );
+        assert_eq!(next_poll_delay_ms(Some(1_000), 0), 5_000, "snap back");
+        assert_eq!(next_poll_delay_ms(Some(12_000), IDLE_EMPTY_PAGES), 12_000);
+        // Plan 094 (S7): a remote floor only ever slows the reader down.
+        assert_eq!(next_poll_delay_ms_with_floor(Some(1_000), 0, 8_000), 8_000);
+        assert_eq!(next_poll_delay_ms_with_floor(Some(9_000), 0, 8_000), 9_000);
+        assert_eq!(
+            next_poll_delay_ms_with_floor(Some(1_000), 0, 10),
+            5_000,
+            "never below 5 s"
+        );
+        assert_eq!(
+            next_poll_delay_ms_with_floor(Some(1_000), IDLE_EMPTY_PAGES, 8_000),
+            10_000
+        );
+        assert_eq!(
+            next_poll_delay_ms_with_floor(Some(1_000), IDLE_EMPTY_PAGES, 15_000),
+            15_000
+        );
     }
 
     #[test]
@@ -1722,6 +2085,7 @@ mod tests {
             last_connected_at: None,
             last_message_at: None,
             last_error: None,
+            retry_at: None,
         };
         let session_generation = {
             let mut coordinator = state.live_chat.lock().await;
@@ -1930,5 +2294,189 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error, FetchError::Api(YouTubeChatErrorKind::Disabled));
+    }
+
+    /// Plan 094: page 1 flows, page 2 answers `quotaExceeded`. The reader
+    /// parks as `Waiting` with `retryAt`, spends nothing while paused, and
+    /// resumes from its page token when the breaker clears.
+    #[derive(Clone)]
+    struct QuotaYouTube {
+        hits: Arc<Mutex<Vec<String>>>,
+    }
+
+    async fn quota_messages(
+        State(server): State<QuotaYouTube>,
+        OriginalUri(uri): OriginalUri,
+    ) -> (StatusCode, Json<Value>) {
+        let query = uri.query().unwrap_or_default().to_string();
+        let served = {
+            let mut hits = server.hits.lock().unwrap();
+            hits.push(query.clone());
+            hits.len()
+        };
+        match served {
+            1 => (
+                StatusCode::OK,
+                Json(json!({
+                    "nextPageToken": "page-1",
+                    "pollingIntervalMillis": 1000,
+                    "items": [text_item("m1", "message 1")]
+                })),
+            ),
+            2 => (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": { "errors": [{
+                    "reason": "quotaExceeded", "domain": "youtube.quota"
+                }] } })),
+            ),
+            _ => (
+                StatusCode::OK,
+                Json(json!({
+                    "nextPageToken": "page-2",
+                    "pollingIntervalMillis": 1000,
+                    "items": [text_item("m2", "message 2")]
+                })),
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_quota_refusal_parks_chat_as_waiting_and_resumes_from_its_page_token() {
+        let server = QuotaYouTube {
+            hits: Arc::new(Mutex::new(Vec::new())),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route(LIVE_CHAT_MESSAGES_PATH, get(quota_messages))
+            .with_state(server.clone());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let state = expiry_state();
+        let connector = start_expiring_connector(
+            &state,
+            format!("http://{address}"),
+            crate::session_token::SessionTokenSource::scripted(vec![]),
+        )
+        .await;
+
+        // Page 1 arrives, then (after the 5 s floor) page 2 is the quota refusal.
+        let snapshot = wait_for_provider_within(&state, Duration::from_secs(12), |snapshot| {
+            snapshot.providers[0].state == LiveChatProviderConnectionState::Waiting
+        })
+        .await;
+        let provider = &snapshot.providers[0];
+        assert_eq!(provider.message, crate::youtube_quota::CHAT_PAUSED_MESSAGE);
+        let paused_until = crate::youtube_quota::paused_until(&state).expect("breaker set");
+        assert_eq!(
+            provider.retry_at.as_deref(),
+            Some(paused_until.to_rfc3339().as_str())
+        );
+        assert_eq!(snapshot.messages.len(), 1);
+        assert_eq!(server.hits.lock().unwrap().len(), 2);
+
+        // Parked: no request goes out while the breaker is set.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            server.hits.lock().unwrap().len(),
+            2,
+            "zero requests while paused"
+        );
+
+        // The breaker clears (the probe would do this): chat resumes with the
+        // page token it held, with no click.
+        crate::youtube_quota::clear_for_tests(&state);
+        let snapshot = wait_for_provider(&state, |snapshot| snapshot.messages.len() >= 2).await;
+        connector.abort();
+        assert_eq!(snapshot.messages[1].message_text, "message 2");
+        assert_eq!(
+            snapshot.providers[0].state,
+            LiveChatProviderConnectionState::Connected
+        );
+        assert_eq!(snapshot.providers[0].retry_at, None);
+        let hits = server.hits.lock().unwrap().clone();
+        assert_eq!(hits.len(), 3);
+        assert!(hits[1].contains("pageToken=page-1"), "{hits:?}");
+        assert!(
+            hits[2].contains("pageToken=page-1"),
+            "resumed from the held token: {hits:?}"
+        );
+        let usage = crate::youtube_quota::usage_snapshot(&state);
+        assert_eq!(usage.total_calls, 3);
+        assert_eq!(usage.total_units, 3);
+    }
+
+    async fn wait_for_provider_within(
+        state: &AppState,
+        within: Duration,
+        done: impl Fn(&crate::live_chat::LiveChatSnapshot) -> bool,
+    ) -> crate::live_chat::LiveChatSnapshot {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            let snapshot = crate::live_chat::current_status(state).await;
+            if done(&snapshot) {
+                return snapshot;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out: {snapshot:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_paused_breaker_refuses_the_send_without_a_request() {
+        let captured = Arc::new(Mutex::new(None));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .fallback(capture_send)
+            .with_state(captured.clone());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let state = expiry_state();
+        crate::youtube_quota::record_quota_exhausted(&state, "test");
+        let error = send_youtube_chat_message_guarded(
+            &state,
+            &reqwest::Client::new(),
+            Some(&format!("http://{address}")),
+            "token-1",
+            "chat-1",
+            "hello",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, crate::youtube_quota::SEND_PAUSED_MESSAGE);
+        assert!(
+            captured.lock().unwrap().is_none(),
+            "no request while paused"
+        );
+        assert_eq!(crate::youtube_quota::usage_snapshot(&state).total_calls, 0);
+    }
+
+    #[tokio::test]
+    async fn a_quota_refusal_on_send_sets_the_breaker() {
+        let base = spawn_send_server(
+            StatusCode::FORBIDDEN,
+            json!({ "error": { "errors": [{ "reason": "quotaExceeded", "domain": "youtube.quota" }] } }),
+        )
+        .await;
+        let state = expiry_state();
+        let error = send_youtube_chat_message_guarded(
+            &state,
+            &reqwest::Client::new(),
+            Some(&base),
+            "token-1",
+            "chat-1",
+            "hello",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, crate::youtube_quota::SEND_PAUSED_MESSAGE);
+        assert!(crate::youtube_quota::paused_until(&state).is_some());
+        assert_eq!(crate::youtube_quota::usage_snapshot(&state).sends.units, 50);
     }
 }

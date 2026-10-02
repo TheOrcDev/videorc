@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react'
-import { toast } from 'sonner'
+import { toast } from '@/lib/toast'
 import { loadJson } from '@/lib/capture'
 import {
   hydrateSceneLibrary,

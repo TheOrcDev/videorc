@@ -160,6 +160,8 @@ mod tests {
             account_connected: connected,
             retryable: false,
             received_at: "2026-09-26T00:00:00Z".to_string(),
+            reason: None,
+            retry_at: None,
         }
     }
 

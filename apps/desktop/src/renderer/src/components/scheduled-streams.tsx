@@ -1,5 +1,5 @@
 import { useRef, useState, type ReactElement, type ReactNode } from 'react'
-import { toast } from 'sonner'
+import { toast } from '@/lib/toast'
 import { CopyIcon, DeleteIcon, EditIcon, ExternalLinkIcon, LinkIcon } from '@/components/icons'
 import { useScheduledStreams } from '@/hooks/use-scheduled-streams'
 import { useStudioCore } from '@/hooks/use-studio'

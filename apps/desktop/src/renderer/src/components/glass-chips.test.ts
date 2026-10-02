@@ -116,6 +116,16 @@ describe('StatusBadge', () => {
     expect(classes).toContain('tone-destructive')
     expect(markup).not.toContain('glass-dot')
   })
+
+  it('tints an on-air session in the live tone (plan 095 S5)', () => {
+    const markup = render('live')
+    const classes = classOf(markup)
+    expect(classes).toContain('glass-chip-tinted')
+    expect(classes).toContain('tone-live')
+    expect(classes).not.toContain('tone-destructive')
+    expect(markup).not.toContain('glass-dot')
+    expect(markup).toContain('data-tone="live"')
+  })
 })
 
 describe('Kbd and StatusDot', () => {

@@ -40,9 +40,12 @@ const ffmpegPath =
 
 const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms))
 
+// Throws rather than exiting so `finally` still stops the app: process.exit
+// here left the dev app and its backend running after a failure.
 function fail(message) {
   console.error(`Linux portal capture smoke FAILED: ${message}`)
-  process.exit(1)
+  process.exitCode = 1
+  throw new Error(message)
 }
 
 if (process.platform !== 'linux') fail('this smoke only runs on Linux')
@@ -53,6 +56,9 @@ try {
     env: {
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
       VIDEORC_SMOKE_STATE_DIR: outputDirectory,
+      // The smoke owns the portal source. The renderer's own screen preview
+      // replaced the smoke's live session mid-check (ogre 2026-09-30).
+      VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW: '1',
       VIDEORC_LINUX_H264_ENCODER: 'openh264'
     },
     timeoutMs,
@@ -100,6 +106,14 @@ try {
     }
   )
   console.log(`[portal] preview.screen.start -> ${status.state}: ${status.message ?? ''}`)
+  // preview.screen.start answers after a bounded caller wait (#496). A
+  // portal session still negotiating, or waiting for the renderer's own
+  // preview session to retire, reports `starting`; poll until it settles.
+  const startingDeadline = startedAt + consentWaitMs
+  while (status.state === 'starting' && Date.now() < startingDeadline) {
+    await sleep(500)
+    status = await request(ws, timeoutMs, 'preview.screen.status')
+  }
   // Let a granted stream accumulate frames before judging it.
   const settleDeadline = Date.now() + 8000
   while (
@@ -146,7 +160,9 @@ try {
     `Linux portal capture smoke PASS (${assessment.outcome}); evidence in ${outputDirectory}`
   )
 } catch (error) {
-  fail(error?.stack ?? String(error))
+  // fail() already reported its own message; report anything else once.
+  if (process.exitCode !== 1) console.error(`Linux portal capture smoke FAILED: ${error?.stack ?? error}`)
+  process.exitCode = 1
 } finally {
   await stopApp()
 }

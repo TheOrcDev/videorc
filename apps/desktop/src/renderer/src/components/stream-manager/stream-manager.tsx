@@ -7,7 +7,7 @@ import {
   type ReactElement,
   type RefObject
 } from 'react'
-import { toast } from 'sonner'
+import { toast } from '@/lib/toast'
 
 import { CohostListenPrompt, CohostPane } from '@/components/cohost-pane'
 import { CohostListeningIndicator, CohostStatus } from '@/components/cohost-status'
@@ -129,15 +129,24 @@ function cohostTone(state: CohostState | null): StatusDotTone {
 function PaneLabel({
   label,
   unseen,
-  dot
+  dot,
+  onStream = false
 }: {
   label: string
   unseen: number
   dot?: StatusDotTone
+  /** Something only this pane shows is on stream (plan 095, D1). */
+  onStream?: boolean
 }): ReactElement {
   return (
     <span className="flex items-center gap-1.5">
       {dot ? <StatusDot tone={dot} /> : null}
+      {onStream ? (
+        <span className="flex" data-slot="pane-on-stream" title="On stream">
+          <StatusDot tone="good" />
+          <span className="sr-only">On stream:</span>
+        </span>
+      ) : null}
       {label}
       {unseen > 0 ? (
         <Badge
@@ -262,6 +271,10 @@ export function StreamManager({
 }: StreamManagerProps): ReactElement {
   const trafficLightGutter = useTrafficLightGutter()
   const messages = useMemo(() => sortMessagesChronological(snapshot.messages), [snapshot.messages])
+  // The message on stream now (plan 095, S2): the backend's live state when
+  // it has one. Chat, Activity and Orcle all read this one slot.
+  const liveHighlightId =
+    highlightState?.phase === 'live' ? (highlightState.messageId ?? null) : highlightedId
   const inHistory = viewMode?.kind === 'history'
   const live = !inHistory && Boolean(snapshot.sessionId)
   const mode = inHistory ? 'History' : live ? 'Live' : messages.length > 0 ? 'History' : 'Idle'
@@ -387,6 +400,12 @@ export function StreamManager({
   )
   const chatUnseen = useUnseen(chatCount, chatVisible)
   const activityUnseen = useUnseen(items.length, activityVisible)
+  // A follow on stream has no chat row to say so (plan 095, D1): while
+  // Activity sits behind a tab, its tab carries the success dot.
+  const activityOnStream =
+    !activityVisible &&
+    liveHighlightId !== null &&
+    messages.some((message) => message.id === liveHighlightId && message.eventType === 'follow')
   const orcleUnseen = useUnseen(shownCohostState?.questions.length ?? 0, orcleVisible)
 
   const mentionNames = useMemo(
@@ -511,7 +530,7 @@ export function StreamManager({
             expandSignal={cohostExpand}
             flash={cohostFlash}
             gate={cohostGate!}
-            highlightedMessageId={highlightedId}
+            highlightedMessageId={liveHighlightId}
             starting={cohostStarting}
             state={shownCohostState}
             onAnswered={(question) => onCohostAnswered?.(question)}
@@ -627,7 +646,7 @@ export function StreamManager({
                 <PaneLabel label="Chat" unseen={chatUnseen} />
               </TabsTrigger>
               <TabsTrigger value="activity">
-                <PaneLabel label="Activity" unseen={activityUnseen} />
+                <PaneLabel label="Activity" onStream={activityOnStream} unseen={activityUnseen} />
               </TabsTrigger>
               {cohostPresent ? (
                 <TabsTrigger value="orcle">
@@ -651,7 +670,7 @@ export function StreamManager({
           >
             <TabsList>
               <TabsTrigger value="activity">
-                <PaneLabel label="Activity" unseen={activityUnseen} />
+                <PaneLabel label="Activity" onStream={activityOnStream} unseen={activityUnseen} />
               </TabsTrigger>
               {cohostPresent ? (
                 <TabsTrigger value="orcle">
@@ -704,7 +723,11 @@ export function StreamManager({
         >
           <ActivityPane
             className="flex"
+            highlightApplyingId={highlightApplyingId}
+            highlightFailure={highlightFailure}
+            highlightState={highlightState}
             items={items}
+            liveHighlightId={liveHighlightId}
             nowMs={nowMs}
             audience={activityAudience}
             providers={snapshot.providers}

@@ -10,6 +10,7 @@ import {
   DEFAULT_COMMENT_HIGHLIGHT_ANCHOR,
   normalizeCommentHighlightAnchor
 } from './backend'
+import { CHAT_AVATAR_MAX_BYTES } from './chat-avatar-bytes'
 import {
   MAX_NOTES_TEXT_LENGTH,
   boundedPassthroughElectronEventChannels,
@@ -33,12 +34,12 @@ import {
 describe('Electron IPC contract', () => {
   it('maps every renderer-facing invoke channel to a real async API method', () => {
     expectTypeOf<ElectronInvokeMappingInvariant>().toEqualTypeOf<true>()
-    // 109: plan 071 added the Stream Manager Show who followed channel
-    // (plan 068 had added the mark-clip relay pair; plan 062 the shortcut
-    // recorder arm; plan 055 the dashboard push and get; plan 050 retired
-    // glass:wallpaper:get with the wallpaper underlay).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(109)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(109)
+    // 110: plan 095 added the highlight card's avatars:read (plan 071 had
+    // added the Stream Manager Show who followed channel; plan 068 the
+    // mark-clip relay pair; plan 062 the shortcut recorder arm; plan 055 the
+    // dashboard push and get; plan 050 retired glass:wallpaper:get).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(110)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(110)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -526,6 +527,26 @@ describe('Electron IPC contract', () => {
         { text: 'x'.repeat(MAX_NOTES_TEXT_LENGTH + 1) }
       ])
     ).toThrow(`at most ${MAX_NOTES_TEXT_LENGTH} characters`)
+  })
+})
+
+describe('cached chat image bytes IPC (plan 095)', () => {
+  it('returns null or bounded bytes, never another structured-clone value', () => {
+    const localUrl = 'videorc-asset://avatar/0123456789abcdef0123456789abcdef.png'
+    expect(validateElectronInvokeArgs('avatars:read', [localUrl])).toEqual([localUrl])
+    expect(() => validateElectronInvokeArgs('avatars:read', [''])).toThrow()
+    expect(validateElectronInvokeResult('avatars:read', null)).toBeNull()
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
+    expect(validateElectronInvokeResult('avatars:read', bytes)).toBe(bytes)
+    expect(() => validateElectronInvokeResult('avatars:read', new Uint8Array(0))).toThrow(
+      'image bytes'
+    )
+    expect(() =>
+      validateElectronInvokeResult('avatars:read', new Uint8Array(CHAT_AVATAR_MAX_BYTES + 1))
+    ).toThrow('image bytes')
+    expect(() => validateElectronInvokeResult('avatars:read', 'cG5n')).toThrow('image bytes')
+    expect(() => validateElectronInvokeResult('avatars:read', { length: 4 })).toThrow('image bytes')
+    expect(() => validateElectronInvokeResult('avatars:read', [0x89, 0x50])).toThrow('image bytes')
   })
 })
 

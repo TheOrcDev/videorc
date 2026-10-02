@@ -12,7 +12,7 @@ import {
   WarningIcon
 } from '@/components/icons'
 import { useState, type ComponentProps, type ReactElement } from 'react'
-import { toast } from 'sonner'
+import { toast } from '@/lib/toast'
 
 import { KebabMenu } from '@/components/kebab-menu'
 import { Gallery, PageHeader } from '@/components/page'

@@ -32,8 +32,18 @@ Installed from:
   (`lib/audio/*`, `use-audio-config`, `db-scale`) came out byte-identical to
   the plan 092 copies after Prettier.
 
-Once PR #2 is merged, audiocn.dev serves these files; check them against the
-site and record the merge commit here.
+PR #2 merged as audiocn `d3736de` (2026-10-02). Checked against audiocn.dev
+at that commit, after Prettier: every plan 093 file and every shared file is
+byte-identical. Upstream is ahead of the plan 092 copies in two ways, not
+adopted yet:
+
+- `level-meter` carries audiocn #4 (`42f863e`): `[overflow-anchor:none]` on
+  the root so animated meters never anchor a scrolling page, plus room for a
+  horizontal `LevelMeterScale` (Videorc renders no scale).
+- `lib/audio/types.ts` and `lib/audio/decibels.ts` each gained one leading
+  doc comment.
+
+Adopting them is an ordinary update (see Updating).
 
 ## Rules
 

@@ -76,6 +76,13 @@ describe('avatarHostAllowed', () => {
     expect(avatarHostAllowed('http://yt3.ggpht.com/abc')).toBe(false)
   })
 
+  it("allows X's default avatars, which live on abs.twimg.com (plan 095)", () => {
+    expect(
+      avatarHostAllowed('https://abs.twimg.com/sticky/default_profile_images/default_profile.png')
+    ).toBe(true)
+    expect(avatarHostAllowed('https://abs.twimg.com.evil.example/a.png')).toBe(false)
+  })
+
   it('allows every Vercel Blob store the web may upload account avatars to', () => {
     // Parity with the web's isAccountAvatarBlobUrl: bare host or any subdomain.
     expect(avatarHostAllowed('https://blob.vercel-storage.com/avatars/u.png')).toBe(true)

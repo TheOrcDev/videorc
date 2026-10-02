@@ -71,7 +71,8 @@ export function formatCommentTime(iso: string): string {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
-function HighlightStatus({
+/** The on-stream badge, shared by chat and Activity rows (plan 095, S2). */
+export function HighlightStatus({
   status
 }: {
   status: CommentHighlightPresentation

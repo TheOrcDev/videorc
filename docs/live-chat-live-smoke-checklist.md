@@ -56,6 +56,27 @@ send-result honesty, highlight slot, and event protocol end to end over a real W
 - [ ] A YouTube destination on Manual RTMP has no broadcast to attach comments to; confirm its
       row says so instead of failing silently.
 
+YouTube quota (plan 094). Every install shares one Google Cloud project quota, so the reader
+polls `liveChatMessages.list` no faster than every 5 s (10 s after six empty pages; the remote
+`minPollMs` flag can only slow it), viewers poll every 60 s and subscribers every 120 s, and a
+per-install budget of 2,500 units a day sheds subscribers and thumbnails at 80%, viewers at
+95% and sends at 100%. A `quotaExceeded` answer anywhere pauses every YouTube call until
+midnight Pacific (09:00 CEST) and resumes on its own. The owner's lever is
+[`docs/youtube-service-flags.md`](youtube-service-flags.md). The automated drill is
+`pnpm smoke:youtube-quota` (fake API, part of `smoke:local-gates`); on a real account check:
+
+- [ ] While paused (set `youtube.pausedUntil` on the web, or wait for a real outage): the
+      Livestream page YouTube row, the Stream Manager status bar and the Comments destination
+      status all read "paused until <local time>", once, with no raw Google text and no toast
+      storm; the stream and the other platforms keep going.
+- [ ] Stop during the pause: one toast, then Record starts immediately. Go Live offers "Use
+      stream key" for the YouTube OAuth destination; Twitch/Kick/X/Custom go live.
+- [ ] Connect YouTube during the pause: exactly one toast ("Couldn't finish connecting
+      YouTube…"), no retries.
+- [ ] After the reset (or the flag is withdrawn): chat, viewers and subscribers come back with
+      no click; the session log has `youtube-api-usage` summaries every 10 minutes and one
+      `youtube-service-flags` line.
+
 ## Twitch OAuth live smoke (requires a Twitch account with chat read + write scopes)
 
 - [ ] Reconnect Twitch so the granted scopes include `user:read:chat` and `user:write:chat`;
@@ -106,7 +127,7 @@ OAuth with `events:subscribe` and `chat:write`.
       rate limiting messages, try again in a moment".
 - [ ] Follow the channel from the viewer account; a named follow row appears in the Stream
       Manager Activity and the Followers stat counts it (`delta-only`, no total).
-- [ ] The viewer count in the stats bar matches kick.com within one 30 s sample.
+- [ ] The viewer count in the stats bar matches kick.com within one 60 s sample.
 - [ ] Stop the stream; `GET https://api.kick.com/public/v1/events/subscriptions` with the
       account's token returns no subscriptions for the app.
 - [ ] Go live again, then Disconnect Kick; the subscriptions are gone again and the relay
