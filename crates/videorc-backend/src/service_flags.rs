@@ -158,8 +158,9 @@ impl YouTubeServiceFlags {
 #[derive(Debug, Deserialize)]
 struct WireDocument {
     version: serde_json::Value,
+    /// Judged below: an object becomes [`WireYouTube`], anything else is noted.
     #[serde(default)]
-    youtube: Option<WireYouTube>,
+    youtube: Option<serde_json::Value>,
 }
 
 /// Loose on purpose: every field optional, any JSON type accepted and judged
@@ -191,8 +192,14 @@ fn integer(value: &serde_json::Value) -> Option<i64> {
 /// Parse and clamp one document. `Err` means "fail open to compiled defaults"
 /// with the reason; the caller never trusts a partial read.
 pub fn parse_service_flags(body: &str, now: DateTime<Utc>) -> Result<YouTubeServiceFlags, String> {
-    let document: WireDocument = serde_json::from_str(body)
+    let value: serde_json::Value = serde_json::from_str(body)
         .map_err(|error| format!("service flags are not readable JSON: {error}"))?;
+    // serde would read a one-element array as the struct; only an object is a document.
+    if !value.is_object() {
+        return Err("service flags are not a JSON object".to_string());
+    }
+    let document: WireDocument = serde_json::from_value(value)
+        .map_err(|error| format!("service flags are not readable: {error}"))?;
     match integer(&document.version) {
         Some(version) if version as u64 == SERVICE_FLAGS_VERSION && version > 0 => {}
         Some(version) => {
@@ -208,8 +215,16 @@ pub fn parse_service_flags(body: &str, now: DateTime<Utc>) -> Result<YouTubeServ
         },
         ..YouTubeServiceFlags::default()
     };
-    let Some(youtube) = document.youtube else {
-        return Ok(flags);
+    let youtube = match document.youtube {
+        None | Some(serde_json::Value::Null) => return Ok(flags),
+        Some(value) if value.is_object() => serde_json::from_value::<WireYouTube>(value)
+            .map_err(|error| format!("service flags youtube block is not readable: {error}"))?,
+        Some(other) => {
+            flags.notes.push(format!(
+                "youtube {other} is not an object; keeping the defaults"
+            ));
+            return Ok(flags);
+        }
     };
 
     if let Some(value) = youtube.chat_transport {
@@ -529,7 +544,20 @@ mod tests {
         assert!(parse_service_flags(r#"{"version":2}"#, now()).is_err());
         assert!(parse_service_flags(r#"{"version":"1"}"#, now()).is_err());
         assert!(parse_service_flags(r#"{"version":0}"#, now()).is_err());
-        assert!(parse_service_flags(r#"[1]"#, now()).is_err());
+        assert!(
+            parse_service_flags(r#"[1]"#, now()).is_err(),
+            "an array is not a document"
+        );
+        assert!(parse_service_flags(r#"[1, {"minPollMs": 1}]"#, now()).is_err());
+        let not_an_object =
+            parse_service_flags(r#"{"version":1,"youtube":[5000]}"#, now()).unwrap();
+        assert!(not_an_object.is_default_behaviour());
+        assert_eq!(not_an_object.notes.len(), 1, "{:?}", not_an_object.notes);
+        assert!(
+            parse_service_flags(r#"{"version":1,"youtube":null}"#, now())
+                .unwrap()
+                .is_default_behaviour()
+        );
         let defaults = YouTubeServiceFlags::compiled("fail-open: test");
         assert!(defaults.is_default_behaviour());
         assert_eq!(defaults.source, ServiceFlagsSource::Compiled);

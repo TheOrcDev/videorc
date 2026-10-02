@@ -111,12 +111,16 @@ try {
   assert(prepared.serverUrl === `rtmp://127.0.0.1:${basePort}/live`, `ingest ${prepared.serverUrl}`)
   console.log(`[quota] prepared broadcast ${prepared.broadcastId} on the fake API`)
 
-  const outputAuthorization = await requestSmokeCommand(
-    smoke,
-    'authorize-smoke-resource',
-    { kind: 'output-directory', path: outputDirectory },
-    { timeoutMs }
-  )
+  // Output-directory capabilities are single-use: one per session.start.
+  const authorizeOutput = async () =>
+    (
+      await requestSmokeCommand(
+        smoke,
+        'authorize-smoke-resource',
+        { kind: 'output-directory', path: outputDirectory },
+        { timeoutMs }
+      )
+    ).capabilityId
 
   // --- a. Live with chat, then the quota flips. ------------------------------------
   listeners = [
@@ -130,7 +134,7 @@ try {
     timeoutMs,
     'session.start',
     sessionParams({
-      outputDirectoryCapability: outputAuthorization.capabilityId,
+      outputDirectoryCapability: await authorizeOutput(),
       video,
       prepared,
       youtubeServerUrl: prepared.serverUrl,
@@ -296,7 +300,7 @@ try {
     timeoutMs,
     'session.start',
     sessionParams({
-      outputDirectoryCapability: outputAuthorization.capabilityId,
+      outputDirectoryCapability: await authorizeOutput(),
       video,
       prepared: null,
       streamEnabled: false,
@@ -347,7 +351,7 @@ try {
     timeoutMs,
     'session.start',
     sessionParams({
-      outputDirectoryCapability: outputAuthorization.capabilityId,
+      outputDirectoryCapability: await authorizeOutput(),
       video,
       prepared: null,
       customServerUrl: `rtmp://127.0.0.1:${basePort + 2}/live`,
