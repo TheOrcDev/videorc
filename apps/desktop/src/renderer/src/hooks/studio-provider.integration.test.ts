@@ -72,6 +72,7 @@ import type {
   VideorcAccountSnapshot,
   VideorcApi
 } from '../../../shared/backend'
+import { resolveStreamOutputTopologyRequest } from '@/lib/go-live-output'
 import { BackgroundAssetsProvider } from './use-background-assets'
 import { useFrameSource } from './use-frame-source'
 import { useStudioMicVisualSource } from './use-studio-mic-sources'
@@ -80,7 +81,6 @@ import {
   StudioProvider,
   buildStreamOutputTopologyProbeParams,
   resolvedStreamingProfileEntitlementGate,
-  resolveStreamOutputTopologyRequest,
   STREAM_OUTPUT_SPLIT_UNAVAILABLE_REASON,
   streamOutputTopologyBlockReason,
   streamOutputTopologySplitRejected,

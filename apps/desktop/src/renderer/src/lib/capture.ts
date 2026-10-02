@@ -1022,36 +1022,6 @@ export function resolveProviderStreamOutputPlan(
   }
 }
 
-/**
- * The one profile a record+stream session can share when the host cannot run
- * a separate encoded stream role: the recording takes the destinations'
- * profile. Null when the destinations disagree with each other (the backend
- * resolves each destination from its own settings, so a recording override
- * alone cannot make that session share one encode) or when simulcast owns the
- * auxiliary role.
- */
-export function sharedEncodeFallbackVideo(
-  recording: VideoSettings,
-  streaming: StreamingSettings | undefined,
-  options: ProviderStreamOutputPlanOptions = {}
-): VideoSettings | null {
-  if (!streaming?.enabled || !options.recordEnabled || options.simulcastArmed) {
-    return null
-  }
-  const targetVideos = streaming.targets
-    .filter((target) => target.enabled)
-    .map((target) => streamOutputVideoForTarget(recording, streaming, target))
-  const [first] = targetVideos
-  if (!first || !targetVideos.every((video) => sameVideoOutputProfile(video, first))) {
-    return null
-  }
-  const shared = resolveProviderStreamOutputPlan(recording, streaming, {
-    ...options,
-    separateEncodedOutputRoleAvailable: false
-  }).streamVideo
-  return sameVideoOutputProfile(shared, first) ? { ...first } : null
-}
-
 export function streamVideoProfileValidationReason(
   video: VideoSettings,
   platform?: StreamPlatform

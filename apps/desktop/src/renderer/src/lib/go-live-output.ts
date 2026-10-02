@@ -1,6 +1,7 @@
 import {
   STREAM_OUTPUT_SPLIT_UNAVAILABLE_REASON,
-  resolveStreamOutputTopologyRequest,
+  buildStreamOutputTopologyProbeParams,
+  sameTopologyVideoProfile,
   streamOutputTopologyProbeRequestKey,
   streamOutputTopologyResultMatchesRequest,
   streamOutputTopologySplitRejected
@@ -14,13 +15,108 @@ import type {
   StreamingSettings,
   VideoSettings
 } from '../../../shared/backend'
-import { simulcastArmed, videoPresets, type CaptureConfig } from './capture'
+import {
+  providerStreamOutputPlanOptions,
+  resolveProviderStreamOutputPlan,
+  simulcastArmed,
+  streamOutputVideoForTarget,
+  videoPresets,
+  type CaptureConfig,
+  type ProviderStreamOutputPlanOptions
+} from './capture'
 import { isUntrustedPerformanceCheckResult, outputLabel, outputVerdict } from './performance-check'
 
 // Everything a livestream start decides about its own output (plan 090):
 // which topology the host can run, whether the recording shares the stream's
 // encode, and whether a CPU-encoded stream steps down to what this computer
 // measurably holds. Loaded on the first Go Live, never at startup.
+
+/**
+ * The one profile a record+stream session can share when the host cannot run
+ * a separate encoded stream role: the recording takes the destinations'
+ * profile. Null when the destinations disagree with each other (the backend
+ * resolves each destination from its own settings, so a recording override
+ * alone cannot make that session share one encode) or when simulcast owns the
+ * auxiliary role.
+ */
+export function sharedEncodeFallbackVideo(
+  recording: VideoSettings,
+  streaming: StreamingSettings | undefined,
+  options: ProviderStreamOutputPlanOptions = {}
+): VideoSettings | null {
+  if (!streaming?.enabled || !options.recordEnabled || options.simulcastArmed) {
+    return null
+  }
+  const targetVideos = streaming.targets
+    .filter((target) => target.enabled)
+    .map((target) => streamOutputVideoForTarget(recording, streaming, target))
+  const [first] = targetVideos
+  if (!first || !targetVideos.every((video) => sameTopologyVideoProfile(video, first))) {
+    return null
+  }
+  const shared = resolveProviderStreamOutputPlan(recording, streaming, {
+    ...options,
+    separateEncodedOutputRoleAvailable: false
+  }).streamVideo
+  return sameTopologyVideoProfile(shared, first) ? { ...first } : null
+}
+
+export interface StreamOutputTopologyRequest {
+  params: StreamOutputTopologyProbeParams
+  /**
+   * Set when the host rejected the separate stream role and sharing one
+   * encode changes the recording: it takes this profile for the session. The
+   * probe request and `session.start` must both use it.
+   */
+  sharedFallbackVideo: VideoSettings | null
+}
+
+/**
+ * The topology a livestream start should probe and run. Starts from the
+ * optimistic split request; once the host has rejected that exact split, it
+ * re-plans as one shared encode at the destinations' profile instead of
+ * leaving the user to match the bitrates by hand.
+ */
+export function resolveStreamOutputTopologyRequest(
+  captureConfig: CaptureConfig,
+  streaming: StreamingSettings,
+  suppressCaptionsForSession: boolean,
+  rejectedSplitRequestKeys: ReadonlySet<string>
+): StreamOutputTopologyRequest {
+  const params = buildStreamOutputTopologyProbeParams(
+    captureConfig,
+    streaming,
+    suppressCaptionsForSession
+  )
+  if (
+    params.outputRoles.includes('stream') &&
+    rejectedSplitRequestKeys.has(streamOutputTopologyProbeRequestKey(params))
+  ) {
+    const video = sharedEncodeFallbackVideo(
+      captureConfig.video,
+      streaming,
+      providerStreamOutputPlanOptions({ ...captureConfig, streaming })
+    )
+    // Captions burned into the stream only need a clean recording beside a
+    // captioned stream, which one encode cannot give. Captions that are off
+    // only pre-arm the split, and the backend never blocks a start for that.
+    const needsCleanRecording =
+      captureConfig.captions.enabled &&
+      !suppressCaptionsForSession &&
+      captureConfig.captions.burnTarget === 'stream'
+    if (video && !needsCleanRecording) {
+      return {
+        params: {
+          streamProfile: { ...video },
+          recordingProfile: { ...video },
+          outputRoles: ['shared']
+        },
+        sharedFallbackVideo: sameTopologyVideoProfile(video, captureConfig.video) ? null : video
+      }
+    }
+  }
+  return { params, sharedFallbackVideo: null }
+}
 
 const pixels = (video: Pick<VideoSettings, 'width' | 'height'>): number =>
   video.width * video.height

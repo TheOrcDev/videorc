@@ -107,7 +107,6 @@ import {
   reconcileSourceSelectionForLayoutTransaction,
   resolveProviderStreamOutputPlan,
   rtmpDefaults,
-  sharedEncodeFallbackVideo,
   simulcastArmed,
   simulcastLegLiveRequest,
   smokePreviewCompositorCaptureConfig,
@@ -136,7 +135,7 @@ import {
   performanceCheckTooHeavyToast,
   shouldRunPerformanceCheck
 } from '@/lib/performance-check'
-import type { GoLiveSessionOutput } from '@/lib/go-live-output'
+import type * as GoLiveOutput from '@/lib/go-live-output'
 import {
   decideCancelGoLiveConfirmation,
   decideContinueGoLiveWithReadyDestinations,
@@ -710,61 +709,15 @@ export function streamOutputTopologySplitRejected(
 export const STREAM_OUTPUT_SPLIT_UNAVAILABLE_REASON =
   "This computer can't encode the recording and the livestream separately. Use the same quality for every destination, set captions to burn into both or neither, or turn off recording, then go live."
 
-export interface StreamOutputTopologyRequest {
-  params: StreamOutputTopologyProbeParams
-  /**
-   * Set when the host rejected the separate stream role and sharing one
-   * encode changes the recording: it takes this profile for the session. The
-   * probe request and `session.start` must both use it.
-   */
-  sharedFallbackVideo: VideoSettings | null
-}
+// The shared-encode re-plan and the Go Live output settling (plan 090) live
+// in a chunk loaded with the first rejected split or the first Go Live, so the
+// startup bundle does not carry them. A split is only ever marked rejected
+// after this chunk loaded, so the topology memo reads it synchronously.
+let goLiveOutputChunk: typeof GoLiveOutput | null = null
 
-/**
- * The topology a livestream start should probe and run. Starts from the
- * optimistic split request; once the host has rejected that exact split, it
- * re-plans as one shared encode at the destinations' profile instead of
- * leaving the user to match the bitrates by hand.
- */
-export function resolveStreamOutputTopologyRequest(
-  captureConfig: CaptureConfig,
-  streaming: StreamingSettings,
-  suppressCaptionsForSession: boolean,
-  rejectedSplitRequestKeys: ReadonlySet<string>
-): StreamOutputTopologyRequest {
-  const params = buildStreamOutputTopologyProbeParams(
-    captureConfig,
-    streaming,
-    suppressCaptionsForSession
-  )
-  if (
-    params.outputRoles.includes('stream') &&
-    rejectedSplitRequestKeys.has(streamOutputTopologyProbeRequestKey(params))
-  ) {
-    const video = sharedEncodeFallbackVideo(
-      captureConfig.video,
-      streaming,
-      providerStreamOutputPlanOptions({ ...captureConfig, streaming })
-    )
-    // Captions burned into the stream only need a clean recording beside a
-    // captioned stream, which one encode cannot give. Captions that are off
-    // only pre-arm the split, and the backend never blocks a start for that.
-    const needsCleanRecording =
-      captureConfig.captions.enabled &&
-      !suppressCaptionsForSession &&
-      captureConfig.captions.burnTarget === 'stream'
-    if (video && !needsCleanRecording) {
-      return {
-        params: {
-          streamProfile: { ...video },
-          recordingProfile: { ...video },
-          outputRoles: ['shared']
-        },
-        sharedFallbackVideo: sameTopologyVideoProfile(video, captureConfig.video) ? null : video
-      }
-    }
-  }
-  return { params, sharedFallbackVideo: null }
+async function loadGoLiveOutput(): Promise<typeof GoLiveOutput> {
+  goLiveOutputChunk ??= await import('@/lib/go-live-output')
+  return goLiveOutputChunk
 }
 
 export function streamOutputTopologyBlockReason(
@@ -807,7 +760,7 @@ function sameExactVideoSettings(left: VideoSettings, right: VideoSettings): bool
   return left.preset === right.preset && sameTopologyVideoProfile(left, right)
 }
 
-function sameTopologyVideoProfile(left: VideoSettings, right: VideoSettings): boolean {
+export function sameTopologyVideoProfile(left: VideoSettings, right: VideoSettings): boolean {
   return (
     left.width === right.width &&
     left.height === right.height &&
@@ -9786,18 +9739,28 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     return () => window.removeEventListener('videorc:resume-system-audio', resume)
   }, [])
 
-  const currentStreamOutputTopology = useMemo(
-    () =>
-      captureConfig.streamEnabled
-        ? resolveStreamOutputTopologyRequest(
-            captureConfig,
-            captureConfig.streaming,
-            suppressCaptionsForSession,
-            rejectedStreamOutputSplitKeys
-          )
-        : null,
-    [captureConfig, rejectedStreamOutputSplitKeys, suppressCaptionsForSession]
-  )
+  const currentStreamOutputTopology =
+    useMemo((): GoLiveOutput.StreamOutputTopologyRequest | null => {
+      if (!captureConfig.streamEnabled) {
+        return null
+      }
+      if (rejectedStreamOutputSplitKeys.size > 0 && goLiveOutputChunk) {
+        return goLiveOutputChunk.resolveStreamOutputTopologyRequest(
+          captureConfig,
+          captureConfig.streaming,
+          suppressCaptionsForSession,
+          rejectedStreamOutputSplitKeys
+        )
+      }
+      return {
+        params: buildStreamOutputTopologyProbeParams(
+          captureConfig,
+          captureConfig.streaming,
+          suppressCaptionsForSession
+        ),
+        sharedFallbackVideo: null
+      }
+    }, [captureConfig, rejectedStreamOutputSplitKeys, suppressCaptionsForSession])
   const currentStreamOutputTopologyRequest = currentStreamOutputTopology?.params ?? null
   const streamSharedEncodeFallbackVideo = currentStreamOutputTopology?.sharedFallbackVideo ?? null
   const currentStreamOutputTopologyRequestKey = currentStreamOutputTopologyRequest
@@ -9837,15 +9800,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         .requestTyped('stream.output.topology.probe', params, {
           signal: controller.signal
         })
-        .then((result) => {
+        .then(async (result) => {
           if (!streamOutputTopologyResultMatchesRequest(result, params)) {
             throw new Error(
               'Backend returned a livestream output verdict for a different output configuration.'
             )
           }
+          const splitRejected = streamOutputTopologySplitRejected(result)
+          if (splitRejected) {
+            // The re-plan reads the Go Live chunk; load it before the
+            // rejection reaches the topology memo.
+            await loadGoLiveOutput()
+          }
           if (
             clientRef.current === client &&
-            streamOutputTopologySplitRejected(result) &&
+            splitRejected &&
             !rejectedStreamOutputSplitKeysRef.current.has(requestKey)
           ) {
             // Committed with the verdict below (one render), so a rejected
@@ -9901,8 +9870,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // holds. The logic lives in a chunk loaded on the first Go Live, so the
   // startup bundle does not carry it.
   const settleStreamOutputTopology = useCallback(
-    async (streaming: StreamingSettings): Promise<GoLiveSessionOutput> => {
-      const { settleGoLiveSessionOutput } = await import('@/lib/go-live-output')
+    async (streaming: StreamingSettings): Promise<GoLiveOutput.GoLiveSessionOutput> => {
+      const { settleGoLiveSessionOutput } = await loadGoLiveOutput()
       return settleGoLiveSessionOutput({
         captureConfig,
         streaming,
@@ -12220,7 +12189,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               video: output.video,
               streaming: output.streaming
             }
-            const notice = (await import('@/lib/go-live-output')).goLiveSessionOutputNotice(output)
+            const notice = (await loadGoLiveOutput()).goLiveSessionOutputNotice(output)
             if (notice) {
               toast.info(notice.title, {
                 id: 'stream-output-adjusted',
@@ -12539,7 +12508,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       confirmedPreflight?: GoLivePreflight,
       // What this session will really send (plan 090): a broadcast prepared
       // at the saved profile would advertise a size the stream never reaches.
-      sessionOutput?: Pick<GoLiveSessionOutput, 'video' | 'streaming'>
+      sessionOutput?: Pick<GoLiveOutput.GoLiveSessionOutput, 'video' | 'streaming'>
     ): Promise<GoLivePartialSetup> => {
       if (!client) {
         throw new Error('Backend socket is not connected.')
