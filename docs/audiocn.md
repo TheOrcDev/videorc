@@ -20,8 +20,8 @@ use and why, is `plans/092-audiocn-audio-components.md`.
 Renderer paths are relative to `apps/desktop/src/renderer/src/`.
 
 Installed from: audiocn `221100c` (branch `fix/videorc-adoption`, the plan
-092 U1 fixes), served from a local build of that commit. Once that branch is
-merged, audiocn.dev serves the same files.
+092 U1 fixes, audiocn PR #2), served from a local build of that commit. Once
+that PR is merged, audiocn.dev serves the same files.
 
 ## Rules
 
@@ -37,7 +37,8 @@ adapters that live outside the eager bundle:
 
 - `lib/mic-frame-sources.ts` turns the visual mic pipeline into audiocn frame sources: `createMicMeterSource` (peak and RMS with the configured mic gain added, silence while muted) and `createMicVisualSource` (bands and level history, raw).
 - `hooks/use-studio-mic-sources.ts` returns one stable source per pipeline. Only lazy chunks (the Studio dashboard, the Studio tab, Sources) import it.
-- Backend levels (`diagnostics.stats`, 1 Hz, already post-gain) go in as plain values: `LevelMeter peakDb`, `DbReadout value`, `ClipIndicator clipping`, with `vu` ballistics so one step a second glides.
+- During a session the backend's own bus levels drive the strips: `audio.levels`, about 20 a second, post-gain and post-mute, for the microphone, System audio and the mix as written. `lib/backend-audio-levels.ts` keeps them outside React (eager, no dependencies); `lib/backend-level-sources.ts` turns them into meter sources and reads the -120 dBFS wire floor as silence.
+- Without those, backend levels (`diagnostics.stats`, 1 Hz, already post-gain) go in as plain values: `LevelMeter peakDb`, `DbReadout value`, `ClipIndicator clipping`, with `vu` ballistics so one step a second glides.
 
 ## Updating
 

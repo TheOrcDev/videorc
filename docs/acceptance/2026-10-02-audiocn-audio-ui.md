@@ -54,7 +54,21 @@ and is not touched by this plan.
 microphone visualizer did not remain active": `[data-videorc-mic-visualizer]`
 mounts (the selector contract holds) but the analyser cannot open a microphone
 without the grant, so the label never reads Live. Run it where the grant
-exists (owner checklist, item 9).
+exists (owner checklist, item 12).
+
+### Phase C (backend bus levels)
+
+- `cargo test -p videorc-backend`, targeted: the new window maths, a live-bus
+  test (microphone read before the sum at -4.44 dBFS for a 0.6 tone, System
+  audio at its gained 0.7 peak, the master under the limiter ceiling with
+  clipped samples counted), the event builder, the wire shape (missing sources
+  omitted, silence floored at -120); plus the session audio, performance
+  check, LAN remote and diagnostics suites (150 tests).
+- `cargo clippy -p videorc-backend -- -D warnings`, `cargo fmt --check --all`.
+- TS: the `audio.levels` schema, the store (liveness notifies only on
+  transitions; one timer a second), the level sources, and the mixer's
+  priority and Mix strip markup.
+- `pnpm test:scripts`: 1,692 tests.
 
 ## Owner checklist (packaged app, both themes)
 
@@ -79,7 +93,12 @@ Studio, Audio mixer:
    mic muted it reads "Microphone is muted. Unmute to see its level."
 10. Idle CPU: Studio open, mic muted, no session. Activity Monitor shows the
     renderer as idle as on 0.9.126.
-11. Run `VIDEORC_PERF_REQUIRE_STUDIO_MIC_VISUALS=1 pnpm smoke:preview-performance`
+11. Record (or stream) with System audio on and music playing: the System
+    audio meter now moves smoothly (it was one step a second), and a Mix strip
+    appears under it showing what is recorded, with a clip count. Push the mic
+    and the music hot together: the Mix clip light comes on even when neither
+    source clips alone. Stop: the Mix strip goes away within a second.
+12. Run `VIDEORC_PERF_REQUIRE_STUDIO_MIC_VISUALS=1 pnpm smoke:preview-performance`
     on a checkout whose Electron binary has the Microphone grant.
 
 Decisions to confirm while doing it: D1 (segmented meter or the old bars) and

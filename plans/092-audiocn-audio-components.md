@@ -1,7 +1,9 @@
 # Plan 092: audiocn for Videorc's audio UI
 
-**Status:** PLANNED 2026-10-02. Nothing is built; this file is the only
-change. **Priority:** P2. No user-reported bug, but it closes two honesty gaps
+**Status:** EXECUTED 2026-10-02: U1 in audiocn PR #2; S1 to S4 and Phase C
+on `feat/092-audiocn-audio-ui` (one Videorc PR); Phase B not built (D2's
+default is no). Owner by-eye and live-mic checks are owed (see "Execution
+notes" and `docs/acceptance/2026-10-02-audiocn-audio-ui.md`). **Priority:** P2. No user-reported bug, but it closes two honesty gaps
 in the Studio mixer (the meter ignores the Gain the user set, and 28 band bars
 cannot say "too hot") and moves Videorc's audio UI onto the owner's own shadcn
 audio library. **Size:** M: one upstream slice in audiocn (U1), four Videorc
@@ -491,6 +493,33 @@ implementation, and eager raw bytes are unchanged.
 - Per-app audio capture.
 
 ## Execution notes
+
+### What was done (2026-10-02)
+
+- **U1:** audiocn PR #2 (`fix/videorc-adoption`, four commits ending `221100c`). It covers every U1 item, plus a 100 ms painter clock so a woken meter never jumps, and a quiet-source stop for `DbReadout`'s 4 Hz ticker. audiocn: 318 tests (19 new), typecheck, Ultracite, React Doctor, build. `test:install` could not run here (see the deviations).
+- **S1** `855d5487`: vendored with eager raw +29 B (the `use-reduced-motion` swap).
+- **S2** `3ab5106b`: the mixer on channel strips, eager raw -1,311 B against main.
+- **S3** `cda0540d`: the sliver and the preview, eager raw -3,961 B.
+- **S4** `bc212d22`: `mic-meter.ts` trimmed; acceptance record written.
+- **Phase C** `4d5874a6`: bus level windows, the `audio.levels` sampler, backend level sources and the Mix strip. Eager raw -2,132 B against main (the store and the event schema are eager).
+- **Performance** (`smoke:preview-performance`, two alternating runs each): renderer CPU 7.7 % and 1.5 % on the branch against 17.8 % and 12.6 % on main. The one failing budget (WebSocket wire rate, about 82 KiB/s against 80) fails on main too.
+
+### Deviations from the plan, and why
+
+1. **Installed from a local build of the U1 branch, not audiocn.dev.** U1 is an open PR, not merged and deployed. The files are U1's, byte for byte (after Prettier), with no local patches, which is what STOP condition 1 protects. Once audiocn PR #2 merges, `shadcn add` from audiocn.dev serves the same files.
+2. **`--overwrite`, then restore.** The CLI asks per file and ignores piped answers. Installing with `--overwrite`, then restoring `badge.tsx` and `styles.css` and dropping `cn`, gives the same result as answering Yes/No by hand. `docs/audiocn.md` keeps the by-hand answers for people.
+3. **Two audiocn parts unused.** `ChannelStripIcon` paints a `bg-background` tile with a shadow (the body is the only `--background` coat), and `ChannelStripStatus` tints its badge (the tone lives in the dot). The icons stay inline, and the monitor label stays plain text, which also keeps the perf probe's `Live` span.
+4. **Phase C has no subscribe RPC.** Only the main Studio renderer holds a full-event socket. The main process and the isolated command sockets use include lists, the phone remote has its own allowlist, and secondary windows get data through main-process relays. So `audio.levels` is sent only while a session's bus runs, is coalescible, and is hidden during benchmark sessions. Opting in per connection would add connection-lifecycle code for no receiver it would actually exclude.
+5. **The 1 Hz `live_peak` keeps its meaning** (last chunk). During a session the mixer reads `audio.levels`; outside one, the bus does not run.
+6. **`audiocn`'s settle threshold is 0.001 of the track** (about 0.06 dB), looser than the 0.0005 write threshold. A big drop then settles in about 6 s, mostly the peak hold's 1.2 s wait plus its fall.
+
+### Owed
+
+- The owner checklist in `docs/acceptance/2026-10-02-audiocn-audio-ui.md` (packaged app, both themes, live mic), including D1 and D4.
+- `VIDEORC_PERF_REQUIRE_STUDIO_MIC_VISUALS=1 pnpm smoke:preview-performance` where the Electron binary has the Microphone grant.
+- Merging audiocn PR #2, which deploys audiocn.dev.
+
+### How it was started
 
 - Start U1 in audiocn first.
 - Then create a Videorc worktree from `origin/main` and never work in the shared checkout:
