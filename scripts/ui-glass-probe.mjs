@@ -737,15 +737,12 @@ async function runPersistence(smoke, devtoolsHost, theme) {
     })
     let neutralityRed = null
     if (shoot_) {
-      const { raised, file, referenceMean } = await shootWithReference(
-        smoke,
-        theme,
-        'main',
-        'red',
-        `persist-${step}-`
-      )
+      const shot = await shootWithReference(smoke, theme, 'main', 'red', `persist-${step}-`)
+      // A resize or a simple-fullscreen exit can leave no bare backdrop beside
+      // the window: fail with the reference error, not a null dereference.
+      const reference = requireReference(shot, 'main', 'red')
       neutralityRed = round(
-        colorDistance(measure(file, raised.bounds, 'main')[0].mean, referenceMean)
+        colorDistance(measure(shot.file, shot.raised.bounds, 'main')[0].mean, reference)
       )
     }
     const focus = await requestSmokeCommand(smoke, 'focused-window')
