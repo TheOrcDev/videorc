@@ -608,6 +608,8 @@ async function seedRendererCaptionsProfile(smoke) {
   throw new Error(`Renderer did not reload the seeded caption profile: ${JSON.stringify(latest)}`)
 }
 
+// The session records and streams: the backend reports it as `recording`, and
+// the inspector pill reads "Streaming" because it is on air (plan 095 S5).
 async function hydrateRendererActiveSession(smoke) {
   const hydrated = await smokeCommand(smoke, 'eval-js', {
     code: `
@@ -619,7 +621,7 @@ async function hydrateRendererActiveSession(smoke) {
       let sessionStatus = null
       while (Date.now() < deadline) {
         sessionStatus = document.querySelector('[data-videorc-session-status]')?.textContent?.trim() ?? null
-        if (sessionStatus === 'Recording') break
+        if (sessionStatus === 'Streaming') break
         await sleep(50)
       }
       return { recordingState: recording.state, sessionStatus }
@@ -627,7 +629,7 @@ async function hydrateRendererActiveSession(smoke) {
   })
   if (
     hydrated?.result?.recordingState !== 'recording' ||
-    hydrated.result.sessionStatus !== 'Recording'
+    hydrated.result.sessionStatus !== 'Streaming'
   ) {
     throw new Error(`Renderer did not hydrate record+stream: ${JSON.stringify(hydrated)}`)
   }

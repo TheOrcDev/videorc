@@ -1315,6 +1315,10 @@ export interface OAuthCallbackResult {
   accountConnected: boolean
   retryable: boolean
   receivedAt: string
+  /** Plan 094: a bounded reason the renderer words itself (`youtube-quota`). */
+  reason?: string
+  /** When the blocked action can be tried again (RFC 3339), with `reason`. */
+  retryAt?: string
 }
 
 export interface StreamSessionTargetHistory {
@@ -2255,6 +2259,33 @@ export interface AudioMeterResult {
   peakDb?: number
   meanDb?: number
   message?: string
+}
+
+/** Plan 092 Phase C: digital silence on the `audio.levels` wire (JSON has no -Infinity). */
+export const AUDIO_LEVEL_FLOOR_DB = -120
+
+/** Plan 092 Phase C: one level reading over the last window, dBFS, within -120..+48. */
+export interface AudioLevelReading {
+  peakDb: number
+  rmsDb: number
+}
+
+/**
+ * Plan 092 Phase C: `audio.levels`, about 20 a second while a session's audio
+ * bus runs, or while the warm microphone stands by between sessions
+ * (microphone only, no `sessionId`). Readings carry the configured gain: what
+ * the recording and the stream get. A source with no samples in the window is
+ * omitted.
+ */
+export interface AudioLevelsEvent {
+  /** The session whose bus measured the levels; absent for the standby microphone. */
+  sessionId?: string
+  microphone?: AudioLevelReading
+  systemAudio?: AudioLevelReading
+  /** The mix written to the recording and the stream. */
+  master?: AudioLevelReading
+  /** Samples the mix clipped since the previous event. */
+  masterClippedSamples: number
 }
 
 export interface AudioMeterSampleSnapshot {
@@ -3452,6 +3483,13 @@ export interface RuntimeInfo {
     kind: 'material' | 'mica' | 'solid'
     reason: string | null
     paintCheck: 'pending' | 'painted' | 'blank' | 'unknown' | 'skipped'
+    /**
+     * Plan 091: how the macOS material is drawn on the main window (`clear`
+     * is the stripped, neutral blur), null without a material, and the style
+     * `VIDEORC_GLASS_STYLE` asked for.
+     */
+    style: 'clear' | 'material' | null
+    styleRequested: 'clear' | 'material'
   }
   isPackaged: boolean
   permissionTargetName: string
@@ -3896,6 +3934,10 @@ export interface VideorcApi {
   /** Fetch-and-cache a chat avatar from an allowlisted platform CDN; returns a
    * local videorc-asset:// URL or null (disallowed host / fetch failure). */
   cacheChatAvatar: (url: string) => Promise<string | null>
+  /** The bytes of one cached image (`videorc-asset://avatar/...`) for the
+   * highlight card to decode with `createImageBitmap` (plan 095, S3): null
+   * when the URL names no managed cache file or it is over the 2 MB cap. */
+  readChatAvatar: (localUrl: string) => Promise<Uint8Array | null>
   /** Correlated Comments-window command relay; the main renderer owns the backend socket. */
   sendCommentHighlight: (command: CommentHighlightCommand) => Promise<CommentHighlightState>
   onCommentHighlightRequest: (callback: (command: CommentHighlightCommand) => void) => () => void
@@ -4278,6 +4320,12 @@ export interface LiveChatProviderState {
   lastConnectedAt?: string
   lastMessageAt?: string
   lastError?: string
+  /**
+   * While `state` is `waiting` for a known reason with a known end (the
+   * YouTube quota pause, plan 094): when the connector resumes, RFC 3339.
+   * Shown in local time; absent otherwise.
+   */
+  retryAt?: string
 }
 
 /** A rich-text fragment of a message (plain text, emote, mention, …). */
@@ -5096,6 +5144,34 @@ export interface PlatformAudience {
 export interface FollowerGain {
   at: string
   count: number
+}
+
+/**
+ * `youtube.quota` event (plan 094): the shared YouTube Data API quota breaker.
+ * `pausedUntil` is present (RFC 3339) while every YouTube call is paused and
+ * absent, never null, once they may resume. One state for the Livestream page,
+ * the Stream Manager and the Comments destination status.
+ */
+export interface YouTubeQuotaStatus {
+  pausedUntil?: string
+  /** The per-install daily budget (plan 094, S6); always sent by current backends. */
+  budget?: YouTubeQuotaBudget
+}
+
+/**
+ * How much of this install's daily YouTube budget is spent, highest step last.
+ * `shed-extras` (80%): no subscribers or thumbnails, viewers every 2 minutes;
+ * `shed-viewers` (95%): no viewers; `essentials-only` (100%): Go Live, Stop
+ * and chat read only. Never blocks a running stream.
+ */
+export type YouTubeQuotaBudgetStep = 'normal' | 'shed-extras' | 'shed-viewers' | 'essentials-only'
+
+export interface YouTubeQuotaBudget {
+  /** Estimated units spent this Pacific day. */
+  units: number
+  /** The budget in effect; 0 means the budget is off. */
+  limit: number
+  step: YouTubeQuotaBudgetStep
 }
 
 /** `stream.audience` event and `stream.audience.snapshot` result (wire mirror of audience.rs). */

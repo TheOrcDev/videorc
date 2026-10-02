@@ -40,7 +40,12 @@ export function App(): ReactElement {
             <AppShell />
             {/* Inset above the 26 px status bar: toasts must never cover its
                 Search/Preview/Notes/Chat hints (plan 022 Q3, plan 050 S11). */}
-            <Toaster offset={{ bottom: 38, right: 16 }} position="bottom-right" richColors />
+            <Toaster
+              offset={{ bottom: 38, right: 16 }}
+              position="bottom-right"
+              richColors
+              visibleToasts={3}
+            />
           </StudioProvider>
         </BackgroundAssetsProvider>
       </TooltipProvider>

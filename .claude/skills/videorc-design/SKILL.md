@@ -24,6 +24,10 @@ a screen ad hoc.
 1. **shadcn/ui only.** Every element is a shadcn/ui component or a composition
    of them, installed and customized per the `shadcn` skill. No other
    component libraries and no hand-rolled widgets when a primitive exists.
+   audiocn (the owner's shadcn audio registry, `@audiocn`) counts as shadcn:
+   its meters draw audio, fed by Videorc adapters, never by its
+   Web Audio hooks or blocks. Base UI enters only inside its files
+   (`docs/audiocn.md`).
 2. **Real glass, never fake glass.** The OS draws the blur. No CSS
    `backdrop-filter` / `backdrop-blur` anywhere in the renderer: it wedged the
    compositor in June, and on the vibrancy windows it never reaches the screen
@@ -44,7 +48,12 @@ a screen ad hoc.
 Every window uses one material and one title-bar recipe (`window-glass.ts`):
 
 - **Material.** `vibrancy: 'under-window'`, with the effect state pinned
-  to `active` so glass stays glass when the window is inactive.
+  to `active` so glass stays glass when the window is inactive, stripped to
+  **clear glass** by the native addon (plan 091): Ghostex's strip on
+  Electron's own vibrancy view, no tint, no wallpaper tinting, no saturation
+  boost, a 60 pt blur. What shows through is the desktop as soft colour, and
+  the coats decide the whole tone. `VIDEORC_GLASS_STYLE=material` keeps
+  AppKit's own grey material as the A/B control for one release;
   `VIDEORC_GLASS=0` paints the solid palette instead.
 - **Title bar.** `titleBarStyle: 'hiddenInset'`. Traffic lights are centred
   in the header row, which is 40 px (28 px for Preview). A header row shares
@@ -57,19 +66,29 @@ Every window uses one material and one title-bar recipe (`window-glass.ts`):
   main window never lightens it. If the pin is unavailable, it falls back to
   solid dark. Stream Manager, Captions and Notes follow the app theme like
   main (#412).
-- **Coats.**
-  - `body` paints `--glass-window`, the one window coat.
-  - A content pane adds `--glass-content`, so the sidebar reads lighter than
-    content.
+- **Covers.** One cover per region, Ghostex's numbers (plan 091, D3): how
+  much of the solid tone a region paints over the clear blur. The sidebar
+  covers 88% (dark) · 93% (light), the work area 83% · 86%: the sidebar is
+  the heavier, more covered region, the work area shows more desktop.
+  - The coats are derived from the covers (D4), never set by hand: `body`
+    paints the lighter cover (`--glass-window`), the sidebar `<aside>` adds
+    its delta (`bg-glass-sidebar`), content panes add theirs
+    (`bg-glass-content`, 0 on macOS), so each region composites to exactly
+    its cover.
   - Single-pane windows wrap their body in `WindowFrame`.
   - Never stack a third coat.
-- **Accessibility.** `prefers-reduced-transparency` swaps both coats for
-  `--glass-solid`. `prefers-contrast: more` thickens the coat and strengthens
-  hairlines, chip rims, and the secondary text tier.
+  - Windows keeps plan 050's Mica composite through its own covers.
+- **Accessibility.** `prefers-reduced-transparency` swaps the window coat
+  for `--glass-solid` and drops the region coats (the addon leaves AppKit's
+  solid material whole). `prefers-contrast: more` puts both covers at 95%
+  and strengthens hairlines, chip rims, and the secondary text tier.
 - **Proof.** `pnpm probe:ui-glass --gate` measures every window over
   stand-in backdrops: transmission (the glass is real), sharpness (nothing
-  behind is legible), contrast, pinned-dark luminance, and the native effect
-  view state. It runs in `smoke:local-gates`.
+  behind is legible), contrast, pinned-dark luminance, the native effect
+  view state, and since plan 091 neutrality (the stripped material passes
+  the backdrop colour through), `nativeClear` (the strip holds) and
+  `ghostexParity` (each region composites to its cover). It runs in
+  `smoke:local-gates`.
 
 ## Tokens
 
@@ -79,16 +98,26 @@ source). Values below are dark · light.
 
 Coats and surfaces
 
-- Window coat `--glass-window`: black `oklch(0.13 0.003 286 / 42%)` ·
-  porcelain `oklch(0.985 0.001 286 / 60%)`.
-- Content coat `--glass-content`: 34% · 30% of the same base.
-- Solid `--glass-solid`: `#0D0D0F` · `#FAFAFB`.
-- Floating glass `--glass-float`: black `oklch(0.275 0.004 286)` ·
-  porcelain `oklch(0.99 0 0)`, one raised step above the window glass as
-  measured (`probe:ui-glass --surfaces`), with the chip edge (rim, top
-  highlight, sheen). Opaque: without a frost, even 3% translucency lets
-  white text under a menu read through. Only dialogs, menus, selects,
-  popovers, hover cards, tooltips, toasts, and the palette float.
+- Base `--glass-base`: black `0.16 0.004 286` (`#0D0D0F`) · porcelain
+  `0.985 0.001 286` (`#FAFAFB`), the OKLCH components every coat is cut
+  from. Solid `--glass-solid` is that base, opaque.
+- Covers `--glass-cover-sidebar` / `--glass-cover-work`: 0.88 / 0.83 ·
+  0.93 / 0.86 (Windows 0.34 / 0.5116 · 0.5 / 0.62). The coats
+  `--glass-window`, `--glass-sidebar` and `--glass-content` are derived
+  from them in `styles.css`.
+- Floating glass, three flat opaque tiers of the solid (plan 091, D6,
+  Ghostex's web-modal recipe), each a 1 px rim (white 10% · black 10%) and
+  a drop shadow, no sheen and no highlight:
+  - popup `--glass-float` (menus, selects, popovers, hover cards, chart
+    tooltips, toasts): black `#222224` (the solid plus 6% then 3% white,
+    `color-mix` in sRGB) · porcelain `oklch(0.99 0 0)`;
+  - dialog `--glass-float-dialog` (dialogs, the palette, the error panel):
+    black `#1C1C1D` · porcelain;
+  - tooltip `--glass-float-tooltip`: the black solid · porcelain.
+    Opaque: without a frost, even 3% translucency lets white text under a
+    menu read through. Deliberately darker than the glass over a bright
+    desktop: `probe:ui-glass --surfaces` checks each tier reads its own token
+    whatever is behind it.
 
 Text (three tiers, nothing else)
 
@@ -225,8 +254,8 @@ made it chat first: one thin stats bar and fewer words.
 
 The command palette alone keeps the Raycast scale:
 
-- `rounded-panel` float glass (the Dialog's `glass-float`; `Command` itself
-  paints nothing).
+- `rounded-panel` float glass (the Dialog's `glass-float-dialog`; `Command`
+  itself paints nothing).
 - An 18–20 px borderless search input with a leading 24 px icon.
 - 40 px rows: icon, title, secondary context, an optional alias key chip,
   then right-aligned metadata.
@@ -268,19 +297,22 @@ once in `styles.css`.
 ## Floating surfaces
 
 Dialogs, popovers, hover cards, menus, selects, tooltips, toasts, and the
-palette are raised pieces of the window glass: `border glass-float` (plan
-072). One surface per float: a `Command` inside a Dialog or Popover stays
-transparent. Every toast is the same neutral glass: a type (success,
-warning, error, info) colours its 16 px icon only, never the panel, rim or
-sheen, and the text stays monochrome. Never `bg-popover`:
-a guard test fails on it, so a fresh shadcn add must be moved onto the
-utility.
+palette are flat, opaque tiers of the window's solid tone (plan 072 made
+them opaque, plan 091 D6 made them flat): `border glass-float` for the popup
+tier, `border glass-float-dialog` for dialogs and the palette,
+`border glass-float-tooltip` for tooltips. One surface per float: a
+`Command` inside a Dialog or Popover stays transparent. Every toast is the
+same neutral popup glass: a type (success, warning, error, info) colours its
+16 px icon only, never the panel or its rim, and the text stays monochrome.
+Never `bg-popover`: a guard test fails on it, so a fresh shadcn add must be
+moved onto the utility.
 
-- Dialogs: 12 px radius, `p-5`.
-- Menus, selects, and popovers: 10 px radius. Menu items are 28 px with a
-  6 px radius, concentric inside the 4 px inset.
-- Tooltips: a small glass popover (8 px radius, 12 px text), never an
-  inverted pill. They open after about 600 ms.
+- Dialogs: 12 px radius, `p-5`, the dialog tier.
+- Menus, selects, and popovers: 10 px radius, the popup tier. Menu items
+  are 28 px with a 6 px radius, concentric inside the 4 px inset. Hover
+  inside a float stays `bg-accent` (white 8%).
+- Tooltips: the tooltip tier (8 px radius, 12 px text), never an inverted
+  pill. They open after about 600 ms.
 - `Alert`: a flush inline status row (a faint tone tint, the icon in the
   tone, monochrome text), never a card.
 - `Empty`: short tertiary text, centred, no dashed box and no illustration.
@@ -375,6 +407,7 @@ confirming a routine interaction the user just watched succeed.
 | Scroll regions            | `PaneBody` or `ScrollArea type="scroll"`        |
 | Menus / popovers          | `DropdownMenu` / `Popover` on `glass-float`     |
 | Toasts                    | sonner on `glass-float`; type colours the icon  |
+| Audio levels              | audiocn meters (`docs/audiocn.md`)              |
 
 Missing a primitive? Install it through the shadcn CLI (see the shadcn skill);
 do not hand-roll it.

@@ -9,6 +9,7 @@ import { GroupedList } from '@/components/list-row'
 import { PlatformGlyph } from '@/components/platform-glyph'
 import { PanelSection } from '@/components/panel-section'
 import { DestinationCard } from '@/components/streaming/destination-card'
+import { youtubeQuotaPausedUntil } from '@/lib/youtube-quota'
 import { GoLivePanel } from '@/components/streaming/go-live-panel'
 import { ThumbnailField } from '@/components/streaming/thumbnail-field'
 import {
@@ -116,8 +117,10 @@ function StreamingSetup(): ReactElement {
     xNativeCapabilityLoading,
     refreshXNativeCapability,
     authorizeXLive,
-    stopSession
+    stopSession,
+    youtubeQuota
   } = useStudioCore()
+  const youtubeQuotaPaused = youtubeQuotaPausedUntil(youtubeQuota)
   const streaming = captureConfig.streaming
   const livestreamingEntitlementReason = entitlementDisabledReason(entitlements, 'livestreaming')
   const streamingControlsDisabled = isSessionActive || Boolean(livestreamingEntitlementReason)
@@ -272,6 +275,7 @@ function StreamingSetup(): ReactElement {
                 onRefreshXNativeCapability={refreshXNativeCapability}
                 onAuthorizeXLive={authorizeXLive}
                 onSelectYouTubeChannel={selectYouTubeChannel}
+                youtubeQuotaPausedUntil={youtubeQuotaPaused}
               />
             ))}
           </GroupedList>

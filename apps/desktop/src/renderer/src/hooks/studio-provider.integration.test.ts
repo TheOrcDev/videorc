@@ -73,11 +73,9 @@ import type {
   VideorcApi
 } from '../../../shared/backend'
 import { BackgroundAssetsProvider } from './use-background-assets'
-import {
-  StudioMicVisualProvider,
-  useStudioMicVisualLifecycle,
-  useStudioMicVisualPainter
-} from './use-studio-mic-visual'
+import { useFrameSource } from './use-frame-source'
+import { useStudioMicVisualSource } from './use-studio-mic-sources'
+import { StudioMicVisualProvider, useStudioMicVisualLifecycle } from './use-studio-mic-visual'
 import {
   StudioProvider,
   buildStreamOutputTopologyProbeParams,
@@ -415,6 +413,8 @@ class StudioBackend {
   terminalRecordingStatusOnMethodEmitted = false
   youtubePrepareCount = 0
   youtubeCompleteFailuresRemaining = 0
+  /** Plan 094: `complete` refused by the backend's quota breaker (coded). */
+  youtubeCompleteQuotaFailuresRemaining = 0
   xPrepareCount = 0
   xPrepareFailuresRemaining = 0
   xPublishCount = 0
@@ -1125,6 +1125,15 @@ class StudioBackend {
           this.youtubeCompleteFailuresRemaining -= 1
           throw new Error('Temporary YouTube completion failure.')
         }
+        if (params.status === 'complete' && this.youtubeCompleteQuotaFailuresRemaining > 0) {
+          this.youtubeCompleteQuotaFailuresRemaining -= 1
+          throw Object.assign(
+            new Error(
+              "YouTube's daily API limit is used up. YouTube ends the broadcast on its own about a minute after you stop."
+            ),
+            { code: 'youtube-quota-paused' }
+          )
+        }
         return {
           platform: 'youtube',
           accountId: String(params.accountId ?? 'youtube-account-1'),
@@ -1529,9 +1538,9 @@ type StudioObservation = {
   recording: StudioRecordingContextValue
 }
 
-/** A mixer-like consumer: paints frames (which retains analyser demand) and reports lifecycle. */
+/** A mixer-like consumer: reads frames (which retains analyser demand) and reports lifecycle. */
 function MicVisualProbe({ observe }: { observe: (active: boolean) => void }): null {
-  useStudioMicVisualPainter(() => undefined)
+  useFrameSource(useStudioMicVisualSource(), () => undefined)
   const lifecycle = useStudioMicVisualLifecycle()
   useEffect(() => observe(lifecycle.active), [lifecycle.active, observe])
   return null
@@ -3692,6 +3701,94 @@ describe('real StudioProvider lifecycle', () => {
       phase: 'ended',
       sessionId: 'late-live-loss'
     })
+  })
+
+  // Plan 095 S5: Go Live leaves recordEnabled on, and the backend reports a
+  // record+stream session as `recording` with a stream URL. It is on air (the
+  // Stream Manager opens, the X reminder fires) and it still saves a file.
+  it('treats Go Live (record+stream) as live and still announces the saved recording', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const openCommentsWindow = vi.fn(async () => undefined)
+    Object.assign(api, { openCommentsWindow })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem(STORAGE_KEYS.settings, JSON.stringify({ openStreamManagerOnLive: true }))
+    localStorage.setItem(
+      STORAGE_KEYS.captureConfig,
+      JSON.stringify({
+        ...defaultCaptureConfig,
+        recordEnabled: true,
+        streamEnabled: true,
+        streaming: {
+          ...defaultCaptureConfig.streaming,
+          enabled: true,
+          enabledTargetIds: ['x'],
+          targets: defaultCaptureConfig.streaming.targets.map((target) =>
+            target.id === 'x' ? { ...target, enabled: true, authMode: 'manual-rtmp' } : target
+          )
+        }
+      } satisfies CaptureConfig)
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    vi.clearAllMocks()
+
+    const xReminderCalls = (): number =>
+      toastSpies.info.mock.calls.filter(([message]) =>
+        String(message).startsWith('X feed is connected')
+      ).length
+    const goLive: RecordingStatus = {
+      state: 'recording',
+      sessionId: 'go-live-session',
+      startedAt: now,
+      streamUrl: 'rtmp://127.0.0.1/live/***',
+      message: 'Running both session.'
+    }
+    const pushStatus = async (status: RecordingStatus): Promise<void> => {
+      await act(async () => {
+        backend.sockets[0]?.onmessage?.({
+          data: JSON.stringify({ event: 'recording.status', payload: status })
+        })
+        await Promise.resolve()
+      })
+    }
+
+    await pushStatus(goLive)
+    await waitForObservation(() => latest()?.recording.recording.sessionId === 'go-live-session')
+    await waitForObservation(() => openCommentsWindow.mock.calls.length === 1)
+    expect(xReminderCalls()).toBe(1)
+
+    // A running tick repeats the state: no second window, no second reminder.
+    await pushStatus({ ...goLive, message: 'Still running.' })
+    await waitForObservation(() => latest()?.recording.recording.message === 'Still running.')
+    expect(openCommentsWindow).toHaveBeenCalledTimes(1)
+    expect(xReminderCalls()).toBe(1)
+
+    await pushStatus({
+      state: 'idle',
+      sessionId: 'go-live-session',
+      outputPath: '/recordings/go-live-session.mp4',
+      durationMs: 65_000,
+      message: 'Saved.'
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+    await waitForObservation(() => toastSpies.success.mock.calls.length === 1)
+    expect(toastSpies.success).toHaveBeenCalledWith(
+      'Recording saved',
+      expect.objectContaining({ duration: 12000 })
+    )
   })
 
   it('saves complete visual scenes, applies one atomic target and preserves independent builtin framing', async () => {
@@ -8547,6 +8644,75 @@ describe('real StudioProvider lifecycle', () => {
     ).toHaveLength(2)
     expect(backend.youtubePrepareCount).toBe(1)
     expect(latest()?.core.goLiveConfirmationOpen).toBe(true)
+  })
+
+  // Plan 094 (bug 1): the owner's failed `complete` on quota was retained and
+  // every later Record retried it ("Finish cleaning up the previous livestream
+  // providers before starting again") until midnight Pacific. YouTube ends the
+  // broadcast itself (enableAutoStop), so a quota refusal is settled.
+  it('settles a quota-refused completion so the next start never retries it', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    backend.sessionStartError = 'The encoder rejected this start.'
+    backend.youtubeCompleteQuotaFailuresRemaining = 1
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openYouTubeGoLiveConfirmation(latest)
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+
+    const completions = (): number =>
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      ).length
+    expect(backend.youtubePrepareCount).toBe(1)
+    expect(completions()).toBe(1)
+    const youtubeTarget = latest()!.core.captureConfig.streaming.targets.find(
+      (target) => target.platform === 'youtube'
+    )
+    expect(youtubeTarget?.status?.state).toBe('stopped')
+    expect(youtubeTarget?.status?.message).toContain('ends the broadcast on its own')
+
+    // A recording-only start proceeds at once: no completion retry, no
+    // "finish cleaning up" error.
+    backend.sessionStartError = null
+    await act(async () => {
+      latest()!.core.setCaptureConfig({
+        ...latest()!.core.captureConfig,
+        recordEnabled: true,
+        streamEnabled: false
+      })
+    })
+    await act(async () => {
+      await latest()!.core.startSession()
+    })
+    expect(completions()).toBe(1)
+    expect(latest()?.core.lastError ?? null).toBeNull()
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'session.start')
+    ).toHaveLength(2)
   })
 
   it('retains cancelled partial-setup cleanup and retries it before preparing again', async () => {

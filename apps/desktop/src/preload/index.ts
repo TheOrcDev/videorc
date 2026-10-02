@@ -44,6 +44,7 @@ const api: VideorcApi = {
   importScheduledThumbnail: () => invoke('scheduled-streams:import-thumbnail'),
   backgroundAssetExists: (assetId) => invoke('backgrounds:asset-exists', assetId),
   cacheChatAvatar: (url) => invoke('avatars:cache', url),
+  readChatAvatar: (localUrl) => invoke('avatars:read', localUrl),
   sendCommentHighlight: (command) => invoke('comments-window:highlight', command),
   onCommentHighlightRequest: (callback) => subscribe('comments-window:highlight-request', callback),
   pushCommentHighlightResult: (resolution) =>

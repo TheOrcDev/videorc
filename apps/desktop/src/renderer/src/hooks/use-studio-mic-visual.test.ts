@@ -1,58 +1,39 @@
-import { StrictMode, act, createElement, useRef, type ReactElement } from 'react'
+import { StrictMode, act, createElement, type ReactElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { MicVisualPipelineProvider, useStudioMicVisualPeakDb } from './use-studio-mic-visual'
-import { useAudioMixerFramePainter } from '../components/studio/audio-mixer'
-import { useMicPickerFramePainter } from '../components/studio/mic-picker-preview'
-import { useSessionMicFramePainter } from '../components/studio/session-mic-sliver'
-import type { LiveWaveformHandle } from '../components/ui/live-waveform'
+import { useFrameSource } from './use-frame-source'
+import { useStudioMicMeterSource, useStudioMicVisualSource } from './use-studio-mic-sources'
+import { MicVisualPipelineProvider } from './use-studio-mic-visual'
 import { createMicVisualPipeline, type MicVisualAudioContextLike } from '../lib/mic-visual-pipeline'
 
 type TestStream = { getTracks: () => Array<{ stop: () => void }> }
 
-function AudioMixerPainterProbe({
-  element,
+/** The Studio mixer's meter, readout and clip light all read this source (plan 092). */
+function MixerMeterSourceProbe({
+  onFrame,
   onRender
 }: {
-  element: HTMLDivElement
+  onFrame: (peakDb: number) => void
   onRender: () => void
 }): null {
   onRender()
-  const elementRef = useRef<HTMLDivElement>(element)
-  useAudioMixerFramePainter(elementRef)
+  const source = useStudioMicMeterSource({ gainDb: 6, muted: false })
+  useFrameSource(source, (frame) => onFrame(frame.channels[0].peakDb))
   return null
 }
 
-function SessionMicPainterProbe({
-  element,
+/** The session sliver and the picker preview both read this source (plan 092). */
+function VisualSourceProbe({
+  onFrame,
   onRender
 }: {
-  element: HTMLDivElement
+  onFrame: (bandCount: number) => void
   onRender: () => void
 }): null {
   onRender()
-  const elementRef = useRef<HTMLDivElement>(element)
-  useSessionMicFramePainter(elementRef)
-  return null
-}
-
-function MicPickerPainterProbe({
-  onPaint,
-  onRender
-}: {
-  onPaint: () => void
-  onRender: () => void
-}): null {
-  onRender()
-  const waveformRef = useRef<LiveWaveformHandle>({ paint: onPaint })
-  useMicPickerFramePainter(waveformRef)
-  return null
-}
-
-function PeakLabelProbe({ onRender }: { onRender: () => void }): null {
-  onRender()
-  useStudioMicVisualPeakDb()
+  const source = useStudioMicVisualSource()
+  useFrameSource(source, (frame) => onFrame(frame.bands.length))
   return null
 }
 
@@ -114,29 +95,32 @@ describe('Studio visual microphone consumers', () => {
     })
     const renderCounts = [0, 0, 0]
     const paintCounts = [0, 0, 0]
-    let peakLabelRenderCount = 0
+    const meterPeaks: number[] = []
+    const bandCounts: number[] = []
     const probes: ReactElement[] = [
-      createElement(AudioMixerPainterProbe, {
+      createElement(MixerMeterSourceProbe, {
         key: 'mixer',
-        element: testDom.createBarVisualizer(28, () => {
+        onFrame: (peakDb) => {
           paintCounts[0] += 1
-        }),
+          meterPeaks.push(peakDb)
+        },
         onRender: () => {
           renderCounts[0] += 1
         }
       }),
-      createElement(SessionMicPainterProbe, {
+      createElement(VisualSourceProbe, {
         key: 'sliver',
-        element: testDom.createBarVisualizer(5, () => {
+        onFrame: (bandCount) => {
           paintCounts[1] += 1
-        }),
+          bandCounts.push(bandCount)
+        },
         onRender: () => {
           renderCounts[1] += 1
         }
       }),
-      createElement(MicPickerPainterProbe, {
+      createElement(VisualSourceProbe, {
         key: 'picker',
-        onPaint: () => {
+        onFrame: () => {
           paintCounts[2] += 1
         },
         onRender: () => {
@@ -162,15 +146,7 @@ describe('Studio visual microphone consumers', () => {
                 permissionStatus: 'granted'
               }
             },
-            [
-              ...probes,
-              createElement(PeakLabelProbe, {
-                key: 'peak-label',
-                onRender: () => {
-                  peakLabelRenderCount += 1
-                }
-              })
-            ]
+            probes
           )
         )
       )
@@ -180,7 +156,6 @@ describe('Studio visual microphone consumers', () => {
     expect(getUserMedia).toHaveBeenCalledTimes(1)
     expect(scheduledFrames.size).toBe(1)
     const rendersAfterMount = [...renderCounts]
-    const peakRendersAfterMount = peakLabelRenderCount
 
     for (let frameIndex = 1; frameIndex <= 8; frameIndex += 1) {
       const next = scheduledFrames.entries().next().value as
@@ -195,8 +170,11 @@ describe('Studio visual microphone consumers', () => {
 
     expect(renderCounts).toEqual(rendersAfterMount)
     expect(paintCounts.every((count) => count >= 8)).toBe(true)
-    // The dB/clip label may commit the first peak, but never once per frame.
-    expect(peakLabelRenderCount - peakRendersAfterMount).toBeLessThanOrEqual(2)
+    // The meter reads what the recording gets: a 0.2 peak (-13.98 dBFS) plus
+    // the 6 dB gain.
+    expect(meterPeaks.at(-1)).toBeCloseTo(20 * Math.log10(0.2) + 6, 2)
+    // Bars and waveforms get the pipeline's 32 bands.
+    expect(bandCounts.at(-1)).toBe(32)
     expect(contexts).toHaveLength(1)
     expect(getUserMedia).toHaveBeenCalledTimes(1)
     expect(scheduledFrames.size).toBe(1)
@@ -205,7 +183,6 @@ describe('Studio visual microphone consumers', () => {
 
 function installRenderEnvironment(): {
   container: Element
-  createBarVisualizer: (barCount: number, onPaint: () => void) => HTMLDivElement
   restore: () => void
 } {
   class FakeElement {
@@ -249,27 +226,6 @@ function installRenderEnvironment(): {
     insertBefore: () => {},
     removeChild: () => {}
   } as unknown as Element
-  const createBarVisualizer = (barCount: number, onPaint: () => void): HTMLDivElement => {
-    const bars = Array.from({ length: barCount }, () => {
-      const bar = new FakeElement()
-      let height = ''
-      Object.defineProperty(bar.style, 'height', {
-        configurable: true,
-        get: () => height,
-        set: (value: string) => {
-          height = value
-          onPaint()
-        }
-      })
-      return bar
-    })
-    const visualizer = new FakeElement()
-    visualizer.children = {
-      length: bars.length,
-      item: (index) => bars[index] ?? null
-    }
-    return visualizer as unknown as HTMLDivElement
-  }
   const descriptors = new Map(
     ['window', 'document', 'HTMLElement', 'IS_REACT_ACT_ENVIRONMENT'].map((name) => [
       name,
@@ -286,7 +242,6 @@ function installRenderEnvironment(): {
 
   return {
     container,
-    createBarVisualizer,
     restore: () => {
       for (const [name, descriptor] of descriptors) {
         if (descriptor) Object.defineProperty(globalThis, name, descriptor)

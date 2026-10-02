@@ -74,11 +74,17 @@ describe('desktop scale', () => {
       'chart.tsx'
     ]) {
       const source = read(name)
-      expect(source, name).toMatch(/rounded-(md|lg|xl) border glass-float/)
+      // Plan 091 D6: the popup tier for everything that floats, the tooltip
+      // tier for tooltips, the dialog tier for dialogs (and the palette).
+      expect(source, name).toMatch(
+        name === 'tooltip.tsx'
+          ? /rounded-md border glass-float-tooltip /
+          : /rounded-(lg|xl) border glass-float /
+      )
       expect(source, name).not.toContain('bg-popover')
       expect(source, name).not.toMatch(/rounded-(2xl|3xl)/)
     }
-    expect(read('dialog.tsx')).toContain('rounded-panel border glass-float p-5')
+    expect(read('dialog.tsx')).toContain('rounded-panel border glass-float-dialog p-5')
     // Command always sits inside a Dialog or Popover: it never paints a coat.
     expect(read('command.tsx')).not.toMatch(/\bbg-(popover|card|background)\b/)
   })

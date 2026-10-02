@@ -13,7 +13,7 @@
 //! real-OAuth smoke. (IRC fallback is a later addition, gated behind this EventSub path.)
 
 use std::collections::HashSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -299,13 +299,33 @@ fn parse_helix_user_avatar(body: &Value, user_id: &str) -> Option<String> {
     })
 }
 
+/// A failed Helix lookup is retried after this long. A session used to cache
+/// `None` for good, so one Helix hiccup on a chatter's first message left them
+/// a monogram for the whole stream (plan 095, S3).
+const TWITCH_AVATAR_MISS_RETRY: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Debug, Clone)]
+struct TwitchAvatarEntry {
+    avatar: Option<String>,
+    fetched_at: Instant,
+}
+
+impl TwitchAvatarEntry {
+    /// A hit is final for the session; a miss is served until the retry window
+    /// passes, then looked up again.
+    fn serves(&self, now: Instant) -> bool {
+        self.avatar.is_some() || now.duration_since(self.fetched_at) < TWITCH_AVATAR_MISS_RETRY
+    }
+}
+
 /// Session-scoped avatar backfill: EventSub chat events carry no avatar, so
 /// the FIRST message from each chatter costs one Helix `GET /users` lookup
-/// (read scope) and every later message hits this cache. Failures cache None —
-/// the feed shows a monogram instead of hammering Helix.
+/// (read scope) and every later message hits this cache. A failure is cached
+/// as None for `TWITCH_AVATAR_MISS_RETRY` (the feed shows a monogram instead
+/// of hammering Helix), then retried once more.
 #[derive(Default)]
 struct TwitchAvatarCache {
-    by_user_id: std::collections::HashMap<String, Option<String>>,
+    by_user_id: std::collections::HashMap<String, TwitchAvatarEntry>,
 }
 
 impl TwitchAvatarCache {
@@ -316,8 +336,13 @@ impl TwitchAvatarCache {
         access_token: &str,
         user_id: &str,
     ) -> Option<String> {
-        if let Some(cached) = self.by_user_id.get(user_id) {
-            return cached.clone();
+        let now = Instant::now();
+        if let Some(cached) = self
+            .by_user_id
+            .get(user_id)
+            .filter(|cached| cached.serves(now))
+        {
+            return cached.avatar.clone();
         }
         let base = config
             .api_base_url
@@ -339,7 +364,13 @@ impl TwitchAvatarCache {
             },
             None => None,
         };
-        self.by_user_id.insert(user_id.to_string(), avatar.clone());
+        self.by_user_id.insert(
+            user_id.to_string(),
+            TwitchAvatarEntry {
+                avatar: avatar.clone(),
+                fetched_at: now,
+            },
+        );
         avatar
     }
 }
@@ -1545,6 +1576,7 @@ mod tests {
             last_connected_at: None,
             last_message_at: None,
             last_error: None,
+            retry_at: None,
         }
     }
 
@@ -2301,6 +2333,32 @@ mod tests {
                 .to_string(),
         );
         assert_eq!(keepalive, EventSubFrame::Keepalive);
+    }
+
+    #[test]
+    fn a_missed_helix_avatar_lookup_is_retried_after_five_minutes() {
+        let fetched_at = Instant::now();
+        let miss = TwitchAvatarEntry {
+            avatar: None,
+            fetched_at,
+        };
+        assert!(miss.serves(fetched_at), "a fresh miss is served");
+        assert!(
+            miss.serves(fetched_at + TWITCH_AVATAR_MISS_RETRY - Duration::from_secs(1)),
+            "a miss inside the window is still served"
+        );
+        assert!(
+            !miss.serves(fetched_at + TWITCH_AVATAR_MISS_RETRY),
+            "a miss past the window is looked up again"
+        );
+        let hit = TwitchAvatarEntry {
+            avatar: Some("https://static-cdn.jtvnw.net/a.png".to_string()),
+            fetched_at,
+        };
+        assert!(
+            hit.serves(fetched_at + Duration::from_secs(60 * 60)),
+            "a hit is final for the session"
+        );
     }
 
     #[test]

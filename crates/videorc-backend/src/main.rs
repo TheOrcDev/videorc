@@ -89,6 +89,7 @@ mod scheduled_x;
 mod scheduled_youtube;
 mod screen_capture;
 mod secrets;
+mod service_flags;
 mod session_audio;
 mod session_ops;
 mod session_token;
@@ -140,6 +141,7 @@ mod x_live;
 mod x_oauth1;
 mod youtube;
 mod youtube_chat;
+mod youtube_quota;
 
 use std::convert::Infallible;
 use std::io::Write;
@@ -570,6 +572,9 @@ async fn run_backend() -> Result<()> {
         let entitlement_state = state.clone();
         tokio::spawn(async move { refresh_account_entitlements(&entitlement_state).await });
     }
+    // Plan 094 (S7): remote service flags at startup and every 30 minutes;
+    // fails open to compiled defaults.
+    tokio::spawn(service_flags::run_service_flags_refresher(state.clone()));
     match (oauth_listener, oauth_callback_port) {
         (Some(oauth_listener), Some(oauth_port)) => {
             let oauth_app = Router::new()
@@ -1709,6 +1714,59 @@ fn prepare_oauth_account_transition(
     (account, superseded)
 }
 
+/// Plan 094 (S3): whether a YouTube connect must stop for the shared quota.
+/// With no `error`, this is the pre-lookup check (the breaker is already set);
+/// with a profile-lookup error, a quota refusal sets the breaker. Returns the
+/// pause end. Other platforms never block here.
+fn youtube_connect_quota_block(
+    state: &AppState,
+    platform: StreamPlatform,
+    error: Option<&anyhow::Error>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    if platform != StreamPlatform::Youtube {
+        return None;
+    }
+    match error {
+        None => youtube_quota::paused_until(state),
+        Some(error) => youtube_quota::note_error(state, "YouTube connect", error),
+    }
+}
+
+/// The terminal result for a YouTube connect blocked on quota: not retryable
+/// (a retry would spend quota and fail the same way), reason `youtube-quota`
+/// with `retryAt`, and the token checkpoint cleaned up like every other
+/// non-retryable path. The renderer words it.
+async fn finish_youtube_quota_blocked_connect(
+    state: &AppState,
+    mut result: oauth::OAuthCallbackResult,
+    callback_state: &str,
+    until: chrono::DateTime<chrono::Utc>,
+) -> oauth::OAuthCallbackResult {
+    result.status = oauth::OAuthCallbackStatus::Failed;
+    result.retryable = false;
+    result.reason = Some(YOUTUBE_QUOTA_CONNECT_REASON.to_string());
+    result.retry_at = Some(until.to_rfc3339());
+    result.message = Some(format!(
+        "{} Try connecting YouTube again after {}.",
+        youtube_quota::API_PAUSED_MESSAGE,
+        until.to_rfc3339()
+    ));
+    if let Err(cleanup_error) = state
+        .oauth
+        .finish_with_secret_cleanup(callback_state, secrets::delete_secret)
+        .await
+    {
+        result.retryable = true;
+        result.message = Some(format!(
+            "OAuth checkpoint cleanup failed and will be retried: {cleanup_error}"
+        ));
+    }
+    result
+}
+
+/// `OAuthCallbackResult.reason` for a YouTube connect blocked on quota.
+const YOUTUBE_QUOTA_CONNECT_REASON: &str = "youtube-quota";
+
 async fn complete_oauth_callback(
     state: &AppState,
     params: OAuthCompleteParams,
@@ -1892,6 +1950,17 @@ async fn complete_oauth_callback(
         };
 
         match token_and_checkpoint {
+            // Plan 094 (S3): YouTube's profile lookup spends quota. While the
+            // breaker is set, refuse before the lookup; the 10-minute callback
+            // TTL cannot wait for a reset hours away, so this is terminal.
+            Some((checkpoint, _))
+                if youtube_connect_quota_block(state, checkpoint.platform(), None).is_some() =>
+            {
+                let until = youtube_connect_quota_block(state, checkpoint.platform(), None)
+                    .expect("checked above");
+                return finish_youtube_quota_blocked_connect(state, result, &callback_state, until)
+                    .await;
+            }
             Some((checkpoint, token)) => match oauth::account_from_exchanged_token(
                 &checkpoint,
                 &token,
@@ -1961,6 +2030,17 @@ async fn complete_oauth_callback(
                     Some((account, commit, guard))
                 }
                 Err(error) => {
+                    if let Some(until) =
+                        youtube_connect_quota_block(state, checkpoint.platform(), Some(&error))
+                    {
+                        return finish_youtube_quota_blocked_connect(
+                            state,
+                            result,
+                            &callback_state,
+                            until,
+                        )
+                        .await;
+                    }
                     result.status = oauth::OAuthCallbackStatus::Failed;
                     result.retryable = true;
                     result.message = Some(format!(
@@ -2061,6 +2141,8 @@ async fn complete_x_oauth1_callback(
         account_connected: false,
         retryable: false,
         received_at,
+        reason: None,
+        retry_at: None,
     };
 
     if let Some(denied_token) = denied {
@@ -2485,8 +2567,31 @@ async fn validate_platform_accounts(state: &AppState) -> Vec<PlatformAccountVali
         account = fresh.account.clone();
         changed |= fresh.refreshed;
 
+        // Plan 094: no YouTube profile lookup while the quota breaker is set.
+        // The token is stored and the account stays connected; the lookup
+        // runs again on the next validation after the reset.
+        if account.platform == StreamPlatform::Youtube
+            && let Some(paused_until) = youtube_quota::paused_until(state)
+        {
+            validations.push(platform_validation(
+                &account,
+                PlatformAccountValidationState::Valid,
+                format!(
+                    "{} Validation resumes after {}.",
+                    youtube_quota::API_PAUSED_MESSAGE,
+                    paused_until.to_rfc3339()
+                ),
+            ));
+            continue;
+        }
+        if account.platform == StreamPlatform::Youtube {
+            youtube_quota::record_call(state, youtube_quota::YouTubeEndpoint::ChannelsList);
+        }
         let mut validation =
             oauth::validate_provider_access(account.platform, &fresh.access_token, &client).await;
+        if let Err(error) = validation.as_ref() {
+            youtube_quota::note_error(state, "account validation", error);
+        }
         if validation.is_err() && !fresh.refreshed {
             let validation_error = validation.expect_err("checked above");
             match refresh_platform_access_token(state, &credential, access_ref, &client).await {
@@ -2589,12 +2694,23 @@ async fn prepare_youtube_stream_target(
         anyhow::bail!("{message}");
     }
 
+    // Plan 094: the insert would fail on quota; refuse up front so the
+    // renderer can offer the stream-key path instead.
+    youtube_quota::refuse_if_paused(state)?;
     let credential = youtube_account_credentials(state, params.account_id.as_deref())?;
     let client = reqwest::Client::new();
     let mut fresh = fresh_platform_access_token(state, &credential, &client).await?;
     let video = params.video;
     let target_id = params.target_id;
     let thumbnail_asset_id = metadata.thumbnail_asset_id.clone();
+    // Estimated: insert broadcast + insert stream + bind (50 each).
+    for endpoint in [
+        youtube_quota::YouTubeEndpoint::LiveBroadcastsInsert,
+        youtube_quota::YouTubeEndpoint::LiveStreamsInsert,
+        youtube_quota::YouTubeEndpoint::LiveBroadcastsBind,
+    ] {
+        youtube_quota::record_call(state, endpoint);
+    }
     let mut prepared = youtube::prepare_youtube_broadcast(
         YouTubePrepareRequest {
             access_token: fresh.access_token.clone(),
@@ -2634,6 +2750,9 @@ async fn prepare_youtube_stream_target(
             secrets::put_secret,
         )
         .await;
+    }
+    if let Err(error) = prepared.as_ref() {
+        youtube_quota::note_error(state, "broadcast prepare", error);
     }
     let prepared = prepared?;
 
@@ -2693,16 +2812,29 @@ async fn set_youtube_broadcast_thumbnail(
             tracing::warn!("[youtube-thumbnail] managed thumbnail unavailable: {error}");
             Err("thumbnailUnavailable".to_string())
         }
+        // Plan 094: a thumbnail is the first call to shed; none while paused
+        // and none once the daily budget (S6) reaches 80%.
+        Ok(_) if youtube_quota::paused_until(state).is_some() => Err("quotaPaused".to_string()),
+        Ok(_)
+            if youtube_quota::budget_refuses(state, youtube_quota::BudgetCall::Thumbnail)
+                .is_some() =>
+        {
+            Err("budgetShed".to_string())
+        }
         Ok(path) => {
+            youtube_quota::record_call(state, youtube_quota::YouTubeEndpoint::ThumbnailsSet);
             let upload = async {
                 scheduled_streams_service::youtube_api(state, account_id)
                     .await?
                     .thumbnail(broadcast_id, &path, asset_id)
                     .await
             };
-            upload
-                .await
-                .map_err(|error| youtube::youtube_thumbnail_failure_code(&error))
+            upload.await.map_err(|error| {
+                if youtube_quota::note_error(state, "thumbnail upload", &error).is_some() {
+                    return "quotaPaused".to_string();
+                }
+                youtube::youtube_thumbnail_failure_code(&error)
+            })
         }
     };
     match &outcome {
@@ -2763,9 +2895,16 @@ async fn transition_youtube_stream_target(
     params: YouTubeBroadcastTransitionParams,
 ) -> anyhow::Result<YouTubeBroadcastTransitionResult> {
     refuse_scheduled_youtube_broadcast(state, &params.broadcast_id)?;
+    youtube_quota::refuse_if_paused(state)?;
     let credential = youtube_account_credentials(state, params.account_id.as_deref())?;
     let client = reqwest::Client::new();
     let mut fresh = fresh_platform_access_token(state, &credential, &client).await?;
+    // Estimated: the transition (50) plus one status confirmation read.
+    youtube_quota::record_call(
+        state,
+        youtube_quota::YouTubeEndpoint::LiveBroadcastsTransition,
+    );
+    youtube_quota::record_call(state, youtube_quota::YouTubeEndpoint::LiveBroadcastsList);
     let mut transition = youtube::transition_youtube_broadcast(
         YouTubeBroadcastTransitionRequest {
             access_token: fresh.access_token.clone(),
@@ -2795,6 +2934,9 @@ async fn transition_youtube_stream_target(
         )
         .await;
     }
+    if let Err(error) = transition.as_ref() {
+        youtube_quota::note_error(state, "broadcast transition", error);
+    }
     transition
 }
 
@@ -2802,9 +2944,11 @@ async fn youtube_stream_status(
     state: &AppState,
     params: YouTubeStreamStatusParams,
 ) -> anyhow::Result<YouTubeStreamStatusResult> {
+    youtube_quota::refuse_if_paused(state)?;
     let credential = youtube_account_credentials(state, params.account_id.as_deref())?;
     let client = reqwest::Client::new();
     let mut fresh = fresh_platform_access_token(state, &credential, &client).await?;
+    youtube_quota::record_call(state, youtube_quota::YouTubeEndpoint::LiveStreamsList);
     let mut status = youtube::get_youtube_stream_status(
         YouTubeStreamStatusRequest {
             access_token: fresh.access_token.clone(),
@@ -2832,6 +2976,9 @@ async fn youtube_stream_status(
         )
         .await;
     }
+    if let Err(error) = status.as_ref() {
+        youtube_quota::note_error(state, "stream status", error);
+    }
     status
 }
 
@@ -2855,8 +3002,10 @@ async fn list_youtube_channels(
             }],
         });
     }
+    youtube_quota::refuse_if_paused(state)?;
     let client = reqwest::Client::new();
     let mut fresh = fresh_platform_access_token(state, &credential, &client).await?;
+    youtube_quota::record_call(state, youtube_quota::YouTubeEndpoint::ChannelsList);
     let mut channels = youtube::list_youtube_channels(
         YouTubeChannelListRequest {
             access_token: fresh.access_token.clone(),
@@ -4804,6 +4953,7 @@ fn websocket_event_is_coalescible(event: &str) -> bool {
             | "preview.live.status"
             | "stream.health"
             | "stream.viewers"
+            | "audio.levels"
     )
 }
 
@@ -5270,6 +5420,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         }),
 
         COMMAND_LANE_SMOKE_BLOCK_METHOD
+        | "test.youtubeQuota.forceExpiry"
+        | "test.youtubeQuota.seedAccount"
         | "noiseCleanup.start"
         | "noiseCleanup.cancel"
         | "performance.check.run"
@@ -5287,6 +5439,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "resource.admin.resolve_screen_path"
         | "resource.admin.resolve_background_path"
         | "health.ping"
+        | "youtube.quota.status"
         | "scheduledStreams.capabilities"
         | "scheduledStreams.list"
         | "scheduledStreams.get"
@@ -8203,6 +8356,113 @@ async fn handle_text_message_with_role(
                 )
             }
         }
+        // Plan 094 (S4): the quota-outage drill. Debug builds only, admitted
+        // through the explicit smoke RPC switch, and only while the dev-only
+        // `VIDEORC_YOUTUBE_API_BASE_URL` points YouTube at a local fake, so no
+        // seeded token or forced expiry can ever reach Google.
+        #[cfg(debug_assertions)]
+        "test.youtubeQuota.forceExpiry" => {
+            if youtube_quota::youtube_api_base_url_override().is_none() {
+                ServerResponse::error(
+                    command.id,
+                    "youtube-quota-smoke-disabled",
+                    format!(
+                        "{} must point at a local fake for the quota smoke hooks.",
+                        youtube_quota::YOUTUBE_API_BASE_URL_ENV
+                    ),
+                )
+            } else if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "The quota expiry hook does not accept parameters.",
+                )
+            } else {
+                match youtube_quota::force_expiry_for_smoke(state) {
+                    Some(previous) => ServerResponse::ok(
+                        command.id,
+                        serde_json::json!({ "forced": true, "previousPausedUntil": previous.to_rfc3339() }),
+                    ),
+                    None => ServerResponse::error(
+                        command.id,
+                        "youtube-quota-not-paused",
+                        "YouTube is not paused; nothing to expire.",
+                    ),
+                }
+            }
+        }
+        #[cfg(debug_assertions)]
+        "test.youtubeQuota.seedAccount" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct SeedParams {
+                access_token: String,
+                #[serde(default)]
+                account_id: Option<String>,
+                #[serde(default)]
+                account_label: Option<String>,
+            }
+            if youtube_quota::youtube_api_base_url_override().is_none() {
+                ServerResponse::error(
+                    command.id,
+                    "youtube-quota-smoke-disabled",
+                    format!(
+                        "{} must point at a local fake before a YouTube account can be seeded.",
+                        youtube_quota::YOUTUBE_API_BASE_URL_ENV
+                    ),
+                )
+            } else {
+                match serde_json::from_value::<SeedParams>(command.params) {
+                    Ok(params) if params.access_token.trim().is_empty() => ServerResponse::error(
+                        command.id,
+                        "invalid-params",
+                        "accessToken is required.",
+                    ),
+                    Ok(params) => {
+                        let account_id = params
+                            .account_id
+                            .unwrap_or_else(|| "youtube-quota-smoke-channel".to_string());
+                        let token_secret_ref = format!("youtube-quota-smoke:{account_id}:access");
+                        let seeded = secrets::put_secret(&token_secret_ref, &params.access_token)
+                            .and_then(|()| {
+                                state
+                                    .database
+                                    .upsert_platform_account(UpsertPlatformAccount {
+                                        platform: StreamPlatform::Youtube,
+                                        account_id: account_id.clone(),
+                                        account_label: params
+                                            .account_label
+                                            .unwrap_or_else(|| "Quota smoke channel".to_string()),
+                                        account_handle: None,
+                                        avatar_url: None,
+                                        scopes: vec![live_chat::YOUTUBE_CHAT_SCOPE.to_string()],
+                                        token_secret_ref: Some(token_secret_ref),
+                                        refresh_token_secret_ref: None,
+                                        stream_key_secret_ref: None,
+                                        expires_at: None,
+                                        status: PlatformAccountStatus::Connected,
+                                    })
+                            });
+                        match seeded {
+                            Ok(account) => {
+                                if let Ok(accounts) = state.database.list_platform_accounts() {
+                                    state.emit_event("platformAccounts.changed", accounts);
+                                }
+                                ServerResponse::ok(command.id, account)
+                            }
+                            Err(error) => ServerResponse::error(
+                                command.id,
+                                "youtube-quota-seed-failed",
+                                error.to_string(),
+                            ),
+                        }
+                    }
+                    Err(error) => {
+                        ServerResponse::error(command.id, "invalid-params", error.to_string())
+                    }
+                }
+            }
+        }
         #[cfg(debug_assertions)]
         COMMAND_LANE_SMOKE_RELEASE_METHOD => {
             if !rpc_params_are_empty(&command.params) {
@@ -9983,6 +10243,9 @@ async fn handle_text_message_with_role(
             let snapshot = state.audience.lock().ok().and_then(|hub| hub.snapshot());
             ServerResponse::ok(command.id, snapshot)
         }
+        // Plan 094: the shared quota breaker, for windows that open after the
+        // `youtube.quota` event fired.
+        "youtube.quota.status" => ServerResponse::ok(command.id, youtube_quota::status(state)),
         "sessions.audience.get" => {
             match serde_json::from_value::<audience::SessionAudienceParams>(command.params) {
                 Ok(params) => match audience::session_audience(&state.database, &params.session_id)
@@ -10838,11 +11101,14 @@ async fn handle_text_message_with_role(
             match serde_json::from_value::<YouTubePrepareParams>(command.params) {
                 Ok(params) => match prepare_youtube_stream_target(state, params).await {
                     Ok(prepared) => ServerResponse::ok(command.id, prepared),
-                    Err(error) => ServerResponse::error(
-                        command.id,
-                        "youtube-prepare-failed",
-                        error.to_string(),
-                    ),
+                    Err(error) => {
+                        tracing::warn!("[youtube-prepare] failed: {error:#}");
+                        let (code, message) = youtube::youtube_failure_response(
+                            &error,
+                            youtube::YouTubeFailureStep::Prepare,
+                        );
+                        ServerResponse::error(command.id, code, message)
+                    }
                 },
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
@@ -10866,14 +11132,22 @@ async fn handle_text_message_with_role(
         }
         "streamTargets.youtube.transition" => {
             match serde_json::from_value::<YouTubeBroadcastTransitionParams>(command.params) {
-                Ok(params) => match transition_youtube_stream_target(state, params).await {
-                    Ok(result) => ServerResponse::ok(command.id, result),
-                    Err(error) => ServerResponse::error(
-                        command.id,
-                        "youtube-transition-failed",
-                        error.to_string(),
-                    ),
-                },
+                Ok(params) => {
+                    let step = match params.status {
+                        youtube::YouTubeBroadcastTransitionStatus::Complete => {
+                            youtube::YouTubeFailureStep::TransitionComplete
+                        }
+                        _ => youtube::YouTubeFailureStep::TransitionLive,
+                    };
+                    match transition_youtube_stream_target(state, params).await {
+                        Ok(result) => ServerResponse::ok(command.id, result),
+                        Err(error) => {
+                            tracing::warn!("[youtube-transition] failed: {error:#}");
+                            let (code, message) = youtube::youtube_failure_response(&error, step);
+                            ServerResponse::error(command.id, code, message)
+                        }
+                    }
+                }
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
@@ -13127,6 +13401,8 @@ mod tests {
                         account_connected: attempt >= 2,
                         retryable: attempt < 2,
                         received_at: chrono::Utc::now().to_rfc3339(),
+                        reason: None,
+                        retry_at: None,
                     }
                 }
             },
@@ -13211,6 +13487,8 @@ mod tests {
                         account_connected: false,
                         retryable: attempt == 0,
                         received_at: chrono::Utc::now().to_rfc3339(),
+                        reason: None,
+                        retry_at: None,
                     }
                 }
             },
@@ -13254,6 +13532,8 @@ mod tests {
                         account_connected: false,
                         retryable: true,
                         received_at: chrono::Utc::now().to_rfc3339(),
+                        reason: None,
+                        retry_at: None,
                     }
                 }
             },
@@ -13304,6 +13584,8 @@ mod tests {
                         account_connected: attempt >= 8,
                         retryable: attempt < 8,
                         received_at: chrono::Utc::now().to_rfc3339(),
+                        reason: None,
+                        retry_at: None,
                     }
                 }
             },
@@ -19504,6 +19786,78 @@ mod tests {
         assert!(should_refresh_platform_access_token(
             &platform_account_with_status(PlatformAccountStatus::Connected, Some(near_expiry))
         ));
+    }
+
+    /// Plan 094 (S3): a quota 403 on the connect profile lookup is terminal
+    /// (reason `youtube-quota`, `retryAt`), it sets the breaker, and the next
+    /// connect is refused before any profile request. Other platforms and
+    /// other errors keep the retryable path.
+    #[tokio::test]
+    async fn youtube_connect_quota_is_terminal_and_blocks_the_next_lookup() {
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            storage::Database::open_in_memory_for_tests(),
+        );
+        let quota = anyhow::anyhow!(
+            "YouTube profile lookup failed with HTTP 403 Forbidden: quotaExceeded: The request cannot be completed because you have exceeded your quota."
+        );
+        assert_eq!(
+            youtube_connect_quota_block(&state, StreamPlatform::Youtube, None),
+            None,
+            "nothing blocks before any quota error"
+        );
+        assert_eq!(
+            youtube_connect_quota_block(&state, StreamPlatform::Twitch, Some(&quota)),
+            None
+        );
+        let until = youtube_connect_quota_block(&state, StreamPlatform::Youtube, Some(&quota))
+            .expect("quota blocks the connect");
+        assert_eq!(youtube_quota::paused_until(&state), Some(until));
+        // The second connect is refused before the lookup (no error needed).
+        assert_eq!(
+            youtube_connect_quota_block(&state, StreamPlatform::Youtube, None),
+            Some(until)
+        );
+        let other = anyhow::anyhow!("YouTube profile lookup failed with HTTP 503");
+        // A non-quota error never pretends to be quota, even while paused.
+        assert_eq!(
+            youtube_connect_quota_block(&state, StreamPlatform::Youtube, Some(&other)),
+            None
+        );
+
+        let result = finish_youtube_quota_blocked_connect(
+            &state,
+            oauth::OAuthCallbackResult {
+                platform: Some(StreamPlatform::Youtube),
+                state: "unknown-state".to_string(),
+                status: oauth::OAuthCallbackStatus::Success,
+                code_present: true,
+                error: None,
+                message: None,
+                token_stored: false,
+                account_connected: false,
+                retryable: true,
+                received_at: chrono::Utc::now().to_rfc3339(),
+                reason: None,
+                retry_at: None,
+            },
+            "unknown-state",
+            until,
+        )
+        .await;
+        assert_eq!(result.status, oauth::OAuthCallbackStatus::Failed);
+        assert!(!result.retryable);
+        assert_eq!(result.reason.as_deref(), Some("youtube-quota"));
+        assert_eq!(
+            result.retry_at.as_deref(),
+            Some(until.to_rfc3339().as_str())
+        );
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["reason"], "youtube-quota");
+        assert!(!json["message"].as_str().unwrap().contains('<'));
     }
 
     #[test]

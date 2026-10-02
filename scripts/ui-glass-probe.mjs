@@ -22,19 +22,47 @@
 // is therefore measured unfocused, the state Chat and Captions live in during
 // a stream; the material is `visualEffectState: 'active'` either way.
 //
-// --surfaces adds the floating glass (plan 072) on main and chat: the real
-// `glass-float` utility painted over a text-free patch of the window and over
-// app text (sidebar rows, Stream Manager filters), scored by
-// scripts/lib/float-glass-checks.mjs (lift over the window glass, text
+// --surfaces adds the floating glass (plan 072; plan 091 S3) on main and
+// chat: the real float utilities (the popup, dialog and tooltip tiers)
+// painted over a text-free patch of the window and over app text (sidebar
+// rows, Stream Manager filters), scored by scripts/lib/float-glass-checks.mjs
+// (a fixed tone against the computed colour whatever is behind, opaque, text
 // contrast, no bleed of the text underneath). The old near-opaque popover
-// coat is measured beside it as an ungated control, so the report shows the slab the
-// gate exists to catch. The primitives' use of the utility is pinned by the
-// renderer guard tests.
+// coat is measured beside them as an ungated control. The primitives' use of
+// the utilities is pinned by the renderer guard tests.
+//
+// Plan 091 (the clear glass, VIDEORC_GLASS_STYLE=clear) adds two metrics on
+// every window with a page, gated whenever the app reports that style was
+// requested:
+//
+//   neutrality    with the renderer's coats zeroed through CDP, the RGB
+//                 distance between the window sample and a patch of the bare
+//                 backdrop beside the window, over white, black, red and blue.
+//                 A stripped material passes the colour through (<= 8); the
+//                 material as AppKit draws it sits hundreds of steps away
+//   nativeClear   every behind-window effect view reads back as the
+//                 clear-glass class with the Ghostex radius, no wallpaper
+//                 tinting and no saturation filter (scripts/lib/glass-neutrality.mjs)
+//   parity        ghostexParity (S1): the coats a sample sits under are read
+//                 from the page (getComputedStyle), composited over the
+//                 bare-backdrop reference in sRGB, and the prediction must
+//                 sit within a few RGB steps of the capture over white and
+//                 black (scripts/lib/glass-parity.mjs). The OKLCH L of both
+//                 is reported beside it for the plan's table
+//
+// --style=clear|material launches the app with that VIDEORC_GLASS_STYLE.
+// --persistence (main only) walks the transitions AppKit rebuilds a material
+// through (theme, resize, simple fullscreen, a re-created vibrancy view) and
+// re-reads nativeClear after each. The focus cycle and minimize/restore need
+// --allow-focus: both activate the app, taking the user's focus for a moment.
+// --frost-check records (never gates) whether a bare CSS backdrop-filter
+// reaches the screen on these windows, plan 072's S0 question.
 //
 // Report mode prints every metric; --gate fails the run on any check.
 //
 //   node scripts/ui-glass-probe.mjs [--gate] [--surfaces] [--themes=dark,light]
-//     [--roles=main,chat,captions,notes,preview]
+//     [--roles=main,chat,captions,notes,preview] [--style=clear|material]
+//     [--persistence] [--allow-focus] [--frost-check]
 //
 // Extra app env rides in VIDEORC_UI_GLASS_APP_ENV (JSON), e.g.
 // '{"VIDEORC_GLASS":"0"}' to measure the solid palette.
@@ -54,6 +82,13 @@ import {
   FLOAT_GLASS_THRESHOLDS,
   growRect
 } from './lib/float-glass-checks.mjs'
+import {
+  backdropReferenceRect,
+  nativeClearCheck,
+  NEUTRALITY_BACKDROPS,
+  neutralityOf
+} from './lib/glass-neutrality.mjs'
+import { parityOf, parseCssColor } from './lib/glass-parity.mjs'
 import {
   colorDistance,
   contrastRatio,
@@ -76,7 +111,16 @@ export const GLASS_THRESHOLDS = Object.freeze({
   maxSharpness: 6,
   minPrimaryContrast: 7,
   minSecondaryContrast: 4.5,
-  maxPinnedLuminance: 0.12
+  maxPinnedLuminance: 0.12,
+  // Plan 091: a stripped material within 8 RGB steps of the bare backdrop
+  // (AppKit's dark material measures about 313 over white), at Ghostex's radius.
+  maxNeutrality: 8,
+  clearBlurRadius: 60,
+  // Plan 091 S1: the coats composited over the reference predict the sample
+  // within this many RGB steps. The 2026-10-02 population (20 samples, five
+  // windows, both themes) tops out at 1.53; 4 keeps 2.6x that and still fails
+  // a cover off by 0.016 or more (0.02 moves a dark sample 5 steps over white).
+  maxParity: 4
 })
 
 // sRGB of the text tokens in styles.css: --foreground / --muted-foreground
@@ -155,11 +199,19 @@ const option = (name, fallback) =>
   argv.find((arg) => arg.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback
 const gate = flag('gate')
 const surfaces = flag('surfaces')
+const persistence = flag('persistence')
+const allowFocus = flag('allow-focus')
+const frostCheck = flag('frost-check')
 const themes = option('themes', 'dark,light').split(',')
 const roles = option('roles', 'main,chat,captions,notes,preview').split(',')
-const extraAppEnv = process.env.VIDEORC_UI_GLASS_APP_ENV
-  ? JSON.parse(process.env.VIDEORC_UI_GLASS_APP_ENV)
-  : {}
+const style = option('style', null)
+if (style !== null && style !== 'clear' && style !== 'material') {
+  throw new Error(`--style must be clear or material, not ${style}.`)
+}
+const extraAppEnv = {
+  ...(process.env.VIDEORC_UI_GLASS_APP_ENV ? JSON.parse(process.env.VIDEORC_UI_GLASS_APP_ENV) : {}),
+  ...(style ? { VIDEORC_GLASS_STYLE: style } : {})
+}
 const outputDir =
   process.env.VIDEORC_UI_GLASS_OUTPUT_DIR ?? mkdtempSync(join(tmpdir(), 'videorc-ui-glass-'))
 mkdirSync(outputDir, { recursive: true })
@@ -331,18 +383,90 @@ async function placeOnPrimaryDisplay(smoke, role, index) {
   const { bounds, primaryWorkArea } = await waitForWindow(smoke, role)
   const width = Math.min(bounds.width, primaryWorkArea.width - 80)
   const height = Math.min(bounds.height, primaryWorkArea.height - 80)
+  // focus: false shows the placed window inactive; the plain set-bounds path
+  // calls show(), which activates the app and takes the user's focus.
   await requestSmokeCommand(smoke, SET_BOUNDS_COMMAND[role], {
     x: primaryWorkArea.x + 40 + index * 12,
     y: primaryWorkArea.y + 30 + index * 12,
     width,
-    height
+    height,
+    focus: false
   })
 }
 
-// Paints a probe surface over `rect` (window points) in the role's page:
-// `float` is the real glass-float utility, `control` the old popover coat,
-// `leak` the utility at a 97% coat (the translucency that let white tab
-// labels read through the hover card before the coat went opaque).
+// ghostexParity (plan 091 S1): the elements whose coats a sample sits under,
+// body first. main's toolbar sample sits on body + main (the content coat),
+// its sidebar sample on body + aside (the sidebar coat); the single-pane
+// windows paint the content coat on their WindowFrame. The preview has no
+// page (its coats come from window-palette.ts) and is not scored.
+const COAT_STACKS = {
+  main: { 'content-toolbar': ['body', 'main'], 'sidebar-foot': ['body', 'aside'] },
+  chat: { 'list-foot': ['body', '[data-slot="window-frame"]'] },
+  captions: { body: ['body', '[data-slot="window-frame"]'] },
+  notes: { textarea: ['body', '[data-slot="window-frame"]'] }
+}
+
+// The computed background of each coat element, as Chromium resolved the
+// tokens (`oklch(L C H / A)`), per sample: the read-back that proves the
+// derived coats survived the CSS pipeline, and the input to the parity
+// prediction. Null for a role without a page.
+async function readCoats(devtoolsHost, role) {
+  const stacks = COAT_STACKS[role]
+  const target = stacks ? await pageTarget(devtoolsHost, role) : null
+  if (!target) return null
+  const selectors = [...new Set(Object.values(stacks).flat())]
+  const computed = await cdpEvaluate(
+    target.webSocketDebuggerUrl,
+    `(() => Object.fromEntries(${JSON.stringify(selectors)}.map((selector) => {
+      const el = document.querySelector(selector);
+      return [selector, el ? getComputedStyle(el).backgroundColor : null];
+    })))()`
+  )
+  const coats = {}
+  for (const [sample, stack] of Object.entries(stacks)) {
+    if (stack.some((selector) => computed[selector] === null)) continue
+    coats[sample] = stack.map((selector) => parseCssColor(computed[selector]))
+  }
+  return { computed, coats }
+}
+
+// Plan 091: zero (or restore) the window coats in the role's page, so a shot
+// shows the native material alone. An injected `!important` rule on the
+// token hosts beats styles.css whatever the theme class; a reload drops it.
+async function setCoats(devtoolsHost, role, zero) {
+  const target = await pageTarget(devtoolsHost, role)
+  if (!target) return false
+  await cdpEvaluate(
+    target.webSocketDebuggerUrl,
+    `(() => {
+      document.getElementById('ui-glass-probe-neutral')?.remove();
+      if (${zero ? 'true' : 'false'}) {
+        const style = document.createElement('style');
+        style.id = 'ui-glass-probe-neutral';
+        style.textContent = ':root, :root.dark, .dark { --glass-window: transparent !important; --glass-content: transparent !important; --glass-sidebar: transparent !important; }';
+        document.head.appendChild(style);
+      }
+      return true;
+    })()`
+  )
+  return true
+}
+
+// The float tiers the gate measures (plan 091 D6): the utility each paints
+// and the real primitives that carry it.
+const SURFACE_TIERS = {
+  float: 'glass-float',
+  dialog: 'glass-float-dialog',
+  tooltip: 'glass-float-tooltip'
+}
+
+// Paints a probe surface over `rect` (window points) in the role's page and
+// returns its computed background colour: `float`, `dialog` and `tooltip`
+// are the real utilities (the popup, dialog and tooltip tiers), `control`
+// the old popover coat, `leak` the popup tier at a 97% coat (the
+// translucency that let white tab labels read through the hover card before
+// the coat went opaque), `frost` a bare CSS backdrop-filter with no coat at
+// all (plan 072 S0's question).
 async function showSurface(devtoolsHost, role, bounds, rect, kind, theme) {
   const target = await pageTarget(devtoolsHost, role)
   if (!target) throw new Error(`No CDP target for ${role}; cannot paint a floating surface.`)
@@ -350,9 +474,10 @@ async function showSurface(devtoolsHost, role, bounds, rect, kind, theme) {
     rect,
     boundsWidth: bounds.width,
     kind,
+    utility: SURFACE_TIERS[kind] ?? SURFACE_TIERS.float,
     coat: OLD_POPOVER_COAT[theme]
   })
-  await cdpEvaluate(
+  return cdpEvaluate(
     target.webSocketDebuggerUrl,
     `(() => {
       const spec = ${spec};
@@ -360,7 +485,10 @@ async function showSurface(devtoolsHost, role, bounds, rect, kind, theme) {
       const scale = innerWidth / spec.boundsWidth;
       const el = document.createElement('div');
       el.id = 'ui-glass-probe-surface';
-      el.className = spec.kind === 'control' ? 'rounded-lg border' : 'rounded-lg border glass-float';
+      el.className =
+        spec.kind === 'control' ? 'rounded-lg border'
+        : spec.kind === 'frost' ? 'rounded-lg'
+        : 'rounded-lg border ' + spec.utility;
       Object.assign(el.style, {
         position: 'fixed', zIndex: '2147483647', pointerEvents: 'none',
         left: spec.rect.x * scale + 'px', top: spec.rect.y * scale + 'px',
@@ -370,8 +498,13 @@ async function showSurface(devtoolsHost, role, bounds, rect, kind, theme) {
       if (spec.kind === 'leak') {
         el.style.backgroundColor = 'color-mix(in oklch, var(--glass-float) 97%, transparent)';
       }
+      if (spec.kind === 'frost') {
+        el.style.backgroundColor = 'transparent';
+        el.style.backdropFilter = 'blur(24px)';
+        el.style.webkitBackdropFilter = 'blur(24px)';
+      }
       document.body.appendChild(el);
-      return true;
+      return getComputedStyle(el).backgroundColor;
     })()`
   )
 }
@@ -432,36 +565,45 @@ function regionAt(file, bounds, rect) {
   return { mean: regionMean(image, pixels), sharpness: laplacianVariance(image, pixels) }
 }
 
-// Floating glass on one role: the patch over every backdrop without the
-// surface (the window shots already taken), with glass-float, and with the
-// old coat; then the bleed of the role's app text through it.
-async function measureSurfaces(smoke, devtoolsHost, theme, role, windowFiles, bounds) {
+// Floating glass on one role: each tier painted over the patch, shot over
+// every backdrop and scored against its own computed colour (tone), its
+// spread (opaque) and the text tokens; the old popover coat rides along as
+// an ungated control; then the bleed of the role's app text through the
+// popup tier.
+async function measureSurfaces(smoke, devtoolsHost, theme, role, bounds) {
   const results = []
   const patch = centredRect(SAMPLES[role][0].rect(bounds), 160, 18)
   const surfaceRect = growRect(patch, SURFACE_OVERHANG, bounds)
-  const windowMeans = Object.fromEntries(
-    BACKDROPS.map((variant) => [variant, regionAt(windowFiles[variant], bounds, patch).mean])
-  )
-  const means = {}
-  for (const kind of ['float', 'control']) {
-    await showSurface(devtoolsHost, role, bounds, surfaceRect, kind, theme)
-    means[kind] = {}
+  const text = TEXT[theme]
+  const scored = {}
+  for (const kind of ['float', 'dialog', 'tooltip', 'control']) {
+    const computed = await showSurface(devtoolsHost, role, bounds, surfaceRect, kind, theme)
+    await sleep(300)
+    const surfaceMeans = {}
     for (const variant of BACKDROPS) {
       const { raised, file } = await shoot(smoke, theme, role, variant, `${kind}-`)
-      means[kind][variant] = regionAt(file, raised.bounds, patch).mean
+      surfaceMeans[variant] = regionAt(file, raised.bounds, patch).mean
+    }
+    scored[kind] = {
+      computed,
+      ...evaluateFloatPatch({ surfaceMeans, text, expected: parseCssColor(computed) })
     }
   }
-  const text = TEXT[theme]
-  const float = evaluateFloatPatch({ theme, windowMeans, surfaceMeans: means.float, text })
-  const control = evaluateFloatPatch({ theme, windowMeans, surfaceMeans: means.control, text })
-  results.push({
-    theme,
-    role,
-    sample: 'float-patch',
-    metrics: { ...float.metrics, controlLiftMin: control.metrics.liftMin },
-    checks: float.checks,
-    pass: float.pass
-  })
+  for (const kind of ['float', 'dialog', 'tooltip']) {
+    results.push({
+      theme,
+      role,
+      sample: `${kind}-patch`,
+      metrics: {
+        utility: SURFACE_TIERS[kind],
+        computed: scored[kind].computed,
+        ...scored[kind].metrics,
+        ...(kind === 'float' ? { controlTone: scored.control.metrics.tone } : {})
+      },
+      checks: scored[kind].checks,
+      pass: scored[kind].pass
+    })
+  }
 
   const textRect = await appTextRect(devtoolsHost, role, bounds)
   if (textRect) {
@@ -503,11 +645,234 @@ function round(value, digits = 2) {
   return Number(value.toFixed(digits))
 }
 
-function evaluate(theme, role, shots, glassState, pageDark) {
+function imageMean(file) {
+  const image = decodePng(readFileSync(file))
+  return regionMean(image, { x: 0, y: 0, width: image.width, height: image.height })
+}
+
+// One backdrop shot of the window with a reference patch of the bare
+// backdrop beside it, captured in the same pass (plan 091).
+async function shootWithReference(smoke, theme, role, variant, prefix = '') {
+  const shot = await shoot(smoke, theme, role, variant, prefix)
+  const reference = backdropReferenceRect(shot.raised.bounds, shot.raised.primaryWorkArea)
+  if (!reference) return { ...shot, referenceMean: null }
+  const referenceFile = capture(reference, `${prefix}${theme}-${role}-${variant}-reference`)
+  return { ...shot, referenceMean: imageMean(referenceFile) }
+}
+
+function requireReference(shot, role, variant) {
+  if (!shot.referenceMean) {
+    throw new Error(
+      `No bare backdrop beside the ${role} window for a ${variant} reference; shrink the window.`
+    )
+  }
+  return shot.referenceMean
+}
+
+// neutrality (plan 091): the role's samples with the coats zeroed, against
+// the backdrop reference, per backdrop. Null for a window without a page.
+async function measureNeutrality(smoke, devtoolsHost, theme, role) {
+  if (!(await setCoats(devtoolsHost, role, true))) return null
+  await sleep(500)
+  const samples = {}
+  const references = {}
+  try {
+    for (const variant of NEUTRALITY_BACKDROPS) {
+      const shot = await shootWithReference(smoke, theme, role, variant, 'neutral-')
+      samples[variant] = measure(shot.file, shot.raised.bounds, role).map((sample) => sample.mean)
+      references[variant] = requireReference(shot, role, variant)
+    }
+  } finally {
+    await setCoats(devtoolsHost, role, false)
+  }
+  return SAMPLES[role].map((_sample, index) =>
+    neutralityOf(
+      Object.fromEntries(NEUTRALITY_BACKDROPS.map((variant) => [variant, samples[variant][index]])),
+      references
+    )
+  )
+}
+
+// Plan 072's S0 question, re-asked under the clear glass and recorded only:
+// does a bare CSS backdrop-filter over the sidebar rows reach the screen?
+async function measureFrostBleed(smoke, devtoolsHost, theme, bounds) {
+  const textRect = await appTextRect(devtoolsHost, 'main', bounds)
+  if (!textRect) return null
+  await hideSurface(devtoolsHost, 'main')
+  const under = await shoot(smoke, theme, 'main', 'photo', 'frost-under-')
+  const surfaceRect = growRect(textRect, SURFACE_OVERHANG, bounds)
+  const sample = belowSheen(textRect, surfaceRect)
+  await showSurface(devtoolsHost, 'main', bounds, surfaceRect, 'frost', theme)
+  await sleep(500)
+  const through = await shoot(smoke, theme, 'main', 'photo', 'frost-through-')
+  await hideSurface(devtoolsHost, 'main')
+  const sharpnessUnder = regionAt(under.file, under.raised.bounds, sample).sharpness
+  const sharpnessThrough = regionAt(through.file, through.raised.bounds, sample).sharpness
+  return {
+    theme,
+    role: 'main',
+    sample: 'frost-bleed',
+    metrics: {
+      sharpnessUnder: round(sharpnessUnder),
+      sharpnessThrough: round(sharpnessThrough),
+      // Plan 072's bleed gate for floats is <= 0.5; a frost that reached the
+      // screen would blur the rows to near that, as Chromium's own capture does.
+      reachesScreen: sharpnessThrough <= 0.5
+    },
+    checks: {},
+    pass: true
+  }
+}
+
+// Plan 091 persistence matrix on the main window: nativeClear (and the red
+// neutrality distance, coats zeroed) after every transition AppKit may
+// rebuild the material through. Every step runs without activating the app
+// except the focus cycle, which needs --allow-focus.
+async function runPersistence(smoke, devtoolsHost, theme) {
+  const rows = []
+  const check = async (step, { capture: shoot_ = true, extra = {} } = {}) => {
+    const state = await requestSmokeCommand(smoke, 'window-glass-state', { role: 'main' })
+    const native = nativeClearCheck(state.effectViews, {
+      blurRadius: GLASS_THRESHOLDS.clearBlurRadius
+    })
+    let neutralityRed = null
+    if (shoot_) {
+      const shot = await shootWithReference(smoke, theme, 'main', 'red', `persist-${step}-`)
+      // A resize or a simple-fullscreen exit can leave no bare backdrop beside
+      // the window: fail with the reference error, not a null dereference.
+      const reference = requireReference(shot, 'main', 'red')
+      neutralityRed = round(
+        colorDistance(measure(shot.file, shot.raised.bounds, 'main')[0].mean, reference)
+      )
+    }
+    const focus = await requestSmokeCommand(smoke, 'focused-window')
+    rows.push({
+      step,
+      style: state.applied?.style ?? null,
+      clear: native.clear,
+      blurRadius: native.blurRadius,
+      chameleonVisible: native.chameleonVisible,
+      saturatePresent: native.saturatePresent,
+      neutralityRed,
+      mainFocused: focus.mainFocused,
+      pass:
+        native.pass && (neutralityRed === null || neutralityRed <= GLASS_THRESHOLDS.maxNeutrality),
+      failures: native.failures,
+      ...extra
+    })
+  }
+  const other = theme === 'dark' ? 'light' : 'dark'
+  await setCoats(devtoolsHost, 'main', true)
+  await sleep(400)
+  await check('baseline')
+
+  if (allowFocus) {
+    await requestSmokeCommand(smoke, 'raise-window', { role: 'main', focus: true })
+    await sleep(700)
+    await requestSmokeCommand(smoke, 'main-window-blur')
+    await sleep(700)
+    await requestSmokeCommand(smoke, 'raise-window', { role: 'main', focus: false })
+    await check('focus-cycle')
+  } else {
+    rows.push({
+      step: 'focus-cycle',
+      skipped: 'needs --allow-focus (takes the user focus for ~1 s)'
+    })
+  }
+
+  await applyTheme(devtoolsHost, other)
+  await setCoats(devtoolsHost, 'main', true)
+  await sleep(400)
+  await check(`theme-${other}`)
+  await applyTheme(devtoolsHost, theme)
+  await setCoats(devtoolsHost, 'main', true)
+  await sleep(400)
+  await check(`theme-${theme}`)
+
+  // resize-window and move-window only setSize/setPosition; main-window-set-bounds
+  // also calls show(), which asks AppKit to activate the app.
+  const { bounds } = await requestSmokeCommand(smoke, 'raise-window', {
+    role: 'main',
+    focus: false
+  })
+  const restoreBounds = async () => {
+    await requestSmokeCommand(smoke, 'resize-window', {
+      width: bounds.width,
+      height: bounds.height
+    })
+    await requestSmokeCommand(smoke, 'move-window', { x: bounds.x, y: bounds.y })
+    await requestSmokeCommand(smoke, 'raise-window', { role: 'main', focus: false })
+    await sleep(700)
+  }
+  await requestSmokeCommand(smoke, 'resize-window', {
+    width: bounds.width - 60,
+    height: bounds.height - 40
+  })
+  await sleep(700)
+  await check('resize-smaller')
+  await restoreBounds()
+  await check('resize-restored')
+
+  await requestSmokeCommand(smoke, 'main-window-simple-fullscreen', { enabled: true })
+  await sleep(1500)
+  await check('simple-fullscreen-in', { capture: false })
+  await requestSmokeCommand(smoke, 'main-window-simple-fullscreen', { enabled: false })
+  await sleep(1500)
+  await restoreBounds()
+  await check('simple-fullscreen-out')
+
+  // deminiaturize: activates the app whatever the caller asks, so this pair
+  // takes the user's focus too (measured 2026-10-02: mainFocused flips true).
+  if (allowFocus) {
+    await requestSmokeCommand(smoke, 'minimize-window')
+    await sleep(1200)
+    await check('minimized', { capture: false })
+    await requestSmokeCommand(smoke, 'restore-window', { focus: false })
+    await sleep(1200)
+    await requestSmokeCommand(smoke, 'raise-window', { role: 'main', focus: false })
+    await sleep(500)
+    await check('restored')
+  } else {
+    rows.push({
+      step: 'minimize-restore',
+      skipped: 'needs --allow-focus (deminiaturize activates the app)'
+    })
+  }
+
+  await requestSmokeCommand(smoke, 'set-vibrancy', { role: 'main', material: null })
+  await sleep(400)
+  const recreated = await requestSmokeCommand(smoke, 'set-vibrancy', {
+    role: 'main',
+    material: 'under-window'
+  })
+  await sleep(800)
+  await check('set-vibrancy-recreate', { extra: { restyle: recreated.style ?? null } })
+  const healed = await requestSmokeCommand(smoke, 'heal-main-window', { lever: 'revibrancy' })
+  await sleep(800)
+  await check('revibrancy', { extra: { restyle: healed.style ?? null } })
+
+  await setCoats(devtoolsHost, 'main', false)
+  return { rows, layerTrees: { before: recreated.before ?? null, after: recreated.after ?? null } }
+}
+
+function evaluate(theme, role, shots, glassState, pageDark, neutrality, parity = {}) {
   const results = []
   const byName = (variant) => shots[variant]
+  const styleRequested = glassState?.styleRequested ?? 'material'
+  const native = nativeClearCheck(glassState?.effectViews, {
+    blurRadius: GLASS_THRESHOLDS.clearBlurRadius
+  })
   for (const [index, sample] of SAMPLES[role].entries()) {
     const at = (variant) => byName(variant)[index]
+    const coats = parity.coats?.[sample.name] ?? null
+    const ghostex =
+      coats && parity.references?.white && parity.references?.black
+        ? parityOf({
+            sampleMeans: { white: at('white').mean, black: at('black').mean },
+            referenceMeans: { white: parity.references.white, black: parity.references.black },
+            coats
+          })
+        : null
     const transmission = colorDistance(at('red').mean, at('blue').mean)
     const sharpness = at('text').sharpness
     const text = TEXT[PINNED_DARK_ROLES.has(role) ? 'dark' : theme]
@@ -531,17 +896,55 @@ function evaluate(theme, role, shots, glassState, pageDark) {
     }
     const effectViews = glassState?.effectViews ?? []
     checks.native = effectViews.length > 0 && effectViews.every((view) => view.state === 'active')
+    const neutral = neutrality?.[index] ?? null
+    // Plan 091: gated on the style the app was asked for, so a strip that
+    // failed to apply (the app then keeps the material) fails the run.
+    if (styleRequested === 'clear') {
+      checks.nativeClear = native.pass
+      if (neutral) checks.neutrality = neutral.max <= GLASS_THRESHOLDS.maxNeutrality
+      if (ghostex) checks.parity = ghostex.max <= GLASS_THRESHOLDS.maxParity
+    }
     results.push({
       theme,
       role,
       sample: sample.name,
       metrics: {
         glass: glassState?.applied?.mode?.kind ?? 'unknown',
+        style: glassState?.applied?.style ?? null,
         transmission: round(transmission),
         sharpness: round(sharpness),
         primaryContrast: round(primaryContrast),
         secondaryContrast: round(secondaryContrast),
-        whiteLuminance: round(whiteLuminance, 4)
+        whiteLuminance: round(whiteLuminance, 4),
+        ...(neutral
+          ? {
+              neutrality: round(neutral.max),
+              neutralityBy: Object.fromEntries(
+                Object.entries(neutral.byBackdrop).map(([variant, value]) => [
+                  variant,
+                  round(value)
+                ])
+              )
+            }
+          : {}),
+        ...(ghostex
+          ? {
+              parity: round(ghostex.max),
+              parityBy: {
+                white: round(ghostex.byBackdrop.white),
+                black: round(ghostex.byBackdrop.black)
+              },
+              cover: round(ghostex.cover, 4),
+              lightness: Object.fromEntries(
+                Object.entries(ghostex.lightness).map(([variant, value]) => [
+                  variant,
+                  { measured: round(value.measured, 3), expected: round(value.expected, 3) }
+                ])
+              )
+            }
+          : {}),
+        nativeClear: native.pass,
+        blurRadius: native.blurRadius
       },
       checks,
       pass: Object.values(checks).every(Boolean)
@@ -609,7 +1012,13 @@ async function main() {
     thresholds: GLASS_THRESHOLDS,
     floatThresholds: surfaces ? FLOAT_GLASS_THRESHOLDS : undefined,
     extraAppEnv,
+    style,
+    styleRequested: null,
     results: [],
+    effectViews: {},
+    coats: {},
+    persistence: null,
+    layerTrees: null,
     windowServerCpu: null
   }
   const looks = []
@@ -634,22 +1043,42 @@ async function main() {
         const shots = {}
         const files = {}
         let bounds = null
+        const references = {}
         for (const variant of BACKDROPS) {
-          const { raised, file } = await shoot(smoke, theme, role, variant)
+          const { raised, file, referenceMean } = await shootWithReference(
+            smoke,
+            theme,
+            role,
+            variant
+          )
           shots[variant] = measure(file, raised.bounds, role)
           files[variant] = file
           bounds = raised.bounds
+          references[variant] = referenceMean
         }
         await assertTheme(devtoolsHost, theme)
         const look = await shoot(smoke, theme, role, 'photo')
         looks.push({ file: look.file, label: `${theme} · ${role}` })
         const glassState = await requestSmokeCommand(smoke, 'window-glass-state', { role })
+        report.effectViews[`${theme}-${role}`] = glassState.effectViews ?? null
+        report.styleRequested = glassState.styleRequested ?? null
         const pageDark = await pageDarkClass(devtoolsHost, role)
-        report.results.push(...evaluate(theme, role, shots, glassState, pageDark))
+        const coatsRead = await readCoats(devtoolsHost, role)
+        if (coatsRead) report.coats[`${theme}-${role}`] = coatsRead.computed
+        const neutrality = await measureNeutrality(smoke, devtoolsHost, theme, role)
+        await assertTheme(devtoolsHost, theme)
+        report.results.push(
+          ...evaluate(theme, role, shots, glassState, pageDark, neutrality, {
+            references,
+            coats: coatsRead?.coats ?? null
+          })
+        )
+        if (frostCheck && role === 'main') {
+          const frost = await measureFrostBleed(smoke, devtoolsHost, theme, bounds)
+          if (frost) report.results.push(frost)
+        }
         if (surfaces && SURFACE_ROLES.has(role)) {
-          report.results.push(
-            ...(await measureSurfaces(smoke, devtoolsHost, theme, role, files, bounds))
-          )
+          report.results.push(...(await measureSurfaces(smoke, devtoolsHost, theme, role, bounds)))
           await showSurface(
             devtoolsHost,
             role,
@@ -663,6 +1092,13 @@ async function main() {
           await hideSurface(devtoolsHost, role)
         }
       }
+    }
+    if (persistence && roles.includes('main')) {
+      const theme = themes[themes.length - 1]
+      await assertTheme(devtoolsHost, theme)
+      const walked = await runPersistence(smoke, devtoolsHost, theme)
+      report.persistence = walked.rows
+      report.layerTrees = walked.layerTrees
     }
     await requestSmokeCommand(smoke, 'close-backdrop-window')
     // Let the capture burst settle before measuring the steady state.
@@ -684,13 +1120,30 @@ async function main() {
       `${result.pass ? 'PASS' : 'FAIL'} ${result.theme.padEnd(5)} ${result.role.padEnd(8)} ${result.sample.padEnd(15)} ${JSON.stringify(result.metrics)}${failed.length ? ` failed=${failed.join(',')}` : ''}`
     )
   }
+  let persistenceFailures = 0
+  for (const row of report.persistence ?? []) {
+    if (row.skipped) {
+      console.log(`SKIP  persistence ${row.step.padEnd(22)} ${row.skipped}`)
+      continue
+    }
+    if (!row.pass) persistenceFailures += 1
+    console.log(
+      `${row.pass ? 'PASS' : 'FAIL'} persistence ${row.step.padEnd(22)} ${JSON.stringify(row)}`
+    )
+  }
   console.log(`WindowServer CPU (idle, preview presenting): ${report.windowServerCpu ?? 'n/a'}%`)
   console.log(`report: ${join(outputDir, 'report.json')}`)
   if (report.contactSheet) console.log(`contact sheet: ${report.contactSheet}`)
   const failures = report.results.filter((result) => !result.pass)
-  if (gate && failures.length) {
+  // The persistence rows gate only a clear-glass run: under the material
+  // style they report what the walk did to a plain view.
+  const persistenceGated = (report.styleRequested ?? style) === 'clear'
+  if (gate && (failures.length || (persistenceGated && persistenceFailures))) {
     console.error(
-      `probe:ui-glass FAILED: ${failures.length} sample(s) outside the glass thresholds.`
+      `probe:ui-glass FAILED: ${failures.length} sample(s) outside the glass thresholds` +
+        (persistenceGated && persistenceFailures
+          ? `, ${persistenceFailures} persistence step(s) lost the clear glass.`
+          : '.')
     )
     process.exit(1)
   }

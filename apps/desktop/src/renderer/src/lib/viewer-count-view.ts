@@ -2,9 +2,10 @@ import type { ViewerSample } from '@/lib/backend'
 
 // Viewer rider V2: chip presentation rules. Terminology honesty — the count
 // is concurrent VIEWERS ("watching"), never "subs". A sample older than 2×
-// the sampler cadence greys out instead of freezing at a confident number.
+// the sampler cadence (two missed polls) greys out instead of freezing at a
+// confident number.
 
-const SAMPLE_STALE_AFTER_MS = 75_000
+const SAMPLE_STALE_AFTER_MS = 150_000
 
 export function formatViewerCount(count: number): string {
   // Promote on the ROUNDED value: 999,999 is "1m", never "1000k".

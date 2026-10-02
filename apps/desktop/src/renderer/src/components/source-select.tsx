@@ -27,7 +27,8 @@ export function SourceSelect({
   discoveryPending = false,
   description,
   disabled = false,
-  searchable = false
+  searchable = false,
+  labelHidden = false
 }: {
   label: string
   devices: Device[]
@@ -43,6 +44,8 @@ export function SourceSelect({
   description?: ReactNode
   disabled?: boolean
   searchable?: boolean
+  /** Keep the label for screen readers only, under a heading that already names it. */
+  labelHidden?: boolean
 }): ReactElement {
   const id = useId()
   // Q6 (plan 022): the select must never render a blank surface. A saved id
@@ -55,7 +58,9 @@ export function SourceSelect({
       <Suspense
         fallback={
           <Field>
-            <FieldLabel htmlFor={id}>{label}</FieldLabel>
+            <FieldLabel className={labelHidden ? 'sr-only' : undefined} htmlFor={id}>
+              {label}
+            </FieldLabel>
             <Select disabled>
               <SelectTrigger id={id} aria-label={label} className="w-full">
                 <SelectValue
@@ -82,6 +87,7 @@ export function SourceSelect({
           discoveryPending={discoveryPending}
           description={description}
           disabled={disabled}
+          labelHidden={labelHidden}
         />
       </Suspense>
     )
@@ -89,7 +95,9 @@ export function SourceSelect({
 
   return (
     <Field>
-      <FieldLabel htmlFor={id}>{label}</FieldLabel>
+      <FieldLabel className={labelHidden ? 'sr-only' : undefined} htmlFor={id}>
+        {label}
+      </FieldLabel>
       <Select
         disabled={disabled}
         value={value ?? (allowNone ? NONE_VALUE : '')}

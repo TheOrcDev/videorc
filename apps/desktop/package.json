@@ -1,6 +1,6 @@
 {
   "name": "@videorc/desktop",
-  "version": "0.9.126",
+  "version": "0.9.127",
   "private": true,
   "main": "./out/main/index.js",
   "description": "Videorc desktop app.",
@@ -22,6 +22,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@base-ui/react": "^1.8.0",
     "@phosphor-icons/react": "^2.1.10",
     "@tanstack/react-virtual": "^3.14.13",
     "class-variance-authority": "^0.7.1",

@@ -1974,6 +1974,7 @@ mod tests {
             last_connected_at: None,
             last_message_at: None,
             last_error: None,
+            retry_at: None,
         }
     }
 
@@ -2185,6 +2186,19 @@ mod tests {
         assert_eq!(
             kicks.fragments,
             vec![text_fragment("gg "), emote_fragment("39261", "kkHuh")]
+        );
+    }
+
+    /// Plan 095, S1: the streamer's own message is the host on every platform.
+    #[test]
+    fn the_broadcaster_badge_is_marked_owner() {
+        let mut event = chat_event("own-1");
+        event["payload"]["sender"]["badges"] = json!(["Broadcaster", "Subscriber"]);
+        let message =
+            relay_event_to_message(serde_json::from_value(event).unwrap(), "s1", None).unwrap();
+        assert_eq!(
+            message.author_roles,
+            vec!["owner".to_string(), "member".to_string()]
         );
     }
 

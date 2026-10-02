@@ -14,6 +14,7 @@ import {
   microphoneLossPresentation,
   sessionRuntimeContinuationIsCurrent,
   sessionRuntimeRecoveryPlan,
+  showOAuthCallbackExhausted,
   showOAuthCallbackResult,
   showSessionHealthEvent,
   showXPlaybackEvent
@@ -133,10 +134,50 @@ describe('session runtime recovery', () => {
       message: 'Authorization was declined.'
     })
 
-    expect(toastSpies.success).toHaveBeenCalledWith('Account connected.')
-    expect(toastSpies.error).toHaveBeenCalledWith('OAuth callback failed.', {
+    // No platform on the result: the generic words and the shared fallback id.
+    expect(toastSpies.success).toHaveBeenCalledWith('Account connected.', {
+      id: 'oauth-callback:provider'
+    })
+    expect(toastSpies.error).toHaveBeenCalledWith("Couldn't finish connecting the account.", {
+      id: 'oauth-callback:provider',
       description: 'Authorization was declined.'
     })
+  })
+
+  // Plan 094 (S3): repeated callback results for one platform share an id, so
+  // the renderer's retries update one toast; a YouTube quota block says when
+  // to try again, in local time; the exhaust toast lands on the same id.
+  it('keeps one connect toast per platform and words the YouTube quota block', () => {
+    const retryAt = new Date(Date.now() + 3 * 60 * 60_000)
+    const base = {
+      platform: 'youtube' as const,
+      state: 'state-1',
+      status: 'failed' as const,
+      codePresent: true,
+      tokenStored: false,
+      accountConnected: false,
+      retryable: true,
+      receivedAt: '2026-10-02T13:00:00.000Z',
+      message: 'OAuth account preparation failed and will be retried: HTTP 503'
+    }
+    showOAuthCallbackResult(base)
+    showOAuthCallbackResult(base)
+    showOAuthCallbackResult({
+      ...base,
+      retryable: false,
+      reason: 'youtube-quota',
+      retryAt: retryAt.toISOString(),
+      message: 'ignored: the renderer words quota itself'
+    })
+    showOAuthCallbackExhausted()
+    expect(toastSpies.error).toHaveBeenCalledTimes(4)
+    const ids = new Set(toastSpies.error.mock.calls.map((call) => (call[1] as { id: string }).id))
+    expect([...ids]).toEqual(['oauth-callback:youtube'])
+    expect(toastSpies.error.mock.calls[2][0]).toBe("Couldn't finish connecting YouTube.")
+    expect(toastSpies.error.mock.calls[2][1]).toMatchObject({
+      description: `Couldn't finish connecting YouTube. Videorc's daily YouTube API limit is used up. Try again after ${retryAt.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}.`
+    })
+    expect(toastSpies.error.mock.calls[3][0]).toBe("Couldn't finish connecting YouTube.")
   })
 })
 

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  applyClearGlass,
   loadWindowAppearanceBinding,
   pinWindowAppearance,
   windowAppearanceBindingFromModule,
@@ -28,6 +29,85 @@ describe('windowAppearanceBindingFromModule', () => {
   it('only reports a pin for a literal true', () => {
     const binding = windowAppearanceBindingFromModule({ setWindowAppearance: () => 'yes' })
     expect(binding?.setWindowAppearance(handle, 'dark')).toBe(false)
+  })
+
+  it('wires the clear-glass export when the addon has it (plan 091)', () => {
+    const setWindowGlassStyle = vi.fn(() => ({ restyled: true, reason: null }))
+    const binding = windowAppearanceBindingFromModule({
+      setWindowAppearance: () => true,
+      setWindowGlassStyle
+    })
+    expect(binding?.setWindowGlassStyle?.(handle, { blurRadius: 60 })).toEqual({
+      restyled: true,
+      reason: null
+    })
+    expect(setWindowGlassStyle).toHaveBeenCalledWith(handle, { blurRadius: 60 })
+    const stale = windowAppearanceBindingFromModule({ setWindowAppearance: () => true })
+    expect(stale?.setWindowGlassStyle).toBeUndefined()
+  })
+
+  it('reads the addon result strictly: a literal true restyles, a string is the reason', () => {
+    const binding = windowAppearanceBindingFromModule({
+      setWindowAppearance: () => true,
+      setWindowGlassStyle: () => ({ restyled: 'yes', reason: 'unsupported-class:NSKVONotifying' })
+    })
+    expect(binding?.setWindowGlassStyle?.(handle, { blurRadius: 60 })).toEqual({
+      restyled: false,
+      reason: 'unsupported-class:NSKVONotifying'
+    })
+  })
+})
+
+describe('applyClearGlass (plan 091)', () => {
+  const loadWith = (
+    result: { restyled: boolean; reason: string | null } | Error | undefined
+  ): WindowAppearanceLoad => ({
+    binding: {
+      setWindowAppearance: () => true,
+      ...(result === undefined
+        ? {}
+        : {
+            setWindowGlassStyle: () => {
+              if (result instanceof Error) throw result
+              return result
+            }
+          })
+    },
+    unavailableReason: null
+  })
+
+  it('applies through the binding with the requested radius', () => {
+    const setWindowGlassStyle = vi.fn(() => ({ restyled: true, reason: null }))
+    const load: WindowAppearanceLoad = {
+      binding: { setWindowAppearance: () => true, setWindowGlassStyle },
+      unavailableReason: null
+    }
+    expect(applyClearGlass(load, () => handle, 60)).toEqual({ applied: true })
+    expect(setWindowGlassStyle).toHaveBeenCalledWith(handle, { blurRadius: 60 })
+  })
+
+  it('explains every way the strip can stay off, so main keeps the material', () => {
+    expect(
+      applyClearGlass({ binding: null, unavailableReason: 'no addon' }, () => handle, 60)
+    ).toEqual({ applied: false, reason: 'no addon' })
+    const stale = applyClearGlass(loadWith(undefined), () => handle, 60)
+    expect(!stale.applied && stale.reason).toMatch(/pnpm build:native-preview-addon/)
+    expect(
+      applyClearGlass(
+        loadWith({
+          restyled: false,
+          reason: 'unsupported-class:NSKVONotifying_NSVisualEffectView'
+        }),
+        () => handle,
+        60
+      )
+    ).toEqual({ applied: false, reason: 'unsupported-class:NSKVONotifying_NSVisualEffectView' })
+    expect(applyClearGlass(loadWith({ restyled: false, reason: null }), () => handle, 60)).toEqual({
+      applied: false,
+      reason: 'The addon re-classed no effect view.'
+    })
+    const thrown = applyClearGlass(loadWith(new Error('bad handle')), () => handle, 60)
+    expect(!thrown.applied && thrown.reason).toMatch(/bad handle/)
   })
 })
 

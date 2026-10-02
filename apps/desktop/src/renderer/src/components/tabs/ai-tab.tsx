@@ -13,7 +13,7 @@ import {
   WaveformIcon
 } from '@/components/icons'
 import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
-import { toast } from 'sonner'
+import { toast } from '@/lib/toast'
 
 import { PageHeader } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'

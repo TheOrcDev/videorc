@@ -88,6 +88,36 @@ const idleCapturePressureDiagnostics = {
 } satisfies Pick<DiagnosticStats, (typeof requiredCapturePressureDiagnosticFields)[number]>
 
 describe('backend RPC contract', () => {
+  it('validates audio.levels and rejects malformed readings (plan 092 Phase C)', () => {
+    const levels = {
+      sessionId: 'session-1',
+      microphone: { peakDb: -12.5, rmsDb: -20 },
+      master: { peakDb: -1, rmsDb: -9 },
+      masterClippedSamples: 3
+    }
+    expect(validateBackendEventPayload('audio.levels', levels)).toEqual(levels)
+    // Gain can push the processed microphone past full scale.
+    const hot = { ...levels, microphone: { peakDb: 25.5, rmsDb: 12 } }
+    expect(validateBackendEventPayload('audio.levels', hot)).toEqual(hot)
+    expect(
+      validateBackendEventPayload('audio.levels', { sessionId: 's', masterClippedSamples: 0 })
+    ).toEqual({ sessionId: 's', masterClippedSamples: 0 })
+    // The standby microphone between sessions carries no session.
+    const standby = { microphone: { peakDb: -30, rmsDb: -36 }, masterClippedSamples: 0 }
+    expect(validateBackendEventPayload('audio.levels', standby)).toEqual(standby)
+    for (const malformed of [
+      { ...levels, sessionId: null },
+      { ...levels, microphone: { peakDb: -12, rmsDb: -20, extra: 1 } },
+      { ...levels, microphone: { peakDb: -200, rmsDb: -20 } },
+      { ...levels, microphone: { peakDb: 60, rmsDb: -20 } },
+      { ...levels, microphone: null },
+      { ...levels, masterClippedSamples: -1 },
+      { ...levels, unknown: true }
+    ]) {
+      expect(() => validateBackendEventPayload('audio.levels', malformed)).toThrow()
+    }
+  })
+
   it('accepts redacted recovery candidates and rejects ingest credentials in renderer results', () => {
     const candidate = {
       candidateKind: 'ingest',
@@ -503,6 +533,15 @@ describe('backend RPC contract', () => {
       receivedAt: '2026-07-12T00:00:00.000Z'
     }
     expect(validateBackendEventPayload('platformAccounts.oauth.callback', event)).toEqual(event)
+    // Plan 094 (S3): a terminal YouTube connect carries its reason and retry time.
+    const quota = {
+      ...event,
+      status: 'failed',
+      retryable: false,
+      reason: 'youtube-quota',
+      retryAt: '2026-10-03T07:00:00Z'
+    }
+    expect(validateBackendEventPayload('platformAccounts.oauth.callback', quota)).toEqual(quota)
     const xOAuth1Event: OAuthCallbackResult = {
       platform: 'x',
       state: '',
@@ -1984,6 +2023,31 @@ describe('backend RPC contract', () => {
     expect(() =>
       validateBackendRpcParams('liveChat.emotes.set', { sevenTv: true, bttv: true })
     ).toThrow('liveChat.emotes.set')
+  })
+
+  it('accepts the youtube.quota event with and without a pause end', () => {
+    const paused = { pausedUntil: '2026-10-03T07:00:00Z' }
+    expect(validateBackendEventPayload('youtube.quota', paused)).toEqual(paused)
+    expect(validateBackendEventPayload('youtube.quota', {})).toEqual({})
+    expect(validateBackendRpcResult('youtube.quota.status', paused)).toEqual(paused)
+    expect(() => validateBackendEventPayload('youtube.quota', { pausedUntil: null })).toThrow()
+    // Plan 094 (S6): the per-install budget rides along, every step named.
+    const budgeted = { budget: { units: 2000, limit: 2500, step: 'shed-extras' } }
+    expect(validateBackendEventPayload('youtube.quota', budgeted)).toEqual(budgeted)
+    expect(validateBackendRpcResult('youtube.quota.status', { ...paused, ...budgeted })).toEqual({
+      ...paused,
+      ...budgeted
+    })
+    expect(() =>
+      validateBackendEventPayload('youtube.quota', {
+        budget: { units: 1, limit: 2500, step: 'panic' }
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendEventPayload('youtube.quota', {
+        budget: { units: -1, limit: 2500, step: 'normal' }
+      })
+    ).toThrow()
   })
 
   it('bounds unregistered method and event payloads instead of passing arbitrary values', () => {

@@ -10,7 +10,7 @@
 // Loaded lazily from use-studio and from the Publish tab: nothing here is on
 // the eager renderer path (the eager bundle budget is tight).
 
-import { toast } from 'sonner'
+import { toast } from '@/lib/toast'
 
 import {
   cloudAiReadiness,

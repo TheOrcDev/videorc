@@ -4,10 +4,14 @@ import { lazy, Suspense, useEffect, useState, type ReactElement } from 'react'
 import { GoLiveConfirmationDialog } from '@/components/go-live-dialog'
 import { PanelSection } from '@/components/panel-section'
 import { PreviewStage } from '@/components/preview-stage'
-import { StatusBadge } from '@/components/status-badge'
 import { QuickSettings } from '@/components/studio/quick-settings'
 import { SessionMicSliver } from '@/components/studio/session-mic-sliver'
-import { SessionPanel, SessionTransport, TakeoverSection } from '@/components/studio/session-panel'
+import {
+  SessionPanel,
+  SessionStatusPill,
+  SessionTransport,
+  TakeoverSection
+} from '@/components/studio/session-panel'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import type { StudioPanel, WorkspaceTab } from '@/components/workspace-nav'
@@ -22,15 +26,15 @@ import { goLiveEntitlementGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import type { SettingsTabId } from '@/lib/settings-tabs'
 import { studioHealth } from '@/lib/studio-health'
-import {
-  isSessionTransportActive,
-  sessionStatusLabel,
-  sessionStatusTone
-} from '@/lib/studio-session-view'
+import { isSessionTransportActive, sessionStopControl } from '@/lib/studio-session-view'
 
 const StudioDashboardBottomRow = lazy(async () => ({
   default: (await import('@/components/studio/studio-dashboard-bottom-row'))
     .StudioDashboardBottomRow
+}))
+// The meter brings audiocn: its own chunk, so the inspector paints first.
+const MicrophoneSection = lazy(async () => ({
+  default: (await import('@/components/studio/microphone-section')).MicrophoneSection
 }))
 
 export function StudioTab(): ReactElement {
@@ -141,17 +145,13 @@ export function StudioTab(): ReactElement {
     void stopSession()
   }
 
-  const stopLabel = stopRequestPending
-    ? 'Stopping…'
-    : recording.state === 'stopping'
-      ? 'Force stop'
-      : recording.state === 'streaming'
-        ? 'End livestream'
-        : 'Stop recording'
+  // Go Live is record+stream, which the backend reports as `recording`: the
+  // stream URL is what makes it on air (plan 095 S5).
+  const stopControl = sessionStopControl(recording, stopRequestPending)
 
-  // data hook: the backend-resilience and captions smokes read this badge.
-  // It rides the inspector's transport block, so it exists in every preview
-  // mode, docked included, and the mic sliver shares its one home.
+  // The status pill rides the inspector's transport block, so it exists in
+  // every preview mode, docked included, and the mic sliver shares its one
+  // home.
   const sessionStatus = (
     <span className="flex items-center gap-1.5">
       <SessionMicSliver
@@ -159,12 +159,7 @@ export function StudioTab(): ReactElement {
         muted={captureConfig.audio.microphoneMuted}
         sessionActive={active}
       />
-      <span data-videorc-session-status>
-        <StatusBadge
-          tone={sessionStatusTone(recording.state, wsStatus)}
-          value={sessionStatusLabel(recording.state, wsStatus)}
-        />
-      </span>
+      <SessionStatusPill recording={recording} wsStatus={wsStatus} />
     </span>
   )
 
@@ -187,15 +182,15 @@ export function StudioTab(): ReactElement {
       />
 
       {/* The Studio bench: the preview pane leads, and the inspector (the
-          transport, session facts, inputs, takeover) sits beside it, split by
-          a hairline. Hard
+          transport, session facts, microphone, inputs, takeover) sits beside
+          it, split by a hairline. Hard
           blocks surface inside the Session section, never as a yellow top
           banner (post-0.9.4 fix batch F8). */}
       <div className="grid min-h-full lg:grid-cols-[minmax(0,1fr)_minmax(0,20rem)]">
         <div className="min-w-0 lg:border-r">
           <StudioPreviewPanel />
-          {/* Scenes, the vertical leg, and the mixer: deferred so the launch
-              surface paints its preview and transport first. */}
+          {/* Scenes and the vertical leg: deferred so the launch surface
+              paints its preview and transport first. */}
           <Suspense fallback={<StudioDashboardBottomRowFallback />}>
             <StudioDashboardBottomRow />
           </Suspense>
@@ -212,7 +207,8 @@ export function StudioTab(): ReactElement {
             recordBlockedReason={recordBlockedReason}
             startRequestPending={startRequestPending}
             status={sessionStatus}
-            stopLabel={stopLabel}
+            stopLabel={stopControl.label}
+            stopTitle={stopControl.title}
             onLiveStream={handleLiveStream}
             onRecord={handleRecord}
             onStop={handleStop}
@@ -232,8 +228,14 @@ export function StudioTab(): ReactElement {
             onDismissStartFailure={dismissSessionStartFailure}
             onRetryStart={retrySessionStart}
           />
-          {/* Inputs: compact mirrors of Source / Mic / Output / Captions, each
-              editing the same captureConfig and deep-linking to its page. */}
+          {/* The microphone and its live level, between Session and Inputs
+              (owner call, 2026-10-02): a check that runs all the time. */}
+          <Suspense fallback={<MicrophoneSectionFallback />}>
+            <MicrophoneSection />
+          </Suspense>
+          {/* Inputs: compact mirrors of Screen / Camera / System audio / Output
+              / Captions, each editing the same captureConfig and deep-linking
+              to its page. */}
           <QuickSettings />
           <TakeoverSection />
         </aside>
@@ -248,10 +250,17 @@ function StudioDashboardBottomRowFallback(): ReactElement {
       <PanelSection title="Scenes">
         <div className="h-24 rounded-row bg-foreground/[0.04]" />
       </PanelSection>
-      <PanelSection title="Audio mixer">
-        <div className="h-24 rounded-row bg-foreground/[0.04]" />
-      </PanelSection>
     </div>
+  )
+}
+
+/** The Microphone section's height while its chunk loads: the picker and the meter row. */
+function MicrophoneSectionFallback(): ReactElement {
+  return (
+    <PanelSection title="Microphone">
+      <div className="h-control rounded-chip bg-foreground/[0.04]" />
+      <div className="h-4 rounded-chip bg-foreground/[0.04]" />
+    </PanelSection>
   )
 }
 

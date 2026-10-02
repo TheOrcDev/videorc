@@ -1,14 +1,21 @@
-// Floating-glass checks for `probe:ui-glass --surfaces` (plan 072).
+// Floating-glass checks for `probe:ui-glass --surfaces` (plan 072; plan 091
+// S3 for the tone check).
 //
 // A floating surface (menu, popover, hover card, tooltip, dialog, toast) is a
-// raised piece of the window glass. The probe paints the real `glass-float`
-// utility over a text-free patch of the window and over app text, region-
-// captures both states, and these pure helpers score the samples. Calibration
-// and the populations: docs/acceptance/2026-09-28-glass-floating-surfaces.md.
+// flat, opaque tier of the window's solid tone (plan 091 D6, Ghostex's web
+// modals). The probe paints the real utilities over a text-free patch of the
+// window and over app text, region-captures both states, and these pure
+// helpers score the samples. Calibration and the populations:
+// docs/acceptance/2026-09-28-glass-floating-surfaces.md (plan 072) and
+// docs/acceptance/2026-10-02-clear-glass-calibration.md (plan 091).
 //
-//   lift         OKLCH lightness of the surface minus the window glass at the
-//                same rect, per backdrop. The old near-opaque popover coat
-//                measured about -0.1 in dark (a black slab on grey glass).
+//   tone         the surface reads its own token: the RGB distance between
+//                the capture and the computed background colour the page
+//                reports for it (getComputedStyle through CDP), per backdrop.
+//                Plan 072's "lift over the window glass" band is gone: the
+//                dark floats are now deliberately darker than the glass over
+//                a bright desktop, so a fixed tone, whatever is behind, is
+//                the contract.
 //   contrast     the text tokens against the surface over white and black
 //                backdrops (the plan 050 thresholds)
 //   opaque       the surface reads the same over every backdrop. It fails
@@ -21,10 +28,14 @@
 //                text to hide. (A CSS frost cannot do this job: it never
 //                reaches the screen on the vibrancy windows.)
 
-import { contrastRatio, oklchLightness } from './image-stats.mjs'
+import { colorDistance, contrastRatio, oklchLightness } from './image-stats.mjs'
 
 export const FLOAT_GLASS_THRESHOLDS = Object.freeze({
-  lift: Object.freeze({ dark: Object.freeze([-0.02, 0.12]), light: Object.freeze([-0.04, 0.06]) }),
+  // A neutral opaque tone reaches the display unchanged (plan 091 S1 proved
+  // the sRGB prediction of the neutral coats within 1.5 steps), so the
+  // capture is compared with the token directly; 4 keeps 2.6x the plan 091
+  // population and fails a tier off by one 3% step (about 7 RGB steps).
+  maxToneDistance: 4,
   maxSurfaceSpread: 0.01,
   minTextUnder: 20,
   maxSharpnessThrough: 0.5,
@@ -55,12 +66,13 @@ export function centredRect(rect, width, height) {
   }
 }
 
-// Mirrors the `transparent 35%` stop of the glass-float sheen in styles.css:
-// the gradient's 8-bit banding reads as detail, so the bleed sample starts
-// below it.
+// The bleed sample skips the top band of the surface. Plan 072's sheen
+// gradient lived there (its 8-bit banding read as detail); plan 091 S3 made
+// the floats flat, and the band stays as a margin from the rim and the
+// shadow's edge.
 export const SHEEN_FRACTION = 0.35
 
-/** The part of `rect` below the sheen of a surface painted at `surface`. */
+/** The part of `rect` below the top band of a surface painted at `surface`. */
 export function belowSheen(rect, surface) {
   const top = Math.max(rect.y, surface.y + surface.height * SHEEN_FRACTION + 2)
   const bottom = rect.y + rect.height
@@ -69,18 +81,20 @@ export function belowSheen(rect, surface) {
 }
 
 /**
- * Scores one patch: `windowMeans` and `surfaceMeans` map a backdrop variant
- * (red, blue, white, black, text) to the mean sRGB colour of the same rect
- * without and with the surface. `text` holds the theme's primary and
- * secondary text colours.
+ * Scores one patch: `surfaceMeans` maps a backdrop variant (red, blue,
+ * white, black, text) to the mean sRGB colour of the rect with the surface
+ * painted, `expected` is the surface's computed background colour (sRGB)
+ * and `text` holds the theme's primary and secondary text colours.
  */
-export function evaluateFloatPatch({ theme, windowMeans, surfaceMeans, text }) {
-  const variants = Object.keys(surfaceMeans).filter((variant) => windowMeans[variant])
-  if (!variants.length) throw new Error('No backdrop variant was measured in both states.')
+export function evaluateFloatPatch({ surfaceMeans, text, expected }) {
+  const variants = Object.keys(surfaceMeans ?? {})
+  if (!variants.length) throw new Error('No backdrop variant was measured with the surface.')
+  if (!expected) throw new Error('The surface needs its computed colour for the tone check.')
   const surfaceLightness = variants.map((variant) => oklchLightness(surfaceMeans[variant]))
-  const lifts = variants.map(
-    (variant, index) => surfaceLightness[index] - oklchLightness(windowMeans[variant])
+  const toneBy = Object.fromEntries(
+    variants.map((variant) => [variant, round(colorDistance(surfaceMeans[variant], expected), 2)])
   )
+  const tone = Math.max(...Object.values(toneBy))
   const surfaceSpread = Math.max(...surfaceLightness) - Math.min(...surfaceLightness)
   const contrastBackdrops = ['white', 'black'].filter((variant) => surfaceMeans[variant])
   if (!contrastBackdrops.length) throw new Error('Contrast needs the white or black backdrop.')
@@ -90,19 +104,20 @@ export function evaluateFloatPatch({ theme, windowMeans, surfaceMeans, text }) {
   const secondaryContrast = Math.min(
     ...contrastBackdrops.map((variant) => contrastRatio(text.secondary, surfaceMeans[variant]))
   )
-  const [minLift, maxLift] = FLOAT_GLASS_THRESHOLDS.lift[theme]
-  const liftMin = Math.min(...lifts)
-  const liftMax = Math.max(...lifts)
   const checks = {
-    lift: liftMin >= minLift && liftMax <= maxLift,
+    tone: tone <= FLOAT_GLASS_THRESHOLDS.maxToneDistance,
     opaque: surfaceSpread <= FLOAT_GLASS_THRESHOLDS.maxSurfaceSpread,
     primaryContrast: primaryContrast >= FLOAT_GLASS_THRESHOLDS.minPrimaryContrast,
     secondaryContrast: secondaryContrast >= FLOAT_GLASS_THRESHOLDS.minSecondaryContrast
   }
   return {
     metrics: {
-      liftMin: round(liftMin),
-      liftMax: round(liftMax),
+      tone,
+      toneBy,
+      surfaceLightness: round(
+        surfaceLightness.reduce((sum, value) => sum + value, 0) / surfaceLightness.length
+      ),
+      expectedLightness: round(oklchLightness(expected)),
       surfaceSpread: round(surfaceSpread),
       primaryContrast: round(primaryContrast, 2),
       secondaryContrast: round(secondaryContrast, 2)

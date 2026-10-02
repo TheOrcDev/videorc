@@ -68,12 +68,80 @@ export function windowPalette(dark: boolean): WindowPalette {
 export const DOCKED_PREVIEW_CORNER_RADIUS = 12
 
 /**
- * The dark glass coats (styles.css `.dark` --glass-window / --glass-content)
- * for main-side documents that cannot read the stylesheet: the Preview frame
- * paints both over the OS material (plan 050). window-palette.test.ts fails
- * when these drift from styles.css.
+ * How much of the base tone each window region paints over the clear blur
+ * (plan 091, D3 and D5): styles.css `--glass-cover-sidebar` /
+ * `--glass-cover-work` per platform and theme. The macOS numbers are
+ * Ghostex's (dark work 83%, the smallest cover that keeps secondary text at
+ * 4.5:1 over white); the Windows numbers reproduce the plan 050 Mica
+ * composite exactly. window-palette.test.ts fails when styles.css drifts.
  */
-export const DARK_GLASS_COATS = Object.freeze({
-  window: 'oklch(0.13 0.003 286 / 42%)',
-  content: 'oklch(0.13 0.003 286 / 34%)'
-})
+export interface GlassCovers {
+  sidebar: number
+  work: number
+}
+
+export const GLASS_COVERS = Object.freeze({
+  darwin: {
+    dark: { sidebar: 0.88, work: 0.83 },
+    light: { sidebar: 0.93, work: 0.86 }
+  },
+  win32: {
+    dark: { sidebar: 0.34, work: 0.5116 },
+    light: { sidebar: 0.5, work: 0.62 }
+  }
+} as const satisfies Record<string, Record<'dark' | 'light', GlassCovers>>)
+
+export interface GlassCoats {
+  /** The body coat's alpha: the lighter cover, so first paint is already tinted. */
+  body: number
+  /** What the sidebar adds over the body to composite to its cover. */
+  sidebar: number
+  /** What a content pane adds over the body to composite to its cover. */
+  content: number
+}
+
+/**
+ * styles.css's D4 derivation, in numbers: the body paints
+ * `min(sidebar, work)` and each region adds `1 - (1 - cover) / (1 - body)`,
+ * so coat over body composites to exactly the region's cover.
+ */
+export function deriveGlassCoats(covers: GlassCovers): GlassCoats {
+  const body = Math.min(covers.sidebar, covers.work)
+  const delta = (cover: number): number =>
+    body >= 1 ? 0 : 1 - (1 - cover) / Math.max(1 - body, 0.001)
+  return { body, sidebar: delta(covers.sidebar), content: delta(covers.work) }
+}
+
+/** The cover a coat over the body composites to: the inverse of `deriveGlassCoats`. */
+export function compositeCover(body: number, coat: number): number {
+  return 1 - (1 - body) * (1 - coat)
+}
+
+/**
+ * styles.css `.dark` `--glass-base`: the dark tone every dark coat is cut
+ * from, the OKLCH of DARK_WINDOW_PALETTE.base (#0D0D0F).
+ */
+export const DARK_GLASS_BASE = '0.16 0.004 286'
+
+function alphaPercent(alpha: number): string {
+  return `${Math.round(alpha * 10_000) / 100}%`
+}
+
+/**
+ * The dark glass coats for main-side documents that cannot read the
+ * stylesheet: the Preview frame paints both over the clear material, pinned
+ * dark because it frames video (plan 050; plan 091 S2). Derived from the
+ * dark covers like styles.css derives its own: the body paints the work
+ * cover (83%) and the content coat is the work delta, 0% on macOS, so the
+ * frame composites to exactly what the main window's work area does.
+ * window-palette.test.ts fails when these drift from styles.css.
+ */
+export const DARK_GLASS_COATS = Object.freeze(
+  (() => {
+    const coats = deriveGlassCoats(GLASS_COVERS.darwin.dark)
+    return {
+      window: `oklch(${DARK_GLASS_BASE} / ${alphaPercent(coats.body)})`,
+      content: `oklch(${DARK_GLASS_BASE} / ${alphaPercent(coats.content)})`
+    }
+  })()
+)

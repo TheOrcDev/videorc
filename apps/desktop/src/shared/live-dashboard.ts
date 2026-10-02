@@ -8,6 +8,7 @@ import type {
   StreamTargetsSnapshot,
   ViewerSample
 } from './backend'
+import { sessionIsLive } from './capture-state'
 
 /**
  * The Stream Manager's live data (plan 055, D7). The main renderer, which
@@ -75,7 +76,7 @@ export interface DestinationEvent {
   at: string
 }
 
-/** 60 minutes of 30-second viewer samples. */
+/** 60 minutes of viewer samples (60 s cadence since plan 094; 30 s before). */
 export const VIEWER_HISTORY_POINTS = 120
 export const VIEWER_HISTORY_WINDOW_MS = 60 * 60_000
 /** Health arrives at most every 2 s; keep 10 minutes. */
@@ -107,9 +108,13 @@ function forSession(
   return { ...emptyLiveDashboardState(updatedAt), sessionId, session: state.session }
 }
 
-/** `null` for `starting` and `stopping`: the session keeps its last state. */
+/**
+ * `null` for `starting` and `stopping`: the session keeps its last state. Go
+ * Live is a record+stream session, which the backend reports as `recording`
+ * with a `streamUrl`: it is on air all the same (plan 095 S5).
+ */
 function sessionStateOf(status: RecordingStatus): LiveDashboardSessionState | null {
-  if (status.state === 'streaming') return 'live'
+  if (sessionIsLive(status)) return 'live'
   if (status.state === 'recording') return 'recording'
   if (status.state === 'idle' || status.state === 'failed') return 'off-air'
   return null

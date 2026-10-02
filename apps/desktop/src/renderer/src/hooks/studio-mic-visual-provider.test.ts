@@ -32,14 +32,12 @@ vi.mock('@/hooks/use-studio', () => ({
   })
 }))
 
-import {
-  StudioMicVisualProvider,
-  useStudioMicVisualLifecycle,
-  useStudioMicVisualPainter
-} from './use-studio-mic-visual'
+import { useFrameSource } from './use-frame-source'
+import { useStudioMicVisualSource } from './use-studio-mic-sources'
+import { StudioMicVisualProvider, useStudioMicVisualLifecycle } from './use-studio-mic-visual'
 
 function VisualConsumer({ onLifecycle }: { onLifecycle: (active: boolean) => void }): null {
-  useStudioMicVisualPainter(() => undefined)
+  useFrameSource(useStudioMicVisualSource(), () => undefined)
   onLifecycle(useStudioMicVisualLifecycle().active)
   return null
 }

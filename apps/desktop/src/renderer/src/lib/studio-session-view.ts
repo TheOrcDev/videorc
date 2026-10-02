@@ -2,9 +2,15 @@
 // React/component imports so they run under the node-only vitest runner. The
 // status strings/tones are shared by the Session rows and the Preview badge.
 
+import { sessionIsLive } from '../../../shared/capture-state'
+
+export { sessionIsLive }
+
 export type SessionVideo = { width: number; height: number; fps: number }
 export type SessionTarget = { enabled: boolean; label: string; platform: string }
-export type SessionStatusTone = 'good' | 'warn' | 'error' | 'neutral'
+export type SessionStatusTone = 'good' | 'warn' | 'error' | 'live' | 'neutral'
+/** The slice of `recording.status` the session chrome reads. */
+export type SessionStatusView = { state: string; streamUrl?: string | null }
 
 /** "Local recording" / "Streaming only" / "Recording + streaming" / "No output". */
 export function sessionMode(recordEnabled: boolean, streamEnabled: boolean): string {
@@ -65,7 +71,6 @@ export function streamingSummary(streamEnabled: boolean, targets: SessionTarget[
   return `${enabled.length} destinations`
 }
 
-/** Idle reads as "Ready" (the mockup's resting state); transitions get an ellipsis. */
 /**
  * True while a session owns the transport — the Stop/Force-stop control must
  * stay reachable through EVERY in-flight state (F-020: excluding starting/
@@ -77,9 +82,31 @@ export function isSessionTransportActive(state: string): boolean {
   )
 }
 
+/** A live session that also writes a local file: Go Live records by default. */
+export function sessionAlsoRecords(status: SessionStatusView): boolean {
+  return status.state === 'recording' && sessionIsLive(status)
+}
+
 /**
- * The toolbar's session clock (plan 050 S12): m:ss under an hour, h:mm:ss
- * after, from the backend's recording.durationMs. Missing reads 0:00.
+ * Milliseconds since the session started, from `recording.startedAt` (plan
+ * 095 S5). The backend sends `durationMs` only in the terminal status, so a
+ * running clock counts from the start. Missing or unparsable input is
+ * `undefined`; a start in the future (clock skew) reads 0.
+ */
+export function sessionElapsedMs(
+  startedAt: string | null | undefined,
+  nowMs: number
+): number | undefined {
+  const startedMs = startedAt ? Date.parse(startedAt) : Number.NaN
+  if (!Number.isFinite(startedMs) || !Number.isFinite(nowMs)) {
+    return undefined
+  }
+  return Math.max(0, nowMs - startedMs)
+}
+
+/**
+ * The inspector's session clock (plan 050 S12): m:ss under an hour, h:mm:ss
+ * after. Fed by `sessionElapsedMs` while a session runs. Missing reads 0:00.
  */
 export function sessionClockLabel(durationMs?: number): string {
   const total =
@@ -94,7 +121,34 @@ export function sessionClockLabel(durationMs?: number): string {
     : `${minutes}:${seconds}`
 }
 
-export function sessionStatusLabel(state: string, wsStatus?: string): string {
+/**
+ * The Stop button. A live session ends the livestream, and says so when it
+ * also stops a recording (Go Live is record+stream by default).
+ */
+export function sessionStopControl(
+  status: SessionStatusView,
+  stopRequestPending: boolean
+): { label: string; title?: string } {
+  if (stopRequestPending) {
+    return { label: 'Stopping…' }
+  }
+  if (status.state === 'stopping') {
+    return { label: 'Force stop' }
+  }
+  if (sessionIsLive(status)) {
+    return sessionAlsoRecords(status)
+      ? { label: 'End livestream', title: 'Also stops the recording' }
+      : { label: 'End livestream' }
+  }
+  return { label: 'Stop recording' }
+}
+
+/**
+ * Idle reads as "Ready" (the mockup's resting state); transitions get an
+ * ellipsis. An on-air session reads "Streaming" whether or not it also
+ * records: the backend calls record+stream `recording` (plan 095 S5).
+ */
+export function sessionStatusLabel(status: SessionStatusView, wsStatus?: string): string {
   // F-014: never report Ready over a dead backend socket — the app used to
   // zombie with a green Ready badge after a backend crash. Boot-time
   // waiting/connecting reads as "Connecting…", real drops as offline.
@@ -104,34 +158,37 @@ export function sessionStatusLabel(state: string, wsStatus?: string): string {
   if (wsStatus && wsStatus !== 'connected') {
     return 'Backend offline'
   }
-  switch (state) {
+  if (sessionIsLive(status)) {
+    return 'Streaming'
+  }
+  switch (status.state) {
     case 'idle':
       return 'Ready'
     case 'starting':
       return 'Starting…'
     case 'recording':
       return 'Recording'
-    case 'streaming':
-      return 'Streaming'
     case 'stopping':
       return 'Stopping…'
     case 'failed':
       return 'Failed'
     default:
-      return state.charAt(0).toUpperCase() + state.slice(1)
+      return status.state.charAt(0).toUpperCase() + status.state.slice(1)
   }
 }
 
-export function sessionStatusTone(state: string, wsStatus?: string): SessionStatusTone {
+export function sessionStatusTone(status: SessionStatusView, wsStatus?: string): SessionStatusTone {
   if (wsStatus === 'waiting' || wsStatus === 'connecting') {
     return 'warn'
   }
   if (wsStatus && wsStatus !== 'connected') {
     return 'error'
   }
-  switch (state) {
+  if (sessionIsLive(status)) {
+    return 'live'
+  }
+  switch (status.state) {
     case 'idle':
-    case 'streaming':
       return 'good'
     case 'starting':
     case 'stopping':

@@ -10,13 +10,22 @@
 //!
 //! The slot is never load-bearing: when it is empty, `start_session` opens the
 //! device exactly as before.
+//!
+//! Plan 092: while it stands by, the warm source is also the Studio meter's
+//! feed. Its callback keeps a level window, and `stream_standby_levels` sends
+//! it as `audio.levels` (microphone only, no session) about 20 times a second,
+//! so the meter shows the microphone whenever Studio is open, not only during
+//! a session.
 
+use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::audio::{AudioProcessingSettings, parse_coreaudio_microphone_id};
-use crate::protocol::{WarmMicrophoneArmParams, WarmMicrophoneStatus};
+use crate::audio::{AudioCaptureStats, AudioProcessingSettings, parse_coreaudio_microphone_id};
+use crate::protocol::{
+    AudioLevelReading, AudioLevelsEvent, WarmMicrophoneArmParams, WarmMicrophoneStatus,
+};
 use crate::session_audio::InitialAudioSource;
 use crate::state::AppState;
 
@@ -24,7 +33,16 @@ pub struct WarmMicrophone {
     device_id: u32,
     source: InitialAudioSource,
     armed_at: Instant,
+    /// The configured gain, applied to standby meter readings only: the PCM
+    /// stays raw and the session bus owns gain and mute.
+    gain_db: f32,
+    /// The opening that installed this source; its standby meter runs while
+    /// this source is the one in the slot.
+    generation: u64,
 }
+
+/// Plan 092: how often a standing-by warm microphone reports its level.
+const STANDBY_LEVELS_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Default)]
 pub struct WarmMicrophoneSlot {
@@ -155,6 +173,8 @@ impl WarmMicrophoneSlot {
                 device_id,
                 source,
                 armed_at: Instant::now(),
+                gain_db: 0.0,
+                generation: self.generation.load(Ordering::Acquire),
             })
         };
         drop(previous);
@@ -166,6 +186,7 @@ impl WarmMicrophoneSlot {
         opening: &WarmOpenGuard<'_>,
         device_id: u32,
         source: InitialAudioSource,
+        gain_db: f32,
     ) -> Option<WarmMicrophoneStatus> {
         let previous = {
             let mut slot = self.inner.lock().unwrap_or_else(|p| p.into_inner());
@@ -178,25 +199,40 @@ impl WarmMicrophoneSlot {
                 device_id,
                 source,
                 armed_at: Instant::now(),
+                gain_db,
+                generation: opening.generation,
             })
         };
         drop(previous);
         Some(self.status())
     }
 
+    /// The standby meter's inputs while the warm source installed by
+    /// `generation` is still in the slot: None once it was disarmed, replaced
+    /// or taken by a session. An opening that fails leaves it running.
+    fn standby_meter(&self, generation: u64) -> Option<(Arc<AudioCaptureStats>, f32)> {
+        let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        guard
+            .as_ref()
+            .filter(|warm| warm.generation == generation)
+            .map(|warm| (warm.source.stats_handle(), warm.gain_db))
+    }
+
     /// Applies live gain/mute changes to the warm source of `device_id`.
     pub fn update_processing_settings(
         &self,
         device_id: u32,
-        _settings: AudioProcessingSettings,
+        settings: AudioProcessingSettings,
     ) -> bool {
-        let guard = self
+        let mut guard = self
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match guard.as_ref() {
+        match guard.as_mut() {
             Some(warm) if warm.device_id == device_id => {
-                // Standby PCM stays raw; the session bus owns gain/mute.
+                // Standby PCM stays raw; the session bus owns gain/mute. Only
+                // the standby meter applies the gain.
+                warm.gain_db = settings.gain_db;
                 true
             }
             _ => false,
@@ -316,12 +352,15 @@ pub async fn arm_warm_microphone(
         drop(source);
         return refused("session-active", None);
     }
-    let Some(status) = state
-        .warm_microphone
-        .install_if_current(&opening, device_id, source)
+    let generation = opening.generation;
+    let Some(status) =
+        state
+            .warm_microphone
+            .install_if_current(&opening, device_id, source, settings.gain_db)
     else {
         return refused("superseded", None);
     };
+    tokio::spawn(stream_standby_levels(state.clone(), generation));
     state.emit_log(
         "info",
         format!(
@@ -330,6 +369,36 @@ pub async fn arm_warm_microphone(
         ),
     );
     status
+}
+
+/// Plan 092: the standing-by warm microphone's level, about 20 times a second,
+/// as `audio.levels` with the microphone only and no session. Readings carry
+/// the configured gain, like the session bus's, so the meter always shows the
+/// level a recording would get. Ends once that warm source leaves the slot.
+async fn stream_standby_levels(state: AppState, generation: u64) {
+    let mut ticker = tokio::time::interval(STANDBY_LEVELS_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        let Some((stats, gain_db)) = state.warm_microphone.standby_meter(generation) else {
+            return;
+        };
+        state.emit_event("audio.levels", standby_levels_event(&stats, gain_db));
+    }
+}
+
+/// One standby reading: the window since the last one, with the gain applied.
+fn standby_levels_event(stats: &AudioCaptureStats, gain_db: f32) -> AudioLevelsEvent {
+    let (peak, rms) = stats.take_level_window();
+    let gain = 10_f32.powf(gain_db / 20.0);
+    let rms = f64::from(rms * gain);
+    AudioLevelsEvent {
+        session_id: None,
+        microphone: Some(AudioLevelReading::from_window(peak * gain, rms * rms)),
+        system_audio: None,
+        master: None,
+        master_clipped_samples: 0,
+    }
 }
 
 /// `audio.mic.disarm`.
@@ -386,6 +455,62 @@ mod tests {
         );
         assert!(!slot.status().armed, "the slot is empty after a handoff");
         assert!(!slot.disarm());
+    }
+
+    #[test]
+    fn standby_meter_follows_the_installed_source_and_its_gain() {
+        let slot = WarmMicrophoneSlot::default();
+        let warm = test_native_audio_source(settings(0.0));
+        let warm_stats = warm.stats_handle();
+        slot.install(7, InitialAudioSource::warm(warm));
+        let generation = slot.generation.load(Ordering::Acquire);
+        let (stats, gain_db) = slot
+            .standby_meter(generation)
+            .expect("a warm source meters");
+        assert!(
+            Arc::ptr_eq(&stats, &warm_stats),
+            "the warm source's own window"
+        );
+        assert_eq!(gain_db, 0.0);
+        assert!(slot.update_processing_settings(7, settings(6.0)));
+        assert_eq!(
+            slot.standby_meter(generation).map(|(_, gain)| gain),
+            Some(6.0)
+        );
+        {
+            let _opening = slot.hold_open_for_test();
+            assert!(
+                slot.standby_meter(generation).is_some(),
+                "an opening that installed nothing leaves the meter running"
+            );
+        }
+        assert!(slot.take_for_capture(7, settings(0.0)).is_some());
+        assert!(
+            slot.standby_meter(generation).is_none(),
+            "a session that takes the source ends the standby meter"
+        );
+    }
+
+    #[test]
+    fn standby_levels_carry_the_gain_and_no_session() {
+        let stats = AudioCaptureStats::default();
+        stats.record_level_window(0.25, 0.1);
+        stats.record_level_window(0.5, 0.2);
+        let event = standby_levels_event(&stats, 6.0);
+        assert_eq!(event.session_id, None);
+        assert_eq!(event.system_audio, None);
+        assert_eq!(event.master, None);
+        let microphone = event.microphone.expect("a microphone reading");
+        // The loudest callback wins, and +6 dB lifts 0.5 to about full scale.
+        assert!(microphone.peak_db.abs() < 0.1, "{microphone:?}");
+        let rms_db = 20.0 * (0.2_f32 * 10_f32.powf(0.3)).log10();
+        assert!((microphone.rms_db - rms_db).abs() < 0.1, "{microphone:?}");
+        // Read and cleared: the next window is silence until a callback lands.
+        let silent = standby_levels_event(&stats, 6.0)
+            .microphone
+            .expect("still a reading");
+        assert_eq!(silent.peak_db, crate::protocol::AUDIO_LEVEL_FLOOR_DB);
+        assert_eq!(silent.rms_db, crate::protocol::AUDIO_LEVEL_FLOOR_DB);
     }
 
     #[test]
@@ -544,7 +669,8 @@ mod tests {
             slot.install_if_current(
                 &opening,
                 7,
-                InitialAudioSource::warm(test_native_audio_source(settings(0.0)))
+                InitialAudioSource::warm(test_native_audio_source(settings(0.0))),
+                0.0
             )
             .is_none()
         );

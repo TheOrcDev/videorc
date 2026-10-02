@@ -21,37 +21,45 @@ The single source of truth for how Videorc looks and feels. Every UI task follow
 Implemented as shadcn CSS variables in `apps/desktop/src/renderer/src/styles.css` (oklch; that file is the live source of truth). Main-process data-URL windows (Notes/Comments/Preview — dark-always, they frame video) mirror the solid values in `src/main/window-palette.ts`; change them together.
 
 Surfaces (dark = black glass · light = porcelain)
-- Window/panel base, translucent over the wallpaper frost: dark `oklch(0.13 0.003 286 / 68%)` (solid `#0D0D0F`) · light `oklch(0.985 0.001 286 / 62%)` (solid `#FAFAFB`). Never pure #000 — it kills the glass depth. Floating surfaces (menus, popovers, hover cards, tooltips, dialogs, toasts) use the `glass-float` utility (plan 072): the window glass tone one step raised, with the chip edge, never `bg-popover`. `.claude/skills/videorc-design/SKILL.md` is the current language.
-- Electron implementation note (bisected with scripts/ui-glass-bisect-probe.mjs): real backdrop blur is unreachable — NSVisualEffectView materials paint fully opaque through Electron on current macOS, and CSS `backdrop-filter` cannot see behind the window (putting it on the root also kills alpha pass-through). The frost is therefore the `GlassWallpaperUnderlay`: main fetches the actual wallpaper (System Events), the renderer draws it blurred (70px, saturate 1.4) as the app's bottom layer, geometry-tracked to the window, under the theme's translucent `--background` coat. The window stays `transparent: true` + `backgroundColor: '#00000000'` so the underlay's absence (Automation denied) degrades to plain translucent glass. Exactly ONE element paints `--background` (the body) plus the underlay's tint layer — never add further coats.
+
+- Window base: clear glass (plan 091), the OS blur stripped of its tint by the native addon, under one cover per region of the solid tone: dark `#0D0D0F` (`oklch(0.16 0.004 286)`) · light `#FAFAFB` (`oklch(0.985 0.001 286)`); the sidebar covers 88% · 93%, the work area 83% · 86%, and the coats are derived from those covers in `styles.css`. Never pure #000 — it kills the glass depth. Floating surfaces (menus, popovers, hover cards, tooltips, dialogs, toasts) are flat, opaque tiers of the solid (plan 072, plan 091 D6): `glass-float` (popup), `glass-float-dialog`, `glass-float-tooltip`, a rim and a drop shadow, never `bg-popover`. `.claude/skills/videorc-design/SKILL.md` is the current language.
+- Electron implementation note: the wallpaper-underlay frost described here before plan 050 is gone. The window is real `under-window` vibrancy (plan 050) with the material stripped to a neutral 60 pt blur by the addon (plan 091); CSS `backdrop-filter` still never reaches the screen on these windows and stays banned.
 - Panels float: rounded corners `16–20px` (panel), layered shadow (`0 16px 70px rgba(0,0,0,0.55)` dark · `rgba(0,0,0,0.25)` light) + a tight `0 0 0 1px` hairline ring.
 - Hairlines and borders: dark white-10% (`rgba(255,255,255,0.10)`) — the polished edge of the black glass · light black-8% (`rgba(0,0,0,0.08)`); never solid gray borders.
 
 Text (three tiers, nothing else; dark · light)
+
 - Primary (chrome · ink): `#F4F4F5` · `#1C1C1E`, weight 500 for titles/labels.
 - Secondary: `#A1A1AA` · `#6E6E73`, weight 400 — inline context after a title, right-aligned metadata, placeholders.
 - Tertiary: `#71717A` · `#98989D` — section headers, footer hints, disabled.
 
 Selection & interaction (dark · light)
+
 - Selected/hovered row: white-8% · black-6% overlay, radius `8–10px`, full-row block; no outlines, no color fills.
 - Pressed: white-12% · black-10%. Focus-visible: 2px ring (dark white-28% · light black-25%, keyboard only).
 
 Brand red (the logo's LED-glow eyes)
+
 - ONE saturated accent, semantic only — record, LIVE, destructive: dark `oklch(0.60-0.62 0.23-0.24 27)` · light `oklch(0.55 0.24 27)` (`--destructive`/`--live`). Never chrome, never decorative: the logo has two red eyes, not a red face.
 
 Geometry & rhythm
+
 - Radii: panel 16–20, rows/cards 8–10, key chips & small controls 6.
 - Row height: 44–48px; list rows are single-line.
 - Horizontal padding: 16–20px panel gutter; 12px between icon and title; 8px between title and inline context.
 - Section headers get 16px top spacing, 8px bottom.
 
 Type
+
 - System font stack (SF Pro on macOS). Sizes: search/title input 18–20, row title 14–15, metadata/section headers 12–13, key chips 11–12.
 
 Icons
+
 - App/source icons: 24px rounded-square (radius ~6), vivid, full-color — they are the only large color on screen.
 - Inline/status icons: 16px, Phosphor (already in the app), tinted secondary gray unless conveying status.
 
 Motion
+
 - Fast and subtle: 100–150ms ease-out. Panels fade+scale from 0.98; rows highlight instantly (no transition on selection). Nothing bounces.
 
 ## Core patterns
@@ -61,6 +69,7 @@ Motion
 **Search header** — borderless input on the panel itself: leading 24px icon, large placeholder in secondary gray, trailing hint (tertiary text + key chip). No input box outline; the panel IS the input surface. Use shadcn `Command` (cmdk) — this pattern is its native shape.
 
 **Sectioned list** — tertiary-gray section label ("Development", "Suggestions"), then rows. Row anatomy, left to right:
+
 1. 24px rounded-square icon
 2. Primary title
 3. Inline context in secondary gray on the same line (e.g. the owning app/platform)
@@ -76,18 +85,18 @@ Motion
 
 ## shadcn component mapping
 
-| Need | Use |
-|---|---|
-| Palette / searchable list | `Command` (+ `CommandDialog`) |
-| Modals & confirmations | `Dialog` themed as glass panel |
-| Lists / destination rows | `Command` rows or composed row primitive (one shared component) |
-| Buttons | `Button` ghost/outline; primary actions stay text+kbd, not big filled CTAs |
-| Shortcut hints | `Kbd` composition (Badge-based), shared |
-| Section/row dividers | `Separator` at white 8% |
-| Badges/status | `Badge` with monochrome variants; color only for live/error |
-| Scroll regions | `ScrollArea` |
-| Menus/popovers | `DropdownMenu`/`Popover` on `glass-float` |
-| Toasts | sonner styled to the same glass tokens |
+| Need                      | Use                                                                        |
+| ------------------------- | -------------------------------------------------------------------------- |
+| Palette / searchable list | `Command` (+ `CommandDialog`)                                              |
+| Modals & confirmations    | `Dialog` themed as glass panel                                             |
+| Lists / destination rows  | `Command` rows or composed row primitive (one shared component)            |
+| Buttons                   | `Button` ghost/outline; primary actions stay text+kbd, not big filled CTAs |
+| Shortcut hints            | `Kbd` composition (Badge-based), shared                                    |
+| Section/row dividers      | `Separator` at white 8%                                                    |
+| Badges/status             | `Badge` with monochrome variants; color only for live/error                |
+| Scroll regions            | `ScrollArea`                                                               |
+| Menus/popovers            | `DropdownMenu`/`Popover` on `glass-float`                                  |
+| Toasts                    | sonner styled to the same glass tokens                                     |
 
 Missing a primitive? Install it via the shadcn CLI (see the shadcn skill) — do not hand-roll.
 

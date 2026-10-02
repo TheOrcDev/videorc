@@ -10,6 +10,11 @@ import {
 import { useEffect, useState, type KeyboardEvent, type ReactElement } from 'react'
 
 import { ListRow } from '@/components/list-row'
+import {
+  YOUTUBE_STREAM_KEY_LINK_LABEL,
+  YOUTUBE_STREAM_KEY_URL,
+  youtubeDestinationPausedMessage
+} from '@/lib/youtube-quota-copy'
 import { PlatformGlyph } from '@/components/platform-glyph'
 import { StatusBadge } from '@/components/status-badge'
 import { StatusDot } from '@/components/status-dot'
@@ -124,10 +129,13 @@ export function DestinationCard({
   onRefreshYouTubeChannels,
   onRefreshXNativeCapability,
   onAuthorizeXLive,
-  onSelectYouTubeChannel
+  onSelectYouTubeChannel,
+  youtubeQuotaPausedUntil
 }: {
   target: StreamTargetSettings
   account?: PlatformAccount
+  /** Plan 094: the shared YouTube API pause end, while paused. */
+  youtubeQuotaPausedUntil?: Date | null
   credentials?: OAuthProviderCredentialStatus
   disabled: boolean
   enableGate: EntitlementUiGate
@@ -167,7 +175,17 @@ export function DestinationCard({
   const setup = destinationSetup(target, account)
   // While a session is live the runtime status (on air / stopped / skipped)
   // takes over the badge; otherwise only something worth reading shows.
-  const badge = runtime ? runtimeBadge(runtime) : idleDestinationBadge(target, account)
+  // Plan 094: YouTube's API is paused (shared quota). The OAuth path can't
+  // create a broadcast until the reset; the stream key still can.
+  const youtubePaused =
+    target.platform === 'youtube' && target.authMode === 'oauth' && youtubeQuotaPausedUntil
+      ? youtubeQuotaPausedUntil
+      : null
+  const badge = runtime
+    ? runtimeBadge(runtime)
+    : youtubePaused
+      ? { tone: 'warning' as const, label: 'API paused' }
+      : idleDestinationBadge(target, account)
   const statusMessage = runtime?.message ?? target.status?.message
   // Multistreaming is free for every plan: the only enable gate left is the
   // shared destination cap (or a disabled livestreaming feature), so the
@@ -385,6 +403,32 @@ export function DestinationCard({
               </div>
             ) : null}
 
+            {youtubePaused ? (
+              <Alert data-slot="youtube-quota-paused" variant="warning">
+                <WarningIcon />
+                <AlertDescription className="flex flex-col gap-2">
+                  <span>{youtubeDestinationPausedMessage(youtubePaused)}</span>
+                  <span className="flex flex-wrap items-center gap-2">
+                    <Button
+                      disabled={disabled}
+                      size="sm"
+                      variant="outline"
+                      onClick={() => onPatch(target.id, { authMode: 'manual-rtmp' })}
+                    >
+                      Use stream key
+                    </Button>
+                    <Button
+                      className="h-auto p-0 text-xs"
+                      size="sm"
+                      variant="link"
+                      onClick={() => openExternalUrl(YOUTUBE_STREAM_KEY_URL)}
+                    >
+                      {YOUTUBE_STREAM_KEY_LINK_LABEL}
+                    </Button>
+                  </span>
+                </AlertDescription>
+              </Alert>
+            ) : null}
             {oauthMode ? (
               <OAuthAccountPanel
                 account={account}

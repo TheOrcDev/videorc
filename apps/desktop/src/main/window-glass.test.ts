@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  CLEAR_GLASS_BLUR_RADIUS,
   DEFAULT_GLASS_MATERIAL,
+  DEFAULT_GLASS_STYLE,
   glassModeForRole,
   resolveGlassMode,
+  resolveGlassStyle,
   solidWindowBase,
   trafficLightPosition,
   WINDOWS_MICA_MIN_BUILD,
@@ -53,6 +56,23 @@ describe('resolveGlassMode', () => {
         material: DEFAULT_GLASS_MATERIAL
       })
     }
+  })
+})
+
+describe('resolveGlassStyle (plan 091)', () => {
+  it('strips to clear glass unless VIDEORC_GLASS_STYLE=material asks for the A/B control', () => {
+    expect(DEFAULT_GLASS_STYLE).toBe('clear')
+    expect(resolveGlassStyle(undefined)).toBe('clear')
+    expect(resolveGlassStyle('material')).toBe('material')
+    expect(resolveGlassStyle(' Material ')).toBe('material')
+    expect(resolveGlassStyle('clear')).toBe('clear')
+    for (const value of ['', '1', 'ghostex', 'frost', '0']) {
+      expect(resolveGlassStyle(value)).toBe(DEFAULT_GLASS_STYLE)
+    }
+  })
+
+  it("uses Ghostex's blur radius", () => {
+    expect(CLEAR_GLASS_BLUR_RADIUS).toBe(60)
   })
 })
 

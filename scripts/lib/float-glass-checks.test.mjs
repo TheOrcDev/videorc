@@ -15,76 +15,68 @@ const DARK_TEXT = { primary: parseHexColor('#F5F5F6'), secondary: parseHexColor(
 const grey = (value) => ({ r: value, g: value, b: value })
 const allBackdrops = (colour) =>
   Object.fromEntries(['red', 'blue', 'white', 'black', 'text'].map((variant) => [variant, colour]))
+// Plan 091 D6 dark tiers: dialog #1C1C1D, popup #232324, tooltip #0D0D0F.
+const POPUP = { r: 0x23, g: 0x23, b: 0x24 }
 
-test('a raised surface one step lighter than the dark window glass passes', () => {
-  // Window glass ≈ #2B2B2B (the owner's Stream Manager), surface ≈ #333336.
+test('a flat float that reads its own token over every backdrop passes', () => {
   const result = evaluateFloatPatch({
-    theme: 'dark',
-    windowMeans: allBackdrops(grey(0x2b)),
-    surfaceMeans: allBackdrops({ r: 0x33, g: 0x33, b: 0x36 }),
-    text: DARK_TEXT
+    surfaceMeans: allBackdrops({ r: 0x23, g: 0x23, b: 0x25 }),
+    text: DARK_TEXT,
+    expected: POPUP
   })
   assert.equal(result.pass, true, JSON.stringify(result))
-  assert.ok(result.metrics.liftMin > 0)
+  assert.ok(result.metrics.tone <= 1.01)
+  assert.equal(result.metrics.toneBy.white, 1)
+  assert.ok(result.metrics.surfaceLightness > 0.2 && result.metrics.surfaceLightness < 0.3)
 })
 
-test('the old near-opaque popover coat fails as a black slab on the window glass', () => {
-  // The screenshot that started plan 072: #111113 on #2B2B2B.
+test('a float one tier off its token fails on tone, whatever the glass behind', () => {
+  // The dialog tier painted where the popup tier was asked for: #1C1C1D vs #232324.
   const result = evaluateFloatPatch({
-    theme: 'dark',
-    windowMeans: allBackdrops(grey(0x2b)),
-    surfaceMeans: allBackdrops({ r: 0x11, g: 0x11, b: 0x13 }),
-    text: DARK_TEXT
+    surfaceMeans: allBackdrops({ r: 0x1c, g: 0x1c, b: 0x1d }),
+    text: DARK_TEXT,
+    expected: POPUP
   })
-  assert.equal(result.checks.lift, false)
-  assert.ok(result.metrics.liftMin < FLOAT_GLASS_THRESHOLDS.lift.dark[0])
+  assert.equal(result.checks.tone, false)
+  assert.ok(result.metrics.tone > FLOAT_GLASS_THRESHOLDS.maxToneDistance)
+  assert.equal(result.checks.opaque, true)
 })
 
 test('an obscured or translucent surface capture fails closed', () => {
   // The five-window run where a backdrop stacked over the Stream Manager:
   // the surface read L 0.406 over red but 0.274 over white.
   const result = evaluateFloatPatch({
-    theme: 'dark',
-    windowMeans: allBackdrops(grey(0x2b)),
-    surfaceMeans: { ...allBackdrops({ r: 0x33, g: 0x33, b: 0x36 }), red: grey(0x4f) },
-    text: DARK_TEXT
+    surfaceMeans: { ...allBackdrops(POPUP), red: grey(0x4f) },
+    text: DARK_TEXT,
+    expected: POPUP
   })
   assert.equal(result.checks.opaque, false)
   assert.equal(result.pass, false)
   assert.ok(result.metrics.surfaceSpread > FLOAT_GLASS_THRESHOLDS.maxSurfaceSpread)
 })
 
-test('a surface too light for its text fails on contrast, not lift', () => {
+test('a surface too light for its text fails on contrast, not tone', () => {
   const result = evaluateFloatPatch({
-    theme: 'dark',
-    windowMeans: allBackdrops(grey(0x60)),
     surfaceMeans: allBackdrops(grey(0x68)),
-    text: DARK_TEXT
+    text: DARK_TEXT,
+    expected: grey(0x68)
   })
-  assert.equal(result.checks.lift, true)
+  assert.equal(result.checks.tone, true)
   assert.equal(result.checks.secondaryContrast, false)
 })
 
-test('patch scoring needs a shared backdrop and a contrast backdrop', () => {
+test('patch scoring needs a measured backdrop, a contrast backdrop and the computed colour', () => {
   assert.throws(
-    () =>
-      evaluateFloatPatch({
-        theme: 'dark',
-        windowMeans: { red: grey(0x2b) },
-        surfaceMeans: { blue: grey(0x33) },
-        text: DARK_TEXT
-      }),
-    /both states/
+    () => evaluateFloatPatch({ surfaceMeans: {}, text: DARK_TEXT, expected: POPUP }),
+    /No backdrop variant/
   )
   assert.throws(
-    () =>
-      evaluateFloatPatch({
-        theme: 'dark',
-        windowMeans: { red: grey(0x2b) },
-        surfaceMeans: { red: grey(0x33) },
-        text: DARK_TEXT
-      }),
+    () => evaluateFloatPatch({ surfaceMeans: { red: POPUP }, text: DARK_TEXT, expected: POPUP }),
     /white or black/
+  )
+  assert.throws(
+    () => evaluateFloatPatch({ surfaceMeans: allBackdrops(POPUP), text: DARK_TEXT }),
+    /computed colour/
   )
 })
 
@@ -115,7 +107,7 @@ test('rect helpers grow within the window and centre inside a rect', () => {
   })
 })
 
-test('the bleed sample starts below the sheen of the surface', () => {
+test('the bleed sample starts below the top band of the surface', () => {
   const surface = { x: 0, y: 0, width: 200, height: 100 }
   assert.deepEqual(belowSheen({ x: 30, y: 30, width: 140, height: 40 }, surface), {
     x: 30,

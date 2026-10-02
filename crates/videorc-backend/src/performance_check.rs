@@ -269,12 +269,13 @@ const YIELD_TO_CAPTURE_TIMEOUT: Duration = Duration::from_secs(8);
 /// renderer would flip to "Recording", toast health warnings and patch Library
 /// rows for a session the user never started. Filtered at the WebSocket relay,
 /// not at `emit_event` — `stop_recording` itself waits on `recording.status`.
-const SUPPRESSED_EVENTS: [&str; 5] = [
+const SUPPRESSED_EVENTS: [&str; 6] = [
     "recording.status",
     "recording.finalization",
     "health.event",
     "session.log",
     "diagnostics.stats",
+    "audio.levels",
 ];
 
 #[derive(Debug, Default)]
