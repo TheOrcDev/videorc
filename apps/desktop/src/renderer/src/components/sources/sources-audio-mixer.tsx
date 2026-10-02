@@ -32,7 +32,7 @@ import { MuteToggle } from '@/components/ui/channel-toggle'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Fader, FaderRange, FaderThumb, FaderTrack } from '@/components/ui/fader'
 import { Kbd, KbdGroup } from '@/components/ui/kbd'
-import { Mixer, MixerChannels, MixerTitle } from '@/components/ui/mixer'
+import { Mixer, MixerChannels } from '@/components/ui/mixer'
 import {
   ParameterSlider,
   ParameterSliderControl,
@@ -120,7 +120,12 @@ export function applySyncChange(
       }
 }
 
-/** A control's tooltip with its global shortcut, when one is bound (keyboard-first, quietly). */
+/**
+ * A control's tooltip with its global shortcut, when one is bound
+ * (keyboard-first, quietly). The trigger is a wrapper: Radix's TooltipTrigger
+ * writes `data-state` onto its child, which would replace a Switch's
+ * checked/unchecked, the hook its track styles use.
+ */
 function ShortcutTooltip({
   label,
   keys,
@@ -132,7 +137,9 @@ function ShortcutTooltip({
 }): ReactElement {
   return (
     <Tooltip>
-      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipTrigger asChild>
+        <span className="inline-flex">{children}</span>
+      </TooltipTrigger>
       <TooltipContent>
         {label}
         {keys.length > 0 ? (
@@ -166,6 +173,8 @@ export function SourcesAudioMixer(): ReactElement {
   const { openSettings } = useWorkspaceNav()
   const microphone = useMicrophoneMeter()
   const backendLevelsLive = useBackendAudioLevelsLive()
+  // Calibrate's last message; a Sync reset replaces it, as the old Reset did.
+  const [syncMessage, setSyncMessage] = useState<string | null>(null)
   const microphones = microphonePickerDevices(deviceList.devices)
   const audio = captureConfig.audio
   const platform = runtimeInfo?.platform
@@ -202,12 +211,20 @@ export function SourcesAudioMixer(): ReactElement {
         }
       />
       {/* gap-0: only the channels area is used; the empty header, separator
-          and master rows would each add the grid's gap. */}
-      <Mixer className="gap-0" maxDb={0} minDb={-60}>
-        <MixerTitle className="sr-only">Audio mixer</MixerTitle>
+          and master rows would each add the grid's gap. No MixerTitle: the
+          section's own heading names it, and a second one would announce
+          "Audio mixer" twice. */}
+      <Mixer aria-labelledby={undefined} className="gap-0" maxDb={0} minDb={-60}>
         <MixerChannels className="gap-0 divide-y divide-border" scrollable={false}>
           <MicrophoneChannel
-            calibration={<SyncCalibration audio={audio} setAudio={setAudio} />}
+            calibration={
+              <SyncCalibration
+                audio={audio}
+                message={syncMessage}
+                setAudio={setAudio}
+                setMessage={setSyncMessage}
+              />
+            }
             gainDb={audio.microphoneGainDb}
             meter={microphone.meter}
             microphoneSelected={Boolean(selectedMicrophone)}
@@ -223,9 +240,10 @@ export function SourcesAudioMixer(): ReactElement {
             onMutedChange={(microphoneMuted) =>
               setAudio((current) => ({ ...current, microphoneMuted }))
             }
-            onSyncChange={(offsetMs, reason) =>
+            onSyncChange={(offsetMs, reason) => {
               setAudio((current) => applySyncChange(current, offsetMs, reason))
-            }
+              if (reason === 'reset') setSyncMessage('Reset microphone sync to structural default.')
+            }}
           />
           {systemAudio.visible ? (
             <SystemAudioSettings
@@ -402,13 +420,16 @@ export function MicrophoneChannel({
 /** The flash/click measurement tools for Sync, folded away (plan 093, D3). */
 function SyncCalibration({
   audio,
-  setAudio
+  setAudio,
+  message,
+  setMessage
 }: {
   audio: AudioSettings
   setAudio: (update: (current: AudioSettings) => AudioSettings) => void
+  message: string | null
+  setMessage: (message: string | null) => void
 }): ReactElement {
   const [recommendation, setRecommendation] = useState<AudioSyncRecommendationReport | null>(null)
-  const [message, setMessage] = useState<string | null>(null)
   const state = audioSyncCalibrationState(recommendation, audio)
 
   return (

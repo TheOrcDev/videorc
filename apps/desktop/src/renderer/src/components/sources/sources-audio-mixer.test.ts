@@ -123,6 +123,14 @@ describe('Sources System audio settings (plan 069)', () => {
 })
 
 describe('Sources System audio strip (plan 093)', () => {
+  it('keeps the On switch styled by its own state under the shortcut tooltip', () => {
+    // Radix TooltipTrigger asChild writes data-state onto its child; on the
+    // Switch that replaced checked/unchecked, the only hook its track styles use.
+    const onSwitch = /<button[^>]*aria-label="System audio"[^>]*>/
+    expect(render({ requested: true }).match(onSwitch)?.[0]).toContain('data-state="checked"')
+    expect(render({}).match(onSwitch)?.[0]).toContain('data-state="unchecked"')
+  })
+
   it('rests with no reading outside a session, and says when it moves', () => {
     const markup = render({ requested: true })
     expect(markup).toContain('data-videorc-system-audio-visualizer=""')
