@@ -1,6 +1,11 @@
 import { useMemo, useState, type ReactElement } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
+import {
+  HighlightStatus,
+  commentHighlightPresentationForMessage,
+  type CommentHighlightPresentation
+} from '@/components/comment-row'
 import { CopyIcon, PreviewIcon, SendIcon, type AppIcon } from '@/components/icons'
 import {
   AnnouncementIcon,
@@ -16,7 +21,12 @@ import { Button } from '@/components/ui/button'
 import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import type { AudienceSnapshot, LiveChatProviderState, StreamPlatform } from '@/lib/backend'
+import type {
+  AudienceSnapshot,
+  CommentHighlightState,
+  LiveChatProviderState,
+  StreamPlatform
+} from '@/lib/backend'
 import { AvatarCircle } from '@/lib/chat-avatar'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import {
@@ -111,29 +121,54 @@ export function activityCapabilityNote(
   return notes.length ? notes.join(' ') : null
 }
 
-function ActivityRow({
-  item,
-  nowMs,
-  onShowOnStream,
-  onThank,
-  onShowFollowNames
-}: {
-  item: ActivityItem
-  nowMs: number
-  onShowOnStream?: (item: ActivityItem) => void
-  onThank?: (item: ActivityItem) => void
-  onShowFollowNames?: () => void
-}): ReactElement {
-  const Icon = item.gift ? GiftIcon : KIND_ICONS[item.kind]
+const IDLE: CommentHighlightPresentation = { phase: 'idle' }
+
+/** What the stream shows for this row (plan 095, S2): the same slot and id as
+ * chat, so a row with a chat message behind it reads exactly like that chat
+ * row. Rows without one (destinations, counts) are never on stream. */
+export function activityHighlight(
+  item: ActivityItem,
+  slot: {
+    liveHighlightId?: string | null
+    highlightState?: CommentHighlightState
+    highlightApplyingId?: string | null
+    highlightFailure?: { messageId: string; reason: string } | null
+  }
+): CommentHighlightPresentation {
+  if (!item.messageId) return IDLE
+  return commentHighlightPresentationForMessage({
+    messageId: item.messageId,
+    highlightedId: slot.liveHighlightId,
+    state: slot.highlightState,
+    applyingId: slot.highlightApplyingId,
+    failure: slot.highlightFailure
+  })
+}
+
+/** The row's ⋯ menu. Show on stream toggles, so on a live row it says what a
+ * click does: Remove from stream (plan 095, S2). */
+export function activityRowActions(
+  item: ActivityItem,
+  highlight: CommentHighlightPresentation,
+  {
+    onShowOnStream,
+    onThank,
+    onShowFollowNames
+  }: {
+    onShowOnStream?: (item: ActivityItem) => void
+    onThank?: (item: ActivityItem) => void
+    onShowFollowNames?: () => void
+  }
+): KebabMenuItem[] {
   const destination = item.kind === 'destination-failed' || item.kind === 'destination-recovered'
-  const person = activityRowShowsPerson(item)
-  const actions: KebabMenuItem[] = [
+  return [
     ...(onShowOnStream && item.messageId
       ? [
           {
             id: 'show',
-            label: 'Show on stream',
+            label: highlight.phase === 'live' ? 'Remove from stream' : 'Show on stream',
             icon: PreviewIcon,
+            disabled: highlight.phase === 'applying',
             onSelect: () => onShowOnStream(item)
           }
         ]
@@ -163,10 +198,39 @@ function ActivityRow({
         )
     }
   ]
+}
+
+function ActivityRow({
+  item,
+  nowMs,
+  highlight,
+  onShowOnStream,
+  onThank,
+  onShowFollowNames
+}: {
+  item: ActivityItem
+  nowMs: number
+  highlight: CommentHighlightPresentation
+  onShowOnStream?: (item: ActivityItem) => void
+  onThank?: (item: ActivityItem) => void
+  onShowFollowNames?: () => void
+}): ReactElement {
+  const Icon = item.gift ? GiftIcon : KIND_ICONS[item.kind]
+  const person = activityRowShowsPerson(item)
+  const actions = activityRowActions(item, highlight, {
+    onShowOnStream,
+    onThank,
+    onShowFollowNames
+  })
+  const status = highlight.phase !== 'idle'
   return (
     <li
-      className="flex items-start gap-2.5 px-3 py-2 hover:bg-accent"
+      className={cn(
+        'flex items-start gap-2.5 px-3 py-2 hover:bg-accent',
+        highlight.phase === 'live' && 'bg-accent'
+      )}
       data-activity-id={item.id}
+      data-highlight-phase={item.messageId ? highlight.phase : undefined}
       data-kind={item.kind}
       data-slot="activity-row"
     >
@@ -205,8 +269,16 @@ function ActivityRow({
           >
             {item.short}
           </span>
+          {status ? (
+            <span className="ml-auto shrink-0 pl-1" data-slot="activity-highlight">
+              <HighlightStatus status={highlight} />
+            </span>
+          ) : null}
           <time
-            className="ml-auto shrink-0 pl-1 text-[11px] text-subtle tabular-nums"
+            className={cn(
+              'shrink-0 pl-1 text-[11px] text-subtle tabular-nums',
+              !status && 'ml-auto'
+            )}
             dateTime={item.at}
           >
             {relativeTime(item.at, nowMs)}
@@ -229,6 +301,10 @@ export function ActivityPane({
   providers,
   nowMs,
   className,
+  liveHighlightId = null,
+  highlightState,
+  highlightApplyingId = null,
+  highlightFailure = null,
   onShowOnStream,
   onThank,
   onShowFollowNames
@@ -238,6 +314,11 @@ export function ActivityPane({
   providers: readonly LiveChatProviderState[]
   nowMs: number
   className?: string
+  /** The message on stream now (plan 095, S2): Activity shares chat's slot. */
+  liveHighlightId?: string | null
+  highlightState?: CommentHighlightState
+  highlightApplyingId?: string | null
+  highlightFailure?: { messageId: string; reason: string } | null
   onShowOnStream?: (item: ActivityItem) => void
   onThank?: (item: ActivityItem) => void
   /** Reconnect Twitch with its follow permission (plan 071, S2). */
@@ -318,6 +399,12 @@ export function ActivityPane({
             {shown.map((item) => (
               <ActivityRow
                 key={item.id}
+                highlight={activityHighlight(item, {
+                  liveHighlightId,
+                  highlightState,
+                  highlightApplyingId,
+                  highlightFailure
+                })}
                 item={item}
                 nowMs={nowMs}
                 onShowOnStream={onShowOnStream}
