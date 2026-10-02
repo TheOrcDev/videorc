@@ -496,12 +496,16 @@ implementation, and eager raw bytes are unchanged.
 
 ### What was done (2026-10-02)
 
-- **U1:** audiocn PR #2 (`fix/videorc-adoption`, four commits ending `221100c`). It covers every U1 item, plus a 100 ms painter clock so a woken meter never jumps, and a quiet-source stop for `DbReadout`'s 4 Hz ticker. audiocn: 318 tests (19 new), typecheck, Ultracite, React Doctor, build. `test:install` could not run here (see the deviations).
+- **U1:** audiocn PR #2 (`fix/videorc-adoption`, five commits ending `a847315`). It covers every U1 item, plus a 100 ms painter clock so a woken meter never jumps, and a quiet-source stop for `DbReadout`'s 4 Hz ticker. audiocn: 320 tests (21 new), typecheck, Ultracite, React Doctor, build. `test:install` could not run here (see the deviations).
 - **S1** `855d5487`: vendored with eager raw +29 B (the `use-reduced-motion` swap).
 - **S2** `3ab5106b`: the mixer on channel strips, eager raw -1,311 B against main.
 - **S3** `cda0540d`: the sliver and the preview, eager raw -3,961 B.
 - **S4** `bc212d22`: `mic-meter.ts` trimmed; acceptance record written.
 - **Phase C** `4d5874a6`: bus level windows, the `audio.levels` sampler, backend level sources and the Mix strip. Eager raw -2,132 B against main (the store and the event schema are eager).
+- **Review fixes** (CodeRabbit on #532): muting a live strip left the readout on the last live level, because `DbReadout` writes its text outside React and the muted value rendered the same text React already had. Fixed in audiocn (`a847315`: the span swaps between a source and a value, and a starting ticker always writes) and re-installed; the re-installed file differs from the old one by the fix alone. `audio-mixer-live.test.ts` mounts the microphone strip, mutes it, and fails on the old file. `docs/audiocn.md` now says where each update step runs.
+- **`audio.levels` ceiling:** the schema rejected any reading above +24 dBFS, and the post-gain microphone reaches +24 at full scale (gain clamps at ±24 dB), so one hot window could drop a whole event. The backend now clamps readings to -120..+48 dBFS and the schema accepts that range.
+- **Windows CI test race:** `silent_drain_keeps_mic_only_bytes_identical_up_to_the_drain` read the bus cursor as soon as the FIFO reader held 96,000 frames, but the bus advances its cursor after a chunk's bookkeeping, so the Windows source gates (25 repeats) caught it one chunk short. The test now also waits for the cursor (`4f6188d5`). Main's runs of that job fail on a sibling silent-drain test too.
+- **`smoke:recording-studio`:** not green end to end here. Three full branch runs each failed one native-preview timing budget (stage 27 twice, stage 30 once); two base runs passed. Every stage passes on its own, and stage 27 alone fails on base too (1 of 8 alternating runs, 0 of 8 for the branch). Details and the reading: the acceptance record.
 - **Performance** (`smoke:preview-performance`, two alternating runs each): renderer CPU 7.7 % and 1.5 % on the branch against 17.8 % and 12.6 % on main. The one failing budget (WebSocket wire rate, about 82 KiB/s against 80) fails on main too.
 
 ### Deviations from the plan, and why
@@ -517,6 +521,7 @@ implementation, and eager raw bytes are unchanged.
 
 - The owner checklist in `docs/acceptance/2026-10-02-audiocn-audio-ui.md` (packaged app, both themes, live mic), including D1 and D4.
 - `VIDEORC_PERF_REQUIRE_STUDIO_MIC_VISUALS=1 pnpm smoke:preview-performance` where the Electron binary has the Microphone grant.
+- One `pnpm smoke:recording-studio` from the granted checkout on this branch (the worktree runs never passed end to end; see the acceptance record).
 - Merging audiocn PR #2, which deploys audiocn.dev.
 
 ### How it was started

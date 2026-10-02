@@ -10,7 +10,7 @@ Microphone grant, so nothing here saw a live microphone.
 | Item | Value |
 | --- | --- |
 | Branch | `feat/092-audiocn-audio-ui` (worktree `../videorc-wt-092`), from `origin/main` `a8637877` |
-| audiocn | `221100c` on `fix/videorc-adoption` (plan 092 U1), installed from a local build of that commit |
+| audiocn | `a847315` on `fix/videorc-adoption` (plan 092 U1), installed from a local build of that commit |
 | Machine | Apple Silicon Mac, macOS, arm64 Node 24.6 |
 | Dev app grants | Screen Recording yes (native preview ran); Microphone **no** for this worktree's Electron binary (TCC is per binary) |
 
@@ -70,6 +70,50 @@ exists (owner checklist, item 12).
   priority and Mix strip markup.
 - `pnpm test:scripts`: 1,692 tests.
 
+### `pnpm smoke:recording-studio` (dev app, worktrees, shared host)
+
+Not green end to end on the branch. Every stage passes on its own; in full
+runs the branch failed one native-preview timing budget each time, and so
+does main on this machine (below).
+
+Full runs (33 stages each):
+
+| Run | Head | Result |
+| --- | --- | --- |
+| branch 1 | `f50c7fe3` | 1-26 PASS; 27 FAIL: floating input-to-present p95 125 ms (budget 100); my audiocn tests were running alongside |
+| branch 2 | `7b413208` | 1-26 PASS; 27 FAIL: p95 132 ms |
+| branch 3 | `4f6188d5` | 1-29 PASS (27 at p95 98 ms); 30 FAIL: one native preview scene update took 55.1 ms (budget 50; 1.5 ms run alone) |
+| base 1 | `a8637877` | 33/33 PASS (27 at p95 19 ms) |
+| base 2 | `a8637877` | 33/33 PASS (27 at p95 20 ms) |
+
+Stages 28-33 on `7b413208`, one by one: all PASS (preview lifecycle 100 of
+100, window placement and docking, surface reattach at 60 fps and p95 18 ms,
+real ScreenCaptureKit recording, Notes window invisible, and system audio
+on/off/toggles/self/stream, which drives the Phase C level windows through
+real sessions).
+
+Stage 27 alone, eight alternating pairs on the same machine:
+
+| Head | Floating input-to-present p95, ms | Fails |
+| --- | --- | --- |
+| base `a8637877` | 58, 4, **105**, 5, 3, 4, 4, 4 | 1 of 8 |
+| branch | 3, 3, 14, 31, 4, 6, 38, 4 | 0 of 8 |
+
+What the budget measures: the age of the composited source frame plus the
+main-process hand-off (`native-preview-present-metrics.ts`). In every
+failing run the preview still presented at 60 fps with no skipped
+compositor frames and no queue wait; the content (the real camera is in the
+scene) was old. Plan 092 changes no main-process, preload, native-preview,
+compositor or camera code, and its backend code runs only while a
+recording's audio bus runs; this phase records nothing.
+
+Reading: the stage 27 budget fails on main here too (1 of 8 alone), and run
+alone the branch is not worse. The branch's 0 of 3 full runs against base's
+2 of 2 is not explained; host load was not controlled (the owner's browser
+GPU helper and WindowServer were each at about 50-60 % CPU throughout).
+Owed: one `pnpm smoke:recording-studio` from the granted checkout before
+merge.
+
 ## Owner checklist (packaged app, both themes)
 
 Studio, Audio mixer:
@@ -100,6 +144,8 @@ Studio, Audio mixer:
     source clips alone. Stop: the Mix strip goes away within a second.
 12. Run `VIDEORC_PERF_REQUIRE_STUDIO_MIC_VISUALS=1 pnpm smoke:preview-performance`
     on a checkout whose Electron binary has the Microphone grant.
+13. Run `pnpm smoke:recording-studio` from the granted checkout on this branch
+    (see the full-run table above for what failed here and why it is open).
 
 Decisions to confirm while doing it: D1 (segmented meter or the old bars) and
 D4 (red from -9 or -6 dBFS).
