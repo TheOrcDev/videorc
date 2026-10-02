@@ -3,6 +3,8 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { createFrameEmitter } from '@/lib/audio/frame-source'
+import type { MeterFrame } from '@/lib/audio/types'
 import { defaultCaptureConfig } from '@/lib/capture'
 import type { MeterInput } from '@/lib/mic-meter-input'
 import { systemAudioSwitchView, type SystemAudioSwitchInput } from '@/lib/system-audio'
@@ -15,7 +17,14 @@ import {
 
 const noop = (): void => {}
 
-function render(input: Partial<SystemAudioSwitchInput>, macOS = true, echoGuard = true): string {
+const NO_READING: MeterInput = { kind: 'value', peakDb: Number.NaN }
+
+function render(
+  input: Partial<SystemAudioSwitchInput>,
+  macOS = true,
+  echoGuard = true,
+  meter: MeterInput = NO_READING
+): string {
   const view = systemAudioSwitchView({
     device: { status: 'available' },
     requested: false,
@@ -25,17 +34,23 @@ function render(input: Partial<SystemAudioSwitchInput>, macOS = true, echoGuard 
     ...input
   })
   return renderToStaticMarkup(
-    createElement(SystemAudioSettings, {
-      view,
-      gainDb: -6,
-      macOS,
-      echoGuard,
-      onEnabledChange: noop,
-      onGainChange: noop,
-      onEchoGuardChange: noop,
-      onOpenPermissions: noop,
-      onResume: noop
-    })
+    createElement(
+      TooltipProvider,
+      null,
+      createElement(SystemAudioSettings, {
+        view,
+        gainDb: -6,
+        macOS,
+        echoGuard,
+        meter,
+        toggleShortcut: [],
+        onEnabledChange: noop,
+        onGainChange: noop,
+        onEchoGuardChange: noop,
+        onOpenPermissions: noop,
+        onResume: noop
+      })
+    )
   )
 }
 
@@ -44,8 +59,11 @@ describe('Sources System audio settings (plan 069)', () => {
     const markup = render({})
     expect(markup).toContain('System audio')
     expect(markup).toContain('aria-label="System audio"')
-    expect(markup).toContain('Level')
-    expect(markup).toContain('value="-6"')
+    // Plan 093: Level is a fader now; its hidden input carries a 0..1
+    // position, so the value reads from the strip's value text.
+    expect(markup).toContain('aria-label="System audio gain"')
+    expect(markup).toContain('>\u22126.0 dB<')
+    expect(markup).toContain('aria-valuetext="\u22126.0 dB"')
     expect(markup).toContain(
       'Everything your computer plays, except Videorc, including your own stream if it is open in a browser tab: mute that tab, because headphones don&#x27;t stop it.'
     )
@@ -95,10 +113,40 @@ describe('Sources System audio settings (plan 069)', () => {
     expect(markup).toContain('Needs Screen Recording permission')
     expect(markup).toContain('Open Settings')
     expect(markup).toMatch(/role="switch"[^>]*disabled=""/)
+    expect(markup).toMatch(
+      /data-slot="channel-strip"[^>]*data-disabled=""|data-disabled=""[^>]*data-slot="channel-strip"/
+    )
+    expect(markup).toMatch(
+      /data-disabled=""[^>]*data-slot="fader"|data-slot="fader"[^>]*data-disabled=""/
+    )
   })
 })
 
-const NO_READING: MeterInput = { kind: 'value', peakDb: Number.NaN }
+describe('Sources System audio strip (plan 093)', () => {
+  it('rests with no reading outside a session, and says when it moves', () => {
+    const markup = render({ requested: true })
+    expect(markup).toContain('data-videorc-system-audio-visualizer=""')
+    expect(markup).toContain('title="Shows while recording or live"')
+    expect(markup).toContain('aria-label="System audio level"')
+  })
+
+  it('drops the hint once the bus level drives it', () => {
+    const source = createFrameEmitter<MeterFrame>()
+    const markup = render({ requested: true, sessionActive: true, confirmed: true }, true, true, {
+      kind: 'source',
+      source
+    })
+    expect(markup).not.toContain('Shows while recording or live')
+  })
+
+  it('shows the state beside the title, never a permanent "Unavailable"', () => {
+    expect(render({ requested: true })).toContain('data-slot="channel-strip-description">On<')
+    expect(render({})).toContain('data-slot="channel-strip-description">Off<')
+    expect(render({ device: { status: 'permission-required' } })).not.toContain(
+      'data-slot="channel-strip-description"'
+    )
+  })
+})
 
 function renderMicrophone(
   overrides: Partial<Parameters<typeof MicrophoneChannel>[0]> = {}

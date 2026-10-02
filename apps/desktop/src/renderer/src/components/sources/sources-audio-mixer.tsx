@@ -12,7 +12,6 @@ import { useRef, useState, type ReactElement, type ReactNode } from 'react'
 
 import { acceleratorDisplayKeys } from '../../../../shared/accelerator'
 import { PanelSection } from '@/components/panel-section'
-import { PowerSlider } from '@/components/power-slider'
 import { SourceSelect } from '@/components/source-select'
 import { MicLevelMeter } from '@/components/studio/mic-level-meter'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
@@ -48,7 +47,11 @@ import { Switch } from '@/components/ui/switch'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioCore } from '@/hooks/use-studio'
-import { useMicrophoneMeter } from '@/hooks/use-studio-mic-sources'
+import {
+  backendLevelSources,
+  useBackendAudioLevelsLive,
+  useMicrophoneMeter
+} from '@/hooks/use-studio-mic-sources'
 import { formatDb } from '@/lib/audio/decibels'
 import {
   SYSTEM_AUDIO_GAIN_DB_DEFAULT,
@@ -68,7 +71,12 @@ import {
   resetAudioSyncCalibration,
   type AudioSyncRecommendationReport
 } from '@/lib/capture'
-import { micLevelUnavailableCopy, type MeterInput } from '@/lib/mic-meter-input'
+import {
+  meterHasNoReading,
+  micLevelUnavailableCopy,
+  systemAudioMeterInput,
+  type MeterInput
+} from '@/lib/mic-meter-input'
 import type { MicStreamFailureReason } from '@/lib/mic-stream'
 import type { AudioMixerMonitorLabel } from '@/lib/mic-visual-gate'
 import {
@@ -91,6 +99,7 @@ const PARAMETER_THUMB =
 
 /** The renderer stores whole numbers (`clampNumber`), so faders step whole dB. */
 const MICROPHONE_GAIN_DETENTS = [0]
+const SYSTEM_AUDIO_GAIN_DETENTS = [SYSTEM_AUDIO_GAIN_DB_DEFAULT, 0]
 
 /**
  * A Sync change from the parameter slider. A reset restores the structural
@@ -156,6 +165,7 @@ export function SourcesAudioMixer(): ReactElement {
   } = useStudioCore()
   const { openSettings } = useWorkspaceNav()
   const microphone = useMicrophoneMeter()
+  const backendLevelsLive = useBackendAudioLevelsLive()
   const microphones = microphonePickerDevices(deviceList.devices)
   const audio = captureConfig.audio
   const platform = runtimeInfo?.platform
@@ -215,27 +225,37 @@ export function SourcesAudioMixer(): ReactElement {
               setAudio((current) => applySyncChange(current, offsetMs, reason))
             }
           />
+          {systemAudio.visible ? (
+            <SystemAudioSettings
+              echoGuard={audio.systemAudioEchoGuard !== false}
+              gainDb={audio.systemAudioGainDb}
+              macOS={platform === 'darwin'}
+              meter={systemAudioMeterInput({
+                sessionActive: isSessionActive,
+                mixed: systemAudio.meter,
+                backendLevelsLive,
+                source: backendLevelSources.systemAudio
+              })}
+              toggleShortcut={acceleratorDisplayKeys(
+                settings.globalShortcuts?.systemAudioToggle,
+                platform
+              )}
+              view={systemAudio}
+              onEchoGuardChange={(systemAudioEchoGuard) =>
+                setAudio((current) => ({ ...current, systemAudioEchoGuard }))
+              }
+              onEnabledChange={(systemAudioEnabled) =>
+                setAudio((current) => ({ ...current, systemAudioEnabled }))
+              }
+              onGainChange={(systemAudioGainDb) =>
+                setAudio((current) => ({ ...current, systemAudioGainDb }))
+              }
+              onOpenPermissions={() => openSettings('permissions')}
+              onResume={requestSystemAudioResume}
+            />
+          ) : null}
         </MixerChannels>
       </Mixer>
-      {systemAudio.visible ? (
-        <SystemAudioSettings
-          gainDb={audio.systemAudioGainDb}
-          macOS={platform === 'darwin'}
-          view={systemAudio}
-          onEnabledChange={(systemAudioEnabled) =>
-            setAudio((current) => ({ ...current, systemAudioEnabled }))
-          }
-          onGainChange={(systemAudioGainDb) =>
-            setAudio((current) => ({ ...current, systemAudioGainDb }))
-          }
-          echoGuard={audio.systemAudioEchoGuard !== false}
-          onEchoGuardChange={(systemAudioEchoGuard) =>
-            setAudio((current) => ({ ...current, systemAudioEchoGuard }))
-          }
-          onOpenPermissions={() => openSettings('permissions')}
-          onResume={requestSystemAudioResume}
-        />
-      ) : null}
     </PanelSection>
   )
 }
@@ -522,12 +542,18 @@ export function SyncCalibrationView({
   )
 }
 
-/** System audio (plan 069): the switch, its level, and the one fact people need. */
+/**
+ * System audio (plan 069) as the mixer's second strip (plan 093): its state,
+ * a level that moves while a session mixes it, the Level fader and the On
+ * switch; then the one fact people need, the echo guard and any issue.
+ */
 export function SystemAudioSettings({
   view,
   gainDb,
   macOS,
   echoGuard,
+  meter,
+  toggleShortcut,
   onEnabledChange,
   onGainChange,
   onEchoGuardChange,
@@ -539,6 +565,10 @@ export function SystemAudioSettings({
   macOS: boolean
   /** Plan 076: pause System audio when it carries the stream back. */
   echoGuard: boolean
+  /** The bus level while a session mixes System audio; no reading otherwise. */
+  meter: MeterInput
+  /** Key chips of the bound global System audio shortcut; empty when none is bound. */
+  toggleShortcut: readonly string[]
   onEnabledChange: (enabled: boolean) => void
   onGainChange: (gainDb: number) => void
   onEchoGuardChange: (enabled: boolean) => void
@@ -546,28 +576,62 @@ export function SystemAudioSettings({
   onResume: () => void
 }): ReactElement {
   return (
-    <div
-      className="grid gap-2 rounded-row border border-border bg-foreground/[0.03] px-3 py-2"
-      data-videorc-system-audio-settings
-    >
-      <div className="flex items-center justify-between gap-3">
-        <span className="flex min-w-0 items-center gap-2 text-sm font-medium">
+    <div className="flex flex-col gap-3 py-3" data-videorc-system-audio-settings="">
+      <ChannelStrip className="p-0" disabled={view.permissionRequired} variant="ghost">
+        <ChannelStripHeader>
           <DesktopIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
-          <span className="truncate">System audio</span>
-        </span>
-        <span className="flex shrink-0 items-center gap-2.5">
-          {view.permissionRequired ? null : (
-            <span className="text-xs text-muted-foreground">{view.stateLabel}</span>
-          )}
-          <Switch
-            aria-label="System audio"
-            checked={view.checked}
-            disabled={view.disabled}
-            size="sm"
-            onCheckedChange={onEnabledChange}
+          <ChannelStripText>
+            <ChannelStripTitle>System audio</ChannelStripTitle>
+            {view.permissionRequired ? null : (
+              <ChannelStripDescription>{view.stateLabel}</ChannelStripDescription>
+            )}
+          </ChannelStripText>
+        </ChannelStripHeader>
+        <ChannelStripMeter
+          data-videorc-system-audio-visualizer=""
+          title={meterHasNoReading(meter) ? 'Shows while recording or live' : undefined}
+        >
+          <MicLevelMeter
+            aria-label="System audio level"
+            className="min-w-0 flex-1"
+            meter={meter}
+            orientation="horizontal"
+            variant="segmented"
           />
-        </span>
-      </div>
+        </ChannelStripMeter>
+        <ChannelStripFader>
+          <Fader
+            aria-label="System audio gain"
+            detents={SYSTEM_AUDIO_GAIN_DETENTS}
+            disabled={view.permissionRequired}
+            fineStep={1}
+            largeStep={6}
+            max={SYSTEM_AUDIO_GAIN_DB_MAX}
+            min={SYSTEM_AUDIO_GAIN_DB_MIN}
+            resetValue={SYSTEM_AUDIO_GAIN_DB_DEFAULT}
+            step={1}
+            value={gainDb}
+            onValueChange={onGainChange}
+          >
+            <FaderTrack>
+              <FaderRange />
+              <FaderThumb className={FADER_THUMB} />
+            </FaderTrack>
+          </Fader>
+        </ChannelStripFader>
+        <ChannelStripValue>{formatDb(gainDb)}</ChannelStripValue>
+        <ChannelStripControls>
+          <ShortcutTooltip keys={toggleShortcut} label="System audio">
+            <Switch
+              aria-label="System audio"
+              checked={view.checked}
+              disabled={view.disabled}
+              size="sm"
+              onCheckedChange={onEnabledChange}
+            />
+          </ShortcutTooltip>
+        </ChannelStripControls>
+      </ChannelStrip>
       <p className="text-xs text-muted-foreground">
         Everything your computer plays, except Videorc, including your own stream if it is open in a
         browser tab: mute that tab, because headphones don't stop it. Use headphones so your mic
@@ -586,18 +650,6 @@ export function SystemAudioSettings({
           onCheckedChange={onEchoGuardChange}
         />
       </div>
-      <PowerSlider
-        bipolar
-        defaultValue={SYSTEM_AUDIO_GAIN_DB_DEFAULT}
-        disabled={view.permissionRequired}
-        label="Level"
-        max={SYSTEM_AUDIO_GAIN_DB_MAX}
-        min={SYSTEM_AUDIO_GAIN_DB_MIN}
-        numericInput
-        suffix=" dB"
-        value={gainDb}
-        onChange={onGainChange}
-      />
       {view.permissionRequired || (view.issue === 'unavailable' && macOS) ? (
         <div className="flex items-center justify-between gap-2 text-xs text-warning">
           <span className="min-w-0">
