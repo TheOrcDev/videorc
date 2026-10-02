@@ -117,32 +117,31 @@ merge.
 
 ## Owner checklist (packaged app, both themes)
 
-Studio, Audio mixer:
+Studio, Microphone section (between Session and Inputs; owner call
+2026-10-02 replaced the Audio mixer with it):
 
-1. Mic live: speak. The segmented meter moves smoothly; the peak hold marker
-   lingers about a second; the readout updates about four times a second and
-   the row never shifts.
-2. Gain: drag Sources > Gain from 0 to +12 dB while speaking. The Studio meter
-   rises with it (the old bars did not).
-3. Hot: shout or tap the mic. Amber from -20 dBFS, red from -9 dBFS; at -1 dBFS
-   or above the clip light comes on, holds 1.5 s, and a click resets it.
-4. Muted: the strip dims, the readout reads -∞ dB, the label reads Muted.
-5. No microphone: "No microphone", no mute button, the readout reads "-- dB".
-6. Permission refused, silent, no frames, device issue: each notice reads as
-   before, as plain warning text with no tinted panel behind it.
-7. System audio off, on, live (meter while a session mixes it), echo (Resume),
-   permission required: the same states and words as before.
+1. The section holds the microphone picker and its level, nothing else. The
+   old mixer at the bottom of Studio is gone.
+2. Always on: with Studio open and no session, speak. The segmented meter
+   moves at once and keeps moving; there is no Check level button. The peak
+   hold lingers about a second; the readout updates about four times a second
+   and never shifts the row.
+3. Pick another microphone in the picker: within a second the meter follows
+   the new device.
+4. Gain: drag Sources > Gain from 0 to +12 dB while speaking. The meter rises
+   with it.
+5. Hot: shout or tap the mic. Amber from -20 dBFS, red from -9 dBFS.
+6. Muted (Inputs > Mic, or the shortcut): the readout reads -∞ dB and the
+   meter is flat.
+7. Record: the meter keeps moving through Record and after Stop.
 8. Session sliver: five bars beside the status badge during a session; flat
    and dim while muted; the badge never moves when muting.
 9. Sources mic preview: the scrolling waveform follows the voice; with the
    mic muted it reads "Microphone is muted. Unmute to see its level."
 10. Idle CPU: Studio open, mic muted, no session. Activity Monitor shows the
     renderer as idle as on 0.9.126.
-11. Record (or stream) with System audio on and music playing: the System
-    audio meter now moves smoothly (it was one step a second), and a Mix strip
-    appears under it showing what is recorded, with a clip count. Push the mic
-    and the music hot together: the Mix clip light comes on even when neither
-    source clips alone. Stop: the Mix strip goes away within a second.
+11. Inputs still has a Mic row (its picker and Mute). Decide whether it stays
+    beside the new section.
 12. Run `VIDEORC_PERF_REQUIRE_STUDIO_MIC_VISUALS=1 pnpm smoke:preview-performance`
     on a checkout whose Electron binary has the Microphone grant.
 13. Run `pnpm smoke:recording-studio` from the granted checkout on this branch

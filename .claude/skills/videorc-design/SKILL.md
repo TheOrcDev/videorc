@@ -25,7 +25,7 @@ a screen ad hoc.
    of them, installed and customized per the `shadcn` skill. No other
    component libraries and no hand-rolled widgets when a primitive exists.
    audiocn (the owner's shadcn audio registry, `@audiocn`) counts as shadcn:
-   its meters and strips draw audio, fed by Videorc adapters, never by its
+   its meters draw audio, fed by Videorc adapters, never by its
    Web Audio hooks or blocks. Base UI enters only inside its files
    (`docs/audiocn.md`).
 2. **Real glass, never fake glass.** The OS draws the blur. No CSS
@@ -379,7 +379,7 @@ confirming a routine interaction the user just watched succeed.
 | Scroll regions            | `PaneBody` or `ScrollArea type="scroll"`        |
 | Menus / popovers          | `DropdownMenu` / `Popover` on `glass-float`     |
 | Toasts                    | sonner on `glass-float`; type colours the icon  |
-| Audio levels and mixers   | audiocn meters and strips (`docs/audiocn.md`)   |
+| Audio levels              | audiocn meters (`docs/audiocn.md`)              |
 
 Missing a primitive? Install it through the shadcn CLI (see the shadcn skill);
 do not hand-roll it.
