@@ -61,6 +61,22 @@ describe('live dashboard state', () => {
     expect(ended.sessionId).toBe('s1')
   })
 
+  it('puts Go Live (record+stream, reported as recording) on air (plan 095 S5)', () => {
+    const goLive = reduceDashboardRecording(
+      emptyLiveDashboardState(at(0)),
+      { state: 'recording', sessionId: 's1', startedAt: at(0), streamUrl: 'rtmp://x/***' },
+      at(0)
+    )
+    expect(goLive.session).toEqual({ state: 'live', startedAt: at(0) })
+    // A recording with no stream stays a recording.
+    const recording = reduceDashboardRecording(
+      emptyLiveDashboardState(at(0)),
+      { state: 'recording', sessionId: 's1', startedAt: at(0) },
+      at(0)
+    )
+    expect(recording.session).toEqual({ state: 'recording', startedAt: at(0) })
+  })
+
   it('keeps a peak and a bounded 60-minute viewer history', () => {
     let state = live()
     for (let index = 0; index < VIEWER_HISTORY_POINTS + 20; index += 1) {

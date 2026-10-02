@@ -16,7 +16,12 @@ import {
   type StudioPanel,
   type WorkspaceTab
 } from '@/components/workspace-nav'
-import { useStudioAudio, useStudioCore, useStudioShell } from '@/hooks/use-studio'
+import {
+  useStudioAudio,
+  useStudioCore,
+  useStudioRecordingState,
+  useStudioShell
+} from '@/hooks/use-studio'
 import { StudioMicVisualProvider } from '@/hooks/use-studio-mic-visual'
 import { useWhatsNew } from '@/hooks/use-whats-new'
 import { ONBOARDING_DISMISSED_VALUE, STORAGE_KEYS } from '@/lib/capture'
@@ -28,6 +33,7 @@ import {
   type SettingsTabId
 } from '@/lib/settings-tabs'
 import { isActiveRecordingState } from '@/lib/format'
+import { sessionIsLive } from '../../../shared/capture-state'
 import {
   isMediaAccessSnapshotReady,
   shouldShowPermissionsOnboarding,
@@ -156,6 +162,7 @@ export function AppShell(): ReactElement {
     toggleCommentsWindow,
     toggleCaptionsWindow
   } = useStudioShell()
+  const { recording } = useStudioRecordingState()
   const [active, setActive] = useState<WorkspaceTab>('studio')
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
   const [commandOpen, setCommandOpen] = useState(false)
@@ -328,7 +335,9 @@ export function AppShell(): ReactElement {
       : wsStatus === 'failed'
         ? 'error'
         : 'warn'
-  const statusLabel = live ? recordingState : wsStatus
+  // Go Live is record+stream, which the backend reports as `recording`: the
+  // stream URL is what makes it on air (plan 095 S5).
+  const statusLabel = live ? (sessionIsLive(recording) ? 'streaming' : recordingState) : wsStatus
 
   return (
     <WorkspaceNavContext.Provider

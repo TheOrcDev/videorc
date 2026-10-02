@@ -112,10 +112,16 @@ describe('isLiveSession', () => {
 
 describe('liveSessionLabel', () => {
   it('labels the capture state for the live row', () => {
-    expect(liveSessionLabel('recording')).toBe('Recording')
-    expect(liveSessionLabel('starting')).toBe('Recording')
-    expect(liveSessionLabel('streaming')).toBe('Streaming')
-    expect(liveSessionLabel('stopping')).toBe('Finishing')
+    expect(liveSessionLabel({ state: 'recording' })).toBe('Recording')
+    expect(liveSessionLabel({ state: 'starting' })).toBe('Recording')
+    expect(liveSessionLabel({ state: 'streaming' })).toBe('Streaming')
+    expect(liveSessionLabel({ state: 'stopping' })).toBe('Finishing')
+  })
+
+  it('labels Go Live (record+stream, reported as recording) as Streaming (plan 095 S5)', () => {
+    expect(
+      liveSessionLabel({ state: 'recording', streamUrl: 'rtmp://live.twitch.tv/app/***' })
+    ).toBe('Streaming')
   })
 })
 
