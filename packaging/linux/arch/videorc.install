@@ -1,0 +1,31 @@
+# Videorc binary AUR install hooks (plan 071). Cache refreshes are best-effort:
+# the helpers live in gtk3 / desktop-file-utils, which are recommendations
+# rather than hard dependencies of the package.
+
+post_install() {
+  if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
+  fi
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q >/dev/null 2>&1 || true
+  fi
+}
+
+post_upgrade() {
+  post_install
+}
+
+pre_remove() {
+  return 0
+}
+
+post_remove() {
+  # The metainfo file is package-owned (installed under /usr/share/metainfo in
+  # package()), so pacman removes it; only the caches need refreshing here.
+  if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
+  fi
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q >/dev/null 2>&1 || true
+  fi
+}

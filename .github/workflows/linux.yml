@@ -47,14 +47,37 @@ jobs:
 
       - name: Install PipeWire/SPA compile dependencies
         # The Linux-only `pipewire` crate (libspa-sys) finds libpipewire-0.3
-        # via pkg-config and generates bindings with clang/bindgen.
+        # via pkg-config and generates bindings with clang/bindgen. `appstream`
+        # provides appstreamcli for the metainfo structural gate below.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config \
             clang \
             libpipewire-0.3-dev \
-            libspa-0.2-dev
+            libspa-0.2-dev \
+            appstream
+
+      - name: Validate Linux packaging assets
+        # Plan 071 structural gate (runs after the apt step above installs
+        # appstream/appstreamcli): the AppStream metainfo must validate, the
+        # distro package contract + icon dimension unit tests must pass, and the
+        # 512x512 app icon must be what electron-builder will generate hicolor
+        # icons from. No full electron-builder run needed for these.
+        run: |
+          set -euo pipefail
+          appstreamcli validate packaging/linux/metainfo/dev.theorcdev.videorc.metainfo.xml
+          node --test scripts/lib/linux-dist-package.test.mjs
+          node --input-type=module -e "
+            import fs from 'node:fs';
+            const { readPngDimensions } = await import('./scripts/lib/linux-dist-package.mjs');
+            const icon = fs.readFileSync('apps/desktop/build-resources/icon.png');
+            const d = readPngDimensions(icon);
+            if (!d || d.width !== 512 || d.height !== 512) {
+              throw new Error('build-resources/icon.png must be a 512x512 PNG, got ' + JSON.stringify(d));
+            }
+            console.log('icon.png 512x512 OK');
+          "
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable

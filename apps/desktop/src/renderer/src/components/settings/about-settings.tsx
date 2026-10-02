@@ -115,7 +115,9 @@ function UpdateControl({
         <p className="text-xs text-muted-foreground">
           {status.reason === 'windows-feed-unpublished'
             ? 'No Windows update is published for you yet. Sign in to get Windows Alpha pilot updates automatically, or download the newest build from your account page.'
-            : 'Automatic updates aren’t available for this build yet. Grab new versions from the downloads page.'}
+            : status.reason === 'linux-native-install'
+              ? 'Updates are managed by your package manager on this install: upgrade Videorc through your distribution’s package manager.'
+              : 'Automatic updates aren’t available for this build yet. Grab new versions from the downloads page.'}
         </p>
       )
     case 'checking':
