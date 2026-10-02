@@ -1,6 +1,7 @@
 # Plan 095: Highlight card emotes and avatars, Activity "On stream", X host
 
-**Status:** PLANNED 2026-10-02. **Priority:** P1. All four are visible to the
+**Status:** EXECUTED 2026-10-02, in review (S1-S5 on
+`fix/095-highlight-card-host`; owner live acceptance owed). **Priority:** P1. All four are visible to the
 owner or viewers during a live stream. **Size:** M, 5 slices. **Planned
 against:** `origin/main` `b4bb692e` (same card, highlight and chat code as the
 installed 0.9.126). The shared checkout is on an old branch, so work in a
