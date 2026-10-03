@@ -7,10 +7,88 @@ import {
   analyzeNativeStatusSamples,
   cgOraclePreviewReady,
   effectivePresentFpsFloor,
-  pixelOracleCaptureSize
+  pixelOracleCaptureSize,
+  layoutIntentDiagnostic
 } from './preview-interaction-stress.mjs'
 
 describe('preview interaction stress contract', () => {
+  it('captures only bounded per-click selected intent and availability diagnostics', () => {
+    const state = {
+      visual: {
+        sources: {
+          cameraId: 'camera:1',
+          screenId: 'screen:1',
+          cameraOff: false,
+          cameraName: 'private title'
+        },
+        layout: { layoutPreset: 'screen-camera' }
+      },
+      pendingLayout: 'camera-only',
+      recording: 'recording',
+      credentials: 'private credential',
+      diagnostics: {
+        layoutIntentId: 42,
+        layoutIntentAwaitingProof: 42,
+        confirmedSceneRevision: 8,
+        backendSceneRevision: 9,
+        sourceSelectionState: { snapshot: { sourceRevision: 3, extra: 'private source data' } },
+        selectedDeviceAvailability: { camera: 'available', screen: 'permission-required' },
+        sceneGesturePending: true,
+        sceneTransformPending: false
+      }
+    }
+    const row = layoutIntentDiagnostic(state, 'screen-only', 'before', true, 100)
+    assert.deepEqual(row, {
+      at: 100,
+      preset: 'screen-only',
+      phase: 'before',
+      disabled: true,
+      selected: {
+        cameraId: 'camera:1',
+        screenId: 'screen:1',
+        windowId: null,
+        cameraOff: false,
+        testPattern: false
+      },
+      availability: { camera: 'available', screen: 'permission-required', window: null },
+      currentLayout: 'screen-camera',
+      pendingLayout: 'camera-only',
+      intentId: 42,
+      awaitingProof: 42,
+      confirmedSceneRevision: 8,
+      backendSceneRevision: 9,
+      sourceRevision: 3,
+      sceneGesturePending: true,
+      sceneTransformPending: false,
+      recording: 'recording'
+    })
+    assert.doesNotMatch(JSON.stringify(row), /private/)
+    // The maintained eval embeds exactly this projection, without dependencies.
+    const embedded = new Function(`return (${layoutIntentDiagnostic.toString()})`)()
+    assert.deepEqual(embedded(state, 'screen-only', 'before', true, 100), row)
+    state.visual.sources.screenId = undefined
+    assert.equal(
+      layoutIntentDiagnostic(state, 'screen-only', 'after', true, 101).selected.screenId,
+      null
+    )
+  })
+
+  it('reports absent ownership and availability as unknown without inventing a ready source', () => {
+    const row = layoutIntentDiagnostic(undefined, 'camera-only', 'before', undefined, 0)
+    assert.equal(row.disabled, null)
+    assert.equal(row.intentId, null)
+    assert.equal(row.confirmedSceneRevision, null)
+    assert.equal(row.backendSceneRevision, null)
+    assert.deepEqual(row.availability, { camera: null, screen: null, window: null })
+    assert.deepEqual(row.selected, {
+      cameraId: null,
+      screenId: null,
+      windowId: null,
+      cameraOff: false,
+      testPattern: false
+    })
+  })
+
   it('allows measurement tolerance only when recording caps presentation at the floor', () => {
     assert.equal(effectivePresentFpsFloor(30, 60), 30)
     assert.equal(effectivePresentFpsFloor(30, 30), 28.5)

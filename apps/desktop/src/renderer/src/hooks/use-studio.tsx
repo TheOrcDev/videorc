@@ -14703,6 +14703,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         visual: workingVisual,
         diagnostics: {
           wsStatus,
+          layoutIntentId: layoutIntentIdRef.current,
+          layoutIntentAwaitingProof: layoutIntentAwaitingProofRef.current,
+          confirmedSceneRevision: nativePreviewCommittedSceneRef.current?.sceneRevision ?? null,
+          backendSceneRevision:
+            nativePreviewCompositorLatestStatusRef.current?.sceneRevision ?? null,
+          selectedDeviceAvailability: {
+            camera:
+              deviceList.devices.find((device) => device.id === captureConfig.sources.cameraId)
+                ?.status ?? null,
+            screen:
+              deviceList.devices.find((device) => device.id === captureConfig.sources.screenId)
+                ?.status ?? null,
+            window:
+              deviceList.devices.find((device) => device.id === captureConfig.sources.windowId)
+                ?.status ?? null
+          },
           hasScene: scene !== null,
           visualTransactionPending,
           sourceDeviceSwitchPending,

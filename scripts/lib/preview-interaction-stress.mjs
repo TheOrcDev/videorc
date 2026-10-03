@@ -532,3 +532,41 @@ function formatPercent(value) {
 function unique(values) {
   return [...new Set(values)]
 }
+
+/** Reduced per-click ownership evidence; safe to serialize into renderer eval. */
+export function layoutIntentDiagnostic(state, preset, phase, disabled, at) {
+  const sources = state?.visual?.sources ?? {}
+  const diagnostics = state?.diagnostics ?? {}
+  const scalarId = (value) => (typeof value === 'string' ? value : null)
+  const revision = (value) => (Number.isSafeInteger(value) && value >= 0 ? value : null)
+  const availability = (value) =>
+    ['available', 'unavailable', 'permission-required'].includes(value) ? value : null
+  return {
+    at: revision(at),
+    preset: scalarId(preset),
+    phase: scalarId(phase),
+    disabled: typeof disabled === 'boolean' ? disabled : null,
+    selected: {
+      cameraId: scalarId(sources.cameraId),
+      screenId: scalarId(sources.screenId),
+      windowId: scalarId(sources.windowId),
+      cameraOff: sources.cameraOff === true,
+      testPattern: sources.testPattern === true
+    },
+    availability: {
+      camera: availability(diagnostics.selectedDeviceAvailability?.camera),
+      screen: availability(diagnostics.selectedDeviceAvailability?.screen),
+      window: availability(diagnostics.selectedDeviceAvailability?.window)
+    },
+    currentLayout: scalarId(state?.visual?.layout?.layoutPreset),
+    pendingLayout: scalarId(state?.pendingLayout),
+    intentId: revision(diagnostics.layoutIntentId),
+    awaitingProof: revision(diagnostics.layoutIntentAwaitingProof),
+    confirmedSceneRevision: revision(diagnostics.confirmedSceneRevision),
+    backendSceneRevision: revision(diagnostics.backendSceneRevision),
+    sourceRevision: revision(diagnostics.sourceSelectionState?.snapshot?.sourceRevision),
+    sceneGesturePending: diagnostics.sceneGesturePending === true,
+    sceneTransformPending: diagnostics.sceneTransformPending === true,
+    recording: scalarId(state?.recording)
+  }
+}
