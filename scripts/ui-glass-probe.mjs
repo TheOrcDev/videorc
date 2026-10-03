@@ -58,7 +58,10 @@
 // --frost-check records (never gates) whether a bare CSS backdrop-filter
 // reaches the screen on these windows, plan 072's S0 question.
 //
-// Report mode prints every metric; --gate fails the run on any check.
+// Capture validity is separate from glass metrics. A missing/stale owner or
+// an obstructed capture invalidates the entire run in both report and gate
+// modes; no pixels from that run establish material acceptance or failure.
+// Report mode prints every valid metric; --gate fails the run on any check.
 //
 //   node scripts/ui-glass-probe.mjs [--gate] [--surfaces] [--themes=dark,light]
 //     [--roles=main,chat,captions,notes,preview] [--style=clear|material]
@@ -89,6 +92,12 @@ import {
   neutralityOf
 } from './lib/glass-neutrality.mjs'
 import { parityOf, parseCssColor } from './lib/glass-parity.mjs'
+import {
+  captureGlassEvidence,
+  finalizeGlassEvidence,
+  InvalidGlassEvidenceError
+} from './lib/glass-evidence-validity.mjs'
+import { createGlassWindowReader } from './lib/glass-window-oracle.mjs'
 import {
   colorDistance,
   contrastRatio,
@@ -212,9 +221,12 @@ const extraAppEnv = {
   ...(process.env.VIDEORC_UI_GLASS_APP_ENV ? JSON.parse(process.env.VIDEORC_UI_GLASS_APP_ENV) : {}),
   ...(style ? { VIDEORC_GLASS_STYLE: style } : {})
 }
-const outputDir =
-  process.env.VIDEORC_UI_GLASS_OUTPUT_DIR ?? mkdtempSync(join(tmpdir(), 'videorc-ui-glass-'))
-mkdirSync(outputDir, { recursive: true })
+const outputRoot = process.env.VIDEORC_UI_GLASS_OUTPUT_DIR ?? tmpdir()
+mkdirSync(outputRoot, { recursive: true })
+// Never overwrite a previous run's report or raw shots, including invalid ones.
+const outputDir = mkdtempSync(join(outputRoot, 'videorc-ui-glass-'))
+let glassWindowReader
+let glassValidity
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -321,11 +333,11 @@ async function assertTheme(devtoolsHost, theme) {
 
 function capture(bounds, name) {
   const file = join(outputDir, `${name}.png`)
-  execFileSync('screencapture', [
-    '-x',
-    `-R${bounds.x},${bounds.y},${bounds.width},${bounds.height}`,
-    file
-  ])
+  execFileSync(
+    'screencapture',
+    ['-x', `-R${bounds.x},${bounds.y},${bounds.width},${bounds.height}`, file],
+    { timeout: 10_000 }
+  )
   return file
 }
 
@@ -357,7 +369,14 @@ async function shoot(smoke, theme, role, variant, prefix = '') {
   )
   const raised = await requestSmokeCommand(smoke, 'raise-window', { role, focus: false })
   await sleep(700)
-  return { raised, file: capture(raised.bounds, `${prefix}${theme}-${role}-${variant}`) }
+  return captureGlassEvidence({
+    role,
+    raised,
+    capture,
+    name: `${prefix}${theme}-${role}-${variant}`,
+    readWindows: () => glassWindowReader(),
+    recordValidity: (diagnostic) => glassValidity.samples.push(diagnostic)
+  })
 }
 
 // Windows open asynchronously (the preview through its supervisor): wait for
@@ -655,9 +674,28 @@ function imageMean(file) {
 async function shootWithReference(smoke, theme, role, variant, prefix = '') {
   const shot = await shoot(smoke, theme, role, variant, prefix)
   const reference = backdropReferenceRect(shot.raised.bounds, shot.raised.primaryWorkArea)
-  if (!reference) return { ...shot, referenceMean: null }
-  const referenceFile = capture(reference, `${prefix}${theme}-${role}-${variant}-reference`)
-  return { ...shot, referenceMean: imageMean(referenceFile) }
+  if (!reference) {
+    throw new InvalidGlassEvidenceError({
+      role,
+      phase: 'reference',
+      status: 'INVALID',
+      reason: 'controlled-reference-region-missing',
+      ownerCategory: 'controlled-backdrop',
+      intersection: null,
+      timestamp: Date.now()
+    })
+  }
+  const referenceShot = await captureGlassEvidence({
+    role,
+    raised: shot.raised,
+    capture,
+    name: `${prefix}${theme}-${role}-${variant}-reference`,
+    readWindows: () => glassWindowReader(),
+    referenceRect: reference,
+    expectedOwnership: shot.ownership,
+    recordValidity: (diagnostic) => glassValidity.samples.push(diagnostic)
+  })
+  return { ...shot, referenceMean: imageMean(referenceShot.file) }
 }
 
 function requireReference(shot, role, variant) {
@@ -1008,7 +1046,7 @@ async function main() {
     }
   })
   const smoke = launched.connections['preview-motion-ready']
-  const report = {
+  let report = {
     thresholds: GLASS_THRESHOLDS,
     floatThresholds: surfaces ? FLOAT_GLASS_THRESHOLDS : undefined,
     extraAppEnv,
@@ -1019,11 +1057,14 @@ async function main() {
     coats: {},
     persistence: null,
     layerTrees: null,
-    windowServerCpu: null
+    windowServerCpu: null,
+    validity: { status: 'VALID', samples: [] }
   }
+  glassValidity = report.validity
   const looks = []
   try {
     if (!devtoolsUrl) throw new Error('No DevTools endpoint observed (VIDEORC_REMOTE_DEBUG_PORT).')
+    glassWindowReader = createGlassWindowReader(outputDir)
     const devtoolsHost = new URL(devtoolsUrl.replace('ws://', 'http://')).host
     await sleep(6000)
     for (const role of roles) {
@@ -1104,10 +1145,41 @@ async function main() {
     // Let the capture burst settle before measuring the steady state.
     await sleep(20_000)
     report.windowServerCpu = sampleWindowServerCpu()
+  } catch (error) {
+    report.validity.status = 'INVALID'
+    const diagnostic =
+      error instanceof InvalidGlassEvidenceError
+        ? error.diagnostic
+        : {
+            role: 'probe',
+            phase: 'run',
+            status: 'INVALID',
+            reason: 'probe-incomplete',
+            ownerCategory: 'unknown',
+            intersection: null,
+            timestamp: Date.now()
+          }
+    if (!report.validity.samples.includes(diagnostic)) report.validity.samples.push(diagnostic)
   } finally {
-    await launched.stop()
+    try {
+      await launched.stop()
+    } catch {
+      report.validity.status = 'INVALID'
+      report.validity.samples.push({
+        role: 'probe',
+        phase: 'teardown',
+        status: 'INVALID',
+        reason: 'owned-teardown-failed',
+        ownerCategory: 'unknown',
+        intersection: null,
+        timestamp: Date.now()
+      })
+    }
   }
 
+  const persistenceGated = (report.styleRequested ?? style) === 'clear'
+  const outcome = finalizeGlassEvidence(report, { gate, persistenceGated })
+  report = outcome.report
   report.contactSheet = writeContactSheet(looks)
   report.outputDir = outputDir
   writeFileSync(join(outputDir, 'report.json'), `${JSON.stringify(report, null, 2)}\n`)
@@ -1117,7 +1189,7 @@ async function main() {
       .filter(([, ok]) => !ok)
       .map(([name]) => name)
     console.log(
-      `${result.pass ? 'PASS' : 'FAIL'} ${result.theme.padEnd(5)} ${result.role.padEnd(8)} ${result.sample.padEnd(15)} ${JSON.stringify(result.metrics)}${failed.length ? ` failed=${failed.join(',')}` : ''}`
+      `${result.status} ${result.theme.padEnd(5)} ${result.role.padEnd(8)} ${result.sample.padEnd(15)} ${outcome.status === 'INVALID' ? '(unscored evidence)' : JSON.stringify(result.metrics)}${failed.length ? ` failed=${failed.join(',')}` : ''}`
     )
   }
   let persistenceFailures = 0
@@ -1128,19 +1200,29 @@ async function main() {
     }
     if (!row.pass) persistenceFailures += 1
     console.log(
-      `${row.pass ? 'PASS' : 'FAIL'} persistence ${row.step.padEnd(22)} ${JSON.stringify(row)}`
+      `${row.status ?? (row.pass ? 'PASS' : 'FAIL')} persistence ${row.step.padEnd(22)} ${outcome.status === 'INVALID' ? '(unscored evidence)' : JSON.stringify(row)}`
     )
   }
   console.log(`WindowServer CPU (idle, preview presenting): ${report.windowServerCpu ?? 'n/a'}%`)
   console.log(`report: ${join(outputDir, 'report.json')}`)
   if (report.contactSheet) console.log(`contact sheet: ${report.contactSheet}`)
-  const failures = report.results.filter((result) => !result.pass)
+  if (outcome.status === 'INVALID') {
+    for (const diagnostic of report.validity.samples.filter(
+      (sample) => sample.status === 'INVALID'
+    )) {
+      console.error(`INVALID capture: ${JSON.stringify(diagnostic)}`)
+    }
+    console.error(
+      'probe:ui-glass INVALID: no material or contrast verdict. If a system dialog overlaps the probe, the operator must dismiss it before a fresh run.'
+    )
+    process.exitCode = 1
+    return
+  }
   // The persistence rows gate only a clear-glass run: under the material
   // style they report what the walk did to a plain view.
-  const persistenceGated = (report.styleRequested ?? style) === 'clear'
-  if (gate && (failures.length || (persistenceGated && persistenceFailures))) {
+  if (outcome.exitCode) {
     console.error(
-      `probe:ui-glass FAILED: ${failures.length} sample(s) outside the glass thresholds` +
+      `probe:ui-glass FAILED: ${outcome.failures} sample(s) outside the glass thresholds` +
         (persistenceGated && persistenceFailures
           ? `, ${persistenceFailures} persistence step(s) lost the clear glass.`
           : '.')
