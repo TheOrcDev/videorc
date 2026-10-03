@@ -3,10 +3,23 @@ import { lstatSync, realpathSync, statSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isAbsolute } from 'node:path'
 
+import type {
+  CommentsSendOperation,
+  CommentsSnapshotDelta,
+  CommentsViewSnapshot,
+  LiveChatSnapshot
+} from '../shared/backend'
+import { MAX_COMMENTS_SNAPSHOT_MESSAGES } from '../shared/comments-snapshot-delta'
+import { validateElectronInvokeArgs } from '../shared/electron-ipc-contract'
+import { parseCommentsViewMode } from './comments-command-broker'
 import { isPathInsideAnyRoot } from './managed-asset-paths'
 
 const MAX_PARAM_DEPTH = 8
 const MAX_PARAM_KEYS = 2_000
+// Full Comments fixtures use the existing IPC node ceiling. The HTTP byte
+// ceiling, smoke depth/prototype policy and every other command budget remain
+// unchanged; ordinary delta requests still use MAX_PARAM_KEYS.
+const MAX_COMMENTS_FIXTURE_KEYS = 100_000
 const MAX_REQUEST_BODY_BYTES = 1024 * 1024
 const MAX_SMOKE_RESOURCE_PATH_LENGTH = 4_096
 const SMOKE_PREVIEW_FRAME_ORIGIN = 'videorc-asset://smoke-preview/frame.svg'
@@ -28,6 +41,7 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'comments-window-command-trace',
   'comments-window-layout-metrics',
   'comments-window-open',
+  'comments-window-push-delta',
   'comments-window-push-snapshot',
   'comments-window-reader-state',
   'comments-window-route-send-result',
@@ -372,6 +386,194 @@ function validateJsonValue(
   )
 }
 
+function plainRecord(value: unknown): value is Record<string, unknown> {
+  return (
+    Boolean(value) && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype
+  )
+}
+
+function onlyFields(value: Record<string, unknown>, fields: readonly string[]): boolean {
+  return Object.keys(value).every((key) => fields.includes(key))
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+function validCommentsSendReceipt(
+  value: unknown,
+  sessionId: string | undefined
+): value is CommentsSendOperation {
+  if (
+    !plainRecord(value) ||
+    !onlyFields(value, [
+      'id',
+      'sessionId',
+      'text',
+      'phase',
+      'destinations',
+      'createdAt',
+      'updatedAt'
+    ])
+  )
+    return false
+  return (
+    nonEmptyString(value.id) &&
+    nonEmptyString(value.sessionId) &&
+    value.sessionId === sessionId &&
+    typeof value.text === 'string' &&
+    typeof value.phase === 'string' &&
+    ['sending', 'sent', 'partial', 'failed', 'delivery-unknown'].includes(value.phase) &&
+    nonEmptyString(value.createdAt) &&
+    nonEmptyString(value.updatedAt) &&
+    Array.isArray(value.destinations) &&
+    value.destinations.every(
+      (destination) =>
+        plainRecord(destination) &&
+        onlyFields(destination, [
+          'destinationId',
+          'platform',
+          'phase',
+          'providerMessageId',
+          'reason'
+        ]) &&
+        nonEmptyString(destination.destinationId) &&
+        typeof destination.platform === 'string' &&
+        ['youtube', 'twitch', 'kick', 'x', 'tiktok', 'instagram', 'custom'].includes(
+          destination.platform
+        ) &&
+        typeof destination.phase === 'string' &&
+        ['pending', 'sent', 'failed', 'read-only', 'unavailable', 'timed-out-unknown'].includes(
+          destination.phase
+        ) &&
+        (destination.providerMessageId === undefined ||
+          typeof destination.providerMessageId === 'string') &&
+        (destination.reason === undefined || typeof destination.reason === 'string')
+    )
+  )
+}
+
+/** Dev fixture envelope only. Shared IPC checks bounded data and delivery
+ * metadata; these header guards do not claim a full provider/message schema. */
+export function validateSmokeCommentsSnapshotParams(value: unknown): CommentsViewSnapshot | null {
+  if (
+    !plainRecord(value) ||
+    !onlyFields(value, ['snapshot', 'mode', 'latestSendOperation']) ||
+    !validateJsonValue(value, 0, { remaining: MAX_COMMENTS_FIXTURE_KEYS })
+  )
+    return null
+  const snapshot = value.snapshot
+  if (
+    !plainRecord(snapshot) ||
+    !onlyFields(snapshot, [
+      'sessionId',
+      'providers',
+      'messages',
+      'unreadCount',
+      'updatedAt',
+      'delivery'
+    ]) ||
+    (snapshot.sessionId !== undefined && typeof snapshot.sessionId !== 'string') ||
+    !Array.isArray(snapshot.providers) ||
+    !snapshot.providers.every(plainRecord) ||
+    !Array.isArray(snapshot.messages) ||
+    snapshot.messages.length > MAX_COMMENTS_SNAPSHOT_MESSAGES ||
+    !snapshot.messages.every(plainRecord) ||
+    !Number.isSafeInteger(snapshot.unreadCount) ||
+    Number(snapshot.unreadCount) < 0 ||
+    !nonEmptyString(snapshot.updatedAt)
+  )
+    return null
+  const mode =
+    value.mode === undefined ? { kind: 'live' as const } : parseCommentsViewMode(value.mode)
+  if (
+    !mode ||
+    (value.mode !== undefined &&
+      (!plainRecord(value.mode) ||
+        !onlyFields(
+          value.mode,
+          mode.kind === 'live' ? ['kind'] : ['kind', 'sessionId', 'title', 'startedAt']
+        )))
+  )
+    return null
+  if (
+    mode.kind === 'history' &&
+    snapshot.sessionId !== undefined &&
+    snapshot.sessionId !== mode.sessionId
+  )
+    return null
+  const sessionId =
+    mode.kind === 'history' ? mode.sessionId : (snapshot.sessionId as string | undefined)
+  if (
+    value.latestSendOperation !== undefined &&
+    !validCommentsSendReceipt(value.latestSendOperation, sessionId)
+  )
+    return null
+  const view: CommentsViewSnapshot = {
+    mode,
+    snapshot: snapshot as unknown as LiveChatSnapshot,
+    ...(value.latestSendOperation === undefined
+      ? {}
+      : { latestSendOperation: value.latestSendOperation as CommentsSendOperation })
+  }
+  try {
+    const [validated] = validateElectronInvokeArgs('comments-window:push-snapshot', [view])
+    return validated
+  } catch {
+    return null
+  }
+}
+
+export function validateSmokeCommentsDeltaParams(value: unknown): CommentsSnapshotDelta | null {
+  if (
+    !plainRecord(value) ||
+    !onlyFields(value, ['delta']) ||
+    !validateJsonValue(value, 0, { remaining: MAX_PARAM_KEYS })
+  )
+    return null
+  const delta = value.delta
+  if (!plainRecord(delta) || (delta.sessionId !== undefined && typeof delta.sessionId !== 'string'))
+    return null
+  switch (delta.kind) {
+    case 'adopt':
+      if (
+        !onlyFields(delta, ['kind', 'deliveryBoundary', 'sessionId', 'updatedAt']) ||
+        !nonEmptyString(delta.updatedAt)
+      )
+        return null
+      break
+    case 'clear':
+      if (
+        !onlyFields(delta, ['kind', 'deliveryBoundary', 'sessionId', 'updatedAt']) ||
+        !nonEmptyString(delta.updatedAt)
+      )
+        return null
+      break
+    case 'message':
+      if (!onlyFields(delta, ['kind', 'message', 'sessionId']) || !plainRecord(delta.message))
+        return null
+      break
+    case 'provider':
+      if (
+        !onlyFields(delta, ['kind', 'provider', 'sessionId', 'updatedAt']) ||
+        !plainRecord(delta.provider) ||
+        !nonEmptyString(delta.updatedAt)
+      )
+        return null
+      break
+    default:
+      return null
+  }
+  try {
+    const [validated] = validateElectronInvokeArgs('comments-window:push-delta', [
+      delta as CommentsSnapshotDelta
+    ])
+    return validated
+  } catch {
+    return null
+  }
+}
+
 export function validateSmokeCommandPayload(value: unknown): ValidatedSmokeCommand | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return null
@@ -384,7 +586,11 @@ export function validateSmokeCommandPayload(value: unknown): ValidatedSmokeComma
   if (!params || typeof params !== 'object' || Array.isArray(params)) {
     return null
   }
-  if (!validateJsonValue(params, 0, { remaining: MAX_PARAM_KEYS })) {
+  if (body.command === 'comments-window-push-snapshot') {
+    if (!validateSmokeCommentsSnapshotParams(params)) return null
+  } else if (body.command === 'comments-window-push-delta') {
+    if (!validateSmokeCommentsDeltaParams(params)) return null
+  } else if (!validateJsonValue(params, 0, { remaining: MAX_PARAM_KEYS })) {
     return null
   }
   if (

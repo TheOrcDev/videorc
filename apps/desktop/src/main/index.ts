@@ -191,6 +191,8 @@ import {
   smokeCommandServerAllowed,
   smokePreviewFrameUrl,
   validateSmokeBackendRpcRequest,
+  validateSmokeCommentsSnapshotParams,
+  validateSmokeCommentsDeltaParams,
   validateSmokeResourceAuthorization
 } from './smoke-command-security'
 import { runTimedBoundsStorm, timeSmokeAction } from './smoke-window-bounds-storm'
@@ -366,11 +368,7 @@ import {
   scrubReleaseAuthorityEnvironment
 } from './release-authority-env'
 import { secureIpcHandle, sendElectronEvent } from './secure-ipc'
-import {
-  validateElectronInvokeArgs,
-  type ElectronEventChannel,
-  type ElectronIpcEventMap
-} from '../shared/electron-ipc-contract'
+import type { ElectronEventChannel, ElectronIpcEventMap } from '../shared/electron-ipc-contract'
 import {
   installRendererSessionPermissions,
   installWebContentsSecurity,
@@ -10558,26 +10556,22 @@ async function runSmokePreviewMotionCommand(
   }
 
   if (command === 'comments-window-push-snapshot') {
+    const view = validateSmokeCommentsSnapshotParams(params)
+    if (!view) throw new Error('Invalid Comments fixture snapshot.')
     // The isolated fixture takes over once; real publisher metadata must not
     // authorize or reject the probe's independent fixture generation.
     if (!commentsSmokeSnapshotOverride) latestLiveCommentsSnapshot = null
     commentsSmokeSnapshotOverride = true
-    const snapshot = params.snapshot as LiveChatSnapshot
-    const requestedMode = params.mode as CommentsViewMode | undefined
-    const mode = requestedMode ?? { kind: 'live' as const }
-    cacheCommentsView({
-      mode,
-      snapshot,
-      latestSendOperation: params.latestSendOperation as CommentsSendOperation | undefined
-    })
-    commentsViewSelection.set(mode)
+    cacheCommentsView(view)
+    commentsViewSelection.set(view.mode)
     emitCommentsView()
     return currentCommentsView()
   }
 
   if (command === 'comments-window-push-delta') {
     if (!commentsSmokeSnapshotOverride) throw new Error('Comments fixture has not taken ownership.')
-    const [delta] = validateElectronInvokeArgs('comments-window:push-delta', [params.delta])
+    const delta = validateSmokeCommentsDeltaParams(params)
+    if (!delta) throw new Error('Invalid Comments fixture delta.')
     return applyLiveCommentsDelta(delta)
   }
 
