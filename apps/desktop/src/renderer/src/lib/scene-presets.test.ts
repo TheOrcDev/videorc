@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { defaultCaptureConfig } from './capture'
+import { defaultCaptureConfig, reconcileSourceSelection } from './capture'
 import {
   hydrateSceneLibrary,
   hydrateWorkingScene,
@@ -64,6 +64,62 @@ describe('scene presets', () => {
     expect(sceneNameError(' first ', [saved()])).toBeTruthy()
     expect(sceneNameError(' '.repeat(4), [])).toBeTruthy()
     expect(sceneNameError('x'.repeat(81), [])).toBeTruthy()
+  })
+  it.each([null, 'true', 1, {}, []])('rejects an untrusted Camera Off value %j', (cameraOff) => {
+    expect(() =>
+      normalizeSceneVisual({
+        ...visual(),
+        sources: { cameraOff }
+      })
+    ).toThrow('Invalid camera Off intent')
+  })
+  it('retains explicit Off through persisted library and working checkpoints', () => {
+    const off = normalizeSceneVisual({ ...visual(), sources: { cameraOff: true } })
+    const entry = { ...saved(), visual: off }
+    const library = hydrateSceneLibrary(JSON.parse(JSON.stringify({ version: 1, scenes: [entry] })))
+    const checkpoint = hydrateWorkingScene(
+      JSON.parse(JSON.stringify({ version: 1, sceneId: entry.id, visual: off }))
+    )!
+    expect(library.library.scenes[0].visual.sources.cameraOff).toBe(true)
+    expect(checkpoint.visual.sources.cameraOff).toBe(true)
+    expect(checkpoint.visual.sources.cameraId).toBeUndefined()
+    expect(sameSceneVisual(entry.visual, checkpoint.visual)).toBe(true)
+  })
+  it('normalizes On and legacy absent flags equally without treating a missing ID as Off', () => {
+    const on = visual()
+    expect(on.sources.cameraOff).toBe(false)
+    expect(sameSceneVisual(on, { ...on, sources: { ...on.sources, cameraOff: undefined } })).toBe(
+      true
+    )
+    expect(sameSceneVisual(on, { ...on, sources: { ...on.sources, cameraOff: false } })).toBe(true)
+    const legacy = normalizeSceneVisual({ ...on, sources: {} })
+    expect(legacy.sources.cameraOff).toBe(false)
+    expect(
+      reconcileSourceSelection(legacy.sources, [
+        { id: 'cam', name: 'Camera', kind: 'camera', status: 'available' }
+      ]).cameraId
+    ).toBe('cam')
+  })
+  it('keeps selected IDs authoritative over contradictory Off and preserves missing-device policy', () => {
+    const contradictory = normalizeSceneVisual({
+      ...visual(),
+      sources: { cameraId: 'cam', cameraOff: true }
+    })
+    expect(contradictory.sources.cameraOff).toBe(false)
+    const devices = [
+      { id: 'cam', name: 'Camera', kind: 'camera' as const, status: 'available' as const }
+    ]
+    expect(reconcileSourceSelection(contradictory.sources, devices).cameraId).toBe('cam')
+    const missing = normalizeSceneVisual({
+      ...visual(),
+      layout: { ...visual().layout, layoutPreset: 'camera-only' },
+      sources: { cameraId: 'missing', cameraOff: true }
+    })
+    expect(missing.sources.cameraOff).toBe(false)
+    expect(sceneSourceProblems(missing, devices)).toEqual([
+      'Camera unavailable. Choose a replacement.'
+    ])
+    expect(reconcileSourceSelection(missing.sources, devices).cameraId).toBe('cam')
   })
   it('restores a modified working checkpoint rather than reapplying the named snapshot', () => {
     const modified = visual()

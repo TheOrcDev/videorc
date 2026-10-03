@@ -12,7 +12,14 @@ export const SCENE_LIBRARY_KEY = 'videorc.scene-presets.v1'
 export const WORKING_SCENE_KEY = 'videorc.working-scene.v1'
 export type VisualSources = Pick<
   SourceSelection,
-  'cameraId' | 'cameraName' | 'screenId' | 'screenName' | 'windowId' | 'windowName' | 'testPattern'
+  | 'cameraId'
+  | 'cameraName'
+  | 'cameraOff'
+  | 'screenId'
+  | 'screenName'
+  | 'windowId'
+  | 'windowName'
+  | 'testPattern'
 >
 export type SavedSceneBackground = Omit<EffectiveSceneBackground, 'managedAssetPath'> & {
   fileName?: string
@@ -41,6 +48,10 @@ export function visualSources(sources: VisualSources): VisualSources {
   return {
     cameraId: sources.cameraId,
     cameraName: sources.cameraName,
+    // Match capture reconciliation: a selected ID wins over a stale Off flag.
+    // Legacy absent flags remain automatic selection, never inferred Off.
+    // Always project a boolean so apply/checkpoint restore clears prior Off.
+    cameraOff: sources.cameraOff === true && !sources.cameraId,
     screenId: sources.screenId,
     screenName: sources.screenName,
     windowId: sources.windowId,
@@ -113,6 +124,8 @@ export function normalizeSceneVisual(raw: unknown): SceneVisual {
     typeof data.sources !== 'object'
   )
     throw new Error('Invalid scene layout or sources')
+  if (data.sources.cameraOff !== undefined && typeof data.sources.cameraOff !== 'boolean')
+    throw new Error('Invalid camera Off intent')
   for (const key of ['cameraId', 'screenId', 'windowId'] as const) {
     if (
       data.sources[key] !== undefined &&

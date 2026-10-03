@@ -3933,6 +3933,128 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().captureConfig.layout.cameraZoom).toBe(175)
   })
 
+  it('restores saved Camera Off after On through device discovery and a finished session', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.canSaveScene === true)
+    await act(async () => latest().applyCameraPreset({ layoutPreset: 'screen-only' }))
+    await waitForObservation(
+      () => latest().captureConfig.layout.layoutPreset === 'screen-only' && latest().canSaveScene
+    )
+    const cameras = latest().deviceList.devices.filter((device) => device.kind === 'camera')
+    await act(async () =>
+      latest().switchSourceDeviceLive(
+        'camera',
+        buildCameraSources(latest().captureConfig.sources, cameras, undefined)
+      )
+    )
+    await waitForObservation(
+      () => latest().captureConfig.sources.cameraOff === true && latest().canSaveScene
+    )
+    await act(async () => {
+      expect(latest().saveScene('Camera Off')).toBe(true)
+    })
+    const saved = latest().savedScenes[0]
+    await act(async () =>
+      latest().switchSourceDeviceLive(
+        'camera',
+        buildCameraSources(latest().captureConfig.sources, cameras, 'camera:1')
+      )
+    )
+    await waitForObservation(
+      () => latest().captureConfig.sources.cameraId === 'camera:1' && latest().canSaveScene
+    )
+    await act(async () => {
+      expect(latest().saveScene('Camera On')).toBe(true)
+    })
+    const savedOn = latest().savedScenes[1]
+    await act(async () => {
+      expect(await latest().applySavedScene(saved.id)).toBe(true)
+    })
+    expect(latest().captureConfig.sources.cameraOff).toBe(true)
+    expect(latest().captureConfig.sources.cameraId).toBeUndefined()
+    expect(latest().savedScenes[0].visual.sources).toMatchObject({ cameraOff: true })
+    expect(latest().savedSceneModified).toBe(false)
+    await act(async () => {
+      expect(await latest().applySavedScene(savedOn.id)).toBe(true)
+    })
+    expect(latest().captureConfig.sources.cameraOff).toBe(false)
+    expect(latest().captureConfig.sources.cameraId).toBe('camera:1')
+    expect(latest().savedSceneModified).toBe(false)
+    await act(async () => {
+      expect(await latest().applySavedScene(saved.id)).toBe(true)
+    })
+    await act(async () => latest().applyCameraPreset({ cameraZoom: 135 }))
+    await waitForObservation(
+      () => latest().captureConfig.layout.cameraZoom === 135 && latest().canSaveScene
+    )
+    expect(latest().savedSceneModified).toBe(true)
+    await act(async () => {
+      expect(latest().saveScene('Camera Off', saved.id)).toBe(true)
+    })
+    expect(latest().savedScenes[0].visual.sources.cameraOff).toBe(true)
+    expect(latest().savedSceneModified).toBe(false)
+    await act(async () => {
+      expect(latest().saveScene('Camera Off copy')).toBe(true)
+    })
+    const savedCopy = latest().savedScenes[2]
+    expect(savedCopy.visual.sources.cameraOff).toBe(true)
+    backend.deviceList.devices.unshift({
+      id: 'camera:new',
+      name: 'New Camera',
+      kind: 'camera',
+      status: 'available'
+    })
+    await act(async () => latest().refreshBackend({ fresh: true }))
+    expect(latest().captureConfig.sources.cameraOff).toBe(true)
+    expect(latest().captureConfig.sources.cameraId).toBeUndefined()
+    await act(async () => latest().startSession())
+    await waitForObservation(() => observations.at(-1)?.recording.recording.state === 'recording')
+    expect(backend.confirmedSources.cameraId).toBeUndefined()
+    expect(latest().captureConfig.sources.cameraOff).toBe(true)
+    await act(async () => {
+      expect(await latest().stopSession()).toBe(true)
+    })
+    await waitForObservation(() => observations.at(-1)?.recording.recording.state === 'idle')
+    await act(async () => latest().refreshBackend({ fresh: true }))
+    expect(latest().captureConfig.sources.cameraOff).toBe(true)
+    expect(latest().captureConfig.sources.cameraId).toBeUndefined()
+    expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.sources.cameraOff).toBe(true)
+    const staleOnConfig = {
+      ...latest().captureConfig,
+      sources: buildCameraSources(latest().captureConfig.sources, cameras, 'camera:1')
+    }
+    await act(async () => root!.unmount())
+    root = null
+    // The working checkpoint owns visual intent even if capture storage is older.
+    localStorage.setItem(STORAGE_KEYS.captureConfig, JSON.stringify(staleOnConfig))
+    observations.length = 0
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.canSaveScene === true)
+    await act(async () => latest().refreshBackend({ fresh: true }))
+    expect(latest().activeSavedSceneId).toBe(savedCopy.id)
+    expect(latest().captureConfig.sources.cameraOff).toBe(true)
+    expect(latest().captureConfig.sources.cameraId).toBeUndefined()
+    expect(latest().savedSceneModified).toBe(false)
+  }, 15_000)
+
   it('refuses missing saved sources without fallback and preserves storage on failed saves', async () => {
     const backend = new StudioBackend()
     TestWebSocket.backend = backend
