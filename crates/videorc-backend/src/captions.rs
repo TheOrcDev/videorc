@@ -209,6 +209,13 @@ pub async fn inject_caption_contract_test_audio(duration_ms: u64) -> Result<u64>
     if !caption_contract_test_enabled() {
         bail!("Caption contract test audio is disabled.");
     }
+    produce_caption_contract_test_audio(duration_ms).await
+}
+
+// Kept separate from the RPC env guard so the maintained tests can exercise
+// the actual debug producer and installed tap without changing global env.
+#[cfg(debug_assertions)]
+async fn produce_caption_contract_test_audio(duration_ms: u64) -> Result<u64> {
     if !TAP_ACTIVE.load(Ordering::Relaxed) {
         bail!("Start the caption contract session before injecting audio.");
     }
@@ -216,6 +223,7 @@ pub async fn inject_caption_contract_test_audio(duration_ms: u64) -> Result<u64>
     let frames = duration_ms.div_ceil(20);
     let samples_per_channel = (48_000_u64 * 20 / 1_000) as usize;
     let before = TAP_FRAMES_SEEN.load(Ordering::Relaxed);
+    let producer_started_at = std::time::Instant::now();
     for frame_index in 0..frames {
         let mut samples = Vec::with_capacity(samples_per_channel * 2);
         for sample_index in 0..samples_per_channel {
@@ -224,6 +232,12 @@ pub async fn inject_caption_contract_test_audio(duration_ms: u64) -> Result<u64>
             let sample = phase.sin() * 0.12;
             samples.extend_from_slice(&[sample, sample]);
         }
+        // Native frames represent completed PCM buffers. Pace this debug
+        // producer by its sample clock too: stamping a 20ms buffer immediately
+        // after grant would truthfully make its first samples pre-grant.
+        let buffer_end =
+            producer_started_at + std::time::Duration::from_millis((frame_index + 1) * 20);
+        tokio::time::sleep_until(tokio::time::Instant::from_std(buffer_end)).await;
         offer_caption_frame(&AudioFrame {
             timestamp_micros: frame_index * 20_000,
             captured_at: std::time::Instant::now(),
@@ -7022,6 +7036,218 @@ mod tests {
     fn test_caption_app_state_with_database(database: crate::storage::Database) -> AppState {
         let (events, _) = tokio::sync::broadcast::channel(16);
         AppState::new("test-token".to_string(), 0, events, database)
+    }
+
+    #[cfg(debug_assertions)]
+    async fn start_caption_contract_listen_grant(state: &AppState) -> Result<()> {
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("caption-contract-grant".into(), Vec::new());
+        crate::cohost::set_cohost_settings(
+            state,
+            crate::protocol::CohostSettingsPatch {
+                enabled: Some(true),
+                listen: Some(true),
+                ..Default::default()
+            },
+        )
+        .await?;
+        crate::cohost::start_cohost(
+            state,
+            crate::protocol::CohostStartParams {
+                session_id: "caption-contract-grant".into(),
+                consent_to_process_chat: true,
+                stream_title: None,
+            },
+        )
+        .await?;
+        Ok(())
+    }
+
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn caption_contract_fixture_fresh_audio_owns_the_first_listen_chunk() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        let mut session = test_caption_session(&state, false);
+        let outcome: Result<_> = async {
+            start_caption_contract_listen_grant(&state).await?;
+            let expected = session.admitted_orcle_audio().await;
+            let mut receiver = {
+                let _control = CAPTION_CONTROL.lock().await;
+                install_tap()
+            };
+            // Same real producer as the gated RPC, with no env mutation or
+            // second injection to skip its first chunk. The capacity holds
+            // all 150 frames, so no separate consumer can alter the clock.
+            let producer_started_at = std::time::Instant::now();
+            let accepted = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                produce_caption_contract_test_audio(3_000),
+            )
+            .await??;
+            let producer_elapsed = producer_started_at.elapsed();
+            let grant_times = {
+                let coordinator = state.captions.lock().await;
+                (coordinator.speech_started_at, coordinator.listen_started_at)
+            };
+            let sequence = CaptionSequence::default();
+            let mut timeline = CaptionTimeline::new(0.0);
+            let mut buffer = CaptionChunkBuffer::new(
+                (f64::from(CAPTION_SAMPLE_RATE) * CAPTION_CHUNK_SECONDS) as usize,
+                MAX_BUFFERED_CAPTION_CHUNKS,
+            );
+            let mut admissions = Vec::new();
+            let mut capture_times = Vec::new();
+            for _ in 0..accepted {
+                let frame =
+                    tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+                        .await?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("Owned caption tap closed before its frames drained.")
+                        })?;
+                let admission = session.admitted_orcle_audio_for_frame(&frame).await;
+                capture_times.push((frame.captured_at, frame.duration(), frame.timestamp_micros));
+                admissions.push(admission);
+                buffer.push_samples(
+                    downmix_resample_to_16k_mono(&frame.samples, frame.channels, frame.sample_rate),
+                    0,
+                    admission,
+                    &sequence,
+                    &mut timeline,
+                );
+            }
+            session.receiver = receiver;
+            Ok((
+                accepted,
+                expected,
+                grant_times,
+                producer_started_at,
+                producer_elapsed,
+                admissions,
+                capture_times,
+                buffer.drain_pending(),
+            ))
+        }
+        .await;
+        // End the exact owned bus and cohost before any failing assertion.
+        remove_tap();
+        crate::cohost::stop_cohost(&state).await;
+        let (
+            accepted,
+            expected,
+            grant_times,
+            producer_started_at,
+            producer_elapsed,
+            admissions,
+            capture_times,
+            chunks,
+        ) = outcome
+            .expect("actual contract producer and tap should complete within their deadlines");
+        assert_eq!(accepted, 150);
+        assert_eq!(TAP_FRAMES_DROPPED.load(Ordering::Relaxed), 0);
+        assert!(!TAP_ACTIVE.load(Ordering::Acquire));
+        assert!(expected.speech_epoch.is_some() && expected.listen_epoch.is_some());
+        let (speech_grant, listen_grant) = (grant_times.0.unwrap(), grant_times.1.unwrap());
+        assert!(capture_times[0].0 >= speech_grant && capture_times[0].0 >= listen_grant);
+        assert!(
+            capture_times
+                .iter()
+                .all(|(end, _, _)| *end <= std::time::Instant::now())
+        );
+        assert!(
+            producer_elapsed >= std::time::Duration::from_millis(3_000),
+            "The entire sample clock must run, not just the first 20ms followed by a PCM burst."
+        );
+        for (index, (end, duration, timestamp_micros)) in capture_times.iter().enumerate() {
+            assert_eq!(*duration, std::time::Duration::from_millis(20));
+            assert_eq!(*timestamp_micros, index as u64 * 20_000);
+            assert!(
+                *end >= producer_started_at
+                    + std::time::Duration::from_millis((index as u64 + 1) * 20),
+                "Each actual completed buffer must follow its own sample-duration deadline."
+            );
+        }
+        assert!(admissions.iter().all(|admission| *admission == expected));
+        assert_eq!(chunks.len(), 1);
+        assert!(chunk_has_speech(&chunks[0].samples));
+        assert_eq!(
+            session.chunk_purpose(),
+            crate::videorc_api::CaptionChunkPurpose::Listen
+        );
+        assert_eq!(
+            (admissions[0], chunks[0].admission),
+            (expected, expected),
+            "The first fixture buffer and sole 3s speech chunk must own the real grant: first end {}us after grant, buffer duration {}us. Listen-only skips an unowned chunk before upload.",
+            capture_times[0]
+                .0
+                .duration_since(speech_grant.max(listen_grant))
+                .as_micros(),
+            capture_times[0].1.as_micros(),
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn caption_contract_fixture_keeps_pregrant_and_crossing_audio_unowned() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        let session = test_caption_session(&state, false);
+        let old = AudioFrame {
+            timestamp_micros: 0,
+            captured_at: std::time::Instant::now(),
+            sample_rate: 48_000,
+            channels: 2,
+            samples: vec![0.1; 1_920],
+        };
+        let outcome: Result<_> = async {
+            let mut receiver = {
+                let _control = CAPTION_CONTROL.lock().await;
+                install_tap()
+            };
+            offer_caption_frame(&old);
+            start_caption_contract_listen_grant(&state).await?;
+            let first_grant = {
+                let coordinator = state.captions.lock().await;
+                coordinator
+                    .speech_started_at
+                    .unwrap()
+                    .min(coordinator.listen_started_at.unwrap())
+            };
+            // This known past buffer ends at most 10ms after the first grant.
+            // Its 20ms PCM crosses that boundary; no future wall-clock stamp.
+            let crossing = AudioFrame {
+                captured_at: first_grant
+                    + first_grant
+                        .elapsed()
+                        .min(std::time::Duration::from_millis(10)),
+                ..old.clone()
+            };
+            offer_caption_frame(&crossing);
+            let mut admissions = Vec::new();
+            for _ in 0..2 {
+                let frame =
+                    tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+                        .await?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Owned caption tap closed before control frames drained."
+                            )
+                        })?;
+                admissions.push(session.admitted_orcle_audio_for_frame(&frame).await);
+            }
+            Ok(admissions)
+        }
+        .await;
+        remove_tap();
+        crate::cohost::stop_cohost(&state).await;
+        assert_eq!(
+            outcome.expect("actual old/crossing control frames should reach the installed tap"),
+            vec![AdmittedOrcleAudio::default(); 2],
+        );
+        assert!(!TAP_ACTIVE.load(Ordering::Acquire));
     }
 
     #[tokio::test]
