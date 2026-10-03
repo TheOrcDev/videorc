@@ -76,6 +76,7 @@ try {
     windowName: undefined,
     cameraId: 'camera:avfoundation-native:face-time',
     cameraName: 'FaceTime HD Camera',
+    cameraOff: undefined,
     microphoneId: 'microphone:coreaudio:podcast',
     microphoneName: 'Podcast Mic',
     testPattern: false
@@ -136,6 +137,7 @@ try {
       windowName: undefined,
       cameraId: 'camera:avfoundation-native:face-time',
       cameraName: 'FaceTime HD Camera',
+      cameraOff: undefined,
       microphoneId: 'microphone:coreaudio:podcast',
       microphoneName: 'Podcast Mic'
     }
@@ -162,6 +164,7 @@ try {
       windowName: 'Editor',
       cameraId: 'camera:avfoundation-native:desk',
       cameraName: 'Desk Camera',
+      cameraOff: undefined,
       microphoneId: 'microphone:coreaudio:laptop',
       microphoneName: 'Laptop Mic'
     }
@@ -182,6 +185,7 @@ try {
     windowName: undefined,
     cameraId: 'camera:avfoundation-native:face-time',
     cameraName: 'FaceTime HD Camera',
+    cameraOff: undefined,
     microphoneId: 'microphone:coreaudio:podcast',
     microphoneName: 'Podcast Mic'
   })
@@ -220,10 +224,55 @@ try {
       windowName: undefined,
       cameraId: undefined,
       cameraName: undefined,
+      cameraOff: undefined,
       microphoneId: 'microphone:coreaudio:podcast',
       microphoneName: 'Podcast Mic'
     }
   )
+
+  const explicitCameraOff = {
+    screenId: 'screen:screencapturekit:222',
+    screenName: 'Built-in Display',
+    cameraOff: true,
+    microphoneId: 'microphone:coreaudio:podcast',
+    microphoneName: 'Podcast Mic'
+  }
+  const offSources = reconcileSourceSelection(explicitCameraOff, devices)
+  assert.deepEqual(offSources, {
+    screenId: 'screen:screencapturekit:222',
+    screenName: 'Built-in Display',
+    windowId: undefined,
+    windowName: undefined,
+    cameraId: undefined,
+    cameraName: undefined,
+    cameraOff: true,
+    microphoneId: 'microphone:coreaudio:podcast',
+    microphoneName: 'Podcast Mic'
+  })
+  assert.deepEqual(sourceSelectionChangeEvents(explicitCameraOff, offSources), [])
+  const refreshedOffSources = reconcileSourceSelection(offSources, [...devices].reverse())
+  assert.deepEqual(refreshedOffSources, offSources)
+  assert.deepEqual(sourceSelectionChangeEvents(offSources, refreshedOffSources), [])
+
+  // Legacy profiles without an explicit Off still select an available camera.
+  const legacySources = {
+    screenId: 'screen:screencapturekit:222',
+    screenName: 'Built-in Display',
+    microphoneId: 'microphone:coreaudio:podcast',
+    microphoneName: 'Podcast Mic'
+  }
+  assert.equal(Object.hasOwn(legacySources, 'cameraOff'), false)
+  assert.deepEqual(reconcileSourceSelection(legacySources, devices), {
+    screenId: 'screen:screencapturekit:222',
+    screenName: 'Built-in Display',
+    windowId: undefined,
+    windowName: undefined,
+    cameraId: 'camera:avfoundation-native:face-time',
+    cameraName: 'FaceTime HD Camera',
+    cameraOff: undefined,
+    microphoneId: 'microphone:coreaudio:podcast',
+    microphoneName: 'Podcast Mic'
+  })
 
   // Zombie "Fallback - X" avfoundation microphone rows (pre-0.9.27 backends)
   // must never win the default, and selections persisted onto them must
@@ -249,7 +298,7 @@ try {
   assert.equal(avfoundationOnly.microphoneId, 'microphone:avfoundation:2')
 
   console.log(
-    'Source reconciliation smoke OK - persisted IDs, name rematch, fallback behavior, and fallback-mic migration verified.'
+    'Source reconciliation smoke OK - persisted IDs, name rematch, explicit Camera Off, legacy fallback, and fallback-mic migration verified.'
   )
 } finally {
   await rm(tempDir, { recursive: true, force: true })
