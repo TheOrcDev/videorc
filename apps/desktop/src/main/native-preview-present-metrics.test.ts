@@ -48,4 +48,26 @@ describe('native preview present metrics', () => {
     expect(metrics.telemetryRefreshCount).toBeGreaterThanOrEqual(40)
     expect(metrics.telemetryRefreshCount).toBeLessThanOrEqual(41)
   })
+
+  it('keeps each current sample timestamp independent of the percentile cache', () => {
+    let nowMs = 1_000
+    const metrics = new NativePreviewPresentMetrics(() => nowMs, 250)
+    expect(metrics.record({ frameAgeMs: 114 })).toMatchObject({
+      recordedAtMs: 1_000,
+      inputToPresentLatencyMs: 114,
+      inputToPresentLatencyP95Ms: 114
+    })
+    nowMs += 16
+    expect(metrics.record({ frameAgeMs: 2 })).toMatchObject({
+      recordedAtMs: 1_016,
+      inputToPresentLatencyMs: 2,
+      inputToPresentLatencyP95Ms: 114
+    })
+    metrics.reset()
+    expect(metrics.record({ frameAgeMs: 2 })).toMatchObject({
+      recordedAtMs: 1_016,
+      inputToPresentLatencyMs: 2,
+      inputToPresentLatencyP95Ms: 2
+    })
+  })
 })

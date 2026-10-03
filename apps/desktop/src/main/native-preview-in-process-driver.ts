@@ -228,7 +228,8 @@ export function createNativePreviewInProcessDriver(
         request.handoff.height,
         request.handoff.frameId
       )
-      recordSample(presentRoundTripSamplesMs, performance.now() - presentStartedAt)
+      const presentCompletedAt = performance.now()
+      recordSample(presentRoundTripSamplesMs, presentCompletedAt - presentStartedAt)
       if (!result.presented) {
         droppedFrames += 1
         return null
@@ -303,6 +304,30 @@ export function createNativePreviewInProcessDriver(
         nativePreviewContentsScale: cachedBindingMetrics.contentsScale,
         nativePreviewPresentedSceneRevision: request.scene?.revision,
         nativePreviewCompositorRunId: request.handoff.runId,
+        nativePreviewPresentationEvidence: {
+          frameId: request.handoff.frameId,
+          runId:
+            request.handoff.runId && request.handoff.runId.length <= 128
+              ? request.handoff.runId
+              : undefined,
+          sceneRevision: safeRevision(request.frameSceneRevision),
+          frameAgeMs:
+            typeof request.frameAgeMs === 'number' &&
+            Number.isFinite(request.frameAgeMs) &&
+            request.frameAgeMs >= 0
+              ? request.frameAgeMs
+              : undefined,
+          compositorUpdatedAt:
+            request.compositorUpdatedAt &&
+            request.compositorUpdatedAt.length <= 64 &&
+            Number.isFinite(Date.parse(request.compositorUpdatedAt))
+              ? request.compositorUpdatedAt
+              : undefined,
+          presentedAtMs: cadence.recordedAtMs,
+          presentStartedMonotonicMs: presentStartedAt,
+          presentCompletedMonotonicMs: presentCompletedAt,
+          inputToPresentLatencyMs: cadence.inputToPresentLatencyMs
+        },
         bounds: lastBounds,
         updatedAt: new Date().toISOString(),
         message: 'In-process CAMetalLayer preview is presenting compositor output.'
@@ -333,6 +358,10 @@ export function createNativePreviewInProcessDriver(
       cachedBindingMetrics = emptyNativeMetrics()
     }
   }
+}
+
+function safeRevision(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
 }
 
 export function nativePreviewInProcessBindingFromModule(

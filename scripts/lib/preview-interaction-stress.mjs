@@ -34,6 +34,501 @@ export const PREVIEW_INTERACTION_STRESS_PROFILE = Object.freeze({
   })
 })
 
+export const PREVIEW_TIMELINE_LIMITS = Object.freeze({
+  samples: 2_048,
+  bounds: 1_000,
+  actions: 16,
+  oracleSamples: 8_192,
+  oracleWindows: 256
+})
+
+/** Only the already-authenticated Electron PID establishes owned window roles. */
+export function previewCgWindowEvidence(sample, expectedWindowPid) {
+  const windows = Array.isArray(sample?.windows) ? sample.windows : []
+  const ownedPid = evidenceInteger(expectedWindowPid)
+  return {
+    receivedAtMs: evidenceNumber(sample?.receivedAt),
+    oracleUptimeNs: evidenceInteger(sample?.uptimeNs),
+    windows: windows.slice(0, PREVIEW_TIMELINE_LIMITS.oracleWindows).map((window) => {
+      const owned = ownedPid !== null && ownedPid > 0 && window.pid === ownedPid
+      return {
+        order: evidenceInteger(window.order),
+        ownerCategory: owned
+          ? 'owned-app'
+          : ['SecurityAgent', 'loginwindow'].includes(window.owner)
+            ? 'system-ui'
+            : 'other-or-unknown',
+        role: !owned
+          ? 'unknown'
+          : window.name === 'Videorc Preview'
+            ? 'preview'
+            : window.name === 'Videorc'
+              ? 'main'
+              : ['Videorc Native Preview Surface', 'Videorc Preview Surface'].includes(window.name)
+                ? 'surface'
+                : 'owned-other',
+        layer:
+          typeof window.layer === 'number' && Number.isSafeInteger(window.layer)
+            ? window.layer
+            : null,
+        alpha: evidenceNumber(window.alpha),
+        x: evidenceCoordinate(window.x),
+        y: evidenceCoordinate(window.y),
+        width: evidenceNumber(window.width),
+        height: evidenceNumber(window.height)
+      }
+    }),
+    omittedWindows: Math.max(0, windows.length - PREVIEW_TIMELINE_LIMITS.oracleWindows),
+    pixel: sample?.pixel
+      ? Object.fromEntries(
+          ['sampleCount', 'meanLuma', 'nonDarkFraction', 'blankBaseFraction'].map((key) => [
+            key,
+            evidenceNumber(sample.pixel[key])
+          ])
+        )
+      : null,
+    pixelErrorPresent: typeof sample?.pixelError === 'string'
+  }
+}
+
+function evidenceCoordinate(value) {
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    Math.abs(value) <= Number.MAX_SAFE_INTEGER
+    ? value
+    : null
+}
+
+const EVIDENCE_STATES = ['unavailable', 'starting', 'live', 'stopped', 'failed', 'sampler-error']
+const EVIDENCE_TRANSPORTS = [
+  'native-surface',
+  'd3d11-shared-texture',
+  'electron-proof-surface',
+  'latest-jpeg-polling',
+  'mjpeg-stream',
+  'unavailable'
+]
+const EVIDENCE_BACKINGS = [
+  'cametal-layer',
+  'directcomposition-swapchain',
+  'electron-browser-window',
+  'none'
+]
+const EVIDENCE_HOSTS = [
+  'in-process',
+  'helper-process',
+  'external-module',
+  'proof-surface',
+  'backend-d3d11-presenter'
+]
+
+/**
+ * Diagnostic timelines do not replace the freshness gate. The existing latency
+ * is retained-source age plus publication age at present, not action-to-present.
+ * Electron monotonic times share one process clock; Node sampling and wall-clock
+ * anchors remain separate. Sampling can miss presents and interaction evidence
+ * never proves that a particular input caused a particular frame.
+ */
+export function previewInteractionPhaseEvidence({
+  startedAt,
+  finishedAt,
+  measurement,
+  samples = [],
+  boundsResults = [],
+  clickFocus
+}) {
+  const measurementStartedAtMs = evidenceNumber(measurement?.measurementStartedAtMs)
+  const measurementFinishedAtMs = evidenceNumber(measurement?.measurementFinishedAtMs)
+  const reducedSamples = samples.slice(-PREVIEW_TIMELINE_LIMITS.samples).map((sample) => {
+    const status = sample?.status ?? {}
+    const sampledAtMs = evidenceNumber(sample?.at)
+    const presentation = presentationEvidence(status.nativePreviewPresentationEvidence)
+    return {
+      sampledAtMs,
+      sampledBeforeMeasurement: before(sampledAtMs, measurementStartedAtMs),
+      sampledAfterMeasurement: before(measurementFinishedAtMs, sampledAtMs),
+      state: evidenceEnum(status.state, EVIDENCE_STATES),
+      transport: evidenceEnum(status.transport, EVIDENCE_TRANSPORTS),
+      backing: evidenceEnum(status.backing, EVIDENCE_BACKINGS),
+      hostKind: evidenceEnum(status.nativePreviewHostKind, EVIDENCE_HOSTS),
+      presentedFrameId: evidenceInteger(status.presentedFrameId),
+      runId: evidenceId(status.nativePreviewCompositorRunId),
+      sceneRevision: evidenceInteger(status.nativePreviewPresentedSceneRevision),
+      statusUpdatedAtMs: evidenceDate(status.updatedAt),
+      currentFreshnessLatencyMs: evidenceNumber(status.inputToPresentLatencyMs),
+      mainPresentedStatusAgeMs: evidenceNumber(status.nativePreviewMainPresentedStatusAgeMs),
+      mainPresentedFrameAgeP95Ms: evidenceNumber(status.nativePreviewMainPresentedFrameAgeP95Ms),
+      mainQueueWaitP95Ms: evidenceNumber(status.nativePreviewMainQueueWaitP95Ms),
+      mainPresentP95Ms: evidenceNumber(status.nativePreviewMainPresentP95Ms),
+      presentation,
+      presentedBeforeMeasurement: before(presentation?.presentedAtMs, measurementStartedAtMs),
+      presentedAfterMeasurement: before(measurementFinishedAtMs, presentation?.presentedAtMs),
+      presentedAfterSample: before(sampledAtMs, presentation?.presentedAtMs),
+      presentationMatchesStatus: presentationIdentityMatches(presentation, status)
+    }
+  })
+  const bounds = boundsResults.slice(0, 2).map((result) => boundsTimingEvidence(result))
+  const actions = [
+    ...(Array.isArray(clickFocus?.steps) ? clickFocus.steps : []),
+    ...(Array.isArray(clickFocus?.restorationActions)
+      ? clickFocus.restorationActions.map((action) => ({ label: action.label, action }))
+      : [])
+  ]
+  return {
+    version: 1,
+    phaseStartedAtMs: evidenceNumber(startedAt),
+    phaseFinishedAtMs: evidenceNumber(finishedAt),
+    measurementStartedAtMs,
+    measurementFinishedAtMs,
+    metricMeaning: 'Retained source age plus publication age at present; not interaction latency.',
+    clocks: {
+      samples: 'Node wall clock',
+      presentation: 'Electron wall clock and Electron monotonic clock',
+      bounds: 'Electron monotonic clock with separate wall-clock start anchor',
+      actions: 'Electron monotonic clock with separate wall-clock action anchor'
+    },
+    limitations: [
+      'Sampled presents only; no causal input/frame attribution.',
+      'Wall-clock changes can affect cross-process correlation.',
+      'HTTP-storm mode has no per-bounds Electron application timeline.'
+    ],
+    limits: PREVIEW_TIMELINE_LIMITS,
+    sampleCount: samples.length,
+    omittedSamples: Math.max(0, samples.length - reducedSamples.length),
+    samples: reducedSamples,
+    bounds,
+    omittedBoundsGroups: Math.max(0, boundsResults.length - bounds.length),
+    actions: actions.slice(0, PREVIEW_TIMELINE_LIMITS.actions).map(actionEvidence),
+    omittedActions: Math.max(0, actions.length - PREVIEW_TIMELINE_LIMITS.actions)
+  }
+}
+
+function presentationEvidence(value) {
+  if (!value || typeof value !== 'object') return null
+  const frameId = evidenceInteger(value.frameId)
+  const presentedAtMs = evidenceNumber(value.presentedAtMs)
+  const start = evidenceNumber(value.presentStartedMonotonicMs)
+  const end = evidenceNumber(value.presentCompletedMonotonicMs)
+  if (
+    frameId === null ||
+    frameId === 0 ||
+    presentedAtMs === null ||
+    start === null ||
+    end === null ||
+    end < start
+  ) {
+    return null
+  }
+  return {
+    frameId,
+    runId: evidenceId(value.runId),
+    sceneRevision: evidenceInteger(value.sceneRevision),
+    frameAgeMs: evidenceNumber(value.frameAgeMs),
+    compositorUpdatedAtMs: evidenceDate(value.compositorUpdatedAt),
+    presentedAtMs,
+    presentStartedMonotonicMs: start,
+    presentCompletedMonotonicMs: end,
+    inputToPresentLatencyMs: evidenceNumber(value.inputToPresentLatencyMs)
+  }
+}
+
+function presentationIdentityMatches(presentation, status) {
+  const frameId = evidenceInteger(status.presentedFrameId)
+  const runId = evidenceId(status.nativePreviewCompositorRunId)
+  const revision = evidenceInteger(status.nativePreviewPresentedSceneRevision)
+  if (
+    !presentation ||
+    !frameId ||
+    runId === null ||
+    revision === null ||
+    presentation.runId === null ||
+    presentation.sceneRevision === null
+  )
+    return null
+  return (
+    presentation.frameId === frameId &&
+    presentation.runId === runId &&
+    presentation.sceneRevision === revision
+  )
+}
+
+function boundsTimingEvidence(result) {
+  const timing = result?.timing
+  if (!timing || !Array.isArray(timing.entries)) return { available: false }
+  const start = evidenceNumber(timing.monotonicStartedAtMs)
+  const wall = evidenceNumber(timing.wallClockStartedAtMs)
+  if (start === null || wall === null) return { available: false }
+  let invalid = 0
+  let previousIndex = -1
+  const entries = timing.entries.slice(-PREVIEW_TIMELINE_LIMITS.bounds).flatMap((row) => {
+    const index = evidenceInteger(row?.index)
+    const scheduledAtMs = evidenceNumber(row?.scheduledAtMs)
+    const appliedAtMs = evidenceNumber(row?.appliedAtMs)
+    const completedAtMs = evidenceNumber(row?.completedAtMs)
+    if (
+      index === null ||
+      index <= previousIndex ||
+      scheduledAtMs === null ||
+      appliedAtMs === null ||
+      completedAtMs === null ||
+      scheduledAtMs < start ||
+      appliedAtMs < start ||
+      completedAtMs < appliedAtMs
+    ) {
+      invalid += 1
+      return []
+    }
+    previousIndex = index
+    return [{ index, scheduledAtMs, appliedAtMs, completedAtMs }]
+  })
+  return {
+    available: true,
+    monotonicStartedAtMs: start,
+    wallClockStartedAtMs: wall,
+    applied: evidenceInteger(result.applied),
+    elapsedMs: evidenceNumber(result.elapsedMs),
+    maxStartLagMs: evidenceNumber(result.maxStartLagMs),
+    omitted: evidenceInteger(timing.omitted),
+    reducedOmissions: Math.max(0, timing.entries.length - PREVIEW_TIMELINE_LIMITS.bounds),
+    invalidEntries: invalid,
+    entries
+  }
+}
+
+function actionEvidence(step) {
+  const action = step?.action
+  const start = evidenceNumber(action?.appliedAtMs)
+  const end = evidenceNumber(action?.completedAtMs)
+  const wall = evidenceNumber(action?.wallClockAppliedAtMs)
+  return {
+    label: evidenceEnum(step?.label, [
+      'baseline',
+      'main-window-focus',
+      'preview-window-focus',
+      'preview-window-click',
+      'surface-window-click',
+      'always-on-top-toggle',
+      'preview-window-move',
+      'always-on-top-restore',
+      'preview-window-move-restore'
+    ]),
+    action:
+      start !== null && end !== null && end >= start && wall !== null
+        ? { appliedAtMs: start, completedAtMs: end, wallClockAppliedAtMs: wall }
+        : null,
+    verificationCompletedAtMs: evidenceNumber(step?.verificationCompletedAtMs),
+    verificationCompletedMonotonicMs: evidenceNumber(step?.verificationCompletedMonotonicMs),
+    presentation: presentationEvidence(step?.presentationEvidence)
+  }
+}
+
+/** Preserve known aggregate metrics while excluding raw status/transport payloads. */
+export function previewMeasurementEvidence(measurement) {
+  if (!measurement) return null
+  const keys = [
+    'frames',
+    'measuredFps',
+    'intervalP95Ms',
+    'intervalP99Ms',
+    'compositorFrames',
+    'presentedCompositorFrame',
+    'compositorFrameLag',
+    'skippedCompositorFrames',
+    'inputToPresentLatencyMs',
+    'inputToPresentLatencyP50Ms',
+    'inputToPresentLatencyP95Ms',
+    'inputToPresentLatencyP99Ms',
+    'nativePreviewMainQueueWaitP95Ms',
+    'nativePreviewMainPresentP95Ms',
+    'nativePreviewMainPresentedStatusAgeMs',
+    'nativePreviewMainPresentedStatusAgeP95Ms',
+    'nativePreviewMainPresentedFrameAgeP95Ms',
+    'nativePreviewPlacementRoundTripP95Ms',
+    'nativePreviewPresentRoundTripP95Ms',
+    'nativePreviewPresentedSceneRevision',
+    'measurementStartedAtMs',
+    'measurementFinishedAtMs',
+    'width',
+    'height',
+    'blankFrames',
+    'nativePreviewRendererPollIntervalP95Ms',
+    'nativePreviewRendererPollRoundTripP95Ms',
+    'nativePreviewRendererPresentRoundTripP95Ms',
+    'nativePreviewRendererPollInFlightSkips',
+    'nativePreviewMainQueuedBehindCount',
+    'nativePreviewMainCoalescedFrameCount',
+    'nativePreviewHelperRoundTripP95Ms',
+    'nativePreviewMainStatusFetchP95Ms',
+    'nativePreviewMainStatusFetchFailures',
+    'nativePreviewMainStatusFetchSuccesses',
+    'nativePreviewMainSceneMismatchCount',
+    'nativePreviewMainSceneMismatchAgeMs',
+    'nativePreviewMainLastSkippedSceneRevision',
+    'nativePreviewMainLastSkippedFrameSceneRevision',
+    'nativePreviewPlacementEventsReceived',
+    'nativePreviewPlacementsCoalesced',
+    'nativePreviewPlacementsApplied',
+    'nativePreviewIosurfaceCacheHits',
+    'nativePreviewIosurfaceImports',
+    'nativePreviewIosurfaceInvalidations',
+    'nativePreviewIosurfaceImportFailures',
+    'nativePreviewIosurfaceImportLiveCount',
+    'nativePreviewIosurfaceImportPeakCount',
+    'nativePreviewIosurfaceImportCeiling'
+  ]
+  const projected = Object.fromEntries(keys.map((key) => [key, evidenceNumber(measurement[key])]))
+  projected.presentation = presentationEvidence(measurement.nativePreviewPresentationEvidence)
+  projected.identity = {
+    state: evidenceEnum(measurement.status?.state, EVIDENCE_STATES),
+    transport: evidenceEnum(measurement.status?.transport, EVIDENCE_TRANSPORTS),
+    backing: evidenceEnum(measurement.status?.backing, EVIDENCE_BACKINGS),
+    hostKind: evidenceEnum(measurement.status?.nativePreviewHostKind, EVIDENCE_HOSTS),
+    hostAttached:
+      typeof measurement.status?.nativePreviewHostAttached === 'boolean'
+        ? measurement.status.nativePreviewHostAttached
+        : null,
+    sourcePixelsPresent:
+      typeof measurement.status?.sourcePixelsPresent === 'boolean'
+        ? measurement.status.sourcePixelsPresent
+        : null
+  }
+  return projected
+}
+
+function evidenceNumber(value) {
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= 0 &&
+    value <= Number.MAX_SAFE_INTEGER
+    ? value
+    : null
+}
+
+function evidenceInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null
+}
+
+function evidenceId(value) {
+  return typeof value === 'string' && /^[a-zA-Z0-9:_-]{1,128}$/.test(value) ? value : null
+}
+
+function evidenceDate(value) {
+  return typeof value === 'string' && value.length <= 64 ? evidenceNumber(Date.parse(value)) : null
+}
+
+function evidenceEnum(value, allowed) {
+  return allowed.includes(value) ? value : null
+}
+
+function before(left, right) {
+  return evidenceNumber(left) !== null && evidenceNumber(right) !== null ? left < right : null
+}
+
+/** Gate checks run on original values; only this reduced transition reaches disk. */
+export function previewSceneTransitionEvidence(transition, expectedKinds = []) {
+  const selected = transition?.selected ?? {}
+  const surface = transition?.surface ?? {}
+  const scene = transition?.scene ?? {}
+  const compositor = transition?.compositor ?? {}
+  const nativeStatus = transition?.nativeStatus ?? {}
+  const sources = Array.isArray(scene.sources) ? scene.sources : []
+  const kinds = ['camera', 'screen', 'window', 'test-pattern', 'background', 'image', 'text']
+  const collection = (values, project, limit = 128) => {
+    const list = Array.isArray(values) ? values : []
+    return { values: list.slice(0, limit).map(project), omitted: Math.max(0, list.length - limit) }
+  }
+  return {
+    preset: evidenceLayout(transition?.preset),
+    selected: {
+      preset: evidenceLayout(selected.preset),
+      pressed: evidenceBoolean(selected.pressed),
+      disabled: evidenceBoolean(selected.disabled),
+      timeline: collection(selected.timeline, intentRowEvidence, 64)
+    },
+    expectedKinds: collection(expectedKinds, (kind) => evidenceEnum(kind, kinds)),
+    observedKinds: collection(sources.map((source) => source.kind).sort(), (kind) =>
+      evidenceEnum(kind, kinds)
+    ),
+    sourceVisibility: collection(sources, (source) => ({
+      id: evidenceId(source.id),
+      kind: evidenceEnum(source.kind, kinds),
+      visible: evidenceBoolean(source.visible)
+    })),
+    visibleSceneIds: collection(
+      sources
+        .filter((source) => source.visible !== false)
+        .map((source) => source.id)
+        .sort(),
+      evidenceId
+    ),
+    visibleSurfaceIds: collection(surface.visibleSourceIds, evidenceId),
+    surfaceLayout: evidenceLayout(surface.layoutPreset),
+    compositorLayout: evidenceLayout(compositor.sceneLayout?.layoutPreset),
+    surfaceRevision: evidenceInteger(surface.sceneRevision),
+    sceneRevision: evidenceInteger(scene.revision),
+    compositorSceneRevision: evidenceInteger(compositor.sceneRevision),
+    frameSceneRevision: evidenceInteger(compositor.frameSceneRevision),
+    compositorFrameId: evidenceInteger(compositor.framesRendered),
+    compositorRunId: evidenceId(compositor.runId),
+    native: previewInteractionPhaseEvidence({ samples: [{ status: nativeStatus }] }).samples[0],
+    // Preserve every original contract failure; they are generated by named checks.
+    failures: transition?.failures ?? []
+  }
+}
+
+function intentRowEvidence(row) {
+  return {
+    at: evidenceNumber(row?.at),
+    preset: evidenceLayout(row?.preset),
+    phase: evidenceEnum(row?.phase, ['before', 'after', 'committed']),
+    disabled: evidenceBoolean(row?.disabled),
+    selected: {
+      cameraId: evidenceId(row?.selected?.cameraId),
+      screenId: evidenceId(row?.selected?.screenId),
+      windowId: evidenceId(row?.selected?.windowId),
+      cameraOff: evidenceBoolean(row?.selected?.cameraOff),
+      testPattern: evidenceBoolean(row?.selected?.testPattern)
+    },
+    availability: Object.fromEntries(
+      ['camera', 'screen', 'window'].map((role) => [
+        role,
+        evidenceEnum(row?.availability?.[role], ['available', 'unavailable', 'permission-required'])
+      ])
+    ),
+    currentLayout: evidenceLayout(row?.currentLayout),
+    pendingLayout: evidenceLayout(row?.pendingLayout),
+    intentId: evidenceInteger(row?.intentId),
+    awaitingProof: evidenceInteger(row?.awaitingProof),
+    confirmedSceneRevision: evidenceInteger(row?.confirmedSceneRevision),
+    backendSceneRevision: evidenceInteger(row?.backendSceneRevision),
+    sourceRevision: evidenceInteger(row?.sourceRevision),
+    sceneGesturePending: evidenceBoolean(row?.sceneGesturePending),
+    sceneTransformPending: evidenceBoolean(row?.sceneTransformPending),
+    recording: evidenceEnum(row?.recording, [
+      'idle',
+      'starting',
+      'recording',
+      'streaming',
+      'stopping',
+      'failed'
+    ])
+  }
+}
+
+function evidenceLayout(value) {
+  return evidenceEnum(value, [
+    'camera-only',
+    'screen-only',
+    'side-by-side',
+    'screen-camera',
+    'freeform'
+  ])
+}
+
+function evidenceBoolean(value) {
+  return typeof value === 'boolean' ? value : null
+}
+
 export function pixelOracleCaptureSize(
   width,
   height,

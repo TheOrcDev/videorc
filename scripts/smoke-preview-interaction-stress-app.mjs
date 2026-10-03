@@ -18,7 +18,12 @@ import {
   analyzeNativeStatusSamples,
   cgOraclePreviewReady,
   effectivePresentFpsFloor,
-  layoutIntentDiagnostic
+  layoutIntentDiagnostic,
+  previewInteractionPhaseEvidence,
+  previewMeasurementEvidence,
+  previewSceneTransitionEvidence,
+  previewCgWindowEvidence,
+  PREVIEW_TIMELINE_LIMITS
 } from './lib/preview-interaction-stress.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -270,7 +275,10 @@ async function runRapidScenePhase({ smoke, ws, oracle }) {
       smoke,
       ws
     })
-    transitions.push({ round: 0, ...transition })
+    transitions.push({
+      round: 0,
+      ...previewSceneTransitionEvidence(transition, expectedKindsForPreset(preset))
+    })
     failures.push(...transition.failures)
   } catch (error) {
     failures.push(`overlapping latest-intent burst failed: ${error?.message ?? error}`)
@@ -291,7 +299,10 @@ async function runRapidScenePhase({ smoke, ws, oracle }) {
           smoke,
           ws
         })
-        transitions.push({ round, ...transition })
+        transitions.push({
+          round,
+          ...previewSceneTransitionEvidence(transition, expectedKindsForPreset(preset))
+        })
         failures.push(...transition.failures)
       } catch (error) {
         failures.push(`${label} command failed: ${error?.message ?? error}`)
@@ -317,6 +328,7 @@ async function runRapidScenePhase({ smoke, ws, oracle }) {
     transitions,
     continuity,
     cgWindow,
+    evidence: previewInteractionPhaseEvidence({ startedAt, finishedAt, samples }),
     failures: unique(failures)
   }
 }
@@ -573,9 +585,10 @@ async function runMovementPhase({
   failures.push(...requestFailureMessages(`${label} steady`, steady))
   failures.push(...requestFailureMessages(`${label} burst`, burst))
 
+  let clickFocus = null
   if (interleaveClickFocus) {
     try {
-      const clickFocus = await clickFocusPromise
+      clickFocus = await clickFocusPromise
       if (!clickFocus?.previewClicked || !clickFocus?.surfaceClicked) {
         failures.push(`${label} did not deliver both preview and native-surface clicks`)
       }
@@ -610,9 +623,17 @@ async function runMovementPhase({
     finishedAt,
     command,
     movement,
-    measurement,
+    measurement: previewMeasurementEvidence(measurement),
     continuity,
     cgWindow,
+    evidence: previewInteractionPhaseEvidence({
+      startedAt,
+      finishedAt,
+      measurement,
+      samples,
+      boundsResults: [steady[0]?.value, burst[0]?.value],
+      clickFocus
+    }),
     failures: unique(failures)
   }
 }
@@ -1451,7 +1472,19 @@ function writeEvidence() {
     if (oracle?.samples) {
       writeFileSync(
         join(outputDirectory, 'cg-window-samples.jsonl'),
-        oracle.samples.map((sample) => JSON.stringify(sample)).join('\n')
+        [
+          JSON.stringify({
+            sampleCount: oracle.samples.length,
+            omittedSamples: Math.max(
+              0,
+              oracle.samples.length - PREVIEW_TIMELINE_LIMITS.oracleSamples
+            ),
+            limits: PREVIEW_TIMELINE_LIMITS
+          }),
+          ...oracle.samples
+            .slice(-PREVIEW_TIMELINE_LIMITS.oracleSamples)
+            .map((sample) => JSON.stringify(previewCgWindowEvidence(sample, smoke?.appPid)))
+        ].join('\n')
       )
     }
   } catch {

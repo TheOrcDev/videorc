@@ -1963,6 +1963,19 @@ export interface PreviewSurfaceCompositorUpdateParams extends CompositorStatus {
   nativePreviewMainLastSkippedFrameSceneRevision?: number
 }
 
+/** Electron-only evidence from one successful native present; never a later status refresh. */
+export interface NativePreviewPresentationEvidence {
+  frameId: number
+  runId?: string
+  sceneRevision?: number
+  frameAgeMs?: number
+  compositorUpdatedAt?: string
+  presentedAtMs: number
+  presentStartedMonotonicMs: number
+  presentCompletedMonotonicMs: number
+  inputToPresentLatencyMs?: number
+}
+
 export interface PreviewSurfaceStatus {
   /** IPC-only ownership acknowledgement for renderer compositor presents. */
   compositorUpdateAccepted?: boolean
@@ -2038,6 +2051,7 @@ export interface PreviewSurfaceStatus {
   nativePreviewContentsScale?: number
   nativePreviewPresentedSceneRevision?: number
   nativePreviewCompositorRunId?: string
+  nativePreviewPresentationEvidence?: NativePreviewPresentationEvidence
   framePollingSuppressed: boolean
   sourcePixelsPresent: boolean
   pendingHostCommandCount: number

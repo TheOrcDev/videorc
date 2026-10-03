@@ -18,6 +18,91 @@ const bounds = (overrides: Partial<PreviewSurfaceBounds> = {}): PreviewSurfaceBo
 })
 
 describe('native preview in-process driver', () => {
+  it('retains the successful request timing rather than a later compositor sample', async () => {
+    let nowMs = 1_000
+    const binding: NativePreviewInProcessBinding = {
+      attach: () => undefined,
+      update: () => undefined,
+      present: () => ({ presented: true }),
+      destroy: () => undefined,
+      attached: () => true,
+      metrics: () => emptyMetrics()
+    }
+    const driver = createNativePreviewInProcessDriver({
+      binding,
+      getNativeWindowHandle: () => Buffer.from('0100000000000000', 'hex'),
+      nowMs: () => nowMs
+    })
+    await driver.applyHostCommands([{ kind: 'create', bounds: bounds() }])
+    const request = {
+      handoff: { iosurfaceId: 9, width: 1920, height: 1080, frameId: 36, runId: 'run-a' },
+      bounds: bounds(),
+      scene: null,
+      suppressFramePolling: false,
+      frameAgeMs: 97,
+      frameSceneRevision: 9,
+      compositorUpdatedAt: new Date(983).toISOString()
+    }
+    const status = await driver.presentCompositorHandoff(request)
+    expect(status?.inputToPresentLatencyMs).toBe(114)
+    expect(status).toMatchObject({
+      nativePreviewPresentationEvidence: {
+        frameId: 36,
+        runId: 'run-a',
+        sceneRevision: 9,
+        frameAgeMs: 97,
+        compositorUpdatedAt: request.compositorUpdatedAt,
+        presentedAtMs: 1_000,
+        inputToPresentLatencyMs: 114
+      }
+    })
+    nowMs = 2_000
+    await expect(
+      driver.presentCompositorHandoff({
+        ...request,
+        handoff: { ...request.handoff, frameId: 35 },
+        frameAgeMs: 1,
+        compositorUpdatedAt: new Date(1_999).toISOString()
+      })
+    ).resolves.toMatchObject({
+      nativePreviewPresentationEvidence: {
+        frameId: 36,
+        frameAgeMs: 97,
+        presentedAtMs: 1_000,
+        inputToPresentLatencyMs: 114
+      }
+    })
+    await expect(
+      driver.presentCompositorHandoff({
+        ...request,
+        bounds: bounds({ visible: false }),
+        frameAgeMs: 1
+      })
+    ).resolves.toMatchObject({
+      nativePreviewPresentationEvidence: { frameId: 36, sceneRevision: 9, presentedAtMs: 1_000 }
+    })
+    driver.resetMetrics?.()
+    await expect(
+      driver.presentCompositorHandoff({
+        ...request,
+        handoff: { ...request.handoff, frameId: 1, runId: 'run-b' },
+        frameSceneRevision: 10,
+        frameAgeMs: 1,
+        compositorUpdatedAt: new Date(1_999).toISOString()
+      })
+    ).resolves.toMatchObject({
+      inputToPresentLatencyP95Ms: 2,
+      nativePreviewPresentationEvidence: {
+        frameId: 1,
+        runId: 'run-b',
+        sceneRevision: 10,
+        presentedAtMs: 2_000,
+        frameAgeMs: 1,
+        inputToPresentLatencyMs: 2
+      }
+    })
+  })
+
   it('attaches once and ignores position-only window movement', async () => {
     const calls: Array<{ method: string; args: unknown[] }> = []
     const binding: NativePreviewInProcessBinding = {
