@@ -3712,7 +3712,27 @@ export interface CommentsViewSnapshot {
 export interface CommentsHistoryStats {
   viewers: ViewerSample[]
   audience: AudienceSnapshot | null
+  chatTotals?: SessionChatTotals | null
 }
+
+/** Whole-session accounting from SQLite, independent of retained chat rows.
+ * Legacy rows lack complete gift/correction ownership and are never backfilled
+ * by guessing. The unavailable variant deliberately has no numeric totals. */
+export type SessionChatTotals =
+  | {
+      status: 'available'
+      sessionId: string
+      revision: number
+      messageCount: number
+      chatters: number
+      platforms: StreamPlatform[]
+      follows: number
+      supporters: number
+      bits: number
+      tips: { currency: string; amountMicros: number }[]
+      raids: number
+    }
+  | { status: 'legacy-unavailable'; sessionId: string }
 
 // Detached preview window: main is the lifecycle and bounds authority; renderer
 // surface requests must carry this generation so stale effects cannot mutate the

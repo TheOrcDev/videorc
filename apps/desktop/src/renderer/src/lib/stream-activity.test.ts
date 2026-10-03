@@ -250,6 +250,17 @@ describe('stream activity', () => {
     expect(activityItems([fixtures.communitySingle])).toHaveLength(1)
   })
 
+  it('needs retained parent ownership to exclude its children after deletion', () => {
+    const deletedParent = { ...fixtures.community, isDeleted: true }
+    expect(activityTotals([deletedParent, fixtures.communitySingle]).supporters).toBe(0)
+    // The production tombstone replaces details. These historical rows no
+    // longer prove whether this child belongs to that deleted parent.
+    expect(
+      activityTotals([{ ...deletedParent, details: undefined }, fixtures.communitySingle])
+        .supporters
+    ).toBe(1)
+  })
+
   it('totals supporters, bits and tips per currency', () => {
     const totals = activityTotals(all)
     // resub 1 + prime 1 + community 5 + anonymous gift 1 + upgrade 1 +
@@ -473,4 +484,15 @@ describe('stream activity', () => {
     const [legacy] = activityItems([fixtures.follow])
     expect(thankYouDraft(legacy)).toBe('Thanks for the follow, @Cool_User!')
   })
+})
+
+it('retains a currency for active zero-amount tips and removes it only when its last tip is deleted', () => {
+  const zero = row('youtube', 'Zero tipper', 'paid', {
+    kind: 'super-chat',
+    currency: 'USD',
+    amountMicros: 0,
+    amountDisplay: '$0'
+  })
+  expect(activityTotals([zero]).tips).toEqual([{ currency: 'USD', amountMicros: 0 }])
+  expect(activityTotals([{ ...zero, isDeleted: true }]).tips).toEqual([])
 })

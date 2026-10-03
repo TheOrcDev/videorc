@@ -4947,6 +4947,7 @@ fn websocket_event_is_coalescible(event: &str) -> bool {
             | "preview.live.status"
             | "stream.health"
             | "stream.viewers"
+            | "liveChat.totals"
             | "audio.levels"
     )
 }
@@ -5475,6 +5476,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "sessions.delete.pending"
         | "sessions.storage"
         | "sessions.comments.list"
+        | "sessions.comments.totals"
         | "sessions.viewers.list"
         | "sessions.audience.get"
         | "stream.audience.snapshot"
@@ -10547,6 +10549,21 @@ async fn handle_text_message_with_role(
                 ServerResponse::error(command.id, "sessions-storage-failed", error.to_string())
             }
         },
+        "sessions.comments.totals" => {
+            match serde_json::from_value::<storage::SessionChatTotalsParams>(command.params) {
+                Ok(params) => match state.database.session_chat_totals(&params.session_id) {
+                    Ok(totals) => ServerResponse::ok(command.id, totals),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "session-chat-totals-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "sessions.comments.list" => {
             match serde_json::from_value::<protocol::SessionCommentsListParams>(command.params) {
                 Ok(params) => match state.database.list_live_chat_messages_page(
@@ -13866,6 +13883,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_chat_totals_telemetry_is_bounded_latest_wins_and_desktop_only() {
+        for role in [BackendRole::Renderer, BackendRole::Admin] {
+            assert_eq!(
+                authorize_backend_method(role, "sessions.comments.totals", false),
+                Ok(())
+            );
+        }
+        assert_eq!(
+            authorize_backend_method(BackendRole::Remote, "sessions.comments.totals", false),
+            Err(backend_authority::MethodAdmissionError::AdminOnly)
+        );
+        assert!(!crate::remote_lan::LAN_EVENTS.contains(&"liveChat.totals"));
+        let telemetry = CoalescingEventBuffer::new(2);
+        for revision in 0..10_000 {
+            telemetry.push(ServerEvent::new(
+                "liveChat.totals",
+                json!({"sessionId":"current", "revision":revision}),
+            ));
+        }
+        assert_eq!(telemetry.stats(), (1, 9_999, 0));
+        let latest = telemetry.recv().await;
+        assert_eq!(latest.event, "liveChat.totals");
+        assert_eq!(latest.payload["revision"], 9_999);
+    }
+
+    #[tokio::test]
     async fn websocket_telemetry_buffer_is_capacity_bounded_and_latest_wins() {
         let transport = WebSocketTransportMetrics::default();
         let connection = transport.register_connection();
@@ -14069,6 +14112,7 @@ mod tests {
         assert!(websocket_event_is_coalescible("preview.frameReady"));
         assert!(websocket_event_is_coalescible("compositor.status"));
         assert!(websocket_event_is_coalescible("preview.surface.status"));
+        assert!(websocket_event_is_coalescible("liveChat.totals"));
         assert!(!websocket_event_is_coalescible("liveChat.message"));
         assert!(!websocket_event_is_coalescible("liveChat.snapshot"));
         assert!(!websocket_event_is_coalescible("liveChat.providerStatus"));
@@ -14092,6 +14136,7 @@ mod tests {
             "liveChat.status",
             "liveChat.sendOperations.list",
             "liveChat.sendOperations.latest",
+            "sessions.comments.totals",
             "screens.list",
             "recording.status",
             "capture.recovery.status",
@@ -17749,6 +17794,38 @@ mod tests {
         let error = response.error.expect("idle snapshot error");
         assert_eq!(error.code, "stream-targets-unavailable");
         assert!(error.message.contains("No active capture session"));
+    }
+
+    #[tokio::test]
+    async fn session_chat_totals_rpc_returns_zero_and_rejects_unbounded_or_foreign_parameters() {
+        let state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session("rpc-totals")
+            .unwrap();
+        let response = handle_text_message(&state,
+            r#"{"id":"totals","method":"sessions.comments.totals","params":{"sessionId":"rpc-totals"}}"#).await;
+        assert!(response.ok);
+        assert_eq!(
+            response.payload.unwrap(),
+            serde_json::to_value(storage::SessionChatTotals::empty("rpc-totals")).unwrap()
+        );
+        for params in [
+            json!({}),
+            json!({"sessionId": ""}),
+            json!({"sessionId": "rpc-totals", "messages": []}),
+            json!({"sessionId": "s".repeat(4097)}),
+        ] {
+            let response = handle_text_message(
+                &state,
+                &json!({"id":"bad-totals","method":"sessions.comments.totals","params":params})
+                    .to_string(),
+            )
+            .await;
+            assert!(!response.ok);
+            assert_eq!(response.error.unwrap().code, "invalid-params");
+        }
+        assert!(!crate::remote_lan::LAN_EVENTS.contains(&"liveChat.totals"));
     }
 
     #[tokio::test]

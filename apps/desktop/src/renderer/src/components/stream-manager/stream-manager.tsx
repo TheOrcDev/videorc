@@ -475,6 +475,7 @@ export function StreamManager({
   const stats = useMemo(
     () =>
       statItems({
+        sessionId: viewMode?.kind === 'history' ? viewMode.sessionId : (snapshot.sessionId ?? null),
         dashboard: inHistory ? null : dashboard,
         viewerSample: inHistory ? null : viewerSample,
         messages,
@@ -490,7 +491,17 @@ export function StreamManager({
             }
           : {})
       }),
-    [dashboard, history, inHistory, messages, nowMs, snapshot.providers, viewMode, viewerSample]
+    [
+      dashboard,
+      history,
+      inHistory,
+      messages,
+      nowMs,
+      snapshot.providers,
+      snapshot.sessionId,
+      viewMode,
+      viewerSample
+    ]
   )
 
   // The streamer's own order and picks for the stats bar (plan 057, D2).

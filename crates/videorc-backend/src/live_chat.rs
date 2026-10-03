@@ -2972,6 +2972,7 @@ pub(crate) async fn try_deliver_messages(
     }
     let messages = mark_first_time_chatters(state, messages).await;
     let messages = decorate_seventv_emotes(state, messages).await;
+    let coordinator_inputs = messages.clone();
     let _delivery = state.live_chat_persistence.begin_delivery().await;
     let (delivery_generation, delivery_session_id, undos, authoritative_messages) = {
         // Coordinator ingest can turn an eligible message into a tombstone.
@@ -3001,6 +3002,25 @@ pub(crate) async fn try_deliver_messages(
         let mut undos = Vec::with_capacity(messages.len());
         let mut authoritative_messages = Vec::with_capacity(messages.len());
         for message in messages {
+            // Ordinary retained duplicates never reach SQLite. Validate their
+            // immutable owner before that fast path can hide a conflicting ID.
+            // Only the bounded retained buffer is inspected; no lifetime set.
+            if coordinator.seen.contains(&message.id)
+                && coordinator.messages.iter().any(|existing| {
+                    existing.id == message.id
+                        && (existing.session_id != message.session_id
+                            || existing.platform != message.platform
+                            || existing.target_id != message.target_id
+                            || existing.provider_message_id != message.provider_message_id)
+                })
+            {
+                for undo in undos.into_iter().rev() {
+                    coordinator.rollback_ingest(undo);
+                }
+                return Err(LiveChatPersistenceFailure::terminal(
+                    "Live-chat message identity conflicts with its retained owner.",
+                ));
+            }
             let ingested = coordinator.ingest_reversible(message);
             match ingested.outcome {
                 IngestOutcome::New(message) | IngestOutcome::Updated(message) => {
@@ -3020,25 +3040,49 @@ pub(crate) async fn try_deliver_messages(
     if authoritative_messages.is_empty() {
         return Ok(());
     }
-    if let Err(error) = state
+    let persisted_messages = match state
         .live_chat_persistence
         .persist_batch(authoritative_messages.clone())
         .await
     {
-        let _highlight_commit = state.comment_highlight_commit.lock().await;
-        let mut coordinator = state.live_chat.lock().await;
-        for undo in undos.into_iter().rev() {
-            coordinator.rollback_ingest(undo);
-        }
-        drop(coordinator);
-        state.emit_log(
+        Ok(messages) => messages,
+        Err(error) => {
+            let _highlight_commit = state.comment_highlight_commit.lock().await;
+            let mut coordinator = state.live_chat.lock().await;
+            for undo in undos.into_iter().rev() {
+                coordinator.rollback_ingest(undo);
+            }
+            drop(coordinator);
+            state.emit_log(
             "warn",
             format!(
                 "Could not persist {} live chat message(s); exact-message retry remains eligible: {error}",
                 authoritative_messages.len()
             ),
         );
-        return Err(error);
+            return Err(error);
+        }
+    };
+    if persisted_messages.len() != authoritative_messages.len()
+        || persisted_messages
+            .iter()
+            .zip(&authoritative_messages)
+            .any(|(persisted, admitted)| {
+                persisted.id != admitted.id
+                    || persisted.session_id != admitted.session_id
+                    || persisted.platform != admitted.platform
+                    || persisted.target_id != admitted.target_id
+                    || persisted.provider_message_id != admitted.provider_message_id
+            })
+    {
+        let _highlight_commit = state.comment_highlight_commit.lock().await;
+        let mut coordinator = state.live_chat.lock().await;
+        for undo in undos.into_iter().rev() {
+            coordinator.rollback_ingest(undo);
+        }
+        return Err(LiveChatPersistenceFailure::terminal(
+            "Live-chat persistence returned a mismatched delivery owner.",
+        ));
     }
     let _highlight_commit = state.comment_highlight_commit.lock().await;
     let delivery_still_current = {
@@ -3055,6 +3099,31 @@ pub(crate) async fn try_deliver_messages(
             "Live-chat delivery completed after its session was replaced.",
         ));
     }
+    let replayed_tombstones: HashSet<_> = persisted_messages
+        .iter()
+        .zip(&authoritative_messages)
+        .filter(|(persisted, admitted)| persisted.is_deleted && !admitted.is_deleted)
+        .map(|(persisted, _)| persisted.id.as_str())
+        .collect();
+    if !replayed_tombstones.is_empty() {
+        // Restore compact batch undo records, then replay only real admissions.
+        // A stored deletion encountered after clear/eviction is not new chat:
+        // it must not alter unread, receive/trim counters or cohost publication.
+        let mut coordinator = state.live_chat.lock().await;
+        for undo in undos.into_iter().rev() {
+            coordinator.rollback_ingest(undo);
+        }
+        for message in coordinator_inputs {
+            if !replayed_tombstones.contains(message.id.as_str()) {
+                coordinator.ingest(message);
+            }
+        }
+    }
+    let authoritative_messages: Vec<_> = persisted_messages
+        .iter()
+        .filter(|message| !replayed_tombstones.contains(message.id.as_str()))
+        .cloned()
+        .collect();
     for message in &authoritative_messages {
         if message.is_deleted {
             crate::comment_highlight::clear_comment_highlight_for_message_under_commit_fence(
@@ -3065,6 +3134,11 @@ pub(crate) async fn try_deliver_messages(
             .await;
         }
         state.emit_event("liveChat.message", message);
+    }
+    // A confirmed persisted snapshot, independent of the bounded paint buffer
+    // and unread owner. Reconnect/lag readers hydrate it through the totals RPC.
+    if let Ok(Some(totals)) = state.database.session_chat_totals(&delivery_session_id) {
+        state.emit_event("liveChat.totals", totals);
     }
     drop(_highlight_commit);
     crate::cohost::note_messages_under_lifecycle_fence(state, &_delivery, &authoritative_messages)
@@ -4071,6 +4145,463 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persisted_parent_deletion_loses_legacy_gift_group_metadata() {
+        let state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session("gift-session")
+            .unwrap();
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("gift-session".to_string(), Vec::new());
+        let gift = |sequence, subscription, gift_count| {
+            let mut row = fake_message(
+                "gift-session",
+                StreamPlatform::Twitch,
+                Some("channel"),
+                sequence,
+            );
+            row.event_type = LiveChatEventType::Membership;
+            row.details = Some(LiveChatEventDetails::Subscription {
+                subscription,
+                tier: None,
+                is_prime: false,
+                months: None,
+                streak_months: None,
+                gift_count: Some(gift_count),
+                recipient_name: None,
+                community_gift_id: Some("gift-group".to_string()),
+            });
+            row
+        };
+        let parent = gift(1, SubscriptionKind::CommunitySubGift, 5);
+        let child = gift(2, SubscriptionKind::SubGift, 1);
+        assert!(deliver_message(&state, parent.clone()).await);
+        assert!(deliver_message(&state, child.clone()).await);
+        let mut tombstone = deletion_for(parent.clone(), "2026-07-10T12:00:10Z");
+        tombstone.details = None;
+        assert!(deliver_message(&state, tombstone).await);
+        let persisted = state
+            .database
+            .list_live_chat_messages("gift-session")
+            .unwrap();
+        let deleted_parent = persisted.iter().find(|row| row.id == parent.id).unwrap();
+        assert!(deleted_parent.is_deleted);
+        assert_eq!(
+            deleted_parent.details, None,
+            "legacy persistence cannot recover this parent's gift-group ownership"
+        );
+        assert_eq!(
+            persisted
+                .iter()
+                .find(|row| row.id == child.id)
+                .unwrap()
+                .details,
+            child.details
+        );
+        assert_eq!(
+            state
+                .live_chat
+                .lock()
+                .await
+                .messages
+                .iter()
+                .find(|row| row.id == parent.id)
+                .unwrap()
+                .details,
+            None
+        );
+        assert!(matches!(
+            state.database.session_chat_totals("gift-session").unwrap(),
+            Some(crate::storage::SessionChatTotals::Available { supporters: 0, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn durable_chat_totals_cover_delivery_rollover_local_clear_and_duplicates() {
+        let state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session("durable-session")
+            .unwrap();
+        let generation = {
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.start_session("durable-session".to_string(), Vec::new());
+            coordinator.session_generation()
+        };
+        let mut sub = fake_message("durable-session", StreamPlatform::Twitch, None, 0);
+        sub.event_type = LiveChatEventType::Membership;
+        sub.details = Some(LiveChatEventDetails::Subscription {
+            subscription: SubscriptionKind::Sub,
+            tier: None,
+            is_prime: false,
+            months: None,
+            streak_months: None,
+            gift_count: None,
+            recipient_name: None,
+            community_gift_id: None,
+        });
+        let mut tip = fake_message("durable-session", StreamPlatform::Youtube, None, 1);
+        tip.event_type = LiveChatEventType::Paid;
+        tip.details = Some(LiveChatEventDetails::SuperChat {
+            amount_micros: 20_000_000,
+            currency: "USD".to_string(),
+            amount_display: "$20".to_string(),
+            tier: None,
+        });
+        try_deliver_messages(&state, generation, vec![sub.clone(), tip])
+            .await
+            .unwrap();
+        for start in (2..6002).step_by(100) {
+            try_deliver_messages(
+                &state,
+                generation,
+                (start..start + 100)
+                    .map(|sequence| {
+                        fake_message("durable-session", StreamPlatform::X, None, sequence)
+                    })
+                    .collect(),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            state.live_chat.lock().await.messages.len(),
+            DEFAULT_MAX_CHAT_MESSAGES
+        );
+        let totals = state
+            .database
+            .session_chat_totals("durable-session")
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(&totals, crate::storage::SessionChatTotals::Available { message_count: 6002, supporters: 1, tips, .. } if tips[0].amount_micros == 20_000_000)
+        );
+        let cleared = clear_local_live_chat(&state).await;
+        assert!(cleared.messages.is_empty());
+        assert_eq!(cleared.unread_count, 0);
+        assert_eq!(
+            state
+                .database
+                .session_chat_totals("durable-session")
+                .unwrap(),
+            Some(totals.clone())
+        );
+        assert!(deliver_message(&state, sub).await);
+        assert_eq!(
+            state
+                .database
+                .session_chat_totals("durable-session")
+                .unwrap(),
+            Some(totals)
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_tombstone_replays_do_not_reenter_live_delivery_after_clear_or_eviction() {
+        for retirement in ["clear", "eviction"] {
+            let state = test_state();
+            state
+                .database
+                .ensure_fake_live_chat_session("replay-session")
+                .unwrap();
+            {
+                let mut coordinator = state.live_chat.lock().await;
+                *coordinator = LiveChatCoordinator::new(2);
+                coordinator.start_session("replay-session".to_string(), Vec::new());
+            }
+            let original = fake_message("replay-session", StreamPlatform::Twitch, None, 0);
+            assert!(deliver_message(&state, original.clone()).await);
+            assert!(
+                deliver_message(
+                    &state,
+                    deletion_for(original.clone(), "2026-07-10T12:00:10Z")
+                )
+                .await
+            );
+            if retirement == "clear" {
+                clear_local_live_chat(&state).await;
+            } else {
+                for sequence in 1..3 {
+                    assert!(
+                        deliver_message(
+                            &state,
+                            fake_message("replay-session", StreamPlatform::Twitch, None, sequence)
+                        )
+                        .await
+                    );
+                }
+            }
+            let before = state.live_chat.lock().await.diagnostics();
+            let mut events = state.events.subscribe();
+            let fresh = fake_message("replay-session", StreamPlatform::Twitch, None, 3);
+            let generation = state.live_chat.lock().await.session_generation();
+            try_deliver_messages(&state, generation, vec![original.clone(), fresh.clone()])
+                .await
+                .unwrap();
+            let coordinator = state.live_chat.lock().await;
+            assert!(!coordinator.messages.iter().any(|row| row.id == original.id));
+            assert_eq!(coordinator.messages_received, before.messages_received + 1);
+            assert_eq!(
+                coordinator.trimmed_count,
+                before.messages_trimmed + u64::from(retirement == "eviction")
+            );
+            assert_eq!(
+                coordinator.unread_count,
+                if retirement == "clear" { 1 } else { 4 }
+            );
+            let mut admitted_ids = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                if event.event == "liveChat.message" {
+                    admitted_ids.push(event.payload["id"].as_str().unwrap().to_string());
+                }
+            }
+            assert_eq!(admitted_ids, vec![fresh.id]);
+        }
+    }
+
+    #[tokio::test]
+    async fn conflicting_persisted_identity_rolls_back_live_batch_and_totals_without_publication() {
+        let state = test_state();
+        for session in ["prior", "current"] {
+            state
+                .database
+                .ensure_fake_live_chat_session(session)
+                .unwrap();
+        }
+        let prior = fake_message("prior", StreamPlatform::Twitch, None, 0);
+        state.database.save_live_chat_message(&prior).unwrap();
+        let before = state.database.session_chat_totals("prior").unwrap();
+        let generation = {
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.start_session("current".to_string(), Vec::new());
+            coordinator.session_generation()
+        };
+        let mut conflict = fake_message("current", StreamPlatform::Twitch, None, 0);
+        conflict.id = prior.id;
+        let mut events = state.events.subscribe();
+        let result = try_deliver_messages(
+            &state,
+            generation,
+            vec![
+                fake_message("current", StreamPlatform::Twitch, None, 1),
+                conflict,
+            ],
+        )
+        .await;
+        assert!(result.unwrap_err().is_terminal());
+        let coordinator = state.live_chat.lock().await;
+        assert!(coordinator.messages.is_empty());
+        assert!(coordinator.seen.is_empty());
+        assert_eq!(
+            (
+                coordinator.unread_count,
+                coordinator.messages_received,
+                coordinator.trimmed_count
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(state.database.session_chat_totals("prior").unwrap(), before);
+        assert_eq!(
+            state.database.session_chat_totals("current").unwrap(),
+            Some(crate::storage::SessionChatTotals::empty("current"))
+        );
+        while let Ok(event) = events.try_recv() {
+            assert!(!matches!(
+                event.event.as_str(),
+                "liveChat.message" | "liveChat.totals"
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn session_chat_totals_match_normalized_fake_activity_rules() {
+        let state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session("all-activity")
+            .unwrap();
+        let generation = {
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.start_session("all-activity".to_string(), Vec::new());
+            coordinator.session_generation()
+        };
+        let mut messages = Vec::new();
+        for platform in [
+            StreamPlatform::Twitch,
+            StreamPlatform::Youtube,
+            StreamPlatform::Kick,
+        ] {
+            messages.push(fake_message("all-activity", platform, None, 0));
+            messages.extend(fake_events("all-activity", platform, None));
+        }
+        try_deliver_messages(&state, generation, messages)
+            .await
+            .unwrap();
+        let value = serde_json::to_value(
+            state
+                .database
+                .session_chat_totals("all-activity")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["messageCount"], 13);
+        assert_eq!(value["chatters"], 7);
+        assert_eq!(value["supporters"], 7);
+        assert_eq!(value["follows"], 2);
+        assert_eq!(value["raids"], 1);
+        assert_eq!(value["bits"], 1500);
+        assert_eq!(
+            value["tips"],
+            serde_json::json!([{ "currency":"USD", "amountMicros":5_000_000 }, { "currency":"EUR", "amountMicros":2_000_000 }])
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_identity_conflict_refuses_fresh_prefix_without_changing_duplicate_accounting()
+    {
+        let state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session("retained-owner")
+            .unwrap();
+        let generation = {
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.start_session("retained-owner".to_string(), Vec::new());
+            coordinator.session_generation()
+        };
+        let original = fake_message("retained-owner", StreamPlatform::Twitch, Some("target"), 0);
+        try_deliver_messages(&state, generation, vec![original.clone()])
+            .await
+            .unwrap();
+        // Admission owns first-message decoration. Compare to the confirmed
+        // retained row, including that decoration, rather than the raw input.
+        let confirmed = state
+            .live_chat
+            .lock()
+            .await
+            .messages
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for field in ["platform", "target", "provider"] {
+            let mut conflict = original.clone();
+            match field {
+                "platform" => conflict.platform = StreamPlatform::Youtube,
+                "target" => conflict.target_id = Some("another-target".to_string()),
+                "provider" => conflict.provider_message_id = "another-provider-id".to_string(),
+                _ => unreachable!(),
+            }
+            let before = state.live_chat.lock().await.diagnostics();
+            let totals = state
+                .database
+                .session_chat_totals("retained-owner")
+                .unwrap();
+            let mut events = state.events.subscribe();
+            let fresh = fake_message("retained-owner", StreamPlatform::Twitch, Some("target"), 1);
+            let result = try_deliver_messages(&state, generation, vec![fresh, conflict]).await;
+            assert!(
+                result.is_err(),
+                "retained {field} conflicts must refuse the entire batch"
+            );
+            assert!(result.unwrap_err().is_terminal());
+            let coordinator = state.live_chat.lock().await;
+            assert_eq!(
+                coordinator.messages.iter().cloned().collect::<Vec<_>>(),
+                confirmed
+            );
+            assert_eq!(
+                serde_json::to_value(coordinator.diagnostics()).unwrap(),
+                serde_json::to_value(before).unwrap()
+            );
+            assert_eq!(
+                state
+                    .database
+                    .session_chat_totals("retained-owner")
+                    .unwrap(),
+                totals
+            );
+            while let Ok(event) = events.try_recv() {
+                assert!(!matches!(
+                    event.event.as_str(),
+                    "liveChat.message" | "liveChat.totals"
+                ));
+            }
+        }
+        let duplicates = state.live_chat.lock().await.duplicates_skipped;
+        try_deliver_messages(&state, generation, vec![original])
+            .await
+            .unwrap();
+        assert_eq!(
+            state.live_chat.lock().await.duplicates_skipped,
+            duplicates + 1
+        );
+    }
+
+    #[tokio::test]
+    async fn mismatched_persistence_outcomes_roll_back_compact_admission_before_publication() {
+        for mismatch in ["length", "order", "owner"] {
+            let mut state = test_state();
+            state
+                .database
+                .ensure_fake_live_chat_session("worker-owner")
+                .unwrap();
+            state.live_chat_persistence =
+                crate::live_chat_persistence::LiveChatPersistence::with_writer(Arc::new(
+                    move |messages| {
+                        let mut outcomes = messages.to_vec();
+                        match mismatch {
+                            "length" => {
+                                outcomes.pop();
+                            }
+                            "order" => outcomes.reverse(),
+                            "owner" => {
+                                outcomes[0].provider_message_id = "foreign-provider".to_string()
+                            }
+                            _ => unreachable!(),
+                        }
+                        Ok(outcomes)
+                    },
+                ));
+            let generation = {
+                let mut coordinator = state.live_chat.lock().await;
+                coordinator.start_session("worker-owner".to_string(), Vec::new());
+                coordinator.session_generation()
+            };
+            let mut events = state.events.subscribe();
+            let result = try_deliver_messages(
+                &state,
+                generation,
+                vec![
+                    fake_message("worker-owner", StreamPlatform::Twitch, None, 1),
+                    fake_message("worker-owner", StreamPlatform::Twitch, None, 2),
+                ],
+            )
+            .await;
+            assert!(result.unwrap_err().is_terminal());
+            let coordinator = state.live_chat.lock().await;
+            assert!(coordinator.messages.is_empty() && coordinator.seen.is_empty());
+            assert_eq!(
+                (
+                    coordinator.unread_count,
+                    coordinator.messages_received,
+                    coordinator.trimmed_count
+                ),
+                (0, 0, 0)
+            );
+            while let Ok(event) = events.try_recv() {
+                assert!(!matches!(
+                    event.event.as_str(),
+                    "liveChat.message" | "liveChat.totals"
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn persistence_failure_restores_dedup_state_for_redelivery() {
         let (events, _) = broadcast::channel(16);
         let state = AppState::new(
@@ -4215,15 +4746,17 @@ mod tests {
         let writer_started_for_task = writer_started.clone();
         let release_writer_for_task = release_writer.clone();
         state.live_chat_persistence =
-            crate::live_chat_persistence::LiveChatPersistence::with_writer(Arc::new(move |_| {
-                writer_started_for_task.store(true, Ordering::SeqCst);
-                let (released, signal) = &*release_writer_for_task;
-                let mut released = released.lock().unwrap();
-                while !*released {
-                    released = signal.wait(released).unwrap();
-                }
-                Ok(())
-            }));
+            crate::live_chat_persistence::LiveChatPersistence::with_writer(Arc::new(
+                move |messages| {
+                    writer_started_for_task.store(true, Ordering::SeqCst);
+                    let (released, signal) = &*release_writer_for_task;
+                    let mut released = released.lock().unwrap();
+                    while !*released {
+                        released = signal.wait(released).unwrap();
+                    }
+                    Ok(messages.to_vec())
+                },
+            ));
         let session_generation = {
             let mut coordinator = state.live_chat.lock().await;
             coordinator.start_session("old-session".to_string(), Vec::new());

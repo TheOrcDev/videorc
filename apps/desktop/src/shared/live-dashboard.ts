@@ -6,9 +6,11 @@ import type {
   StreamTargetRuntime,
   StreamTargetState,
   StreamTargetsSnapshot,
+  SessionChatTotals,
   ViewerSample
 } from './backend'
 import { sessionIsLive } from './capture-state'
+import { sessionChatTotalsSchema } from './session-chat-totals'
 
 /**
  * The Stream Manager's live data (plan 055, D7). The main renderer, which
@@ -28,6 +30,7 @@ export interface LiveDashboardState {
   targets: StreamTargetRuntime[]
   /** Destination failures and recoveries this session, oldest first (S5). */
   destinationEvents: DestinationEvent[]
+  chatTotals?: SessionChatTotals | null
   updatedAt: string
 }
 
@@ -94,6 +97,7 @@ export function emptyLiveDashboardState(updatedAt: string): LiveDashboardState {
     health: null,
     targets: [],
     destinationEvents: [],
+    chatTotals: null,
     updatedAt
   }
 }
@@ -236,6 +240,24 @@ export function reduceDashboardAudience(
   return { ...scoped, audience: snapshot, updatedAt: now }
 }
 
+/** Totals never establish a session. Only a confirmed recording/session edge
+ * can select their owner, and an older hydration cannot reverse live progress. */
+export function reduceDashboardChatTotals(
+  state: LiveDashboardState,
+  totals: SessionChatTotals,
+  now: string
+): LiveDashboardState {
+  sessionChatTotalsSchema.parse(totals)
+  if (state.sessionId !== totals.sessionId) return state
+  const previous = state.chatTotals
+  if (
+    previous?.status === 'available' &&
+    (totals.status !== 'available' || totals.revision <= previous.revision)
+  )
+    return state
+  return { ...state, chatTotals: totals, updatedAt: now }
+}
+
 export function reduceDashboardHealth(
   state: LiveDashboardState,
   health: StreamHealth,
@@ -346,6 +368,14 @@ export function normalizeLiveDashboardState(value: unknown): LiveDashboardState 
     !Array.isArray(state.destinationEvents)
   ) {
     return null
+  }
+  if (state.chatTotals !== undefined && state.chatTotals !== null) {
+    try {
+      sessionChatTotalsSchema.parse(state.chatTotals)
+      if (state.chatTotals.sessionId !== state.sessionId) return null
+    } catch {
+      return null
+    }
   }
   return state as LiveDashboardState
 }

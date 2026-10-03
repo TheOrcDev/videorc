@@ -5,7 +5,8 @@ import type {
   LiveChatProviderState,
   StreamPlatform,
   StreamTargetRuntime,
-  ViewerSample
+  ViewerSample,
+  SessionChatTotals
 } from '@/lib/backend'
 
 import {
@@ -25,6 +26,7 @@ import {
   type StatId,
   type StatItemModel
 } from './stream-manager-stats'
+import { applyLiveChatMessages, emptyLiveChatSnapshot } from './live-chat-view'
 
 const T0 = Date.parse('2026-09-24T10:00:00Z')
 const at = (seconds: number): string => new Date(T0 + seconds * 1000).toISOString()
@@ -49,12 +51,34 @@ function sample(seconds: number, total: number): ViewerSample {
   }
 }
 
-function live(): LiveDashboardState {
-  return reduceDashboardRecording(
-    emptyLiveDashboardState(at(0)),
-    { state: 'streaming', sessionId: 's', startedAt: at(0) },
-    at(0)
-  )
+function totals(
+  overrides: Partial<Extract<SessionChatTotals, { status: 'available' }>> = {}
+): Extract<SessionChatTotals, { status: 'available' }> {
+  return {
+    status: 'available',
+    sessionId: 's',
+    revision: 0,
+    messageCount: 0,
+    chatters: 0,
+    follows: 0,
+    supporters: 0,
+    bits: 0,
+    raids: 0,
+    platforms: [],
+    tips: [],
+    ...overrides
+  }
+}
+
+function live(chatTotals: SessionChatTotals | null = totals()): LiveDashboardState {
+  return {
+    ...reduceDashboardRecording(
+      emptyLiveDashboardState(at(0)),
+      { state: 'streaming', sessionId: 's', startedAt: at(0) },
+      at(0)
+    ),
+    chatTotals
+  }
 }
 
 function withTargets(
@@ -485,7 +509,17 @@ describe('stats bar items (plan 057)', () => {
       })
     ]
     const items = statItems({
-      dashboard: live(),
+      dashboard: live(
+        totals({
+          revision: 5,
+          messageCount: 5,
+          chatters: 4,
+          supporters: 1,
+          bits: 600,
+          platforms: ['twitch', 'youtube'],
+          tips: [{ currency: 'USD', amountMicros: 20_000_000 }]
+        })
+      ),
       viewerSample: null,
       messages,
       providers: [provider('twitch'), provider('youtube')],
@@ -503,6 +537,116 @@ describe('stats bar items (plan 057)', () => {
     expect(supportersUnit(new Set(['twitch', 'youtube']), 3)).toBe('supporters')
     expect(formatMoneyShort(4_990_000, 'USD')).toMatch(/4\.99/)
     expect(formatMoneyShort(20_000_000, 'USD')).not.toMatch(/\.00/)
+  })
+
+  it('keeps whole-session support and chatters after paid rows leave the bounded view', () => {
+    const paid = [
+      message({
+        id: 'early-sub',
+        eventType: 'membership',
+        details: {
+          kind: 'subscription',
+          subscription: 'sub',
+          isPrime: false
+        }
+      }),
+      message({
+        id: 'early-tip',
+        platform: 'youtube',
+        eventType: 'paid',
+        authorId: 'early-tipper',
+        details: {
+          kind: 'super-chat',
+          amountMicros: 20_000_000,
+          currency: 'USD',
+          amountDisplay: '$20'
+        }
+      })
+    ]
+    const snapshot = applyLiveChatMessages({ ...emptyLiveChatSnapshot(at(0)), sessionId: 's' }, [
+      ...paid,
+      ...Array.from({ length: 2001 }, (_, index) =>
+        message({
+          id: `ordinary-${index}`,
+          authorId: `viewer-${index}`,
+          receivedAt: at(60 + index)
+        })
+      )
+    ])
+    expect(snapshot.messages).toHaveLength(2000)
+    const items = statItems({
+      dashboard: live(
+        totals({
+          revision: 2003,
+          messageCount: 2003,
+          chatters: 2002,
+          supporters: 1,
+          platforms: ['twitch', 'youtube'],
+          tips: [{ currency: 'USD', amountMicros: 20_000_000 }]
+        })
+      ),
+      viewerSample: null,
+      messages: snapshot.messages,
+      providers: [provider('twitch'), provider('youtube')],
+      nowMs: T0 + 3_000_000
+    })
+    expect(find(items, 'supporters')).toMatchObject({ value: '1' })
+    expect(find(items, 'tips')?.value).toBe('$20')
+    expect(find(items, 'chat')?.details).toContainEqual({ label: 'Chatters', value: '2,002' })
+  })
+
+  it('uses the same durable accounting in History even when only X rows remain', () => {
+    const confirmed = totals({
+      revision: 6003,
+      messageCount: 6003,
+      chatters: 6002,
+      supporters: 1,
+      platforms: ['twitch', 'youtube', 'x'],
+      tips: [{ currency: 'USD', amountMicros: 20_000_000 }]
+    })
+    const items = statItems({
+      dashboard: live(confirmed),
+      sessionId: 's',
+      viewerSample: null,
+      messages: [message({ platform: 'x' })],
+      providers: [],
+      nowMs: T0,
+      history: {
+        sessionId: 's',
+        title: 'Finished',
+        startedAt: at(0),
+        stats: { viewers: [], audience: null, chatTotals: confirmed }
+      }
+    })
+    expect(find(items, 'supporters')).toMatchObject({ value: '1' })
+    expect(find(items, 'tips')?.value).toBe('$20')
+    expect(find(items, 'chat')).toMatchObject({ value: '6,003', unit: 'messages' })
+    expect(find(items, 'chat')?.details).toContainEqual({ label: 'Chatters', value: '6,002' })
+  })
+
+  it('does not present retained rows or a stale dashboard as complete session totals', () => {
+    for (const confirmed of [
+      null,
+      { status: 'legacy-unavailable', sessionId: 's' } as const,
+      totals({ sessionId: 'previous', supporters: 99 })
+    ]) {
+      const items = statItems({
+        dashboard: live(confirmed),
+        sessionId: 's',
+        viewerSample: null,
+        messages: [
+          message({
+            eventType: 'membership',
+            details: { kind: 'subscription', subscription: 'sub', isPrime: false }
+          })
+        ],
+        providers: [provider('twitch')],
+        nowMs: T0
+      })
+      expect(find(items, 'supporters')).toMatchObject({ value: '–' })
+      expect(find(items, 'tips')).toMatchObject({ value: '–' })
+      expect(find(items, 'chat')?.details).toContainEqual({ label: 'Chatters', value: '–' })
+    }
   })
 
   it('shows zero tips as a subtle measured zero', () => {

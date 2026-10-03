@@ -1,5 +1,22 @@
 {
   "schemaVersion": 2,
+  "sessionChatTotals": {
+    "params": { "sessionId": "session-fixture" },
+    "available": {
+      "status": "available",
+      "sessionId": "session-fixture",
+      "revision": 6003,
+      "messageCount": 6003,
+      "chatters": 6002,
+      "platforms": ["twitch", "youtube", "x"],
+      "follows": 0,
+      "supporters": 1,
+      "bits": 1500,
+      "tips": [{ "currency": "USD", "amountMicros": 20000000 }],
+      "raids": 0
+    },
+    "legacy": { "status": "legacy-unavailable", "sessionId": "legacy-session" }
+  },
   "previewSurfaceBounds": {
     "wire": {
       "screenX": 120.5,

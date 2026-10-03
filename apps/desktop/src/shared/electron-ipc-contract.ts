@@ -35,6 +35,8 @@ import type {
   ViewerSample
 } from './backend'
 import type { LiveDashboardState } from './live-dashboard'
+import { normalizeLiveDashboardState } from './live-dashboard'
+import { sessionChatTotalsSchema } from './session-chat-totals'
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { COMMENT_HIGHLIGHT_ANCHORS, DOCK_SLOTS, LAYOUT_PRESET_VALUES } from './backend'
 import { CHAT_AVATAR_MAX_BYTES, chatAvatarBytesWithinCap } from './chat-avatar-bytes'
@@ -975,6 +977,11 @@ const commentsViewSchema = runtimeSchema<unknown>(
     boundedIpcValueSchema.parse(value, path)
     if (value === null) return value
     const view = value as CommentsViewSnapshot
+    if (view?.history?.chatTotals !== undefined && view.history.chatTotals !== null) {
+      sessionChatTotalsSchema.parse(view.history.chatTotals, `${path}.history.chatTotals`)
+      if (view.mode.kind !== 'history' || view.history.chatTotals.sessionId !== view.mode.sessionId)
+        throw new RuntimeSchemaError(`${path}.history.chatTotals`, 'the selected history session')
+    }
     if (view?.snapshot?.delivery !== undefined) {
       try {
         validateChatDelivery(view.snapshot.delivery)
@@ -1000,7 +1007,19 @@ const commentsDeltaSchema = runtimeSchema<unknown>('a bounded comments delta', (
   }
   return value
 })
+const dashboardSchema = runtimeSchema<LiveDashboardState | null>(
+  'a bounded dashboard with confirmed totals',
+  (value, path) => {
+    boundedIpcValueSchema.parse(value, path)
+    if (value === null) return null
+    const state = normalizeLiveDashboardState(value)
+    if (!state) throw new RuntimeSchemaError(path, 'a dashboard with matching session totals')
+    return state
+  }
+)
 const specificRuntimeInvokeContracts = {
+  'comments-window:dashboard-push': invokeContract(tupleSchema([dashboardSchema])),
+  'comments-window:dashboard-get': invokeContract(noArgs, dashboardSchema),
   'comments-window:push-snapshot': invokeContract(tupleSchema([commentsViewSchema])),
   'comments-window:push-delta': invokeContract(tupleSchema([commentsDeltaSchema])),
   'comments-window:get-snapshot': invokeContract(noArgs, commentsViewSchema),
@@ -1119,8 +1138,6 @@ export const boundedPassthroughElectronInvokeChannels = [
   'comments-window:follow-names',
   'comments-window:viewers-push',
   'comments-window:viewers-get',
-  'comments-window:dashboard-push',
-  'comments-window:dashboard-get',
   'comments-window:cohost-push',
   'comments-window:cohost-get',
   'comments-window:cohost-action',
@@ -1206,6 +1223,7 @@ const backendConnectionSchema = objectSchema(
 )
 
 const specificRuntimeEventSchemas = {
+  'comments-window:dashboard': dashboardSchema,
   'comments-window:snapshot': commentsViewSchema,
   'comments-window:delta': commentsDeltaSchema,
   'account:callback': accountCallbackSchema,
@@ -1258,7 +1276,6 @@ export const boundedPassthroughElectronEventChannels = [
   'comments-window:clear-request',
   'comments-window:clip-mark-request',
   'comments-window:viewers',
-  'comments-window:dashboard',
   'comments-window:cohost',
   'comments-window:cohost-action-request',
   'comments-window:cohost-enable-request',

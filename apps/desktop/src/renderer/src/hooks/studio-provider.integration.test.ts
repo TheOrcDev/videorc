@@ -76,6 +76,7 @@ import type {
   SourceSwitchParams,
   SourceSelection,
   SessionSummary,
+  SessionChatTotals,
   StreamOutputTopologyProbeResult,
   StreamScreen,
   VideorcAccountRefreshResult,
@@ -393,6 +394,7 @@ class StudioBackend {
   sourceFailure: string | null = null
   recordingState: RecordingStatus['state'] = 'idle'
   recordingSessionId: string | undefined
+  chatTotals: SessionChatTotals | null = null
   recordingStatusOverride: RecordingStatus | undefined
   accountSnapshot: VideorcAccountSnapshot = { status: 'signed-out' }
   accountTransportFailuresRemaining = 0
@@ -659,6 +661,8 @@ class StudioBackend {
           throw new Error('Temporary audio.meter.sample failure.')
         }
         return this.audioMeterResult
+      case 'sessions.comments.totals':
+        return this.chatTotals?.sessionId === params.sessionId ? this.chatTotals : null
       case 'recording.status':
         if (this.recordingStatusOverride) {
           return this.recordingStatusOverride
@@ -2349,6 +2353,110 @@ describe('real StudioProvider lifecycle', () => {
         (entry) => entry.delta?.kind === 'clear' && entry.delta.sessionId === 'delivery-live'
       )
     ).toBe(true)
+  })
+
+  it('relays confirmed whole-session totals across overflow, clear, lag recovery and renderer reopen', async () => {
+    const backend = new StudioBackend()
+    const initial: SessionChatTotals = {
+      status: 'available',
+      sessionId: 'totals-live',
+      revision: 6003,
+      messageCount: 6003,
+      chatters: 6002,
+      supporters: 1,
+      follows: 0,
+      bits: 1500,
+      raids: 0,
+      platforms: ['twitch', 'youtube', 'x'],
+      tips: [{ currency: 'USD', amountMicros: 20_000_000 }]
+    }
+    backend.chatTotals = initial
+    backend.recordingState = 'recording'
+    backend.recordingSessionId = initial.sessionId
+    backend.liveChatSnapshot = {
+      sessionId: initial.sessionId,
+      providers: [],
+      unreadCount: 0,
+      updatedAt: now,
+      messages: Array.from({ length: 5000 }, (_, index) => ({
+        ...highlightMessage,
+        platform: 'x',
+        sessionId: initial.sessionId,
+        id: `totals-row-${index}`,
+        receivedAt: new Date(Date.parse(now) + index * 1000).toISOString()
+      }))
+    }
+    const release = backend.deferResponse('sessions.comments.totals', initial)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    let dashboard: import('../../../shared/live-dashboard').LiveDashboardState | null = null
+    api.getDashboard = async () => dashboard
+    api.pushDashboard = async (state) => {
+      dashboard = state
+    }
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const mount = async () => {
+      root = await mountStudioProvider(testDom.container, (value) => {
+        observations.push(value)
+      })
+      await waitForObservation(() => observations.at(-1)?.core.wsStatus === 'connected')
+    }
+    const emit = async (event: string, payload: unknown) => {
+      await act(async () => {
+        for (const socket of backend.sockets)
+          socket.onmessage?.({ data: JSON.stringify({ event, payload }) })
+      })
+    }
+    await mount()
+    await waitForObservation(() =>
+      backend.sentCommands.some((command) => command.method === 'sessions.comments.totals')
+    )
+    const newer = { ...initial, revision: 6004, supporters: 2 }
+    await emit('liveChat.totals', newer)
+    await act(async () => release())
+    await waitForObservation(
+      () => dashboard?.chatTotals?.status === 'available' && dashboard.chatTotals.revision === 6004
+    )
+    expect(observations.at(-1)!.chat.liveChatSnapshot.messages).toHaveLength(2000)
+    backend.liveChatSnapshot = { ...backend.liveChatSnapshot, messages: [], unreadCount: 0 }
+    await emit('liveChat.cleared', backend.liveChatSnapshot)
+    await waitForObservation(() => observations.at(-1)!.chat.liveChatSnapshot.messages.length === 0)
+    expect(dashboard!.chatTotals).toEqual(newer)
+    backend.chatTotals = { ...newer, revision: 6005, supporters: 3 }
+    const requests = backend.sentCommands.filter(
+      (command) => command.method === 'sessions.comments.totals'
+    ).length
+    await emit('events.lagged', { skipped: 1 })
+    await waitForObservation(
+      () => dashboard?.chatTotals?.status === 'available' && dashboard.chatTotals.revision === 6005
+    )
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'sessions.comments.totals').length
+    ).toBe(requests + 1)
+    await act(async () => root!.unmount())
+    root = null
+    observations.length = 0
+    await mount()
+    await waitForObservation(
+      () =>
+        backend.sentCommands.filter((command) => command.method === 'sessions.comments.totals')
+          .length ===
+        requests + 2
+    )
+    expect(dashboard!.chatTotals).toEqual(backend.chatTotals)
+    await emit('recording.status', { state: 'recording', sessionId: 'replacement', startedAt: now })
+    await emit('stream.audience', { sessionId: initial.sessionId, updatedAt: now, platforms: [] })
+    await emit('liveChat.totals', { ...initial, revision: 9999 })
+    await waitForObservation(() => dashboard?.sessionId === 'replacement')
+    expect(dashboard!.chatTotals).toBeNull()
   })
 
   it('marks suspended recovery overflow as incomplete while main keeps every raw admission and retry hydration mints none', async () => {

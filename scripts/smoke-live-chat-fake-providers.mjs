@@ -299,10 +299,24 @@ try {
       throw new Error('SQLite and the authoritative snapshot did not converge chronologically.')
     }
 
+    const wholeSessionTotals = await request(ws, timeoutMs, 'sessions.comments.totals', {
+      sessionId
+    })
+    if (
+      wholeSessionTotals?.status !== 'available' ||
+      wholeSessionTotals.messageCount !== expectedMessageCount
+    ) {
+      throw new Error('Persisted whole-session row total did not match admitted fake messages.')
+    }
+
     // Drop the event socket after the burst, reconnect to the same backend, and replace
     // incremental belief with the authoritative snapshot + persisted send operation.
     await closeWebSocket(ws)
     ws = await connectBackend(connection, timeoutMs)
+    const recoveredTotals = await request(ws, timeoutMs, 'sessions.comments.totals', { sessionId })
+    if (JSON.stringify(recoveredTotals) !== JSON.stringify(wholeSessionTotals)) {
+      throw new Error('Reconnect changed confirmed whole-session totals.')
+    }
     const reconnectedMessages = collectMessages(ws)
     const recovered = await request(ws, timeoutMs, 'liveChat.status', {})
     const recoveredIds = recovered.messages.map((message) => message.id)
@@ -361,6 +375,12 @@ try {
       throw new Error(`liveChat.clearLocal did not empty the feed: ${cleared.messages.length}`)
     }
 
+    if (
+      JSON.stringify(await request(ws, timeoutMs, 'sessions.comments.totals', { sessionId })) !==
+      JSON.stringify(wholeSessionTotals)
+    ) {
+      throw new Error('Local clear changed persisted whole-session totals.')
+    }
     const stopped = await request(ws, timeoutMs, 'liveChat.stop', {})
     if (stopped.sessionId) {
       throw new Error(
@@ -492,7 +512,73 @@ try {
     if (!expectedKinds.every((kind) => persistedKinds.has(kind))) {
       throw new Error(`Persisted events lost their details: ${JSON.stringify([...persistedKinds])}`)
     }
+    const eventTotals = await request(ws, timeoutMs, 'sessions.comments.totals', {
+      sessionId: eventsSessionId
+    })
+    if (
+      eventTotals?.status !== 'available' ||
+      eventTotals.messageCount !== 13 ||
+      eventTotals.supporters !== 7 ||
+      eventTotals.bits !== 1500 ||
+      eventTotals.follows !== 2 ||
+      eventTotals.raids !== 1 ||
+      eventTotals.chatters !== 7 ||
+      JSON.stringify(eventTotals.tips) !==
+        JSON.stringify([
+          { currency: 'USD', amountMicros: 5_000_000 },
+          { currency: 'EUR', amountMicros: 2_000_000 }
+        ])
+    ) {
+      throw new Error('Confirmed fake activity accounting disagreed with the normalized fixture.')
+    }
+    // Reuse the same persisted session with an independent X destination. Its
+    // canonical IDs cannot collide with the activity fixtures, and >5,000 rows
+    // retire every paid row from the live buffer without erasing accounting.
+    await request(ws, timeoutMs, 'liveChat.start', {
+      sessionId: eventsSessionId,
+      platforms: ['x'],
+      destinations: [
+        { platform: 'x', targetId: 'totals-rollover', read: 'ready', write: 'read-only' }
+      ],
+      fakes: [
+        {
+          platform: 'x',
+          targetId: 'totals-rollover',
+          count: 6001,
+          intervalMs: 1,
+          includeDuplicate: true
+        }
+      ]
+    })
+    const rolledTotals = await waitForSessionTotals(ws, eventsSessionId, 6014, timeoutMs)
+    if (
+      rolledTotals.supporters !== eventTotals.supporters ||
+      rolledTotals.bits !== eventTotals.bits ||
+      JSON.stringify(rolledTotals.tips) !== JSON.stringify(eventTotals.tips) ||
+      rolledTotals.chatters !== 10
+    ) {
+      throw new Error(
+        'Whole-session accounting changed when paid rows rolled out of the live buffer.'
+      )
+    }
+    const rolledView = await request(ws, timeoutMs, 'liveChat.status', {})
+    if (
+      rolledView.messages.length !== 5000 ||
+      rolledView.messages.some((message) => message.details)
+    ) {
+      throw new Error(
+        'Rollover fixture did not retire activity rows while preserving the live cap.'
+      )
+    }
+    await request(ws, timeoutMs, 'liveChat.clearLocal', {})
     await request(ws, timeoutMs, 'liveChat.stop', {})
+    if (
+      JSON.stringify(
+        await request(ws, timeoutMs, 'sessions.comments.totals', { sessionId: eventsSessionId })
+      ) !== JSON.stringify(rolledTotals)
+    ) {
+      throw new Error('Finished History accounting changed after local clear and stop.')
+    }
 
     console.log(
       `Unified-comments fake-provider smoke OK - ${diagnostics.messagesReceived} messages, ` +
@@ -572,6 +658,16 @@ async function waitForAuthoritativeMessages(ws, sessionId, expectedCount, deadli
       expected: expectedCount
     })}`
   )
+}
+
+async function waitForSessionTotals(ws, sessionId, expectedCount, deadlineMs) {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt <= deadlineMs) {
+    const totals = await request(ws, deadlineMs, 'sessions.comments.totals', { sessionId })
+    if (totals?.status === 'available' && totals.messageCount === expectedCount) return totals
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100))
+  }
+  throw new Error('Timed out waiting for confirmed whole-session rollover accounting.')
 }
 
 async function listPersistedMessages(ws, sessionId, expectedCount, deadlineMs) {
