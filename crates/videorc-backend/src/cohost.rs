@@ -1009,11 +1009,6 @@ pub struct RecentSpeechFinal {
     pub segments: Vec<crate::captions::CaptionSegment>,
     /// Captions were presenting when this final landed.
     pub presented: bool,
-    /// The capture the caption task transcribes (its session id and whether
-    /// it records to a file), carried so a voice clip mark in the capture-end
-    /// drain lands after the recording slot is gone. `None` falls back to the
-    /// active slot.
-    pub mark_target: Option<crate::clip_marks::MarkTarget>,
 }
 
 /// The last five minutes of transcript finals, in memory, in arrival order.
@@ -3983,8 +3978,9 @@ pub(crate) fn note_caption_final(state: &AppState, update: &CaptionsUpdate) {
     }
 }
 
-/// Every transcript final can mark its recording independently. Orcle learns
-/// it only when the caption coordinator still owns its admitted speech epoch.
+/// Orcle learns a transcript final only when the caption coordinator still
+/// owns its admitted speech epoch. Caption callbacks route clip marks through
+/// their immutable recording owner independently, before this admission gate.
 /// The caller checks ownership and calls this synchronously under that lock;
 /// a consent boundary cannot land between the check and the append.
 pub(crate) fn note_transcript_final(
@@ -3996,14 +3992,6 @@ pub(crate) fn note_transcript_final(
     if final_.text.trim().is_empty() {
         return;
     }
-    // Clip that (plan 068 D6): the same lock-match-return discipline.
-    crate::clip_marks::note_transcript_final(
-        state,
-        &final_.text,
-        &final_.segments,
-        final_.offset_seconds,
-        final_.mark_target.clone(),
-    );
     if !orcle_owned {
         return;
     }
@@ -7218,7 +7206,6 @@ mod tests {
                     text: text.to_string(),
                     segments: Vec::new(),
                     presented: false,
-                    mark_target: None,
                 })
                 .collect(),
             version: finals.len() as u64,
@@ -9368,7 +9355,6 @@ mod tests {
             text: text.to_string(),
             segments: Vec::new(),
             presented: false,
-            mark_target: None,
         };
         assert!(speech.since(None, now).is_some());
         assert!(speech.since(Some(speech.version()), now).is_none());
@@ -9418,7 +9404,6 @@ mod tests {
                 text: "clip that".to_string(),
                 segments: Vec::new(),
                 presented: false,
-                mark_target: None,
             },
             true,
         );
@@ -10465,7 +10450,6 @@ mod tests {
                 text: "okay clip".to_string(),
                 segments: Vec::new(),
                 presented: false,
-                mark_target: None,
             },
             true,
         );
@@ -10626,7 +10610,7 @@ mod tests {
             crate::captions::caption_task_alive_for_test(&state).await,
             "the stream's last chunks still drain"
         );
-        crate::captions::finish_captions_for_capture(&state).await;
+        crate::captions::finish_captions_for_capture(&state, "rec-1").await;
         assert!(!crate::captions::caption_task_alive_for_test(&state).await);
 
         state

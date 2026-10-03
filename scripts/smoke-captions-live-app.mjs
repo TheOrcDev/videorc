@@ -141,9 +141,10 @@ try {
   sessionActive = true
   await hydrateRendererActiveSession(smoke)
 
-  // Captions are part of the backend session itself. No harness-side
-  // captions.start or overlay RPC is allowed: renderer events must drive both
-  // the live compositor PNG and the post-recording cue-frame round trip.
+  // Initial captions are part of the backend session itself. No harness-side
+  // captions.start bootstraps them; a separate API retry is tested below.
+  // No overlay RPC is allowed: renderer events must drive both the live
+  // compositor PNG and the post-recording cue-frame round trip.
   try {
     await waitFor(
       () => fake.state.realtimeTokenRequests >= 1,
@@ -287,6 +288,73 @@ try {
         safeFakeCounters(fake.state)
       )}`
     )
+  }
+  // API retry is independent of the session-owned startup and renderer proof
+  // above. The selected synthetic native microphone remains eligible here.
+  console.log('Captions live smoke: terminal Blocked API retry')
+  const captionBeforeRetry = await request(backend, timeoutMs, 'captions.status.get', {})
+  const sourceBeforeRetry = await request(backend, timeoutMs, 'session.sources.get', {
+    sessionId: started.sessionId
+  })
+  if (
+    sourceBeforeRetry.sessionId !== started.sessionId ||
+    !Number.isInteger(sourceBeforeRetry.outputProcessId) ||
+    sourceBeforeRetry.outputProcessId <= 0
+  ) {
+    throw new Error('Caption retry has no confirmed recording output process.')
+  }
+  fake.state.chunkFailureCode = 'unauthorized'
+  await injectPreControlsPcm(smoke, started.sessionId)
+  await waitForCaptionStatus(backend, (status) => {
+    return status.state === 'blocked' && status.reasonCode === 'unauthorized'
+  })
+  fake.state.chunkFailureCode = null
+  const retryStarted = await request(backend, timeoutMs, 'captions.start', { language: 'en' })
+  if (
+    !retryStarted.sessionClientId ||
+    retryStarted.sessionClientId === captionBeforeRetry.sessionClientId
+  ) {
+    throw new Error('Caption API retry did not confirm a new provider client.')
+  }
+  const retryInjection = await injectPreControlsPcm(smoke, started.sessionId)
+  await waitFor(
+    () =>
+      observed.updates.some(
+        (update) =>
+          update.sessionClientId === retryStarted.sessionClientId &&
+          update.kind === 'final' &&
+          update.text === finalText
+      ),
+    timeoutMs,
+    'fresh final after caption API retry'
+  )
+  await waitForCaptionStatus(backend, (status) => {
+    return (
+      status.sessionClientId === retryStarted.sessionClientId &&
+      status.transport === 'chunked' &&
+      status.providerReady === true
+    )
+  })
+  const recordingAfterRetry = await request(backend, timeoutMs, 'recording.status', {})
+  const sourceAfterRetry = await request(backend, timeoutMs, 'session.sources.get', {
+    sessionId: started.sessionId
+  })
+  if (
+    recordingAfterRetry.state !== 'recording' ||
+    recordingAfterRetry.sessionId !== started.sessionId ||
+    recordingAfterRetry.outputPath !== started.outputPath ||
+    sourceAfterRetry.sessionId !== started.sessionId ||
+    sourceAfterRetry.outputProcessId !== sourceBeforeRetry.outputProcessId
+  ) {
+    throw new Error('Caption API retry replaced the recording or its output process.')
+  }
+  const captionApiRetry = {
+    sessionId: started.sessionId,
+    previousClientId: captionBeforeRetry.sessionClientId,
+    confirmedClientId: retryStarted.sessionClientId,
+    outputProcessId: sourceAfterRetry.outputProcessId,
+    freshFinalObserved: true,
+    injection: retryInjection
   }
   const overlaySnapshot = await waitForCaptionOverlay(smoke)
 
@@ -440,6 +508,7 @@ try {
         diagnostics,
         observed,
         proof: {
+          captionApiRetry,
           injections: { mutedInjection, baselineInjection, gainedInjection },
           microphoneLoss: { disconnectResult, statusAfterLoss, postLossAudio },
           captionWavAmplitude: { muted: mutedAudio, baseline: baselineAudio, gained: gainedAudio },

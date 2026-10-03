@@ -10,6 +10,7 @@
 //! The caption task calls [`note_transcript_final`], which locks, matches, and
 //! returns; the recording lock and the database write happen on a spawned task.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use anyhow::Result;
@@ -36,9 +37,13 @@ pub const CLIP_MARK_DEDUPE_SECONDS: f64 = 10.0;
 /// phrase that started in the previous final.
 const TAIL_WORDS: usize = 2;
 
-/// Carried words older than this are a different sentence; a tail from the
-/// future belongs to a previous session whose file time restarted.
+/// Carried words older than this, or ahead of this final, are not its sentence.
 const TAIL_MAX_AGE_SECONDS: f64 = 6.0;
+
+/// One active capture and its most recently drained predecessor. A provider
+/// drain may still own the first while the next owner is registered in tests
+/// or a future transport; neither undrained owner may be evicted.
+const MAX_RETAINED_RECORDINGS: usize = 2;
 
 /// Why `clip.mark` produced no mark.
 #[derive(Debug, thiserror::Error)]
@@ -137,17 +142,17 @@ pub fn find_clip_phrase(tail: &[TimedWord], words: &[TimedWord]) -> Option<Phras
     None
 }
 
-/// Matcher state across finals: the carried tail and the last mark for dedupe.
+/// Matcher state inside one explicitly owned recording.
 #[derive(Debug, Default)]
-pub struct ClipMarkDetector {
+struct RecordingMatcher {
     tail: Vec<TimedWord>,
     last_mark_at_seconds: Option<f64>,
 }
 
-impl ClipMarkDetector {
+impl RecordingMatcher {
     /// One settled final. Returns a match that is not a repeat of the last
     /// mark; the tail always advances.
-    pub fn note_final(
+    fn note_final(
         &mut self,
         text: &str,
         segments: &[CaptionSegment],
@@ -168,12 +173,11 @@ impl ClipMarkDetector {
     }
 
     /// Dedupe: a voice mark within [`CLIP_MARK_DEDUPE_SECONDS`] after the
-    /// previous mark is dropped. An earlier time than the last mark means the
-    /// file time restarted (a new session) and is accepted.
+    /// previous mark is dropped, including an out-of-order final. File time
+    /// is a coordinate inside this recording, never evidence of a new owner.
     fn accept_voice_mark(&mut self, at_seconds: f64) -> bool {
         if let Some(last) = self.last_mark_at_seconds
-            && at_seconds >= last
-            && at_seconds - last < CLIP_MARK_DEDUPE_SECONDS
+            && (at_seconds - last).abs() < CLIP_MARK_DEDUPE_SECONDS
         {
             return false;
         }
@@ -182,13 +186,148 @@ impl ClipMarkDetector {
     }
 
     /// A manual mark always lands; it only moves the dedupe window.
-    pub fn note_manual_mark(&mut self, at_seconds: f64) {
+    fn note_manual_mark(&mut self, at_seconds: f64) {
         self.last_mark_at_seconds = Some(at_seconds);
     }
+}
 
-    /// Sign-out: the carried words are transcript; they go with it.
+#[derive(Debug)]
+struct RecordingMatcherOwner {
+    session_id: String,
+    matcher: RecordingMatcher,
+    drained: bool,
+    retirement_deferred: bool,
+    provider_join_unproven: bool,
+}
+
+/// Recording owners are registered by caption startup or a manual mark's
+/// confirmed active slot, before any transcript can match. Finals never
+/// create owners: a pruned/unknown target cannot revive old words or dedupe.
+/// Capture end retires only its exact owner after its caption task is joined.
+/// Keep the most recent drained recording alongside the active owner so a
+/// controlled late final from A cannot borrow B's tail/window. Capacity is
+/// fixed; undrained owners are never evicted to make space.
+#[derive(Debug, Default)]
+pub struct ClipMarkDetector {
+    recordings: VecDeque<RecordingMatcherOwner>,
+}
+
+impl ClipMarkDetector {
+    pub fn register_recording(&mut self, session_id: &str) -> bool {
+        if let Some(owner) = self
+            .recordings
+            .iter()
+            .find(|owner| owner.session_id == session_id)
+        {
+            return !owner.drained;
+        }
+        if self.recordings.len() == MAX_RETAINED_RECORDINGS {
+            let Some(retired) = self.recordings.iter().position(|owner| owner.drained) else {
+                return false;
+            };
+            self.recordings.remove(retired);
+        }
+        self.recordings.push_back(RecordingMatcherOwner {
+            session_id: session_id.to_string(),
+            matcher: RecordingMatcher::default(),
+            drained: false,
+            retirement_deferred: false,
+            provider_join_unproven: false,
+        });
+        true
+    }
+
+    pub fn note_final(
+        &mut self,
+        session_id: &str,
+        text: &str,
+        segments: &[CaptionSegment],
+        offset_seconds: f64,
+    ) -> Option<PhraseMatch> {
+        self.recordings
+            .iter_mut()
+            .find(|owner| owner.session_id == session_id && !owner.provider_join_unproven)?
+            .matcher
+            .note_final(text, segments, offset_seconds)
+    }
+
+    pub fn note_manual_mark(&mut self, session_id: &str, at_seconds: f64) {
+        if let Some(owner) = self
+            .recordings
+            .iter_mut()
+            .find(|owner| owner.session_id == session_id)
+        {
+            owner.matcher.note_manual_mark(at_seconds);
+        }
+    }
+
+    pub fn retire_recording(&mut self, session_id: &str) -> bool {
+        if let Some(owner) = self
+            .recordings
+            .iter_mut()
+            .find(|owner| owner.session_id == session_id)
+        {
+            if owner.provider_join_unproven {
+                return false;
+            }
+            owner.drained = true;
+        }
+        self.prune_drained_recordings();
+        true
+    }
+
+    pub fn defer_retirement(&mut self, session_id: &str) {
+        if let Some(owner) = self
+            .recordings
+            .iter_mut()
+            .find(|owner| owner.session_id == session_id)
+        {
+            owner.retirement_deferred = true;
+        }
+    }
+
+    pub fn note_provider_join_failed(&mut self, session_id: &str) {
+        if let Some(owner) = self
+            .recordings
+            .iter_mut()
+            .find(|owner| owner.session_id == session_id)
+        {
+            // An unrelated or empty later runtime cannot prove this taken
+            // provider handle joined. Keep only this owner's uncertainty.
+            owner.provider_join_unproven = true;
+        }
+    }
+
+    pub(crate) fn provider_join_unproven(&self, session_id: &str) -> bool {
+        self.recordings
+            .iter()
+            .any(|owner| owner.session_id == session_id && owner.provider_join_unproven)
+    }
+
+    pub fn retire_deferred_recordings(&mut self) {
+        for owner in &mut self.recordings {
+            if owner.retirement_deferred && !owner.provider_join_unproven {
+                owner.drained = true;
+            }
+        }
+        self.prune_drained_recordings();
+    }
+
+    fn prune_drained_recordings(&mut self) {
+        let latest_drained = self.recordings.iter().rposition(|owner| owner.drained);
+        let mut index = 0;
+        self.recordings.retain(|owner| {
+            let retain = !owner.drained || Some(index) == latest_drained;
+            index += 1;
+            retain
+        });
+    }
+
+    /// Sign-out erases every retained transcript tail, including a late owner.
     pub fn forget_words(&mut self) {
-        self.tail.clear();
+        for owner in &mut self.recordings {
+            owner.matcher.tail.clear();
+        }
     }
 }
 
@@ -209,11 +348,30 @@ pub struct MarkTarget {
     pub records_to_file: bool,
 }
 
+/// Register the immutable recording owner before its provider task admits any
+/// finals. Stream-only/no-capture targets deliberately have no matcher state.
+pub(crate) fn register_caption_target(state: &AppState, target: Option<&MarkTarget>) {
+    let Some(target) = target.filter(|target| target.records_to_file) else {
+        return;
+    };
+    let registered = state
+        .clip_marks
+        .lock()
+        .is_ok_and(|mut detector| detector.register_recording(&target.session_id));
+    if !registered {
+        state.emit_log(
+            "warn",
+            "Voice clip marks are unavailable until the previous caption owners finish draining."
+                .to_string(),
+        );
+    }
+}
+
 /// Caption-task hook for every transcript final (both intents, both
 /// transports): match under the std lock and return. A hit is recorded on a
 /// spawned task so the caller never waits on the recording lock. `target` is
-/// the capture the caption task transcribes; `None` falls back to the active
-/// recording slot.
+/// immutable capture ownership; `None` means no capture and never falls back
+/// to whichever recording happens to be active when the write runs.
 pub(crate) fn note_transcript_final(
     state: &AppState,
     text: &str,
@@ -221,11 +379,18 @@ pub(crate) fn note_transcript_final(
     offset_seconds: f64,
     target: Option<MarkTarget>,
 ) {
-    let found = state
-        .clip_marks
-        .lock()
-        .ok()
-        .and_then(|mut detector| detector.note_final(text, segments, offset_seconds));
+    let Some(target) = target else {
+        return;
+    };
+    let found = if target.records_to_file {
+        state.clip_marks.lock().ok().and_then(|mut detector| {
+            detector.note_final(&target.session_id, text, segments, offset_seconds)
+        })
+    } else {
+        // A stream-only request can explain why a whole phrase was not saved,
+        // but it retains no words and changes no recording's dedupe window.
+        find_clip_phrase(&[], &timed_words(text, segments, offset_seconds))
+    };
     let Some(found) = found else {
         return;
     };
@@ -241,7 +406,7 @@ pub(crate) fn note_transcript_final(
     handle.spawn(async move {
         match record_mark(
             &state,
-            target,
+            Some(target),
             Some(found.at_seconds),
             ClipMarkSource::Voice,
             Some(found.phrase.clone()),
@@ -288,23 +453,32 @@ async fn record_mark(
     phrase: Option<String>,
 ) -> Result<ClipMarkedEvent, ClipMarkError> {
     let (session_id, at_seconds, records_to_file) = match (target, at_seconds) {
-        (Some(target), Some(at_seconds)) => (target.session_id, at_seconds, target.records_to_file),
+        (Some(target), Some(at_seconds)) => {
+            if source == ClipMarkSource::Manual {
+                note_manual_target(state, &target, at_seconds.max(0.0));
+            }
+            (target.session_id, at_seconds, target.records_to_file)
+        }
         (_, at_seconds) => {
             let recording = state.recording.lock().await;
             let active = recording.as_ref().ok_or(ClipMarkError::NoActiveSession)?;
-            (
-                active.session_id.clone(),
-                at_seconds.unwrap_or_else(|| active.capture_elapsed_seconds()),
-                active.output_path.is_some(),
-            )
+            let target = MarkTarget {
+                session_id: active.session_id.clone(),
+                records_to_file: active.output_path.is_some(),
+            };
+            let at_seconds = at_seconds
+                .unwrap_or_else(|| active.capture_elapsed_seconds())
+                .max(0.0);
+            if source == ClipMarkSource::Manual {
+                // Registration and dedupe advance while the exact active
+                // slot is still guarded: its monitor cannot retire an absent
+                // owner and then have this manual request recreate it.
+                note_manual_target(state, &target, at_seconds);
+            }
+            (target.session_id, at_seconds, target.records_to_file)
         }
     };
     let at_seconds = at_seconds.max(0.0);
-    if source == ClipMarkSource::Manual
-        && let Ok(mut detector) = state.clip_marks.lock()
-    {
-        detector.note_manual_mark(at_seconds);
-    }
     let event = if records_to_file {
         state.database.insert_clip_mark(&ClipMark {
             id: uuid::Uuid::new_v4().to_string(),
@@ -334,6 +508,15 @@ async fn record_mark(
     Ok(event)
 }
 
+fn note_manual_target(state: &AppState, target: &MarkTarget, at_seconds: f64) {
+    if target.records_to_file
+        && let Ok(mut detector) = state.clip_marks.lock()
+        && detector.register_recording(&target.session_id)
+    {
+        detector.note_manual_mark(&target.session_id, at_seconds);
+    }
+}
+
 /// `clip.marks.list`: every mark of a session, earliest first.
 pub fn list_marks(state: &AppState, session_id: &str) -> Result<Vec<ClipMark>> {
     state.database.list_clip_marks(session_id)
@@ -342,6 +525,12 @@ pub fn list_marks(state: &AppState, session_id: &str) -> Result<Vec<ClipMark>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn detector_for_recording() -> ClipMarkDetector {
+        let mut detector = ClipMarkDetector::default();
+        assert!(detector.register_recording("recording"));
+        detector
+    }
 
     fn word(word: &str, at_seconds: f64) -> TimedWord {
         TimedWord {
@@ -408,44 +597,254 @@ mod tests {
 
     #[test]
     fn a_phrase_split_across_finals_matches_once_at_the_first_word() {
-        let mut detector = ClipMarkDetector::default();
+        let mut detector = detector_for_recording();
         assert!(
             detector
-                .note_final("and that was great, clip", &[segment("clip", 2.5)], 30.0)
+                .note_final(
+                    "recording",
+                    "and that was great, clip",
+                    &[segment("clip", 2.5)],
+                    30.0
+                )
                 .is_none()
         );
         let found = detector
-            .note_final("that for me", &[segment("that", 0.1)], 33.0)
+            .note_final("recording", "that for me", &[segment("that", 0.1)], 33.0)
             .expect("boundary match");
         assert_eq!(found.phrase, "clip that");
         assert_eq!(found.at_seconds, 32.5);
         // The tail alone never matches again on the next silent final.
-        assert!(detector.note_final("okay", &[], 36.0).is_none());
+        assert!(
+            detector
+                .note_final("recording", "okay", &[], 36.0)
+                .is_none()
+        );
     }
 
     #[test]
     fn a_stale_tail_does_not_complete_a_phrase() {
-        let mut detector = ClipMarkDetector::default();
-        assert!(detector.note_final("clip", &[], 30.0).is_none());
+        let mut detector = detector_for_recording();
+        assert!(
+            detector
+                .note_final("recording", "clip", &[], 30.0)
+                .is_none()
+        );
         // Ten seconds of other finals later, "that" is a new sentence.
-        assert!(detector.note_final("that", &[], 40.0).is_none());
+        assert!(
+            detector
+                .note_final("recording", "that", &[], 40.0)
+                .is_none()
+        );
         // And a tail from a previous session (file time restarted) is dropped.
-        let mut detector = ClipMarkDetector::default();
-        assert!(detector.note_final("clip", &[], 3000.0).is_none());
-        assert!(detector.note_final("that", &[], 1.0).is_none());
+        let mut detector = detector_for_recording();
+        assert!(
+            detector
+                .note_final("recording", "clip", &[], 3000.0)
+                .is_none()
+        );
+        assert!(detector.note_final("recording", "that", &[], 1.0).is_none());
     }
 
     #[test]
     fn repeats_within_ten_seconds_dedupe_against_voice_and_manual_marks() {
+        let mut detector = detector_for_recording();
+        assert!(
+            detector
+                .note_final("recording", "clip that", &[], 100.0)
+                .is_some()
+        );
+        assert!(
+            detector
+                .note_final("recording", "clip that", &[], 105.0)
+                .is_none()
+        );
+        assert!(
+            detector
+                .note_final("recording", "clip that", &[], 110.0)
+                .is_some()
+        );
+        detector.note_manual_mark("recording", 200.0);
+        assert!(
+            detector
+                .note_final("recording", "clip it", &[], 209.0)
+                .is_none()
+        );
+        assert!(
+            detector
+                .note_final("recording", "clip it", &[], 210.5)
+                .is_some()
+        );
+        // A distant out-of-order moment remains distinct within this recording.
+        assert!(
+            detector
+                .note_final("recording", "clip this", &[], 4.0)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_previous_recordings_manual_mark_does_not_suppress_a_new_recording() {
+        for new_time in [15.0, 10.0, 4.0] {
+            let mut detector = ClipMarkDetector::default();
+            assert!(detector.register_recording("a"));
+            assert!(detector.register_recording("b"));
+            detector.note_manual_mark("a", 10.0);
+            assert!(
+                detector
+                    .note_final("b", "clip that", &[], new_time)
+                    .is_some(),
+                "A10 and B{new_time} are distinct recordings, not a repeated moment"
+            );
+        }
+    }
+
+    #[test]
+    fn late_finals_keep_their_own_recordings_tail_and_dedupe_window() {
         let mut detector = ClipMarkDetector::default();
-        assert!(detector.note_final("clip that", &[], 100.0).is_some());
-        assert!(detector.note_final("clip that", &[], 105.0).is_none());
-        assert!(detector.note_final("clip that", &[], 110.0).is_some());
-        detector.note_manual_mark(200.0);
-        assert!(detector.note_final("clip it", &[], 209.0).is_none());
-        assert!(detector.note_final("clip it", &[], 210.5).is_some());
-        // A new session restarts file time: an earlier time is a new mark.
-        assert!(detector.note_final("clip this", &[], 4.0).is_some());
+        assert!(detector.register_recording("a"));
+        assert!(detector.note_final("a", "clip that", &[], 10.0).is_some());
+        detector.retire_recording("a");
+        assert!(detector.register_recording("b"));
+        assert!(detector.note_final("b", "clip that", &[], 15.0).is_some());
+        assert!(detector.note_final("a", "clip that", &[], 15.0).is_none());
+        assert!(detector.note_final("b", "clip", &[], 30.0).is_none());
+        assert!(detector.note_final("a", "that", &[], 30.0).is_none());
+        assert_eq!(
+            detector
+                .note_final("b", "that", &[], 31.0)
+                .unwrap()
+                .at_seconds,
+            30.0
+        );
+        detector.note_manual_mark("b", 40.0);
+        assert!(detector.note_final("b", "clip that", &[], 38.0).is_none());
+        assert!(detector.note_final("b", "clip that", &[], 45.0).is_none());
+        assert!(detector.note_final("a", "clip that", &[], 40.0).is_some());
+    }
+
+    #[test]
+    fn owner_retention_is_bounded_without_evicting_undrained_recordings() {
+        let mut detector = ClipMarkDetector::default();
+        assert!(detector.register_recording("a"));
+        assert!(detector.register_recording("b"));
+        assert!(!detector.register_recording("c"));
+        assert!(detector.note_final("a", "clip that", &[], 10.0).is_some());
+        assert!(detector.note_final("b", "clip that", &[], 10.0).is_some());
+        detector.retire_recording("a");
+        assert!(detector.register_recording("c"));
+        assert!(detector.note_final("a", "clip that", &[], 30.0).is_none());
+        assert!(
+            detector
+                .note_final("unknown", "clip that", &[], 30.0)
+                .is_none()
+        );
+        assert_eq!(detector.recordings.len(), MAX_RETAINED_RECORDINGS);
+        for index in 0..100 {
+            detector.retire_recording("c");
+            let owner = format!("next-{index}");
+            assert!(detector.register_recording(&owner));
+            detector.retire_recording(&owner);
+            assert!(detector.recordings.len() <= MAX_RETAINED_RECORDINGS);
+        }
+        // Retiring an old owner cannot retire or prune the still-active B.
+        detector.retire_recording("a");
+        assert!(detector.note_final("b", "clip that", &[], 40.0).is_some());
+    }
+
+    #[test]
+    fn sign_out_erases_words_from_every_retained_recording() {
+        let mut detector = ClipMarkDetector::default();
+        assert!(detector.register_recording("a"));
+        assert!(detector.register_recording("b"));
+        assert!(detector.note_final("a", "clip", &[], 10.0).is_none());
+        assert!(detector.note_final("b", "make a", &[], 20.0).is_none());
+        detector.retire_recording("a");
+        detector.forget_words();
+        assert!(detector.note_final("a", "that", &[], 11.0).is_none());
+        assert!(detector.note_final("b", "clip", &[], 21.0).is_none());
+    }
+
+    #[test]
+    fn deferred_retirement_keeps_failed_join_evidence_owned_and_bounded() {
+        let mut detector = ClipMarkDetector::default();
+        assert!(detector.register_recording("unjoined-a"));
+        assert!(detector.register_recording("manual-b"));
+        detector.note_provider_join_failed("unjoined-a");
+        detector.defer_retirement("unjoined-a");
+        detector.defer_retirement("manual-b");
+        detector.retire_deferred_recordings();
+        assert!(!detector.retire_recording("unjoined-a"));
+        assert!(
+            detector
+                .note_final("unjoined-a", "clip that", &[], 10.0)
+                .is_none()
+        );
+        assert!(detector.register_recording("new-c"));
+        assert!(!detector.register_recording("new-d"));
+        detector.retire_recording("new-c");
+        assert!(detector.register_recording("new-d"));
+        assert_eq!(detector.recordings.len(), MAX_RETAINED_RECORDINGS);
+        assert!(
+            detector
+                .recordings
+                .iter()
+                .any(|owner| owner.session_id == "unjoined-a"
+                    && !owner.drained
+                    && owner.provider_join_unproven)
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_capture_owner_is_registered_before_its_slot_can_retire() {
+        let _caption_test_guard = crate::captions::caption_lifecycle_test_lock().lock().await;
+        let state = mark_test_state();
+        persist_session(&state, "manual-a");
+        persist_session(&state, "voice-b");
+        let mut active = crate::recording::test_active_recording_stub("manual-a");
+        active.output_path = Some(std::path::PathBuf::from("/tmp/manual-a.mp4"));
+        *state.recording.lock().await = Some(active);
+        let manual = mark_manual(&state).await.unwrap();
+        assert!(manual.saved);
+        assert_eq!(manual.session_id, "manual-a");
+        assert!(
+            state
+                .clip_marks
+                .lock()
+                .unwrap()
+                .note_final("manual-a", "clip that", &[], manual.at_seconds + 5.0)
+                .is_none()
+        );
+        // The real monitor removes the slot before this no-caption finish.
+        state.recording.lock().await.take();
+        crate::captions::finish_captions_for_capture(&state, "manual-a").await;
+        assert!(
+            !state
+                .clip_marks
+                .lock()
+                .unwrap()
+                .register_recording("manual-a")
+        );
+        let target_b = MarkTarget {
+            session_id: "voice-b".into(),
+            records_to_file: true,
+        };
+        register_caption_target(&state, Some(&target_b));
+        let mut events = state.events.subscribe();
+        note_transcript_final(&state, "clip that", &[], 15.0, Some(target_b));
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.event, "clip.marked");
+        assert_eq!(event.payload["sessionId"], "voice-b");
+        assert_eq!(list_marks(&state, "manual-a").unwrap().len(), 1);
+        assert_eq!(list_marks(&state, "voice-b").unwrap().len(), 1);
+        // Explicit no-capture never borrows an active B recording.
+        *state.recording.lock().await =
+            Some(crate::recording::test_active_recording_stub("voice-b"));
+        note_transcript_final(&state, "clip that", &[], 40.0, None);
+        assert!(events.try_recv().is_err());
+        assert_eq!(list_marks(&state, "voice-b").unwrap().len(), 1);
     }
 
     #[test]
@@ -557,9 +956,17 @@ mod tests {
 
     #[test]
     fn forgetting_words_drops_a_half_said_phrase() {
-        let mut detector = ClipMarkDetector::default();
-        assert!(detector.note_final("okay clip", &[], 10.0).is_none());
+        let mut detector = detector_for_recording();
+        assert!(
+            detector
+                .note_final("recording", "okay clip", &[], 10.0)
+                .is_none()
+        );
         detector.forget_words();
-        assert!(detector.note_final("that", &[], 11.0).is_none());
+        assert!(
+            detector
+                .note_final("recording", "that", &[], 11.0)
+                .is_none()
+        );
     }
 }

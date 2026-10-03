@@ -352,15 +352,14 @@ pub struct CaptionChunkRecord {
 }
 
 fn upsert_caption_record(chunks: &mut Vec<CaptionChunkRecord>, record: CaptionChunkRecord) -> bool {
-    let existing = record
-        .provider_item_id
-        .as_ref()
-        .and_then(|provider_item_id| {
-            chunks.iter_mut().find(|candidate| {
-                candidate.capture_epoch == record.capture_epoch
-                    && candidate.provider_item_id.as_ref() == Some(provider_item_id)
-            })
-        });
+    let existing = chunks.iter_mut().find(|candidate| {
+        candidate.capture_epoch == record.capture_epoch
+            && match (&candidate.provider_item_id, &record.provider_item_id) {
+                (Some(left), Some(right)) => left == right,
+                (None, None) => candidate.seq == record.seq,
+                _ => false,
+            }
+    });
     if let Some(existing) = existing {
         *existing = record;
         false
@@ -2854,6 +2853,9 @@ pub struct CaptionContractTestCue {
 #[derive(Default)]
 pub struct CaptionsCoordinator {
     task: Option<tokio::task::JoinHandle<()>>,
+    /// Same immutable owner as CaptionSession, kept only to associate a
+    /// taken task's provider join evidence with its recording matcher.
+    task_mark_target: Option<crate::clip_marks::MarkTarget>,
     stop: Option<Arc<AtomicBool>>,
     status: Option<CaptionsStatus>,
     /// The captions intent (plan 068 D1): the user wants live captions
@@ -2937,6 +2939,9 @@ pub struct CaptionsCoordinator {
     /// deadline. The process may no longer prove a safe sign-out without a
     /// restart, so subsequent starts and sign-out claims remain fail-closed.
     privacy_teardown_failed: bool,
+    /// The current serialized sign-out has joined its detached provider.
+    /// Exact capture ends during later artifact cleanup need not wait on I/O.
+    privacy_provider_joined: bool,
 }
 
 pub struct PendingCueRender {
@@ -3628,11 +3633,12 @@ async fn start_captions_with_bearer_for_session(
     let listen_task_alive = coordinator.listen_wanted && coordinator_task_alive(&coordinator);
     if !capture_active {
         if !listen_task_alive {
-            if let Some(task) = coordinator.task.take() {
-                task.abort();
-            }
-            coordinator.stop = None;
-            remove_tap();
+            drop(coordinator);
+            // The retired capture's monitor can still be awaiting this
+            // control lock. Abort and join before Ready; its exact owner is
+            // retired only by the monitor's subsequent capture-end call.
+            finish_caption_task_for_retry(state, None).await?;
+            coordinator = state.captions.lock().await;
         }
         let status = CaptionsStatus::ready();
         set_status(state, &mut coordinator, status.clone());
@@ -3672,6 +3678,9 @@ async fn start_captions_with_bearer_for_session(
         block_captions_after_control(state, "captions-microphone-required", message.into()).await;
         anyhow::bail!(message);
     }
+    drop(coordinator);
+    finish_caption_task_for_retry(state, mark_target.as_ref()).await?;
+    let mut coordinator = state.captions.lock().await;
     let status = spawn_transcription_task(
         state,
         &mut coordinator,
@@ -3687,6 +3696,29 @@ async fn start_captions_with_bearer_for_session(
     set_status(state, &mut coordinator, status.clone());
 
     Ok(Some(status))
+}
+
+// Called only after start's existing task reuse and input eligibility gates,
+// while CAPTION_CONTROL and any expected recording slot guard remain held.
+async fn finish_caption_task_for_retry(
+    state: &AppState,
+    target: Option<&crate::clip_marks::MarkTarget>,
+) -> Result<()> {
+    let joined = finish_caption_task(state, true, false).await;
+    let previous_join_unproven =
+        target
+            .filter(|target| target.records_to_file)
+            .is_some_and(|target| {
+                state.clip_marks.lock().map_or(true, |detector| {
+                    detector.provider_join_unproven(&target.session_id)
+                })
+            });
+    if !joined || previous_join_unproven {
+        let message = "The previous caption provider did not finish stopping. Live captions could not restart safely.";
+        block_captions_after_control(state, "captions-start-failed", message.into()).await;
+        bail!(message);
+    }
+    Ok(())
 }
 
 /// What the caption start seams read off the capture slot: whether its
@@ -3721,7 +3753,10 @@ fn spawn_transcription_task(
     coordinator: &mut CaptionsCoordinator,
     start: TranscriptionTaskStart,
 ) -> CaptionsStatus {
+    crate::clip_marks::register_caption_target(state, start.mark_target.as_ref());
     if let Some(task) = coordinator.task.take() {
+        let target = coordinator.task_mark_target.take();
+        note_caption_provider_join(state, target.as_ref(), task.is_finished());
         task.abort();
     }
     remove_tap();
@@ -3740,6 +3775,7 @@ fn spawn_transcription_task(
     coordinator.shadow_status = Some(status.clone());
     coordinator.presentation = Some(present.clone());
     coordinator.listen_ready = false;
+    coordinator.task_mark_target = start.mark_target.clone();
 
     let task_state = state.clone();
     let task_stop = stop.clone();
@@ -4008,6 +4044,7 @@ pub async fn stop_captions_for_sign_out(
         caption_burn_tasks,
         artifact_publication,
         private_frame_io,
+        task_mark_target,
     ) = {
         let _control = CAPTION_CONTROL.lock().await;
         let mut coordinator = state.captions.lock().await;
@@ -4018,6 +4055,7 @@ pub async fn stop_captions_for_sign_out(
         // those exact objects; failure is not an unrecoverable in-memory latch.
         coordinator.privacy_teardown_failed = false;
         coordinator.privacy_teardown_in_progress = true;
+        coordinator.privacy_provider_joined = false;
         coordinator.desired_enabled = false;
         coordinator.listen_wanted = false;
         coordinator.listen_ready = false;
@@ -4033,7 +4071,11 @@ pub async fn stop_captions_for_sign_out(
         coordinator.capture_epoch = coordinator.capture_epoch.saturating_add(1);
         coordinator.finalized_style = None;
         coordinator.artifact_generation = coordinator.artifact_generation.saturating_add(1);
-        let runtime = (coordinator.task.take(), coordinator.stop.take());
+        let runtime = (
+            coordinator.task.take(),
+            coordinator.stop.take(),
+            coordinator.task_mark_target.take(),
+        );
         let pending_frames_dirs = take_pending_caption_frame_dirs(&mut coordinator);
         let caption_burn_tasks = std::mem::take(&mut coordinator.caption_burn_tasks);
         let artifact_publication = coordinator.artifact_publication.clone();
@@ -4047,6 +4089,7 @@ pub async fn stop_captions_for_sign_out(
             caption_burn_tasks,
             artifact_publication,
             private_frame_io,
+            runtime.2,
         )
     };
 
@@ -4058,6 +4101,7 @@ pub async fn stop_captions_for_sign_out(
     TAP_FRAMES_DROPPED.store(0, Ordering::Release);
     clear_caption_presentation(state, "signing-out");
     let runtime_stopped = finish_taken_caption_task(task, stop, false).await;
+    note_caption_provider_join(state, task_mark_target.as_ref(), runtime_stopped);
     if runtime_stopped {
         // The provider was detached under the generation fence, but an
         // already-polled future could have committed one last chunk before
@@ -4066,6 +4110,10 @@ pub async fn stop_captions_for_sign_out(
         let mut coordinator = state.captions.lock().await;
         coordinator.chunks.clear();
         coordinator.finalized_style = None;
+        coordinator.privacy_provider_joined = true;
+        if let Ok(mut detector) = state.clip_marks.lock() {
+            detector.retire_deferred_recordings();
+        }
     }
     // Orcle's copy of what was said goes with the transcript, before the
     // credentials do: nothing heard under this account can ride the next
@@ -4203,7 +4251,7 @@ pub async fn shutdown_caption_artifacts(state: &AppState) {
 /// Capture sessions own caption audio. Closing the tap lets queued frames drain
 /// and gives realtime VAD a bounded window to settle the last utterance before
 /// artifact generation drains canonical cues.
-pub async fn finish_captions_for_capture(state: &AppState) -> CaptionsStatus {
+pub async fn finish_captions_for_capture(state: &AppState, session_id: &str) -> CaptionsStatus {
     let _control = CAPTION_CONTROL.lock().await;
     {
         let mut coordinator = state.captions.lock().await;
@@ -4215,6 +4263,12 @@ pub async fn finish_captions_for_capture(state: &AppState) -> CaptionsStatus {
             // boundary.
             let status = CaptionsStatus::idle();
             coordinator.status = Some(status.clone());
+            if let Ok(mut detector) = state.clip_marks.lock() {
+                detector.defer_retirement(session_id);
+                if coordinator.privacy_provider_joined {
+                    detector.retire_recording(session_id);
+                }
+            }
             drop(coordinator);
             clear_caption_presentation(state, "capture-ended-during-sign-out");
             return status;
@@ -4222,7 +4276,26 @@ pub async fn finish_captions_for_capture(state: &AppState) -> CaptionsStatus {
         let style = coordinator.style;
         coordinator.finalized_style = Some(style);
     }
-    finish_caption_task(state, true, true).await;
+    if finish_caption_task(state, true, true).await {
+        // The monitor passes the immutable retired capture ID. The recording
+        // slot is already gone, and must never stand in for this drain owner.
+        if let Ok(mut detector) = state.clip_marks.lock()
+            && !detector.retire_recording(session_id)
+        {
+            detector.defer_retirement(session_id);
+            state.emit_log(
+                "warn",
+                "The recording's earlier caption provider join remains unproven; its clip owner is retained."
+                    .to_string(),
+            );
+        }
+    } else {
+        state.emit_log(
+            "warn",
+            "Caption provider teardown did not finish; its recording clip owner remains retained."
+                .to_string(),
+        );
+    }
     let status = {
         let mut coordinator = state.captions.lock().await;
         let status = if coordinator.desired_enabled {
@@ -4244,7 +4317,7 @@ async fn finish_caption_task(
     preserve_desired: bool,
     drain_final_transcript: bool,
 ) -> bool {
-    let (task, stop) = {
+    let (task, stop, task_mark_target) = {
         let mut coordinator = state.captions.lock().await;
         if !preserve_desired {
             coordinator.desired_enabled = false;
@@ -4252,9 +4325,28 @@ async fn finish_caption_task(
         coordinator.presentation = None;
         coordinator.shadow_status = None;
         coordinator.listen_ready = false;
-        (coordinator.task.take(), coordinator.stop.take())
+        (
+            coordinator.task.take(),
+            coordinator.stop.take(),
+            coordinator.task_mark_target.take(),
+        )
     };
-    finish_taken_caption_task(task, stop, drain_final_transcript).await
+    let joined = finish_taken_caption_task(task, stop, drain_final_transcript).await;
+    note_caption_provider_join(state, task_mark_target.as_ref(), joined);
+    joined
+}
+
+fn note_caption_provider_join(
+    state: &AppState,
+    target: Option<&crate::clip_marks::MarkTarget>,
+    joined: bool,
+) {
+    if !joined
+        && let Some(target) = target.filter(|target| target.records_to_file)
+        && let Ok(mut detector) = state.clip_marks.lock()
+    {
+        detector.note_provider_join_failed(&target.session_id);
+    }
 }
 
 async fn finish_taken_caption_task(
@@ -4646,6 +4738,23 @@ struct RealtimeCaptionTimeline {
     admission: AdmittedOrcleAudio,
 }
 
+/// A VAD item keeps its admission ownership and original file coordinates
+/// through re-anchor. Completed identities remain briefly for canonical cue
+/// corrections, but their clip hook runs only once. Unknown/pruned items can
+/// never borrow the current timeline or recording.
+#[derive(Debug, Clone, PartialEq)]
+struct RealtimeCaptionItem {
+    seq: u64,
+    offset_seconds: f64,
+    capture_epoch: u64,
+    capture_end_seconds: Option<f64>,
+    admission: AdmittedOrcleAudio,
+    mark_target: Option<crate::clip_marks::MarkTarget>,
+    clip_processed: bool,
+}
+
+const MAX_REALTIME_CAPTION_ITEMS: usize = 128;
+
 impl RealtimeCaptionTimeline {
     fn cue_offset_seconds(&self, audio_start_ms: Option<f64>) -> f64 {
         let absolute_start_ms = audio_start_ms
@@ -4702,7 +4811,7 @@ impl RealtimeAudioAdmissions {
     fn for_event(
         &self,
         event: &RealtimeCaptionEvent,
-        items: &std::collections::HashMap<String, (u64, f64, AdmittedOrcleAudio)>,
+        items: &std::collections::HashMap<String, RealtimeCaptionItem>,
         socket_admission: AdmittedOrcleAudio,
     ) -> AdmittedOrcleAudio {
         match event {
@@ -4710,7 +4819,7 @@ impl RealtimeAudioAdmissions {
             RealtimeCaptionEvent::Partial { item_id, .. }
             | RealtimeCaptionEvent::Completed { item_id, .. } => items
                 .get(item_id)
-                .map(|(_, _, admission)| *admission)
+                .map(|item| item.admission)
                 .unwrap_or_default(),
             RealtimeCaptionEvent::ConfigurationAcknowledged => socket_admission,
             _ => AdmittedOrcleAudio::default(),
@@ -5082,7 +5191,7 @@ async fn run_realtime_caption_session(
     let mut ever_connected = false;
     let mut retry_budget = RealtimeRetryBudget::default();
     // Utterance bookkeeping: item id → (caption seq, audio offset, speech/listen owners).
-    let mut items: std::collections::HashMap<String, (u64, f64, AdmittedOrcleAudio)> =
+    let mut items: std::collections::HashMap<String, RealtimeCaptionItem> =
         std::collections::HashMap::new();
     // Recording-epoch anchoring (same idea as chunked): mono ms sent since the
     // capture pipeline (re)started. speech_started's audio_start_ms is
@@ -5285,13 +5394,12 @@ async fn run_realtime_caption_session(
                     };
                     audio_heartbeat.record_frame(std::time::Instant::now());
                     if caption_anchor_should_reset(last_frame_timestamp, frame.timestamp_micros) {
-                        // New recording: re-anchor, forget in-flight
-                        // utterances (their transcripts belong to the
-                        // previous video), and advance the capture epoch.
+                        // Re-anchor presentation while retaining bounded
+                        // original item ownership for late clip routing.
+                        retire_realtime_caption_items(&mut items, capture_epoch, timeline.current_seconds());
                         ms_at_anchor = ms_sent;
                         timeline.reset_capture();
                         sequence.reset();
-                        items.clear();
                         let mut coordinator = session.state.captions.lock().await;
                         coordinator.capture_epoch += 1;
                         capture_epoch = coordinator.capture_epoch;
@@ -5834,7 +5942,7 @@ async fn report_usage(session: &CaptionSession, unreported_ms: &mut f64) {
 async fn handle_realtime_event(
     session: &CaptionSession,
     event: RealtimeCaptionEvent,
-    items: &mut std::collections::HashMap<String, (u64, f64, AdmittedOrcleAudio)>,
+    items: &mut std::collections::HashMap<String, RealtimeCaptionItem>,
     sequence: &CaptionSequence,
     timeline: RealtimeCaptionTimeline,
 ) {
@@ -5843,26 +5951,50 @@ async fn handle_realtime_event(
             item_id,
             audio_start_ms,
         } => {
+            let coordinator = session.state.captions.lock().await;
+            if coordinator.privacy_teardown_in_progress
+                || coordinator.privacy_teardown_failed
+                || session.stop.load(Ordering::Acquire)
+            {
+                return;
+            }
+            if audio_start_ms
+                .is_some_and(|start| timeline.socket_audio_base_ms + start < timeline.ms_at_anchor)
+            {
+                return;
+            }
             let offset = timeline.cue_offset_seconds(audio_start_ms);
-            realtime_item_entry(items, sequence, &item_id, offset, timeline.admission);
+            let _ = realtime_item_entry(
+                items,
+                sequence,
+                &item_id,
+                offset,
+                timeline.capture_epoch,
+                timeline.admission,
+                session.mark_target.clone(),
+            );
         }
         RealtimeCaptionEvent::Partial {
             item_id,
             transcript,
         } => {
-            // Unknown item = its speech started before a recording boundary
-            // (we cleared it) — the transcript belongs to the previous video.
-            let Some(&(item_seq, _, _)) = items.get(&item_id) else {
+            let Some(item) = items.get(&item_id) else {
                 return;
             };
-            if !session.presenting() {
+            let coordinator = session.state.captions.lock().await;
+            if coordinator.privacy_teardown_in_progress
+                || coordinator.privacy_teardown_failed
+                || session.stop.load(Ordering::Acquire)
+                || item.capture_epoch != coordinator.capture_epoch
+                || !session.presenting()
+            {
                 return;
             }
             session.state.emit_event(
                 "captions.update",
                 CaptionsUpdate {
                     session_client_id: session.session_client_id.clone(),
-                    seq: item_seq,
+                    seq: item.seq,
                     kind: CaptionUpdateKind::Partial,
                     text: transcript,
                     chunk_seconds: 0,
@@ -5874,15 +6006,17 @@ async fn handle_realtime_event(
             item_id,
             transcript,
         } => {
-            // Same boundary rule as partials: cleared items never resurrect.
-            let Some(&(item_seq, offset, admission)) = items.get(&item_id) else {
+            let Some(item) = items.get(&item_id).cloned() else {
                 return;
             };
-            let end = timeline.cue_end_seconds(offset);
+            let offset = item.offset_seconds;
+            let end = item
+                .capture_end_seconds
+                .unwrap_or_else(|| timeline.cue_end_seconds(offset));
             let duration_seconds = (end - offset).clamp(0.5, 30.0);
             let update = CaptionsUpdate {
                 session_client_id: session.session_client_id.clone(),
-                seq: item_seq,
+                seq: item.seq,
                 kind: CaptionUpdateKind::Final,
                 text: transcript.clone(),
                 chunk_seconds: (end - offset).ceil() as u64,
@@ -5890,19 +6024,26 @@ async fn handle_realtime_event(
             };
             let inserted = {
                 let mut coordinator = session.state.captions.lock().await;
+                if coordinator.privacy_teardown_in_progress
+                    || coordinator.privacy_teardown_failed
+                    || session.stop.load(Ordering::Acquire)
+                {
+                    return;
+                }
                 // Presentation is read under the coordinator lock that
                 // `captions.stop` flips it under: a final never lands after
                 // the caption boundary that cleared the bar.
-                let presented = session.presenting();
+                let current_capture = item.capture_epoch == coordinator.capture_epoch;
+                let presented = session.presenting() && current_capture;
                 let inserted = upsert_caption_record(
                     &mut coordinator.chunks,
                     CaptionChunkRecord {
-                        seq: item_seq,
+                        seq: item.seq,
                         offset_seconds: offset,
                         duration_seconds,
                         text: transcript.clone(),
                         segments: Vec::new(),
-                        capture_epoch: timeline.capture_epoch,
+                        capture_epoch: item.capture_epoch,
                         provider_item_id: Some(item_id.clone()),
                         presented,
                     },
@@ -5910,22 +6051,33 @@ async fn handle_realtime_event(
                 if presented {
                     session.state.emit_event("captions.update", update.clone());
                 }
-                // The check and synchronous append share the coordinator lock
-                // with consent retirement. Clip marks keep their capture owner.
-                crate::cohost::note_transcript_final(
-                    &session.state,
-                    &update,
-                    crate::cohost::RecentSpeechFinal {
-                        at: std::time::Instant::now(),
-                        offset_seconds: offset,
-                        duration_seconds,
-                        text: transcript,
-                        segments: Vec::new(),
-                        presented,
-                        mark_target: session.mark_target.clone(),
-                    },
-                    admission.owns_speech(&coordinator),
-                );
+                if !item.clip_processed {
+                    items.get_mut(&item_id).unwrap().clip_processed = true;
+                    crate::clip_marks::note_transcript_final(
+                        &session.state,
+                        &transcript,
+                        &[],
+                        offset,
+                        item.mark_target.clone(),
+                    );
+                }
+                // Orcle's consent check and append stay under the coordinator
+                // lock, independently of the recording-owned clip hook.
+                if current_capture {
+                    crate::cohost::note_transcript_final(
+                        &session.state,
+                        &update,
+                        crate::cohost::RecentSpeechFinal {
+                            at: std::time::Instant::now(),
+                            offset_seconds: offset,
+                            duration_seconds,
+                            text: transcript,
+                            segments: Vec::new(),
+                            presented,
+                        },
+                        item.admission.owns_speech(&coordinator),
+                    );
+                }
                 inserted
             };
             if !inserted {
@@ -5943,15 +6095,59 @@ async fn handle_realtime_event(
 }
 
 fn realtime_item_entry(
-    items: &mut std::collections::HashMap<String, (u64, f64, AdmittedOrcleAudio)>,
+    items: &mut std::collections::HashMap<String, RealtimeCaptionItem>,
     sequence: &CaptionSequence,
     item_id: &str,
     offset: f64,
+    capture_epoch: u64,
     admission: AdmittedOrcleAudio,
-) -> (u64, f64, AdmittedOrcleAudio) {
-    *items
-        .entry(item_id.to_string())
-        .or_insert_with(|| (sequence.next(), offset, admission))
+    mark_target: Option<crate::clip_marks::MarkTarget>,
+) -> Option<RealtimeCaptionItem> {
+    if !items.contains_key(item_id) && items.len() == MAX_REALTIME_CAPTION_ITEMS {
+        let completed = items
+            .iter()
+            .filter(|(_, item)| item.clip_processed)
+            .min_by_key(|(_, item)| (item.capture_epoch, item.seq))
+            .map(|(id, _)| id.clone());
+        match completed {
+            Some(id) => {
+                items.remove(&id);
+            }
+            None => {
+                tracing::warn!(
+                    "Realtime caption item ownership reached its bound; refusing an unknown item."
+                );
+                return None;
+            }
+        }
+    }
+    Some(
+        items
+            .entry(item_id.to_string())
+            .or_insert_with(|| RealtimeCaptionItem {
+                seq: sequence.next(),
+                offset_seconds: offset,
+                capture_epoch,
+                capture_end_seconds: None,
+                admission,
+                mark_target,
+                clip_processed: false,
+            })
+            .clone(),
+    )
+}
+
+fn retire_realtime_caption_items(
+    items: &mut std::collections::HashMap<String, RealtimeCaptionItem>,
+    capture_epoch: u64,
+    capture_end_seconds: f64,
+) {
+    for item in items
+        .values_mut()
+        .filter(|item| item.capture_epoch == capture_epoch)
+    {
+        item.capture_end_seconds = Some(capture_end_seconds.max(item.offset_seconds + 0.5));
+    }
 }
 
 #[derive(Debug)]
@@ -6332,20 +6528,40 @@ async fn commit_chunk_transcript(
     };
     {
         let mut coordinator = session.state.captions.lock().await;
-        let presented = session.presenting();
-        coordinator.chunks.push(CaptionChunkRecord {
-            seq: chunk.seq,
-            offset_seconds: chunk.offset_seconds,
-            duration_seconds: chunk.duration_seconds,
-            text: text.to_string(),
-            segments: response.segments.clone(),
-            capture_epoch: chunk.capture_epoch,
-            provider_item_id: None,
-            presented,
-        });
+        if coordinator.privacy_teardown_in_progress
+            || coordinator.privacy_teardown_failed
+            || session.stop.load(Ordering::Acquire)
+        {
+            return;
+        }
         let current_epoch = coordinator.capture_epoch;
-        if presented && chunk.capture_epoch == current_epoch {
+        let presented = session.presenting() && chunk.capture_epoch == current_epoch;
+        let first_final = upsert_caption_record(
+            &mut coordinator.chunks,
+            CaptionChunkRecord {
+                seq: chunk.seq,
+                offset_seconds: chunk.offset_seconds,
+                duration_seconds: chunk.duration_seconds,
+                text: text.to_string(),
+                segments: response.segments.clone(),
+                capture_epoch: chunk.capture_epoch,
+                provider_item_id: None,
+                presented,
+            },
+        );
+        if presented {
             session.state.emit_event("captions.update", update.clone());
+        }
+        // Recording ownership is independent of current caption presentation
+        // and Orcle consent. An old admitted chunk still marks its own file.
+        if first_final {
+            crate::clip_marks::note_transcript_final(
+                &session.state,
+                text,
+                &response.segments,
+                chunk.offset_seconds,
+                session.mark_target.clone(),
+            );
         }
         if chunk.capture_epoch != current_epoch {
             tracing::info!(
@@ -6366,7 +6582,6 @@ async fn commit_chunk_transcript(
                 text: text.to_string(),
                 segments: response.segments.clone(),
                 presented,
-                mark_target: session.mark_target.clone(),
             },
             chunk.admission.owns_speech(&coordinator),
         );
@@ -7257,13 +7472,18 @@ mod tests {
         let mut sequence = CaptionSequence::default();
         let mut realtime_items = std::collections::HashMap::new();
 
-        let (realtime_seq, offset, epoch) = realtime_item_entry(
+        let first_item = realtime_item_entry(
             &mut realtime_items,
             &mut sequence,
             "item-1",
             0.25,
+            0,
             AdmittedOrcleAudio::test_epoch(0),
-        );
+            None,
+        )
+        .unwrap();
+        let realtime_seq = first_item.seq;
+        let offset = first_item.offset_seconds;
         assert_eq!(realtime_seq, 1);
         assert_eq!(
             realtime_item_entry(
@@ -7271,9 +7491,11 @@ mod tests {
                 &mut sequence,
                 "item-1",
                 0.5,
-                AdmittedOrcleAudio::test_epoch(1)
+                1,
+                AdmittedOrcleAudio::test_epoch(1),
+                None,
             ),
-            (realtime_seq, offset, epoch),
+            Some(first_item),
             "provider revisions keep the canonical realtime cue identity"
         );
 
@@ -7766,7 +7988,7 @@ mod tests {
 
         tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            finish_captions_for_capture(&state),
+            finish_captions_for_capture(&state, "caption-artifact-test"),
         )
         .await
         .expect("capture finalization must obtain caption control during blocked SRT I/O");
@@ -8434,7 +8656,7 @@ mod tests {
         .expect("sign-out fence must install during blocked cue-frame I/O");
         tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            finish_captions_for_capture(&state),
+            finish_captions_for_capture(&state, "caption-artifact-test"),
         )
         .await
         .expect("capture finalization must obtain control during blocked cue-frame I/O");
@@ -8508,7 +8730,7 @@ mod tests {
 
         tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            finish_captions_for_capture(&state),
+            finish_captions_for_capture(&state, "caption-artifact-test"),
         )
         .await
         .expect("capture finalization must not wait for watchdog filesystem cleanup");
@@ -8775,7 +8997,7 @@ mod tests {
 
         let finalized = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            finish_captions_for_capture(&state),
+            finish_captions_for_capture(&state, "caption-artifact-test"),
         )
         .await
         .expect("capture finalization must not wait for sign-out artifact cleanup");
@@ -10418,6 +10640,1170 @@ mod tests {
         }
     }
 
+    fn persist_clip_test_recording(state: &AppState, session_id: &str) {
+        persist_clip_test_capture(state, session_id, true);
+    }
+
+    fn persist_clip_test_capture(state: &AppState, session_id: &str, records_to_file: bool) {
+        state
+            .database
+            .create_session(&crate::storage::NewSession {
+                id: session_id.to_string(),
+                title: "Caption clip ownership".to_string(),
+                started_at: "2026-10-03T10:00:00Z".to_string(),
+                mode: if records_to_file { "record" } else { "stream" }.to_string(),
+                output_path: records_to_file.then(|| format!("/tmp/{session_id}.mp4")),
+                container: records_to_file.then(|| "mp4".to_string()),
+                stream_preset: None,
+                sources: serde_json::from_str("{}").unwrap(),
+                layout: crate::protocol::default_layout_settings(),
+                output: serde_json::from_value(serde_json::json!({
+                    "recordEnabled": records_to_file,
+                    "streamEnabled": !records_to_file,
+                    "video": {
+                        "preset": "tutorial-1080p30",
+                        "width": 1920,
+                        "height": 1080,
+                        "fps": 30,
+                        "bitrateKbps": 6000
+                    },
+                    "rtmp": { "preset": "custom", "serverUrl": "", "streamKey": "" }
+                }))
+                .unwrap(),
+            })
+            .unwrap();
+    }
+
+    async fn next_clip_event(
+        events: &mut tokio::sync::broadcast::Receiver<crate::protocol::ServerEvent>,
+    ) -> crate::protocol::ServerEvent {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let event = events.recv().await.expect("clip event channel");
+                if event.event == "clip.marked" {
+                    return event;
+                }
+            }
+        })
+        .await
+        .expect("the admitted recording final must produce a clip mark")
+    }
+
+    #[tokio::test]
+    async fn no_capture_caption_start_joins_the_retired_provider_before_ready() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        struct ProviderFinished(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for ProviderFinished {
+            fn drop(&mut self) {
+                if let Some(finished) = self.0.take() {
+                    let _ = finished.send(());
+                }
+            }
+        }
+        let state = test_caption_app_state();
+        for id in ["cancel-a", "cancel-b", "cancel-c"] {
+            let capture_permit = state.ffmpeg_work.begin_capture_when_available().await;
+            let mut active = crate::recording::test_active_recording_stub(id);
+            active.output_path = Some(std::path::PathBuf::from(format!("/tmp/{id}.mp4")));
+            *state.recording.lock().await = Some(active);
+            let (_, target) = caption_capture_facts(state.recording.lock().await.as_ref());
+            crate::clip_marks::register_caption_target(&state, target.as_ref());
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (finished_tx, mut finished_rx) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let _finished = ProviderFinished(Some(finished_tx));
+                let _ = started_tx.send(());
+                std::future::pending::<()>().await;
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            {
+                let mut coordinator = state.captions.lock().await;
+                coordinator.task = Some(task);
+                coordinator.task_mark_target = target;
+                coordinator.stop = Some(Arc::new(AtomicBool::new(false)));
+                coordinator.listen_wanted = true;
+                coordinator.desired_enabled = true;
+            }
+            // Reach the actual monitor window: admission remains gated, the
+            // old slot is retired, and Listen intentionally leaves the task
+            // for capture drain. An idle captions.start can arrive next.
+            let finalizing = state.ffmpeg_work.begin_finalizing();
+            state.recording.lock().await.take();
+            drop(capture_permit);
+            stop_listen_with(&state, ListenStop::DrainWithCapture).await;
+            let status = start_captions_with_bearer(&state, None, || Some("test-bearer".into()))
+                .await
+                .unwrap();
+            assert_eq!(status.state, CaptionsState::Ready);
+            assert!(
+                finished_rx.try_recv().is_ok(),
+                "Ready must follow the provider join"
+            );
+            finish_captions_for_capture(&state, id).await;
+            assert!(
+                !state.clip_marks.lock().unwrap().register_recording(id),
+                "the exact drained owner must stay retired"
+            );
+            drop(finalizing);
+        }
+        assert!(
+            state
+                .clip_marks
+                .lock()
+                .unwrap()
+                .register_recording("after-cancellation")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_terminal_blocked_retry_joins_before_replacement_and_preserves_its_owner() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        let target = crate::clip_marks::MarkTarget {
+            session_id: "blocked-retry".into(),
+            records_to_file: true,
+        };
+        crate::clip_marks::register_caption_target(&state, Some(&target));
+        state
+            .clip_marks
+            .lock()
+            .unwrap()
+            .note_manual_mark("blocked-retry", 10.0);
+        let session = test_caption_session(&state, true);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let finished = Arc::new(AtomicBool::new(false));
+        let task_finished = finished.clone();
+        let task = tokio::spawn(async move {
+            let _finished = CaptionTestTaskFinished(task_finished);
+            let outcome = handle_terminal_failure(
+                &session,
+                "unauthorized",
+                "Sign in again.",
+                CaptionsTransport::Chunked,
+                TerminalOrigin::Upload(purpose(false)),
+            )
+            .await;
+            assert_eq!(outcome, TerminalOutcome::EndTask);
+            let _ = started_tx.send(());
+            // Controlled scheduling point after the real Blocked event and
+            // before the provider loop returns. No network/native fixture.
+            std::future::pending::<()>().await;
+        });
+        {
+            let mut coordinator = state.captions.lock().await;
+            coordinator.task = Some(task);
+            coordinator.task_mark_target = Some(target.clone());
+            coordinator.stop = Some(Arc::new(AtomicBool::new(false)));
+            coordinator.presentation = Some(Arc::new(AtomicBool::new(true)));
+            coordinator.desired_enabled = true;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            state.captions.lock().await.status.as_ref().unwrap().state,
+            CaptionsState::Blocked
+        );
+        assert!(!finished.load(Ordering::Acquire));
+        let _control = CAPTION_CONTROL.lock().await;
+        finish_caption_task_for_retry(&state, Some(&target))
+            .await
+            .unwrap();
+        assert!(
+            finished.load(Ordering::Acquire),
+            "a Blocked retry must join the old provider"
+        );
+        assert!(
+            state
+                .clip_marks
+                .lock()
+                .unwrap()
+                .note_final("blocked-retry", "clip that", &[], 15.0)
+                .is_none()
+        );
+        let mut coordinator = state.captions.lock().await;
+        spawn_transcription_task(
+            &state,
+            &mut coordinator,
+            TranscriptionTaskStart {
+                bearer: "test-bearer".into(),
+                client: VideorcApiClient::new().unwrap(),
+                language: None,
+                capture_elapsed_seconds: 20.0,
+                present: true,
+                mark_target: Some(target),
+            },
+        );
+        // Current-thread test: cancel the new queued provider before any poll.
+        // This exercises ownership installation without a real provider call.
+        let new_task = coordinator.task.take().unwrap();
+        coordinator.task_mark_target.take();
+        coordinator.stop.take();
+        new_task.abort();
+        drop(coordinator);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), new_task)
+            .await
+            .unwrap();
+        remove_tap();
+        assert!(
+            state
+                .clip_marks
+                .lock()
+                .unwrap()
+                .note_final("blocked-retry", "clip that", &[], 15.0)
+                .is_none()
+        );
+        assert!(
+            state
+                .clip_marks
+                .lock()
+                .unwrap()
+                .note_final("blocked-retry", "clip that", &[], 20.0)
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_retry_join_refuses_replacement_even_after_an_empty_runtime_retry() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        let target = crate::clip_marks::MarkTarget {
+            session_id: "unjoined-retry".into(),
+            records_to_file: true,
+        };
+        crate::clip_marks::register_caption_target(&state, Some(&target));
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::task::spawn_blocking(move || {
+            let _ = started_tx.send(());
+            let _ = release_rx.recv();
+            let _ = finished_tx.send(());
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        {
+            let mut coordinator = state.captions.lock().await;
+            coordinator.task = Some(task);
+            coordinator.task_mark_target = Some(target.clone());
+            coordinator.stop = Some(Arc::new(AtomicBool::new(false)));
+            coordinator.desired_enabled = true;
+        }
+        let _control = CAPTION_CONTROL.lock().await;
+        let result = finish_caption_task_for_retry(&state, Some(&target)).await;
+        // Own the blocking worker until it signals completion, even when the
+        // production abort/join deadline intentionally refuses its result.
+        drop(release_tx);
+        tokio::time::timeout(std::time::Duration::from_secs(2), finished_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("did not finish stopping")
+        );
+        assert!(state.captions.lock().await.task.is_none());
+        assert!(state.captions.lock().await.task_mark_target.is_none());
+        assert_eq!(
+            state
+                .captions
+                .lock()
+                .await
+                .status
+                .as_ref()
+                .unwrap()
+                .reason_code
+                .as_deref(),
+            Some("captions-start-failed")
+        );
+        assert!(
+            finish_caption_task_for_retry(&state, Some(&target))
+                .await
+                .is_err()
+        );
+        assert!(
+            !state
+                .clip_marks
+                .lock()
+                .unwrap()
+                .retire_recording("unjoined-retry")
+        );
+        assert!(
+            state
+                .clip_marks
+                .lock()
+                .unwrap()
+                .register_recording("independent-owner")
+        );
+        let independent = crate::clip_marks::MarkTarget {
+            session_id: "independent-owner".into(),
+            records_to_file: true,
+        };
+        assert!(
+            finish_caption_task_for_retry(&state, Some(&independent))
+                .await
+                .is_ok()
+        );
+        assert!(
+            state
+                .clip_marks
+                .lock()
+                .unwrap()
+                .note_final("unjoined-retry", "clip that", &[], 10.0)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn caption_opt_out_and_on_share_the_same_recordings_manual_dedupe() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        let target = crate::clip_marks::MarkTarget {
+            session_id: "opt-out-capture".into(),
+            records_to_file: true,
+        };
+        crate::clip_marks::register_caption_target(&state, Some(&target));
+        state
+            .clip_marks
+            .lock()
+            .unwrap()
+            .note_manual_mark("opt-out-capture", 10.0);
+        let mut active = crate::recording::test_active_recording_stub("opt-out-capture");
+        active.output_path = Some(std::path::PathBuf::from("/tmp/opt-out-capture.mp4"));
+        *state.recording.lock().await = Some(active);
+        install_intent_test_task(&state, true, false).await;
+        state.captions.lock().await.task_mark_target = Some(target.clone());
+        stop_captions(&state).await;
+        assert!(state.captions.lock().await.task.is_none());
+        assert!(state.captions.lock().await.task_mark_target.is_none());
+        assert!(
+            state
+                .clip_marks
+                .lock()
+                .unwrap()
+                .note_final("opt-out-capture", "clip that", &[], 15.0)
+                .is_none()
+        );
+        crate::clip_marks::register_caption_target(&state, Some(&target));
+        install_intent_test_task(&state, true, false).await;
+        state.captions.lock().await.task_mark_target = Some(target);
+        let task_id = state.captions.lock().await.task.as_ref().unwrap().id();
+        let confirmed_status =
+            serde_json::to_value(state.captions.lock().await.status.as_ref().unwrap()).unwrap();
+        let status = start_captions_with_bearer(&state, None, || Some("test-bearer".into()))
+            .await
+            .unwrap();
+        assert_eq!(serde_json::to_value(&status).unwrap(), confirmed_status);
+        assert_eq!(
+            state.captions.lock().await.task.as_ref().unwrap().id(),
+            task_id
+        );
+        assert!(
+            state
+                .clip_marks
+                .lock()
+                .unwrap()
+                .note_final("opt-out-capture", "clip that", &[], 15.0)
+                .is_none()
+        );
+        assert!(
+            state
+                .clip_marks
+                .lock()
+                .unwrap()
+                .note_final("opt-out-capture", "clip that", &[], 20.0)
+                .is_some()
+        );
+        state.recording.lock().await.take();
+        finish_captions_for_capture(&state, "opt-out-capture").await;
+        assert!(
+            !state
+                .clip_marks
+                .lock()
+                .unwrap()
+                .register_recording("opt-out-capture")
+        );
+    }
+
+    #[tokio::test]
+    async fn privacy_teardown_and_failed_join_block_both_actual_caption_callbacks() {
+        let state = test_caption_app_state();
+        persist_clip_test_recording(&state, "privacy-a");
+        let target = crate::clip_marks::MarkTarget {
+            session_id: "privacy-a".into(),
+            records_to_file: true,
+        };
+        crate::clip_marks::register_caption_target(&state, Some(&target));
+        let mut session = test_caption_session(&state, true);
+        session.mark_target = Some(target.clone());
+        let sequence = CaptionSequence::default();
+        let mut items = std::collections::HashMap::new();
+        let timeline = RealtimeCaptionTimeline {
+            capture_base_seconds: 10.0,
+            ms_sent: 2_000.0,
+            capture_epoch: 0,
+            ms_at_anchor: 0.0,
+            socket_audio_base_ms: 0.0,
+            admission: AdmittedOrcleAudio::default(),
+        };
+        handle_realtime_event(
+            &session,
+            RealtimeCaptionEvent::SpeechStarted {
+                item_id: "private-item".into(),
+                audio_start_ms: Some(0.0),
+            },
+            &mut items,
+            &sequence,
+            timeline,
+        )
+        .await;
+        for (in_progress, failed) in [(true, false), (false, true)] {
+            {
+                let mut coordinator = state.captions.lock().await;
+                coordinator.privacy_teardown_in_progress = in_progress;
+                coordinator.privacy_teardown_failed = failed;
+            }
+            let mut events = state.events.subscribe();
+            commit_chunk_transcript(
+                &session,
+                &stamped_chunk(1, 10.0),
+                true,
+                &chunk_response("clip that", 60),
+            )
+            .await;
+            handle_realtime_event(
+                &session,
+                RealtimeCaptionEvent::Completed {
+                    item_id: "private-item".into(),
+                    transcript: "clip that".into(),
+                },
+                &mut items,
+                &sequence,
+                timeline,
+            )
+            .await;
+            assert!(drain_events(&mut events).is_empty());
+            assert!(state.captions.lock().await.chunks.is_empty());
+            assert!(!items["private-item"].clip_processed);
+            assert!(
+                crate::cohost::recent_speech_since(&state, None)
+                    .unwrap()
+                    .finals
+                    .is_empty()
+            );
+            assert!(
+                crate::clip_marks::list_marks(&state, "privacy-a")
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        // No callback repopulated the post-purge matcher. Its first eligible
+        // phrase still lands; a failed provider owner is then refused even
+        // after a later empty runtime confirms its own (different) join.
+        assert!(
+            state
+                .clip_marks
+                .lock()
+                .unwrap()
+                .note_final("privacy-a", "clip that", &[], 10.0)
+                .is_some()
+        );
+        note_caption_provider_join(&state, Some(&target), false);
+        note_caption_provider_join(&state, None, true);
+        state.captions.lock().await.privacy_teardown_failed = false;
+        assert!(
+            !state
+                .clip_marks
+                .lock()
+                .unwrap()
+                .retire_recording("privacy-a")
+        );
+        assert!(
+            state
+                .clip_marks
+                .lock()
+                .unwrap()
+                .note_final("privacy-a", "clip that", &[], 30.0)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unproven_signed_out_provider_cannot_write_after_an_empty_runtime_retry() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        for records_to_file in [true, false] {
+            let state = test_caption_app_state();
+            persist_clip_test_capture(&state, "failed-sign-out", records_to_file);
+            let target = crate::clip_marks::MarkTarget {
+                session_id: "failed-sign-out".into(),
+                records_to_file,
+            };
+            crate::clip_marks::register_caption_target(&state, Some(&target));
+            let mut session = test_caption_session(&state, true);
+            session.mark_target = Some(target.clone());
+            let timeline = RealtimeCaptionTimeline {
+                capture_base_seconds: 10.0,
+                ms_at_anchor: 0.0,
+                socket_audio_base_ms: 0.0,
+                ms_sent: 2_000.0,
+                capture_epoch: 0,
+                admission: AdmittedOrcleAudio::default(),
+            };
+            let sequence = CaptionSequence::default();
+            let mut items = std::collections::HashMap::new();
+            handle_realtime_event(
+                &session,
+                RealtimeCaptionEvent::SpeechStarted {
+                    item_id: "pre-sign-out".into(),
+                    audio_start_ms: Some(0.0),
+                },
+                &mut items,
+                &sequence,
+                timeline,
+            )
+            .await;
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+            let task = tokio::task::spawn_blocking(move || {
+                let _ = started_tx.send(());
+                let _ = release_rx.recv();
+                let _ = finished_tx.send(());
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            {
+                let mut coordinator = state.captions.lock().await;
+                coordinator.task = Some(task);
+                coordinator.task_mark_target = Some(target);
+                coordinator.stop = Some(session.stop.clone());
+            }
+            let status = stop_captions_for_sign_out(&state, || {}).await;
+            drop(release_tx);
+            tokio::time::timeout(std::time::Duration::from_secs(2), finished_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(status.state, CaptionsState::Blocked);
+            assert!(session.stop.load(Ordering::Acquire));
+            finish_captions_for_capture(&state, "failed-sign-out").await;
+            for empty_retry in [false, true] {
+                if empty_retry {
+                    assert_eq!(
+                        stop_captions_for_sign_out(&state, || {}).await.state,
+                        CaptionsState::Idle
+                    );
+                    assert!(!state.captions.lock().await.privacy_teardown_in_progress);
+                }
+                let mut events = state.events.subscribe();
+                commit_chunk_transcript(
+                    &session,
+                    &stamped_chunk(1, 10.0),
+                    true,
+                    &chunk_response("clip that", 60),
+                )
+                .await;
+                handle_realtime_event(
+                    &session,
+                    RealtimeCaptionEvent::Completed {
+                        item_id: "pre-sign-out".into(),
+                        transcript: "clip that".into(),
+                    },
+                    &mut items,
+                    &sequence,
+                    timeline,
+                )
+                .await;
+                assert!(drain_events(&mut events).is_empty());
+                assert!(state.captions.lock().await.chunks.is_empty());
+                assert!(
+                    crate::cohost::recent_speech_since(&state, None)
+                        .unwrap()
+                        .finals
+                        .is_empty()
+                );
+                assert!(!items["pre-sign-out"].clip_processed);
+                assert!(
+                    crate::clip_marks::list_marks(&state, "failed-sign-out")
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+            if records_to_file {
+                assert!(
+                    !state
+                        .clip_marks
+                        .lock()
+                        .unwrap()
+                        .retire_recording("failed-sign-out")
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_ends_during_sign_out_retire_only_after_the_exact_provider_join() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        for cycle in 0..3 {
+            let id = format!("sign-out-capture-{cycle}");
+            let newer = format!("manual-capture-{cycle}");
+            let target = crate::clip_marks::MarkTarget {
+                session_id: id.clone(),
+                records_to_file: true,
+            };
+            crate::clip_marks::register_caption_target(&state, Some(&target));
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            // Started blocking work cannot be aborted until released. This
+            // controls the actual join barrier rather than polling a handle
+            // to Ready and then accidentally awaiting it a second time.
+            let task = tokio::task::spawn_blocking(move || {
+                let _ = started_tx.send(());
+                let _ = release_rx.recv();
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            let publication = {
+                let mut coordinator = state.captions.lock().await;
+                coordinator.task = Some(task);
+                coordinator.task_mark_target = Some(target);
+                coordinator.stop = Some(Arc::new(AtomicBool::new(false)));
+                coordinator.artifact_publication.clone()
+            };
+            let publication_guard = publication.lock().await;
+            let signing_out_state = state.clone();
+            let signing_out =
+                tokio::spawn(
+                    async move { stop_captions_for_sign_out(&signing_out_state, || {}).await },
+                );
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while !state.captions.lock().await.privacy_teardown_in_progress {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                finish_captions_for_capture(&state, &id),
+            )
+            .await
+            .unwrap();
+            assert!(!state.captions.lock().await.privacy_provider_joined);
+            assert!(
+                state.clip_marks.lock().unwrap().register_recording(&id),
+                "capture end cannot retire its still-unjoined provider"
+            );
+            release_tx.send(()).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while !state.captions.lock().await.privacy_provider_joined {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(!state.clip_marks.lock().unwrap().register_recording(&id));
+            // End during later filesystem cleanup is independent of the
+            // joined provider, including a manual-only newer recording.
+            assert!(state.clip_marks.lock().unwrap().register_recording(&newer));
+            finish_captions_for_capture(&state, &id).await;
+            assert!(state.clip_marks.lock().unwrap().register_recording(&newer));
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                finish_captions_for_capture(&state, &newer),
+            )
+            .await
+            .unwrap();
+            assert!(!state.clip_marks.lock().unwrap().register_recording(&newer));
+            assert!(!signing_out.is_finished());
+            drop(publication_guard);
+            let status = tokio::time::timeout(std::time::Duration::from_secs(2), signing_out)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(status.state, CaptionsState::Idle);
+        }
+        assert!(
+            state
+                .clip_marks
+                .lock()
+                .unwrap()
+                .register_recording("after-sign-out-cycles")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_late_chunk_final_keeps_its_recording_mark_after_capture_epoch_changes() {
+        let state = test_caption_app_state();
+        persist_clip_test_recording(&state, "late-chunk-a");
+        persist_clip_test_recording(&state, "late-chunk-b");
+        state.captions.lock().await.capture_epoch = 1;
+        *state.recording.lock().await =
+            Some(crate::recording::test_active_recording_stub("late-chunk-b"));
+        let mut session = test_caption_session(&state, true);
+        session.mark_target = Some(crate::clip_marks::MarkTarget {
+            session_id: "late-chunk-a".to_string(),
+            records_to_file: true,
+        });
+        crate::clip_marks::register_caption_target(&state, session.mark_target.as_ref());
+        let mut events = state.events.subscribe();
+        commit_chunk_transcript(
+            &session,
+            &stamped_chunk(1, 10.0),
+            true,
+            &chunk_response("clip that", 60),
+        )
+        .await;
+        let emitted = drain_events(&mut events);
+        assert!(caption_event_names(&emitted).is_empty());
+        assert!(
+            crate::cohost::recent_speech_since(&state, None)
+                .unwrap()
+                .finals
+                .is_empty()
+        );
+        let event = match emitted
+            .into_iter()
+            .find(|event| event.event == "clip.marked")
+        {
+            Some(event) => event,
+            None => next_clip_event(&mut events).await,
+        };
+        assert_eq!(event.payload["sessionId"], "late-chunk-a");
+        assert_eq!(event.payload["saved"], true);
+        assert_eq!(
+            crate::clip_marks::list_marks(&state, "late-chunk-a")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            crate::clip_marks::list_marks(&state, "late-chunk-b")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!state.captions.lock().await.chunks[0].presented);
+        state
+            .clip_marks
+            .lock()
+            .unwrap()
+            .note_manual_mark("late-chunk-a", 40.0);
+        commit_chunk_transcript(
+            &session,
+            &stamped_chunk(1, 10.0),
+            true,
+            &chunk_response("clip that", 60),
+        )
+        .await;
+        assert_eq!(state.captions.lock().await.chunks.len(), 1);
+        assert!(
+            state
+                .clip_marks
+                .lock()
+                .unwrap()
+                .note_final("late-chunk-a", "clip that", &[], 45.0)
+                .is_none(),
+            "the same completed chunk must not call the clip hook again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_late_realtime_final_keeps_its_mark_without_old_capture_presentation() {
+        let state = test_caption_app_state();
+        persist_clip_test_recording(&state, "late-realtime-a");
+        let mut session = test_caption_session(&state, true);
+        session.mark_target = Some(crate::clip_marks::MarkTarget {
+            session_id: "late-realtime-a".to_string(),
+            records_to_file: true,
+        });
+        crate::clip_marks::register_caption_target(&state, session.mark_target.as_ref());
+        let mut items = std::collections::HashMap::new();
+        let sequence = CaptionSequence::default();
+        let old_timeline = RealtimeCaptionTimeline {
+            capture_base_seconds: 10.0,
+            ms_at_anchor: 0.0,
+            socket_audio_base_ms: 0.0,
+            ms_sent: 2_000.0,
+            capture_epoch: 0,
+            admission: AdmittedOrcleAudio::test_epoch(0),
+        };
+        handle_realtime_event(
+            &session,
+            RealtimeCaptionEvent::SpeechStarted {
+                item_id: "old-a".to_string(),
+                audio_start_ms: Some(0.0),
+            },
+            &mut items,
+            &sequence,
+            old_timeline,
+        )
+        .await;
+        // Exercise the actual retirement seam called by realtime re-anchor.
+        retire_realtime_caption_items(&mut items, 0, 12.0);
+        sequence.reset();
+        state.captions.lock().await.capture_epoch = 1;
+        let current_timeline = RealtimeCaptionTimeline {
+            capture_base_seconds: 0.0,
+            ms_sent: 1_000.0,
+            capture_epoch: 1,
+            ..old_timeline
+        };
+        let mut events = state.events.subscribe();
+        for event in [
+            RealtimeCaptionEvent::Partial {
+                item_id: "old-a".to_string(),
+                transcript: "clip th".to_string(),
+            },
+            RealtimeCaptionEvent::Completed {
+                item_id: "old-a".to_string(),
+                transcript: "clip that".to_string(),
+            },
+        ] {
+            handle_realtime_event(&session, event, &mut items, &sequence, current_timeline).await;
+        }
+        let emitted = drain_events(&mut events);
+        assert!(caption_event_names(&emitted).is_empty());
+        assert!(
+            crate::cohost::recent_speech_since(&state, None)
+                .unwrap()
+                .finals
+                .is_empty()
+        );
+        let event = match emitted
+            .into_iter()
+            .find(|event| event.event == "clip.marked")
+        {
+            Some(event) => event,
+            None => next_clip_event(&mut events).await,
+        };
+        assert_eq!(event.payload["sessionId"], "late-realtime-a");
+        assert_eq!(event.payload["atSeconds"], 10.0);
+        assert_eq!(event.payload["saved"], true);
+        {
+            let coordinator = state.captions.lock().await;
+            let cue = &coordinator.chunks[0];
+            assert_eq!(cue.capture_epoch, 0);
+            assert_eq!(cue.offset_seconds, 10.0);
+            assert_eq!(cue.duration_seconds, 2.0);
+            assert!(!cue.presented);
+        }
+        state
+            .clip_marks
+            .lock()
+            .unwrap()
+            .note_manual_mark("late-realtime-a", 40.0);
+        handle_realtime_event(
+            &session,
+            RealtimeCaptionEvent::Completed {
+                item_id: "old-a".into(),
+                transcript: "clip that".into(),
+            },
+            &mut items,
+            &sequence,
+            current_timeline,
+        )
+        .await;
+        assert!(
+            state
+                .clip_marks
+                .lock()
+                .unwrap()
+                .note_final("late-realtime-a", "clip that", &[], 45.0)
+                .is_none(),
+            "repeated provider completions must call the clip hook only once"
+        );
+        handle_realtime_event(
+            &session,
+            RealtimeCaptionEvent::SpeechStarted {
+                item_id: "new-a".into(),
+                audio_start_ms: Some(0.0),
+            },
+            &mut items,
+            &sequence,
+            current_timeline,
+        )
+        .await;
+        assert_eq!(items["old-a"].seq, items["new-a"].seq);
+        assert_ne!(items["old-a"].capture_epoch, items["new-a"].capture_epoch);
+    }
+
+    #[tokio::test]
+    async fn realtime_item_retention_refuses_unknown_pruned_and_unregistered_clip_owners() {
+        let state = test_caption_app_state();
+        persist_clip_test_recording(&state, "item-a");
+        let target = crate::clip_marks::MarkTarget {
+            session_id: "item-a".into(),
+            records_to_file: true,
+        };
+        crate::clip_marks::register_caption_target(&state, Some(&target));
+        let mut session = test_caption_session(&state, true);
+        session.mark_target = Some(target.clone());
+        let sequence = CaptionSequence::default();
+        let mut items = std::collections::HashMap::new();
+        for index in 0..MAX_REALTIME_CAPTION_ITEMS {
+            assert!(
+                realtime_item_entry(
+                    &mut items,
+                    &sequence,
+                    &format!("item-{index}"),
+                    10.0,
+                    0,
+                    AdmittedOrcleAudio::default(),
+                    Some(target.clone())
+                )
+                .is_some()
+            );
+        }
+        assert!(
+            realtime_item_entry(
+                &mut items,
+                &sequence,
+                "overflow",
+                10.0,
+                0,
+                AdmittedOrcleAudio::default(),
+                Some(target.clone())
+            )
+            .is_none()
+        );
+        assert_eq!(items.len(), MAX_REALTIME_CAPTION_ITEMS);
+        items.get_mut("item-0").unwrap().clip_processed = true;
+        assert!(
+            realtime_item_entry(
+                &mut items,
+                &sequence,
+                "fresh-item",
+                10.0,
+                1,
+                AdmittedOrcleAudio::default(),
+                Some(target)
+            )
+            .is_some()
+        );
+        assert!(!items.contains_key("item-0"));
+        assert_eq!(items.len(), MAX_REALTIME_CAPTION_ITEMS);
+        {
+            let mut detector = state.clip_marks.lock().unwrap();
+            detector.retire_recording("item-a");
+            assert!(detector.register_recording("item-b"));
+            assert!(detector.register_recording("item-c"));
+        }
+        state.captions.lock().await.capture_epoch = 1;
+        let timeline = RealtimeCaptionTimeline {
+            capture_base_seconds: 0.0,
+            ms_sent: 1_000.0,
+            ms_at_anchor: 0.0,
+            socket_audio_base_ms: 0.0,
+            capture_epoch: 1,
+            admission: AdmittedOrcleAudio::default(),
+        };
+        let mut events = state.events.subscribe();
+        for id in ["unknown", "item-0", "item-1"] {
+            handle_realtime_event(
+                &session,
+                RealtimeCaptionEvent::Completed {
+                    item_id: id.into(),
+                    transcript: "clip that".into(),
+                },
+                &mut items,
+                &sequence,
+                timeline,
+            )
+            .await;
+        }
+        assert!(caption_event_names(&drain_events(&mut events)).is_empty());
+        let coordinator = state.captions.lock().await;
+        assert_eq!(
+            coordinator.chunks.len(),
+            1,
+            "only the known item keeps its canonical old cue"
+        );
+        assert!(!coordinator.chunks[0].presented);
+        drop(coordinator);
+        assert!(items["item-1"].clip_processed);
+        assert!(
+            crate::clip_marks::list_marks(&state, "item-a")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            crate::cohost::recent_speech_since(&state, None)
+                .unwrap()
+                .finals
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_admission_waits_for_the_old_caption_drain_before_recording_replacement() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        for records_to_file in [true, false] {
+            let state = test_caption_app_state();
+            persist_clip_test_capture(&state, "drain-a", records_to_file);
+            persist_clip_test_recording(&state, "drain-b");
+            let capture_permit = state.ffmpeg_work.begin_capture_when_available().await;
+            let mut active_a = crate::recording::test_active_recording_stub("drain-a");
+            if records_to_file {
+                active_a.output_path = Some(std::path::PathBuf::from("/tmp/drain-a.mp4"));
+            }
+            *state.recording.lock().await = Some(active_a);
+            let (_, target_a) = caption_capture_facts(state.recording.lock().await.as_ref());
+            let mut session = test_caption_session(&state, true);
+            session.mark_target = target_a;
+            crate::clip_marks::register_caption_target(&state, session.mark_target.as_ref());
+            session.receiver = install_tap();
+            let present = session.present.clone();
+            let stop = session.stop.clone();
+            let task_mark_target = session.mark_target.clone();
+            let (draining_tx, draining_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                while session.receiver.recv().await.is_some() {}
+                draining_tx.send(()).expect("provider drain boundary");
+                let _ = release_rx.await;
+                // Only the provider response is controlled. Final routing is
+                // the actual callback, after the recording slot was retired.
+                commit_chunk_transcript(
+                    &session,
+                    &stamped_chunk(1, 10.0),
+                    true,
+                    &chunk_response("clip that", 60),
+                )
+                .await;
+            });
+            let old_task_id = task.id();
+            {
+                let mut coordinator = state.captions.lock().await;
+                coordinator.task = Some(task);
+                coordinator.task_mark_target = task_mark_target;
+                coordinator.stop = Some(stop);
+                coordinator.desired_enabled = true;
+                coordinator.listen_wanted = true;
+                coordinator.presentation = Some(present);
+                coordinator.status = Some(CaptionsStatus::active(
+                    CaptionsState::Listening,
+                    CaptionsTransport::Chunked,
+                    "captions-drain-a",
+                ));
+            }
+            let generation = reserve_caption_session_start(&state).await.unwrap();
+            let status = start_captions_with_bearer_for_session(
+                &state,
+                Some(("drain-a", generation)),
+                None,
+                || Some("test-bearer".to_string()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(status.state, CaptionsState::Listening);
+            assert_eq!(
+                state.captions.lock().await.task.as_ref().unwrap().id(),
+                old_task_id,
+                "an authorized task is reused within the same capture"
+            );
+
+            // Match monitor_session: finalization owns the gate before A's
+            // slot becomes reusable, and holds it past provider/artifact drain.
+            let finalizing_permit = state.ffmpeg_work.begin_finalizing();
+            let retired_a = state.recording.lock().await.take().unwrap();
+            drop(retired_a);
+            drop(capture_permit);
+            stop_listen_with(&state, ListenStop::DrainWithCapture).await;
+            let replacement_state = state.clone();
+            let replacement = tokio::spawn(async move {
+                let permit = replacement_state
+                    .ffmpeg_work
+                    .begin_capture_when_available()
+                    .await;
+                *replacement_state.recording.lock().await =
+                    Some(crate::recording::test_active_recording_stub("drain-b"));
+                let generation = reserve_caption_session_start(&replacement_state)
+                    .await
+                    .unwrap();
+                let result = start_captions_with_bearer_for_session(
+                    &replacement_state,
+                    Some(("drain-b", generation)),
+                    None,
+                    || Some("test-bearer".to_string()),
+                )
+                .await;
+                (permit, result)
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while state.ffmpeg_work.snapshot().capture_waiting == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("replacement capture reached the production admission gate");
+            assert!(state.recording.lock().await.is_none());
+            let mut events = state.events.subscribe();
+            let finishing_state = state.clone();
+            let finishing = tokio::spawn(async move {
+                finish_captions_for_capture(&finishing_state, "drain-a").await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(2), draining_rx)
+                .await
+                .expect("capture finish closed the provider tap")
+                .expect("provider reached final response barrier");
+            assert!(!replacement.is_finished());
+            assert!(!finishing.is_finished());
+            assert!(state.recording.lock().await.is_none());
+            release_tx
+                .send(())
+                .expect("release final provider response");
+            tokio::time::timeout(std::time::Duration::from_secs(2), finishing)
+                .await
+                .expect("caption drain deadline")
+                .expect("caption drain task");
+            let event = next_clip_event(&mut events).await;
+            assert_eq!(event.payload["sessionId"], "drain-a");
+            assert_eq!(event.payload["saved"], records_to_file);
+            assert!(state.captions.lock().await.task.is_none());
+            assert!(!TAP_ACTIVE.load(Ordering::Acquire));
+            assert!(!replacement.is_finished());
+            drop(finalizing_permit);
+            let (replacement_permit, result) =
+                tokio::time::timeout(std::time::Duration::from_secs(2), replacement)
+                    .await
+                    .expect("capture starts after finalization")
+                    .expect("replacement task");
+            // The stub has no microphone: the fresh start truthfully refuses
+            // instead of adopting the now-joined A task as B's provider.
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Select an available microphone")
+            );
+            assert!(state.captions.lock().await.task.is_none());
+            assert_eq!(
+                state.recording.lock().await.as_ref().unwrap().session_id,
+                "drain-b"
+            );
+            assert!(
+                crate::clip_marks::list_marks(&state, "drain-b")
+                    .unwrap()
+                    .is_empty()
+            );
+            drop(replacement_permit);
+        }
+    }
+
     /// Finding 10: captions turned off while an upload was in flight never
     /// show its final; the record and Orcle still get it.
     #[tokio::test]
@@ -10568,7 +11954,7 @@ mod tests {
             "the tap keeps feeding it"
         );
         // The capture seam closes the tap and joins the drained task.
-        finish_captions_for_capture(&state).await;
+        finish_captions_for_capture(&state, "caption-artifact-test").await;
         assert!(state.captions.lock().await.task.is_none());
         assert!(!TAP_ACTIVE.load(Ordering::Acquire));
 
@@ -10584,7 +11970,7 @@ mod tests {
         stop_listen_with(&state, ListenStop::DrainIfCapturing).await;
         assert!(coordinator_task_alive(&*state.captions.lock().await));
         *state.recording.lock().await = None;
-        finish_captions_for_capture(&state).await;
+        finish_captions_for_capture(&state, "caption-artifact-test").await;
         assert!(state.captions.lock().await.task.is_none());
 
         // An explicit stop (Orcle off, listening off) aborts at once.
@@ -10633,12 +12019,11 @@ mod tests {
         )
         .await;
         let speech = crate::cohost::recent_speech_since(&state, None).expect("speech");
+        assert_eq!(speech.finals[0].offset_seconds, 9.0);
+        assert!(!speech.finals[0].presented);
         assert_eq!(
-            speech.finals[0]
-                .mark_target
-                .as_ref()
-                .map(|t| t.session_id.as_str()),
-            Some("marked-stream")
+            session.mark_target.as_ref().unwrap().session_id,
+            "marked-stream"
         );
     }
 
