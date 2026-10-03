@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
+import { scenePresetStateReadCode } from './lib/scene-presets-smoke-state.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
@@ -34,7 +35,7 @@ const evaluate = async (code) => {
   const response = await requestSmokeCommand(smoke, 'eval-js', { code }, { timeoutMs })
   return response?.result ?? response
 }
-const state = () => evaluate('return window.__videorcSmokeScenePresets?.state()')
+const state = () => evaluate(scenePresetStateReadCode)
 const waitFor = async (predicate, description) => {
   const until = Date.now() + timeoutMs
   console.log(`[scene-presets] Waiting for ${description}`)

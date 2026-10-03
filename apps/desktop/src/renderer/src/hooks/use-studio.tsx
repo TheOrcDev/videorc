@@ -14707,9 +14707,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           visualTransactionPending,
           sourceDeviceSwitchPending,
           sourceSelectionState,
-          sourceSwitchReason,
+          sourceSwitchReasons: {
+            capture: sourceSwitchReason('capture'),
+            camera: sourceSwitchReason('camera'),
+            microphone: sourceSwitchReason('microphone')
+          },
           allowCaptureNone,
-          retrySourceStatus,
           sceneGesturePending,
           sceneTransformPending,
           confirmedVisual: confirmedVisualRef.current
@@ -14720,6 +14723,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       save: value.saveScene,
       apply: value.applySavedScene,
       remove: value.deleteSavedScene,
+      retrySourceStatus,
       background: value.applyBackgroundSlot,
       backgroundStyle: value.applyWorkingBackgroundStyle,
       removeBackground: (id: string) =>
