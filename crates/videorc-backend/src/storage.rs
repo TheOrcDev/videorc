@@ -62,6 +62,16 @@ pub struct SessionCloneFacts {
     pub mp4_path: Option<String>,
 }
 
+/// When a session ran and how it ran, for readers that place events on its
+/// timeline (plan 119: moments, the Orcle report).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionTiming {
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub mode: String,
+}
+
 const PERFORMANCE_CHECK_PROCESSING_KIND: &str = "performance-check";
 
 #[derive(Debug, Clone)]
@@ -2433,6 +2443,25 @@ impl Database {
             );
         }
         Ok(())
+    }
+
+    /// When one session ran; `None` when its row is gone.
+    pub fn session_timing(&self, session_id: &str) -> Result<Option<SessionTiming>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT started_at, ended_at, duration_ms, mode FROM sessions WHERE id = ?1",
+            params![session_id],
+            |row| {
+                Ok(SessionTiming {
+                    started_at: row.get(0)?,
+                    ended_at: row.get(1)?,
+                    duration_ms: row.get(2)?,
+                    mode: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     /// Every recorded media path for a session, in preference order (mp4 export

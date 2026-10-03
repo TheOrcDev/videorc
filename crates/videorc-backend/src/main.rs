@@ -55,6 +55,7 @@ mod live_render;
 mod live_scene;
 mod live_source_switch;
 mod metal_compositor;
+mod moments;
 mod mpeg_ts;
 mod native_preview_host;
 mod noise_cleanup;
@@ -108,6 +109,7 @@ mod system_audio_capture;
 #[cfg(any(windows, all(test, target_os = "macos")))]
 mod system_audio_capture_windows;
 mod system_audio_session;
+mod transcript;
 mod twitch;
 mod twitch_chat;
 #[cfg(target_os = "macos")]
