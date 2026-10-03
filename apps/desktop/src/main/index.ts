@@ -4,8 +4,15 @@ import { normalizeAccelerator } from '../shared/accelerator'
 import type {
   GlobalShortcutsConfig,
   GlobalShortcutsResult,
+  SessionMediaGrantResult,
   ShortcutRecorderArmResult
 } from '../shared/backend'
+import {
+  SESSION_MEDIA_HOST,
+  SessionMediaGrantRegistry,
+  inspectSessionMediaFile,
+  serveSessionMediaRequest
+} from './session-media'
 import {
   app,
   BrowserWindow,
@@ -23,7 +30,8 @@ import {
   shell,
   systemPreferences,
   WebContentsView,
-  type NativeImage
+  type NativeImage,
+  type WebContents
 } from 'electron'
 import { randomBytes, randomUUID } from 'node:crypto'
 import {
@@ -12898,6 +12906,42 @@ async function openManagedSession(sessionId: unknown): Promise<string> {
   return shell.openPath(await resolveManagedSessionPath(sessionId))
 }
 
+// --- In-app playback grants (plan 119, S11) -------------------------------------
+// The player never receives a path. It asks for a grant on a session id, main
+// resolves the managed file through the same backend admin RPC Library's Play
+// uses, accepts only a finalized regular .mp4, and hands back an unguessable
+// `videorc-asset://session-media/<grantId>` URL that the protocol handler
+// serves Range-aware (session-media.ts). Grants die after ten minutes unless
+// renewed, and with the window that minted them.
+const sessionMediaGrants = new SessionMediaGrantRegistry()
+const sessionMediaGrantOwners = new Set<number>()
+
+async function grantSessionMedia(
+  sender: WebContents,
+  sessionId: unknown
+): Promise<SessionMediaGrantResult> {
+  let path: string
+  try {
+    path = await resolveManagedSessionPath(sessionId)
+  } catch {
+    return { error: 'not-found' }
+  }
+  const inspection = inspectSessionMediaFile(path)
+  if (!inspection.ok) {
+    return { error: inspection.error }
+  }
+  const ownerId = sender.id
+  if (!sessionMediaGrantOwners.has(ownerId)) {
+    sessionMediaGrantOwners.add(ownerId)
+    sender.once('destroyed', () => {
+      sessionMediaGrantOwners.delete(ownerId)
+      sessionMediaGrants.revokeOwner(ownerId)
+    })
+  }
+  const issued = sessionMediaGrants.issue(ownerId, sessionId as string, inspection.file)
+  return { url: issued.url, expiresAt: issued.expiresAt }
+}
+
 async function revealManagedBackground(assetId: unknown): Promise<void> {
   if (typeof assetId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(assetId)) {
     throw new Error('Managed background asset id is invalid.')
@@ -13288,6 +13332,11 @@ function registerManagedAssetProtocol(): void {
             'Cache-Control': 'no-store'
           }
         })
+      }
+      // Finalized recordings for the in-app player (plan 119, S11): grant ids
+      // only, Range-aware, identity re-checked on every request.
+      if (url.host === SESSION_MEDIA_HOST) {
+        return serveSessionMediaRequest(sessionMediaGrants, request, url.pathname)
       }
       const resolved =
         url.host === 'scheduled-thumbnail'
@@ -13775,6 +13824,9 @@ app.whenReady().then(async () => {
   )
   secureIpcHandle('resource:open-session', (_event, sessionId: unknown) =>
     openManagedSession(sessionId)
+  )
+  secureIpcHandle('media:grant-session', (event, sessionId: unknown) =>
+    grantSessionMedia(event.sender, sessionId)
   )
   secureIpcHandle('resource:reveal-background', (_event, assetId: unknown) =>
     revealManagedBackground(assetId)

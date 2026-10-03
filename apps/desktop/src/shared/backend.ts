@@ -3950,6 +3950,19 @@ export interface ShortcutRecorderArmResult {
   armed: boolean
 }
 
+/** Why main refused to mint a session media grant (plan 119, S11). */
+export type SessionMediaGrantRefusal =
+  /** No such session, no managed file, or the file is gone (or reached through a symlink). */
+  | 'not-found'
+  /** The session's managed file is not an `.mp4`. */
+  | 'not-mp4'
+  /** The MP4 exists but has no index yet: the recording is still being finalized. */
+  | 'not-ready'
+
+export type SessionMediaGrantResult =
+  | { url: string; expiresAt: number }
+  | { error: SessionMediaGrantRefusal }
+
 export interface VideorcApi {
   setGlobalShortcuts?: (shortcuts: GlobalShortcutsConfig) => Promise<GlobalShortcutsResult>
   onGlobalShortcut?: (callback: (action: GlobalShortcutAction) => void) => () => void
@@ -4148,6 +4161,14 @@ export interface VideorcApi {
   getDashboard?: () => Promise<LiveDashboardState | null>
   onDashboard?: (callback: (state: LiveDashboardState | null) => void) => () => void
   openSession: (sessionId: string) => Promise<string>
+  /**
+   * In-app playback (plan 119, S11): mints a short-lived grant for one
+   * finalized recording MP4, served Range-aware at
+   * `videorc-asset://session-media/<grantId>`. Main-window only. Calling again
+   * for the same session renews the grant and keeps its URL while the file is
+   * unchanged; the grant also dies with the window.
+   */
+  grantSessionMedia: (sessionId: string) => Promise<SessionMediaGrantResult>
   trashSessionDeletion: (operationId: string) => Promise<{ deleted: boolean; failedCount: number }>
   onOAuthCallbackUrl: (callback: (envelope: OAuthCallbackEnvelope) => void) => () => void
   /**
