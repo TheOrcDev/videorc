@@ -80,6 +80,7 @@ function snack(message) {
 }
 
 function showGate(title, text) {
+  cancelHolds()
   $('gate-title').textContent = title
   $('gate-text').textContent = text
   $('view-gate').hidden = false
@@ -90,6 +91,7 @@ function showGate(title, text) {
 
 let activeView = 'comments'
 function showView(view) {
+  if (view !== 'deck') cancelHolds()
   activeView = view
   $('view-gate').hidden = true
   $('tabs').hidden = false
@@ -220,6 +222,37 @@ function paintHighlight() {
 
 let describe = null
 let state = null
+let sessionControl = null
+const holdOwners = new Map()
+
+function cancelHolds() {
+  for (const owner of holdOwners.values()) owner.cancel()
+}
+
+function retireKey(node) {
+  holdOwners.get(node)?.dispose()
+  holdOwners.delete(node)
+}
+
+function retireSessionControl() {
+  if (sessionControl) retireKey(sessionControl.node)
+  sessionControl = null
+}
+
+// Keep retained controls attached: removing and re-inserting a held button can
+// lose its release route in the browser. Every removed hold owner is disposed.
+function updateKeys(container, nodes) {
+  for (const node of [...container.children]) {
+    if (!nodes.includes(node)) {
+      retireKey(node)
+      node.remove()
+    }
+  }
+  nodes.forEach((node, index) => {
+    const current = container.children[index]
+    if (current !== node) container.insertBefore(node, current ?? null)
+  })
+}
 
 function prettyPreset(id) {
   return id.replace(/[-_]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
@@ -239,21 +272,44 @@ function key({ name, hint, on = false, accent, disabled = false, onTap, onHold }
   }
   node.append(el('span', 'hold'))
   let timer = null
+  let pointerId = null
+  let retired = false
+  const available = () =>
+    !retired &&
+    node.isConnected &&
+    !node.disabled &&
+    client?.status === 'connected' &&
+    activeView === 'deck' &&
+    document.visibilityState === 'visible'
   const cancel = () => {
     clearTimeout(timer)
     timer = null
+    pointerId = null
     node.dataset.holding = 'false'
   }
-  node.addEventListener('pointerdown', () => {
+  holdOwners.set(node, {
+    cancel,
+    dispose: () => {
+      retired = true
+      cancel()
+    }
+  })
+  node.addEventListener('pointerdown', (event) => {
+    if (pointerId !== null || !available()) return
+    pointerId = event.pointerId
     node.dataset.holding = 'true'
     timer = setTimeout(() => {
-      cancel()
-      onHold()
+      timer = null
+      node.dataset.holding = 'false'
+      // Keep the pointer owned until release: repeated down events must not
+      // re-arm the same gesture after it has already sent its single intent.
+      if (available()) onHold()
     }, HOLD_TO_STOP_MS)
   })
-  for (const event of ['pointerup', 'pointerleave', 'pointercancel']) {
-    node.addEventListener(event, () => {
-      if (timer && event === 'pointerup') snack('Hold to stop.')
+  for (const type of ['pointerup', 'pointerleave', 'pointercancel']) {
+    node.addEventListener(type, (event) => {
+      if (event.pointerId !== pointerId) return
+      if (timer !== null && type === 'pointerup') snack('Hold to stop.')
       cancel()
     })
   }
@@ -271,20 +327,32 @@ function renderDeck() {
   const streaming = state.streamEnabled
   $('live').hidden = !(state.sessionActive && streaming)
 
+  const action = streaming
+    ? state.sessionActive
+      ? 'streamStop'
+      : 'streamStart'
+    : state.sessionActive
+      ? 'recordStop'
+      : 'recordStart'
+  if (sessionControl?.action !== action || sessionControl?.sessionState !== state.sessionState) {
+    retireSessionControl()
+  }
   const session = state.sessionActive
-    ? key({
+    ? (sessionControl?.node ??
+      key({
         name: streaming ? 'End stream' : 'Stop recording',
         hint: 'Hold to stop',
         on: true,
         accent: 'red',
-        onHold: () => send({ kind: streaming ? 'streamStop' : 'recordStop' })
-      })
+        onHold: () => send({ kind: action })
+      }))
     : key({
         name: streaming ? 'Go live' : 'Record',
         hint: streaming && state.recordEnabled ? 'Stream + record' : 'Tap to start',
         accent: 'red',
-        onTap: () => send({ kind: streaming ? 'streamStart' : 'recordStart' })
+        onTap: () => send({ kind: action })
       })
+  sessionControl = { action, sessionState: state.sessionState, node: session }
   const mic = key({
     name: 'Microphone',
     hint: state.micMuted ? 'Muted' : 'On',
@@ -308,8 +376,9 @@ function renderDeck() {
     disabled: highlight.phase !== 'live',
     onTap: () => send({ kind: 'commentHighlightClear' })
   })
-  $('deck-main').replaceChildren(
-    ...[session, mic, systemAudio, comments].filter((node) => node !== null)
+  updateKeys(
+    $('deck-main'),
+    [session, mic, systemAudio, comments].filter((node) => node !== null)
   )
 
   const presets = describe.layoutPresets ?? []
@@ -385,6 +454,7 @@ function start() {
   })
   client.on('paired', rememberCredentials)
   client.on('status', ({ status, detail }) => {
+    if (status !== 'connected') retireSessionControl()
     $('status').dataset.status = status
     $('status').textContent = STATUS_TEXT[status] ?? status
     if (status === 'connected') {
@@ -442,9 +512,11 @@ $('tabs').addEventListener('click', (event) => {
 
 // A phone that slept or changed network reconnects the moment it is looked at.
 document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') cancelHolds()
   if (document.visibilityState === 'visible' && client?.status === 'reconnecting') {
     client.reconnectNow()
   }
 })
+window.addEventListener('pagehide', cancelHolds)
 
 start()
