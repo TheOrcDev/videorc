@@ -1,3 +1,4 @@
+import type { ChatDelivery, ChatDeliveryBoundary } from './chat-delivery'
 import type { LiveDashboardState } from './live-dashboard'
 import type { GlobalShortcutAction } from './global-shortcuts'
 import type { BackgroundImportResult } from './background-import'
@@ -4407,6 +4408,8 @@ export interface LiveChatMessage {
 
 /** Authoritative live-chat snapshot: provider rows + persisted/buffered messages + unread count. */
 export interface LiveChatSnapshot {
+  /** Renderer/broker delivery evidence; absent on backend/history hydration. */
+  delivery?: ChatDelivery
   sessionId?: string
   providers: LiveChatProviderState[]
   messages: LiveChatMessage[]
@@ -4416,9 +4419,15 @@ export interface LiveChatSnapshot {
 
 /** Incremental main-renderer -> Comments-window transport after the initial snapshot seed. */
 export type CommentsSnapshotDelta =
+  | { kind: 'adopt'; deliveryBoundary: ChatDeliveryBoundary; sessionId?: string; updatedAt: string }
   | { kind: 'message'; message: LiveChatMessage; sessionId?: string }
   | { kind: 'provider'; provider: LiveChatProviderState; sessionId?: string; updatedAt: string }
-  | { kind: 'clear'; sessionId?: string; updatedAt: string }
+  | {
+      kind: 'clear'
+      sessionId?: string
+      updatedAt: string
+      deliveryBoundary?: ChatDeliveryBoundary
+    }
 
 /** An empty snapshot for the renderer store before any chat session starts. */
 export function createEmptyLiveChatSnapshot(updatedAt: string): LiveChatSnapshot {

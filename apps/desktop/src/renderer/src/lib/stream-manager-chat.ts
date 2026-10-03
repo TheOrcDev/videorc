@@ -12,11 +12,13 @@ export interface ChatPaneFilter {
   search: string
 }
 
-export function chatPaneMessages(
-  messages: readonly LiveChatMessage[],
+export function chatPaneMessages<
+  T extends Pick<LiveChatMessage, 'id' | 'platform' | 'eventType' | 'messageText' | 'authorName'>
+>(
+  messages: readonly T[],
   filter: ChatPaneFilter,
   context: { questionMessageIds: ReadonlySet<string>; mentionNames: readonly string[] }
-): LiveChatMessage[] {
+): T[] {
   const query = filter.search.trim().toLowerCase()
   return messages.filter((message) => {
     if (message.eventType === 'follow') return false

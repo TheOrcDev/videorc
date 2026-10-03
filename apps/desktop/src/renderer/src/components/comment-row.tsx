@@ -272,7 +272,10 @@ function MessageBody({
 }
 
 /** True when the message names one of the streamer's own accounts. */
-export function commentMentions(message: LiveChatMessage, names: readonly string[]): boolean {
+export function commentMentions(
+  message: Pick<LiveChatMessage, 'eventType' | 'messageText'>,
+  names: readonly string[]
+): boolean {
   if (names.length === 0 || message.eventType !== 'message') return false
   const text = message.messageText.toLowerCase()
   return names.some((name) => {

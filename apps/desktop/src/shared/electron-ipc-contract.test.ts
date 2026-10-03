@@ -625,3 +625,120 @@ describe('global layout shortcut IPC', () => {
     ).toThrow()
   })
 })
+
+describe('comments delivery IPC metadata', () => {
+  const delivery = { ownerId: 'provider-current', generation: 1, sequence: 0, entries: [] }
+  const view = {
+    mode: { kind: 'live' },
+    snapshot: { providers: [], messages: [], unreadCount: 0, updatedAt: 'now', delivery }
+  }
+  it('preserves adoption, clear and snapshot metadata through invoke/result/event mirrors', () => {
+    for (const kind of ['adopt', 'clear']) {
+      const delta = {
+        kind,
+        deliveryBoundary: { ownerId: delivery.ownerId, generation: delivery.generation },
+        updatedAt: 'now'
+      }
+      expect(validateElectronInvokeArgs('comments-window:push-delta', [delta])).toEqual([delta])
+      expect(validateElectronEventPayload('comments-window:delta', delta)).toEqual(delta)
+    }
+    expect(validateElectronInvokeArgs('comments-window:push-snapshot', [view])).toEqual([view])
+    expect(validateElectronInvokeResult('comments-window:get-snapshot', view)).toEqual(view)
+    expect(validateElectronEventPayload('comments-window:snapshot', view)).toEqual(view)
+  })
+  it.each([
+    null,
+    { ...delivery, ownerId: '' },
+    { ...delivery, generation: NaN },
+    { ...delivery, sequence: Infinity },
+    { ...delivery, entries: Array(2001).fill(null) },
+    { ...delivery, source: null },
+    { ...delivery, secret: 'never allowed' }
+  ])('rejects invalid delivery evidence at all snapshot boundaries', (invalid) => {
+    const malformed = { ...view, snapshot: { ...view.snapshot, delivery: invalid } }
+    expect(() => validateElectronInvokeArgs('comments-window:push-snapshot', [malformed])).toThrow()
+    expect(() => validateElectronInvokeResult('comments-window:get-snapshot', malformed)).toThrow()
+    expect(() => validateElectronEventPayload('comments-window:snapshot', malformed)).toThrow()
+  })
+  it('rejects malformed control boundaries and keeps the existing global payload limit', () => {
+    for (const boundary of [
+      null,
+      { ownerId: 'owner', generation: -1 },
+      { ownerId: 'owner', generation: 0, sequence: 0 }
+    ]) {
+      const delta = { kind: 'adopt', deliveryBoundary: boundary, updatedAt: 'now' }
+      expect(() => validateElectronInvokeArgs('comments-window:push-delta', [delta])).toThrow()
+      expect(() => validateElectronEventPayload('comments-window:delta', delta)).toThrow()
+    }
+    const huge = { ...view, nested: Array.from({ length: 10_000 }, () => Array(11).fill(1)) }
+    expect(() => validateElectronInvokeArgs('comments-window:push-snapshot', [huge])).toThrow()
+  })
+})
+
+it('accepts representative full retained rows plus a reduced 2,000-entry journal within unchanged IPC limits', () => {
+  const messages = Array.from({ length: 2000 }, (_, index) => ({
+    id: `s:twitch:${index}`,
+    providerMessageId: String(index),
+    sessionId: 's',
+    platform: 'twitch',
+    authorName: 'Viewer',
+    authorId: `viewer-${index}`,
+    authorBadges: ['subscriber'],
+    authorRoles: ['subscriber'],
+    publishedAt: '2026-10-03T00:00:00Z',
+    receivedAt: '2026-10-03T00:00:00Z',
+    messageText: 'Hello @orc',
+    fragments: [{ type: 'text', text: 'Hello @orc' }],
+    eventType: 'paid',
+    isDeleted: false,
+    details: { kind: 'super-chat', amountMicros: 1_000_000, currency: 'USD', amountDisplay: '$1' }
+  }))
+  const entries = messages.map((message, index) => ({
+    sequence: index + 1,
+    message: {
+      id: message.id,
+      platform: message.platform,
+      authorName: message.authorName,
+      messageText: message.messageText,
+      eventType: message.eventType,
+      isDeleted: false,
+      activity: true
+    }
+  }))
+  const view = {
+    mode: { kind: 'live' },
+    snapshot: {
+      sessionId: 's',
+      providers: [],
+      messages,
+      unreadCount: 0,
+      updatedAt: 'now',
+      delivery: { ownerId: 'owner', generation: 0, sequence: 2000, entries }
+    }
+  }
+  expect(validateElectronInvokeArgs('comments-window:push-snapshot', [view])).toEqual([view])
+  expect(validateElectronEventPayload('comments-window:snapshot', view)).toEqual(view)
+})
+
+it('preserves and validates queue-loss revisions through delivery IPC mirrors', () => {
+  const view = {
+    mode: { kind: 'live' },
+    snapshot: {
+      providers: [],
+      messages: [],
+      unreadCount: 0,
+      updatedAt: 'now',
+      delivery: { ownerId: 'owner', generation: 0, sequence: 0, entries: [], lossRevision: 1 }
+    }
+  }
+  expect(validateElectronInvokeArgs('comments-window:push-snapshot', [view])).toEqual([view])
+  expect(validateElectronInvokeResult('comments-window:get-snapshot', view)).toEqual(view)
+  expect(validateElectronEventPayload('comments-window:snapshot', view)).toEqual(view)
+  for (const lossRevision of [NaN, Infinity, -1, Number.MAX_SAFE_INTEGER + 1])
+    expect(() =>
+      validateElectronEventPayload('comments-window:snapshot', {
+        ...view,
+        snapshot: { ...view.snapshot, delivery: { ...view.snapshot.delivery, lossRevision } }
+      })
+    ).toThrow()
+})

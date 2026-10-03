@@ -1,3 +1,5 @@
+import { markChatDeliveryIncomplete } from '../../../shared/chat-delivery'
+import type { CommentsViewSnapshot } from '../../../shared/backend'
 import { closeVisualMicrophoneStreams } from '@/lib/mic-visual-ownership'
 import { LazyLiveSourceSelectionController } from '@/lib/live-source-selection-loader'
 import { confirmedSourceSelection } from '@/lib/source-selection-confirmed'
@@ -2179,7 +2181,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Read-only live chat store: persisted by the backend when available, live-updated by
   // liveChat.* websocket events, and mirrored to the detached Comments window cache.
   const [liveChatSnapshot, setLiveChatSnapshot] = useState<LiveChatSnapshot>(() =>
-    createEmptyLiveChatSnapshot(new Date().toISOString())
+    applyLiveChatSnapshot(createEmptyLiveChatSnapshot(new Date().toISOString()))
   )
   const liveChatSnapshotRef = useRef(liveChatSnapshot)
   const liveChatStateRevisionRef = useRef(0)
@@ -2187,11 +2189,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   liveChatSnapshotRef.current = liveChatSnapshot
   const updateLiveChatSnapshot = useCallback((next: SetStateAction<LiveChatSnapshot>): void => {
     liveChatStateRevisionRef.current += 1
-    setLiveChatSnapshot((current) => {
-      const resolved = typeof next === 'function' ? next(current) : next
-      liveChatSnapshotRef.current = resolved
-      return resolved
-    })
+    const resolved = typeof next === 'function' ? next(liveChatSnapshotRef.current) : next
+    liveChatSnapshotRef.current = resolved
+    setLiveChatSnapshot(resolved)
   }, [])
   const replaceLiveChatSnapshotState = useCallback(
     (next: LiveChatSnapshot): void => {
@@ -2200,21 +2200,61 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [updateLiveChatSnapshot]
   )
+  const publishedChatBoundaryRef = useRef<string | null>(null)
+  const publishLiveCommentsSnapshot = useCallback(
+    (view: CommentsViewSnapshot): Promise<void> | undefined => {
+      if (view.mode.kind === 'live') {
+        const delivery = view.snapshot.delivery
+        const current = liveChatSnapshotRef.current.delivery
+        // Never authorize an obsolete async bootstrap/recovery publisher.
+        if (
+          !delivery ||
+          delivery.ownerId !== current?.ownerId ||
+          delivery.generation !== current.generation
+        )
+          return
+        const key = `${delivery.ownerId}:${delivery.generation}`
+        if (publishedChatBoundaryRef.current !== key) {
+          publishedChatBoundaryRef.current = key
+          void window.videorc?.pushCommentsDelta?.({
+            kind: 'adopt',
+            deliveryBoundary: { ownerId: delivery.ownerId, generation: delivery.generation },
+            updatedAt: view.snapshot.updatedAt
+          })
+        }
+      }
+      return window.videorc?.pushCommentsSnapshot?.(view)
+    },
+    []
+  )
   const clearLiveChatForTerminalSession = useCallback(
     (sessionId?: string): void => {
       if (!sessionId || liveChatSnapshotRef.current.sessionId !== sessionId) {
         return
       }
-      const cleared = createEmptyLiveChatSnapshot(new Date().toISOString())
+      const cleared = applyLiveChatSnapshot(
+        createEmptyLiveChatSnapshot(new Date().toISOString()),
+        liveChatSnapshotRef.current,
+        true
+      )
       latestLiveChatSendOperationRef.current = undefined
       liveChatSendOperationRevisionRef.current += 1
       replaceLiveChatSnapshotState(cleared)
-      void window.videorc?.pushCommentsSnapshot?.({
+      void window.videorc?.pushCommentsDelta?.({
+        kind: 'clear',
+        sessionId,
+        updatedAt: cleared.updatedAt,
+        deliveryBoundary: {
+          ownerId: cleared.delivery!.ownerId,
+          generation: cleared.delivery!.generation
+        }
+      })
+      void publishLiveCommentsSnapshot({
         mode: { kind: 'live' },
         snapshot: cleared
       })
     },
-    [replaceLiveChatSnapshotState]
+    [publishLiveCommentsSnapshot, replaceLiveChatSnapshotState]
   )
   const latestLiveChatSendOperationRef = useRef<CommentsSendOperation | undefined>(undefined)
   const liveChatSendOperationRevisionRef = useRef(0)
@@ -2233,14 +2273,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       liveChatSendOperationRevisionRef.current += 1
       if (options.publishSnapshot) {
         const snapshot = liveChatSnapshotRef.current
-        void window.videorc?.pushCommentsSnapshot?.({
+        void publishLiveCommentsSnapshot({
           mode: { kind: 'live' },
           snapshot,
           latestSendOperation: next?.sessionId === snapshot.sessionId ? next : undefined
         })
       }
     },
-    []
+    [publishLiveCommentsSnapshot]
   )
   const applyLiveChatSendOperation = useCallback(
     (operation: CommentsSendOperation): void => {
@@ -2900,12 +2940,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       next.sessionId,
       sendOperationRevisionAtStart
     )
-    await window.videorc?.pushCommentsSnapshot?.({
+    await publishLiveCommentsSnapshot({
       mode: { kind: 'live' },
       snapshot: currentSnapshot,
       latestSendOperation
     })
-  }, [applyLiveChatSendOperationsQuery, client, replaceLiveChatSnapshotState])
+  }, [
+    applyLiveChatSendOperationsQuery,
+    client,
+    publishLiveCommentsSnapshot,
+    replaceLiveChatSnapshotState
+  ])
   const openCommentsWindow = useCallback(async () => {
     await refreshLiveChatSnapshotForComments().catch(() => {})
     await window.videorc?.setCommentsViewMode?.({ kind: 'live' })
@@ -2954,7 +2999,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const operations = await client
           .request<CommentsSendOperation[]>('liveChat.sendOperations.list', { sessionId })
           .catch(() => [])
-        await window.videorc?.pushCommentsSnapshot?.({
+        await publishLiveCommentsSnapshot({
           mode: { kind: 'history', sessionId, title, startedAt },
           snapshot,
           latestSendOperation: operations.at(-1)
@@ -2971,7 +3016,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         toast.error(message)
       }
     },
-    [client]
+    [client, publishLiveCommentsSnapshot]
   )
   const [streamMetadataDraft, setStreamMetadataDraft] = useState<StreamMetadataDraft | null>(null)
   const [streamMetadataValidation, setStreamMetadataValidation] =
@@ -5695,6 +5740,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const bootstrapAbort = new AbortController()
     const generationIsCurrent = (): boolean =>
       !disposed && bootstrapGenerationRef.current === generation
+    const liveChatBootstrapInitialSnapshot = liveChatSnapshotRef.current
+    const initialDelivery = liveChatBootstrapInitialSnapshot.delivery!
+    // Ordered control boundary, before any raw events or bootstrap publication.
+    publishedChatBoundaryRef.current = `${initialDelivery.ownerId}:${initialDelivery.generation}`
+    void window.videorc?.pushCommentsDelta?.({
+      kind: 'adopt',
+      deliveryBoundary: {
+        ownerId: initialDelivery.ownerId,
+        generation: initialDelivery.generation
+      },
+      updatedAt: liveChatBootstrapInitialSnapshot.updatedAt
+    })
     const nextClient = new BackendClient(connection)
     const platformBootstrapClient = new BackendClient(connection)
     const bootstrapRequest = <TPayload,>(method: string, params?: unknown): Promise<TPayload> =>
@@ -5703,7 +5760,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     let liveChatBootstrapComplete = false
     let liveChatBootstrapOverflowed = false
     const liveChatBootstrapEvents: LiveChatBootstrapEvent[] = []
+    const markLiveChatOverflow = (): void => {
+      if (generationIsCurrent()) updateLiveChatSnapshot(markChatDeliveryIncomplete)
+    }
     const liveChatMessageBatcher = new LiveChatMessageBatcher({
+      onOverflow: markLiveChatOverflow,
       onFlush: (messages) => {
         if (generationIsCurrent()) {
           updateLiveChatSnapshot((current) => applyLiveChatMessages(current, messages))
@@ -5890,6 +5951,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               return { value: { kind: 'superseded' }, overflowed: false }
             }
             const pending = liveChatMessageBatcher.drainPending()
+            if (pending.overflowed) markLiveChatOverflow()
             return {
               value: {
                 kind: 'candidate',
@@ -5921,7 +5983,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             recoveredSnapshot.sessionId,
             recovery.sendOperationRevisionAtStart
           )
-          void window.videorc?.pushCommentsSnapshot?.({
+          void publishLiveCommentsSnapshot({
             mode: { kind: 'live' },
             snapshot: recoveredSnapshot,
             latestSendOperation
@@ -6471,12 +6533,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
       nextClient.on('liveChat.snapshot', (payload) => {
         bootstrapGuard.mark('liveChat')
-        const snapshot = applyLiveChatSnapshot(payload as LiveChatSnapshot)
+        liveChatMessageBatcher.flush()
+        const snapshot = applyLiveChatSnapshot(
+          payload as LiveChatSnapshot,
+          liveChatSnapshotRef.current
+        )
         bufferLiveChatBootstrapEvent({ kind: 'snapshot', snapshot })
         liveChatMessageBatcher.clear()
         replaceLiveChatSnapshotState(snapshot)
         const latestSendOperation = latestLiveChatSendOperationRef.current
-        void window.videorc?.pushCommentsSnapshot?.({
+        void publishLiveCommentsSnapshot({
           mode: { kind: 'live' },
           snapshot,
           latestSendOperation:
@@ -6509,12 +6575,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
       nextClient.on('liveChat.cleared', (payload) => {
         bootstrapGuard.mark('liveChat')
-        const snapshot = applyLiveChatSnapshot(payload as LiveChatSnapshot)
+        const snapshot = applyLiveChatSnapshot(
+          payload as LiveChatSnapshot,
+          liveChatSnapshotRef.current,
+          true
+        )
         bufferLiveChatBootstrapEvent({ kind: 'snapshot', snapshot })
         liveChatMessageBatcher.clear()
         replaceLiveChatSnapshotState(snapshot)
+        void window.videorc?.pushCommentsDelta?.({
+          kind: 'clear',
+          sessionId: snapshot.sessionId,
+          updatedAt: snapshot.updatedAt,
+          deliveryBoundary: {
+            ownerId: snapshot.delivery!.ownerId,
+            generation: snapshot.delivery!.generation
+          }
+        })
         const latestSendOperation = latestLiveChatSendOperationRef.current
-        void window.videorc?.pushCommentsSnapshot?.({
+        void publishLiveCommentsSnapshot({
           mode: { kind: 'live' },
           snapshot,
           latestSendOperation:
@@ -6933,10 +7012,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (!generationIsCurrent()) {
           return
         }
-        const initialLiveChatSnapshot = replayLiveChatBootstrapEvents(
+        let initialLiveChatSnapshot = replayLiveChatBootstrapEvents(
           liveChatBootstrapBase,
-          liveChatBootstrapEvents
+          liveChatBootstrapEvents,
+          liveChatBootstrapInitialSnapshot
         )
+        if (liveChatBootstrapOverflowed)
+          initialLiveChatSnapshot = markChatDeliveryIncomplete(initialLiveChatSnapshot)
         liveChatMessageBatcher.clear()
         liveChatBootstrapComplete = true
         replaceLiveChatSnapshotState(initialLiveChatSnapshot)
@@ -6954,7 +7036,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           initialLiveChatSnapshot.sessionId,
           sendOperationRevisionAtStart
         )
-        void window.videorc?.pushCommentsSnapshot?.({
+        void publishLiveCommentsSnapshot({
           mode: { kind: 'live' },
           snapshot: initialLiveChatSnapshot,
           latestSendOperation: initialSendOperation
@@ -7140,6 +7222,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     applyRecordingStatus,
     claimPlatformLifecycleOwner,
     clearLiveChatForTerminalSession,
+    publishLiveCommentsSnapshot,
     commitActiveScreen,
     commitCohostState,
     commitCaptureRecoveryStatus,
