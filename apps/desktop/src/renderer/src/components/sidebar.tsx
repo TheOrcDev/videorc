@@ -18,7 +18,7 @@ import {
   STUDIO_PANELS,
   WORKSPACE_TABS,
   shortcutDigitFor,
-  shortcutOrderFor,
+  sidebarOrderFor,
   type StudioPanel,
   type WorkspaceTab
 } from '@/components/workspace-nav'
@@ -228,7 +228,7 @@ export function Sidebar({
               isActive={active === tab.id}
               triggerId={tab.id}
               shortcutDigit={shortcutDigitFor(tab.id)}
-              shortcutIndex={reducedMotion ? 0 : shortcutOrderFor(tab.id)}
+              shortcutIndex={reducedMotion ? 0 : sidebarOrderFor(tab.id)}
               modKey={modKey}
               shortcutVisible={shortcutVisible}
               onClick={() => onSelect(tab.id)}
@@ -246,7 +246,7 @@ export function Sidebar({
               isActive={activeStudioPanel === panel.id}
               triggerId={panel.legacyTabId}
               shortcutDigit={shortcutDigitFor(panel.id)}
-              shortcutIndex={reducedMotion ? 0 : shortcutOrderFor(panel.id)}
+              shortcutIndex={reducedMotion ? 0 : sidebarOrderFor(panel.id)}
               modKey={modKey}
               shortcutVisible={shortcutVisible}
               onClick={() => onSelectStudioPanel(panel.id)}
@@ -264,7 +264,7 @@ export function Sidebar({
               isActive={active === tab.id}
               triggerId={tab.id}
               shortcutDigit={shortcutDigitFor(tab.id)}
-              shortcutIndex={reducedMotion ? 0 : shortcutOrderFor(tab.id)}
+              shortcutIndex={reducedMotion ? 0 : sidebarOrderFor(tab.id)}
               modKey={modKey}
               shortcutVisible={shortcutVisible}
               onClick={() => onSelect(tab.id)}
@@ -287,7 +287,7 @@ export function Sidebar({
                 isActive={active === tab.id}
                 triggerId={tab.id}
                 shortcutDigit={shortcutDigitFor(tab.id)}
-                shortcutIndex={reducedMotion ? 0 : shortcutOrderFor(tab.id)}
+                shortcutIndex={reducedMotion ? 0 : sidebarOrderFor(tab.id)}
                 modKey={modKey}
                 shortcutVisible={shortcutVisible}
                 onClick={() => onSelect(tab.id)}

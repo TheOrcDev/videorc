@@ -8098,6 +8098,268 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()?.chat.cohostState?.status).toBe('paused')
   }, 15_000)
 
+  // Plan 119 S2: Orcle Live is one switch. On asks for cloud-AI consent first
+  // (the Orcle tab's dialog), then writes chat AND listening in ONE save; off
+  // writes `enabled` alone. Cloud AI is its own choice and never rewrites them.
+  async function mountOrcleLiveProvider(consent: '0' | '1'): Promise<{
+    backend: StudioBackend
+    latest: () => StudioObservation | undefined
+    settingsWrites: () => unknown[]
+    emitApi: (name: string, value: unknown) => void
+    pushCohostEnableResult: ReturnType<typeof vi.fn>
+  }> {
+    const backend = new StudioBackend()
+    backend.entitlements = premiumEntitlements
+    backend.cohostSettings = { ...backend.cohostSettings, enabled: false, listen: false }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    let emitApi: ((name: string, value: unknown) => void) | undefined
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      registerEmitter: (emit) => {
+        emitApi = emit
+      }
+    })
+    const pushCohostEnableResult = vi.fn(async () => true)
+    Object.assign(api, { pushCohostEnableResult })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem('videorc.aiConsent', consent)
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    await waitForObservation(() => latest()?.core.cohostSettings !== null)
+    return {
+      backend,
+      latest,
+      settingsWrites: () =>
+        backend.sentCommands
+          .filter((command) => command.method === 'cohost.settings.set')
+          .map((command) => command.params),
+      emitApi: (name, value) => emitApi?.(name, value),
+      pushCohostEnableResult
+    }
+  }
+
+  it('turns Orcle Live on only through the consent dialog, then in one save with listening', async () => {
+    const { latest, settingsWrites } = await mountOrcleLiveProvider('0')
+
+    await act(async () => latest()!.core.setOrcleLive(true))
+    await waitForObservation(() => latest()?.core.orcleConsentRequested === true)
+    // Asking writes nothing: no consent and no settings until the answer.
+    expect(settingsWrites()).toEqual([])
+    expect(localStorage.getItem('videorc.aiConsent')).toBe('0')
+
+    await act(async () => latest()!.core.answerOrcleConsent(true))
+    await waitForObservation(() => latest()?.core.cohostSettings?.enabled === true)
+    expect(latest()!.core.orcleConsentRequested).toBe(false)
+    expect(latest()!.core.aiConsent).toBe(true)
+    expect(localStorage.getItem('videorc.aiConsent')).toBe('1')
+    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
+    expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: true })
+
+    // Off is `enabled` alone: listening and consent stay as they were.
+    await act(async () => latest()!.core.setOrcleLive(false))
+    await waitForObservation(() => latest()?.core.cohostSettings?.enabled === false)
+    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }, { enabled: false }])
+    expect(latest()!.core.cohostSettings?.listen).toBe(true)
+    expect(localStorage.getItem('videorc.aiConsent')).toBe('1')
+    expect(toastSpies.error).not.toHaveBeenCalled()
+  }, 15_000)
+
+  it('changes nothing when the Orcle Live consent dialog is declined', async () => {
+    const { latest, settingsWrites } = await mountOrcleLiveProvider('0')
+
+    await act(async () => latest()!.core.setOrcleLive(true))
+    await waitForObservation(() => latest()?.core.orcleConsentRequested === true)
+    await act(async () => latest()!.core.answerOrcleConsent(false))
+    await waitForObservation(() => latest()?.core.orcleConsentRequested === false)
+
+    expect(latest()!.core.aiConsent).toBe(false)
+    expect(localStorage.getItem('videorc.aiConsent')).toBe('0')
+    expect(settingsWrites()).toEqual([])
+    expect(latest()!.core.cohostSettings?.enabled).toBe(false)
+  }, 15_000)
+
+  it('turns Orcle Live on without a dialog once cloud AI is allowed', async () => {
+    const { latest, settingsWrites } = await mountOrcleLiveProvider('1')
+
+    await act(async () => latest()!.core.setOrcleLive(true))
+    await waitForObservation(() => latest()?.core.cohostSettings?.enabled === true)
+    expect(latest()!.core.orcleConsentRequested).toBe(false)
+    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
+  }, 15_000)
+
+  it('revokes cloud AI without rewriting Orcle settings, and asks again on the next on', async () => {
+    const { latest, settingsWrites } = await mountOrcleLiveProvider('1')
+    await act(async () => latest()!.core.setOrcleLive(true))
+    await waitForObservation(() => latest()?.core.cohostSettings?.enabled === true)
+
+    await act(async () => latest()!.core.setAiConsent(false))
+    await waitForObservation(() => latest()?.core.aiConsent === false)
+    expect(localStorage.getItem('videorc.aiConsent')).toBe('0')
+    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
+    expect(latest()!.core.cohostSettings?.enabled).toBe(true)
+
+    await act(async () => latest()!.core.setOrcleLive(true))
+    await waitForObservation(() => latest()?.core.orcleConsentRequested === true)
+    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
+  }, 15_000)
+
+  it('applies the same Orcle Live save to every Comments-window way on', async () => {
+    const { latest, settingsWrites, emitApi, pushCohostEnableResult } =
+      await mountOrcleLiveProvider('0')
+
+    // The consent CTA: grant consent and turn on in the same click.
+    await act(async () => {
+      emitApi('onCohostEnableRequest', {
+        requestId: 'enable-1',
+        enabled: true,
+        grantConsent: true,
+        listen: true
+      })
+    })
+    await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 1)
+    expect(localStorage.getItem('videorc.aiConsent')).toBe('1')
+    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
+    expect(pushCohostEnableResult).toHaveBeenLastCalledWith({
+      requestId: 'enable-1',
+      ok: true,
+      value: expect.objectContaining({ consented: true, enabled: true, listen: true })
+    })
+
+    // The status popover's switch, off: `enabled` alone.
+    await act(async () => {
+      emitApi('onCohostEnableRequest', { requestId: 'enable-2', enabled: false })
+    })
+    await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 2)
+    expect(settingsWrites().at(-1)).toEqual({ enabled: false })
+
+    // An `enabled`-only on (the nudge's old shape) still turns listening on.
+    await act(async () => {
+      emitApi('onCohostEnableRequest', { requestId: 'enable-3', enabled: true })
+    })
+    await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 3)
+    expect(settingsWrites().at(-1)).toEqual({ enabled: true, listen: true })
+    expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: true })
+    expect(latest()!.core.orcleConsentRequested).toBe(false)
+  }, 15_000)
+
+  // The post-stream pack ran itself when a streamed, recorded session Orcle
+  // heard finalized with a transcript. Its switch went with Publish (plan
+  // 119 S2), so the auto-run went too: nothing calls the cloud on Stop.
+  it('starts no cloud job when a streamed recording Orcle heard finalizes', async () => {
+    // Cloud AI reads ready, so the removed auto-run would have sent its job.
+    class CloudReadyBackend extends StudioBackend {
+      override response(command: BackendCommand): unknown {
+        if (command.method === 'ai.capabilities.get') {
+          return {
+            entitlement: { cloudAi: true },
+            features: { cloudAiEnabled: true },
+            models: { defaultTextModel: 'test-model' },
+            readiness: {
+              access: { cloudAiEntitled: true, globallyDisabled: false },
+              gateway: { configured: true, configError: null },
+              transcription: { configured: true, configError: null },
+              worker: { configured: true, configError: null }
+            },
+            workflow: { inputModes: [{ enabled: true, kind: 'transcript' }] }
+          }
+        }
+        if (command.method === 'ai.quota.get') {
+          return {
+            access: { allowed: true, code: null, message: null, status: null },
+            today: { limit: 20, remaining: 20 },
+            monthly: { limit: 500, remaining: 500 }
+          }
+        }
+        return super.response(command)
+      }
+    }
+    const backend = new CloudReadyBackend()
+    backend.entitlements = premiumEntitlements
+    backend.accountSnapshot = signedInAccount
+    backend.cohostSettings = { ...backend.cohostSettings, enabled: true, listen: true }
+    backend.sessionSummaries = [
+      sessionSummary({
+        id: 'pack-1',
+        title: 'Streamed and recorded',
+        mode: 'record+stream',
+        mp4Path: '/recordings/pack-1.mp4'
+      })
+    ]
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem('videorc.aiConsent', '1')
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    await waitForObservation(() => latest()?.core.account?.status === 'signed-in')
+    await waitForObservation(() => latest()?.core.aiCapabilities !== null)
+    await waitForObservation(
+      () => latest()?.core.sessions.some((row) => row.id === 'pack-1') === true
+    )
+    await waitForObservation(() => latest()?.core.cohostSettings?.listen === true)
+
+    const emit = async (event: string, payload: unknown): Promise<void> => {
+      await act(async () => {
+        for (const socket of backend.sockets) {
+          socket.onmessage?.({ data: JSON.stringify({ event, payload }) })
+        }
+        await Promise.resolve()
+      })
+    }
+    // Everything the old auto-run needed: Orcle heard the stream, the
+    // transcript landed, and the MP4 finalized.
+    await emit('liveChat.snapshot', {
+      sessionId: 'pack-1',
+      providers: [],
+      messages: [],
+      unreadCount: 0,
+      updatedAt: now
+    })
+    await waitForObservation(() => latest()?.chat.cohostState?.listening?.state === 'on')
+    await emit('health.event', {
+      id: 'srt-pack-1',
+      sessionId: 'pack-1',
+      level: 'info',
+      code: 'captions-srt-written',
+      message: 'The transcript was saved next to the recording.',
+      createdAt: now
+    } satisfies HealthEvent)
+    await emit('recording.finalization', {
+      sessionId: 'pack-1',
+      state: 'finalized',
+      mp4Path: '/recordings/pack-1.mp4',
+      updatedAt: now
+    })
+    // Room for the lazy import the old auto-run went through.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    })
+
+    expect(backend.sentCommands.some((command) => command.method === 'ai.run_post_recording')).toBe(
+      false
+    )
+  }, 15_000)
+
   it('does not reuse a stale permission snapshot when the click-time status read fails', async () => {
     const backend = new StudioBackend()
     TestWebSocket.backend = backend

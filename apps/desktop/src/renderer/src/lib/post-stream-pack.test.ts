@@ -154,17 +154,17 @@ describe('post-stream pack wiring', () => {
     expect(postStreamPackOutputs(undefined)).toEqual(['publish_pack'])
   })
 
-  it('matches the transcript health code the backend emits and the studio listens for', () => {
-    // use-studio matches the code inline so this module stays off the eager
-    // bundle; a rename on either side must fail here, not silently never run.
+  it('is no longer wired into the studio: the auto-run went with Publish (plan 119 S2)', () => {
+    // Its switch left with Publish, so the studio must not run the pack on
+    // its own. Plan 119 S4 deletes this module and this test.
     const root = join(__dirname, '..', '..', '..', '..', '..', '..')
     const studio = readFileSync(
       join(root, 'apps/desktop/src/renderer/src/hooks/use-studio.tsx'),
       'utf8'
     )
-    const captions = readFileSync(join(root, 'crates/videorc-backend/src/captions.rs'), 'utf8')
-    expect(studio).toContain(`event.code === '${TRANSCRIPT_WRITTEN_HEALTH_CODE}'`)
-    expect(captions).toContain(`"${TRANSCRIPT_WRITTEN_HEALTH_CODE}"`)
+    expect(studio).not.toContain("import('@/lib/post-stream-pack')")
+    expect(studio).not.toContain(`event.code === '${TRANSCRIPT_WRITTEN_HEALTH_CODE}'`)
+    expect(studio).not.toContain('autoRunPostStreamPack')
   })
 })
 

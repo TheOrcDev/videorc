@@ -46,7 +46,6 @@ import {
 const StudioTab = lazy(async () => ({
   default: (await import('@/components/tabs/studio-tab')).StudioTab
 }))
-const AiTab = lazy(async () => ({ default: (await import('@/components/tabs/ai-tab')).AiTab }))
 const AssetsTab = lazy(async () => ({
   default: (await import('@/components/tabs/assets-tab')).AssetsTab
 }))
@@ -60,6 +59,9 @@ const loadLayoutTab = () => import('@/components/tabs/layout-tab')
 const LayoutTab = lazy(async () => ({ default: (await loadLayoutTab()).LayoutTab }))
 const LibraryTab = lazy(async () => ({
   default: (await import('@/components/tabs/library-tab')).LibraryTab
+}))
+const OrcleTab = lazy(async () => ({
+  default: (await import('@/components/tabs/orcle-tab')).OrcleTab
 }))
 const RecordingTab = lazy(async () => ({
   default: (await import('@/components/tabs/recording-tab')).RecordingTab
@@ -164,7 +166,6 @@ export function AppShell(): ReactElement {
   } = useStudioShell()
   const { recording } = useStudioRecordingState()
   const [active, setActive] = useState<WorkspaceTab>('studio')
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
   const [commandOpen, setCommandOpen] = useState(false)
   const [onboardingOpen, setOnboardingOpen] = useState(false)
   const whatsNew = useWhatsNew(runtimeInfo?.version, runtimeInfo?.platform)
@@ -223,22 +224,10 @@ export function AppShell(): ReactElement {
     setOnboardingOpen(true)
   }, [])
 
-  const openInAi = useCallback((sessionId: string) => {
-    setSelectedSessionId(sessionId)
+  // Library's "Open in Publish (AI)" opens the Orcle tab until plan 119 S3
+  // replaces that entry with "Orcle report".
+  const openOrcleTab = useCallback(() => {
     setActive('ai')
-  }, [])
-
-  // D6: the post-recording toasts funnel here. A `detail.sessionId` (the
-  // post-stream pack toast, plan 068 D10) selects that session; without one,
-  // clearing the selection lets Publish preselect the newest completed one.
-  useEffect(() => {
-    const onOpenPublish = (event: Event): void => {
-      const sessionId = (event as CustomEvent<{ sessionId?: unknown } | null>).detail?.sessionId
-      setSelectedSessionId(typeof sessionId === 'string' ? sessionId : null)
-      setActive('ai')
-    }
-    window.addEventListener('videorc:open-publish', onOpenPublish)
-    return () => window.removeEventListener('videorc:open-publish', onOpenPublish)
   }, [])
 
   useEffect(() => {
@@ -389,13 +378,8 @@ export function AppShell(): ReactElement {
                   {active === 'live' ? <StreamingTab /> : null}
                   {active === 'captions' ? <CaptionsTab /> : null}
                   {active === 'recording' ? <RecordingTab /> : null}
-                  {active === 'library' ? <LibraryTab onOpenInAi={openInAi} /> : null}
-                  {active === 'ai' ? (
-                    <AiTab
-                      selectedSessionId={selectedSessionId}
-                      setSelectedSessionId={setSelectedSessionId}
-                    />
-                  ) : null}
+                  {active === 'library' ? <LibraryTab onOpenInAi={openOrcleTab} /> : null}
+                  {active === 'ai' ? <OrcleTab /> : null}
                   {active === 'diagnostics' ? <DiagnosticsTab /> : null}
                   {active === 'settings' ? (
                     <SettingsTab

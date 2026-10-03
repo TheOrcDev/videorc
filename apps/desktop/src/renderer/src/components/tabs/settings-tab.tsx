@@ -1,6 +1,5 @@
 import { useEffect, type ReactElement } from 'react'
 
-import { CohostSettingsSection } from '@/components/cohost-settings-section'
 import { ConfigGrid, PageStack } from '@/components/page'
 import { AboutSettings } from '@/components/settings/about-settings'
 import { GeneralSettings } from '@/components/settings/general-settings'
@@ -23,8 +22,8 @@ import { SETTINGS_TABS, isSettingsTabId, type SettingsTabId } from '@/lib/settin
 const SECTION_PAIR = 'flex-1 content-start lg:content-stretch lg:[&>*]:border-b-0'
 
 /**
- * Settings (plan 064): seven tabs in a segmented strip under the toolbar, one
- * tab's sections below it. The strip never scrolls away: Settings owns its
+ * Settings (plan 064): six tabs in a segmented strip under the toolbar, one
+ * tab's sections below it (Orcle's moved to the Orcle tab, plan 119). The strip never scrolls away: Settings owns its
  * scroll (app-shell turns the pane body's off), and only the region under the
  * strip scrolls. The selected tab lives in app-shell, so links can open a
  * named tab and Settings reopens on the one used last.
@@ -103,11 +102,6 @@ export function SettingsTab({
           <ConfigGrid className={SECTION_PAIR}>
             <RemoteSettings />
           </ConfigGrid>
-        </TabsContent>
-        <TabsContent className="flex flex-col" value="orcle">
-          <PageStack>
-            <CohostSettingsSection />
-          </PageStack>
         </TabsContent>
         <TabsContent className="flex flex-col" value="about">
           <ConfigGrid className={SECTION_PAIR}>

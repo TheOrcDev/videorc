@@ -319,6 +319,13 @@ describe('cohostPaneMode', () => {
     )
   })
 
+  it('points a disabled Orcle at the Orcle tab, its one home since Settings lost it', () => {
+    const mode = cohostPaneMode({ gate: { allowed: true }, consented: true, enabled: false })
+    expect(mode.kind === 'disabled' ? mode.reason : null).toMatch(
+      /^Orcle is off\. Turn it on in the Orcle tab \((?:⌘|Ctrl\+)9\)\.$/
+    )
+  })
+
   it('renders the pane once Premium, consent, and the toggle all agree', () => {
     expect(cohostPaneMode({ gate: { allowed: true }, consented: true, enabled: true })).toEqual({
       kind: 'live'
@@ -956,6 +963,9 @@ describe('listening (plan 068)', () => {
 
   it('names the cloud step, the transcript and what is kept in the consent copy', () => {
     expect(COHOST_CONSENT_SENTENCE.startsWith(COHOST_CHAT_CONSENT_SENTENCE)).toBe(true)
+    // Turning Orcle on turns listening on (plan 119), so hearing is not an option.
+    expect(COHOST_CONSENT_SENTENCE).toContain("While you're live it also hears you")
+    expect(COHOST_CONSENT_SENTENCE).not.toContain('If you turn on listening')
     for (const sentence of [COHOST_CONSENT_SENTENCE, COHOST_LISTEN_CONSENT_SENTENCE]) {
       expect(sentence).toContain('microphone audio')
       expect(sentence).toContain("goes to Videorc's cloud speech-to-text")

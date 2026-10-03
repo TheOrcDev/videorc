@@ -5,8 +5,8 @@ import {
   HealthIcon,
   LibraryIcon,
   LivestreamIcon,
+  OrcleIcon,
   OutputIcon,
-  PublishIcon,
   SceneIcon,
   SettingsIcon,
   SourcesIcon,
@@ -46,10 +46,13 @@ export type StudioPanelMeta = {
   legacyTabId: string
 }
 
+// Orcle (plan 119) replaced Publish and joined the stage row, right under
+// Studio. Its id stays `ai`, so deep links, smokes, ⌘9 and the
+// `data-videorc-tab-trigger` value keep working.
 export const WORKSPACE_TABS: WorkspaceTabMeta[] = [
   { id: 'studio', label: 'Studio', icon: StudioIcon, group: 'stage' },
+  { id: 'ai', label: 'Orcle', icon: OrcleIcon, group: 'stage' },
   { id: 'library', label: 'Library', icon: LibraryIcon, group: 'library' },
-  { id: 'ai', label: 'Publish', icon: PublishIcon, group: 'library' },
   { id: 'settings', label: 'Settings', icon: SettingsIcon, group: 'system' },
   { id: 'diagnostics', label: 'Health', icon: HealthIcon, group: 'system' }
 ]
@@ -67,10 +70,12 @@ export const STUDIO_PANELS: StudioPanelMeta[] = [
   { id: 'recording', label: 'Output', icon: OutputIcon, legacyTabId: 'recording' }
 ]
 
-// Page shortcuts in sidebar order. Studio + the Setup pages + Library take ⌘1–⌘8,
-// AI takes ⌘9, and Settings keeps the platform-standard ⌘,. Health intentionally has NO
-// digit — it stays reachable via ⌘K (and the account menu). The main process emits
-// the raw key ('1'–'9' or ',') and AppShell maps whatever is listed here.
+// Page shortcuts. Studio, the Setup pages and Library take ⌘1–⌘8 in sidebar
+// order. Orcle keeps ⌘9, the key Publish had, although it now sits under Studio
+// (plan 119): muscle memory and deep links outrank a strict sidebar order.
+// Settings keeps the platform-standard ⌘,. Health intentionally has NO digit — it
+// stays reachable via ⌘K (and the account menu). The main process emits the raw
+// key ('1'–'9' or ',') and AppShell maps whatever is listed here.
 export const WORKSPACE_SHORTCUTS: { digit: string; tab: WorkspaceTab }[] = [
   { digit: '1', tab: 'studio' },
   { digit: '2', tab: 'sources' },
@@ -88,13 +93,24 @@ export function shortcutDigitFor(tab: WorkspaceTab): string | undefined {
   return WORKSPACE_SHORTCUTS.find((entry) => entry.tab === tab)?.digit
 }
 
+const tabIdsIn = (group: WorkspaceTabGroup): WorkspaceTab[] =>
+  WORKSPACE_TABS.filter((tab) => tab.group === group).map((tab) => tab.id)
+
+/** Every page the sidebar shows, top to bottom (Health has no row). */
+const SIDEBAR_ORDER: WorkspaceTab[] = [
+  ...tabIdsIn('stage'),
+  ...STUDIO_PANELS.map((panel) => panel.id),
+  ...tabIdsIn('library'),
+  ...tabIdsIn('system').filter((tab) => tab !== 'diagnostics')
+]
+
 /**
- * A page's position in the shortcut order, which is also its position down the
- * sidebar. The reveal cascade uses it so the chips arrive top-to-bottom
- * regardless of which sidebar group a row sits in.
+ * A page's position down the sidebar. The reveal cascade uses it so the
+ * shortcut chips arrive top-to-bottom, regardless of which sidebar group a row
+ * sits in and of its digit (Orcle's ⌘9 sits second).
  */
-export function shortcutOrderFor(tab: WorkspaceTab): number {
-  const index = WORKSPACE_SHORTCUTS.findIndex((entry) => entry.tab === tab)
+export function sidebarOrderFor(tab: WorkspaceTab): number {
+  const index = SIDEBAR_ORDER.indexOf(tab)
   return index === -1 ? 0 : index
 }
 

@@ -1,4 +1,4 @@
-import { ChevronDownIcon, CohostIcon, MicrophoneIcon } from '@/components/icons'
+import { ChevronDownIcon, MicrophoneIcon, OrcleIcon } from '@/components/icons'
 import {
   useEffect,
   useMemo,
@@ -339,11 +339,7 @@ export function CohostPane({
           aria-hidden
           className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=closed]:-rotate-90"
         />
-        <CohostIcon
-          aria-hidden
-          className="size-4 shrink-0 text-muted-foreground"
-          weight="duotone"
-        />
+        <OrcleIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
         <span className="shrink-0 text-xs font-medium text-foreground">Orcle</span>
         <span
           className={cn(
@@ -962,7 +958,7 @@ function CohostNotice({ label, children }: { label: string; children: ReactNode 
       className="flex shrink-0 items-center gap-2 rounded-row bg-foreground/[0.04] px-2.5 py-1.5 text-[11px] text-muted-foreground"
       data-slot="cohost-notice"
     >
-      <CohostIcon aria-hidden className="size-4 shrink-0" weight="duotone" />
+      <OrcleIcon aria-hidden className="size-4 shrink-0" weight="duotone" />
       <Badge className="shrink-0" variant="outline">
         {label}
         <span className="ml-1 shrink-0 text-[10px] font-medium tracking-wide text-muted-foreground">

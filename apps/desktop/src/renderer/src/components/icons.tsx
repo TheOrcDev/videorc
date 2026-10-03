@@ -101,7 +101,6 @@ type _RegistryIconProps = _AssertIconProps<
     | 'Pulse'
     | 'PushPin'
     | 'Record'
-    | 'Robot'
     | 'Scissors'
     | 'ShieldCheck'
     | 'SignIn'
@@ -136,7 +135,8 @@ type _RegistryIconProps = _AssertIconProps<
 /**
  * Navigation — one slot per sidebar destination. These are the icons the
  * 2026-08-25 semantic audit reviews first: several are placeholders inherited
- * from the pre-audit set (see the audit table in the Nucleo plan).
+ * from the pre-audit set (see the audit table in the Nucleo plan). The Orcle
+ * tab's slot is `OrcleIcon`, drawn below.
  */
 export {
   VideoCamera as StudioIcon,
@@ -147,7 +147,6 @@ export {
   ClosedCaptioning as CaptionsIcon,
   Record as OutputIcon,
   FilmReel as LibraryIcon,
-  Sparkle as PublishIcon,
   GearSix as SettingsIcon,
   Pulse as HealthIcon
 } from '@phosphor-icons/react'
@@ -244,10 +243,10 @@ export {
   LinkSimple as LinkIcon
 } from '@phosphor-icons/react'
 /**
- * AI, tooling and appearance.
+ * AI, tooling and appearance. Orcle (code name `cohost`) has its own mark,
+ * `OrcleIcon`, drawn below.
  */
 export {
-  Robot as CohostIcon,
   Brain as BrainIcon,
   Sparkle as SparkleIcon,
   Lightning as FastIcon,
@@ -293,6 +292,45 @@ export const KickIcon: AppIcon = ({ size, weight: _weight, children, ...props })
     <path
       fillRule="evenodd"
       d="M56 16h144a40 40 0 0 1 40 40v144a40 40 0 0 1-40 40H56a40 40 0 0 1-40-40V56a40 40 0 0 1 40-40ZM64 56v144h44v-44h20v22h22v22h44v-56h-22v-32h22V56h-44v22h-22v22h-20V56Z"
+    />
+  </svg>
+)
+
+// The head both Orcle weights share: a broad cranium, ears pointing out and
+// up, and a jaw wider than the brow.
+const ORCLE_HEAD =
+  'M64 84C64 40 96 24 128 24s64 16 64 60l54-22-48 64 12 58c0 30-22 56-52 56H98c-30 0-52-26-52-56l12-58-48-64Z'
+
+/**
+ * Orcle's mark (plan 119): the app logo's orc head, simplified to read at
+ * 16 px. Pointed ears, slanted eyes under a heavy brow, and two lower tusks.
+ * Hand-drawn like `KickIcon` on Phosphor's 256 grid in currentColor, so it
+ * sizes and tints like the set. One mark everywhere Orcle appears: the
+ * sidebar, the Stream Manager and the Studio session row.
+ *
+ * Unlike `KickIcon` it honours `weight` the way its Phosphor neighbours do,
+ * so the sidebar's regular-to-fill swap still reads: an outline at Phosphor's
+ * 16-unit stroke (thin, light, regular), the outline over a 20% head
+ * (duotone), and a solid head with knocked-out features (fill, bold).
+ */
+export const OrcleIcon: AppIcon = ({ size, weight, children, ...props }) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 256 256"
+    width={size ?? '1em'}
+    height={size ?? '1em'}
+    fill="currentColor"
+    {...props}
+  >
+    {children}
+    {weight === 'duotone' ? <path d={ORCLE_HEAD} opacity="0.2" /> : null}
+    <path
+      fillRule="evenodd"
+      d={
+        weight === 'fill' || weight === 'bold'
+          ? `${ORCLE_HEAD}M70 102l50 14-6 18q-24 2-40-12Zm116 0-50 14 6 18q24 2 40-12ZM80 204l8-46 16 24h48l16-24 8 46Z`
+          : `${ORCLE_HEAD}m16 4-6 40-12 56c0 22 16 40 36 40h60c20 0 36-18 36-40l-12-56-6-40c0-32-20-48-48-48s-48 16-48 48Zm-2 14 42 13-6 17q-22 2-33-11Zm100 0-42 13 6 17q22 2 33-11ZM84 206l7-46 15 26h44l15-26 7 46Z`
+      }
     />
   </svg>
 )

@@ -225,6 +225,8 @@ export interface StreamManagerProps {
   cohostNudgeDismissedForever?: boolean
   /** Persisted `cohost.settings.listen` (plan 068); unknown hides its card. */
   cohostListen?: boolean
+  /** Orcle Live's one switch (plan 119), from the status popover and the
+   * nudge: on means Orcle reads chat and hears you, off only stops it. */
   onCohostEnable?: (enabled: boolean) => void
   /** Turn listening on from the one-time card (plan 068 D3). */
   onCohostListenOn?: () => void

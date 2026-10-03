@@ -6,6 +6,9 @@ import { STORAGE_KEYS } from '@/lib/capture'
  *
  * The shell imports this module, so it sits in the eager chunk: keep it to
  * ids, labels and the storage helpers (no icons, no components).
+ *
+ * Orcle's settings moved to the Orcle tab (plan 119), so every setting keeps
+ * one home. A remembered `orcle` is no longer a tab id and reads as General.
  */
 export const SETTINGS_TABS = [
   { id: 'general', label: 'General' },
@@ -13,7 +16,6 @@ export const SETTINGS_TABS = [
   { id: 'permissions', label: 'Permissions' },
   { id: 'shortcuts', label: 'Shortcuts' },
   { id: 'remote', label: 'Remote' },
-  { id: 'orcle', label: 'Orcle' },
   { id: 'about', label: 'About' }
 ] as const
 

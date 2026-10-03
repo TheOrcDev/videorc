@@ -293,7 +293,6 @@ import type {
   OAuthCallbackEnvelope,
   OAuthStartResult,
   OAuthProviderCredentialStatus,
-  RecordingFinalizationEvent,
   RecordingStatus,
   RemoteControlStatus,
   RemoteLanPairing,
@@ -387,7 +386,12 @@ import {
   type EntitlementUiGate
 } from '@/lib/entitlement-ui'
 import { commentCanHighlight, CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
-import { applyCohostState, cohostErrorToast, cohostHighlightMessageId } from '@/lib/cohost-state'
+import {
+  applyCohostState,
+  cohostErrorToast,
+  cohostHighlightMessageId,
+  orcleLiveSettingsPatch
+} from '@/lib/cohost-state'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import { upsertNoiseCleanupJob } from '@/lib/noise-cleanup-jobs'
 import {
@@ -1115,6 +1119,18 @@ export type StudioContextValue = {
   cohostGate: EntitlementUiGate
   cohostActionPending: boolean
   patchCohostSettings: (patch: CohostSettingsPatch) => Promise<void>
+  /**
+   * Orcle Live's one switch (plan 119). On without cloud-AI consent only
+   * raises `orcleConsentRequested` (the Orcle tab's consent dialog) and writes
+   * nothing; on with consent writes `{enabled: true, listen: true}` in one
+   * `cohost.settings.set`; off writes `{enabled: false}`.
+   */
+  setOrcleLive: (on: boolean) => Promise<void>
+  /** The consent dialog Orcle Live asked for is waiting for an answer. */
+  orcleConsentRequested: boolean
+  /** Accept: grant cloud-AI consent, then the one Orcle Live patch. Decline:
+   * close the dialog and change nothing. */
+  answerOrcleConsent: (accepted: boolean) => Promise<void>
   markCohostQuestionAnswered: (questionId: string, sessionId?: string) => void
   dismissCohostQuestion: (questionId: string, sessionId?: string) => void
   /** Put a voice-resolved question back (`cohost.question.restore`, plan 060 D9). */
@@ -2095,14 +2111,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const sessionsRef = useRef<SessionSummary[]>([])
   sessionsRef.current = sessions
   const remuxSessionRef = useRef<((sessionId: string) => Promise<void>) | null>(null)
-  // Plan 068 D10: sessions whose transcript SRT landed (`captions-srt-written`
-  // precedes their `finalized` event), and the lazy post-stream pack trigger.
-  const transcriptWrittenSessionIdsRef = useRef(new Set<string>())
-  // Sessions whose Orcle listening reached `on`: only those make the pack.
-  const orcleListenedSessionIdsRef = useRef(new Set<string>())
-  const autoRunPostStreamPackRef = useRef<((event: RecordingFinalizationEvent) => void) | null>(
-    null
-  )
   const [sessionsNextCursor, setSessionsNextCursor] = useState<string | null>(null)
   const [sessionsLoadingMore, setSessionsLoadingMore] = useState(false)
   const sessionListGenerationRef = useRef(0)
@@ -3906,9 +3914,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (merged === previous) return
     cohostStateRef.current = merged
     setCohostState(merged)
-    if (merged.sessionId && merged.listening?.state === 'on') {
-      orcleListenedSessionIdsRef.current.add(merged.sessionId)
-    }
     // Toast discipline: the pane and the destination chip already show every
     // co-host state. Only a NEW failure (reason + server error code) is news;
     // backoff retries of the same failure stay silent.
@@ -3981,6 +3986,30 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setCohostSettings(next)
     },
     [client]
+  )
+
+  // Orcle Live's one switch (plan 119 S2). Consent comes first: on without it
+  // only asks (the Orcle tab's consent dialog), and nothing is written until
+  // the streamer accepts. On is one save: chat and listening together.
+  const [orcleConsentRequested, setOrcleConsentRequested] = useState(false)
+  const setOrcleLive = useCallback(
+    async (on: boolean): Promise<void> => {
+      if (on && !aiConsent) {
+        setOrcleConsentRequested(true)
+        return
+      }
+      await patchCohostSettings(orcleLiveSettingsPatch(on))
+    },
+    [aiConsent, patchCohostSettings]
+  )
+  const answerOrcleConsent = useCallback(
+    async (accepted: boolean): Promise<void> => {
+      setOrcleConsentRequested(false)
+      if (!accepted) return
+      setAiConsent(true)
+      await patchCohostSettings(orcleLiveSettingsPatch(true))
+    },
+    [patchCohostSettings, setAiConsent]
   )
 
   const runCohostAction = useCallback(
@@ -4138,20 +4167,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     void window.videorc?.pushCohostWindowState?.(cohostWindowState)
   }, [cohostWindowState])
 
-  // "Turn on co-host" from the Comments window's presence popover or nudge, and
-  // "Turn on" listening from its one-time card (plan 068 D3). The settings
-  // (engine enabled, listening, cloud-AI consent) are main-renderer owned, so
-  // the window asks and gets the resolved window state back.
+  // Orcle Live's one switch from the Comments window (plan 119): its presence
+  // popover, nudge, consent CTA and one-time listening card. On is the same
+  // single `{enabled: true, listen: true}` save as the Orcle tab (the window
+  // sends `listen: true` too), off only `{enabled: false}`. The settings and
+  // cloud-AI consent are main-renderer owned, so the window asks and gets the
+  // resolved window state back; its consent CTA grants consent in the click.
   useEffect(() => {
     const off = window.videorc?.onCohostEnableRequest?.((command: CohostEnableCommand) => {
       void (async () => {
         if (command.grantConsent === true) setAiConsent(true)
-        const settingsPatch: CohostSettingsPatch = {
-          enabled: command.enabled,
-          ...(typeof command.listen === 'boolean' ? { listen: command.listen } : {})
-        }
         if (!client) throw new Error('Backend socket is not connected.')
-        const next = await client.request<CohostSettings>('cohost.settings.set', settingsPatch)
+        const next = await client.request<CohostSettings>(
+          'cohost.settings.set',
+          orcleLiveSettingsPatch(command.enabled)
+        )
         setCohostSettings(next)
         return {
           ...cohostWindowStateRef.current,
@@ -6102,9 +6132,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             }
           })
         }
-        if (event.state === 'finalized') {
-          autoRunPostStreamPackRef.current?.(event)
-        }
+        // No cloud job follows a finalized recording: the post-stream pack
+        // auto-run went with Publish and its switch (plan 119 S2).
       }),
       nextClient.on('noiseCleanup.status', (payload) => {
         const job = payload
@@ -6297,9 +6326,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
         if (event.code.startsWith('recording-quality-')) {
           void refreshSessions(nextClient)
-        }
-        if (event.code === 'captions-srt-written' && event.sessionId) {
-          transcriptWrittenSessionIdsRef.current.add(event.sessionId)
         }
         // isSessionAudioLossCode lives in the lazy recovery chunk; this stays
         // byte-cheap for the eager renderer budget.
@@ -13648,36 +13674,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       reportError
     ]
   )
-  // Plan 068 D10: a finished streamed + recorded session with a transcript
-  // makes its own publish pack, once (lib/post-stream-pack.ts, lazy).
-  autoRunPostStreamPackRef.current = (event) => {
-    const activeClient = clientRef.current
-    const transcriptWritten = transcriptWrittenSessionIdsRef.current.delete(event.sessionId)
-    const orcleListened = orcleListenedSessionIdsRef.current.delete(event.sessionId)
-    if (!activeClient) return
-    void import('@/lib/post-stream-pack')
-      .then((pack) =>
-        pack.autoRunPostStreamPack(event, {
-          request: activeClient.request.bind(activeClient),
-          sessions: sessionsRef.current,
-          transcriptWritten,
-          orcleListened,
-          listenOn: cohostListen,
-          consent: aiConsent,
-          runningSessionId: aiRunningSessionId,
-          readiness: {
-            account,
-            capabilities: aiCapabilities,
-            error: aiReadinessError,
-            loading: aiReadinessLoading,
-            quota: aiQuota
-          },
-          setRunningSessionId: setAiRunningSessionId,
-          refreshSessions: () => refreshSessions(activeClient)
-        })
-      )
-      .catch(() => undefined)
-  }
 
   const exportPublishPack = useCallback(
     async (sessionId: string) => {
@@ -14983,6 +14979,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cohostGate,
       cohostActionPending,
       patchCohostSettings,
+      setOrcleLive,
+      orcleConsentRequested,
+      answerOrcleConsent,
       markCohostQuestionAnswered,
       dismissCohostQuestion,
       restoreCohostQuestion,
@@ -15217,6 +15216,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cohostGate,
       cohostActionPending,
       patchCohostSettings,
+      setOrcleLive,
+      orcleConsentRequested,
+      answerOrcleConsent,
       markCohostQuestionAnswered,
       dismissCohostQuestion,
       restoreCohostQuestion,
