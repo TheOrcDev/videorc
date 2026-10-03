@@ -178,6 +178,7 @@ const api: VideorcApi = {
   getDashboard: () => invoke('comments-window:dashboard-get'),
   onDashboard: (callback) => subscribe('comments-window:dashboard', callback),
   openSession: (sessionId) => invoke('resource:open-session', sessionId),
+  grantSessionMedia: (sessionId) => invoke('media:grant-session', sessionId),
   trashSessionDeletion: (operationId) => invoke('resource:trash-session-deletion', operationId),
   pickFile: () => invoke('system:pick-file'),
   pickDirectory: () => invoke('system:pick-directory'),
