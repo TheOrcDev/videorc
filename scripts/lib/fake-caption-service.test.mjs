@@ -6,6 +6,79 @@ import WebSocket from 'ws'
 import { startFakeCaptionService } from './fake-caption-service.mjs'
 
 describe('fake caption service', () => {
+  it(
+    'holds a scripted speech completion behind an explicit response barrier',
+    { timeout: 10_000 },
+    async () => {
+      const token = 'fake-caption-realtime'
+      const fake = await startFakeCaptionService({
+        smokeSessionToken: 'fake-caption-session',
+        smokeRealtimeToken: token,
+        autoTranscript: false
+      })
+      const socket = new WebSocket(`${fake.httpOrigin.replace('http:', 'ws:')}/realtime`, [
+        'ai-gateway-realtime.v1',
+        `ai-gateway-auth.${token}`
+      ])
+      const received = []
+      let held
+      let completed
+      let admission
+      let completionError
+      let socketError
+      socket.on('error', (error) => {
+        socketError = error
+      })
+      socket.on('message', (data) => received.push(JSON.parse(data.toString())))
+      try {
+        await waitFor(() => socket.readyState === WebSocket.OPEN || socketError)
+        if (socketError) throw socketError
+        // Provider VAD offsets follow appended pcm16 duration, independently of
+        // wall-clock delays before a scripted transcript is released.
+        for (const bytes of [640, 320]) {
+          socket.send(
+            JSON.stringify({
+              type: 'input_audio_buffer.append',
+              audio: Buffer.alloc(bytes).toString('base64')
+            })
+          )
+        }
+        await waitFor(() => fake.state.audioAppends === 2)
+        held = fake.holdNextRealtimeFinal()
+        held.arrived.then((value) => {
+          admission = value
+        })
+        completed = fake.emitRealtimeFinal('Delayed speech.')
+        completed.catch((error) => {
+          completionError = error
+        })
+        await waitFor(() => admission || completionError)
+        if (completionError) throw completionError
+        assert.equal(admission.text, 'Delayed speech.')
+        await waitFor(() => received.some((event) => event.type === 'speech-started'))
+        assert.equal(
+          received.find((event) => event.type === 'speech-started').raw.audio_start_ms,
+          20
+        )
+        assert.equal(
+          received.some((event) => event.type === 'input-transcription-completed'),
+          false
+        )
+        held.release()
+        assert.equal(await completed, 1)
+        await waitFor(() =>
+          received.some((event) => event.type === 'input-transcription-completed')
+        )
+        assert.equal(received.at(-1).transcript, 'Delayed speech.')
+      } finally {
+        held?.release()
+        if (completed) await Promise.allSettled([completed])
+        socket.terminate()
+        await fake.close()
+      }
+    }
+  )
+
   it('accepts legacy Bearer and current Gateway subprotocol realtime upgrades', async () => {
     const sessionToken = 'fake-caption-session'
     const realtimeToken = 'fake-caption-realtime'

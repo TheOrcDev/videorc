@@ -3883,8 +3883,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [client, commitCohostState, wsStatus])
 
   // Start with the live-chat session, and re-assert on a consent flip.
-  // `cohost.start` is a no-op for a session already running, and the backend
-  // stops the engine itself when the session ends.
+  // The backend applies changed consent in place and returns its confirmed
+  // state; unchanged consent is idempotent. It stops itself when chat ends.
   useEffect(() => {
     if (!client || wsStatus !== 'connected') return
     if (!cohostLiveSessionId || !cohostEnabled || !cohostGate.allowed) return
