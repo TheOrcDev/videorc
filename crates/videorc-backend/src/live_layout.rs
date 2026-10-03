@@ -1024,15 +1024,8 @@ async fn apply_scene_transaction(
         let live = source_liveness(state, target_sources).await;
         match plan_live_swap(mutation_kind, needs, live) {
             ApplyMode::Hot => {
-                let status = commit_scene_for_intent(
-                    state,
-                    intent_id,
-                    &scene,
-                    params.layout.clone(),
-                    None,
-                    params.transition_ms,
-                )
-                .await?;
+                let status =
+                    commit_scene_for_intent(state, intent_id, &scene, &params, None).await?;
                 retire_unused_sources_after_commit(state, intent_id, needs).await;
                 resync_camera_capture_geometry_after_commit(state, intent_id, &params, needs).await;
                 Ok(layout_apply_status(
@@ -1072,9 +1065,8 @@ async fn apply_scene_transaction(
                     state,
                     intent_id,
                     &scene,
-                    params.layout.clone(),
+                    &params,
                     Some(message.clone()),
-                    params.transition_ms,
                 )
                 .await?;
                 retire_unused_sources_after_commit(state, intent_id, needs).await;
@@ -1189,28 +1181,9 @@ async fn apply_simulcast_leg_scene(
         },
     )
     .await;
-    let session_id = state
-        .recording
-        .lock()
-        .await
-        .as_ref()
-        .filter(|active| !active.stop_requested)
-        .map(|active| active.session_id.clone());
-    let compositor_status = {
-        let compositor = state.compositor.lock().await;
-        if let Some(edit) = compositor.source_edit_snapshot()
-            && let Some(session_id) = session_id
-        {
-            let mut coordinator = state
-                .live_source_switch
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            if let Some(snapshot) = coordinator.reconcile_scenes(&session_id, edit.scenes()) {
-                state.emit_event("session.sources.changed", snapshot);
-            }
-        }
-        compositor.status.clone()
-    };
+    // A secondary layout edits composition, not the session's independently
+    // selected sources. Source transactions own selection across both legs.
+    let compositor_status = state.compositor.lock().await.status.clone();
     let status = SceneCommitStatus {
         applied: true,
         mode: "hot".to_string(),
@@ -1671,9 +1644,8 @@ async fn commit_scene_for_intent(
     state: &AppState,
     intent_id: u64,
     scene: &Scene,
-    layout: crate::protocol::LayoutSettings,
+    params: &SceneConfigParams,
     message: Option<String>,
-    transition_ms: Option<u32>,
 ) -> Result<SceneCommitStatus> {
     // Keep registration and the commit edge mutually exclusive. Warm-up never holds
     // this guard, so a new request can supersede an older waiter immediately.
@@ -1684,9 +1656,17 @@ async fn commit_scene_for_intent(
             intents.latest_intent_id
         );
     }
-    let status =
-        commit_scene_with_layout_with_transition(state, scene, layout, message, transition_ms)
-            .await?;
+    let status = commit_scene_with_layout_at_time_with_policy(
+        state,
+        scene,
+        params.layout.clone(),
+        message,
+        u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
+        false,
+        params.transition_ms,
+        Some(&params.sources),
+    )
+    .await?;
     drop(intents);
     Ok(status)
 }
@@ -2280,6 +2260,7 @@ pub async fn commit_scene_with_layout_with_transition(
         now_millis,
         false,
         transition_ms,
+        None,
     )
     .await
 }
@@ -2292,7 +2273,7 @@ pub async fn commit_idle_scene_with_layout(
 ) -> Result<SceneCommitStatus> {
     let now_millis = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
     commit_scene_with_layout_at_time_with_policy(
-        state, scene, layout, message, now_millis, true, None,
+        state, scene, layout, message, now_millis, true, None, None,
     )
     .await
 }
@@ -2306,7 +2287,7 @@ async fn commit_scene_with_layout_at_time(
     now_millis: u64,
 ) -> Result<SceneCommitStatus> {
     commit_scene_with_layout_at_time_with_policy(
-        state, scene, layout, message, now_millis, false, None,
+        state, scene, layout, message, now_millis, false, None, None,
     )
     .await
 }
@@ -2320,6 +2301,7 @@ async fn commit_scene_with_layout_at_time_with_policy(
     now_millis: u64,
     idle_only: bool,
     transition_ms: Option<u32>,
+    selected_sources: Option<&SourceSelection>,
 ) -> Result<SceneCommitStatus> {
     // An unreadable background must DEGRADE, never kill the commit: failing here
     // took the whole preview down with it (every builtin .webp background before
@@ -2368,27 +2350,17 @@ async fn commit_scene_with_layout_at_time_with_policy(
         },
     )
     .await;
-    {
+    // Install selected visual intent inside the same scene commit fence, and
+    // only when the latest primary config supplied it. Generic scene edits
+    // must not infer source selection from their visible composition.
+    if let Some(selected_sources) = selected_sources {
         let recording = state.recording.lock().await;
-        let session_id = recording
-            .as_ref()
-            .filter(|active| !active.stop_requested)
-            .map(|active| active.session_id.clone());
-        let committed_scenes = state.compositor.lock().await.source_edit_snapshot();
-        if let Some(session_id) = session_id
+        if let Some(active) = recording.as_ref().filter(|active| !active.stop_requested)
             && let Some(sources) = state
                 .live_source_switch
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .reconcile_scenes(
-                    &session_id,
-                    std::iter::once(scene).chain(
-                        committed_scenes
-                            .as_ref()
-                            .into_iter()
-                            .flat_map(|edit| edit.scenes().skip(1)),
-                    ),
-                )
+                .commit_visual_selection(&active.session_id, selected_sources)
         {
             state.emit_event("session.sources.changed", sources);
         }
@@ -2439,6 +2411,236 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    #[tokio::test]
+    async fn generic_scene_edits_preserve_inactive_selected_sources() {
+        let state = test_state();
+        *state.recording.lock().await =
+            Some(crate::recording::test_active_recording_stub("selected"));
+        let selected = sources(true, true);
+        state
+            .live_source_switch
+            .lock()
+            .unwrap()
+            .start("selected".into(), selected.clone());
+        let params = config(LayoutPreset::CameraOnly, true, true);
+        let scene = scene_from_capture_config(params.clone());
+        assert!(!scene.sources.iter().any(
+            |source| source.visible && source.kind == crate::protocol::SceneSourceKind::Screen
+        ));
+        commit_scene_with_layout(&state, &scene, params.layout, None)
+            .await
+            .unwrap();
+        let snapshot = crate::live_source_switch::get(&state, "selected")
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot.confirmed, selected,
+            "composition retirement is not a selected-source intent"
+        );
+        assert_eq!(snapshot.source_revision, 0);
+        let mut hidden = scene.clone();
+        for source in &mut hidden.sources {
+            source.visible = false;
+        }
+        hidden.sources.reverse();
+        commit_scene_with_current_layout(&state, &hidden)
+            .await
+            .unwrap();
+        let after = crate::live_source_switch::get(&state, "selected")
+            .await
+            .unwrap();
+        assert_eq!(after.confirmed, selected);
+        assert_eq!(after.source_revision, 0);
+        // Producer health remains truthful even though selection survives.
+        assert!(snapshot.health.iter().any(|health| health.kind
+            == crate::live_source_switch::SourceKind::Capture
+            && health.health == crate::live_source_switch::SourceHealth::Unavailable));
+    }
+
+    #[tokio::test]
+    async fn primary_selected_intent_is_latest_owned_and_atomic_with_the_scene_commit() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+        let state = test_state();
+        *state.recording.lock().await =
+            Some(crate::recording::test_active_recording_stub("selected"));
+        let initial = sources(true, true);
+        state
+            .live_source_switch
+            .lock()
+            .unwrap()
+            .start("selected".into(), initial.clone());
+        let mut params = config(LayoutPreset::ScreenOnly, false, true);
+        params.sources.microphone_id = None; // stale layout copy, independent mic owner
+        let scene = scene_from_capture_config(params.clone());
+        let intent = begin_layout_intent(&state, Some(1), required_scene_sources(&scene))
+            .await
+            .unwrap();
+        let scene_guard = state.scene_commit.lock().await;
+        let mut commit = std::pin::pin!(commit_scene_for_intent(
+            &state, intent, &scene, &params, None
+        ));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(commit.as_mut().poll(&mut context).is_pending());
+        assert_eq!(
+            state
+                .live_source_switch
+                .lock()
+                .unwrap()
+                .snapshot("selected")
+                .unwrap()
+                .confirmed,
+            initial
+        );
+        // While config waits for composition, microphone admission/receipt is
+        // independent. The final visual commit must preserve its newer ID.
+        {
+            let mut owner = state.live_source_switch.lock().unwrap();
+            owner.enable_microphone();
+            let mic = crate::live_source_switch::SourceSwitchParams {
+                session_id: "selected".into(),
+                request_id: "new-mic".into(),
+                expected_source_revision: 0,
+                kind: crate::live_source_switch::SourceKind::Microphone,
+                device_id: Some("microphone:new".into()),
+                protected_overlay_window_ids: vec![],
+            };
+            owner.admit(&mic).unwrap();
+            owner.commit_microphone(&mic).unwrap();
+        }
+        drop(scene_guard);
+        commit.await.unwrap();
+        let committed = state
+            .live_source_switch
+            .lock()
+            .unwrap()
+            .snapshot("selected")
+            .unwrap();
+        assert!(
+            committed.confirmed.camera_id.is_none(),
+            "explicit Off is selection intent"
+        );
+        assert_eq!(committed.confirmed.screen_id, params.sources.screen_id);
+        assert_eq!(
+            committed.confirmed.microphone_id.as_deref(),
+            Some("microphone:new")
+        );
+        assert_eq!(committed.source_revision, 2);
+        assert_eq!(state.scene.lock().await.clone(), scene);
+        begin_layout_intent(&state, Some(2), required_scene_sources(&scene))
+            .await
+            .unwrap();
+        let stale = config(LayoutPreset::CameraOnly, true, true);
+        assert!(
+            commit_scene_for_intent(
+                &state,
+                intent,
+                &scene_from_capture_config(stale.clone()),
+                &stale,
+                None
+            )
+            .await
+            .is_err()
+        );
+        let after = state
+            .live_source_switch
+            .lock()
+            .unwrap()
+            .snapshot("selected")
+            .unwrap();
+        assert_eq!(after.confirmed, committed.confirmed);
+        assert_eq!(after.source_revision, committed.source_revision);
+        // Rejected config cannot claim source intent or change its revision.
+        assert!(
+            apply_layout_live(
+                &state,
+                SceneLayoutApplyParams {
+                    intent_id: Some(3),
+                    simulcast_leg: false,
+                    config: config(LayoutPreset::CameraOnly, false, true)
+                }
+            )
+            .await
+            .is_err()
+        );
+        let after = state
+            .live_source_switch
+            .lock()
+            .unwrap()
+            .snapshot("selected")
+            .unwrap();
+        assert_eq!(after.confirmed, committed.confirmed);
+        assert_eq!(after.source_revision, committed.source_revision);
+    }
+
+    #[tokio::test]
+    async fn layout_retirement_keeps_selected_sources_but_secondary_edits_do_not_replace_them() {
+        let state = test_state();
+        *state.recording.lock().await =
+            Some(crate::recording::test_active_recording_stub("selected"));
+        let selected = sources(true, true);
+        state
+            .live_source_switch
+            .lock()
+            .unwrap()
+            .start("selected".into(), selected.clone());
+        let params = config(LayoutPreset::CameraOnly, true, true);
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            selected.camera_id.as_deref().unwrap(),
+            &params.layout,
+            params.video.as_ref().unwrap(),
+        )
+        .await;
+        let applied = apply_layout_live(
+            &state,
+            SceneLayoutApplyParams {
+                intent_id: Some(1),
+                simulcast_leg: false,
+                config: params,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            applied
+                .scene
+                .sources
+                .iter()
+                .filter(|source| source.visible
+                    && source.kind == crate::protocol::SceneSourceKind::Screen)
+                .count(),
+            0
+        );
+        let snapshot = state
+            .live_source_switch
+            .lock()
+            .unwrap()
+            .snapshot("selected")
+            .unwrap();
+        assert_eq!(snapshot.confirmed, selected);
+        assert_eq!(snapshot.source_revision, 0);
+        let mut auxiliary = config(LayoutPreset::VerticalScreenOnly, false, true);
+        auxiliary.sources.screen_id = Some("screen:secondary".into());
+        apply_simulcast_leg_scene(
+            &state,
+            &auxiliary,
+            scene_from_capture_config(auxiliary.clone()),
+            Some(2),
+        )
+        .await
+        .unwrap();
+        let after = state
+            .live_source_switch
+            .lock()
+            .unwrap()
+            .snapshot("selected")
+            .unwrap();
+        assert_eq!(after.confirmed, snapshot.confirmed);
+        assert_eq!(after.source_revision, snapshot.source_revision);
+        crate::preview_camera::stop_preview_camera(&state).await;
     }
 
     #[tokio::test]

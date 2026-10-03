@@ -1,6 +1,7 @@
 import { SCENE_LIBRARY_KEY, WORKING_SCENE_KEY, sameSceneVisual } from '../lib/scene-presets'
-import { act, createElement, useEffect } from 'react'
+import { act, createElement, useEffect, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
+import { Window as TestWindow } from 'happy-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const toastSpies = vi.hoisted(() => ({
@@ -27,6 +28,7 @@ vi.mock('@/lib/caption-overlay', async (importOriginal) => ({
 }))
 
 import { revealInFileManagerLabel } from '@/lib/platform'
+import { LayoutTab } from '@/components/tabs/layout-tab'
 import { isMediaAccessSnapshotReady, systemAccessRows } from '@/lib/system-access'
 import type {
   AccountCallbackEnvelope,
@@ -1566,7 +1568,8 @@ function Probe({ observe }: { observe: (value: StudioObservation) => void }): nu
 
 async function mountStudioProvider(
   container: Element,
-  observe: (value: StudioObservation) => void
+  observe: (value: StudioObservation) => void,
+  children?: ReactNode
 ): Promise<Root> {
   let mountedRoot!: Root
   await act(async () => {
@@ -1575,7 +1578,7 @@ async function mountStudioProvider(
       createElement(
         BackgroundAssetsProvider,
         null,
-        createElement(StudioProvider, null, createElement(Probe, { observe }))
+        createElement(StudioProvider, null, createElement(Probe, { observe }), children)
       )
     )
   })
@@ -4299,6 +4302,234 @@ describe('real StudioProvider lifecycle', () => {
     expect(backend.currentLayout.cameraZoom).toBe(first.visual.layout.cameraZoom)
     expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).sceneId).toBe(first.id)
   })
+
+  it('keeps actual Scene controls eligible across composition retirement and ignores delayed older proof', async () => {
+    const cameraId = 'camera:avfoundation:0'
+    const screenId = 'screen:screencapturekit:1'
+    const backend = new StudioBackend()
+    backend.deviceList.devices = [
+      { id: cameraId, name: 'Camera', kind: 'camera', status: 'available' },
+      { id: screenId, name: 'Display', kind: 'screen', status: 'available' }
+    ]
+    backend.recordingState = 'recording'
+    backend.recordingSessionId = 'session-1'
+    backend.confirmedSources = { cameraId, screenId }
+    backend.reportsActiveSceneRevision = true
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderDomEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    localStorage.setItem(
+      STORAGE_KEYS.captureConfig,
+      JSON.stringify({
+        ...defaultCaptureConfig,
+        sources: { cameraId, screenId }
+      })
+    )
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    const heldProofs: Array<{ release: () => void; payload: { activeSceneRevision: number } }> = []
+    const respond = backend.response.bind(backend)
+    backend.response = (command) => {
+      const result = respond(command)
+      if (command.method === 'scene.layout.apply_live') {
+        const params = command.params as { layout: LayoutSettings; sources: SourceSelection }
+        // The backend owner regression proves this corrected contract:
+        // confirmed is selected intent, independent of visible composition.
+        // Only visual fields belong to this layout; the mic owns its receipt.
+        backend.confirmedSources = {
+          ...params.sources,
+          microphoneId: backend.confirmedSources.microphoneId
+        }
+        if (params.layout.layoutPreset !== 'side-by-side') {
+          const payload = { activeSceneRevision: 0 }
+          const release = backend.deferResponse('diagnostics.stats', payload)
+          heldProofs.push({ payload, release })
+        }
+        queueMicrotask(() =>
+          backend.sockets[0]?.onmessage?.({
+            data: JSON.stringify({
+              event: 'session.sources.changed',
+              payload: backend.sourceSnapshot('session-1')
+            })
+          })
+        )
+      }
+      return result
+    }
+    const button = (preset: string): HTMLButtonElement => {
+      const found = document.querySelector<HTMLButtonElement>(
+        `[data-videorc-layout-preset="${preset}"]`
+      )
+      expect(found).not.toBeNull()
+      return found!
+    }
+    try {
+      root = await mountStudioProvider(
+        testDom.container,
+        (value) => {
+          observations.push(value)
+        },
+        createElement(LayoutTab)
+      )
+      await waitForObservation(
+        () =>
+          observations.at(-1)?.recording.recording.state === 'recording' &&
+          latest().sourceSelectionState.snapshot !== null &&
+          latest().deviceList.devices.some((device) => device.id === cameraId)
+      )
+      expect(button('camera-only').disabled).toBe(false)
+      await act(async () => button('camera-only').click())
+      await waitForObservation(
+        () =>
+          latest().sourceSelectionState.snapshot?.confirmed.screenId === screenId &&
+          heldProofs.length === 1
+      )
+      expect(latest().layoutSwitchPending).toBe('camera-only')
+      expect(latest().captureConfig.layout.layoutPreset).toBe('screen-camera')
+      // The first committed composition is camera-only while its output proof
+      // is held. A newer screen or mixed intent must still have selected IDs.
+      expect(button('screen-only').disabled).toBe(false)
+      expect(button('side-by-side').disabled).toBe(false)
+      await act(async () => button('screen-only').click())
+      await waitForObservation(
+        () =>
+          heldProofs.length === 2 &&
+          latest().sourceSelectionState.snapshot?.confirmed.cameraId === cameraId
+      )
+      expect(button('camera-only').disabled).toBe(false)
+      expect(button('side-by-side').disabled).toBe(false)
+      await act(async () => button('side-by-side').click())
+      await waitForObservation(
+        () =>
+          latest().captureConfig.layout.layoutPreset === 'side-by-side' &&
+          latest().layoutSwitchPending === null
+      )
+      await act(async () => {
+        for (const proof of heldProofs) {
+          proof.payload.activeSceneRevision = backend.revision
+          proof.release()
+        }
+      })
+      expect(latest().captureConfig.sources).toMatchObject({ cameraId, screenId })
+      expect(latest().captureConfig.layout.layoutPreset).toBe('side-by-side')
+      expect(
+        backend.sentCommands
+          .filter((command) => command.method === 'scene.layout.apply_live')
+          .map((command) => (command.params as { layout: LayoutSettings }).layout.layoutPreset)
+      ).toEqual(['camera-only', 'screen-only', 'side-by-side'])
+      expect(
+        observations.some(({ core }) =>
+          ['camera-only', 'screen-only'].includes(core.captureConfig.layout.layoutPreset)
+        )
+      ).toBe(false)
+      expect(toastSpies.error).not.toHaveBeenCalled()
+    } finally {
+      for (const proof of heldProofs) {
+        proof.payload.activeSceneRevision = backend.revision
+        proof.release()
+      }
+    }
+  }, 15_000)
+
+  it.each([
+    {
+      name: 'explicit Camera Off',
+      sources: { screenId: 'screen:screencapturekit:1', cameraOff: true },
+      blocked: ['camera-only', 'side-by-side'],
+      unavailable: undefined
+    },
+    {
+      name: 'explicit capture None',
+      sources: { cameraId: 'camera:avfoundation:0' },
+      blocked: ['screen-only', 'side-by-side'],
+      unavailable: undefined
+    },
+    {
+      name: 'missing camera',
+      sources: { cameraId: 'camera:missing', screenId: 'screen:screencapturekit:1' },
+      blocked: [],
+      unavailable: 'camera-only'
+    },
+    {
+      name: 'unavailable display',
+      sources: { cameraId: 'camera:avfoundation:0', screenId: 'screen:screencapturekit:1' },
+      blocked: [],
+      unavailable: 'screen-only'
+    }
+  ])(
+    'does not accept a live layout requiring $name through actual Scene controls',
+    async ({ sources, blocked, unavailable }) => {
+      const backend = new StudioBackend()
+      backend.deviceList.devices = [
+        { id: 'camera:avfoundation:0', name: 'Camera', kind: 'camera', status: 'available' },
+        {
+          id: 'screen:screencapturekit:1',
+          name: 'Display',
+          kind: 'screen',
+          status: unavailable === 'screen-only' ? 'unavailable' : 'available'
+        }
+      ]
+      backend.recordingState = 'recording'
+      backend.recordingSessionId = 'session-1'
+      backend.confirmedSources = sources
+      TestWebSocket.backend = backend
+      vi.stubGlobal('WebSocket', TestWebSocket)
+      const testDom = installProviderDomEnvironment(
+        createVideorcApi({
+          acknowledge: async () => true,
+          pending: async () => [],
+          acknowledgeProvider: async () => true,
+          pendingProvider: async () => []
+        })
+      )
+      restoreEnvironment = testDom.restore
+      localStorage.setItem(
+        STORAGE_KEYS.captureConfig,
+        JSON.stringify({ ...defaultCaptureConfig, sources })
+      )
+      const observations: StudioObservation[] = []
+      const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+      root = await mountStudioProvider(
+        testDom.container,
+        (value) => {
+          observations.push(value)
+        },
+        createElement(LayoutTab)
+      )
+      await waitForObservation(
+        () =>
+          observations.at(-1)?.recording.recording.state === 'recording' &&
+          latest().sourceSelectionState.snapshot !== null &&
+          latest().deviceList.devices.length === 2
+      )
+      const button = (preset: string): HTMLButtonElement =>
+        document.querySelector<HTMLButtonElement>(`[data-videorc-layout-preset="${preset}"]`)!
+      for (const preset of blocked) {
+        expect(button(preset).disabled).toBe(true)
+        await act(async () => button(preset).click())
+      }
+      if (unavailable) {
+        // A selected ID may survive device loss, but the real provider still
+        // validates discovery before admitting its layout to the backend.
+        expect(button(unavailable).disabled).toBe(false)
+        await act(async () => button(unavailable).click())
+        await waitForObservation(() => toastSpies.error.mock.calls.length > 0)
+      }
+      expect(
+        backend.sentCommands.filter((command) => command.method === 'scene.layout.apply_live')
+      ).toHaveLength(0)
+      expect(latest().layoutSwitchPending).toBeNull()
+      if ('cameraOff' in sources) expect(latest().captureConfig.sources.cameraOff).toBe(true)
+    }
+  )
 
   it('routes global layout shortcuts through confirmed transactions and coalesces repeat bursts', async () => {
     const backend = new StudioBackend()
@@ -12168,6 +12399,39 @@ function createVideorcApi(options: {
     }
   )
   return api as unknown as VideorcApi
+}
+
+function installProviderDomEnvironment(api: VideorcApi): {
+  container: Element
+  restore: () => void
+} {
+  const page = new TestWindow({ url: 'http://localhost/' })
+  Object.assign(page, { videorc: api })
+  const globals = {
+    window: page,
+    document: page.document,
+    localStorage: page.localStorage,
+    navigator: page.navigator,
+    HTMLElement: page.HTMLElement,
+    Element: page.Element,
+    Node: page.Node,
+    SVGElement: page.SVGElement,
+    MutationObserver: page.MutationObserver,
+    ResizeObserver: page.ResizeObserver,
+    getComputedStyle: page.getComputedStyle.bind(page),
+    requestAnimationFrame: page.requestAnimationFrame.bind(page),
+    cancelAnimationFrame: page.cancelAnimationFrame.bind(page),
+    IS_REACT_ACT_ENVIRONMENT: true
+  }
+  for (const [name, value] of Object.entries(globals)) vi.stubGlobal(name, value)
+  const container = page.document.createElement('div')
+  page.document.body.append(container)
+  return {
+    container: container as unknown as Element,
+    restore: () => {
+      void page.happyDOM.close()
+    }
+  }
 }
 
 function installProviderTestEnvironment(api: VideorcApi): {

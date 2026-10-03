@@ -17,7 +17,8 @@ import {
   analyzeCgWindowObservations,
   analyzeNativeStatusSamples,
   cgOraclePreviewReady,
-  effectivePresentFpsFloor
+  effectivePresentFpsFloor,
+  layoutIntentDiagnostic
 } from './lib/preview-interaction-stress.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
@@ -326,12 +327,21 @@ async function issueLayoutIntentBurst(smoke, sequence) {
     interClickMs: 10,
     code: `
       const sequence = Array.isArray(params.sequence) ? params.sequence : [];
+      const project = ${layoutIntentDiagnostic.toString()};
+      const timeline = [];
+      const observe = (preset, phase, button) => {
+        // At most two rows per click plus one completion. No full provider
+        // state, device names, credentials or returned transport payloads.
+        timeline.push(project(window.__videorcSmokeScenePresets?.state(), preset, phase, button?.disabled, Date.now()));
+      };
       for (const preset of sequence) {
         const button = Array.from(document.querySelectorAll('[data-videorc-layout-preset]'))
           .find((candidate) => candidate.getAttribute('data-videorc-layout-preset') === preset);
-        if (!button) throw new Error('Missing layout button ' + preset);
-        if (button.disabled) throw new Error('Layout button ' + preset + ' blocked a newer intent');
+        observe(preset, 'before', button);
+        if (!button) throw new Error('Missing layout button ' + preset + '; ownership=' + JSON.stringify(timeline));
+        if (button.disabled) throw new Error('Layout button ' + preset + ' blocked a newer intent; ownership=' + JSON.stringify(timeline));
         button.click();
+        observe(preset, 'after', button);
         await sleep(Number(params.interClickMs ?? 10));
       }
       const preset = sequence.at(-1);
@@ -340,11 +350,12 @@ async function issueLayoutIntentBurst(smoke, sequence) {
         const button = Array.from(document.querySelectorAll('[data-videorc-layout-preset]'))
           .find((candidate) => candidate.getAttribute('data-videorc-layout-preset') === preset);
         if (button?.getAttribute('aria-pressed') === 'true') {
-          return { preset, pressed: true, disabled: Boolean(button.disabled), label: button.textContent?.trim() ?? '' };
+          observe(preset, 'committed', button);
+          return { preset, pressed: true, disabled: Boolean(button.disabled), label: button.textContent?.trim() ?? '', timeline };
         }
         await sleep(25);
       }
-      throw new Error('Latest layout intent did not commit ' + preset);
+      throw new Error('Latest layout intent did not commit ' + preset + '; ownership=' + JSON.stringify(timeline));
     `
   })
   return response?.result ?? response

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::{Scene, SceneSourceKind, SourceSelection};
+use crate::protocol::SourceSelection;
 use crate::state::AppState;
 
 pub const SOURCE_SWITCH_EXECUTION_TIMEOUT: Duration = Duration::from_secs(65);
@@ -442,10 +442,14 @@ impl SourceSwitchCoordinator {
             .ok_or(SwitchError::InactiveSession)
     }
 
-    pub fn reconcile_scenes<'a>(
+    /// Only a successful primary config transaction owns visual selection.
+    /// Scene visibility and producer retirement do not express Off/None. The
+    /// microphone has its own session transaction and may be newer than this
+    /// config's copy of the picked microphone.
+    pub fn commit_visual_selection(
         &mut self,
         session_id: &str,
-        scenes: impl IntoIterator<Item = &'a Scene>,
+        selected: &SourceSelection,
     ) -> Option<SessionSources> {
         if self.stopping {
             return None;
@@ -455,31 +459,10 @@ impl SourceSwitchCoordinator {
             .as_mut()
             .filter(|snapshot| snapshot.session_id == session_id)?;
         let mut confirmed = snapshot.confirmed.clone();
-        confirmed.camera_id = None;
-        confirmed.screen_id = None;
-        confirmed.window_id = None;
-        confirmed.test_pattern = false;
-        for scene in scenes {
-            for source in scene.sources.iter().filter(|source| source.visible) {
-                match source.kind {
-                    SceneSourceKind::Camera if confirmed.camera_id.is_none() => {
-                        confirmed.camera_id = source.device_id.clone()
-                    }
-                    SceneSourceKind::Screen
-                        if confirmed.screen_id.is_none() && confirmed.window_id.is_none() =>
-                    {
-                        confirmed.screen_id = source.device_id.clone()
-                    }
-                    SceneSourceKind::Window
-                        if confirmed.screen_id.is_none() && confirmed.window_id.is_none() =>
-                    {
-                        confirmed.window_id = source.device_id.clone()
-                    }
-                    SceneSourceKind::TestPattern => confirmed.test_pattern = true,
-                    _ => {}
-                }
-            }
-        }
+        confirmed.camera_id = selected.camera_id.clone();
+        confirmed.screen_id = selected.screen_id.clone();
+        confirmed.window_id = selected.window_id.clone();
+        confirmed.test_pattern = selected.test_pattern;
         if snapshot.confirmed == confirmed {
             return None;
         }
@@ -1013,6 +996,63 @@ mod tests {
             device_id: Some("microphone:coreaudio:7".into()),
             protected_overlay_window_ids: vec![],
         }
+    }
+
+    #[test]
+    fn visual_intent_commits_capture_tuple_and_off_without_reverting_newer_microphone() {
+        let mut owner = coordinator();
+        let picked = SourceSelection {
+            camera_id: Some("camera:A".into()),
+            screen_id: Some("screen:A".into()),
+            window_id: None,
+            microphone_id: None,
+            test_pattern: false,
+        };
+        owner.commit_visual_selection("session", &picked).unwrap();
+        let mut mic = request("mic-newer");
+        mic.expected_source_revision = 1;
+        owner.admit(&mic).unwrap();
+        owner.commit_microphone(&mic).unwrap();
+        assert!(owner.commit_visual_selection("session", &picked).is_none());
+        for (camera, screen, window, test_pattern) in [
+            (None, Some("screen:A"), None, false),
+            (Some("camera:B"), None, Some("window:B"), false),
+            (Some("camera:B"), None, None, true),
+            (None, None, None, false),
+        ] {
+            let selected = SourceSelection {
+                camera_id: camera.map(str::to_owned),
+                screen_id: screen.map(str::to_owned),
+                window_id: window.map(str::to_owned),
+                microphone_id: None, // a stale config cannot undo the mic receipt
+                test_pattern,
+            };
+            let before = owner.snapshot("session").unwrap().source_revision;
+            let committed = owner.commit_visual_selection("session", &selected).unwrap();
+            assert_eq!(committed.source_revision, before + 1);
+            assert_eq!(committed.confirmed.camera_id, selected.camera_id);
+            assert_eq!(committed.confirmed.screen_id, selected.screen_id);
+            assert_eq!(committed.confirmed.window_id, selected.window_id);
+            assert_eq!(committed.confirmed.test_pattern, test_pattern);
+            assert_eq!(committed.confirmed.microphone_id, mic.device_id);
+            assert!(
+                owner
+                    .commit_visual_selection("session", &selected)
+                    .is_none()
+            );
+        }
+        let final_snapshot = owner.snapshot("session").unwrap();
+        assert!(
+            owner
+                .commit_visual_selection("stale-session", &picked)
+                .is_none()
+        );
+        owner.stop("session");
+        assert!(owner.commit_visual_selection("session", &picked).is_none());
+        assert_eq!(
+            owner.snapshot("session").unwrap().confirmed,
+            final_snapshot.confirmed
+        );
     }
 
     #[test]
