@@ -60,12 +60,12 @@ const message = (
 })
 const seed = (
   count = 1999,
-  eventType: LiveChatMessage['eventType'] = 'message'
+  eventType: (index: number) => LiveChatMessage['eventType'] = () => 'message'
 ): LiveChatSnapshot =>
   applyLiveChatSnapshot({
     sessionId: 's1',
     providers: [],
-    messages: Array.from({ length: count }, (_, index) => message(index, eventType)),
+    messages: Array.from({ length: count }, (_, index) => message(index, eventType(index))),
     unreadCount: 0,
     updatedAt: 'now'
   })
@@ -203,24 +203,43 @@ for (const [owner, append] of [
     it.each(['message', 'follow'] as const)(
       'counts fresh %s deliveries on its hidden pane at rollover',
       async (eventType) => {
-        let snapshot = seed(1999, eventType)
+        // Five oldest follows exercise Activity identity replacement without
+        // mounting thousands of unrelated row menus in this arrival test.
+        let snapshot = seed(1999, (index) =>
+          eventType === 'follow' && index < 5 ? 'follow' : 'message'
+        )
         const render = async () => {
           await act(async () =>
             root.render(createElement(StreamManager, { snapshot, dashboard: null }))
           )
         }
+        const expectActivity = (indices: number[]) =>
+          expect(
+            [...container.querySelectorAll('[data-slot="activity-row"]')]
+              .map((row) => row.getAttribute('data-activity-id'))
+              .sort()
+          ).toEqual(indices.map((index) => message(index).id).sort())
+        expect(snapshot.messages).toHaveLength(1999)
         await render()
+        if (eventType === 'follow') expectActivity([0, 1, 2, 3, 4])
         const label = eventType === 'follow' ? 'Activity' : 'Chat'
         snapshot = append(snapshot, message(1999, eventType))
+        expect(snapshot.messages).toHaveLength(2000)
         await render()
         expect(badge(label)).toBe('1')
+        if (eventType === 'follow') expectActivity([0, 1, 2, 3, 4, 1999])
         snapshot = append(snapshot, message(2000, eventType))
+        expect(snapshot.messages).toHaveLength(2000)
         await render()
         expect(badge(label)).toBe('2')
-        for (let index = 2001; index < 2004; index++)
+        if (eventType === 'follow') expectActivity([1, 2, 3, 4, 1999, 2000])
+        for (let index = 2001; index < 2004; index++) {
           snapshot = append(snapshot, message(index, eventType))
+          expect(snapshot.messages).toHaveLength(2000)
+        }
         await render()
         expect(badge(label)).toBe('5')
+        if (eventType === 'follow') expectActivity([4, 1999, 2000, 2001, 2002, 2003])
       }
     )
   })
