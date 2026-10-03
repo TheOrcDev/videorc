@@ -236,7 +236,7 @@ pub fn rank_chat_spike_moments(
         if chosen.len() >= MAX_CHAT_PEAKS {
             break;
         }
-        // Adjacent buckets are the same moment — keep the strongest.
+        // Adjacent buckets are the same moment: keep the strongest.
         if chosen
             .iter()
             .any(|(existing, _)| existing.abs_diff(index) <= 1)

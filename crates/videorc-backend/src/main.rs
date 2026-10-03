@@ -5451,6 +5451,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "comments.highlight.canvases"
         | "cohost.status"
         | "cohost.settings.get"
+        | "cohost.report.get"
+        | "cohost.report.latest"
         | "ai.capabilities.get"
         | "ai.quota.get"
         | "ai.jobs.get"
@@ -9077,9 +9079,22 @@ async fn handle_text_message_with_role(
                 }
             }
         }
-        "cohost.promise.done" | "cohost.promise.dismiss" => {
+        "cohost.promise.done" => {
             match serde_json::from_value::<protocol::CohostPromiseParams>(command.params) {
-                Ok(params) => match cohost::close_promise(state, params).await {
+                Ok(params) => match cohost::promise_done(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.promise.dismiss" => {
+            match serde_json::from_value::<protocol::CohostPromiseParams>(command.params) {
+                Ok(params) => match cohost::dismiss_promise(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
                     Err(error) => {
                         ServerResponse::error(command.id, error.code(), error.to_string())
@@ -9145,6 +9160,32 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        "cohost.report.get" => {
+            match serde_json::from_value::<protocol::CohostReportGetParams>(command.params) {
+                Ok(params) if params.session_id.trim().is_empty() => {
+                    ServerResponse::error(command.id, "invalid-params", "sessionId is required")
+                }
+                Ok(params) => {
+                    match cohost::get_session_report(state, params.session_id.trim()).await {
+                        Ok(payload) => ServerResponse::ok(command.id, payload),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "cohost-report-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.report.latest" => match cohost::latest_session_report(state).await {
+            Ok(payload) => ServerResponse::ok(command.id, payload),
+            Err(error) => {
+                ServerResponse::error(command.id, "cohost-report-failed", error.to_string())
+            }
+        },
         "captions.overlay.clear" => {
             match serde_json::from_value::<captions::ClearCaptionOverlayParams>(command.params) {
                 Ok(params) => {

@@ -580,6 +580,18 @@ pub(crate) struct LedgerAuthor {
     name_forms: NameForms,
 }
 
+/// How the session's chatters were greeted, for the Orcle report (plan 119).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct GreetingCounts {
+    /// Authors whose first message in the channel landed this session.
+    pub(crate) first_timers: u64,
+    pub(crate) first_timers_greeted: u64,
+    pub(crate) by_voice: u64,
+    pub(crate) by_chat: u64,
+    pub(crate) on_stream: u64,
+    pub(crate) manual: u64,
+}
+
 /// Every chatter of one Orcle session, keyed like alert corroboration
 /// (`alert_author_key`). Lives in the session and leaves with it.
 #[derive(Debug, Default)]
@@ -823,6 +835,29 @@ impl AuthorLedger {
             }
         }
         self.log.clear();
+    }
+
+    /// Greeting totals for the Orcle report (plan 119 S1), over every author
+    /// of the session. Never the "Say hi" list: that one is pruned as entries
+    /// age out or get greeted.
+    pub(crate) fn greeting_counts(&self) -> GreetingCounts {
+        let mut counts = GreetingCounts::default();
+        for author in self.authors.values() {
+            if author.first_message {
+                counts.first_timers += 1;
+                if author.greeted.is_some() {
+                    counts.first_timers_greeted += 1;
+                }
+            }
+            match author.greeted.as_ref().map(|greeting| greeting.how) {
+                Some(GreetedHow::Voice) => counts.by_voice += 1,
+                Some(GreetedHow::Chat) => counts.by_chat += 1,
+                Some(GreetedHow::Highlight) => counts.on_stream += 1,
+                Some(GreetedHow::Manual) => counts.manual += 1,
+                None => {}
+            }
+        }
+        counts
     }
 
     #[cfg(test)]
@@ -1311,6 +1346,39 @@ mod tests {
             ["Bea", "Cy", "Dee", "Eve", "Fay"]
         );
         assert!(ledger.say_hi(start + SAY_HI_WINDOW + secs(10)).is_empty());
+    }
+
+    #[test]
+    fn greeting_counts_walk_every_author_not_the_pruned_say_hi_list() {
+        let start = Instant::now();
+        let mut ledger = AuthorLedger::default();
+        ledger.note_message("k:sam", &row(1, "Sam", "hi!", true), false, start);
+        ledger.note_message("k:ann", &row(2, "Ann", "first!", true), false, start);
+        ledger.note_message("k:old", &row(3, "Regular", "back", false), false, start);
+        ledger.note_message("k:quiet", &row(4, "Quiet", "...", true), false, start);
+        assert_eq!(
+            ledger.greeting_counts(),
+            GreetingCounts {
+                first_timers: 3,
+                ..GreetingCounts::default()
+            }
+        );
+
+        assert!(ledger.greet("k:sam", GreetedHow::Manual, start + secs(1)));
+        assert!(ledger.greet("k:ann", GreetedHow::Highlight, start + secs(2)));
+        assert!(ledger.greet("k:old", GreetedHow::Chat, start + secs(3)));
+        // A second greeting of the same author never counts twice.
+        assert!(!ledger.greet("k:old", GreetedHow::Voice, start + secs(4)));
+        let counts = ledger.greeting_counts();
+        assert_eq!(counts.first_timers, 3);
+        assert_eq!(counts.first_timers_greeted, 2);
+        assert_eq!((counts.manual, counts.on_stream, counts.by_chat), (1, 1, 1));
+        assert_eq!(counts.by_voice, 0);
+
+        // Long after "Say hi" forgot everyone, the totals still stand.
+        assert!(ledger.say_hi_changed(start + SAY_HI_WINDOW + secs(1)));
+        assert!(ledger.say_hi(start + SAY_HI_WINDOW + secs(1)).is_empty());
+        assert_eq!(ledger.greeting_counts(), counts);
     }
 
     #[test]

@@ -21,8 +21,9 @@ use crate::live_chat::{
 };
 use crate::process_job::output_owned_std_with_timeout;
 use crate::protocol::{
-    AiArtifact, AiArtifactKind, AiArtifactStatus, DiagnosticStats, HealthEvent, HealthLevel,
-    LayoutSettings, NoiseCleanupJob, NoiseCleanupJobStatus, OutputSettings, SessionAiArtifactsPage,
+    AiArtifact, AiArtifactKind, AiArtifactStatus, CohostReportChatPlatformCount,
+    CohostSessionReport, DiagnosticStats, HealthEvent, HealthLevel, LayoutSettings,
+    NoiseCleanupJob, NoiseCleanupJobStatus, OutputSettings, SessionAiArtifactsPage,
     SessionHealthEventsPage, SessionListItem, SessionListPage, SessionLogEntry, SessionLogsPage,
     SessionStorageTotals, SessionSummary, SourceSelection, StreamScreen, StreamScreenStatus,
 };
@@ -62,14 +63,12 @@ pub struct SessionCloneFacts {
     pub mp4_path: Option<String>,
 }
 
-/// When a session ran and how it ran, for readers that place events on its
-/// timeline (plan 119: moments, the Orcle report).
+/// When a session started and how long it ran, for readers that place events
+/// on its timeline (plan 119: moments, the Orcle report).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionTiming {
     pub started_at: String,
-    pub ended_at: Option<String>,
     pub duration_ms: Option<i64>,
-    pub mode: String,
 }
 
 const PERFORMANCE_CHECK_PROCESSING_KIND: &str = "performance-check";
@@ -2449,14 +2448,12 @@ impl Database {
     pub fn session_timing(&self, session_id: &str) -> Result<Option<SessionTiming>> {
         let conn = self.lock()?;
         conn.query_row(
-            "SELECT started_at, ended_at, duration_ms, mode FROM sessions WHERE id = ?1",
+            "SELECT started_at, duration_ms FROM sessions WHERE id = ?1",
             params![session_id],
             |row| {
                 Ok(SessionTiming {
                     started_at: row.get(0)?,
-                    ended_at: row.get(1)?,
-                    duration_ms: row.get(2)?,
-                    mode: row.get(3)?,
+                    duration_ms: row.get(1)?,
                 })
             },
         )
@@ -5024,6 +5021,136 @@ impl Database {
             .map_err(Into::into)
     }
 
+    /// Orcle report (plan 119 S1): save one session's report, folding it into
+    /// the report already there when the same session comes back (Orcle off
+    /// and on mid-stream), in one transaction. `Ok(false)` when the session
+    /// row is gone: a report without its session is skipped, never an error.
+    /// A stored report this build cannot read is replaced.
+    pub fn upsert_cohost_report(&self, report: &CohostSessionReport) -> Result<bool> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let session_exists = transaction
+            .query_row(
+                "SELECT 1 FROM sessions WHERE id = ?1",
+                params![report.session_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !session_exists {
+            return Ok(false);
+        }
+        let stored: Option<String> = transaction
+            .query_row(
+                "SELECT report_json FROM cohost_reports WHERE session_id = ?1",
+                params![report.session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let merged = match stored
+            .as_deref()
+            .and_then(CohostSessionReport::from_stored_json)
+        {
+            Some(existing) => existing.merged_with(report.clone()),
+            None => report.clone(),
+        };
+        transaction.execute(
+            "INSERT INTO cohost_reports (session_id, version, report_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(session_id) DO UPDATE SET
+                version = excluded.version,
+                report_json = excluded.report_json,
+                updated_at = excluded.updated_at",
+            params![
+                merged.session_id,
+                merged.version,
+                serde_json::to_string(&merged)?,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    /// The saved Orcle report of a session; `None` when there is none or it
+    /// was written in a format this build does not read.
+    pub fn get_cohost_report(&self, session_id: &str) -> Result<Option<CohostSessionReport>> {
+        let conn = self.lock()?;
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT report_json FROM cohost_reports WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(stored
+            .as_deref()
+            .and_then(CohostSessionReport::from_stored_json))
+    }
+
+    /// The newest Library session that has an Orcle report.
+    pub fn latest_cohost_report_session_id(&self) -> Result<Option<String>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT reports.session_id
+             FROM cohost_reports AS reports
+             JOIN sessions ON sessions.id = reports.session_id
+             WHERE sessions.library_hidden = 0
+             ORDER BY sessions.started_at DESC, reports.updated_at DESC
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// The newest Library session that streamed (`stream` or
+    /// `record+stream`), report or not.
+    pub fn latest_streamed_session_id(&self) -> Result<Option<String>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id FROM sessions
+             WHERE library_hidden = 0 AND mode LIKE '%stream%'
+             ORDER BY started_at DESC
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Chat rows of a session by platform, busiest first. Counts every kept
+    /// row, like the Library's comment count.
+    pub fn live_chat_message_counts_by_platform(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<CohostReportChatPlatformCount>> {
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT platform, COUNT(*) FROM live_chat_messages
+             WHERE session_id = ?1
+             GROUP BY platform
+             ORDER BY COUNT(*) DESC, platform ASC",
+        )?;
+        let rows = statement.query_map(params![session_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut counts = Vec::new();
+        for row in rows {
+            let (platform_id, messages) = row?;
+            let Some(platform) = stream_platform_from_id(&platform_id) else {
+                continue;
+            };
+            counts.push(CohostReportChatPlatformCount {
+                platform,
+                messages: u64::try_from(messages).unwrap_or(0),
+            });
+        }
+        Ok(counts)
+    }
+
     pub(crate) fn remove_caption_private_artifact(&self, id: &str) -> Result<bool> {
         let conn = self.lock()?;
         Ok(conn.execute(
@@ -6246,6 +6373,13 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_clip_marks_session_at
                 ON clip_marks(session_id, at_seconds);
+
+            CREATE TABLE IF NOT EXISTS cohost_reports (
+                session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+                version INTEGER NOT NULL,
+                report_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             ",
         )?;
         ensure_column(&conn, "sessions", "container", "container TEXT")?;
@@ -7874,6 +8008,265 @@ mod tests {
         );
         let page = database.list_session_items_page(None, 20).unwrap();
         assert_eq!(page.items.len(), 1, "the user's capture must survive");
+    }
+
+    fn sample_cohost_report(
+        session_id: &str,
+        started_at: &str,
+        ended_at: &str,
+    ) -> CohostSessionReport {
+        use crate::protocol::{
+            COHOST_SESSION_REPORT_VERSION, CohostReportQuestion, CohostReportQuestionOutcome,
+        };
+        CohostSessionReport {
+            version: COHOST_SESSION_REPORT_VERSION,
+            session_id: session_id.to_string(),
+            started_at: started_at.to_string(),
+            ended_at: ended_at.to_string(),
+            segments: 1,
+            stream_title: Some("Rust night".to_string()),
+            messages_seen: 10,
+            shown_on_stream: 1,
+            questions: crate::protocol::CohostReportQuestions {
+                total: 2,
+                marked_answered: 1,
+                items: vec![
+                    CohostReportQuestion {
+                        id: "q_1".to_string(),
+                        text: "What keyboard is that?".to_string(),
+                        askers: vec!["Viewer 0".to_string()],
+                        platforms: vec![StreamPlatform::Twitch],
+                        priority: crate::cohost::CohostPriority::High,
+                        first_seen_at: started_at.to_string(),
+                        outcome: CohostReportQuestionOutcome::Open,
+                    },
+                    CohostReportQuestion {
+                        id: "q_2".to_string(),
+                        text: "Which editor?".to_string(),
+                        askers: Vec::new(),
+                        platforms: Vec::new(),
+                        priority: crate::cohost::CohostPriority::Normal,
+                        first_seen_at: started_at.to_string(),
+                        outcome: CohostReportQuestionOutcome::MarkedAnswered,
+                    },
+                ],
+                ..crate::protocol::CohostReportQuestions::default()
+            },
+            flags: crate::protocol::CohostReportFlags::default(),
+            promises: crate::protocol::CohostReportPromises {
+                heard: 1,
+                open: vec![crate::protocol::CohostReportOpenPromise {
+                    text: "Giveaway at 100 viewers".to_string(),
+                    first_seen_at: started_at.to_string(),
+                }],
+                ..crate::protocol::CohostReportPromises::default()
+            },
+            greetings: crate::protocol::CohostReportGreetings {
+                first_timers: 3,
+                manual: 1,
+                ..crate::protocol::CohostReportGreetings::default()
+            },
+            alerts: Vec::new(),
+            recap: crate::protocol::CohostReportRecap::default(),
+        }
+    }
+
+    #[test]
+    fn cohost_reports_merge_on_the_same_session_and_follow_deletes() {
+        use crate::protocol::CohostReportQuestionOutcome;
+        let database = test_database();
+        database.create_session(&sample_session("s-1")).unwrap();
+        database.create_session(&sample_session("s-2")).unwrap();
+        assert_eq!(database.get_cohost_report("s-1").unwrap(), None);
+
+        let first = sample_cohost_report("s-1", "2026-10-04T10:00:00Z", "2026-10-04T10:30:00Z");
+        assert!(database.upsert_cohost_report(&first).unwrap());
+        assert_eq!(
+            database.get_cohost_report("s-1").unwrap(),
+            Some(first.clone())
+        );
+        assert_eq!(database.get_cohost_report("s-2").unwrap(), None);
+
+        // Orcle came back mid-stream: the second report folds into the first.
+        let mut second =
+            sample_cohost_report("s-1", "2026-10-04T10:31:00Z", "2026-10-04T11:00:00Z");
+        second.questions.total = 1;
+        second.questions.marked_answered = 0;
+        second.questions.replied = 1;
+        second.questions.items.truncate(1);
+        second.questions.items[0].outcome = CohostReportQuestionOutcome::Replied;
+        second.promises.open = vec![crate::protocol::CohostReportOpenPromise {
+            text: "Raid someone after".to_string(),
+            first_seen_at: "2026-10-04T10:40:00Z".to_string(),
+        }];
+        second.flags.raised = 1;
+        second.flags.by_kind = vec![crate::protocol::CohostReportFlagKindCount {
+            kind: crate::cohost::CohostFlagKind::Spam,
+            count: 1,
+        }];
+        assert!(database.upsert_cohost_report(&second).unwrap());
+
+        let merged = database.get_cohost_report("s-1").unwrap().unwrap();
+        assert_eq!(merged.version, 1);
+        assert_eq!(merged.segments, 2);
+        assert_eq!(merged.started_at, "2026-10-04T10:00:00Z");
+        assert_eq!(merged.ended_at, "2026-10-04T11:00:00Z");
+        assert_eq!(merged.messages_seen, 20);
+        assert_eq!(merged.questions.total, 3);
+        assert_eq!(merged.questions.marked_answered, 1);
+        assert_eq!(merged.questions.replied, 1);
+        assert_eq!(merged.questions.items.len(), 2);
+        assert_eq!(
+            merged.questions.items[0].outcome,
+            CohostReportQuestionOutcome::Replied,
+            "the later outcome wins"
+        );
+        assert_eq!(
+            merged.questions.items[1].outcome,
+            CohostReportQuestionOutcome::MarkedAnswered
+        );
+        assert_eq!(merged.promises.heard, 2);
+        assert_eq!(merged.promises.open.len(), 2);
+        assert_eq!(merged.flags.raised, 1);
+        assert_eq!(merged.flags.by_kind.len(), 1);
+        assert_eq!(merged.greetings.first_timers, 6);
+
+        // Deleting the session takes its report with it.
+        database
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM sessions WHERE id = 's-1'", [])
+            .unwrap();
+        assert_eq!(database.get_cohost_report("s-1").unwrap(), None);
+        let rows: i64 = database
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM cohost_reports", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn cohost_report_for_a_missing_session_is_skipped_not_an_error() {
+        let database = test_database();
+        let report = sample_cohost_report("nope", "2026-10-04T10:00:00Z", "2026-10-04T10:30:00Z");
+        assert!(!database.upsert_cohost_report(&report).unwrap());
+        assert_eq!(database.get_cohost_report("nope").unwrap(), None);
+        assert_eq!(database.latest_cohost_report_session_id().unwrap(), None);
+    }
+
+    #[test]
+    fn cohost_report_in_an_unknown_version_reads_as_unavailable_and_is_replaced() {
+        let database = test_database();
+        database.create_session(&sample_session("s-1")).unwrap();
+        database
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO cohost_reports (session_id, version, report_json, updated_at)
+                 VALUES ('s-1', 99, '{\"version\":99,\"sessionId\":\"s-1\",\"startedAt\":\"t\",\"endedAt\":\"t\"}', 't')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(database.get_cohost_report("s-1").unwrap(), None);
+        // The newest-report lookup still finds the row; the reader says None.
+        assert_eq!(
+            database.latest_cohost_report_session_id().unwrap(),
+            Some("s-1".to_string())
+        );
+
+        let report = sample_cohost_report("s-1", "2026-10-04T10:00:00Z", "2026-10-04T10:30:00Z");
+        assert!(database.upsert_cohost_report(&report).unwrap());
+        let read = database.get_cohost_report("s-1").unwrap().unwrap();
+        assert_eq!(
+            read.segments, 1,
+            "an unreadable report is replaced, not merged"
+        );
+        assert_eq!(read, report);
+    }
+
+    #[test]
+    fn latest_cohost_report_prefers_a_report_then_the_newest_streamed_session() {
+        let database = test_database();
+        for (id, mode, started_at) in [
+            ("old-stream", "record+stream", "2026-01-01T00:00:00Z"),
+            ("mid-stream", "stream", "2026-02-01T00:00:00Z"),
+            ("new-record", "record", "2026-03-01T00:00:00Z"),
+        ] {
+            database
+                .create_session(&NewSession {
+                    mode: mode.to_string(),
+                    started_at: started_at.to_string(),
+                    ..sample_session(id)
+                })
+                .unwrap();
+        }
+        assert_eq!(database.latest_cohost_report_session_id().unwrap(), None);
+        assert_eq!(
+            database.latest_streamed_session_id().unwrap(),
+            Some("mid-stream".to_string()),
+            "a recording that never streamed is not the newest stream"
+        );
+
+        let report =
+            sample_cohost_report("old-stream", "2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z");
+        assert!(database.upsert_cohost_report(&report).unwrap());
+        assert_eq!(
+            database.latest_cohost_report_session_id().unwrap(),
+            Some("old-stream".to_string())
+        );
+        assert_eq!(
+            database.session_timing("mid-stream").unwrap(),
+            Some(SessionTiming {
+                started_at: "2026-02-01T00:00:00Z".to_string(),
+                duration_ms: None,
+            })
+        );
+        assert_eq!(database.session_timing("missing").unwrap(), None);
+    }
+
+    #[test]
+    fn live_chat_message_counts_by_platform_group_every_kept_row() {
+        let database = test_database();
+        database.create_session(&sample_session("s-1")).unwrap();
+        assert!(
+            database
+                .live_chat_message_counts_by_platform("s-1")
+                .unwrap()
+                .is_empty()
+        );
+        database
+            .save_live_chat_message(&sample_live_chat_message("s-1", 1))
+            .unwrap();
+        database
+            .save_live_chat_message(&sample_live_chat_message("s-1", 2))
+            .unwrap();
+        let mut twitch = sample_live_chat_message("s-1", 3);
+        twitch.platform = StreamPlatform::Twitch;
+        twitch.target_id = Some("target-twitch".to_string());
+        twitch.id = live_chat_message_id(
+            "s-1",
+            StreamPlatform::Twitch,
+            Some("target-twitch"),
+            &twitch.provider_message_id,
+        );
+        database.save_live_chat_message(&twitch).unwrap();
+
+        assert_eq!(
+            database
+                .live_chat_message_counts_by_platform("s-1")
+                .unwrap(),
+            vec![
+                CohostReportChatPlatformCount {
+                    platform: StreamPlatform::Youtube,
+                    messages: 2,
+                },
+                CohostReportChatPlatformCount {
+                    platform: StreamPlatform::Twitch,
+                    messages: 1,
+                },
+            ]
+        );
     }
 
     #[test]

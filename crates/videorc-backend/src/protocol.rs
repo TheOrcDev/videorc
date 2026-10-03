@@ -4326,6 +4326,399 @@ pub struct CohostSettingsPatch {
     pub listen: Option<bool>,
 }
 
+// --- Orcle report (plan 119 S1; mirrored in shared/backend.ts) ---
+
+/// The report format this build writes and reads. A stored report with any
+/// other version reads as unavailable, never as an error.
+pub const COHOST_SESSION_REPORT_VERSION: u32 = 1;
+/// Questions logged per report (first seen first).
+pub const COHOST_REPORT_QUESTIONS_CAP: usize = 200;
+/// Open promises kept at stop.
+pub const COHOST_REPORT_OPEN_PROMISES_CAP: usize = 20;
+/// Asker names kept per logged question.
+pub const COHOST_REPORT_ASKERS_CAP: usize = 5;
+
+/// `cohost.report.get`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportGetParams {
+    pub session_id: String,
+}
+
+/// `cohost.report.saved`: a report for this session was written (or folded
+/// into the one already there).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportSavedEvent {
+    pub session_id: String,
+}
+
+/// What became of a question Orcle caught. The latest outcome wins; a
+/// restore puts it back to `open`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostReportQuestionOutcome {
+    Open,
+    AnsweredOnAir,
+    Replied,
+    MarkedAnswered,
+    Dismissed,
+    /// Still open, but its comment was on stream.
+    Shown,
+}
+
+/// One question in the report's log. Optional lists are omitted while empty,
+/// never null.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportQuestion {
+    pub id: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub askers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<crate::streaming::StreamPlatform>,
+    pub priority: crate::cohost::CohostPriority,
+    pub first_seen_at: String,
+    pub outcome: CohostReportQuestionOutcome,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportQuestions {
+    /// Distinct question ids Orcle surfaced.
+    #[serde(default)]
+    pub total: u64,
+    #[serde(default)]
+    pub marked_answered: u64,
+    #[serde(default)]
+    pub dismissed: u64,
+    #[serde(default)]
+    pub replied: u64,
+    #[serde(default)]
+    pub answered_on_air: u64,
+    #[serde(default)]
+    pub restored: u64,
+    #[serde(default)]
+    pub shown_on_stream: u64,
+    /// First seen first, at most `COHOST_REPORT_QUESTIONS_CAP`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<CohostReportQuestion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportFlagKindCount {
+    pub kind: crate::cohost::CohostFlagKind,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportFlagSeverityCount {
+    pub severity: crate::cohost::CohostFlagSeverity,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportFlags {
+    /// Each flagged message id counted once.
+    #[serde(default)]
+    pub raised: u64,
+    #[serde(default)]
+    pub dismissed: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by_kind: Vec<CohostReportFlagKindCount>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by_severity: Vec<CohostReportFlagSeverityCount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportOpenPromise {
+    pub text: String,
+    pub first_seen_at: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportPromises {
+    /// New promise ids heard this session.
+    #[serde(default)]
+    pub heard: u64,
+    /// Marked done, or the transcript showed they were kept.
+    #[serde(default)]
+    pub kept: u64,
+    #[serde(default)]
+    pub dismissed: u64,
+    #[serde(default)]
+    pub reminded: u64,
+    /// Still open when the session ended, oldest first, at most
+    /// `COHOST_REPORT_OPEN_PROMISES_CAP`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open: Vec<CohostReportOpenPromise>,
+}
+
+/// Greeting totals over every chatter of the session (plan 068 D9).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportGreetings {
+    /// Viewers whose first message in the channel landed this session.
+    #[serde(default)]
+    pub first_timers: u64,
+    #[serde(default)]
+    pub first_timers_greeted: u64,
+    #[serde(default)]
+    pub by_voice: u64,
+    #[serde(default)]
+    pub by_chat: u64,
+    /// Their comment went on stream.
+    #[serde(default)]
+    pub on_stream: u64,
+    /// The streamer pressed Greeted.
+    #[serde(default)]
+    pub manual: u64,
+}
+
+/// One alert kind viewers raised, with the most distinct viewers who said it
+/// at once and whether it was ever corroborated (two viewers within 60 s).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportAlert {
+    pub kind: crate::cohost::CohostAlertKind,
+    pub peak_viewers: u32,
+    pub active: bool,
+    pub first_seen_at: String,
+}
+
+/// Recaps are never posted by Orcle, so posting leaves no count.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportRecap {
+    /// The server offered one (viewers asked what they missed).
+    #[serde(default)]
+    pub offered: u64,
+    #[serde(default)]
+    pub drafted: u64,
+    #[serde(default)]
+    pub dismissed: u64,
+}
+
+/// What Orcle caught in one stream, saved on this computer when the session
+/// ends and deleted with the recording (plan 119 decision 6). Counts and the
+/// question log; never raw chat or drafts. Every optional field is omitted,
+/// never null; the blocks always ride and default on read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostSessionReport {
+    pub version: u32,
+    pub session_id: String,
+    pub started_at: String,
+    pub ended_at: String,
+    /// Orcle sessions folded into this report: turning Orcle off and on
+    /// mid-stream adds one.
+    #[serde(default)]
+    pub segments: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_title: Option<String>,
+    #[serde(default)]
+    pub messages_seen: u64,
+    /// Distinct comments that went on stream, automatically or by hand.
+    #[serde(default)]
+    pub shown_on_stream: u64,
+    #[serde(default)]
+    pub questions: CohostReportQuestions,
+    #[serde(default)]
+    pub flags: CohostReportFlags,
+    #[serde(default)]
+    pub promises: CohostReportPromises,
+    #[serde(default)]
+    pub greetings: CohostReportGreetings,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alerts: Vec<CohostReportAlert>,
+    #[serde(default)]
+    pub recap: CohostReportRecap,
+}
+
+impl CohostSessionReport {
+    /// A stored report, or `None` for anything this build cannot read: another
+    /// version, or a shape that no longer parses. Never an error.
+    pub fn from_stored_json(json: &str) -> Option<Self> {
+        let report: Self = serde_json::from_str(json).ok()?;
+        (report.version == COHOST_SESSION_REPORT_VERSION).then_some(report)
+    }
+
+    /// Fold a later report of the same session into this one (Orcle turned
+    /// off and on mid-stream, or a replacing start): counts add up, questions
+    /// union by id with the later outcome winning, open promises union by
+    /// text, and the span covers both.
+    pub fn merged_with(mut self, later: Self) -> Self {
+        self.version = COHOST_SESSION_REPORT_VERSION;
+        if rfc3339_is_earlier(&later.started_at, &self.started_at) {
+            self.started_at = later.started_at;
+        }
+        if rfc3339_is_earlier(&self.ended_at, &later.ended_at) {
+            self.ended_at = later.ended_at;
+        }
+        self.segments = self.segments.saturating_add(later.segments);
+        if later.stream_title.is_some() {
+            self.stream_title = later.stream_title;
+        }
+        self.messages_seen = self.messages_seen.saturating_add(later.messages_seen);
+        self.shown_on_stream = self.shown_on_stream.saturating_add(later.shown_on_stream);
+
+        let questions = &mut self.questions;
+        questions.total = questions.total.saturating_add(later.questions.total);
+        questions.marked_answered = questions
+            .marked_answered
+            .saturating_add(later.questions.marked_answered);
+        questions.dismissed = questions
+            .dismissed
+            .saturating_add(later.questions.dismissed);
+        questions.replied = questions.replied.saturating_add(later.questions.replied);
+        questions.answered_on_air = questions
+            .answered_on_air
+            .saturating_add(later.questions.answered_on_air);
+        questions.restored = questions.restored.saturating_add(later.questions.restored);
+        questions.shown_on_stream = questions
+            .shown_on_stream
+            .saturating_add(later.questions.shown_on_stream);
+        for item in later.questions.items {
+            if let Some(existing) = questions
+                .items
+                .iter_mut()
+                .find(|existing| existing.id == item.id)
+            {
+                *existing = item;
+            } else if questions.items.len() < COHOST_REPORT_QUESTIONS_CAP {
+                questions.items.push(item);
+            }
+        }
+
+        let flags = &mut self.flags;
+        flags.raised = flags.raised.saturating_add(later.flags.raised);
+        flags.dismissed = flags.dismissed.saturating_add(later.flags.dismissed);
+        for count in later.flags.by_kind {
+            match flags
+                .by_kind
+                .iter_mut()
+                .find(|existing| existing.kind == count.kind)
+            {
+                Some(existing) => existing.count = existing.count.saturating_add(count.count),
+                None => flags.by_kind.push(count),
+            }
+        }
+        for count in later.flags.by_severity {
+            match flags
+                .by_severity
+                .iter_mut()
+                .find(|existing| existing.severity == count.severity)
+            {
+                Some(existing) => existing.count = existing.count.saturating_add(count.count),
+                None => flags.by_severity.push(count),
+            }
+        }
+
+        let promises = &mut self.promises;
+        promises.heard = promises.heard.saturating_add(later.promises.heard);
+        promises.kept = promises.kept.saturating_add(later.promises.kept);
+        promises.dismissed = promises.dismissed.saturating_add(later.promises.dismissed);
+        promises.reminded = promises.reminded.saturating_add(later.promises.reminded);
+        for open in later.promises.open {
+            if promises.open.len() >= COHOST_REPORT_OPEN_PROMISES_CAP {
+                break;
+            }
+            if !promises
+                .open
+                .iter()
+                .any(|existing| existing.text == open.text)
+            {
+                promises.open.push(open);
+            }
+        }
+
+        let greetings = &mut self.greetings;
+        greetings.first_timers = greetings
+            .first_timers
+            .saturating_add(later.greetings.first_timers);
+        greetings.first_timers_greeted = greetings
+            .first_timers_greeted
+            .saturating_add(later.greetings.first_timers_greeted);
+        greetings.by_voice = greetings.by_voice.saturating_add(later.greetings.by_voice);
+        greetings.by_chat = greetings.by_chat.saturating_add(later.greetings.by_chat);
+        greetings.on_stream = greetings
+            .on_stream
+            .saturating_add(later.greetings.on_stream);
+        greetings.manual = greetings.manual.saturating_add(later.greetings.manual);
+
+        for alert in later.alerts {
+            match self
+                .alerts
+                .iter_mut()
+                .find(|existing| existing.kind == alert.kind)
+            {
+                Some(existing) => {
+                    existing.peak_viewers = existing.peak_viewers.max(alert.peak_viewers);
+                    existing.active |= alert.active;
+                    if rfc3339_is_earlier(&alert.first_seen_at, &existing.first_seen_at) {
+                        existing.first_seen_at = alert.first_seen_at;
+                    }
+                }
+                None => self.alerts.push(alert),
+            }
+        }
+
+        self.recap.offered = self.recap.offered.saturating_add(later.recap.offered);
+        self.recap.drafted = self.recap.drafted.saturating_add(later.recap.drafted);
+        self.recap.dismissed = self.recap.dismissed.saturating_add(later.recap.dismissed);
+        self
+    }
+}
+
+/// `a` is strictly before `b`. Both are RFC 3339; when one does not parse the
+/// comparison falls back to the text, which orders same-format UTC stamps.
+fn rfc3339_is_earlier(a: &str, b: &str) -> bool {
+    match (
+        chrono::DateTime::parse_from_rfc3339(a),
+        chrono::DateTime::parse_from_rfc3339(b),
+    ) {
+        (Ok(a), Ok(b)) => a < b,
+        _ => a < b,
+    }
+}
+
+/// Chat rows of one platform in a session (plan 119 S1).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportChatPlatformCount {
+    pub platform: crate::streaming::StreamPlatform,
+    pub messages: u64,
+}
+
+/// Every chat row the session kept, by platform (busiest first).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportChat {
+    pub messages: u64,
+    #[serde(default)]
+    pub by_platform: Vec<CohostReportChatPlatformCount>,
+}
+
+/// `cohost.report.get` / `cohost.report.latest`: the saved report (null when
+/// Orcle left none), the session's moments (computed on read, never stored)
+/// and its chat totals.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportPayload {
+    pub session_id: String,
+    pub report: Option<CohostSessionReport>,
+    #[serde(default)]
+    pub moments: Vec<ClipMoment>,
+    #[serde(default)]
+    pub chat: CohostReportChat,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunAiWorkflowParams {
@@ -6054,6 +6447,197 @@ mod tests {
         );
         assert!(legacy.say_hi.is_empty());
         assert_eq!(legacy.dead_air_nudge, None);
+    }
+
+    #[test]
+    fn shared_high_risk_contract_fixture_matches_cohost_report_dtos() {
+        let params_wire = shared_high_risk_contract_fixture_value("/cohost/reportGetParams");
+        let params: CohostReportGetParams = serde_json::from_value(params_wire.clone()).unwrap();
+        assert_eq!(params.session_id, "session-fixture");
+        assert_eq!(serde_json::to_value(params).unwrap(), params_wire);
+
+        let saved_wire = shared_high_risk_contract_fixture_value("/cohost/reportSaved");
+        let saved: CohostReportSavedEvent = serde_json::from_value(saved_wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(saved).unwrap(), saved_wire);
+
+        let report_wire = shared_high_risk_contract_fixture_value("/cohost/report");
+        let report: CohostSessionReport = serde_json::from_value(report_wire.clone()).unwrap();
+        assert_eq!(report.version, COHOST_SESSION_REPORT_VERSION);
+        assert_eq!(report.questions.items.len(), 2);
+        assert_eq!(
+            report.questions.items[0].outcome,
+            CohostReportQuestionOutcome::Replied
+        );
+        assert!(report.questions.items[1].askers.is_empty());
+        assert_eq!(report.alerts[0].kind, crate::cohost::CohostAlertKind::Audio);
+        assert_eq!(
+            report.flags.by_kind[0].kind,
+            crate::cohost::CohostFlagKind::SelfPromo
+        );
+        // Optional lists ride only when they have entries: no null anywhere.
+        assert_eq!(serde_json::to_value(&report).unwrap(), report_wire);
+        assert_eq!(
+            CohostSessionReport::from_stored_json(&report_wire.to_string()),
+            Some(report.clone())
+        );
+
+        let payload_wire = shared_high_risk_contract_fixture_value("/cohost/reportPayload");
+        let payload: CohostReportPayload = serde_json::from_value(payload_wire.clone()).unwrap();
+        let minimal = payload
+            .report
+            .as_ref()
+            .expect("the payload carries the minimal report");
+        assert_eq!(minimal.segments, 2);
+        assert_eq!(minimal.stream_title, None);
+        assert!(minimal.alerts.is_empty() && minimal.questions.items.is_empty());
+        assert_eq!(payload.moments.len(), 3);
+        assert_eq!(payload.moments[0].source, Some(ClipMomentSource::Voice));
+        assert_eq!(payload.chat.messages, 84);
+        assert_eq!(serde_json::to_value(&payload).unwrap(), payload_wire);
+
+        let empty_wire =
+            shared_high_risk_contract_fixture_value("/cohost/reportPayloadWithoutReport");
+        let empty: CohostReportPayload = serde_json::from_value(empty_wire.clone()).unwrap();
+        assert_eq!(empty.report, None);
+        assert!(empty.moments.is_empty() && empty.chat.by_platform.is_empty());
+        // `report` is the one explicit null: the renderer keys on it.
+        assert_eq!(serde_json::to_value(&empty).unwrap(), empty_wire);
+    }
+
+    #[test]
+    fn cohost_session_report_defaults_missing_blocks_and_reads_other_versions_as_unavailable() {
+        let minimal: CohostSessionReport = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "sessionId": "s-1",
+            "startedAt": "2026-10-04T10:00:00Z",
+            "endedAt": "2026-10-04T11:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(minimal.segments, 0);
+        assert_eq!(minimal.questions, CohostReportQuestions::default());
+        assert_eq!(minimal.greetings, CohostReportGreetings::default());
+        let wire = serde_json::to_value(&minimal).unwrap();
+        for key in ["streamTitle", "alerts"] {
+            assert!(wire.get(key).is_none(), "{key} is omitted, never null");
+        }
+        assert!(wire["questions"].get("items").is_none());
+        assert!(wire["flags"].get("byKind").is_none());
+        assert!(wire["promises"].get("open").is_none());
+        assert_eq!(
+            CohostSessionReport::from_stored_json(&wire.to_string()),
+            Some(minimal)
+        );
+        assert_eq!(
+            CohostSessionReport::from_stored_json(
+                r#"{"version":2,"sessionId":"s-1","startedAt":"t","endedAt":"t"}"#
+            ),
+            None,
+            "a newer format reads as unavailable, never as an error"
+        );
+        assert_eq!(CohostSessionReport::from_stored_json("not json"), None);
+        assert_eq!(
+            CohostSessionReport::from_stored_json(
+                r#"{"version":1,"sessionId":"s","startedAt":"t","endedAt":"t","questions":{"items":[{"id":"q","text":"?","priority":"high","firstSeenAt":"t","outcome":"teleported"}]}}"#
+            ),
+            None,
+            "an outcome this build does not know"
+        );
+    }
+
+    #[test]
+    fn cohost_session_report_merge_sums_counts_and_keeps_the_later_outcome() {
+        let base: CohostSessionReport =
+            serde_json::from_value(shared_high_risk_contract_fixture_value("/cohost/report"))
+                .unwrap();
+        let mut later = base.clone();
+        later.started_at = "2026-08-22T11:31:00Z".to_string();
+        later.ended_at = "2026-08-22T12:00:00Z".to_string();
+        later.stream_title = None;
+        later.questions.items.truncate(1);
+        later.questions.items[0].outcome = CohostReportQuestionOutcome::MarkedAnswered;
+        later.questions.items.push(CohostReportQuestion {
+            id: "q_new".to_string(),
+            text: "Is this live?".to_string(),
+            askers: Vec::new(),
+            platforms: Vec::new(),
+            priority: crate::cohost::CohostPriority::Low,
+            first_seen_at: "2026-08-22T11:45:00Z".to_string(),
+            outcome: CohostReportQuestionOutcome::Open,
+        });
+        later.promises.open.push(CohostReportOpenPromise {
+            text: "Raid someone after".to_string(),
+            first_seen_at: "2026-08-22T11:50:00Z".to_string(),
+        });
+        later.flags.by_kind = vec![CohostReportFlagKindCount {
+            kind: crate::cohost::CohostFlagKind::Spam,
+            count: 3,
+        }];
+        later.alerts[0].peak_viewers = 5;
+        later.alerts[0].first_seen_at = "2026-08-22T11:40:00Z".to_string();
+        later.alerts.push(CohostReportAlert {
+            kind: crate::cohost::CohostAlertKind::Video,
+            peak_viewers: 1,
+            active: false,
+            first_seen_at: "2026-08-22T11:55:00Z".to_string(),
+        });
+
+        let merged = base.clone().merged_with(later);
+        assert_eq!(merged.version, COHOST_SESSION_REPORT_VERSION);
+        assert_eq!(merged.started_at, "2026-08-22T10:00:00Z");
+        assert_eq!(merged.ended_at, "2026-08-22T12:00:00Z");
+        assert_eq!(merged.segments, 2);
+        assert_eq!(
+            merged.stream_title.as_deref(),
+            Some("Rust night"),
+            "a later report without a title keeps the earlier one"
+        );
+        assert_eq!(merged.messages_seen, 168);
+        assert_eq!(merged.shown_on_stream, 4);
+        assert_eq!(merged.questions.total, 10);
+        assert_eq!(merged.questions.replied, 2);
+        assert_eq!(merged.questions.items.len(), 3);
+        assert_eq!(
+            merged.questions.items[0].outcome,
+            CohostReportQuestionOutcome::MarkedAnswered,
+            "the later outcome wins"
+        );
+        assert_eq!(merged.questions.items[1].id, "q_fixture_2");
+        assert_eq!(merged.questions.items[2].id, "q_new");
+        assert_eq!(merged.promises.heard, 4);
+        assert_eq!(
+            merged
+                .promises
+                .open
+                .iter()
+                .map(|open| open.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Giveaway at 100 viewers", "Raid someone after"],
+            "open promises union by text"
+        );
+        assert_eq!(merged.flags.raised, 4);
+        assert_eq!(merged.flags.by_kind.len(), 2);
+        assert_eq!(
+            merged.flags.by_kind[1].kind,
+            crate::cohost::CohostFlagKind::Spam
+        );
+        assert_eq!(merged.flags.by_kind[1].count, 4);
+        assert_eq!(merged.flags.by_severity[0].count, 4);
+        assert_eq!(merged.alerts.len(), 2);
+        assert_eq!(merged.alerts[0].peak_viewers, 5);
+        assert!(merged.alerts[0].active);
+        assert_eq!(merged.alerts[0].first_seen_at, "2026-08-22T10:40:00Z");
+        assert_eq!(merged.alerts[1].kind, crate::cohost::CohostAlertKind::Video);
+        assert_eq!(merged.greetings.first_timers, 6);
+        assert_eq!(merged.recap.offered, 2);
+
+        // A later report that started earlier moves the start back, and a
+        // shorter one never shortens the span.
+        let mut earlier = base.clone();
+        earlier.started_at = "2026-08-22T09:00:00Z".to_string();
+        earlier.ended_at = "2026-08-22T09:30:00Z".to_string();
+        let merged = base.merged_with(earlier);
+        assert_eq!(merged.started_at, "2026-08-22T09:00:00Z");
+        assert_eq!(merged.ended_at, "2026-08-22T11:30:00Z");
     }
 
     #[test]
