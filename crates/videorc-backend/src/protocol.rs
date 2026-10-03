@@ -375,6 +375,25 @@ pub struct SourceSelection {
     pub test_pattern: bool,
 }
 
+/// Visibility belongs to visual roles, independently of selected device IDs.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SourceVisibility {
+    #[serde(default = "default_true")]
+    pub camera: bool,
+    #[serde(default = "default_true")]
+    pub capture: bool,
+}
+
+impl Default for SourceVisibility {
+    fn default() -> Self {
+        Self {
+            camera: true,
+            capture: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LayoutSettings {
@@ -455,6 +474,9 @@ pub struct LayoutSettings {
     /// as an empty object, never null.
     #[serde(default)]
     pub source_transform_overrides: std::collections::BTreeMap<String, CameraTransform>,
+    /// Legacy layouts show both roles. Hidden roles still keep selected IDs.
+    #[serde(default)]
+    pub source_visibility: SourceVisibility,
 }
 
 /// How the scene's source boxes are arranged on the canvas.
@@ -971,6 +993,7 @@ pub(crate) fn default_layout_settings() -> LayoutSettings {
         vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
         arrangement_mode: ArrangementMode::Preset,
         source_transform_overrides: std::collections::BTreeMap::new(),
+        source_visibility: Default::default(),
     }
 }
 
@@ -5413,6 +5436,7 @@ mod tests {
             vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
             arrangement_mode: crate::protocol::ArrangementMode::Preset,
             source_transform_overrides: std::collections::BTreeMap::new(),
+            source_visibility: Default::default(),
             camera_chroma_key_enabled: false,
             camera_chroma_key_color: "#00FF00".to_string(),
             camera_chroma_key_similarity_pct: 40,

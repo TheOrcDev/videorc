@@ -8,7 +8,8 @@ import {
   sameSceneVisual,
   sceneNameError,
   sceneSourceProblems,
-  snapshotBackground
+  snapshotBackground,
+  sourceVisibilityFromScene
 } from './scene-presets'
 import { createDefaultRegistry, applySlot, effectiveSceneBackground } from './background-assets'
 
@@ -31,6 +32,129 @@ const saved = () => ({
   visual: visual()
 })
 describe('scene presets', () => {
+  it('normalizes hidden visual roles through saved and working snapshots', () => {
+    const hidden = normalizeSceneVisual({
+      ...visual(),
+      layout: { ...defaultCaptureConfig.layout, sourceVisibility: { camera: false, capture: true } }
+    })
+    expect(hidden.layout).toHaveProperty('sourceVisibility', { camera: false, capture: true })
+    const entry = { ...saved(), visual: hidden }
+    const library = hydrateSceneLibrary(JSON.parse(JSON.stringify({ version: 1, scenes: [entry] })))
+    const checkpoint = hydrateWorkingScene(
+      JSON.parse(JSON.stringify({ version: 1, sceneId: entry.id, visual: hidden }))
+    )!
+    expect(library.library.scenes[0].visual.layout).toHaveProperty('sourceVisibility', {
+      camera: false,
+      capture: true
+    })
+    expect(sameSceneVisual(hidden, checkpoint.visual)).toBe(true)
+    expect(sameSceneVisual(hidden, visual())).toBe(false)
+    expect(hidden.sources.cameraId).toBe('cam')
+    expect(hidden.sources.cameraOff).toBe(false)
+  })
+
+  it('defaults legacy visibility to visible without falsely modifying old scenes', () => {
+    const legacy = visual()
+    const { sourceVisibility: _visibility, ...layout } = legacy.layout
+    expect(sameSceneVisual(legacy, { ...legacy, layout })).toBe(true)
+    expect(
+      normalizeSceneVisual({
+        ...legacy,
+        layout: { ...layout, sourceVisibility: { camera: false } }
+      }).layout.sourceVisibility
+    ).toEqual({ camera: false, capture: true })
+  })
+  it.each([
+    null,
+    [],
+    'hidden',
+    { camera: 'false' },
+    { capture: 0 },
+    { microphone: false },
+    { camera: false, background: true }
+  ])('rejects untrusted visibility %j', (sourceVisibility) => {
+    expect(() =>
+      normalizeSceneVisual({ ...visual(), layout: { ...visual().layout, sourceVisibility } })
+    ).toThrow('Invalid source visibility')
+  })
+  it.each(['screen', 'window', 'test-pattern'] as const)(
+    'merges acknowledged %s visibility while preserving an absent hidden camera',
+    (kind) => {
+      const transform = {
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+        cropLeft: 0,
+        cropTop: 0,
+        cropRight: 0,
+        cropBottom: 0
+      }
+      const scene = {
+        id: 'main',
+        name: 'Main',
+        outputs: [],
+        sources: [
+          {
+            id: kind === 'test-pattern' ? 'source:test-pattern' : 'source:base',
+            name: 'Capture',
+            kind,
+            visible: true,
+            locked: false,
+            transform,
+            defaultTransform: transform
+          }
+        ]
+      }
+      expect(sourceVisibilityFromScene(scene, { camera: false, capture: false })).toEqual({
+        camera: false,
+        capture: true
+      })
+      expect(
+        sourceVisibilityFromScene(
+          { ...scene, sources: scene.sources.map((source) => ({ ...source, visible: false })) },
+          { camera: false, capture: true }
+        )
+      ).toEqual({ camera: false, capture: false })
+    }
+  )
+
+  it('merges camera-only acknowledgements without revealing an absent capture role', () => {
+    const transform = {
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1,
+      cropLeft: 0,
+      cropTop: 0,
+      cropRight: 0,
+      cropBottom: 0
+    }
+    const scene = {
+      id: 'main',
+      name: 'Main',
+      outputs: [],
+      sources: [
+        {
+          id: 'source:camera',
+          name: 'Camera',
+          kind: 'camera' as const,
+          visible: true,
+          locked: false,
+          transform,
+          defaultTransform: transform
+        }
+      ]
+    }
+    expect(sourceVisibilityFromScene(scene, { camera: false, capture: false })).toEqual({
+      camera: true,
+      capture: false
+    })
+    expect(
+      sourceVisibilityFromScene({ ...scene, sources: [] }, { camera: false, capture: false })
+    ).toEqual({ camera: false, capture: false })
+  })
+
   it('copies normalized visual fields and excludes output, audio and secrets', () => {
     const layout = {
       ...defaultCaptureConfig.layout,

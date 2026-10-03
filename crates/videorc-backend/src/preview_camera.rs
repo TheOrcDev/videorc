@@ -6031,6 +6031,7 @@ mod tests {
             vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
             arrangement_mode: crate::protocol::ArrangementMode::Preset,
             source_transform_overrides: std::collections::BTreeMap::new(),
+            source_visibility: Default::default(),
             camera_chroma_key_enabled: false,
             camera_chroma_key_color: "#00FF00".to_string(),
             camera_chroma_key_similarity_pct: 40,

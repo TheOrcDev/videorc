@@ -857,6 +857,12 @@ const layoutSchema = objectSchema(
     sideBySideCameraSide: enumSchema(['left', 'right']),
     verticalScreenFraming: optionalSchema(enumSchema(['fill', 'fit'])),
     arrangementMode: optionalSchema(enumSchema(['preset', 'freeform'])),
+    sourceVisibility: optionalSchema(
+      objectSchema(
+        { camera: optionalSchema(booleanSchema), capture: optionalSchema(booleanSchema) },
+        { allowUnknown: false }
+      )
+    ),
     sourceTransformOverrides: optionalSchema(
       recordSchema(boundedBackendParamValueSchema, { maxKeys: 16 })
     )

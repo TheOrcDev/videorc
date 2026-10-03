@@ -29,6 +29,7 @@ vi.mock('@/lib/caption-overlay', async (importOriginal) => ({
 
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { LayoutTab } from '@/components/tabs/layout-tab'
+import { sourceVisibilityFromScene } from '@/lib/scene-presets'
 import { isMediaAccessSnapshotReady, systemAccessRows } from '@/lib/system-access'
 import type {
   AccountCallbackEnvelope,
@@ -322,7 +323,7 @@ function sceneForLayout(layout: LayoutSettings): Scene {
         deviceId: 'screen:dxgi:0000000000000001:1',
         transform,
         defaultTransform: transform,
-        visible: true,
+        visible: layout.sourceVisibility?.capture !== false,
         locked: false
       },
       {
@@ -332,7 +333,7 @@ function sceneForLayout(layout: LayoutSettings): Scene {
         deviceId: 'camera:1',
         transform: { ...transform, x: 0.7, y: 0.7, width: 0.25, height: 0.25 },
         defaultTransform: { ...transform, x: 0.7, y: 0.7, width: 0.25, height: 0.25 },
-        visible: layout.layoutPreset !== 'screen-only',
+        visible: layout.layoutPreset !== 'screen-only' && layout.sourceVisibility?.camera !== false,
         locked: false
       }
     ],
@@ -826,6 +827,18 @@ class StudioBackend {
       case 'compositor.status':
         return compositorFor(this.currentScene, this.currentLayout, this.revision)
       case 'scene.load_from_capture_config':
+        this.currentLayout = params.layout as LayoutSettings
+        this.currentScene = {
+          ...this.currentScene,
+          sources: this.currentScene.sources.map((source) => ({
+            ...source,
+            visible:
+              source.kind === 'camera'
+                ? this.currentLayout.sourceVisibility?.camera !== false &&
+                  this.currentLayout.layoutPreset !== 'screen-only'
+                : this.currentLayout.sourceVisibility?.capture !== false
+          }))
+        }
         return {
           applied: true,
           mode: 'idle',
@@ -833,6 +846,27 @@ class StudioBackend {
           scene: this.currentScene,
           compositorStatus: compositorFor(this.currentScene, this.currentLayout, this.revision)
         }
+      case 'scene.source.visibility.update': {
+        this.currentScene = {
+          ...this.currentScene,
+          sources: this.currentScene.sources.map((source) =>
+            source.id === params.sourceId ? { ...source, visible: params.visible === true } : source
+          )
+        }
+        const sourceVisibility = sourceVisibilityFromScene(
+          this.currentScene,
+          this.currentLayout.sourceVisibility
+        )
+        this.currentLayout = { ...this.currentLayout, sourceVisibility }
+        this.revision += 1
+        return {
+          applied: true,
+          mode: this.recordingState === 'recording' ? 'hot' : 'idle',
+          sceneRevision: this.revision,
+          scene: this.currentScene,
+          compositorStatus: compositorFor(this.currentScene, this.currentLayout, this.revision)
+        }
+      }
       case 'scene.layout.apply_preview':
       case 'scene.layout.apply_live': {
         if (params.simulcastLeg === true) {
@@ -4057,6 +4091,343 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest().captureConfig.sources.cameraId).toBeUndefined()
     expect(latest().savedSceneModified).toBe(false)
   }, 15_000)
+
+  it('persists acknowledged camera visibility through Modified, Update, Save-as, apply and remount', async () => {
+    const backend = new StudioBackend()
+    backend.deviceList.devices.push({
+      id: 'camera:1',
+      name: 'Camera 1',
+      kind: 'camera',
+      status: 'available'
+    })
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        observations.at(-1)?.core.canSaveScene === true &&
+        latest().captureConfig.sources.cameraId === 'camera:1'
+    )
+    await act(async () => {
+      expect(latest().saveScene('Visible')).toBe(true)
+    })
+    const visible = latest().savedScenes[0]
+    const cameraId = latest().scene!.sources.find((source) => source.kind === 'camera')!.id
+    await act(async () => latest().setSceneSourceVisible(cameraId, false))
+    expect(latest().scene!.sources.find((source) => source.id === cameraId)!.visible).toBe(false)
+    expect(latest().savedSceneModified).toBe(true)
+    expect(latest().captureConfig.sources.cameraId).toBe('camera:1')
+    expect(latest().captureConfig.sources.cameraOff).not.toBe(true)
+    expect(latest().canSaveScene).toBe(true)
+    await act(async () => {
+      expect(latest().saveScene('Hidden', visible.id)).toBe(true)
+    })
+    expect(latest().savedSceneModified).toBe(false)
+    expect(latest().savedScenes[0].visual.layout).toHaveProperty('sourceVisibility', {
+      camera: false,
+      capture: true
+    })
+    await act(async () => {
+      expect(latest().saveScene('Hidden copy')).toBe(true)
+    })
+    const hidden = latest().savedScenes[1]
+    await act(async () => latest().setSceneSourceVisible(cameraId, true))
+    expect(latest().savedSceneModified).toBe(true)
+    backend.layoutApplyFailure = 'definite'
+    await act(async () => {
+      expect(await latest().applySavedScene(hidden.id)).toBe(false)
+    })
+    expect(latest().scene!.sources.find((source) => source.kind === 'camera')!.visible).toBe(true)
+    expect(latest().captureConfig.layout.sourceVisibility?.camera).toBe(true)
+    expect(
+      JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.layout.sourceVisibility.camera
+    ).toBe(true)
+    backend.layoutApplyFailure = null
+    await act(async () => {
+      expect(await latest().applySavedScene(hidden.id)).toBe(true)
+    })
+    expect(latest().scene!.sources.find((source) => source.kind === 'camera')!.visible).toBe(false)
+    expect(latest().savedSceneModified).toBe(false)
+    expect(latest().captureConfig.sources.cameraId).toBe('camera:1')
+    expect(
+      JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.layout.sourceVisibility.camera
+    ).toBe(false)
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'scene.source.visibility.update')
+    ).toHaveLength(2)
+    await act(async () => root!.unmount())
+    root = null
+    observations.length = 0
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.canSaveScene === true)
+    expect(latest().scene!.sources.find((source) => source.kind === 'camera')!.visible).toBe(false)
+    expect(latest().savedSceneModified).toBe(false)
+    expect(latest().captureConfig.sources.cameraId).toBe('camera:1')
+    expect(latest().captureConfig.sources.cameraOff).not.toBe(true)
+  })
+
+  it('keeps hidden saved visibility atomic through live lost responses and failed apply rollback', async () => {
+    const backend = new StudioBackend()
+    backend.reportsActiveSceneRevision = true
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.canSaveScene === true)
+    await act(async () => {
+      expect(latest().saveScene('Visible')).toBe(true)
+    })
+    const visible = latest().savedScenes[0]
+    const cameraId = latest().scene!.sources.find((source) => source.kind === 'camera')!.id
+    await act(async () => latest().setSceneSourceVisible(cameraId, false))
+    await act(async () => {
+      expect(latest().saveScene('Hidden')).toBe(true)
+    })
+    const hidden = latest().savedScenes[1]
+    await act(async () => {
+      expect(await latest().applySavedScene(visible.id)).toBe(true)
+    })
+    await act(async () => latest().startSession())
+    await waitForObservation(() => observations.at(-1)?.recording.recording.state === 'recording')
+    backend.layoutApplyFailure = 'definite'
+    await act(async () => {
+      expect(await latest().applySavedScene(hidden.id)).toBe(false)
+    })
+    expect(latest().scene!.sources.find((source) => source.kind === 'camera')!.visible).toBe(true)
+    expect(latest().captureConfig.layout.sourceVisibility?.camera).toBe(true)
+    expect(
+      JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.layout.sourceVisibility.camera
+    ).toBe(true)
+    backend.layoutApplyFailure = 'request-outcome-unknown-after-commit'
+    const start = backend.sentCommands.length
+    await act(async () => {
+      expect(await latest().applySavedScene(hidden.id)).toBe(true)
+    })
+    expect(latest().activeSavedSceneId).toBe(hidden.id)
+    expect(latest().savedSceneModified).toBe(false)
+    expect(latest().scene!.sources.find((source) => source.kind === 'camera')!.visible).toBe(false)
+    expect(latest().captureConfig.sources.cameraId).toBe(hidden.visual.sources.cameraId)
+    expect(latest().captureConfig.sources.cameraOff).toBe(false)
+    expect(
+      JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.layout.sourceVisibility.camera
+    ).toBe(false)
+    expect(
+      backend.sentCommands
+        .slice(start)
+        .filter((command) => command.method === 'scene.layout.apply_live')
+    ).toHaveLength(1)
+    expect(
+      backend.sentCommands
+        .slice(start)
+        .filter((command) => command.method === 'scene.source.visibility.update')
+    ).toHaveLength(0)
+    await act(async () => {
+      expect(await latest().stopSession()).toBe(true)
+    })
+  })
+
+  it.each([
+    'acknowledged',
+    'event-before-ack',
+    'event-and-compositor-before-ack',
+    'rejected',
+    'not-applied',
+    'superseded',
+    'source-replaced',
+    'unrelated-transform',
+    'other-visibility',
+    'newer-revision'
+  ] as const)(
+    'persists visibility only after a current %s backend acknowledgement',
+    async (outcome) => {
+      const backend = new StudioBackend()
+      backend.deviceList.devices.push({
+        id: 'camera:1',
+        name: 'Camera 1',
+        kind: 'camera',
+        status: 'available'
+      })
+      TestWebSocket.backend = backend
+      vi.stubGlobal('WebSocket', TestWebSocket)
+      const testDom = installProviderTestEnvironment(
+        createVideorcApi({
+          acknowledge: async () => true,
+          pending: async () => [],
+          acknowledgeProvider: async () => true,
+          pendingProvider: async () => []
+        })
+      )
+      restoreEnvironment = testDom.restore
+      const observations: StudioObservation[] = []
+      const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+      root = await mountStudioProvider(testDom.container, (value) => {
+        observations.push(value)
+      })
+      await waitForObservation(() => observations.at(-1)?.core.canSaveScene === true)
+      await act(async () => {
+        expect(latest().saveScene('Visible')).toBe(true)
+      })
+      const checkpoint = localStorage.getItem(WORKING_SCENE_KEY)
+      const camera = latest().scene!.sources.find((source) => source.kind === 'camera')!
+      const hiddenScene = {
+        ...backend.currentScene,
+        sources: backend.currentScene.sources.map((source) =>
+          source.id === camera.id ? { ...source, visible: false } : source
+        )
+      }
+      const hiddenLayout = {
+        ...backend.currentLayout,
+        sourceVisibility: { camera: false, capture: true }
+      }
+      const status = {
+        applied: outcome !== 'not-applied',
+        mode: 'idle',
+        sceneRevision: backend.revision + 1,
+        scene: hiddenScene,
+        compositorStatus: compositorFor(hiddenScene, hiddenLayout, backend.revision + 1)
+      }
+      const release =
+        outcome === 'rejected'
+          ? backend.deferFailure(
+              'scene.source.visibility.update',
+              new Error('Visibility rejected.')
+            )
+          : backend.deferResponse('scene.source.visibility.update', status)
+      let pending: Promise<void> | undefined
+      try {
+        await act(async () => {
+          pending = latest().setSceneSourceVisible(camera.id, false)
+        })
+        await waitForObservation(() =>
+          backend.sentCommands.some(
+            (command) => command.method === 'scene.source.visibility.update'
+          )
+        )
+        expect(latest().canSaveScene).toBe(false)
+        expect(latest().savedSceneModified).toBe(false)
+        expect(localStorage.getItem(WORKING_SCENE_KEY)).toBe(checkpoint)
+        if (outcome === 'superseded') {
+          await act(async () => latest().applyCameraPreset({ cameraZoom: 143 }))
+          await waitForObservation(
+            () =>
+              latest().captureConfig.layout.cameraZoom === 143 &&
+              latest().layoutSwitchPending === null
+          )
+        }
+        if (outcome === 'acknowledged' || outcome.startsWith('event-')) {
+          backend.currentScene = hiddenScene
+          backend.currentLayout = hiddenLayout
+          backend.revision = status.sceneRevision
+          if (outcome.startsWith('event-')) {
+            await act(async () => {
+              for (const socket of backend.sockets) {
+                socket.onmessage?.({
+                  data: JSON.stringify({ event: 'scene.changed', payload: hiddenScene })
+                })
+                if (outcome === 'event-and-compositor-before-ack')
+                  socket.onmessage?.({
+                    data: JSON.stringify({
+                      event: 'compositor.status',
+                      payload: status.compositorStatus
+                    })
+                  })
+              }
+            })
+            expect(latest().scene!.sources.find((source) => source.id === camera.id)!.visible).toBe(
+              false
+            )
+            expect(localStorage.getItem(WORKING_SCENE_KEY)).toBe(checkpoint)
+          }
+        }
+        if (
+          ['source-replaced', 'unrelated-transform', 'other-visibility', 'newer-revision'].includes(
+            outcome
+          )
+        ) {
+          const changed = {
+            ...backend.currentScene,
+            sources: backend.currentScene.sources.map((source) => {
+              if (outcome === 'source-replaced' && source.id === camera.id)
+                return { ...source, deviceId: 'camera:2' }
+              if (outcome === 'unrelated-transform' && source.id === camera.id)
+                return { ...source, transform: { ...source.transform, x: 0.25 } }
+              if (outcome === 'other-visibility' && source.id !== camera.id)
+                return { ...source, visible: false }
+              return source
+            })
+          }
+          await act(async () => {
+            for (const socket of backend.sockets) {
+              socket.onmessage?.({
+                data: JSON.stringify({ event: 'scene.changed', payload: changed })
+              })
+              if (outcome === 'newer-revision')
+                socket.onmessage?.({
+                  data: JSON.stringify({
+                    event: 'compositor.status',
+                    payload: { ...status.compositorStatus, sceneRevision: status.sceneRevision + 1 }
+                  })
+                })
+            }
+          })
+        }
+        await act(async () => {
+          release()
+          await pending
+        })
+        if (outcome === 'acknowledged' || outcome.startsWith('event-')) {
+          expect(latest().savedSceneModified).toBe(true)
+          expect(
+            JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.layout.sourceVisibility
+              .camera
+          ).toBe(false)
+          expect(latest().captureConfig.layout.sourceVisibility?.camera).toBe(false)
+        } else {
+          expect(latest().captureConfig.layout.sourceVisibility?.camera).toBe(true)
+          expect(latest().scene!.sources.find((source) => source.kind === 'camera')!.visible).toBe(
+            true
+          )
+          expect(
+            JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.layout.sourceVisibility
+              .camera
+          ).toBe(true)
+        }
+        expect(latest().captureConfig.sources.cameraId).toBe('camera:1')
+      } finally {
+        release()
+        await act(async () => {
+          await pending
+        })
+      }
+    }
+  )
 
   it('refuses missing saved sources without fallback and preserves storage on failed saves', async () => {
     const backend = new StudioBackend()

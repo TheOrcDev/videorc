@@ -92,6 +92,37 @@ fn preview_output_dimensions(output_width: u32, output_height: u32) -> (u32, u32
 }
 
 pub fn scene_from_capture_config(params: SceneConfigParams) -> Scene {
+    let visibility = params.layout.source_visibility;
+    let mut scene = build_scene_from_capture_config(params);
+    for source in &mut scene.sources {
+        match source.kind {
+            SceneSourceKind::Camera => source.visible = visibility.camera,
+            SceneSourceKind::Screen | SceneSourceKind::Window | SceneSourceKind::TestPattern => {
+                source.visible = visibility.capture
+            }
+        }
+    }
+    scene
+}
+
+/// Merge only roles present in an acknowledged scene; an omitted camera/base
+/// in another preset must not turn an independently hidden role back on.
+pub fn source_visibility_from_scene(
+    scene: &Scene,
+    mut current: crate::protocol::SourceVisibility,
+) -> crate::protocol::SourceVisibility {
+    for source in &scene.sources {
+        match source.kind {
+            SceneSourceKind::Camera => current.camera = source.visible,
+            SceneSourceKind::Screen | SceneSourceKind::Window | SceneSourceKind::TestPattern => {
+                current.capture = source.visible
+            }
+        }
+    }
+    current
+}
+
+fn build_scene_from_capture_config(params: SceneConfigParams) -> Scene {
     let (output_width, output_height, fps) = params
         .video
         .as_ref()
@@ -1148,6 +1179,7 @@ mod tests {
                 vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
                 arrangement_mode: crate::protocol::ArrangementMode::Preset,
                 source_transform_overrides: std::collections::BTreeMap::new(),
+                source_visibility: Default::default(),
                 camera_chroma_key_enabled: false,
                 camera_chroma_key_color: "#00FF00".to_string(),
                 camera_chroma_key_similarity_pct: 40,
@@ -1600,6 +1632,114 @@ mod tests {
         assert!((camera.transform.width - 0.4).abs() < 1e-9);
         assert!((base.transform.x - 0.4).abs() < 1e-9);
         assert!((base.transform.width - 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reconstructs_hidden_visual_roles_before_first_scene_publication() {
+        let mut wire = serde_json::to_value(base_params()).unwrap();
+        wire["layout"]["sourceVisibility"] = serde_json::json!({"camera": false, "capture": true});
+        let scene = scene_from_capture_config(serde_json::from_value(wire).unwrap());
+        assert!(
+            !scene
+                .sources
+                .iter()
+                .find(|source| source.kind == SceneSourceKind::Camera)
+                .unwrap()
+                .visible
+        );
+        assert!(
+            scene
+                .sources
+                .iter()
+                .find(|source| source.id == "source:base")
+                .unwrap()
+                .visible
+        );
+    }
+
+    #[test]
+    fn reconstructs_capture_visibility_for_screen_window_and_test_pattern() {
+        for kind in ["screen", "window", "test-pattern"] {
+            for freeform in [false, true] {
+                let mut params = base_params();
+                params.layout.source_visibility = crate::protocol::SourceVisibility {
+                    camera: true,
+                    capture: false,
+                };
+                if freeform {
+                    params.layout.arrangement_mode = ArrangementMode::Freeform;
+                }
+                if kind == "window" {
+                    params.sources.screen_id = None;
+                    params.sources.window_id = Some("window:screencapturekit:2".into());
+                }
+                if kind == "test-pattern" {
+                    params.sources.screen_id = None;
+                    params.sources.test_pattern = true;
+                }
+                let scene = scene_from_capture_config(params);
+                assert!(
+                    !scene
+                        .sources
+                        .iter()
+                        .find(|source| source.kind != SceneSourceKind::Camera)
+                        .unwrap()
+                        .visible,
+                    "{kind} freeform={freeform}"
+                );
+                assert!(
+                    scene
+                        .sources
+                        .iter()
+                        .find(|source| source.kind == SceneSourceKind::Camera)
+                        .unwrap()
+                        .visible
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn visibility_wire_defaults_legacy_roles_and_rejects_unknown_or_non_boolean_values() {
+        let legacy = serde_json::to_value(base_params()).unwrap();
+        let mut omitted = legacy.clone();
+        omitted["layout"]
+            .as_object_mut()
+            .unwrap()
+            .remove("sourceVisibility");
+        let decoded: SceneConfigParams = serde_json::from_value(omitted).unwrap();
+        assert_eq!(
+            decoded.layout.source_visibility,
+            crate::protocol::SourceVisibility::default()
+        );
+        for visibility in [
+            serde_json::json!(null),
+            serde_json::json!({"camera": "false"}),
+            serde_json::json!({"microphone": false}),
+        ] {
+            let mut wire = legacy.clone();
+            wire["layout"]["sourceVisibility"] = visibility;
+            assert!(serde_json::from_value::<SceneConfigParams>(wire).is_err());
+        }
+        let mut screen = scene_from_capture_config(base_params());
+        screen
+            .sources
+            .retain(|source| source.kind != SceneSourceKind::Camera);
+        screen.sources[0].visible = false;
+        let merged = source_visibility_from_scene(
+            &screen,
+            crate::protocol::SourceVisibility {
+                camera: false,
+                capture: true,
+            },
+        );
+        assert_eq!(
+            merged,
+            crate::protocol::SourceVisibility {
+                camera: false,
+                capture: false
+            }
+        );
     }
 
     #[test]

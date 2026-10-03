@@ -3,11 +3,15 @@
 // a renderer restart. Media evidence stays in the isolated smoke directory.
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
+import {
+  evaluateVisibilityArtifacts,
+  parseVisibilityFrames
+} from './lib/scene-presets-visibility-artifact.mjs'
 import { scenePresetStateReadCode } from './lib/scene-presets-smoke-state.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
@@ -319,8 +323,242 @@ try {
     a.reduce((sum, channel, index) => sum + Math.abs(channel - b[index]), 0) > 8,
     `Saved background pixels did not change: ${a} / ${b}`
   )
+  // The camera control uses the existing real-device selection contract, not
+  // a synthetic source relabeled as camera. A denied/unavailable/dark camera
+  // must block acceptance; the visible artifact proves foreground pixels exist.
+  await requestSmokeCommand(smoke, 'select-camera-device', { settleMs: 500 }, { timeoutMs })
+  await evaluate(
+    `window.__videorcSmokeScenePresets.layout({layoutPreset: 'camera-only', cameraZoom: 100, sourceVisibility: {camera: true, capture: true}}); return true`
+  )
+  await waitFor(
+    (current) =>
+      current.canSave &&
+      current.visual.layout.layoutPreset === 'camera-only' &&
+      current.visual.sources.cameraId &&
+      current.visual.layout.sourceVisibility.camera,
+    'visible camera-only control'
+  )
+  await evaluate(`window.__videorcSmokeScenePresets.background(null); return true`)
+  await waitFor(
+    (current) => current.canSave && current.visual.background === null,
+    'camera-only without background asset'
+  )
+  const selectedCameraId = (await state()).visual.sources.cameraId
+  assert.equal(
+    await evaluate(`return window.__videorcSmokeScenePresets.save('Visible camera control')`),
+    true
+  )
+  const visibleCamera = (await state()).scenes.find(
+    (scene) => scene.name === 'Visible camera control'
+  )
+  const setCameraVisible = async (visible) => {
+    const scene = await request(ws, timeoutMs, 'scene.get')
+    const camera = scene.sources.find((source) => source.kind === 'camera')
+    assert.ok(camera, 'Camera source is unavailable for the visibility control')
+    await requestSmokeCommand(smoke, 'open-layout-tab', {}, { timeoutMs })
+    await evaluate(`
+      const select = [...document.querySelectorAll('button')].find((button) => button.getAttribute('aria-label') === ${JSON.stringify('Select ')} + ${JSON.stringify(camera.name)});
+      if (!select || select.disabled) throw new Error('Camera inspector selection unavailable');
+      select.click();
+      const toggle = await waitFor(${JSON.stringify('[id="source-visible-' + camera.id + '"]')});
+      if (toggle.disabled) throw new Error('Camera visibility control unavailable');
+      if ((toggle.getAttribute('aria-checked') === 'true') !== ${visible}) toggle.click();
+      return true;
+    `)
+    const confirmed = await waitFor(
+      (current) => current.canSave && current.visual.layout.sourceVisibility.camera === visible,
+      `camera visibility ${visible}`
+    )
+    assert.equal(
+      confirmed.visual.sources.cameraId,
+      selectedCameraId,
+      'Visibility cleared selected camera identity'
+    )
+    assert.equal(confirmed.visual.sources.cameraOff, false, 'Visibility became Camera Off')
+    return confirmed
+  }
+  assert.equal((await setCameraVisible(false)).modified, true)
+  assert.equal(
+    await evaluate(
+      `return window.__videorcSmokeScenePresets.save('Hidden camera', ${JSON.stringify(visibleCamera.id)})`
+    ),
+    true
+  )
+  const hiddenCamera = (await state()).scenes.find((scene) => scene.id === visibleCamera.id)
+  assert.equal(hiddenCamera.visual.layout.sourceVisibility.camera, false)
+  await evaluate(`window.__videorcSmokeScenePresets.layout({cameraZoom: 110}); return true`)
+  await waitFor(
+    (current) =>
+      current.canSave &&
+      current.modified &&
+      current.visual.layout.cameraZoom === 110 &&
+      !current.visual.layout.sourceVisibility.camera,
+    'hidden camera Save-as framing'
+  )
+  assert.equal(
+    await evaluate(`return window.__videorcSmokeScenePresets.save('Hidden camera copy')`),
+    true
+  )
+  const hiddenCopy = (await state()).scenes.find((scene) => scene.name === 'Hidden camera copy')
+  assert.equal((await setCameraVisible(true)).modified, true)
+  assert.equal(
+    await evaluate(
+      `return await window.__videorcSmokeScenePresets.apply(${JSON.stringify(hiddenCamera.id)})`
+    ),
+    true
+  )
+  await waitFor(
+    (current) =>
+      current.canSave &&
+      !current.modified &&
+      current.activeId === hiddenCamera.id &&
+      !current.visual.layout.sourceVisibility.camera,
+    'saved hidden camera after show'
+  )
+  await evaluate(`window.location.reload(); return true`).catch(() => {})
+  const hiddenRestart = await waitFor(
+    (current) =>
+      current.canSave &&
+      !current.modified &&
+      current.activeId === hiddenCamera.id &&
+      !current.visual.layout.sourceVisibility.camera,
+    'hidden camera checkpoint after renderer restart'
+  )
+  assert.equal(hiddenRestart.visual.sources.cameraId, selectedCameraId)
+  assert.equal(hiddenRestart.visual.sources.cameraOff, false)
+
+  const recordCameraVisibility = async (visual, liveTargetId) => {
+    const recording = await request(ws, timeoutMs, 'session.start', {
+      sources: visual.sources,
+      layout: visual.layout,
+      background: null,
+      output: {
+        recordEnabled: true,
+        streamEnabled: false,
+        outputDirectoryCapability: directory.capabilityId,
+        video: { preset: 'custom', width: 640, height: 360, fps: 30, bitrateKbps: 2000 },
+        rtmp: { preset: 'custom', serverUrl: '', streamKey: '' }
+      }
+    })
+    let finished
+    try {
+      await waitFor(
+        (current) => current.recording === 'recording',
+        'confirmed visibility recording start'
+      )
+      const scene = await request(ws, timeoutMs, 'scene.get')
+      assert.equal(scene.background ?? null, null)
+      assert.equal(scene.sources.length, 1, 'Camera-only artifact has another foreground source')
+      assert.equal(scene.sources[0].kind, 'camera')
+      assert.equal(scene.sources[0].visible, visual.layout.sourceVisibility.camera)
+      // This duration is the encoded workload after confirmed start, not a
+      // readiness delay. Hidden analysis includes every frame from file start.
+      await new Promise((resolve) => setTimeout(resolve, 1700))
+      if (liveTargetId) {
+        assert.equal(
+          await evaluate(
+            `return await window.__videorcSmokeScenePresets.apply(${JSON.stringify(liveTargetId)})`
+          ),
+          true
+        )
+        await waitFor(
+          (current) =>
+            current.recording === 'recording' &&
+            current.activeId === liveTargetId &&
+            !current.pendingId &&
+            !current.pendingLayout &&
+            !current.visual.layout.sourceVisibility.camera,
+          'confirmed atomic hidden live apply'
+        )
+        const rebuilt = await request(ws, timeoutMs, 'scene.get')
+        assert.ok(
+          rebuilt.sources.every((source) => !source.visible),
+          'Live rebuild revealed hidden camera'
+        )
+        await new Promise((resolve) => setTimeout(resolve, 1700))
+      }
+    } finally {
+      finished = await request(ws, timeoutMs, 'session.stop')
+      await waitFor((current) => current.recording === 'idle', 'finished visibility recording')
+    }
+    const file = await resolveFinalRecordingPath({
+      started: recording,
+      stopped: finished,
+      timeoutMs
+    })
+    const analysis = await analyzeRecording(file, {
+      ffmpegPath: 'ffmpeg',
+      ffprobePath: 'ffprobe',
+      intendedFps: 30,
+      expectAudio: false,
+      gates: { requireMotion: false, avSyncTargetMs: Infinity, avSyncHardFailMs: Infinity }
+    })
+    writeReports(analysis)
+    assert.equal(analysis.verdict.pass, true, JSON.stringify(analysis.verdict.failures))
+    const metadata = execFileSync(
+      'ffmpeg',
+      [
+        '-v',
+        'error',
+        '-i',
+        file,
+        '-an',
+        '-vf',
+        'signalstats,metadata=mode=print:file=-',
+        '-f',
+        'null',
+        '-'
+      ],
+      { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 }
+    )
+    return { frames: parseVisibilityFrames(metadata), count: analysis.metrics.observedFrames }
+  }
+  // The original visible snapshot was updated to Hidden. Restore its captured
+  // visual as an explicit apply target for the independent positive control.
+  assert.equal(
+    await evaluate(
+      `return await window.__videorcSmokeScenePresets.apply(${JSON.stringify(hiddenCamera.id)}, ${JSON.stringify(visibleCamera.visual)})`
+    ),
+    true
+  )
+  await waitFor(
+    (current) => current.canSave && current.visual.layout.sourceVisibility.camera,
+    'visible artifact control apply'
+  )
+  const visibleArtifact = await recordCameraVisibility(visibleCamera.visual)
+  assert.equal(
+    await evaluate(
+      `return await window.__videorcSmokeScenePresets.apply(${JSON.stringify(hiddenCamera.id)})`
+    ),
+    true
+  )
+  await waitFor(
+    (current) => current.canSave && !current.visual.layout.sourceVisibility.camera,
+    'hidden artifact start intent'
+  )
+  const hiddenArtifact = await recordCameraVisibility(hiddenCamera.visual, hiddenCopy.id)
+  const visibility = evaluateVisibilityArtifacts({
+    visibleFrames: visibleArtifact.frames,
+    visibleCount: visibleArtifact.count,
+    hiddenFrames: hiddenArtifact.frames,
+    hiddenCount: hiddenArtifact.count
+  })
+  writeFileSync(
+    join(outputDirectory, 'scene-visibility-artifact.json'),
+    JSON.stringify(
+      {
+        fixture: 'selected real camera; camera-only; no background asset',
+        hiddenBoundary:
+          'atomic hidden session.start and confirmed hidden live apply; all decoded frames',
+        ...visibility
+      },
+      null,
+      2
+    )
+  )
+  assert.equal(visibility.pass, true, visibility.failures.join('; '))
   console.log(
-    `Scene presets smoke PASS: atomic apply, Camera Off/On round trips, exact source refusal, working restart, live switching and encoded background pixels. ${reports.mdPath}`
+    `Scene presets smoke PASS: atomic apply, Camera Off/On round trips, exact source refusal, working restart, live switching, encoded background pixels and every-frame hidden-camera artifacts. ${reports.mdPath}`
   )
 } finally {
   ws?.close()

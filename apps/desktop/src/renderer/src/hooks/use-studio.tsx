@@ -16,6 +16,7 @@ import {
   resolveSavedBackground,
   sameSceneVisual,
   sceneSourceProblems,
+  sourceVisibilityFromScene,
   type SceneVisual,
   type SavedScene
 } from '@/lib/scene-presets'
@@ -932,7 +933,11 @@ type LayoutTransactionSnapshot = {
 
 type LayoutTransactionSceneEvidence = {
   layout: LayoutSettings
-  sources: Array<{ kind: Scene['sources'][number]['kind']; deviceId: string | null }>
+  sources: Array<{
+    kind: Scene['sources'][number]['kind']
+    deviceId: string | null
+    visible?: boolean
+  }>
   video: Pick<VideoSettings, 'width' | 'height' | 'fps'> | null
   background: Scene['background'] | null
 }
@@ -975,7 +980,13 @@ function requestedLayoutTransactionScene(
 ): LayoutTransactionSceneEvidence {
   return {
     layout: params.layout,
-    sources: requestedLayoutTransactionSources(params.layout, params.sources),
+    sources: requestedLayoutTransactionSources(params.layout, params.sources).map((source) => ({
+      ...source,
+      visible:
+        source.kind === 'camera'
+          ? params.layout.sourceVisibility?.camera !== false
+          : params.layout.sourceVisibility?.capture !== false
+    })),
     video: params.video
       ? { width: params.video.width, height: params.video.height, fps: params.video.fps }
       : null,
@@ -991,7 +1002,8 @@ function backendLayoutTransactionScene(
     layout: snapshot.layout,
     sources: snapshot.scene.sources.map((source) => ({
       kind: source.kind,
-      deviceId: source.deviceId ?? null
+      deviceId: source.deviceId ?? null,
+      visible: source.visible
     })),
     video: output ? { width: output.width, height: output.height, fps: output.fps } : null,
     background: snapshot.scene.background ?? null
@@ -3484,6 +3496,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [visualTransactionPending, setVisualTransactionPending] = useState(false)
   const [sceneGesturePending, setSceneGesturePending] = useState(false)
   const [sceneTransformPending, setSceneTransformPending] = useState(false)
+  const [sceneVisibilityPending, setSceneVisibilityPending] = useState(false)
+  const sceneVisibilityRequestIdRef = useRef(0)
   const [savedScenePendingId, setSavedScenePendingId] = useState<string | null>(null)
   const [workingBackground, setWorkingBackground] = useState(() => {
     const working = hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))
@@ -7671,21 +7685,72 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const setSceneSourceVisible = useCallback(
     async (sourceId: string, visible: boolean) => {
-      if (!client) {
-        return
-      }
-
+      const requestedScene = transformSceneRef.current
+      if (!client || !requestedScene?.sources.some((source) => source.id === sourceId)) return
+      const requestId = ++sceneVisibilityRequestIdRef.current
+      const intentId = layoutIntentIdRef.current
+      // The request's own scene.changed echo may arrive before its ACK. Only
+      // that source's visibility is allowed to differ; other scene edits retire it.
+      const visibilityIdentity = (candidate: Scene | null): string =>
+        JSON.stringify(
+          candidate && {
+            ...candidate,
+            sources: candidate.sources.map((source) =>
+              source.id === sourceId ? { ...source, visible: undefined } : source
+            )
+          }
+        )
+      const identity = visibilityIdentity(requestedScene)
+      const layoutIntent = transformLayoutIntent({ ...captureConfigRef.current.layout })
+      setSceneVisibilityPending(true)
       try {
         const status = await client.request<SceneCommitStatus>('scene.source.visibility.update', {
           sourceId,
           visible
         })
+        if (
+          clientRef.current !== client ||
+          sceneVisibilityRequestIdRef.current !== requestId ||
+          layoutIntentIdRef.current !== intentId ||
+          visibilityIdentity(transformSceneRef.current) !== identity ||
+          transformLayoutIntent({ ...captureConfigRef.current.layout }) !== layoutIntent ||
+          (nativePreviewCommittedSceneRef.current?.sceneRevision ?? 0) > status.sceneRevision
+        )
+          return
+        if (
+          !status.applied ||
+          visibilityIdentity(status.scene) !== identity ||
+          status.scene.sources.find((source) => source.id === sourceId)?.visible !== visible
+        ) {
+          throw new Error('Source visibility was not acknowledged.')
+        }
         applyCommittedScene(status)
+        const current = captureConfigRef.current
+        const sourceVisibility = sourceVisibilityFromScene(
+          status.scene,
+          current.layout.sourceVisibility
+        )
+        const layout = { ...current.layout, sourceVisibility }
+        captureConfigRef.current = { ...current, layout }
+        patchLayout({ sourceVisibility })
+        persistWorkingVisual(
+          layout,
+          current.sources,
+          workingBackgroundRef.current,
+          activeSavedSceneIdRef.current
+        )
       } catch (error) {
-        reportError(error)
+        if (
+          clientRef.current === client &&
+          sceneVisibilityRequestIdRef.current === requestId &&
+          layoutIntentIdRef.current === intentId
+        )
+          reportError(error)
+      } finally {
+        if (sceneVisibilityRequestIdRef.current === requestId) setSceneVisibilityPending(false)
       }
     },
-    [applyCommittedScene, client, reportError]
+    [applyCommittedScene, client, patchLayout, persistWorkingVisual, reportError]
   )
 
   const moveSceneSource = useCallback(
@@ -8494,6 +8559,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     sourceDeviceSwitchPending === null &&
     !sceneGesturePending &&
     !sceneTransformPending &&
+    !sceneVisibilityPending &&
     wsStatus === 'connected' &&
     scene !== null &&
     sameSceneVisual(workingVisual, confirmedVisualRef.current)
