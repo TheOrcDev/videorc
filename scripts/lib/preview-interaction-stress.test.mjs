@@ -8,10 +8,435 @@ import {
   cgOraclePreviewReady,
   effectivePresentFpsFloor,
   pixelOracleCaptureSize,
-  layoutIntentDiagnostic
+  layoutIntentDiagnostic,
+  previewInteractionPhaseEvidence,
+  previewMeasurementEvidence,
+  previewSceneTransitionEvidence,
+  previewCgWindowEvidence,
+  PREVIEW_TIMELINE_LIMITS
 } from './preview-interaction-stress.mjs'
 
 describe('preview interaction stress contract', () => {
+  it('writes only bounded CGWindow geometry/order and authenticated fixed roles', () => {
+    const sample = {
+      receivedAt: 1_000,
+      uptimeNs: 100_000,
+      windows: [
+        {
+          order: 0,
+          pid: 42,
+          id: 123,
+          name: 'Videorc Preview',
+          owner: 'Electron',
+          layer: 0,
+          alpha: 1,
+          x: -10,
+          y: 20,
+          width: 960,
+          height: 540,
+          nativeWindowHandle: 'private handle'
+        },
+        {
+          order: 1,
+          pid: 43,
+          name: 'Videorc Preview',
+          owner: 'private owner',
+          layer: 0,
+          alpha: 1,
+          x: 0,
+          y: 0,
+          width: 10,
+          height: 10
+        },
+        {
+          order: 2,
+          pid: 42,
+          name: 'private title',
+          owner: 'private owner',
+          layer: 1,
+          alpha: 1,
+          x: 0,
+          y: 0,
+          width: 10,
+          height: 10
+        }
+      ],
+      pixel: {
+        sampleCount: 100,
+        meanLuma: 10,
+        nonDarkFraction: 0.5,
+        blankBaseFraction: 0,
+        extra: 'private pixel payload'
+      },
+      pixelError: 'private provider error'
+    }
+    const reduced = previewCgWindowEvidence(sample, 42)
+    assert.equal(reduced.windows[0].role, 'preview')
+    assert.equal(reduced.windows[0].ownerCategory, 'owned-app')
+    assert.equal(reduced.windows[0].x, -10)
+    assert.equal(reduced.windows[1].role, 'unknown')
+    assert.equal(reduced.windows[1].ownerCategory, 'other-or-unknown')
+    assert.equal(reduced.windows[2].role, 'owned-other')
+    assert.equal(reduced.pixelErrorPresent, true)
+    assert.equal(previewCgWindowEvidence(sample, undefined).windows[0].role, 'unknown')
+    assert.doesNotMatch(
+      JSON.stringify(reduced),
+      /private|nativeWindowHandle|Electron|Videorc|"pid"|"id"/
+    )
+    assert.equal(
+      previewCgWindowEvidence({ windows: Array.from({ length: 258 }, () => sample.windows[0]) }, 42)
+        .omittedWindows,
+      2
+    )
+  })
+
+  it('attributes the 114ms freshness sample to its presented frame without replacing it with input timing', () => {
+    const presentation = {
+      frameId: 36,
+      runId: 'run-a',
+      sceneRevision: 9,
+      frameAgeMs: 97,
+      compositorUpdatedAt: new Date(983).toISOString(),
+      presentedAtMs: 1_000,
+      presentStartedMonotonicMs: 50,
+      presentCompletedMonotonicMs: 52,
+      inputToPresentLatencyMs: 114,
+      nativeWindowHandle: 'private handle'
+    }
+    const evidence = previewInteractionPhaseEvidence({
+      startedAt: 900,
+      finishedAt: 1_100,
+      measurement: { measurementStartedAtMs: 950 },
+      samples: [
+        {
+          at: 1_010,
+          status: {
+            state: 'live',
+            presentedFrameId: 36,
+            nativePreviewCompositorRunId: 'run-a',
+            nativePreviewPresentedSceneRevision: 9,
+            updatedAt: new Date(1_009).toISOString(),
+            inputToPresentLatencyMs: 114,
+            nativePreviewPresentationEvidence: presentation,
+            title: 'private title',
+            token: 'private token'
+          }
+        }
+      ],
+      clickFocus: {
+        steps: [
+          {
+            label: 'preview-window-click',
+            action: { appliedAtMs: 48, completedAtMs: 49, wallClockAppliedAtMs: 998 },
+            verificationCompletedAtMs: 1_080,
+            verificationCompletedMonotonicMs: 130,
+            presentationEvidence: presentation
+          }
+        ]
+      }
+    })
+    assert.equal(evidence.samples[0].presentation.inputToPresentLatencyMs, 114)
+    assert.equal(evidence.samples[0].presentation.frameAgeMs, 97)
+    assert.equal(evidence.samples[0].presentation.presentedAtMs, 1_000)
+    assert.equal(evidence.samples[0].presentationMatchesStatus, true)
+    assert.equal(evidence.samples[0].presentedBeforeMeasurement, false)
+    assert.equal(evidence.actions[0].action.wallClockAppliedAtMs, 998)
+    assert.equal(evidence.actions[0].verificationCompletedAtMs, 1_080)
+    assert.doesNotMatch(JSON.stringify(evidence), /private/)
+    assert.equal(PREVIEW_INTERACTION_STRESS_PROFILE.thresholds.maxInputToPresentP95Ms, 100)
+  })
+
+  it('retains and labels samples and successful presents from before the metric reset', () => {
+    const presentation = {
+      frameId: 4,
+      runId: 'run-a',
+      sceneRevision: 1,
+      presentedAtMs: 900,
+      presentStartedMonotonicMs: 30,
+      presentCompletedMonotonicMs: 32
+    }
+    const evidence = previewInteractionPhaseEvidence({
+      measurement: { measurementStartedAtMs: 1_000 },
+      samples: [990, 1_010].map((at) => ({
+        at,
+        status: {
+          presentedFrameId: 4,
+          nativePreviewCompositorRunId: 'run-a',
+          nativePreviewPresentedSceneRevision: 1,
+          updatedAt: new Date(at).toISOString(),
+          nativePreviewPresentationEvidence: presentation
+        }
+      }))
+    })
+    assert.equal(evidence.samples.length, 2)
+    assert.deepEqual(
+      evidence.samples.map((row) => row.sampledBeforeMeasurement),
+      [true, false]
+    )
+    assert.deepEqual(
+      evidence.samples.map((row) => row.presentedBeforeMeasurement),
+      [true, true]
+    )
+    assert.equal(evidence.samples[1].presentation.presentedAtMs, 900)
+    assert.equal(evidence.samples[1].statusUpdatedAtMs, 1_010)
+  })
+
+  it('reports unknown, mismatched and clock-shifted ownership without making it fresh', () => {
+    const evidence = previewInteractionPhaseEvidence({
+      measurement: { measurementStartedAtMs: 1_000 },
+      samples: [
+        { at: 1_001, status: {} },
+        {
+          at: 1_002,
+          status: {
+            presentedFrameId: 2,
+            nativePreviewCompositorRunId: 'run-b',
+            nativePreviewPresentedSceneRevision: 2,
+            nativePreviewPresentationEvidence: {
+              frameId: 1,
+              runId: 'run-a',
+              sceneRevision: 1,
+              presentedAtMs: 1_100,
+              presentStartedMonotonicMs: 40,
+              presentCompletedMonotonicMs: 42
+            }
+          }
+        }
+      ]
+    })
+    assert.equal(evidence.samples[0].presentation, null)
+    assert.equal(evidence.samples[0].presentedBeforeMeasurement, null)
+    assert.equal(evidence.samples[1].presentationMatchesStatus, false)
+    assert.equal(evidence.samples[1].presentedAfterSample, true)
+    assert.equal(previewInteractionPhaseEvidence({ samples: [] }).measurementStartedAtMs, null)
+  })
+
+  it('retains bounds application lag and separate clock anchors without bounds payloads', () => {
+    const evidence = previewInteractionPhaseEvidence({
+      boundsResults: [
+        {
+          applied: 3,
+          elapsedMs: 30,
+          maxStartLagMs: 12,
+          timing: {
+            monotonicStartedAtMs: 1_000,
+            wallClockStartedAtMs: 10_000,
+            omitted: 0,
+            entries: [
+              {
+                index: 0,
+                scheduledAtMs: 1_000,
+                appliedAtMs: 1_000,
+                completedAtMs: 1_010,
+                title: 'private'
+              },
+              { index: 1, scheduledAtMs: 1_004, appliedAtMs: 1_010, completedAtMs: 1_020 },
+              { index: 2, scheduledAtMs: 1_008, appliedAtMs: 1_020, completedAtMs: 1_030 }
+            ]
+          }
+        }
+      ]
+    })
+    assert.equal(evidence.bounds[0].maxStartLagMs, 12)
+    assert.equal(evidence.bounds[0].entries[2].appliedAtMs, 1_020)
+    assert.equal(evidence.bounds[0].wallClockStartedAtMs, 10_000)
+    assert.doesNotMatch(JSON.stringify(evidence), /private/)
+    assert.deepEqual(previewInteractionPhaseEvidence({ boundsResults: [{}] }).bounds, [
+      { available: false }
+    ])
+  })
+
+  it('bounds retained evidence and explicitly reports omissions', () => {
+    const evidence = previewInteractionPhaseEvidence({
+      samples: Array.from({ length: PREVIEW_TIMELINE_LIMITS.samples + 3 }, (_, at) => ({
+        at,
+        status: {}
+      })),
+      clickFocus: { steps: Array.from({ length: 20 }, () => ({ label: 'baseline' })) }
+    })
+    assert.equal(evidence.samples.length, PREVIEW_TIMELINE_LIMITS.samples)
+    assert.equal(evidence.omittedSamples, 3)
+    assert.equal(evidence.samples[0].sampledAtMs, 3)
+    assert.equal(evidence.actions.length, 16)
+    assert.equal(evidence.omittedActions, 4)
+  })
+
+  it('refuses malformed scalar timing and strips unknown fields from aggregate measurement evidence', () => {
+    const result = previewInteractionPhaseEvidence({
+      samples: [
+        {
+          at: Infinity,
+          status: {
+            presentedFrameId: Number.MAX_SAFE_INTEGER + 1,
+            nativePreviewCompositorRunId: 'x'.repeat(129),
+            nativePreviewPresentationEvidence: {
+              frameId: 2,
+              presentedAtMs: NaN,
+              presentStartedMonotonicMs: 30,
+              presentCompletedMonotonicMs: 20
+            }
+          }
+        }
+      ]
+    })
+    assert.equal(result.samples[0].sampledAtMs, null)
+    assert.equal(result.samples[0].presentedFrameId, null)
+    assert.equal(result.samples[0].runId, null)
+    assert.equal(result.samples[0].presentation, null)
+    const measurement = previewMeasurementEvidence({
+      inputToPresentLatencyP95Ms: 114,
+      measuredFps: 59.97,
+      status: { state: 'live', nativeWindowHandle: 'private' },
+      secret: 'private'
+    })
+    assert.equal(measurement.inputToPresentLatencyP95Ms, 114)
+    assert.equal(measurement.measuredFps, 59.97)
+    assert.equal(measurement.identity.state, 'live')
+    assert.doesNotMatch(JSON.stringify(measurement), /private|nativeWindowHandle|secret/)
+    assert.equal(previewMeasurementEvidence(null), null)
+  })
+
+  it('keeps unavailable and every supported fallback identity attributable', () => {
+    const identities = [
+      ['unavailable', 'unavailable', 'none', 'external-module'],
+      ['live', 'd3d11-shared-texture', 'directcomposition-swapchain', 'backend-d3d11-presenter'],
+      ['live', 'electron-proof-surface', 'electron-browser-window', 'proof-surface'],
+      ['live', 'latest-jpeg-polling', 'electron-browser-window', 'helper-process'],
+      ['live', 'mjpeg-stream', 'electron-browser-window', 'in-process']
+    ]
+    for (const [state, transport, backing, hostKind] of identities) {
+      const status = { state, transport, backing, nativePreviewHostKind: hostKind }
+      const row = previewInteractionPhaseEvidence({ samples: [{ status }] }).samples[0]
+      assert.deepEqual(
+        [row.state, row.transport, row.backing, row.hostKind],
+        [state, transport, backing, hostKind]
+      )
+      const measurement = previewMeasurementEvidence({ status })
+      assert.deepEqual(
+        [
+          measurement.identity.state,
+          measurement.identity.transport,
+          measurement.identity.backing,
+          measurement.identity.hostKind
+        ],
+        [state, transport, backing, hostKind]
+      )
+    }
+  })
+
+  it('requires valid frame, run and revision identities on both sides before proving ownership', () => {
+    const presentation = {
+      frameId: 4,
+      runId: 'run-a',
+      sceneRevision: 1,
+      presentedAtMs: 900,
+      presentStartedMonotonicMs: 30,
+      presentCompletedMonotonicMs: 32
+    }
+    const status = {
+      presentedFrameId: 4,
+      nativePreviewCompositorRunId: 'run-a',
+      nativePreviewPresentedSceneRevision: 1,
+      nativePreviewPresentationEvidence: presentation
+    }
+    for (const field of [
+      'presentedFrameId',
+      'nativePreviewCompositorRunId',
+      'nativePreviewPresentedSceneRevision'
+    ]) {
+      const incomplete = { ...status, [field]: undefined }
+      assert.equal(
+        previewInteractionPhaseEvidence({ samples: [{ status: incomplete }] }).samples[0]
+          .presentationMatchesStatus,
+        null
+      )
+    }
+    for (const field of ['runId', 'sceneRevision']) {
+      const incomplete = {
+        ...status,
+        nativePreviewPresentationEvidence: { ...presentation, [field]: undefined }
+      }
+      assert.equal(
+        previewInteractionPhaseEvidence({ samples: [{ status: incomplete }] }).samples[0]
+          .presentationMatchesStatus,
+        null
+      )
+    }
+    const groups = previewInteractionPhaseEvidence({ boundsResults: [{}, {}, {}] })
+    assert.equal(groups.bounds.length, 2)
+    assert.equal(groups.omittedBoundsGroups, 1)
+  })
+
+  it('keeps failed scene contracts and selected intent reviewable without raw scene/status data', () => {
+    const row = layoutIntentDiagnostic(
+      {
+        visual: { sources: { cameraId: 'camera:1' }, layout: { layoutPreset: 'camera-only' } },
+        recording: 'recording',
+        diagnostics: {
+          confirmedSceneRevision: 8,
+          backendSceneRevision: 9
+        }
+      },
+      'screen-only',
+      'before',
+      true,
+      100
+    )
+    const transition = previewSceneTransitionEvidence(
+      {
+        preset: 'screen-only',
+        selected: {
+          preset: 'screen-only',
+          pressed: false,
+          disabled: true,
+          timeline: [row],
+          title: 'private'
+        },
+        surface: {
+          layoutPreset: 'camera-only',
+          sceneRevision: 8,
+          visibleSourceIds: ['source:camera']
+        },
+        scene: {
+          revision: 8,
+          sources: [{ id: 'source:camera', kind: 'camera', visible: true, title: 'private' }]
+        },
+        compositor: { sceneRevision: 9, frameSceneRevision: 8, framesRendered: 36, runId: 'run-a' },
+        nativeStatus: {
+          presentedFrameId: 36,
+          nativePreviewCompositorRunId: 'run-a',
+          nativePreviewPresentedSceneRevision: 8,
+          nativeWindowHandle: 'private'
+        },
+        failures: ['scene contract failed', 'revision mismatch']
+      },
+      ['screen']
+    )
+    assert.deepEqual(transition.failures, ['scene contract failed', 'revision mismatch'])
+    assert.deepEqual(transition.expectedKinds.values, ['screen'])
+    assert.deepEqual(transition.observedKinds.values, ['camera'])
+    assert.equal(transition.selected.timeline.values[0].selected.cameraId, 'camera:1')
+    assert.equal(transition.selected.timeline.values[0].backendSceneRevision, 9)
+    assert.equal(transition.native.runId, 'run-a')
+    assert.equal(transition.native.sceneRevision, 8)
+    assert.deepEqual(transition.sourceVisibility.values, [
+      { id: 'source:camera', kind: 'camera', visible: true }
+    ])
+    assert.doesNotMatch(JSON.stringify(transition), /private|nativeWindowHandle/)
+    const bounded = previewSceneTransitionEvidence({
+      scene: {
+        sources: Array.from({ length: 130 }, (_, index) => ({
+          id: `source:${index}`,
+          kind: 'camera',
+          visible: false
+        }))
+      },
+      selected: { timeline: Array.from({ length: 65 }, () => row) }
+    })
+    assert.equal(bounded.sourceVisibility.omitted, 2)
+    assert.equal(bounded.selected.timeline.omitted, 1)
+  })
+
   it('captures only bounded per-click selected intent and availability diagnostics', () => {
     const state = {
       visual: {

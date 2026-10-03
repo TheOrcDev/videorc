@@ -21,6 +21,8 @@ export interface NativePreviewRealSurfacePresentRequest {
   suppressFramePolling: boolean
   frameAgeMs?: number
   compositorUpdatedAt?: string
+  /** Revision of the retained frame, independent of a later scene/status refresh. */
+  frameSceneRevision?: number
 }
 
 export interface NativePreviewRealSurfaceDriver {

@@ -192,7 +192,7 @@ import {
   validateSmokeBackendRpcRequest,
   validateSmokeResourceAuthorization
 } from './smoke-command-security'
-import { runTimedBoundsStorm } from './smoke-window-bounds-storm'
+import { runTimedBoundsStorm, timeSmokeAction } from './smoke-window-bounds-storm'
 import {
   assertPermissionShortcutSupported,
   buildRuntimeInfo,
@@ -6998,7 +6998,8 @@ async function tryPresentNativePreviewRealSurfaceCompositor(
           suppressFramePolling:
             nativePreviewSurfaceFramePollingSuppressed || status.suppressFramePolling === true,
           frameAgeMs: status.frameAgeMs ?? undefined,
-          compositorUpdatedAt: status.updatedAt
+          compositorUpdatedAt: status.updatedAt,
+          frameSceneRevision: status.frameSceneRevision ?? status.sceneRevision ?? undefined
         })
       }
     )
@@ -10092,7 +10093,8 @@ async function runSmokePreviewMotionCommand(
     if (nativePreviewSurfaceStatusIsRealSurface(nativePreviewSurfaceStatus)) {
       return {
         ...nativePreviewSurfaceStatusMetrics(nativePreviewSurfaceStatus),
-        measurementStartedAtMs
+        measurementStartedAtMs,
+        measurementFinishedAtMs: Date.now()
       }
     }
     const metrics = await nativePreviewSurfaceWindow.webContents.executeJavaScript(
@@ -10134,6 +10136,7 @@ async function runSmokePreviewMotionCommand(
       ...metrics,
       sourceFrameDelta,
       measurementStartedAtMs,
+      measurementFinishedAtMs: Date.now(),
       status: nativePreviewSurfaceStatus
     }
   }
@@ -11296,11 +11299,16 @@ async function runSmokePreviewMotionCommand(
     if (nativePreviewSurfaceStatus.state !== 'live') {
       throw new Error('Native preview surface must be live before exercising click/focus.')
     }
+    const exercisedPreviewWindow = previewWindow
+    const exercisedMainWindow = mainWindow
 
     const steps: Array<Record<string, unknown>> = []
     let lastFrames = nativePreviewSurfaceStatus.framesRendered
     let revision = 9000
-    const forcePresent = async (label: string): Promise<void> => {
+    const forcePresent = async (
+      label: string,
+      action?: ReturnType<typeof timeSmokeAction>['timing']
+    ): Promise<void> => {
       revision += 1
       const beforeFrames = lastFrames
       const deadline = performance.now() + 1000
@@ -11326,6 +11334,10 @@ async function runSmokePreviewMotionCommand(
       } while (performance.now() < deadline)
       const step = {
         label,
+        action: action ?? null,
+        verificationCompletedAtMs: Date.now(),
+        verificationCompletedMonotonicMs: performance.now(),
+        presentationEvidence: status.nativePreviewPresentationEvidence,
         beforeFrames,
         afterFrames: status.framesRendered,
         state: status.state,
@@ -11355,38 +11367,42 @@ async function runSmokePreviewMotionCommand(
     }
 
     await forcePresent('baseline')
-    mainWindow.focus()
+    const mainFocus = timeSmokeAction(() => exercisedMainWindow.focus())
     await delay(80)
-    await forcePresent('main-window-focus')
+    await forcePresent('main-window-focus', mainFocus.timing)
 
-    previewWindow.focus()
+    const previewFocus = timeSmokeAction(() => exercisedPreviewWindow.focus())
     await delay(80)
-    await forcePresent('preview-window-focus')
+    await forcePresent('preview-window-focus', previewFocus.timing)
 
-    const previewClicked = sendWindowCenterClick(previewWindow)
+    const previewClick = timeSmokeAction(() => sendWindowCenterClick(previewWindow))
+    const previewClicked = previewClick.value
     await delay(80)
-    await forcePresent('preview-window-click')
+    await forcePresent('preview-window-click', previewClick.timing)
 
-    const surfaceClicked = sendWindowCenterClick(nativePreviewSurfaceWindow)
+    const surfaceClick = timeSmokeAction(() => sendWindowCenterClick(nativePreviewSurfaceWindow))
+    const surfaceClicked = surfaceClick.value
     await delay(80)
-    await forcePresent('surface-window-click')
+    await forcePresent('surface-window-click', surfaceClick.timing)
 
     const originalAlwaysOnTop = previewWindowAlwaysOnTop
-    setPreviewWindowAlwaysOnTop(!originalAlwaysOnTop)
+    const topToggle = timeSmokeAction(() => setPreviewWindowAlwaysOnTop(!originalAlwaysOnTop))
     await delay(80)
-    await forcePresent('always-on-top-toggle')
-    setPreviewWindowAlwaysOnTop(originalAlwaysOnTop)
+    await forcePresent('always-on-top-toggle', topToggle.timing)
+    const topRestore = timeSmokeAction(() => setPreviewWindowAlwaysOnTop(originalAlwaysOnTop))
 
     const currentBounds = previewWindow.getBounds()
-    previewWindow.setBounds({
-      ...currentBounds,
-      x: currentBounds.x + 6,
-      y: currentBounds.y + 4
-    })
+    const move = timeSmokeAction(() =>
+      exercisedPreviewWindow.setBounds({
+        ...currentBounds,
+        x: currentBounds.x + 6,
+        y: currentBounds.y + 4
+      })
+    )
     pushPreviewWindowPlacement()
     await delay(120)
-    await forcePresent('preview-window-move')
-    previewWindow.setBounds(currentBounds)
+    await forcePresent('preview-window-move', move.timing)
+    const moveRestore = timeSmokeAction(() => exercisedPreviewWindow.setBounds(currentBounds))
     pushPreviewWindowPlacement()
 
     return {
@@ -11395,6 +11411,10 @@ async function runSmokePreviewMotionCommand(
       surfaceClicked,
       nativeOwnsPlacement: nativeSurfaceOwnsPlacement(),
       steps,
+      restorationActions: [
+        { label: 'always-on-top-restore', ...topRestore.timing },
+        { label: 'preview-window-move-restore', ...moveRestore.timing }
+      ],
       status: nativePreviewSurfaceStatus,
       window: previewWindowState()
     }
@@ -11763,6 +11783,8 @@ function nativePreviewSurfaceStatusMetrics(status: PreviewSurfaceStatus): Record
     nativePreviewIosurfaceImportPeakCount: status.nativePreviewIosurfaceImportPeakCount,
     nativePreviewIosurfaceImportCeiling: status.nativePreviewIosurfaceImportCeiling,
     nativePreviewPresentedSceneRevision: status.nativePreviewPresentedSceneRevision,
+    nativePreviewCompositorRunId: status.nativePreviewCompositorRunId,
+    nativePreviewPresentationEvidence: status.nativePreviewPresentationEvidence,
     framePollingSuppressed: status.framePollingSuppressed,
     sourcePixelsPresent: status.sourcePixelsPresent,
     blankFrames: 0,

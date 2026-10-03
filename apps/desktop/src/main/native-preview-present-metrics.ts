@@ -29,7 +29,9 @@ export class NativePreviewPresentMetrics {
     private readonly percentileCacheTtlMs = 250
   ) {}
 
-  record(input: NativePreviewPresentMetricInput): NativePreviewPresentMetricSnapshot {
+  record(
+    input: NativePreviewPresentMetricInput
+  ): NativePreviewPresentMetricSnapshot & { recordedAtMs: number } {
     const nowMs = this.nowMs()
     const previousPresentMs = this.presentTimestampsMs.at(-1)
     recordLimited(this.presentTimestampsMs, nowMs)
@@ -45,6 +47,7 @@ export class NativePreviewPresentMetrics {
     const telemetryFields = this.telemetryFields(nowMs)
     return {
       ...telemetryFields,
+      recordedAtMs: nowMs,
       inputToPresentLatencyMs
     }
   }
