@@ -4831,6 +4831,166 @@ export interface CohostState {
 }
 
 /**
+ * Plan 119 S1: what became of a question Orcle caught. The latest outcome
+ * wins; a restore puts it back to `open`; `shown` means still open, but its
+ * comment was on stream.
+ */
+export type CohostReportQuestionOutcome =
+  | 'open'
+  | 'answered-on-air'
+  | 'replied'
+  | 'marked-answered'
+  | 'dismissed'
+  | 'shown'
+
+/** One question in the report's log. Optional lists are omitted while empty, never null. */
+export interface CohostReportQuestion {
+  id: string
+  text: string
+  /** At most five names. */
+  askers?: string[]
+  platforms?: StreamPlatform[]
+  priority: CohostPriority
+  firstSeenAt: string
+  outcome: CohostReportQuestionOutcome
+}
+
+export interface CohostReportQuestions {
+  /** Distinct question ids Orcle surfaced. */
+  total: number
+  markedAnswered: number
+  dismissed: number
+  replied: number
+  answeredOnAir: number
+  restored: number
+  shownOnStream: number
+  /** First seen first, at most 200. Omitted while empty. */
+  items?: CohostReportQuestion[]
+}
+
+export interface CohostReportFlagKindCount {
+  kind: CohostFlagKind
+  count: number
+}
+
+export interface CohostReportFlagSeverityCount {
+  severity: CohostFlagSeverity
+  count: number
+}
+
+export interface CohostReportFlags {
+  /** Each flagged message counted once. */
+  raised: number
+  dismissed: number
+  byKind?: CohostReportFlagKindCount[]
+  bySeverity?: CohostReportFlagSeverityCount[]
+}
+
+export interface CohostReportOpenPromise {
+  text: string
+  firstSeenAt: string
+}
+
+export interface CohostReportPromises {
+  /** New promises heard this session. */
+  heard: number
+  /** Marked done, or the transcript showed they were kept. */
+  kept: number
+  dismissed: number
+  reminded: number
+  /** Still open at the end, oldest first, at most 20. Omitted while empty. */
+  open?: CohostReportOpenPromise[]
+}
+
+/** Greeting totals over every chatter of the session. */
+export interface CohostReportGreetings {
+  /** Viewers whose first message in the channel landed this session. */
+  firstTimers: number
+  firstTimersGreeted: number
+  byVoice: number
+  byChat: number
+  /** Their comment went on stream. */
+  onStream: number
+  /** The streamer pressed Greeted. */
+  manual: number
+}
+
+/** One alert kind viewers raised: the most distinct viewers who said it at
+ * once, and whether two of them ever agreed within 60 s. */
+export interface CohostReportAlert {
+  kind: CohostAlertKind
+  peakViewers: number
+  active: boolean
+  firstSeenAt: string
+}
+
+/** Recaps are never posted by Orcle, so posting leaves no count. */
+export interface CohostReportRecap {
+  offered: number
+  drafted: number
+  dismissed: number
+}
+
+/**
+ * What Orcle caught in one stream (plan 119 decision 6): counts by outcome,
+ * the questions and what became of them, the promises still open. Saved on
+ * this computer when the session ends and deleted with the recording.
+ * `cohost.report.get` returns it; `cohost.report.saved` announces it. Every
+ * optional field is omitted while empty, never null.
+ */
+export interface CohostSessionReport {
+  version: 1
+  sessionId: string
+  startedAt: string
+  endedAt: string
+  /** Orcle sessions folded into this report: off and on mid-stream adds one. */
+  segments: number
+  streamTitle?: string
+  messagesSeen: number
+  /** Distinct comments that went on stream, automatically or by hand. */
+  shownOnStream: number
+  questions: CohostReportQuestions
+  flags: CohostReportFlags
+  promises: CohostReportPromises
+  greetings: CohostReportGreetings
+  alerts?: CohostReportAlert[]
+  recap: CohostReportRecap
+}
+
+export interface CohostReportChatPlatformCount {
+  platform: StreamPlatform
+  messages: number
+}
+
+/** Every chat row the session kept, by platform (busiest first). */
+export interface CohostReportChat {
+  messages: number
+  byPlatform: CohostReportChatPlatformCount[]
+}
+
+/**
+ * `cohost.report.get` / `cohost.report.latest`: the saved report (null when
+ * Orcle left none), the session's moments (clip marks and chat peaks, computed
+ * on read and never stored) and its chat totals.
+ */
+export interface CohostReportPayload {
+  sessionId: string
+  report: CohostSessionReport | null
+  moments: ClipMoment[]
+  chat: CohostReportChat
+}
+
+/** `cohost.report.get`. */
+export interface CohostReportGetParams {
+  sessionId: string
+}
+
+/** `cohost.report.saved`: a report for this session was written. */
+export interface CohostReportSavedEvent {
+  sessionId: string
+}
+
+/**
  * Off-shaped `cohost.state`: what the backend reports when no engine session
  * exists. Presence is unconditional — surfaces render this instead of hiding
  * (null never reaches the Comments window relay any more).

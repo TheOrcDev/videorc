@@ -22,8 +22,13 @@ import type {
   CohostSettingsPatch,
   CohostStartParams,
   CohostState,
+  CohostReportGetParams,
+  CohostReportPayload,
+  CohostReportSavedEvent,
+  CohostSessionReport,
   ClipMark,
   ClipMarkedEvent,
+  ClipMoment,
   CompositorFrameReady,
   CompositorStatus,
   SceneEditorDraftAck,
@@ -265,6 +270,8 @@ export interface BackendRpcMethodMap {
   'cohost.author.greeted': BackendRpcDefinition<CohostAuthorParams, CohostState>
   'cohost.settings.get': BackendRpcDefinition<undefined, CohostSettings>
   'cohost.settings.set': BackendRpcDefinition<CohostSettingsPatch, CohostSettings>
+  'cohost.report.get': BackendRpcDefinition<CohostReportGetParams, CohostReportPayload>
+  'cohost.report.latest': BackendRpcDefinition<undefined, CohostReportPayload | null>
   'liveChat.emotes.get': BackendRpcDefinition<undefined, ChatEmotesSettings>
   'liveChat.emotes.set': BackendRpcDefinition<ChatEmotesSettingsPatch, ChatEmotesSettings>
   'clip.mark': BackendRpcDefinition<undefined, ClipMarkedEvent>
@@ -297,6 +304,7 @@ export interface BackendEventMap {
   'capture.recovery.status': CaptureRecoveryStatus
   'diagnostics.stats': DiagnosticStats
   'cohost.state': CohostState
+  'cohost.report.saved': CohostReportSavedEvent
   'clip.marked': ClipMarkedEvent
   'performance.check.progress': PerformanceCheckProgress
   'performance.check.completed': PerformanceCheckState
@@ -2226,6 +2234,172 @@ const cohostAuthorParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<CohostAuthorParams>
 
+// Plan 119 S1: the Orcle report. The blocks always ride; every optional list
+// is omitted by the backend while empty (never null). `version` is pinned:
+// the backend reads any other stored version as unavailable, so a report on
+// the wire is always this shape.
+const cohostReportQuestionOutcomeSchema = enumSchema([
+  'open',
+  'answered-on-air',
+  'replied',
+  'marked-answered',
+  'dismissed',
+  'shown'
+])
+const cohostReportQuestionSchema = objectSchema(
+  {
+    id: boundedString,
+    text: stringSchema({ maxLength: 2000 }),
+    askers: optionalSchema(arraySchema(stringSchema({ maxLength: 512 }), { maxLength: 5 })),
+    platforms: optionalSchema(arraySchema(streamPlatformSchema, { maxLength: 7 })),
+    priority: enumSchema(['high', 'normal', 'low']),
+    firstSeenAt: timestamp,
+    outcome: cohostReportQuestionOutcomeSchema
+  },
+  { allowUnknown: false }
+)
+const cohostReportQuestionsSchema = objectSchema(
+  {
+    total: nonNegativeInteger,
+    markedAnswered: nonNegativeInteger,
+    dismissed: nonNegativeInteger,
+    replied: nonNegativeInteger,
+    answeredOnAir: nonNegativeInteger,
+    restored: nonNegativeInteger,
+    shownOnStream: nonNegativeInteger,
+    items: optionalSchema(arraySchema(cohostReportQuestionSchema, { maxLength: 200 }))
+  },
+  { allowUnknown: false }
+)
+const cohostReportFlagsSchema = objectSchema(
+  {
+    raised: nonNegativeInteger,
+    dismissed: nonNegativeInteger,
+    byKind: optionalSchema(
+      arraySchema(
+        objectSchema(
+          { kind: cohostFlagKindSchema, count: nonNegativeInteger },
+          { allowUnknown: false }
+        ),
+        { maxLength: 16 }
+      )
+    ),
+    bySeverity: optionalSchema(
+      arraySchema(
+        objectSchema(
+          { severity: enumSchema(['high', 'medium', 'low']), count: nonNegativeInteger },
+          { allowUnknown: false }
+        ),
+        { maxLength: 4 }
+      )
+    )
+  },
+  { allowUnknown: false }
+)
+const cohostReportPromisesSchema = objectSchema(
+  {
+    heard: nonNegativeInteger,
+    kept: nonNegativeInteger,
+    dismissed: nonNegativeInteger,
+    reminded: nonNegativeInteger,
+    open: optionalSchema(
+      arraySchema(
+        objectSchema(
+          { text: stringSchema({ maxLength: 160 }), firstSeenAt: timestamp },
+          { allowUnknown: false }
+        ),
+        { maxLength: 20 }
+      )
+    )
+  },
+  { allowUnknown: false }
+)
+const cohostReportGreetingsSchema = objectSchema(
+  {
+    firstTimers: nonNegativeInteger,
+    firstTimersGreeted: nonNegativeInteger,
+    byVoice: nonNegativeInteger,
+    byChat: nonNegativeInteger,
+    onStream: nonNegativeInteger,
+    manual: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
+const cohostReportAlertSchema = objectSchema(
+  {
+    kind: enumSchema(['audio', 'video', 'stream-health', 'game', 'other']),
+    peakViewers: nonNegativeInteger,
+    active: booleanSchema,
+    firstSeenAt: timestamp
+  },
+  { allowUnknown: false }
+)
+const cohostReportRecapSchema = objectSchema(
+  { offered: nonNegativeInteger, drafted: nonNegativeInteger, dismissed: nonNegativeInteger },
+  { allowUnknown: false }
+)
+const cohostSessionReportSchema = objectSchema(
+  {
+    version: literalSchema(1),
+    sessionId: boundedString,
+    startedAt: timestamp,
+    endedAt: timestamp,
+    segments: nonNegativeInteger,
+    streamTitle: optionalSchema(stringSchema({ maxLength: 1000 })),
+    messagesSeen: nonNegativeInteger,
+    shownOnStream: nonNegativeInteger,
+    questions: cohostReportQuestionsSchema,
+    flags: cohostReportFlagsSchema,
+    promises: cohostReportPromisesSchema,
+    greetings: cohostReportGreetingsSchema,
+    alerts: optionalSchema(arraySchema(cohostReportAlertSchema, { maxLength: 8 })),
+    recap: cohostReportRecapSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostSessionReport>
+// A moment of the session: a clip mark or a chat peak, snapped to the
+// captions. `source` is omitted by an older backend (never null).
+const clipMomentSchema = objectSchema(
+  {
+    startMs: nonNegativeInteger,
+    endMs: nonNegativeInteger,
+    reason: stringSchema({ minLength: 1, maxLength: 500 }),
+    excerpt: stringSchema({ maxLength: 2000 }),
+    source: optionalSchema(enumSchema(['voice', 'manual', 'chat']))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ClipMoment>
+const cohostReportChatSchema = objectSchema(
+  {
+    messages: nonNegativeInteger,
+    byPlatform: arraySchema(
+      objectSchema(
+        { platform: streamPlatformSchema, messages: nonNegativeInteger },
+        { allowUnknown: false }
+      ),
+      { maxLength: 7 }
+    )
+  },
+  { allowUnknown: false }
+)
+const cohostReportPayloadSchema = objectSchema(
+  {
+    sessionId: boundedString,
+    report: nullableSchema(cohostSessionReportSchema),
+    moments: arraySchema(clipMomentSchema, { maxLength: 10_000 }),
+    chat: cohostReportChatSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostReportPayload>
+const cohostReportGetParamsSchema = objectSchema(
+  { sessionId: boundedString },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostReportGetParams>
+const cohostReportSavedEventSchema = objectSchema(
+  { sessionId: boundedString },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostReportSavedEvent>
+
 const scheduledMutationSchema = objectSchema(
   {
     confirmationFingerprint: optionalSchema(boundedString),
@@ -2686,6 +2860,11 @@ const runtimeContracts = {
   'clip.marks.list': {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
     result: arraySchema(clipMarkSchema, { maxLength: 10_000 })
+  },
+  'cohost.report.get': { params: cohostReportGetParamsSchema, result: cohostReportPayloadSchema },
+  'cohost.report.latest': {
+    params: undefinedSchema,
+    result: nullableSchema(cohostReportPayloadSchema)
   }
 } satisfies Record<BackendRpcMethod, RuntimeBackendRpcContract>
 
@@ -2731,6 +2910,7 @@ const runtimeEventSchemas = {
   'capture.recovery.status': captureRecoveryStatusSchema,
   'diagnostics.stats': diagnosticStatsSchema,
   'cohost.state': cohostStateSchema,
+  'cohost.report.saved': cohostReportSavedEventSchema,
   'clip.marked': clipMarkedEventSchema,
   'performance.check.progress': performanceCheckProgressSchema,
   'performance.check.completed': performanceCheckStateSchema,

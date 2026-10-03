@@ -12,6 +12,10 @@ import type {
   CohostPromiseParams,
   CohostQuestionParams,
   CohostRecapParams,
+  CohostReportGetParams,
+  CohostReportPayload,
+  CohostReportSavedEvent,
+  CohostSessionReport,
   CohostSettings,
   CohostSettingsPatch,
   CohostStartParams,
@@ -91,6 +95,11 @@ interface HighRiskContractFixtures {
     timeoutState: CohostState
     stateV2: CohostState
     legacyState: CohostState
+    reportGetParams: CohostReportGetParams
+    report: CohostSessionReport
+    reportPayload: CohostReportPayload
+    reportPayloadWithoutReport: CohostReportPayload
+    reportSaved: CohostReportSavedEvent
   }
   clip: {
     markedSaved: ClipMarkedEvent
@@ -484,6 +493,54 @@ describe('shared high-risk protocol fixture', () => {
         [fixtures.comments.deletionOperation]
       )
     }
+  })
+
+  it('keeps the Orcle report, its payload and the saved event identical across languages (plan 119 S1)', () => {
+    expect(
+      validateBackendRpcParams('cohost.report.get', fixtures.cohost.reportGetParams)
+    ).toStrictEqual(fixtures.cohost.reportGetParams)
+    expect(
+      validateBackendRpcResult('cohost.report.get', fixtures.cohost.reportPayload)
+    ).toStrictEqual(fixtures.cohost.reportPayload)
+    expect(
+      validateBackendRpcResult('cohost.report.latest', fixtures.cohost.reportPayload)
+    ).toStrictEqual(fixtures.cohost.reportPayload)
+    expect(validateBackendRpcResult('cohost.report.latest', null)).toBeNull()
+    expect(
+      validateBackendRpcResult('cohost.report.get', fixtures.cohost.reportPayloadWithoutReport)
+    ).toStrictEqual(fixtures.cohost.reportPayloadWithoutReport)
+    expect(fixtures.cohost.reportPayloadWithoutReport.report).toBeNull()
+    expect(fixtures.cohost.reportPayloadWithoutReport.moments).toStrictEqual([])
+    expect(
+      validateBackendEventPayload('cohost.report.saved', fixtures.cohost.reportSaved)
+    ).toStrictEqual(fixtures.cohost.reportSaved)
+
+    // The full report carries every optional list; the payload's report is
+    // the minimal shape, which proves the serde-null rule: absent, never null.
+    const full = fixtures.cohost.report
+    expect(
+      validateBackendRpcResult('cohost.report.get', {
+        ...fixtures.cohost.reportPayload,
+        report: full
+      })
+    ).toStrictEqual({ ...fixtures.cohost.reportPayload, report: full })
+    expect(full.version).toBe(1)
+    expect(full.questions.items).toHaveLength(2)
+    expect(full.questions.items?.[1]).not.toHaveProperty('askers')
+    expect(full.questions.items?.[1]).not.toHaveProperty('platforms')
+    const minimal = fixtures.cohost.reportPayload.report as CohostSessionReport
+    expect(minimal.segments).toBe(2)
+    for (const key of ['streamTitle', 'alerts']) {
+      expect(key in minimal).toBe(false)
+    }
+    expect('items' in minimal.questions).toBe(false)
+    expect('byKind' in minimal.flags).toBe(false)
+    expect('open' in minimal.promises).toBe(false)
+    expect(fixtures.cohost.reportPayload.moments.map((moment) => moment.source)).toStrictEqual([
+      'voice',
+      'manual',
+      'chat'
+    ])
   })
 
   it('keeps clip marks and the marked event identical across languages (plan 068 D6)', () => {

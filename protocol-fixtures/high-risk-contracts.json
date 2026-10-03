@@ -741,6 +741,141 @@
       "lastTickAt": null,
       "tickSeq": 0,
       "partial": false
+    },
+    "reportGetParams": { "sessionId": "session-fixture" },
+    "reportSaved": { "sessionId": "session-fixture" },
+    "report": {
+      "version": 1,
+      "sessionId": "session-fixture",
+      "startedAt": "2026-08-22T10:00:00Z",
+      "endedAt": "2026-08-22T11:30:00Z",
+      "segments": 1,
+      "streamTitle": "Rust night",
+      "messagesSeen": 84,
+      "shownOnStream": 2,
+      "questions": {
+        "total": 5,
+        "markedAnswered": 1,
+        "dismissed": 1,
+        "replied": 1,
+        "answeredOnAir": 1,
+        "restored": 0,
+        "shownOnStream": 1,
+        "items": [
+          {
+            "id": "q_fixture",
+            "text": "What keyboard is that?",
+            "askers": ["Viewer"],
+            "platforms": ["twitch"],
+            "priority": "high",
+            "firstSeenAt": "2026-08-22T10:00:00Z",
+            "outcome": "replied"
+          },
+          {
+            "id": "q_fixture_2",
+            "text": "Which editor theme?",
+            "priority": "normal",
+            "firstSeenAt": "2026-08-22T10:20:00Z",
+            "outcome": "open"
+          }
+        ]
+      },
+      "flags": {
+        "raised": 2,
+        "dismissed": 1,
+        "byKind": [
+          { "kind": "self-promo", "count": 1 },
+          { "kind": "spam", "count": 1 }
+        ],
+        "bySeverity": [{ "severity": "low", "count": 2 }]
+      },
+      "promises": {
+        "heard": 2,
+        "kept": 1,
+        "dismissed": 0,
+        "reminded": 1,
+        "open": [{ "text": "Giveaway at 100 viewers", "firstSeenAt": "2026-08-22T10:05:00Z" }]
+      },
+      "greetings": {
+        "firstTimers": 3,
+        "firstTimersGreeted": 2,
+        "byVoice": 1,
+        "byChat": 1,
+        "onStream": 0,
+        "manual": 1
+      },
+      "alerts": [
+        { "kind": "audio", "peakViewers": 2, "active": true, "firstSeenAt": "2026-08-22T10:40:00Z" }
+      ],
+      "recap": { "offered": 1, "drafted": 0, "dismissed": 1 }
+    },
+    "reportPayload": {
+      "sessionId": "session-fixture",
+      "report": {
+        "version": 1,
+        "sessionId": "session-fixture",
+        "startedAt": "2026-08-22T10:00:00Z",
+        "endedAt": "2026-08-22T11:30:00Z",
+        "segments": 2,
+        "messagesSeen": 0,
+        "shownOnStream": 0,
+        "questions": {
+          "total": 0,
+          "markedAnswered": 0,
+          "dismissed": 0,
+          "replied": 0,
+          "answeredOnAir": 0,
+          "restored": 0,
+          "shownOnStream": 0
+        },
+        "flags": { "raised": 0, "dismissed": 0 },
+        "promises": { "heard": 0, "kept": 0, "dismissed": 0, "reminded": 0 },
+        "greetings": {
+          "firstTimers": 0,
+          "firstTimersGreeted": 0,
+          "byVoice": 0,
+          "byChat": 0,
+          "onStream": 0,
+          "manual": 0
+        },
+        "recap": { "offered": 0, "drafted": 0, "dismissed": 0 }
+      },
+      "moments": [
+        {
+          "startMs": 275400,
+          "endMs": 312000,
+          "reason": "You said 'clip that'",
+          "excerpt": "and it actually works first try clip that",
+          "source": "voice"
+        },
+        {
+          "startMs": 724200,
+          "endMs": 754200,
+          "reason": "Marked",
+          "excerpt": "",
+          "source": "manual"
+        },
+        {
+          "startMs": 280000,
+          "endMs": 325000,
+          "reason": "Chat spiked: 9 messages in 30s",
+          "excerpt": "chat is going wild right now",
+          "source": "chat"
+        }
+      ],
+      "chat": {
+        "messages": 84,
+        "byPlatform": [
+          { "platform": "twitch", "messages": 60 },
+          { "platform": "youtube", "messages": 24 }
+        ]
+      }
+    },
+    "reportPayloadWithoutReport": {
+      "sessionId": "session-fixture",
+      "report": null,
+      "moments": [],
+      "chat": { "messages": 0, "byPlatform": [] }
     }
   },
   "clip": {
