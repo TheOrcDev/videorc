@@ -77,7 +77,11 @@
       "sideBySideCameraSide": "right",
       "verticalScreenFraming": "fill",
       "arrangementMode": "preset",
-      "sourceTransformOverrides": {}
+      "sourceTransformOverrides": {},
+      "sourceVisibility": {
+        "camera": true,
+        "capture": true
+      }
     }
   },
   "scene": {

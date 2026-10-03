@@ -5675,6 +5675,7 @@ mod tests {
     #[test]
     fn shared_high_risk_contract_fixture_matches_layout_and_scene_defaults() {
         let legacy_layout = shared_high_risk_contract_fixture_value("/layout/legacyWire");
+        assert!(legacy_layout.get("sourceVisibility").is_none());
         let expected_layout = shared_high_risk_contract_fixture_value("/layout/normalized");
         let layout: LayoutSettings = serde_json::from_value(legacy_layout).unwrap();
         assert_eq!(serde_json::to_value(layout).unwrap(), expected_layout);

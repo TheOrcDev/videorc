@@ -130,6 +130,7 @@ describe('shared high-risk protocol fixture', () => {
   })
 
   it('normalizes legacy layouts and validates the exact scene wire shape', () => {
+    expect(fixtures.layout.legacyWire).not.toHaveProperty('sourceVisibility')
     expect(normalizeLayoutSettings(fixtures.layout.legacyWire)).toStrictEqual(
       fixtures.layout.normalized
     )
