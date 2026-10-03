@@ -2232,6 +2232,13 @@ pub async fn commit_scene_with_current_layout(
             .clone()
             .unwrap_or_else(default_layout_settings)
     };
+    let layout = LayoutSettings {
+        source_visibility: crate::scene::source_visibility_from_scene(
+            scene,
+            layout.source_visibility,
+        ),
+        ..layout
+    };
     commit_scene_with_layout(state, scene, layout, None).await
 }
 
@@ -2411,6 +2418,103 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    #[tokio::test]
+    async fn hidden_roles_are_atomic_in_live_commit_and_selected_ids_survive() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        *state.recording.lock().await =
+            Some(crate::recording::test_active_recording_stub("hidden"));
+        let mut params = config(LayoutPreset::ScreenCamera, true, true);
+        params.layout.source_visibility = crate::protocol::SourceVisibility {
+            camera: false,
+            capture: false,
+        };
+        state
+            .live_source_switch
+            .lock()
+            .unwrap()
+            .start("hidden".into(), params.sources.clone());
+        let status = apply_layout_live(
+            &state,
+            SceneLayoutApplyParams {
+                intent_id: Some(1),
+                simulcast_leg: false,
+                config: params.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(status.applied);
+        assert!(status.scene.sources.iter().all(|source| !source.visible));
+        assert!(
+            status
+                .compositor_status
+                .scene_sources
+                .iter()
+                .all(|source| !source.visible)
+        );
+        assert_eq!(
+            status
+                .compositor_status
+                .scene_layout
+                .as_ref()
+                .unwrap()
+                .source_visibility,
+            params.layout.source_visibility
+        );
+        let selected = state
+            .live_source_switch
+            .lock()
+            .unwrap()
+            .snapshot("hidden")
+            .unwrap();
+        assert_eq!(selected.confirmed, params.sources);
+        assert_eq!(selected.source_revision, 0);
+        let mut publications = 0;
+        while let Ok(event) = events.try_recv() {
+            if event.event == "scene.changed" {
+                let scene: Scene = serde_json::from_value(event.payload).unwrap();
+                assert!(
+                    scene.sources.iter().all(|source| !source.visible),
+                    "no all-visible intermediate scene"
+                );
+                publications += 1;
+            }
+        }
+        assert_eq!(publications, 1);
+        let mut acknowledged = status.scene;
+        acknowledged
+            .sources
+            .iter_mut()
+            .find(|source| source.kind == crate::protocol::SceneSourceKind::Camera)
+            .unwrap()
+            .visible = true;
+        let shown = commit_scene_with_current_layout(&state, &acknowledged)
+            .await
+            .unwrap();
+        assert_eq!(
+            shown
+                .compositor_status
+                .scene_layout
+                .unwrap()
+                .source_visibility,
+            crate::protocol::SourceVisibility {
+                camera: true,
+                capture: false
+            }
+        );
+        assert_eq!(
+            state
+                .live_source_switch
+                .lock()
+                .unwrap()
+                .snapshot("hidden")
+                .unwrap()
+                .confirmed,
+            params.sources
+        );
     }
 
     #[tokio::test]
@@ -3336,6 +3440,7 @@ mod tests {
             vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
             arrangement_mode: crate::protocol::ArrangementMode::Preset,
             source_transform_overrides: std::collections::BTreeMap::new(),
+            source_visibility: Default::default(),
             camera_chroma_key_enabled: false,
             camera_chroma_key_color: "#00FF00".to_string(),
             camera_chroma_key_similarity_pct: 40,

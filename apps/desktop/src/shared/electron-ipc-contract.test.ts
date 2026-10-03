@@ -302,7 +302,8 @@ describe('Electron IPC contract', () => {
       cameraOffsetY: 0,
       sideBySideSplit: '50-50',
       sideBySideCameraSide: 'right',
-      verticalScreenFraming: 'fill'
+      verticalScreenFraming: 'fill',
+      sourceVisibility: { camera: false, capture: true }
     }
     const compositor = {
       state: 'live',
@@ -382,6 +383,19 @@ describe('Electron IPC contract', () => {
         }
       ])
     ).toThrow('one of screen-camera')
+
+    for (const sourceVisibility of [
+      null,
+      { camera: 'false' },
+      { capture: 0 },
+      { microphone: false }
+    ]) {
+      expect(() =>
+        validateElectronInvokeArgs('preview-surface:update-scene', [
+          { revision: 4, scene: null, layout: { ...layout, sourceVisibility }, activeScreen: null }
+        ])
+      ).toThrow('sourceVisibility')
+    }
 
     expect(validateElectronInvokeArgs('preview-surface:update-compositor', [compositor])).toEqual([
       compositor

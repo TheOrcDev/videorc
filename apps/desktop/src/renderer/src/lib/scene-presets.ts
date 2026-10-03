@@ -1,9 +1,16 @@
-import type { Device, EffectiveSceneBackground, LayoutSettings, SourceSelection } from './backend'
+import type {
+  Device,
+  EffectiveSceneBackground,
+  LayoutSettings,
+  Scene,
+  SourceSelection
+} from './backend'
 import {
   defaultCaptureConfig,
   layoutPresetNeedsCamera,
   layoutPresetNeedsScreen,
-  normalizeLayoutSettings
+  normalizeLayoutSettings,
+  normalizeSourceVisibility
 } from './capture'
 import { BUILTIN_LAYOUTS } from './layout-framing-memory'
 import { BUNDLED_BACKGROUND_MANIFEST } from '../../../shared/background-import'
@@ -124,6 +131,17 @@ export function normalizeSceneVisual(raw: unknown): SceneVisual {
     typeof data.sources !== 'object'
   )
     throw new Error('Invalid scene layout or sources')
+  const visibility = data.layout.sourceVisibility
+  if (
+    visibility !== undefined &&
+    (!visibility ||
+      typeof visibility !== 'object' ||
+      Array.isArray(visibility) ||
+      Object.entries(visibility).some(
+        ([role, value]) => !['camera', 'capture'].includes(role) || typeof value !== 'boolean'
+      ))
+  )
+    throw new Error('Invalid source visibility')
   if (data.sources.cameraOff !== undefined && typeof data.sources.cameraOff !== 'boolean')
     throw new Error('Invalid camera Off intent')
   for (const key of ['cameraId', 'screenId', 'windowId'] as const) {
@@ -259,4 +277,18 @@ export function sceneSourceProblems(visual: SceneVisual, devices: readonly Devic
     requireSource(baseId, visual.sources.windowId ? 'window' : 'screen', 'Screen or window')
   }
   return problems
+}
+
+/** Acknowledged roles only; never infer visibility from absence or device IDs. */
+export function sourceVisibilityFromScene(
+  scene: Scene,
+  current: LayoutSettings['sourceVisibility']
+) {
+  const visibility = normalizeSourceVisibility(current)
+  for (const source of scene.sources) {
+    if (source.kind === 'camera') visibility.camera = source.visible
+    if (source.kind === 'screen' || source.kind === 'window' || source.kind === 'test-pattern')
+      visibility.capture = source.visible
+  }
+  return visibility
 }

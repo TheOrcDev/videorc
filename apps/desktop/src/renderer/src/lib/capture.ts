@@ -1236,7 +1236,8 @@ export const defaultCaptureConfig: CaptureConfig = {
     sideBySideCameraSide: 'right',
     verticalScreenFraming: 'fill',
     arrangementMode: 'preset',
-    sourceTransformOverrides: {}
+    sourceTransformOverrides: {},
+    sourceVisibility: { camera: true, capture: true }
   },
   audio: {
     microphoneGainDb: 0,
@@ -1667,6 +1668,11 @@ function normalizeCameraTransform(value: unknown): CameraTransform | null {
   return { x: clampUnit(x), y: clampUnit(y), width: clampUnit(width), height: clampUnit(height) }
 }
 
+export function normalizeSourceVisibility(raw: unknown): { camera: boolean; capture: boolean } {
+  const value = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  return { camera: value.camera !== false, capture: value.capture !== false }
+}
+
 export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
   const candidate = layout && typeof layout === 'object' ? (layout as Partial<LayoutSettings>) : {}
   const cameraTransform = normalizeCameraTransform(candidate.cameraTransform)
@@ -1766,7 +1772,8 @@ export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
       ? candidate.verticalScreenFraming
       : defaultCaptureConfig.layout.verticalScreenFraming,
     arrangementMode: candidate.arrangementMode === 'freeform' ? 'freeform' : 'preset',
-    sourceTransformOverrides: normalizeSourceTransformOverrides(candidate.sourceTransformOverrides)
+    sourceTransformOverrides: normalizeSourceTransformOverrides(candidate.sourceTransformOverrides),
+    sourceVisibility: normalizeSourceVisibility(candidate.sourceVisibility)
   }
 }
 

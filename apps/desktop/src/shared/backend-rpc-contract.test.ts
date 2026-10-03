@@ -835,6 +835,19 @@ describe('backend RPC contract', () => {
       },
       transitionMs: 320
     }
+    const hidden = {
+      ...layoutParams,
+      layout: { ...layoutParams.layout, sourceVisibility: { camera: false, capture: true } }
+    }
+    expect(validateBackendRpcParams('scene.layout.apply_live', hidden)).toEqual(hidden)
+    for (const sourceVisibility of [{ camera: 'false' }, { microphone: false }, null]) {
+      expect(() =>
+        validateBackendRpcParams('scene.layout.apply_live', {
+          ...layoutParams,
+          layout: { ...layoutParams.layout, sourceVisibility }
+        })
+      ).toThrow()
+    }
     expect(validateBackendRpcParams('scene.layout.apply_live', layoutParams)).toEqual(layoutParams)
     expect(validateBackendRpcParams('scene.layout.apply_preview', layoutParams)).toEqual(
       layoutParams

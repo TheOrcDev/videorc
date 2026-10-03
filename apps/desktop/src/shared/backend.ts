@@ -401,6 +401,11 @@ export interface CameraTransform {
   height: number
 }
 
+export interface SourceVisibility {
+  camera: boolean
+  capture: boolean
+}
+
 export interface LayoutSettings {
   layoutPreset: LayoutPreset
   cameraTransformMode: CameraTransformMode
@@ -449,6 +454,8 @@ export interface LayoutSettings {
    * ('source:base', 'source:camera'). Empty means the base arrangement.
    */
   sourceTransformOverrides: Record<string, CameraTransform>
+  /** Independent visual roles; legacy layouts show both. */
+  sourceVisibility?: SourceVisibility
 }
 
 export type SceneSourceKind = 'screen' | 'window' | 'camera' | 'test-pattern'
