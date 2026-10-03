@@ -3796,6 +3796,62 @@ describe('real StudioProvider lifecycle', () => {
     )
   })
 
+  it('returns a fully cloneable development scene-preset state with evaluated source diagnostics', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.canSaveScene === true)
+    await act(async () => latest().applyBackgroundSlot('bg-01'))
+    await waitForObservation(
+      () => latest().scene?.background?.assetId === 'builtin-bg-01' && latest().canSaveScene
+    )
+    await act(async () => {
+      expect(latest().saveScene('Cloneable scene')).toBe(true)
+    })
+
+    const harness = (
+      window as Window & {
+        __videorcSmokeScenePresets?: {
+          state: () => unknown
+          save: StudioCoreContextValue['saveScene']
+          apply: StudioCoreContextValue['applySavedScene']
+          retrySourceStatus: StudioCoreContextValue['retrySourceStatus']
+        }
+      }
+    ).__videorcSmokeScenePresets
+    expect(harness).toBeDefined()
+    const state = harness!.state()
+    // Clone the actual complete projection, including saved and confirmed visuals.
+    expect(structuredClone(state)).toEqual(state)
+    expect(state).toMatchObject({
+      canSave: true,
+      scenes: latest().savedScenes,
+      visual: { background: { assetId: 'builtin-bg-01' } },
+      diagnostics: {
+        sourceSelectionState: latest().sourceSelectionState,
+        sourceSwitchReasons: { capture: null, camera: null, microphone: null },
+        confirmedVisual: { background: { assetId: 'builtin-bg-01' } }
+      }
+    })
+    expect(harness!.save).toBe(latest().saveScene)
+    expect(harness!.apply).toBe(latest().applySavedScene)
+    expect(harness!.retrySourceStatus).toBe(latest().retrySourceStatus)
+  })
+
   it('saves complete visual scenes, applies one atomic target and preserves independent builtin framing', async () => {
     const backend = new StudioBackend()
     TestWebSocket.backend = backend
