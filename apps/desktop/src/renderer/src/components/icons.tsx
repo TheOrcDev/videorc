@@ -17,93 +17,7 @@
  */
 import type { ComponentType, SVGProps } from 'react'
 
-import {
-  ArrowClockwise,
-  ArrowCounterClockwise,
-  ArrowDown,
-  ArrowLeft,
-  ArrowRight,
-  ArrowSquareOut,
-  ArrowUp,
-  ArrowsClockwise,
-  ArrowsDownUp,
-  Brain,
-  Broadcast,
-  Bug,
-  CaretDown,
-  CaretRight,
-  CaretUpIcon,
-  ChatCircle,
-  Check,
-  CheckCircle,
-  CircleNotch,
-  ClosedCaptioning,
-  Copy,
-  Crosshair,
-  Desktop,
-  DeviceMobile,
-  DotsThree,
-  DownloadSimple,
-  Eye,
-  FileVideo,
-  FilmReel,
-  FilmSlate,
-  FloppyDisk,
-  FolderOpen,
-  FrameCorners,
-  Gauge,
-  GearSix,
-  Heartbeat,
-  ImageBroken,
-  ImageSquare,
-  Info,
-  Layout,
-  Lightning,
-  LinkSimple,
-  LockKey,
-  MagnifyingGlass,
-  Microphone,
-  MinusCircle,
-  Monitor,
-  Moon,
-  NotePencil,
-  PaperPlaneRight,
-  PencilSimple,
-  Play,
-  Pulse,
-  PushPin,
-  Record,
-  Robot,
-  Scissors,
-  ShieldCheck,
-  SignIn,
-  SignOut,
-  SlidersHorizontal,
-  Sparkle,
-  SpeakerHigh,
-  SpeakerSlash,
-  SquaresFour,
-  Stop,
-  Sun,
-  TerminalWindow,
-  TextAa,
-  Trash,
-  InstagramLogo,
-  TiktokLogo,
-  TwitchLogo,
-  UploadSimple,
-  UserCircle,
-  VideoCamera,
-  Warning,
-  WarningCircle,
-  Waveform,
-  WaveformSlash,
-  Wrench,
-  X,
-  XCircle,
-  XLogo,
-  YoutubeLogo
-} from '@phosphor-icons/react'
+import type * as PhosphorIcons from '@phosphor-icons/react'
 
 /**
  * The props every registry icon accepts.
@@ -124,142 +38,242 @@ export type AppIconProps = {
  */
 export type AppIcon = ComponentType<AppIconProps>
 
-// The current set still comes from Phosphor. Each slot is annotated `AppIcon`,
-// so the compiler — not the reviewer — checks that whatever this file points
-// at really does accept the app's prop surface.
+// The compile-only check preserves the app prop contract. Direct re-exports
+// let each consumer own its glyph chunks; optional panels must not pull the
+// whole registry into the initial renderer asset graph.
+type _AssertIconProps<T extends Record<string, AppIcon>> = T
+type _RegistryIconProps = _AssertIconProps<
+  Pick<
+    typeof PhosphorIcons,
+    | 'ArrowClockwise'
+    | 'ArrowCounterClockwise'
+    | 'ArrowDown'
+    | 'ArrowLeft'
+    | 'ArrowRight'
+    | 'ArrowSquareOut'
+    | 'ArrowUp'
+    | 'ArrowsClockwise'
+    | 'ArrowsDownUp'
+    | 'Brain'
+    | 'Broadcast'
+    | 'Bug'
+    | 'CaretDown'
+    | 'CaretRight'
+    | 'CaretUpIcon'
+    | 'ChatCircle'
+    | 'Check'
+    | 'CheckCircle'
+    | 'CircleNotch'
+    | 'ClosedCaptioning'
+    | 'Copy'
+    | 'Crosshair'
+    | 'Desktop'
+    | 'DeviceMobile'
+    | 'DotsThree'
+    | 'DownloadSimple'
+    | 'Eye'
+    | 'FileVideo'
+    | 'FilmReel'
+    | 'FilmSlate'
+    | 'FloppyDisk'
+    | 'FolderOpen'
+    | 'FrameCorners'
+    | 'Gauge'
+    | 'GearSix'
+    | 'Heartbeat'
+    | 'ImageBroken'
+    | 'ImageSquare'
+    | 'Info'
+    | 'InstagramLogo'
+    | 'Layout'
+    | 'Lightning'
+    | 'LinkSimple'
+    | 'LockKey'
+    | 'MagnifyingGlass'
+    | 'Microphone'
+    | 'MinusCircle'
+    | 'Monitor'
+    | 'Moon'
+    | 'NotePencil'
+    | 'PaperPlaneRight'
+    | 'PencilSimple'
+    | 'Play'
+    | 'Pulse'
+    | 'PushPin'
+    | 'Record'
+    | 'Robot'
+    | 'Scissors'
+    | 'ShieldCheck'
+    | 'SignIn'
+    | 'SignOut'
+    | 'SlidersHorizontal'
+    | 'Sparkle'
+    | 'SpeakerHigh'
+    | 'SpeakerSlash'
+    | 'SquaresFour'
+    | 'Stop'
+    | 'Sun'
+    | 'TerminalWindow'
+    | 'TextAa'
+    | 'TiktokLogo'
+    | 'Trash'
+    | 'TwitchLogo'
+    | 'UploadSimple'
+    | 'UserCircle'
+    | 'VideoCamera'
+    | 'Warning'
+    | 'WarningCircle'
+    | 'Waveform'
+    | 'WaveformSlash'
+    | 'Wrench'
+    | 'X'
+    | 'XCircle'
+    | 'XLogo'
+    | 'YoutubeLogo'
+  >
+>
 
 /**
  * Navigation — one slot per sidebar destination. These are the icons the
  * 2026-08-25 semantic audit reviews first: several are placeholders inherited
  * from the pre-audit set (see the audit table in the Nucleo plan).
  */
-export const StudioIcon: AppIcon = VideoCamera
-export const SourcesIcon: AppIcon = Monitor
-export const SceneIcon: AppIcon = SquaresFour
-export const AssetsIcon: AppIcon = ImageSquare
-export const LivestreamIcon: AppIcon = Broadcast
-export const CaptionsIcon: AppIcon = ClosedCaptioning
-export const OutputIcon: AppIcon = Record
-export const LibraryIcon: AppIcon = FilmReel
-export const PublishIcon: AppIcon = Sparkle
-export const SettingsIcon: AppIcon = GearSix
-export const HealthIcon: AppIcon = Pulse
-
+export {
+  VideoCamera as StudioIcon,
+  Monitor as SourcesIcon,
+  SquaresFour as SceneIcon,
+  ImageSquare as AssetsIcon,
+  Broadcast as LivestreamIcon,
+  ClosedCaptioning as CaptionsIcon,
+  Record as OutputIcon,
+  FilmReel as LibraryIcon,
+  Sparkle as PublishIcon,
+  GearSix as SettingsIcon,
+  Pulse as HealthIcon
+} from '@phosphor-icons/react'
 /**
  * Status and feedback. One glyph per meaning: a triangle warns, a circle
  * alerts, a crossed circle is an error. Never introduce a second variant of
  * an existing meaning — that is how the set grew to 100 icons.
  */
-export const WarningIcon: AppIcon = Warning
-export const AlertIcon: AppIcon = WarningCircle
-export const ErrorIcon: AppIcon = XCircle
-export const SuccessIcon: AppIcon = CheckCircle
-export const CheckIcon: AppIcon = Check
-export const InfoIcon: AppIcon = Info
-export const SpinnerIcon: AppIcon = CircleNotch
-export const HeartbeatIcon: AppIcon = Heartbeat
-export const GaugeIcon: AppIcon = Gauge
-export const VerifiedIcon: AppIcon = ShieldCheck
-export const DisabledIcon: AppIcon = MinusCircle
-
+export {
+  Warning as WarningIcon,
+  WarningCircle as AlertIcon,
+  XCircle as ErrorIcon,
+  CheckCircle as SuccessIcon,
+  Check as CheckIcon,
+  Info as InfoIcon,
+  CircleNotch as SpinnerIcon,
+  Heartbeat as HeartbeatIcon,
+  Gauge as GaugeIcon,
+  ShieldCheck as VerifiedIcon,
+  MinusCircle as DisabledIcon
+} from '@phosphor-icons/react'
 /**
  * Chrome and controls.
  */
-export const ChevronDownIcon: AppIcon = CaretDown
-export const ChevronUpIcon: AppIcon = CaretUpIcon
-export const ChevronRightIcon: AppIcon = CaretRight
-export const CloseIcon: AppIcon = X
-export const MoreIcon: AppIcon = DotsThree
-export const SearchIcon: AppIcon = MagnifyingGlass
-export const AdjustIcon: AppIcon = SlidersHorizontal
-export const LayoutIcon: AppIcon = Layout
-
+export {
+  CaretDown as ChevronDownIcon,
+  CaretUpIcon as ChevronUpIcon,
+  CaretRight as ChevronRightIcon,
+  X as CloseIcon,
+  DotsThree as MoreIcon,
+  MagnifyingGlass as SearchIcon,
+  SlidersHorizontal as AdjustIcon,
+  Layout as LayoutIcon
+} from '@phosphor-icons/react'
 /**
  * Arrows and movement.
  */
-export const ArrowUpIcon: AppIcon = ArrowUp
-export const ArrowDownIcon: AppIcon = ArrowDown
-export const ArrowLeftIcon: AppIcon = ArrowLeft
-export const ArrowRightIcon: AppIcon = ArrowRight
-export const ExternalLinkIcon: AppIcon = ArrowSquareOut
-export const RefreshIcon: AppIcon = ArrowClockwise
-export const SyncIcon: AppIcon = ArrowsClockwise
-export const ResetIcon: AppIcon = ArrowCounterClockwise
-export const SortIcon: AppIcon = ArrowsDownUp
-
+export {
+  ArrowUp as ArrowUpIcon,
+  ArrowDown as ArrowDownIcon,
+  ArrowLeft as ArrowLeftIcon,
+  ArrowRight as ArrowRightIcon,
+  ArrowSquareOut as ExternalLinkIcon,
+  ArrowClockwise as RefreshIcon,
+  ArrowsClockwise as SyncIcon,
+  ArrowCounterClockwise as ResetIcon,
+  ArrowsDownUp as SortIcon
+} from '@phosphor-icons/react'
 /**
  * Capture, media and playback.
  */
-export const CameraIcon: AppIcon = VideoCamera
-export const DisplayIcon: AppIcon = Monitor
-export const DesktopIcon: AppIcon = Desktop
-export const MobileIcon: AppIcon = DeviceMobile
-export const MicrophoneIcon: AppIcon = Microphone
-export const SpeakerOnIcon: AppIcon = SpeakerHigh
-export const SpeakerOffIcon: AppIcon = SpeakerSlash
-export const WaveformIcon: AppIcon = Waveform
-export const WaveformMutedIcon: AppIcon = WaveformSlash
-export const RecordIcon: AppIcon = Record
-export const StopIcon: AppIcon = Stop
-export const PlayIcon: AppIcon = Play
-export const VideoFileIcon: AppIcon = FileVideo
-export const ClapperboardIcon: AppIcon = FilmSlate
-export const FrameIcon: AppIcon = FrameCorners
-export const CrosshairIcon: AppIcon = Crosshair
-
+export {
+  VideoCamera as CameraIcon,
+  Monitor as DisplayIcon,
+  Desktop as DesktopIcon,
+  DeviceMobile as MobileIcon,
+  Microphone as MicrophoneIcon,
+  SpeakerHigh as SpeakerOnIcon,
+  SpeakerSlash as SpeakerOffIcon,
+  Waveform as WaveformIcon,
+  WaveformSlash as WaveformMutedIcon,
+  Record as RecordIcon,
+  Stop as StopIcon,
+  Play as PlayIcon,
+  FileVideo as VideoFileIcon,
+  FilmSlate as ClapperboardIcon,
+  FrameCorners as FrameIcon,
+  Crosshair as CrosshairIcon
+} from '@phosphor-icons/react'
 /**
  * Files, assets and editing.
  */
-export const FolderIcon: AppIcon = FolderOpen
-export const DownloadIcon: AppIcon = DownloadSimple
-export const UploadIcon: AppIcon = UploadSimple
-export const SaveIcon: AppIcon = FloppyDisk
-export const DeleteIcon: AppIcon = Trash
-export const CopyIcon: AppIcon = Copy
-export const EditIcon: AppIcon = PencilSimple
-export const NoteIcon: AppIcon = NotePencil
-export const ImageIcon: AppIcon = ImageSquare
-export const ImageBrokenIcon: AppIcon = ImageBroken
-export const PreviewIcon: AppIcon = Eye
-
+export {
+  FolderOpen as FolderIcon,
+  DownloadSimple as DownloadIcon,
+  UploadSimple as UploadIcon,
+  FloppyDisk as SaveIcon,
+  Trash as DeleteIcon,
+  Copy as CopyIcon,
+  PencilSimple as EditIcon,
+  NotePencil as NoteIcon,
+  ImageSquare as ImageIcon,
+  ImageBroken as ImageBrokenIcon,
+  Eye as PreviewIcon
+} from '@phosphor-icons/react'
 /**
  * Account, access and links.
  */
-export const LockIcon: AppIcon = LockKey
-export const SignInIcon: AppIcon = SignIn
-export const SignOutIcon: AppIcon = SignOut
-export const AccountIcon: AppIcon = UserCircle
-export const LinkIcon: AppIcon = LinkSimple
-
+export {
+  LockKey as LockIcon,
+  SignIn as SignInIcon,
+  SignOut as SignOutIcon,
+  UserCircle as AccountIcon,
+  LinkSimple as LinkIcon
+} from '@phosphor-icons/react'
 /**
  * AI, tooling and appearance.
  */
-export const CohostIcon: AppIcon = Robot
-export const BrainIcon: AppIcon = Brain
-export const SparkleIcon: AppIcon = Sparkle
-export const FastIcon: AppIcon = Lightning
-export const ClipIcon: AppIcon = Scissors
-export const RepairIcon: AppIcon = Wrench
-export const BugIcon: AppIcon = Bug
-export const TerminalIcon: AppIcon = TerminalWindow
-export const TextIcon: AppIcon = TextAa
-export const ChatIcon: AppIcon = ChatCircle
-export const SendIcon: AppIcon = PaperPlaneRight
-export const PinIcon: AppIcon = PushPin
-export const LightModeIcon: AppIcon = Sun
-export const DarkModeIcon: AppIcon = Moon
-
+export {
+  Robot as CohostIcon,
+  Brain as BrainIcon,
+  Sparkle as SparkleIcon,
+  Lightning as FastIcon,
+  Scissors as ClipIcon,
+  Wrench as RepairIcon,
+  Bug as BugIcon,
+  TerminalWindow as TerminalIcon,
+  TextAa as TextIcon,
+  ChatCircle as ChatIcon,
+  PaperPlaneRight as SendIcon,
+  PushPin as PinIcon,
+  Sun as LightModeIcon,
+  Moon as DarkModeIcon
+} from '@phosphor-icons/react'
 /**
  * Platform brand marks. NOT part of the Nucleo migration: these are third-party
  * logos with their own trademark rules, and the design language keeps app/source
  * marks as the only full-colour icons on screen.
  */
-export const TwitchIcon: AppIcon = TwitchLogo
-export const XPlatformIcon: AppIcon = XLogo
-export const YoutubeIcon: AppIcon = YoutubeLogo
-export const TiktokIcon: AppIcon = TiktokLogo
-export const InstagramIcon: AppIcon = InstagramLogo
-
+export {
+  TwitchLogo as TwitchIcon,
+  XLogo as XPlatformIcon,
+  YoutubeLogo as YoutubeIcon,
+  TiktokLogo as TiktokIcon,
+  InstagramLogo as InstagramIcon
+} from '@phosphor-icons/react'
 /**
  * Kick's mark (plan 063). Phosphor has no Kick logo, so this is a hand-drawn,
  * simplified version: the stepped "K" knocked out of a rounded square, drawn
