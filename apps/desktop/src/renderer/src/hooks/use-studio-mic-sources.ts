@@ -2,6 +2,7 @@ import { useMemo, useRef, useSyncExternalStore } from 'react'
 
 import { useStudioCore, useStudioDiagnostics } from '@/hooks/use-studio'
 import {
+  useStudioMicVisualDemand,
   useStudioMicVisualLifecycle,
   useStudioMicVisualPipeline
 } from '@/hooks/use-studio-mic-visual'
@@ -87,6 +88,9 @@ export function useMicrophoneMeter(): MicrophoneMeter {
   const muted = captureConfig.audio.microphoneMuted
   const micVisual = useStudioMicVisualLifecycle()
   const backendLevelsLive = useBackendAudioLevelsLive()
+  // The visible meter owns fallback demand even before the analyser is active.
+  // Backend levels own painting while live, so this retain ends when they return.
+  useStudioMicVisualDemand(!backendLevelsLive)
   const analyserSource = useStudioMicMeterSource({
     gainDb: captureConfig.audio.microphoneGainDb,
     muted

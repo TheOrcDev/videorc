@@ -20,6 +20,7 @@ import type {
 } from '@/lib/mic-visual-pipeline'
 
 const StudioMicVisualContext = createContext<MicVisualPipeline | undefined>(undefined)
+const StudioMicVisualDemandContext = createContext(false)
 const IDLE_LIFECYCLE: MicVisualLifecycleSnapshot = Object.freeze({
   status: 'idle',
   active: false
@@ -186,7 +187,11 @@ export function MicVisualPipelineProvider({
   }, [deviceName, enabled, permissionStatus, pipeline, selectionKey, strictDevice, resumeEpoch])
 
   return (
-    <StudioMicVisualContext.Provider value={pipeline}>{children}</StudioMicVisualContext.Provider>
+    <StudioMicVisualContext.Provider value={pipeline}>
+      <StudioMicVisualDemandContext.Provider value={enabled && permissionStatus === 'granted'}>
+        {children}
+      </StudioMicVisualDemandContext.Provider>
+    </StudioMicVisualContext.Provider>
   )
 }
 
@@ -197,6 +202,19 @@ export function useStudioMicVisualPipeline(): MicVisualPipeline {
     throw new Error('Studio microphone visuals must be used within StudioMicVisualProvider')
   }
   return pipeline
+}
+
+/**
+ * Retain an eligible consumer's fallback demand before frames exist. Demand
+ * must not wait for `active`: it is what opens the analyser in the first place.
+ * Painting can still prefer backend levels and keep honest no-reading states.
+ */
+export function useStudioMicVisualDemand(wanted: boolean): void {
+  const pipeline = useStudioMicVisualPipeline()
+  const eligible = useContext(StudioMicVisualDemandContext)
+  useEffect(() => {
+    if (wanted && eligible) return pipeline.retain()
+  }, [eligible, pipeline, wanted])
 }
 
 /** Lifecycle changes only; does not rerender at analyser frame rate. */
