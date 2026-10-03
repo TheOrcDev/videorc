@@ -56,6 +56,43 @@ const waitFor = async (predicate, description) => {
     `Timed out: ${description}; last error: ${lastError}; last state: ${JSON.stringify(lastState)}`
   )
 }
+const assertCameraOff = (current, description) => {
+  assert.equal(current.visual.sources.cameraOff, true, `${description}: Camera Off intent missing`)
+  assert.equal(current.visual.sources.cameraId, undefined, `${description}: camera reactivated`)
+}
+const chooseCameraOff = async () => {
+  await evaluate(`
+    const current = window.__videorcSmokeScenePresets.state();
+    const stored = JSON.parse(localStorage.getItem('videorc.captureConfig') ?? '{}');
+    window.__videorcSmokeScenePresets.configure({sources: {
+      ...stored.sources, ...current.visual.sources,
+      cameraId: undefined, cameraName: undefined, cameraOff: true
+    }});
+    return true;
+  `)
+  return waitFor(
+    (current) =>
+      current.canSave &&
+      current.visual.sources.cameraOff === true &&
+      !current.visual.sources.cameraId,
+    'confirmed Camera Off'
+  )
+}
+const refreshDevices = () =>
+  evaluate(`
+  await openTab('sources');
+  const button = [...document.querySelectorAll('button')].find((entry) => entry.textContent?.trim() === 'Refresh');
+  if (!button || button.disabled) throw new Error('Device refresh unavailable.');
+  button.click();
+  await new Promise(requestAnimationFrame);
+  const deadline = Date.now() + ${timeoutMs};
+  while (Date.now() < deadline) {
+    const refreshed = [...document.querySelectorAll('button')].find((entry) => entry.textContent?.trim() === 'Refresh');
+    if (refreshed && !refreshed.disabled) return true;
+    await sleep(25);
+  }
+  throw new Error('Device refresh did not finish.');
+`)
 try {
   ws = await connectBackend(launched.connections['backend-ready'], timeoutMs)
   await waitFor(() => true, 'renderer scene-preset actions ready')
@@ -73,8 +110,18 @@ try {
     (current) => current.canSave && current.visual.background?.assetId === 'builtin-bg-01',
     'first background'
   )
+  assertCameraOff(await chooseCameraOff(), 'before saving A')
   assert.equal(await evaluate(`return window.__videorcSmokeScenePresets.save('Smoke A')`), true)
   const first = (await state()).scenes.find((scene) => scene.name === 'Smoke A')
+  assert.equal(first.visual.sources.cameraOff, true)
+  await requestSmokeCommand(smoke, 'select-camera-device', { settleMs: 500 }, { timeoutMs })
+  await waitFor(
+    (current) =>
+      current.canSave &&
+      current.visual.sources.cameraOff === false &&
+      Boolean(current.visual.sources.cameraId),
+    'Camera On before saving B'
+  )
   await evaluate(
     `window.__videorcSmokeScenePresets.background('bg-02'); window.__videorcSmokeScenePresets.layout({cameraZoom: 175}); return true`
   )
@@ -89,7 +136,41 @@ try {
     'second background'
   )
   assert.equal(await evaluate(`return window.__videorcSmokeScenePresets.save('Smoke B')`), true)
-  const second = (await state()).scenes.find((scene) => scene.name === 'Smoke B')
+  let second = (await state()).scenes.find((scene) => scene.name === 'Smoke B')
+  assert.equal(second.visual.sources.cameraOff, false)
+  assert.equal(
+    await evaluate(
+      `return await window.__videorcSmokeScenePresets.apply(${JSON.stringify(first.id)})`
+    ),
+    true
+  )
+  await waitFor((current) => current.canSave && current.activeId === first.id, 'saved Off after On')
+  await refreshDevices()
+  assertCameraOff(await state(), 'saved A after device refresh')
+  assert.equal(
+    await evaluate(
+      `return await window.__videorcSmokeScenePresets.apply(${JSON.stringify(second.id)})`
+    ),
+    true
+  )
+  const restoredOn = await waitFor(
+    (current) => current.canSave && current.activeId === second.id,
+    'saved On after Off'
+  )
+  assert.equal(restoredOn.visual.sources.cameraOff, false)
+  assert.equal(restoredOn.visual.sources.cameraId, second.visual.sources.cameraId)
+  assert.equal(restoredOn.modified, false)
+  // Update B with explicit Off so both encoded backgrounds also exercise Off
+  // through the live apply and final stop, without changing audio ownership.
+  assertCameraOff(await chooseCameraOff(), 'before updating B')
+  assert.equal(
+    await evaluate(
+      `return window.__videorcSmokeScenePresets.save('Smoke B', ${JSON.stringify(second.id)})`
+    ),
+    true
+  )
+  second = (await state()).scenes.find((scene) => scene.id === second.id)
+  assert.equal(second.visual.sources.cameraOff, true)
   try {
     await requestSmokeCommand(
       smoke,
@@ -159,6 +240,7 @@ try {
     'renderer restart checkpoint'
   )
   const beforeRecording = await state()
+  assertCameraOff(beforeRecording, 'working checkpoint after renderer restart')
   assert.equal(beforeRecording.backgroundSlots.find((slot) => slot.id === 'bg-03').assetId, null)
   const directory = await requestSmokeCommand(
     smoke,
@@ -194,9 +276,13 @@ try {
     `return await window.__videorcSmokeScenePresets.apply(${JSON.stringify(second.id)})`
   )
   await waitFor((current) => current.activeId === second.id && !current.pendingId, 'live B')
+  assertCameraOff(await state(), 'live saved B')
   assert.equal((await request(ws, timeoutMs, 'recording.status')).sessionId, started.sessionId)
   await new Promise((resolve) => setTimeout(resolve, 1700))
   const stopped = await request(ws, timeoutMs, 'session.stop')
+  await waitFor((current) => current.recording === 'idle', 'finished session')
+  await refreshDevices()
+  assertCameraOff(await state(), 'finished session after device refresh')
   const path = await resolveFinalRecordingPath({ started, stopped, timeoutMs })
   const quality = await analyzeRecording(path, {
     ffmpegPath: 'ffmpeg',
@@ -234,7 +320,7 @@ try {
     `Saved background pixels did not change: ${a} / ${b}`
   )
   console.log(
-    `Scene presets smoke PASS: atomic apply, exact source refusal, working restart, live switching and encoded background pixels. ${reports.mdPath}`
+    `Scene presets smoke PASS: atomic apply, Camera Off/On round trips, exact source refusal, working restart, live switching and encoded background pixels. ${reports.mdPath}`
   )
 } finally {
   ws?.close()
