@@ -6910,7 +6910,7 @@ fn update_chat_totals(conn: &Connection, message: &LiveChatMessage, inserted: bo
     if tips.len() > MAX_CHAT_CURRENCIES {
         bail!("Live chat currencies exceed the accounting wire bound.");
     }
-    tips.sort_by(|left, right| right.amount_micros.cmp(&left.amount_micros));
+    tips.sort_by_key(|tip| std::cmp::Reverse(tip.amount_micros));
     conn.execute("INSERT INTO live_chat_contributions (message_id, session_id, contribution_json) VALUES (?1, ?2, ?3)
         ON CONFLICT(message_id) DO UPDATE SET contribution_json = excluded.contribution_json",
         params![message.id, message.session_id, serde_json::to_string(&next)?])?;
