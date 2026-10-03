@@ -633,6 +633,7 @@ try {
       `${IDLE_PROOF_MS / 1000} s idle without a tick.`
   )
 
+  await runConsentScenario({ ready, startedAt })
   await runSpotlightScenario({ ready, startedAt })
 } finally {
   try {
@@ -820,6 +821,227 @@ function waitForBackendReady(child, deadlineMs) {
 }
 
 // --- Spotlight scenario (plan 060 S5) -----------------------------------------
+
+// The debug idle-caption seam exercises consent without starting a second
+// recording. Real requests reach the local fakes; response barriers expose
+// admitted work before the preference changes, rather than relying on sleeps.
+async function runConsentScenario({ ready, startedAt }) {
+  const consentSessionId = `consent-${randomUUID()}`
+  const events = collectEvents(backend)
+  const admin = await connectBackend(
+    { ...ready, token: ready.adminToken, adminToken: undefined },
+    timeoutMs
+  )
+  const holds = []
+  let pump
+  let delayedFinal
+  const phase = (message) =>
+    console.log(
+      `[cohost-smoke consent +${((Date.now() - startedAt) / 1000).toFixed(1)}s] ${message}`
+    )
+  const flip = (consent) =>
+    request(backend, timeoutMs, 'cohost.start', {
+      sessionId: consentSessionId,
+      consentToProcessChat: consent
+    })
+  async function admitted(hold, label, deadlineMs) {
+    let record
+    hold.arrived.then((value) => {
+      record = value
+    })
+    return waitUntil(() => record, deadlineMs, label)
+  }
+  async function emit(text) {
+    const since = Date.now()
+    expect(
+      (await captionFake.emitRealtimeFinal(text)) > 0,
+      'Consent scenario lost its caption socket.'
+    )
+    await waitForEvent(
+      events,
+      'captions.update',
+      (update) => update.text === text && update.kind === 'final',
+      'consent caption final',
+      5_000,
+      since
+    )
+  }
+  try {
+    phase('seed one chat session and independently enabled captions')
+    await request(backend, timeoutMs, 'cohost.settings.set', {
+      enabled: true,
+      listen: true,
+      autoHighlight: false,
+      voiceHighlight: false
+    })
+    await request(backend, timeoutMs, 'liveChat.start', {
+      sessionId: consentSessionId,
+      destinations: [{ platform: 'twitch', targetId: 'consent', read: 'ready', write: 'ready' }],
+      fakes: [{ platform: 'twitch', targetId: 'consent', count: 5, intervalMs: 200, send: 'sent' }]
+    })
+    await flip(true)
+    await request(backend, timeoutMs, 'captions.start', { language: 'en' })
+    pump = startCaptionAudioPump(admin)
+    await waitForEvent(
+      events,
+      'cohost.state',
+      (state) =>
+        state.sessionId === consentSessionId &&
+        state.tickSeq >= 1 &&
+        !state.tickInFlight &&
+        state.questions.length > 0,
+      'consent seed tick',
+      30_000
+    )
+    await waitUntil(
+      () => captionFake.state.audioAppends > 0,
+      5_000,
+      'caption audio for consent scenario'
+    )
+    const captionBefore = await request(backend, timeoutMs, 'captions.status.get', {})
+
+    phase('hold admitted tick, spotlight and speech responses')
+    const tickHold = fake.holdNextTickResponse()
+    holds.push(tickHold)
+    await emit(
+      'I am discussing this keyboard in detail so this complete sentence supplies enough fresh speech for an Orcle tick. The discussion continues through several concrete examples about typing comfort, key travel, desk space and the different shortcuts I use throughout a normal working day.'
+    )
+    const tick = await admitted(tickHold, 'held consent tick admission', 30_000)
+    const sourceId = tick.body.openQuestions[0]?.id
+    const current = await request(backend, timeoutMs, 'cohost.status', {})
+    const messageId = current.questions.find((question) => question.id === sourceId)?.messageIds[0]
+    expect(messageId, 'Seed question must retain its source message.')
+    fake.setSpotlightMatches([
+      { whenTranscriptIncludes: 'consent boundary', messageId, about: 0.95 }
+    ])
+    const spotlightHold = fake.holdNextSpotlightResponse()
+    holds.push(spotlightHold)
+    await emit('This consent boundary sentence identifies the comment I am discussing.')
+    await admitted(spotlightHold, 'held consent spotlight admission', 5_000)
+    const speechHold = captionFake.holdNextRealtimeFinal()
+    holds.push(speechHold)
+    const staleSpeech =
+      'This speech response was admitted before consent was revoked. These old words must never become context for Orcle after consent is granted again, even though live captions can still show this complete delayed transcription for the recording.'
+    delayedFinal = captionFake.emitRealtimeFinal(staleSpeech)
+    delayedFinal.catch(() => {})
+    await admitted(speechHold, 'held consent speech completion', 2_000)
+    const before = await request(backend, timeoutMs, 'cohost.status', {})
+    const revoked = await flip(false)
+    const revokedEventsStart = events.list.length
+    expect(
+      revoked.status === 'paused' &&
+        revoked.reason === 'consent-required' &&
+        revoked.listening?.reasonCode === 'consent-required',
+      `Revocation was not authoritative: ${JSON.stringify(revoked)}`
+    )
+    expect(
+      JSON.stringify(revoked.questions) === JSON.stringify(before.questions) &&
+        revoked.tickSeq === before.tickSeq &&
+        !revoked.tickInFlight,
+      'Revocation must preserve session history and retire the pending tick.'
+    )
+    const counts = {
+      tick: fake.state.requests.length,
+      spotlight: fake.state.spotlightRequests.length
+    }
+    tickHold.release()
+    spotlightHold.release()
+    await sleep(6_000)
+    expect(
+      fake.state.requests.length === counts.tick &&
+        fake.state.spotlightRequests.length === counts.spotlight,
+      'Revoked Orcle admitted new cloud work.'
+    )
+    const after = await request(backend, timeoutMs, 'cohost.status', {})
+    expect(
+      after.status === 'paused' &&
+        after.listening?.reasonCode === 'consent-required' &&
+        !after.spotlight &&
+        JSON.stringify(after.questions) === JSON.stringify(revoked.questions),
+      'Late tick, spotlight or speech reactivated revoked Orcle.'
+    )
+    expect(
+      events.list
+        .slice(revokedEventsStart)
+        .filter((entry) => entry.event === 'cohost.state')
+        .every(
+          (entry) => entry.payload.status === 'paused' && entry.payload.listening?.state !== 'on'
+        ),
+      'A stale cloud response published active Orcle after revoke.'
+    )
+    const captionAfter = await request(backend, timeoutMs, 'captions.status.get', {})
+    expect(
+      captionAfter.sessionClientId === captionBefore.sessionClientId &&
+        captionAfter.state !== 'idle',
+      'Consent revocation restarted or disabled explicit captions.'
+    )
+
+    phase('grant in place and admit fresh work without resetting history')
+    const granted = await flip(true)
+    expect(
+      granted.sessionId === consentSessionId &&
+        granted.status === 'listening' &&
+        JSON.stringify(granted.questions) === JSON.stringify(revoked.questions) &&
+        granted.tickSeq === revoked.tickSeq &&
+        !granted.spotlight,
+      'Grant reset the chat session or accepted a retired result.'
+    )
+    const grantedAt = Date.now()
+    speechHold.release()
+    await delayedFinal
+    await waitForEvent(
+      events,
+      'captions.update',
+      (update) => update.kind === 'final' && update.text === staleSpeech,
+      'independently authorized late caption after grant',
+      5_000,
+      grantedAt
+    )
+    await sleep(6_000)
+    expect(
+      fake.state.requests.length === counts.tick &&
+        fake.state.spotlightRequests.length === counts.spotlight,
+      'Old speech admitted cloud work after regrant.'
+    )
+    const settled = await request(backend, timeoutMs, 'cohost.status', {})
+    expect(
+      !settled.spotlight &&
+        JSON.stringify(settled.questions) === JSON.stringify(granted.questions) &&
+        settled.tickSeq === granted.tickSeq,
+      'A retired result entered the new consent generation.'
+    )
+    fake.setSpotlightMatches([])
+    await emit(
+      'Fresh authorized speech after granting consent should reach the existing Orcle session without any reset. This new discussion covers the keyboard I am using today, how I compare the keys and their feel, and the changes I would suggest to make the same workflow more comfortable.'
+    )
+    await waitUntil(
+      () => fake.state.requests.length > counts.tick,
+      30_000,
+      'fresh tick after consent grant'
+    )
+    const resumed = fake.state.requests.at(-1).body
+    expect(
+      resumed.sessionClientId === consentSessionId &&
+        resumed.consentToProcessChat === true &&
+        resumed.tickSeq > revoked.tickSeq,
+      'Grant did not resume eligible work in the same session.'
+    )
+    console.log(
+      'Orcle consent fake smoke PASS - same-session revoke/grant, bounded cloud admissions, retired tick/spotlight/speech, preserved history and independent captions.'
+    )
+  } finally {
+    for (const hold of holds) hold.release()
+    if (delayedFinal) await Promise.allSettled([delayedFinal])
+    pump?.stop()
+    await request(backend, 5_000, 'cohost.stop', {}).catch(() => {})
+    await request(backend, 5_000, 'captions.stop', {}).catch(() => {})
+    await request(backend, 5_000, 'liveChat.stop', {}).catch(() => {})
+    await request(backend, 5_000, 'cohost.settings.set', { listen: false }).catch(() => {})
+    fake.setSpotlightMatches([])
+    admin.close()
+    events.close()
+  }
+}
 
 async function runSpotlightScenario({ ready, startedAt }) {
   const phase = (label) =>

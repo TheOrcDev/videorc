@@ -319,7 +319,9 @@ export function planCohostSpeech(body, questions) {
     summary = summary.slice(summary.length - COHOST_TICK_SUMMARY_MAX_CHARS)
   }
   const transcriptWords = contentWords(transcript)
-  const topic = transcript ? transcriptWords.slice(0, 3).join(' ').slice(0, COHOST_TICK_TOPIC_MAX_CHARS) : ''
+  const topic = transcript
+    ? transcriptWords.slice(0, 3).join(' ').slice(0, COHOST_TICK_TOPIC_MAX_CHARS)
+    : ''
   const lower = transcript.toLocaleLowerCase('en-US')
   const promises = (body.openPromises ?? []).map((open) => ({
     id: open.id,
@@ -696,6 +698,31 @@ export async function startFakeCohostService({
     memory: new Map()
   }
   const mintId = () => `q_${state.nextQuestionNumber++}`
+  const responseHolds = { tick: [], spotlight: [] }
+  const activeHolds = new Set()
+
+  function holdNextResponse(lane) {
+    let acknowledge
+    let release
+    const arrived = new Promise((resolve) => {
+      acknowledge = resolve
+    })
+    const released = new Promise((resolve) => {
+      release = resolve
+    })
+    const hold = { acknowledge, released, release }
+    responseHolds[lane].push(hold)
+    activeHolds.add(hold)
+    return { arrived, release }
+  }
+
+  async function waitForRelease(lane, record) {
+    const hold = responseHolds[lane].shift()
+    if (!hold) return
+    hold.acknowledge(record)
+    await hold.released
+    activeHolds.delete(hold)
+  }
 
   const server = createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === COHOST_SPOTLIGHT_PATH) {
@@ -757,6 +784,7 @@ export async function startFakeCohostService({
         planned.highlights.map((highlight) => [highlight.messageId, highlight.score])
       )
     }
+    await waitForRelease('tick', record)
     return json(res, 200, planned)
   })
 
@@ -845,7 +873,9 @@ export async function startFakeCohostService({
         headers
       )
     }
-    return json(res, 200, planCohostSpotlight(body, state.spotlightMatches))
+    const planned = planCohostSpotlight(body, state.spotlightMatches)
+    await waitForRelease('spotlight', record)
+    return json(res, 200, planned)
   }
 
   await new Promise((resolveListen, rejectListen) => {
@@ -861,6 +891,12 @@ export async function startFakeCohostService({
   return {
     httpOrigin,
     state,
+    holdNextTickResponse() {
+      return holdNextResponse('tick')
+    },
+    holdNextSpotlightResponse() {
+      return holdNextResponse('spotlight')
+    },
     queueFailure(failure) {
       if (!failure || !Number.isInteger(failure.status) || typeof failure.code !== 'string') {
         throw new Error('queueFailure requires { status, code }.')
@@ -899,6 +935,7 @@ export async function startFakeCohostService({
       state.spotlightMatches = [...matches]
     },
     close() {
+      for (const hold of activeHolds) hold.release()
       return new Promise((resolveClose) => {
         server.closeAllConnections?.()
         server.close(() => resolveClose())

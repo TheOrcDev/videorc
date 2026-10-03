@@ -175,7 +175,11 @@ describe('fake co-host planner', () => {
     )
     assert.equal(
       validateCohostTickRequest(
-        tickBody({ promptVersion: 2, rules: [], messages: [{ ...message('a', 0), firstMessage: true }] })
+        tickBody({
+          promptVersion: 2,
+          rules: [],
+          messages: [{ ...message('a', 0), firstMessage: true }]
+        })
       ).code,
       'invalid-request'
     )
@@ -427,6 +431,68 @@ describe('fake co-host spotlight planner', () => {
 })
 
 describe('fake co-host service', () => {
+  it(
+    'holds admitted tick and spotlight responses until explicitly released',
+    { timeout: 10_000 },
+    async () => {
+      const fake = await startFakeCohostService({ smokeSessionToken: sessionToken })
+      const tick = fake.holdNextTickResponse()
+      const spotlight = fake.holdNextSpotlightResponse()
+      const completed = []
+      const abort = new AbortController()
+      const replies = []
+      const post = (path, body, lane) =>
+        fetch(`${fake.httpOrigin}${path}`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${sessionToken}`, 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: AbortSignal.any([abort.signal, AbortSignal.timeout(5_000)])
+        }).then(async (response) => {
+          completed.push(lane)
+          assert.equal(response.status, 200)
+          return response.json()
+        })
+      try {
+        const tickReply = post('/api/ai/cohost/tick', tickBody(), 'tick')
+        const spotlightReply = post(COHOST_SPOTLIGHT_PATH, spotlightBody(), 'spotlight')
+        replies.push(tickReply, spotlightReply)
+        // Observe HTTP failure or an unexpected early reply while awaiting the
+        // readiness channels. The fetch deadlines also bound missing arrivals.
+        const [tickRecord, spotlightRecord] = await Promise.all([
+          Promise.race([
+            tick.arrived,
+            tickReply.then(() => {
+              throw new Error('Tick escaped its response barrier.')
+            })
+          ]),
+          Promise.race([
+            spotlight.arrived,
+            spotlightReply.then(() => {
+              throw new Error('Spotlight escaped its response barrier.')
+            })
+          ])
+        ])
+        assert.equal(tickRecord.body.sessionClientId, 'smoke-session')
+        assert.equal(spotlightRecord.body.sessionClientId, spotlightBody().sessionClientId)
+        assert.deepEqual(completed, [])
+        tick.release()
+        await tickReply
+        assert.deepEqual(completed, ['tick'])
+        spotlight.release()
+        await spotlightReply
+        assert.deepEqual(completed, ['tick', 'spotlight'])
+        assert.equal(fake.state.requests.length, 1)
+        assert.equal(fake.state.spotlightRequests.length, 1)
+      } finally {
+        tick.release()
+        spotlight.release()
+        abort.abort()
+        await Promise.allSettled(replies)
+        await fake.close()
+      }
+    }
+  )
+
   it('authenticates, records requests, and serves scripted error modes', async () => {
     const fake = await startFakeCohostService({ smokeSessionToken: sessionToken, flagMarker: '#2' })
     const post = (body, token = sessionToken) =>

@@ -617,7 +617,12 @@ class StudioBackend {
           ...this.cohostState,
           sessionId: params.sessionId as string,
           status: params.consentToProcessChat === true ? 'listening' : 'paused',
-          reason: params.consentToProcessChat === true ? null : 'consent-required'
+          reason: params.consentToProcessChat === true ? null : 'consent-required',
+          listening: this.cohostSettings.listen
+            ? params.consentToProcessChat === true
+              ? { state: 'on' }
+              : { state: 'blocked', reasonCode: 'consent-required' }
+            : { state: 'off' }
         }
         return this.cohostState
       case 'cohost.question.answered':
@@ -6751,6 +6756,111 @@ describe('real StudioProvider lifecycle', () => {
       (command) => command.method === 'cohost.question.answered'
     )
     expect(answered?.params).toEqual({ sessionId: 'live-1', questionId: 'q-1' })
+    expect(toastSpies.error).not.toHaveBeenCalled()
+  }, 15_000)
+
+  it('applies cloud-AI preference flips to the same active Orcle session from backend replies', async () => {
+    const backend = new StudioBackend()
+    backend.entitlements = premiumEntitlements
+    backend.cohostSettings.listen = true
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem('videorc.aiConsent', '1')
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    await waitForObservation(() => latest()?.core.cohostSettings?.listen === true)
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'liveChat.snapshot',
+            payload: {
+              sessionId: 'consent-live',
+              providers: [],
+              messages: [],
+              unreadCount: 0,
+              updatedAt: now
+            }
+          })
+        })
+      }
+      await Promise.resolve()
+    })
+    await waitForObservation(() => latest()?.chat.cohostState?.listening?.state === 'on')
+    const started = latest()!.chat.cohostState!
+    const captureCommands = backend.sentCommands.filter((command) =>
+      [
+        'session.start',
+        'session.stop',
+        'liveChat.start',
+        'liveChat.stop',
+        'captions.start',
+        'captions.stop'
+      ].includes(command.method)
+    )
+    for (const consent of [false, true]) {
+      await act(async () => latest()!.core.setAiConsent(consent))
+      await waitForObservation(
+        () => latest()?.chat.cohostState?.status === (consent ? 'listening' : 'paused')
+      )
+      expect(latest()!.chat.cohostState).toMatchObject({
+        sessionId: 'consent-live',
+        reason: consent ? null : 'consent-required',
+        questions: started.questions,
+        tickSeq: started.tickSeq,
+        listening: consent ? { state: 'on' } : { state: 'blocked', reasonCode: 'consent-required' }
+      })
+      expect(latest()!.chat.liveChatSnapshot.sessionId).toBe('consent-live')
+      expect(localStorage.getItem('videorc.aiConsent')).toBe(consent ? '1' : '0')
+    }
+    expect(
+      backend.sentCommands
+        .filter((command) => command.method === 'cohost.start')
+        .map((command) => command.params)
+    ).toEqual([
+      expect.objectContaining({ sessionId: 'consent-live', consentToProcessChat: true }),
+      expect.objectContaining({ sessionId: 'consent-live', consentToProcessChat: false }),
+      expect.objectContaining({ sessionId: 'consent-live', consentToProcessChat: true })
+    ])
+    expect(
+      backend.sentCommands.filter((command) =>
+        [
+          'session.start',
+          'session.stop',
+          'liveChat.start',
+          'liveChat.stop',
+          'captions.start',
+          'captions.stop'
+        ].includes(command.method)
+      )
+    ).toEqual(captureCommands)
     expect(toastSpies.error).not.toHaveBeenCalled()
   }, 15_000)
 

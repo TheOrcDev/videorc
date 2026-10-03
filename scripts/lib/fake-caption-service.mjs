@@ -47,6 +47,8 @@ export async function startFakeCaptionService({
     emittedFinals: []
   }
   let scriptedItemSeq = 0
+  const finalHolds = []
+  const activeFinalHolds = new Set()
   const gatewayProtocol = 'ai-gateway-realtime.v1'
   const gatewayAuthProtocol = `ai-gateway-auth.${smokeRealtimeToken}`
   const realtime = new WebSocketServer({
@@ -143,10 +145,10 @@ export async function startFakeCaptionService({
     realtime.handleUpgrade(req, socket, head, (ws) => realtime.emit('connection', ws, req))
   })
 
-  const connectionStartedAt = new WeakMap()
+  const audioTimeline = new WeakMap()
   realtime.on('connection', (ws) => {
     state.realtimeConnections += 1
-    connectionStartedAt.set(ws, Date.now())
+    audioTimeline.set(ws, { sentMs: 0, lastStartMs: 0 })
     let transcriptSent = false
     ws.on('message', (data) => {
       let message
@@ -162,6 +164,10 @@ export async function startFakeCaptionService({
       }
       if (message.type !== 'input_audio_buffer.append') return
       state.audioAppends += 1
+      const timeline = audioTimeline.get(ws)
+      timeline.lastStartMs = timeline.sentMs
+      timeline.sentMs +=
+        Buffer.from(typeof message.audio === 'string' ? message.audio : '', 'base64').length / 32
       if (typeof message.audio !== 'string' || message.audio.length === 0) {
         state.emptyAudioAppends += 1
       }
@@ -228,6 +234,20 @@ export async function startFakeCaptionService({
   return {
     state,
     httpOrigin,
+    holdNextRealtimeFinal() {
+      let acknowledge
+      let release
+      const arrived = new Promise((resolve) => {
+        acknowledge = resolve
+      })
+      const released = new Promise((resolve) => {
+        release = resolve
+      })
+      const hold = { acknowledge, released, release }
+      finalHolds.push(hold)
+      activeFinalHolds.add(hold)
+      return { arrived, release }
+    },
     /**
      * Push one scripted utterance to every open realtime client: speech
      * started for a fresh item, then its completed transcription (the
@@ -239,18 +259,25 @@ export async function startFakeCaptionService({
       let reached = 0
       for (const client of realtime.clients) {
         if (client.readyState !== 1) continue
-        const startedAt = connectionStartedAt.get(client) ?? Date.now()
+        const audioStartMs = audioTimeline.get(client)?.lastStartMs ?? 0
         client.send(
           JSON.stringify({
             type: 'speech-started',
             itemId: scriptedItemId,
-            raw: { audio_start_ms: Date.now() - startedAt, item_id: scriptedItemId }
+            raw: { audio_start_ms: audioStartMs, item_id: scriptedItemId }
           })
         )
         reached += 1
       }
       if (reached === 0) return 0
-      await new Promise((resolveGap) => setTimeout(resolveGap, 25))
+      const hold = finalHolds.shift()
+      if (hold) {
+        hold.acknowledge({ itemId: scriptedItemId, text, reached })
+        await hold.released
+        activeFinalHolds.delete(hold)
+      } else {
+        await new Promise((resolveGap) => setTimeout(resolveGap, 25))
+      }
       for (const client of realtime.clients) {
         if (client.readyState !== 1) continue
         client.send(
@@ -265,6 +292,7 @@ export async function startFakeCaptionService({
       return reached
     },
     close: async () => {
+      for (const hold of activeFinalHolds) hold.release()
       for (const client of realtime.clients) client.terminate()
       realtime.close()
       await new Promise((resolveClose) => server.close(resolveClose))

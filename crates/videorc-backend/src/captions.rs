@@ -2878,6 +2878,15 @@ pub struct CaptionsCoordinator {
     /// Bumped whenever the listen intent ends (a stop, sign-out): a listening
     /// state a task decided to publish before that never lands after it.
     listen_epoch: u64,
+    /// Current listen grant in the same monotonic clock as AudioFrame. Raw
+    /// frames can remain in the shared caption receiver across revoke/grant;
+    /// they must not acquire the new epoch merely because they drain later.
+    listen_started_at: Option<std::time::Instant>,
+    /// Orcle speech admission is independent of its Listen setting: explicit
+    /// captions also feed consenting voice/spotlight features.
+    speech_admitted: bool,
+    speech_epoch: u64,
+    speech_started_at: Option<std::time::Instant>,
     language: Option<String>,
     /// Orders delayed capture auto-start against explicit stop/start, capture
     /// stop, sign-out, and shutdown. A queued task may commit only the exact
@@ -3374,6 +3383,65 @@ async fn publish_status(session: &CaptionSession, status: CaptionsStatus) {
     session.state.emit_event("captions.status", status);
 }
 
+/// Called under the co-host lifecycle fence. Retirement shares the lock used
+/// by synchronous transcript appends; clear the old transcript before granting.
+pub(crate) async fn retire_orcle_speech(state: &AppState) {
+    let mut coordinator = state.captions.lock().await;
+    coordinator.speech_admitted = false;
+    coordinator.speech_epoch = coordinator.speech_epoch.saturating_add(1);
+    coordinator.speech_started_at = None;
+}
+
+pub(crate) async fn grant_orcle_speech(state: &AppState) {
+    if state.process_shutdown_requested() {
+        return;
+    }
+    let mut coordinator = state.captions.lock().await;
+    if state.process_shutdown_requested()
+        || coordinator.privacy_teardown_in_progress
+        || coordinator.privacy_teardown_failed
+    {
+        return;
+    }
+    if !coordinator.speech_admitted {
+        coordinator.speech_admitted = true;
+        coordinator.speech_started_at = Some(std::time::Instant::now());
+    }
+}
+
+/// Two independent owners travel with input audio. A Listen setting change
+/// retires readiness without retiring speech admitted by the same consent.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct AdmittedOrcleAudio {
+    speech_epoch: Option<u64>,
+    listen_epoch: Option<u64>,
+}
+
+impl AdmittedOrcleAudio {
+    fn merge(self, other: Self) -> Self {
+        Self {
+            speech_epoch: self
+                .speech_epoch
+                .filter(|epoch| Some(*epoch) == other.speech_epoch),
+            listen_epoch: self
+                .listen_epoch
+                .filter(|epoch| Some(*epoch) == other.listen_epoch),
+        }
+    }
+
+    fn owns_speech(self, coordinator: &CaptionsCoordinator) -> bool {
+        coordinator.speech_admitted && self.speech_epoch == Some(coordinator.speech_epoch)
+    }
+
+    #[cfg(test)]
+    fn test_epoch(epoch: u64) -> Self {
+        Self {
+            speech_epoch: Some(epoch),
+            listen_epoch: Some(epoch),
+        }
+    }
+}
+
 /// The listen epoch now (see `CaptionsCoordinator::listen_epoch`).
 pub(crate) async fn current_listen_epoch(state: &AppState) -> u64 {
     state.captions.lock().await.listen_epoch
@@ -3715,6 +3783,15 @@ async fn start_listen_with_bearer(
     cohost_session_id: &str,
     resolve_bearer: impl FnOnce() -> Option<String> + Send,
 ) -> crate::cohost::CohostListening {
+    start_listen_with_bearer_for_epoch(state, cohost_session_id, resolve_bearer, None).await
+}
+
+async fn start_listen_with_bearer_for_epoch(
+    state: &AppState,
+    cohost_session_id: &str,
+    resolve_bearer: impl FnOnce() -> Option<String> + Send,
+    expected_epoch: Option<u64>,
+) -> crate::cohost::CohostListening {
     use crate::cohost::CohostListening;
     if state.process_shutdown_requested() {
         return CohostListening::blocked("shutting-down", "Videorc is shutting down.");
@@ -3725,6 +3802,11 @@ async fn start_listen_with_bearer(
     }
     {
         let coordinator = state.captions.lock().await;
+        if expected_epoch
+            .is_some_and(|epoch| coordinator.listen_epoch != epoch || !coordinator.listen_wanted)
+        {
+            return CohostListening::off();
+        }
         if coordinator.privacy_teardown_in_progress || coordinator.privacy_teardown_failed {
             return CohostListening::blocked(
                 "signing-out",
@@ -3739,6 +3821,9 @@ async fn start_listen_with_bearer(
         caption_capture_facts(state.recording.lock().await.as_ref());
 
     let mut coordinator = state.captions.lock().await;
+    if !coordinator.listen_wanted {
+        coordinator.listen_started_at = Some(std::time::Instant::now());
+    }
     coordinator.listen_wanted = true;
     if coordinator_task_alive(&coordinator) {
         // Captions (or an earlier listen) already run the task: join it.
@@ -3796,18 +3881,33 @@ async fn start_listen_with_bearer(
 /// blocked by no capture) starts now. Runs off the recording path and never
 /// delays it.
 pub async fn resume_listen_for_capture(state: &AppState) {
-    let wanted = {
+    resume_listen_for_capture_after_check(state, std::future::ready(())).await;
+}
+
+async fn resume_listen_for_capture_after_check<F>(state: &AppState, after_check: F)
+where
+    F: std::future::Future<Output = ()>,
+{
+    let epoch = {
         let coordinator = state.captions.lock().await;
-        coordinator.listen_wanted && !coordinator_task_alive(&coordinator)
+        (coordinator.listen_wanted && !coordinator_task_alive(&coordinator))
+            .then_some(coordinator.listen_epoch)
     };
-    if !wanted {
+    let Some(epoch) = epoch else {
         return;
-    }
+    };
+    after_check.await;
     let Some(session_id) = crate::cohost::cohost_status(state).await.session_id else {
         return;
     };
-    let listening = start_listen_for_cohost(state, &session_id).await;
-    crate::cohost::publish_listening(state, listening).await;
+    let listening = start_listen_with_bearer_for_epoch(
+        state,
+        &session_id,
+        crate::account::stored_session_token,
+        Some(epoch),
+    )
+    .await;
+    crate::cohost::publish_listening_for_epoch(state, epoch, listening).await;
 }
 
 /// How Orcle's listen intent ends.
@@ -3845,12 +3945,13 @@ pub async fn stop_listen_with(state: &AppState, how: ListenStop) {
     let end_task = {
         let mut coordinator = state.captions.lock().await;
         coordinator.listen_wanted = false;
+        coordinator.listen_ready = false;
         // A listening state the task decided to publish before the intent
         // ended never lands after it.
         coordinator.listen_epoch = coordinator.listen_epoch.saturating_add(1);
-        !drain_with_capture
-            && coordinator_task_alive(&coordinator)
-            && !coordinator_presenting(&coordinator)
+        // Retirement owns cleanup even if the provider finished first. A
+        // completed handle still owns its stop flag and installed tap.
+        !drain_with_capture && coordinator.task.is_some() && !coordinator_presenting(&coordinator)
     };
     if end_task {
         finish_caption_task(state, true, false).await;
@@ -3922,6 +4023,9 @@ pub async fn stop_captions_for_sign_out(
         coordinator.listen_ready = false;
         // A listening publish queued before this line never lands after it.
         coordinator.listen_epoch = coordinator.listen_epoch.saturating_add(1);
+        coordinator.speech_admitted = false;
+        coordinator.speech_epoch = coordinator.speech_epoch.saturating_add(1);
+        coordinator.speech_started_at = None;
         coordinator.presentation = None;
         coordinator.shadow_status = None;
         coordinator.language = None;
@@ -4279,18 +4383,65 @@ impl CaptionSession {
         self.present.load(Ordering::Acquire)
     }
 
-    /// Mark the task ready to listen, and report `listening` (an `on`, with
-    /// the listen allowance when a listen-metered answer carried it) to Orcle
-    /// when the listen intent is wanted.
-    async fn note_listen_ready(&self, listening: crate::cohost::CohostListening) {
-        let (wanted, epoch) = {
-            let mut coordinator = self.state.captions.lock().await;
-            coordinator.listen_ready = true;
-            (coordinator.listen_wanted, coordinator.listen_epoch)
-        };
-        if wanted {
-            spawn_listening_publish(&self.state, epoch, listening);
+    /// Stamp audio at admission, before its provider response can be delayed.
+    async fn admitted_listen_epoch(&self) -> Option<u64> {
+        let coordinator = self.state.captions.lock().await;
+        coordinator
+            .listen_wanted
+            .then_some(coordinator.listen_epoch)
+    }
+
+    async fn admitted_orcle_audio(&self) -> AdmittedOrcleAudio {
+        let coordinator = self.state.captions.lock().await;
+        AdmittedOrcleAudio {
+            speech_epoch: coordinator
+                .speech_admitted
+                .then_some(coordinator.speech_epoch),
+            listen_epoch: coordinator
+                .listen_wanted
+                .then_some(coordinator.listen_epoch),
         }
+    }
+
+    async fn admitted_orcle_audio_for_frame(&self, frame: &AudioFrame) -> AdmittedOrcleAudio {
+        let coordinator = self.state.captions.lock().await;
+        // Some producers stamp the buffer end. Requiring the entire frame
+        // after grant excludes queued old audio and crossing frames. Caption
+        // audio, capture timestamps, and recording clip marks stay unchanged.
+        let Some(earliest) = frame.captured_at.checked_sub(frame.duration()) else {
+            return AdmittedOrcleAudio::default();
+        };
+        AdmittedOrcleAudio {
+            speech_epoch: coordinator
+                .speech_started_at
+                .filter(|grant| coordinator.speech_admitted && earliest >= *grant)
+                .map(|_| coordinator.speech_epoch),
+            listen_epoch: coordinator
+                .listen_started_at
+                .filter(|grant| coordinator.listen_wanted && earliest >= *grant)
+                .map(|_| coordinator.listen_epoch),
+        }
+    }
+
+    /// Provider readiness belongs to the admitted input, never to a later
+    /// listen intent. Publication runs off the caption task to avoid awaiting
+    /// the chat lifecycle fence during capture finalization.
+    async fn note_listen_ready(
+        &self,
+        admitted_epoch: Option<u64>,
+        listening: crate::cohost::CohostListening,
+    ) {
+        let Some(epoch) = admitted_epoch else {
+            return;
+        };
+        {
+            let mut coordinator = self.state.captions.lock().await;
+            if !coordinator.listen_wanted || coordinator.listen_epoch != epoch {
+                return;
+            }
+            coordinator.listen_ready = true;
+        }
+        spawn_listening_publish(&self.state, epoch, listening);
     }
 
     /// Caption health events are presentation: listen-only stays silent.
@@ -4492,6 +4643,7 @@ struct RealtimeCaptionTimeline {
     socket_audio_base_ms: f64,
     ms_sent: f64,
     capture_epoch: u64,
+    admission: AdmittedOrcleAudio,
 }
 
 impl RealtimeCaptionTimeline {
@@ -4505,6 +4657,64 @@ impl RealtimeCaptionTimeline {
     fn cue_end_seconds(&self, offset_seconds: f64) -> f64 {
         (self.capture_base_seconds + (self.ms_sent - self.ms_at_anchor) / 1000.0)
             .max(offset_seconds + 0.5)
+    }
+}
+
+/// Audio offsets belong to the consent intent at input admission, not to the
+/// intent present when a delayed VAD or transcript event reaches us. Retain a
+/// bounded number of boundaries; older or missing offsets have no Orcle owner.
+#[derive(Default)]
+struct RealtimeAudioAdmissions {
+    boundaries: std::collections::VecDeque<(f64, AdmittedOrcleAudio)>,
+    sent_ms: f64,
+}
+
+impl RealtimeAudioAdmissions {
+    fn record(&mut self, duration_ms: f64, admission: AdmittedOrcleAudio) {
+        if self
+            .boundaries
+            .back()
+            .is_none_or(|(_, last)| *last != admission)
+        {
+            self.boundaries.push_back((self.sent_ms, admission));
+            if self.boundaries.len() > 64 {
+                self.boundaries.pop_front();
+            }
+        }
+        self.sent_ms += duration_ms;
+    }
+
+    fn at(&self, audio_start_ms: Option<f64>) -> AdmittedOrcleAudio {
+        let Some(start) = audio_start_ms.filter(|start| start.is_finite() && *start >= 0.0) else {
+            return AdmittedOrcleAudio::default();
+        };
+        if start >= self.sent_ms {
+            return AdmittedOrcleAudio::default();
+        }
+        self.boundaries
+            .iter()
+            .rev()
+            .find(|(boundary, _)| *boundary <= start)
+            .map(|(_, admission)| *admission)
+            .unwrap_or_default()
+    }
+
+    fn for_event(
+        &self,
+        event: &RealtimeCaptionEvent,
+        items: &std::collections::HashMap<String, (u64, f64, AdmittedOrcleAudio)>,
+        socket_admission: AdmittedOrcleAudio,
+    ) -> AdmittedOrcleAudio {
+        match event {
+            RealtimeCaptionEvent::SpeechStarted { audio_start_ms, .. } => self.at(*audio_start_ms),
+            RealtimeCaptionEvent::Partial { item_id, .. }
+            | RealtimeCaptionEvent::Completed { item_id, .. } => items
+                .get(item_id)
+                .map(|(_, _, admission)| *admission)
+                .unwrap_or_default(),
+            RealtimeCaptionEvent::ConfigurationAcknowledged => socket_admission,
+            _ => AdmittedOrcleAudio::default(),
+        }
     }
 }
 
@@ -4871,8 +5081,9 @@ async fn run_realtime_caption_session(
 
     let mut ever_connected = false;
     let mut retry_budget = RealtimeRetryBudget::default();
-    // Utterance bookkeeping: item id → (caption seq, audio offset seconds).
-    let mut items: std::collections::HashMap<String, (u64, f64)> = std::collections::HashMap::new();
+    // Utterance bookkeeping: item id → (caption seq, audio offset, speech/listen owners).
+    let mut items: std::collections::HashMap<String, (u64, f64, AdmittedOrcleAudio)> =
+        std::collections::HashMap::new();
     // Recording-epoch anchoring (same idea as chunked): mono ms sent since the
     // capture pipeline (re)started. speech_started's audio_start_ms is
     // relative to the WS stream, so remember the stream ms at each anchor.
@@ -4888,6 +5099,7 @@ async fn run_realtime_caption_session(
             return RealtimeOutcome::Ended;
         }
 
+        let socket_admission = session.admitted_orcle_audio().await;
         let token = match session
             .client
             .mint_caption_realtime_token(&session.bearer, &session.session_client_id)
@@ -4983,6 +5195,8 @@ async fn run_realtime_caption_session(
         let socket_audio_base_ms = ms_sent;
         let mut provider_ready = false;
         let mut listening_published = false;
+        let mut published_listen_epoch = None;
+        let mut audio_admissions = RealtimeAudioAdmissions::default();
         let mut speech_watchdog_since: Option<tokio::time::Instant> = None;
 
         // Refresh well before the token expires (60s of headroom against the
@@ -5047,6 +5261,7 @@ async fn run_realtime_caption_session(
                                     | RealtimeCaptionEvent::Partial { .. }
                                     | RealtimeCaptionEvent::Completed { .. }
                             ) {
+                                let admission = audio_admissions.for_event(&parsed, &items, socket_admission);
                                 handle_realtime_event(
                                     session,
                                     parsed,
@@ -5058,6 +5273,7 @@ async fn run_realtime_caption_session(
                                         socket_audio_base_ms,
                                         ms_sent,
                                         capture_epoch,
+                                        admission,
                                     },
                                 )
                                 .await;
@@ -5101,7 +5317,9 @@ async fn run_realtime_caption_session(
                     {
                         speech_watchdog_since = Some(tokio::time::Instant::now());
                     }
+                    let input_admission = session.admitted_orcle_audio_for_frame(&frame).await;
                     let frame_seconds = mono.len() as f64 / f64::from(CAPTION_SAMPLE_RATE);
+                    audio_admissions.record(frame_seconds * 1000.0, input_admission);
                     ms_sent += frame_seconds * 1000.0;
                     unreported_ms += frame_seconds * 1000.0;
                     timeline.advance_seconds(frame_seconds);
@@ -5123,6 +5341,8 @@ async fn run_realtime_caption_session(
                         provider_ready,
                         audio_heartbeat.has_seen_frame(),
                         &mut listening_published,
+                        input_admission.listen_epoch,
+                        &mut published_listen_epoch,
                         token.remaining_seconds,
                     )
                     .await;
@@ -5224,6 +5444,7 @@ async fn run_realtime_caption_session(
                         }
                         RealtimeCaptionEvent::Ignored => {}
                     }
+                    let admission = audio_admissions.for_event(&parsed, &items, socket_admission);
                     handle_realtime_event(
                         session,
                         parsed,
@@ -5235,6 +5456,7 @@ async fn run_realtime_caption_session(
                             socket_audio_base_ms,
                             ms_sent,
                             capture_epoch,
+                            admission,
                         },
                     )
                     .await;
@@ -5243,6 +5465,8 @@ async fn run_realtime_caption_session(
                         provider_ready,
                         audio_heartbeat.has_seen_frame(),
                         &mut listening_published,
+                        admission.listen_epoch,
+                        &mut published_listen_epoch,
                         token.remaining_seconds,
                     )
                     .await;
@@ -5522,23 +5746,32 @@ async fn publish_listening_if_ready(
     provider_ready: bool,
     audio_seen: bool,
     listening_published: &mut bool,
+    admitted_epoch: Option<u64>,
+    published_epoch: &mut Option<u64>,
     remaining_seconds: Option<u64>,
 ) {
-    if !provider_ready || !audio_seen || *listening_published {
+    if !provider_ready || !audio_seen {
         return;
     }
-    *listening_published = true;
-    let mut status = CaptionsStatus::active(
-        CaptionsState::Listening,
-        CaptionsTransport::Realtime,
-        &session.session_client_id,
-    );
-    status.provider_ready = true;
-    status.remaining_seconds = remaining_seconds;
-    publish_status(session, status).await;
+    if !*listening_published {
+        *listening_published = true;
+        let mut status = CaptionsStatus::active(
+            CaptionsState::Listening,
+            CaptionsTransport::Realtime,
+            &session.session_client_id,
+        );
+        status.provider_ready = true;
+        status.remaining_seconds = remaining_seconds;
+        publish_status(session, status).await;
+    }
+    let Some(epoch) = admitted_epoch else { return };
+    if *published_epoch == Some(epoch) {
+        return;
+    }
+    *published_epoch = Some(epoch);
     // The realtime allowance is the caption one: Orcle's stays unknown.
     session
-        .note_listen_ready(crate::cohost::CohostListening::on(None))
+        .note_listen_ready(Some(epoch), crate::cohost::CohostListening::on(None))
         .await;
 }
 
@@ -5601,7 +5834,7 @@ async fn report_usage(session: &CaptionSession, unreported_ms: &mut f64) {
 async fn handle_realtime_event(
     session: &CaptionSession,
     event: RealtimeCaptionEvent,
-    items: &mut std::collections::HashMap<String, (u64, f64)>,
+    items: &mut std::collections::HashMap<String, (u64, f64, AdmittedOrcleAudio)>,
     sequence: &CaptionSequence,
     timeline: RealtimeCaptionTimeline,
 ) {
@@ -5611,7 +5844,7 @@ async fn handle_realtime_event(
             audio_start_ms,
         } => {
             let offset = timeline.cue_offset_seconds(audio_start_ms);
-            realtime_item_entry(items, sequence, &item_id, offset);
+            realtime_item_entry(items, sequence, &item_id, offset, timeline.admission);
         }
         RealtimeCaptionEvent::Partial {
             item_id,
@@ -5619,7 +5852,7 @@ async fn handle_realtime_event(
         } => {
             // Unknown item = its speech started before a recording boundary
             // (we cleared it) — the transcript belongs to the previous video.
-            let Some(&(item_seq, _)) = items.get(&item_id) else {
+            let Some(&(item_seq, _, _)) = items.get(&item_id) else {
                 return;
             };
             if !session.presenting() {
@@ -5642,7 +5875,7 @@ async fn handle_realtime_event(
             transcript,
         } => {
             // Same boundary rule as partials: cleared items never resurrect.
-            let Some(&(item_seq, offset)) = items.get(&item_id) else {
+            let Some(&(item_seq, offset, admission)) = items.get(&item_id) else {
                 return;
             };
             let end = timeline.cue_end_seconds(offset);
@@ -5655,7 +5888,7 @@ async fn handle_realtime_event(
                 chunk_seconds: (end - offset).ceil() as u64,
                 remaining_seconds: None,
             };
-            let (inserted, presented) = {
+            let inserted = {
                 let mut coordinator = session.state.captions.lock().await;
                 // Presentation is read under the coordinator lock that
                 // `captions.stop` flips it under: a final never lands after
@@ -5677,7 +5910,23 @@ async fn handle_realtime_event(
                 if presented {
                     session.state.emit_event("captions.update", update.clone());
                 }
-                (inserted, presented)
+                // The check and synchronous append share the coordinator lock
+                // with consent retirement. Clip marks keep their capture owner.
+                crate::cohost::note_transcript_final(
+                    &session.state,
+                    &update,
+                    crate::cohost::RecentSpeechFinal {
+                        at: std::time::Instant::now(),
+                        offset_seconds: offset,
+                        duration_seconds,
+                        text: transcript,
+                        segments: Vec::new(),
+                        presented,
+                        mark_target: session.mark_target.clone(),
+                    },
+                    admission.owns_speech(&coordinator),
+                );
+                inserted
             };
             if !inserted {
                 tracing::debug!(
@@ -5685,21 +5934,6 @@ async fn handle_realtime_event(
                     "Coalesced a repeated realtime caption completion."
                 );
             }
-            // Orcle hears every final in both intents (plan 068 S3): a
-            // lock-append-return on the coordinator's task, after the emit.
-            crate::cohost::note_transcript_final(
-                &session.state,
-                &update,
-                crate::cohost::RecentSpeechFinal {
-                    at: std::time::Instant::now(),
-                    offset_seconds: offset,
-                    duration_seconds,
-                    text: transcript,
-                    segments: Vec::new(),
-                    presented,
-                    mark_target: session.mark_target.clone(),
-                },
-            );
         }
         RealtimeCaptionEvent::ConfigurationAcknowledged
         | RealtimeCaptionEvent::Error(_)
@@ -5709,14 +5943,15 @@ async fn handle_realtime_event(
 }
 
 fn realtime_item_entry(
-    items: &mut std::collections::HashMap<String, (u64, f64)>,
+    items: &mut std::collections::HashMap<String, (u64, f64, AdmittedOrcleAudio)>,
     sequence: &CaptionSequence,
     item_id: &str,
     offset: f64,
-) -> (u64, f64) {
+    admission: AdmittedOrcleAudio,
+) -> (u64, f64, AdmittedOrcleAudio) {
     *items
         .entry(item_id.to_string())
-        .or_insert_with(|| (sequence.next(), offset))
+        .or_insert_with(|| (sequence.next(), offset, admission))
 }
 
 #[derive(Debug)]
@@ -5726,12 +5961,17 @@ struct BufferedCaptionChunk {
     offset_seconds: f64,
     duration_seconds: f64,
     capture_epoch: u64,
+    admission: AdmittedOrcleAudio,
 }
 
 struct CaptionChunkBuffer {
     chunk_samples: usize,
     max_pending: usize,
     pcm: Vec<i16>,
+    /// Compressed input ownership, consumed with exactly the same PCM. Merge
+    /// speech and readiness independently; mixed owners lose only that field.
+    /// Caption presentation and recording ownership remain independent.
+    pcm_ownership: std::collections::VecDeque<(usize, AdmittedOrcleAudio)>,
     pending: std::collections::VecDeque<BufferedCaptionChunk>,
 }
 
@@ -5741,6 +5981,7 @@ impl CaptionChunkBuffer {
             chunk_samples: chunk_samples.max(1),
             max_pending: max_pending.max(1),
             pcm: Vec::with_capacity(chunk_samples.saturating_mul(2)),
+            pcm_ownership: std::collections::VecDeque::new(),
             pending: std::collections::VecDeque::new(),
         }
     }
@@ -5751,15 +5992,31 @@ impl CaptionChunkBuffer {
         &mut self,
         samples: Vec<i16>,
         capture_epoch: u64,
+        admission: AdmittedOrcleAudio,
         sequence: &CaptionSequence,
         timeline: &mut CaptionTimeline,
     ) -> f64 {
+        if !samples.is_empty() {
+            if let Some((count, epoch)) = self.pcm_ownership.back_mut()
+                && *epoch == admission
+            {
+                *count += samples.len();
+            } else {
+                self.pcm_ownership.push_back((samples.len(), admission));
+            }
+        }
         self.pcm.extend(samples);
         let mut dropped_seconds = 0.0;
         while self.pcm.len() >= self.chunk_samples {
             let chunk = self.pcm.drain(..self.chunk_samples).collect();
-            dropped_seconds +=
-                self.enqueue_back(Self::stamp_chunk(chunk, capture_epoch, sequence, timeline));
+            let admission = self.take_ownership(self.chunk_samples);
+            dropped_seconds += self.enqueue_back(Self::stamp_chunk(
+                chunk,
+                capture_epoch,
+                admission,
+                sequence,
+                timeline,
+            ));
         }
         dropped_seconds
     }
@@ -5775,7 +6032,8 @@ impl CaptionChunkBuffer {
             return 0.0;
         }
         let remainder = std::mem::take(&mut self.pcm);
-        let stamped = Self::stamp_chunk(remainder, capture_epoch, sequence, timeline);
+        let admission = self.take_ownership(remainder.len());
+        let stamped = Self::stamp_chunk(remainder, capture_epoch, admission, sequence, timeline);
         self.enqueue_back(stamped)
     }
 
@@ -5792,9 +6050,11 @@ impl CaptionChunkBuffer {
     ) -> f64 {
         let tail = if !self.pcm.is_empty() {
             let remainder = std::mem::take(&mut self.pcm);
+            let admission = self.take_ownership(remainder.len());
             Some(Self::stamp_chunk(
                 remainder,
                 capture_epoch,
+                admission,
                 sequence,
                 timeline,
             ))
@@ -5815,6 +6075,7 @@ impl CaptionChunkBuffer {
     fn stamp_chunk(
         samples: Vec<i16>,
         capture_epoch: u64,
+        admission: AdmittedOrcleAudio,
         sequence: &CaptionSequence,
         timeline: &mut CaptionTimeline,
     ) -> BufferedCaptionChunk {
@@ -5827,7 +6088,29 @@ impl CaptionChunkBuffer {
             offset_seconds,
             duration_seconds,
             capture_epoch,
+            admission,
         }
+    }
+
+    fn take_ownership(&mut self, mut count: usize) -> AdmittedOrcleAudio {
+        let mut owner = self
+            .pcm_ownership
+            .front()
+            .map(|(_, epoch)| *epoch)
+            .unwrap_or_default();
+        while count > 0 {
+            let Some((available, epoch)) = self.pcm_ownership.front_mut() else {
+                return AdmittedOrcleAudio::default();
+            };
+            owner = owner.merge(*epoch);
+            let taken = count.min(*available);
+            count -= taken;
+            *available -= taken;
+            if *available == 0 {
+                self.pcm_ownership.pop_front();
+            }
+        }
+        owner
     }
 
     fn enqueue_back(&mut self, chunk: BufferedCaptionChunk) -> f64 {
@@ -5860,6 +6143,7 @@ impl CaptionChunkBuffer {
 
     fn clear(&mut self) {
         self.pcm.clear();
+        self.pcm_ownership.clear();
         self.pending.clear();
     }
 
@@ -5895,12 +6179,21 @@ type CaptionChunkUploadFuture =
 struct ListenReadiness {
     ready: bool,
     last_remaining_at: Option<std::time::Instant>,
+    epoch: Option<u64>,
 }
 
 /// How often the listen allowance may change Orcle's published state.
 const LISTEN_REMAINING_REFRESH: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl ListenReadiness {
+    fn select_epoch(&mut self, epoch: Option<u64>) {
+        if self.epoch != epoch {
+            *self = Self {
+                epoch,
+                ..Self::default()
+            };
+        }
+    }
     /// A silent chunk was skipped. Ready only once the tap has delivered
     /// frames, so a dead microphone path never reads as listening. `Some` is
     /// the state to report.
@@ -6037,7 +6330,7 @@ async fn commit_chunk_transcript(
         chunk_seconds: response.chunk_seconds,
         remaining_seconds: caption_metered.then_some(response.remaining_seconds),
     };
-    let (current_epoch, presented) = {
+    {
         let mut coordinator = session.state.captions.lock().await;
         let presented = session.presenting();
         coordinator.chunks.push(CaptionChunkRecord {
@@ -6054,30 +6347,30 @@ async fn commit_chunk_transcript(
         if presented && chunk.capture_epoch == current_epoch {
             session.state.emit_event("captions.update", update.clone());
         }
-        (current_epoch, presented)
-    };
-    if chunk.capture_epoch != current_epoch {
-        tracing::info!(
-            "Suppressed a caption update from a previous recording (epoch {} < {}).",
-            chunk.capture_epoch,
-            current_epoch,
+        if chunk.capture_epoch != current_epoch {
+            tracing::info!(
+                "Suppressed a caption update from a previous recording (epoch {} < {}).",
+                chunk.capture_epoch,
+                current_epoch,
+            );
+            return;
+        }
+        // Same tap as the realtime final (plan 068 S3).
+        crate::cohost::note_transcript_final(
+            &session.state,
+            &update,
+            crate::cohost::RecentSpeechFinal {
+                at: std::time::Instant::now(),
+                offset_seconds: chunk.offset_seconds,
+                duration_seconds: chunk.duration_seconds,
+                text: text.to_string(),
+                segments: response.segments.clone(),
+                presented,
+                mark_target: session.mark_target.clone(),
+            },
+            chunk.admission.owns_speech(&coordinator),
         );
-        return;
     }
-    // Same tap as the realtime final (plan 068 S3).
-    crate::cohost::note_transcript_final(
-        &session.state,
-        &update,
-        crate::cohost::RecentSpeechFinal {
-            at: std::time::Instant::now(),
-            offset_seconds: chunk.offset_seconds,
-            duration_seconds: chunk.duration_seconds,
-            text: text.to_string(),
-            segments: response.segments.clone(),
-            presented,
-            mark_target: session.mark_target.clone(),
-        },
-    );
 }
 
 async fn await_caption_chunk_upload(
@@ -6126,6 +6419,7 @@ async fn run_chunked_caption_session(
             let Some(chunk) = buffer.pop_front() else {
                 break;
             };
+            listen_readiness.select_epoch(chunk.admission.listen_epoch);
             // Silence is never uploaded or metered (plan 068 D4). The chunk
             // was stamped before this point, so the timeline stays exact.
             if !chunk_has_speech(&chunk.samples) {
@@ -6135,8 +6429,16 @@ async fn run_chunked_caption_session(
                 if let Some(listening) =
                     listen_readiness.silent_chunk_skipped(audio_heartbeat.has_seen_frame())
                 {
-                    session.note_listen_ready(listening).await;
+                    session
+                        .note_listen_ready(chunk.admission.listen_epoch, listening)
+                        .await;
                 }
+                continue;
+            }
+            if !session.presenting()
+                && (chunk.admission.listen_epoch.is_none()
+                    || chunk.admission.listen_epoch != session.admitted_listen_epoch().await)
+            {
                 continue;
             }
             in_flight = Some(begin_caption_chunk_upload(session, chunk));
@@ -6207,6 +6509,7 @@ async fn run_chunked_caption_session(
                 let dropped_seconds = buffer.push_samples(
                     mono,
                     capture_epoch,
+                    session.admitted_orcle_audio_for_frame(&frame).await,
                     sequence,
                     timeline,
                 );
@@ -6249,12 +6552,13 @@ async fn run_chunked_caption_session(
                                 caption_metered.then_some(response.remaining_seconds);
                             publish_status(session, status).await;
                         }
+                        listen_readiness.select_epoch(chunk.admission.listen_epoch);
                         let listen_remaining =
                             (!caption_metered).then_some(response.remaining_seconds);
                         if let Some(listening) = listen_readiness
                             .upload_succeeded(listen_remaining, std::time::Instant::now())
                         {
-                            session.note_listen_ready(listening).await;
+                            session.note_listen_ready(chunk.admission.listen_epoch, listening).await;
                         }
                         backoff = None;
                         next_upload_allowed_at = tokio::time::Instant::now();
@@ -6953,12 +7257,23 @@ mod tests {
         let mut sequence = CaptionSequence::default();
         let mut realtime_items = std::collections::HashMap::new();
 
-        let (realtime_seq, offset) =
-            realtime_item_entry(&mut realtime_items, &mut sequence, "item-1", 0.25);
+        let (realtime_seq, offset, epoch) = realtime_item_entry(
+            &mut realtime_items,
+            &mut sequence,
+            "item-1",
+            0.25,
+            AdmittedOrcleAudio::test_epoch(0),
+        );
         assert_eq!(realtime_seq, 1);
         assert_eq!(
-            realtime_item_entry(&mut realtime_items, &mut sequence, "item-1", 0.5),
-            (realtime_seq, offset),
+            realtime_item_entry(
+                &mut realtime_items,
+                &mut sequence,
+                "item-1",
+                0.5,
+                AdmittedOrcleAudio::test_epoch(1)
+            ),
+            (realtime_seq, offset, epoch),
             "provider revisions keep the canonical realtime cue identity"
         );
 
@@ -7025,6 +7340,7 @@ mod tests {
             socket_audio_base_ms: 0.0,
             ms_sent: 1_500.0,
             capture_epoch: 0,
+            admission: AdmittedOrcleAudio::test_epoch(0),
         };
 
         assert_eq!(realtime.cue_offset_seconds(Some(500.0)), 42.5);
@@ -7603,7 +7919,13 @@ mod tests {
         let mut buffer = CaptionChunkBuffer::new(4, 4);
 
         assert_eq!(
-            buffer.push_samples(vec![1, 2, 3, 4], 7, &sequence, &mut timeline),
+            buffer.push_samples(
+                vec![1, 2, 3, 4],
+                7,
+                AdmittedOrcleAudio::test_epoch(0),
+                &sequence,
+                &mut timeline
+            ),
             0.0
         );
         let in_flight = buffer.pop_front().expect("first chunk starts uploading");
@@ -7615,6 +7937,7 @@ mod tests {
             buffer.push_samples(
                 vec![5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
                 7,
+                AdmittedOrcleAudio::test_epoch(0),
                 &sequence,
                 &mut timeline,
             ),
@@ -7658,7 +7981,13 @@ mod tests {
         let sequence = CaptionSequence::default();
         let mut timeline = CaptionTimeline::new(0.0);
         let mut policy_buffer = CaptionChunkBuffer::new(4, 4);
-        policy_buffer.push_samples(vec![1; 8], 3, &sequence, &mut timeline);
+        policy_buffer.push_samples(
+            vec![1; 8],
+            3,
+            AdmittedOrcleAudio::test_epoch(0),
+            &sequence,
+            &mut timeline,
+        );
         let failed = policy_buffer
             .pop_front()
             .expect("first upload fails transiently");
@@ -7719,7 +8048,13 @@ mod tests {
         let final_sequence = CaptionSequence::default();
         let mut timeline = CaptionTimeline::new(0.0);
         let mut buffer = CaptionChunkBuffer::new(4, MAX_BUFFERED_CAPTION_CHUNKS);
-        buffer.push_samples(vec![1; 4], 3, &final_sequence, &mut timeline);
+        buffer.push_samples(
+            vec![1; 4],
+            3,
+            AdmittedOrcleAudio::test_epoch(0),
+            &final_sequence,
+            &mut timeline,
+        );
         let in_flight = buffer.pop_front().expect("one upload is in flight");
         assert_eq!(in_flight.seq, 1);
 
@@ -7729,6 +8064,7 @@ mod tests {
         buffer.push_samples(
             vec![2; MAX_BUFFERED_CAPTION_CHUNKS * 4 + 2],
             3,
+            AdmittedOrcleAudio::test_epoch(0),
             &final_sequence,
             &mut timeline,
         );
@@ -7758,13 +8094,25 @@ mod tests {
         let sequence = CaptionSequence::default();
         let mut timeline = CaptionTimeline::new(0.0);
         let mut buffer = CaptionChunkBuffer::new(4, MAX_BUFFERED_CAPTION_CHUNKS);
-        buffer.push_samples(vec![1; 4], 9, &sequence, &mut timeline);
+        buffer.push_samples(
+            vec![1; 4],
+            9,
+            AdmittedOrcleAudio::test_epoch(0),
+            &sequence,
+            &mut timeline,
+        );
         let in_flight = buffer.pop_front().expect("one upload is in flight");
         assert_eq!(in_flight.seq, 1);
 
         // Three exact full chunks arrive while that upload is pending. There is
         // no PCM remainder, so the newest full chunk (seq 4) owns the last words.
-        buffer.push_samples(vec![2; 12], 9, &sequence, &mut timeline);
+        buffer.push_samples(
+            vec![2; 12],
+            9,
+            AdmittedOrcleAudio::test_epoch(0),
+            &sequence,
+            &mut timeline,
+        );
         assert!(buffer.pcm.is_empty());
         let now = tokio::time::Instant::now();
         let mut backoff = Some(std::time::Duration::from_secs(30));
@@ -7874,6 +8222,7 @@ mod tests {
         let dropped = buffer.push_samples(
             vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
             1,
+            AdmittedOrcleAudio::test_epoch(0),
             &sequence,
             &mut timeline,
         );
@@ -9365,9 +9714,27 @@ mod tests {
         let mut timeline = CaptionTimeline::new(10.0);
         let mut buffer = CaptionChunkBuffer::new(1_600, 8);
         let loud = dbfs(-30.0) * std::f64::consts::SQRT_2;
-        buffer.push_samples(vec![0; 1_600], 1, &sequence, &mut timeline);
-        buffer.push_samples(tone(1_600, loud), 1, &sequence, &mut timeline);
-        buffer.push_samples(vec![0; 1_600], 1, &sequence, &mut timeline);
+        buffer.push_samples(
+            vec![0; 1_600],
+            1,
+            AdmittedOrcleAudio::test_epoch(0),
+            &sequence,
+            &mut timeline,
+        );
+        buffer.push_samples(
+            tone(1_600, loud),
+            1,
+            AdmittedOrcleAudio::test_epoch(0),
+            &sequence,
+            &mut timeline,
+        );
+        buffer.push_samples(
+            vec![0; 1_600],
+            1,
+            AdmittedOrcleAudio::test_epoch(0),
+            &sequence,
+            &mut timeline,
+        );
         let stamped = buffer.drain_pending();
         let offsets: Vec<f64> = stamped.iter().map(|chunk| chunk.offset_seconds).collect();
         assert_eq!(offsets, vec![10.0, 10.1, 10.2]);
@@ -9401,6 +9768,11 @@ mod tests {
     #[tokio::test]
     async fn listen_only_task_presents_nothing_but_orcle_hears_every_final() {
         let state = test_caption_app_state();
+        {
+            let mut coordinator = state.captions.lock().await;
+            coordinator.listen_wanted = true;
+            coordinator.speech_admitted = true;
+        }
         let mut events = state.events.subscribe();
         let session = test_caption_session(&state, false);
 
@@ -9440,6 +9812,7 @@ mod tests {
             socket_audio_base_ms: 0.0,
             ms_sent: 6_000.0,
             capture_epoch: 0,
+            admission: AdmittedOrcleAudio::test_epoch(0),
         };
         handle_realtime_event(
             &session,
@@ -9499,6 +9872,11 @@ mod tests {
     #[tokio::test]
     async fn presenting_task_emits_updates_tagged_presented() {
         let state = test_caption_app_state();
+        {
+            let mut coordinator = state.captions.lock().await;
+            coordinator.listen_wanted = true;
+            coordinator.speech_admitted = true;
+        }
         let mut events = state.events.subscribe();
         let session = test_caption_session(&state, true);
         let mut items = std::collections::HashMap::new();
@@ -9509,6 +9887,7 @@ mod tests {
             socket_audio_base_ms: 0.0,
             ms_sent: 2_000.0,
             capture_epoch: 0,
+            admission: AdmittedOrcleAudio::test_epoch(0),
         };
         handle_realtime_event(
             &session,
@@ -10035,6 +10414,7 @@ mod tests {
             offset_seconds,
             duration_seconds: 3.0,
             capture_epoch: 0,
+            admission: AdmittedOrcleAudio::test_epoch(0),
         }
     }
 
@@ -10043,6 +10423,11 @@ mod tests {
     #[tokio::test]
     async fn a_final_after_captions_turned_off_never_shows() {
         let state = test_caption_app_state();
+        {
+            let mut coordinator = state.captions.lock().await;
+            coordinator.listen_wanted = true;
+            coordinator.speech_admitted = true;
+        }
         let mut events = state.events.subscribe();
         let session = test_caption_session(&state, true);
         commit_chunk_transcript(
@@ -10142,10 +10527,12 @@ mod tests {
         let listening =
             start_listen_with_bearer(&state, "orcle", || Some("test-bearer".into())).await;
         assert_eq!(listening, crate::cohost::CohostListening::starting());
-        stop_listen(&state).await;
         let session = test_caption_session(&state, true);
         session
-            .note_listen_ready(crate::cohost::CohostListening::on(None))
+            .note_listen_ready(
+                session.admitted_listen_epoch().await,
+                crate::cohost::CohostListening::on(None),
+            )
             .await;
         let listening =
             start_listen_with_bearer(&state, "orcle", || Some("test-bearer".into())).await;
@@ -10228,6 +10615,11 @@ mod tests {
         assert_eq!(caption_capture_facts(None), (false, None));
 
         let state = test_caption_app_state();
+        {
+            let mut coordinator = state.captions.lock().await;
+            coordinator.listen_wanted = true;
+            coordinator.speech_admitted = true;
+        }
         let mut session = test_caption_session(&state, false);
         session.mark_target = Some(crate::clip_marks::MarkTarget {
             session_id: "marked-stream".to_string(),
@@ -10252,6 +10644,1061 @@ mod tests {
 
     /// Finding 4: sign-out ends Orcle's listening in the state too, and a
     /// listening publish decided before an intent ended never lands after.
+    #[tokio::test]
+    async fn consent_revocation_keeps_explicit_captions_and_fences_old_listen_publications() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
+            "consent-capture",
+        ));
+        let present = install_intent_test_task(&state, true, false).await;
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("consent-chat".into(), Vec::new());
+        crate::cohost::set_cohost_settings(
+            &state,
+            crate::protocol::CohostSettingsPatch {
+                enabled: Some(true),
+                listen: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let params = crate::protocol::CohostStartParams {
+            session_id: "consent-chat".into(),
+            consent_to_process_chat: true,
+            stream_title: None,
+        };
+        crate::cohost::start_cohost(&state, params.clone())
+            .await
+            .unwrap();
+        let (task_id, capture_epoch, listen_epoch) = {
+            let coordinator = state.captions.lock().await;
+            (
+                coordinator.task.as_ref().unwrap().id(),
+                coordinator.capture_epoch,
+                coordinator.listen_epoch,
+            )
+        };
+        let mut events = state.events.subscribe();
+        let revoked = crate::cohost::start_cohost(
+            &state,
+            crate::protocol::CohostStartParams {
+                consent_to_process_chat: false,
+                ..params.clone()
+            },
+        )
+        .await
+        .unwrap();
+        {
+            let coordinator = state.captions.lock().await;
+            assert!(!coordinator.listen_wanted);
+            assert!(coordinator.desired_enabled);
+            assert_eq!(coordinator.task.as_ref().unwrap().id(), task_id);
+            assert_eq!(coordinator.capture_epoch, capture_epoch);
+            assert!(coordinator.listen_epoch > listen_epoch);
+        }
+        assert!(present.load(Ordering::Acquire));
+        assert!(TAP_ACTIVE.load(Ordering::Acquire));
+        assert_eq!(
+            revoked.reason,
+            Some(crate::cohost::CohostReason::ConsentRequired)
+        );
+        let epoch_after_revoke = current_listen_epoch(&state).await;
+        drain_events(&mut events);
+        crate::cohost::publish_listening_for_epoch(
+            &state,
+            listen_epoch,
+            crate::cohost::CohostListening::on(Some(90)),
+        )
+        .await;
+        assert!(
+            drain_events(&mut events).is_empty(),
+            "old speech readiness cannot publish after revoke"
+        );
+        assert_eq!(crate::cohost::cohost_status(&state).await, revoked);
+        // The same caption task continues to present its authorized finals.
+        commit_chunk_transcript(
+            &test_caption_session(&state, true),
+            &stamped_chunk(1, 0.0),
+            true,
+            &chunk_response("explicit captions remain", 1),
+        )
+        .await;
+        assert!(
+            caption_event_names(&drain_events(&mut events)).contains(&"captions.update".into())
+        );
+        crate::cohost::start_cohost(&state, params).await.unwrap();
+        let coordinator = state.captions.lock().await;
+        assert_eq!(coordinator.task.as_ref().unwrap().id(), task_id);
+        assert_eq!(coordinator.capture_epoch, capture_epoch);
+        assert!(coordinator.listen_epoch > epoch_after_revoke);
+        assert!(coordinator.listen_wanted);
+        drop(coordinator);
+        assert!(state.recording.lock().await.is_some());
+        assert_eq!(
+            state.live_chat.lock().await.session_id(),
+            Some("consent-chat")
+        );
+        crate::cohost::stop_cohost(&state).await;
+        stop_captions(&state).await;
+        *state.recording.lock().await = None;
+    }
+
+    #[tokio::test]
+    async fn replacing_cohost_session_retires_retained_listen_readiness() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        install_intent_test_task(&state, true, false).await;
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("old-listen-chat".into(), Vec::new());
+        crate::cohost::set_cohost_settings(
+            &state,
+            crate::protocol::CohostSettingsPatch {
+                enabled: Some(true),
+                listen: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        crate::cohost::start_cohost(
+            &state,
+            crate::protocol::CohostStartParams {
+                session_id: "old-listen-chat".into(),
+                consent_to_process_chat: true,
+                stream_title: None,
+            },
+        )
+        .await
+        .unwrap();
+        let session = test_caption_session(&state, true);
+        let admitted = session.admitted_orcle_audio().await;
+        let task_id = state.captions.lock().await.task.as_ref().unwrap().id();
+        assert!(admitted.listen_epoch.is_some());
+        // The RPC validates the new authoritative chat while the old Orcle
+        // engine and an explicit caption task are still present.
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("new-listen-chat".into(), Vec::new());
+        let params = crate::protocol::CohostStartParams {
+            session_id: "new-listen-chat".into(),
+            consent_to_process_chat: false,
+            stream_title: None,
+        };
+        let replacement = crate::cohost::start_cohost(&state, params.clone())
+            .await
+            .unwrap();
+        assert_eq!(replacement.session_id.as_deref(), Some("new-listen-chat"));
+        assert_eq!(replacement.status, crate::cohost::CohostStatus::Paused);
+        assert_eq!(
+            replacement.reason,
+            Some(crate::cohost::CohostReason::ConsentRequired)
+        );
+        assert_eq!(
+            replacement
+                .listening
+                .as_ref()
+                .unwrap()
+                .reason_code
+                .as_deref(),
+            Some("consent-required")
+        );
+        {
+            let coordinator = state.captions.lock().await;
+            assert!(!coordinator.listen_wanted);
+            assert!(!coordinator.listen_ready);
+            assert!(coordinator.listen_epoch > admitted.listen_epoch.unwrap());
+            assert_eq!(coordinator.task.as_ref().unwrap().id(), task_id);
+            assert!(coordinator.desired_enabled);
+        }
+        let mut events = state.events.subscribe();
+        session
+            .note_listen_ready(
+                admitted.listen_epoch,
+                crate::cohost::CohostListening::on(Some(60)),
+            )
+            .await;
+        crate::cohost::publish_listening_for_epoch(
+            &state,
+            admitted.listen_epoch.unwrap(),
+            crate::cohost::CohostListening::on(Some(60)),
+        )
+        .await;
+        assert!(drain_events(&mut events).is_empty());
+        assert_eq!(crate::cohost::cohost_status(&state).await, replacement);
+        crate::cohost::start_cohost(
+            &state,
+            crate::protocol::CohostStartParams {
+                consent_to_process_chat: true,
+                ..params
+            },
+        )
+        .await
+        .unwrap();
+        drain_events(&mut events);
+        state.captions.lock().await.listen_ready = false;
+        session
+            .note_listen_ready(
+                admitted.listen_epoch,
+                crate::cohost::CohostListening::on(Some(60)),
+            )
+            .await;
+        crate::cohost::publish_listening_for_epoch(
+            &state,
+            admitted.listen_epoch.unwrap(),
+            crate::cohost::CohostListening::on(Some(60)),
+        )
+        .await;
+        assert!(!state.captions.lock().await.listen_ready);
+        assert!(drain_events(&mut events).is_empty());
+        crate::cohost::stop_cohost(&state).await;
+        stop_captions(&state).await;
+    }
+
+    #[tokio::test]
+    async fn orcle_speech_grant_respects_privacy_and_shutdown_guards() {
+        let state = test_caption_app_state();
+        let session = test_caption_session(&state, true);
+        for (in_progress, failed) in [(true, false), (false, true)] {
+            {
+                let mut coordinator = state.captions.lock().await;
+                coordinator.privacy_teardown_in_progress = in_progress;
+                coordinator.privacy_teardown_failed = failed;
+            }
+            grant_orcle_speech(&state).await;
+            assert_eq!(session.admitted_orcle_audio().await.speech_epoch, None);
+            assert_eq!(state.captions.lock().await.speech_started_at, None);
+        }
+        {
+            let mut coordinator = state.captions.lock().await;
+            coordinator.privacy_teardown_failed = false;
+        }
+        grant_orcle_speech(&state).await;
+        let admitted = session.admitted_orcle_audio().await;
+        let grant = state.captions.lock().await.speech_started_at;
+        assert!(admitted.speech_epoch.is_some());
+        grant_orcle_speech(&state).await;
+        assert_eq!(state.captions.lock().await.speech_started_at, grant);
+        retire_orcle_speech(&state).await;
+        assert!(state.request_process_shutdown());
+        grant_orcle_speech(&state).await;
+        assert_eq!(session.admitted_orcle_audio().await.speech_epoch, None);
+        assert_eq!(state.captions.lock().await.speech_started_at, None);
+    }
+
+    #[tokio::test]
+    async fn caption_only_finals_follow_consent_without_enabling_listen() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        install_intent_test_task(&state, true, false).await;
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("caption-only-consent".into(), Vec::new());
+        crate::cohost::set_cohost_settings(
+            &state,
+            crate::protocol::CohostSettingsPatch {
+                enabled: Some(true),
+                listen: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let params = crate::protocol::CohostStartParams {
+            session_id: "caption-only-consent".into(),
+            consent_to_process_chat: true,
+            stream_title: None,
+        };
+        crate::cohost::start_cohost(&state, params.clone())
+            .await
+            .unwrap();
+        let session = test_caption_session(&state, true);
+        let mut items = std::collections::HashMap::new();
+        let sequence = CaptionSequence::default();
+        let timeline = RealtimeCaptionTimeline {
+            capture_base_seconds: 0.0,
+            ms_at_anchor: 0.0,
+            socket_audio_base_ms: 0.0,
+            ms_sent: 3_000.0,
+            capture_epoch: 0,
+            admission: session.admitted_orcle_audio().await,
+        };
+        handle_realtime_event(
+            &session,
+            RealtimeCaptionEvent::SpeechStarted {
+                item_id: "caption-only-before".into(),
+                audio_start_ms: Some(0.0),
+            },
+            &mut items,
+            &sequence,
+            timeline,
+        )
+        .await;
+        handle_realtime_event(
+            &session,
+            RealtimeCaptionEvent::Completed {
+                item_id: "caption-only-before".into(),
+                transcript: "caption-only realtime before".into(),
+            },
+            &mut items,
+            &sequence,
+            timeline,
+        )
+        .await;
+        let mut before = stamped_chunk(2, 3.0);
+        before.admission = timeline.admission;
+        commit_chunk_transcript(
+            &session,
+            &before,
+            true,
+            &chunk_response("caption-only chunk before", 9),
+        )
+        .await;
+        assert_eq!(
+            crate::cohost::recent_speech_since(&state, None)
+                .unwrap()
+                .finals
+                .len(),
+            2,
+            "explicit captions feed consenting Orcle even with its listen switch off"
+        );
+        handle_realtime_event(
+            &session,
+            RealtimeCaptionEvent::SpeechStarted {
+                item_id: "caption-only-late".into(),
+                audio_start_ms: Some(0.0),
+            },
+            &mut items,
+            &sequence,
+            timeline,
+        )
+        .await;
+        crate::cohost::start_cohost(
+            &state,
+            crate::protocol::CohostStartParams {
+                consent_to_process_chat: false,
+                ..params.clone()
+            },
+        )
+        .await
+        .unwrap();
+        commit_chunk_transcript(
+            &session,
+            &stamped_chunk(3, 6.0),
+            true,
+            &chunk_response("caption-only revoked", 8),
+        )
+        .await;
+        assert!(
+            state
+                .cohost_transcript
+                .lock()
+                .unwrap()
+                .snapshot(std::time::Instant::now())
+                .text
+                .is_empty()
+        );
+        crate::cohost::start_cohost(&state, params.clone())
+            .await
+            .unwrap();
+        handle_realtime_event(
+            &session,
+            RealtimeCaptionEvent::Completed {
+                item_id: "caption-only-late".into(),
+                transcript: "caption-only retired realtime".into(),
+            },
+            &mut items,
+            &sequence,
+            timeline,
+        )
+        .await;
+        assert!(
+            state
+                .cohost_transcript
+                .lock()
+                .unwrap()
+                .snapshot(std::time::Instant::now())
+                .text
+                .is_empty()
+        );
+        let mut fresh = stamped_chunk(4, 9.0);
+        fresh.admission = session.admitted_orcle_audio().await;
+        commit_chunk_transcript(
+            &session,
+            &fresh,
+            true,
+            &chunk_response("caption-only fresh", 7),
+        )
+        .await;
+        assert_eq!(
+            crate::cohost::recent_speech_since(&state, None)
+                .unwrap()
+                .finals[0]
+                .text,
+            "caption-only fresh"
+        );
+        let fresh_timeline = RealtimeCaptionTimeline {
+            admission: fresh.admission,
+            ..timeline
+        };
+        handle_realtime_event(
+            &session,
+            RealtimeCaptionEvent::SpeechStarted {
+                item_id: "caption-only-fresh".into(),
+                audio_start_ms: Some(0.0),
+            },
+            &mut items,
+            &sequence,
+            fresh_timeline,
+        )
+        .await;
+        handle_realtime_event(
+            &session,
+            RealtimeCaptionEvent::Completed {
+                item_id: "caption-only-fresh".into(),
+                transcript: "caption-only fresh realtime".into(),
+            },
+            &mut items,
+            &sequence,
+            fresh_timeline,
+        )
+        .await;
+        assert_eq!(
+            crate::cohost::recent_speech_since(&state, None)
+                .unwrap()
+                .finals
+                .len(),
+            2
+        );
+        assert!(!state.captions.lock().await.listen_wanted);
+        assert!(state.captions.lock().await.desired_enabled);
+        assert_eq!(
+            crate::cohost::cohost_status(&state)
+                .await
+                .listening
+                .unwrap()
+                .state,
+            crate::cohost::CohostListeningState::Off
+        );
+        // Sign-out retires this independent owner; sign-in restores speech
+        // for a consenting session even while Listen remains off.
+        let before_sign_in = fresh.admission;
+        retire_orcle_speech(&state).await;
+        assert_eq!(session.admitted_orcle_audio().await.speech_epoch, None);
+        crate::cohost::resume_listen_after_sign_in(&state).await;
+        let resumed = session.admitted_orcle_audio().await;
+        assert!(resumed.speech_epoch.is_some());
+        assert_ne!(resumed.speech_epoch, before_sign_in.speech_epoch);
+        assert_eq!(resumed.listen_epoch, None);
+        assert!(!state.captions.lock().await.listen_wanted);
+        commit_chunk_transcript(
+            &session,
+            &fresh,
+            true,
+            &chunk_response("signed-out owner", 7),
+        )
+        .await;
+        assert_eq!(
+            crate::cohost::recent_speech_since(&state, None)
+                .unwrap()
+                .finals
+                .len(),
+            2
+        );
+        fresh.admission = resumed;
+        let fresh_timeline = RealtimeCaptionTimeline {
+            admission: resumed,
+            ..fresh_timeline
+        };
+        // Listening may turn on/off without revoking consenting speech. A
+        // chunk crossing only that setting keeps speech but loses readiness.
+        let speech_grant = state.captions.lock().await.speech_started_at;
+        crate::cohost::set_cohost_settings(
+            &state,
+            crate::protocol::CohostSettingsPatch {
+                listen: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let with_listen = session.admitted_orcle_audio().await;
+        let mut buffer = CaptionChunkBuffer::new(4, 8);
+        let mut chunk_timeline = CaptionTimeline::new(12.0);
+        buffer.push_samples(vec![1; 2], 0, with_listen, &sequence, &mut chunk_timeline);
+        crate::cohost::set_cohost_settings(
+            &state,
+            crate::protocol::CohostSettingsPatch {
+                listen: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let without_listen = session.admitted_orcle_audio().await;
+        assert_eq!(with_listen.speech_epoch, without_listen.speech_epoch);
+        assert_eq!(state.captions.lock().await.speech_started_at, speech_grant);
+        buffer.push_samples(
+            vec![1; 2],
+            0,
+            without_listen,
+            &sequence,
+            &mut chunk_timeline,
+        );
+        let mixed_listen = buffer.pop_front().unwrap();
+        assert_eq!(
+            mixed_listen.admission.speech_epoch,
+            fresh.admission.speech_epoch
+        );
+        assert_eq!(mixed_listen.admission.listen_epoch, None);
+        commit_chunk_transcript(
+            &session,
+            &mixed_listen,
+            true,
+            &chunk_response("same consenting speech", 6),
+        )
+        .await;
+        assert_eq!(
+            crate::cohost::recent_speech_since(&state, None)
+                .unwrap()
+                .finals
+                .len(),
+            3
+        );
+        // Reasserting unchanged consent preserves the input-origin boundary.
+        crate::cohost::start_cohost(&state, params.clone())
+            .await
+            .unwrap();
+        assert_eq!(state.captions.lock().await.speech_started_at, speech_grant);
+        // Normal stop and replacement both reject old callback owners, while
+        // explicit captions continue to present their transcript.
+        handle_realtime_event(
+            &session,
+            RealtimeCaptionEvent::SpeechStarted {
+                item_id: "caption-only-stopped".into(),
+                audio_start_ms: Some(0.0),
+            },
+            &mut items,
+            &sequence,
+            fresh_timeline,
+        )
+        .await;
+        crate::cohost::stop_cohost(&state).await;
+        handle_realtime_event(
+            &session,
+            RealtimeCaptionEvent::Completed {
+                item_id: "caption-only-stopped".into(),
+                transcript: "stopped realtime speech".into(),
+            },
+            &mut items,
+            &sequence,
+            fresh_timeline,
+        )
+        .await;
+        commit_chunk_transcript(&session, &fresh, true, &chunk_response("stopped speech", 5)).await;
+        assert!(
+            crate::cohost::recent_speech_since(&state, None)
+                .is_none_or(|speech| speech.finals.is_empty())
+        );
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("replacement-consent".into(), Vec::new());
+        let replacement = crate::protocol::CohostStartParams {
+            session_id: "replacement-consent".into(),
+            ..params
+        };
+        crate::cohost::start_cohost(&state, replacement.clone())
+            .await
+            .unwrap();
+        handle_realtime_event(
+            &session,
+            RealtimeCaptionEvent::Completed {
+                item_id: "caption-only-stopped".into(),
+                transcript: "replaced realtime speech".into(),
+            },
+            &mut items,
+            &sequence,
+            fresh_timeline,
+        )
+        .await;
+        commit_chunk_transcript(
+            &session,
+            &fresh,
+            true,
+            &chunk_response("replaced speech", 4),
+        )
+        .await;
+        assert!(
+            crate::cohost::recent_speech_since(&state, None)
+                .is_none_or(|speech| speech.finals.is_empty())
+        );
+        let replacement_owner = session.admitted_orcle_audio().await;
+        let delivery = state.live_chat_persistence.begin_delivery().await;
+        crate::cohost::stop_cohost_for_session_end_if_matching_before_emit(
+            &state,
+            "caption-only-consent",
+            &delivery,
+            std::future::ready(()),
+        )
+        .await;
+        assert_eq!(session.admitted_orcle_audio().await, replacement_owner);
+        crate::cohost::stop_cohost_for_session_end_if_matching_before_emit(
+            &state,
+            "replacement-consent",
+            &delivery,
+            std::future::ready(()),
+        )
+        .await;
+        drop(delivery);
+        let mut replacement_chunk = stamped_chunk(10, 20.0);
+        replacement_chunk.admission = replacement_owner;
+        commit_chunk_transcript(
+            &session,
+            &replacement_chunk,
+            true,
+            &chunk_response("matching stop speech", 3),
+        )
+        .await;
+        assert!(
+            crate::cohost::recent_speech_since(&state, None)
+                .is_none_or(|speech| speech.finals.is_empty())
+        );
+        crate::cohost::start_cohost(&state, replacement)
+            .await
+            .unwrap();
+        replacement_chunk.admission = session.admitted_orcle_audio().await;
+        crate::cohost::set_cohost_settings(
+            &state,
+            crate::protocol::CohostSettingsPatch {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        commit_chunk_transcript(
+            &session,
+            &replacement_chunk,
+            true,
+            &chunk_response("disabled speech", 2),
+        )
+        .await;
+        assert!(
+            crate::cohost::recent_speech_since(&state, None)
+                .is_none_or(|speech| speech.finals.is_empty())
+        );
+        assert!(state.captions.lock().await.desired_enabled);
+        assert!(
+            state
+                .captions
+                .lock()
+                .await
+                .chunks
+                .iter()
+                .any(|chunk| chunk.text == "disabled speech" && chunk.presented)
+        );
+        stop_captions(&state).await;
+    }
+
+    #[tokio::test]
+    async fn admitted_speech_cannot_join_orcle_after_revoke_and_regrant() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        install_intent_test_task(&state, true, false).await;
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("speech-consent".into(), Vec::new());
+        crate::cohost::set_cohost_settings(
+            &state,
+            crate::protocol::CohostSettingsPatch {
+                enabled: Some(true),
+                listen: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let params = crate::protocol::CohostStartParams {
+            session_id: "speech-consent".into(),
+            consent_to_process_chat: true,
+            stream_title: None,
+        };
+        crate::cohost::start_cohost(&state, params.clone())
+            .await
+            .unwrap();
+        let mut session = test_caption_session(&state, true);
+        session.mark_target = Some(crate::clip_marks::MarkTarget {
+            session_id: "immutable-recording".into(),
+            records_to_file: false,
+        });
+        let old_epoch = session.admitted_orcle_audio().await;
+        let (queued_tx, queued_rx) = mpsc::channel(2);
+        session.receiver = queued_rx;
+        let raw_frame = |captured_at| AudioFrame {
+            timestamp_micros: 0,
+            captured_at,
+            sample_rate: 16_000,
+            channels: 1,
+            samples: vec![0.1; 320],
+        };
+        queued_tx
+            .send(raw_frame(std::time::Instant::now()))
+            .await
+            .unwrap();
+        let task_id = state.captions.lock().await.task.as_ref().unwrap().id();
+        let sequence = CaptionSequence::default();
+        let mut chunk_timeline = CaptionTimeline::new(0.0);
+        let mut buffer = CaptionChunkBuffer::new(4, 8);
+        buffer.push_samples(vec![1; 4], 0, old_epoch, &sequence, &mut chunk_timeline);
+        buffer.push_samples(vec![1; 2], 0, old_epoch, &sequence, &mut chunk_timeline);
+        let mut audio_epochs = RealtimeAudioAdmissions::default();
+        audio_epochs.record(30_000.0, old_epoch);
+        let mut items = std::collections::HashMap::new();
+        let realtime_timeline = |admission| RealtimeCaptionTimeline {
+            capture_base_seconds: 0.0,
+            ms_at_anchor: 0.0,
+            socket_audio_base_ms: 0.0,
+            ms_sent: 90_000.0,
+            capture_epoch: 0,
+            admission,
+        };
+        let old_started = RealtimeCaptionEvent::SpeechStarted {
+            item_id: "old-speech".into(),
+            audio_start_ms: Some(20_000.0),
+        };
+        let epoch = audio_epochs.for_event(&old_started, &items, old_epoch);
+        handle_realtime_event(
+            &session,
+            old_started,
+            &mut items,
+            &sequence,
+            realtime_timeline(epoch),
+        )
+        .await;
+        crate::cohost::start_cohost(
+            &state,
+            crate::protocol::CohostStartParams {
+                consent_to_process_chat: false,
+                ..params.clone()
+            },
+        )
+        .await
+        .unwrap();
+        let revoked_epoch = session.admitted_orcle_audio().await;
+        assert_eq!(revoked_epoch, AdmittedOrcleAudio::default());
+        queued_tx
+            .send(raw_frame(std::time::Instant::now()))
+            .await
+            .unwrap();
+        // Both a mixed chunk and an entirely revoked chunk finish uploading
+        // only after grant. Their presentation stays authorized independently.
+        buffer.push_samples(vec![2; 2], 0, revoked_epoch, &sequence, &mut chunk_timeline);
+        buffer.push_samples(vec![2; 4], 0, revoked_epoch, &sequence, &mut chunk_timeline);
+        audio_epochs.record(30_000.0, revoked_epoch);
+        crate::cohost::start_cohost(&state, params).await.unwrap();
+        let granted_epoch = session.admitted_orcle_audio().await;
+        assert_ne!(granted_epoch, old_epoch);
+        assert_eq!(
+            state.captions.lock().await.task.as_ref().unwrap().id(),
+            task_id
+        );
+        let grant_time = state.captions.lock().await.speech_started_at.unwrap();
+        // Raw receiver frames queued before revoke and while revoked remain
+        // authorized captions, but neither transport may assign today's epoch.
+        for _ in 0..2 {
+            let queued = session.receiver.recv().await.unwrap();
+            assert_eq!(
+                session.admitted_orcle_audio_for_frame(&queued).await,
+                AdmittedOrcleAudio::default()
+            );
+        }
+        let crossing = raw_frame(grant_time + std::time::Duration::from_millis(10));
+        assert_eq!(
+            session.admitted_orcle_audio_for_frame(&crossing).await,
+            AdmittedOrcleAudio::default()
+        );
+        let fresh = raw_frame(grant_time + std::time::Duration::from_millis(40));
+        assert_eq!(
+            session.admitted_orcle_audio_for_frame(&fresh).await,
+            granted_epoch
+        );
+        // Joining/resuming the same intent preserves its capture-time boundary.
+        start_listen_with_bearer(&state, "speech-consent", || None).await;
+        assert_eq!(
+            state.captions.lock().await.speech_started_at,
+            Some(grant_time)
+        );
+        audio_epochs.record(30_000.0, granted_epoch);
+        let mut events = state.events.subscribe();
+        let chunks = buffer.drain_pending();
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.admission)
+                .collect::<Vec<_>>(),
+            vec![
+                old_epoch,
+                AdmittedOrcleAudio::default(),
+                AdmittedOrcleAudio::default()
+            ]
+        );
+        for (chunk, text) in chunks.iter().zip([
+            "old chunk clip that",
+            "mixed chunk words",
+            "revoked chunk words",
+        ]) {
+            commit_chunk_transcript(&session, chunk, true, &chunk_response(text, 9)).await;
+        }
+        // A delayed completed item keeps the ownership of its original VAD.
+        handle_realtime_event(
+            &session,
+            RealtimeCaptionEvent::Completed {
+                item_id: "old-speech".into(),
+                transcript: "old realtime clip that".into(),
+            },
+            &mut items,
+            &sequence,
+            realtime_timeline(granted_epoch),
+        )
+        .await;
+        // VAD itself can arrive late: its known audio offset selects the
+        // revoked input span, rather than sampling today's consent intent.
+        let revoked_started = RealtimeCaptionEvent::SpeechStarted {
+            item_id: "revoked-speech".into(),
+            audio_start_ms: Some(40_000.0),
+        };
+        let epoch = audio_epochs.for_event(&revoked_started, &items, old_epoch);
+        assert_eq!(epoch, AdmittedOrcleAudio::default());
+        handle_realtime_event(
+            &session,
+            revoked_started,
+            &mut items,
+            &sequence,
+            realtime_timeline(epoch),
+        )
+        .await;
+        handle_realtime_event(
+            &session,
+            RealtimeCaptionEvent::Completed {
+                item_id: "revoked-speech".into(),
+                transcript: "revoked realtime words".into(),
+            },
+            &mut items,
+            &sequence,
+            realtime_timeline(granted_epoch),
+        )
+        .await;
+        let emitted = drain_events(&mut events);
+        assert_eq!(caption_event_names(&emitted), vec!["captions.update"; 5]);
+        assert_eq!(state.captions.lock().await.chunks.len(), 5);
+        assert!(
+            state
+                .cohost_transcript
+                .lock()
+                .unwrap()
+                .snapshot(std::time::Instant::now())
+                .text
+                .is_empty(),
+            "pre-revocation chunk/realtime finals cannot enter the new Orcle generation"
+        );
+        assert!(
+            crate::cohost::recent_speech_since(&state, None)
+                .is_none_or(|speech| speech.finals.is_empty())
+        );
+        // Recording clip marks use the immutable task target even for speech
+        // retired from Orcle, with no current recording slot to fall back to.
+        let mut marks = emitted
+            .into_iter()
+            .filter(|event| event.event == "clip.marked")
+            .collect::<Vec<_>>();
+        tokio::time::timeout(secs(1), async {
+            while marks.len() < 2 {
+                let event = events.recv().await.unwrap();
+                if event.event == "clip.marked" {
+                    marks.push(event);
+                }
+            }
+        })
+        .await
+        .expect("both transports still route their clip marks");
+        assert!(
+            marks
+                .iter()
+                .all(|event| event.payload["sessionId"] == "immutable-recording")
+        );
+        state.captions.lock().await.listen_ready = false;
+        session
+            .note_listen_ready(
+                old_epoch.listen_epoch,
+                crate::cohost::CohostListening::on(Some(90)),
+            )
+            .await;
+        assert!(
+            !state.captions.lock().await.listen_ready,
+            "a retired reply cannot ready a new listen epoch"
+        );
+        assert!(drain_events(&mut events).is_empty());
+        // Fresh input after grant reaches the existing Orcle session through
+        // the same two production callbacks and can confirm listening again.
+        buffer.push_samples(vec![3; 4], 0, granted_epoch, &sequence, &mut chunk_timeline);
+        commit_chunk_transcript(
+            &session,
+            &buffer.pop_front().unwrap(),
+            true,
+            &chunk_response("fresh chunk words", 8),
+        )
+        .await;
+        let fresh_started = RealtimeCaptionEvent::SpeechStarted {
+            item_id: "fresh-speech".into(),
+            audio_start_ms: Some(70_000.0),
+        };
+        let epoch = audio_epochs.for_event(&fresh_started, &items, old_epoch);
+        assert_eq!(epoch, granted_epoch);
+        handle_realtime_event(
+            &session,
+            fresh_started,
+            &mut items,
+            &sequence,
+            realtime_timeline(epoch),
+        )
+        .await;
+        handle_realtime_event(
+            &session,
+            RealtimeCaptionEvent::Completed {
+                item_id: "fresh-speech".into(),
+                transcript: "fresh realtime words".into(),
+            },
+            &mut items,
+            &sequence,
+            realtime_timeline(epoch),
+        )
+        .await;
+        let speech = crate::cohost::recent_speech_since(&state, None).unwrap();
+        assert_eq!(
+            speech
+                .finals
+                .iter()
+                .map(|final_| final_.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fresh chunk words", "fresh realtime words"]
+        );
+        assert_eq!(
+            caption_event_names(&drain_events(&mut events)),
+            vec!["captions.update"; 2]
+        );
+        session
+            .note_listen_ready(
+                granted_epoch.listen_epoch,
+                crate::cohost::CohostListening::on(Some(120)),
+            )
+            .await;
+        assert!(state.captions.lock().await.listen_ready);
+        let published = tokio::time::timeout(secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(published.event, "cohost.state");
+        assert_eq!(published.payload["listening"]["remainingSeconds"], 120);
+        crate::cohost::stop_cohost(&state).await;
+        stop_captions(&state).await;
+    }
+
+    #[tokio::test]
+    async fn stop_listen_reaps_a_finished_owned_task_and_tap() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        let receiver = install_tap();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel::<()>();
+        let (completed_tx, completed_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            finish_rx.await.unwrap();
+            drop(receiver);
+            completed_tx.send(()).unwrap();
+        });
+        {
+            let mut coordinator = state.captions.lock().await;
+            coordinator.task = Some(task);
+            coordinator.stop = Some(Arc::new(AtomicBool::new(false)));
+            coordinator.listen_wanted = true;
+            coordinator.presentation = Some(Arc::new(AtomicBool::new(false)));
+        }
+        finish_tx.send(()).unwrap();
+        tokio::time::timeout(secs(1), completed_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(secs(1), async {
+            while coordinator_task_alive(&*state.captions.lock().await) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // Leave the completed handle unpolled: production cleanup owns its
+        // single join, even though completion preceded intent retirement.
+        assert!(state.captions.lock().await.task.is_some());
+        assert!(TAP_ACTIVE.load(Ordering::Acquire));
+        stop_listen(&state).await;
+        let coordinator = state.captions.lock().await;
+        assert!(
+            coordinator.task.is_none(),
+            "retirement reaps the owned finished handle"
+        );
+        assert!(coordinator.stop.is_none());
+        assert!(!coordinator.listen_wanted);
+        assert!(!TAP_ACTIVE.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn delayed_capture_resume_cannot_rearm_a_retired_listen_epoch() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        crate::cohost::start_cohost_session_for_test(&state, "resume-chat").await;
+        state.captions.lock().await.listen_wanted = true;
+        let before = current_listen_epoch(&state).await;
+        let (checked_tx, checked_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let resume_state = state.clone();
+        let resume = tokio::spawn(async move {
+            resume_listen_for_capture_after_check(&resume_state, async {
+                checked_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+            })
+            .await;
+        });
+        tokio::time::timeout(secs(1), checked_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        stop_listen(&state).await;
+        assert!(current_listen_epoch(&state).await > before);
+        let mut events = state.events.subscribe();
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(secs(1), resume)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!state.captions.lock().await.listen_wanted);
+        assert!(state.captions.lock().await.task.is_none());
+        assert!(drain_events(&mut events).is_empty());
+        crate::cohost::stop_cohost(&state).await;
+    }
+
     #[tokio::test]
     async fn sign_out_and_stops_fence_late_listening_publishes() {
         let _caption_test_guard = caption_lifecycle_test_lock().lock().await;

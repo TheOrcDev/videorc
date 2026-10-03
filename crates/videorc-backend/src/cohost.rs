@@ -1432,8 +1432,12 @@ impl CohostSession {
             generation,
             consent,
             stream_title,
-            status: CohostStatus::Listening,
-            reason: None,
+            status: if consent {
+                CohostStatus::Listening
+            } else {
+                CohostStatus::Paused
+            },
+            reason: (!consent).then_some(CohostReason::ConsentRequired),
             detail: None,
             questions: Vec::new(),
             flags: Vec::new(),
@@ -3493,6 +3497,61 @@ impl CohostEngine {
             .is_some_and(|session| session.session_id == session_id)
     }
 
+    /// Consent changes retire cloud work, not the chat session or its history.
+    /// Return the replacement scheduler generation only when consent changed.
+    fn update_consent(&mut self, consent: bool) -> Option<u64> {
+        if self.session.as_ref()?.consent == consent {
+            return None;
+        }
+        if let Some(handle) = self.scheduler.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.spotlight_scheduler.take() {
+            handle.abort();
+        }
+        self.generation = self.generation.wrapping_add(1);
+        let session = self.session.as_mut()?;
+        session.generation = self.generation;
+        session.consent = consent;
+        session.in_flight = false;
+        session.discard_in_flight = false;
+        // Keep the chat delta when its pending answer is retired. A later
+        // grant can process it without losing messages or restarting history.
+        for message in std::mem::take(&mut session.in_flight_messages)
+            .into_iter()
+            .rev()
+        {
+            session.pending.push_front(message);
+        }
+        session.dropped = session
+            .dropped
+            .saturating_add(std::mem::take(&mut session.in_flight_dropped));
+        while session.pending.len() > TICK_DELTA_CAP {
+            session.pending.pop_front();
+            session.dropped = session.dropped.saturating_add(1);
+        }
+        session.in_flight_rules.clear();
+        session.in_flight_transcript.clear();
+        session.transcript_pending.clear();
+        session.speech_version = None;
+        session.speech_cursor = None;
+        session.spotlight.in_flight = false;
+        session.spotlight.last_version = None;
+        session.spotlight.answered_streak.clear();
+        session.spotlight.current = None;
+        session.auto.latest = None;
+        session.auto.requested = None;
+        session.status = if consent {
+            CohostStatus::Listening
+        } else {
+            CohostStatus::Paused
+        };
+        session.reason = (!consent).then_some(CohostReason::ConsentRequired);
+        session.detail = None;
+        session.next_attempt_at = None;
+        Some(self.generation)
+    }
+
     /// Begin a session at `now`. Returns the new generation the scheduler must
     /// own; a late response from any earlier generation is dropped.
     fn start_session(
@@ -3924,15 +3983,16 @@ pub(crate) fn note_caption_final(state: &AppState, update: &CaptionsUpdate) {
     }
 }
 
-/// Every transcript final, from either caption intent and either transport
-/// (plan 068 S3): the spotlight window and the five-minute recent-speech
-/// buffer both learn it. Lock, append, return.
+/// Every transcript final can mark its recording independently. Orcle learns
+/// it only when the caption coordinator still owns its admitted speech epoch.
+/// The caller checks ownership and calls this synchronously under that lock;
+/// a consent boundary cannot land between the check and the append.
 pub(crate) fn note_transcript_final(
     state: &AppState,
     update: &CaptionsUpdate,
     final_: RecentSpeechFinal,
+    orcle_owned: bool,
 ) {
-    note_caption_final(state, update);
     if final_.text.trim().is_empty() {
         return;
     }
@@ -3944,6 +4004,10 @@ pub(crate) fn note_transcript_final(
         final_.offset_seconds,
         final_.mark_target.clone(),
     );
+    if !orcle_owned {
+        return;
+    }
+    note_caption_final(state, update);
     if let Ok(mut speech) = state.cohost_recent_speech.lock() {
         speech.push(final_);
     }
@@ -3964,6 +4028,7 @@ fn clear_transcript(state: &AppState) {
 /// (provider confirmed, allowance exhausted, audio path lost). Publishes the
 /// session snapshot when a session is running; never called under the
 /// lifecycle fence.
+#[cfg(test)]
 pub(crate) async fn publish_listening(state: &AppState, listening: CohostListening) {
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     publish_listening_under_fence(state, listening, &lifecycle_delivery).await;
@@ -4049,17 +4114,25 @@ pub(crate) async fn resume_listen_after_sign_in(state: &AppState) {
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     let running = {
         let engine = state.cohost.lock().await;
-        let listen = engine.settings.enabled && engine.settings.listen;
         engine
             .session
             .as_ref()
-            .filter(|_| listen)
-            .map(|session| (session.session_id.clone(), session.consent))
+            .filter(|_| engine.settings.enabled)
+            .map(|session| {
+                (
+                    session.session_id.clone(),
+                    session.consent,
+                    engine.settings.listen,
+                )
+            })
     };
-    let Some((session_id, consent)) = running else {
+    let Some((session_id, consent, listen)) = running else {
         return;
     };
-    start_listen_if_wanted(state, &session_id, consent, true).await;
+    if consent {
+        crate::captions::grant_orcle_speech(state).await;
+    }
+    start_listen_if_wanted(state, &session_id, consent, listen).await;
     let snapshot = state.cohost.lock().await.snapshot();
     emit_state(state, &snapshot, &lifecycle_delivery);
 }
@@ -4136,6 +4209,7 @@ pub async fn set_cohost_settings(
     let snapshot = engine.snapshot();
     drop(engine);
     if stopped {
+        crate::captions::retire_orcle_speech(state).await;
         clear_transcript(state);
         crate::captions::stop_listen(state).await;
         state.emit_log("info", "Orcle stopped: turned off in Settings.");
@@ -4207,7 +4281,26 @@ where
         return Err(CohostError::Disabled);
     }
     if engine.is_running_for(&session_id) {
-        return Ok(engine.snapshot());
+        let Some(generation) = engine.update_consent(consent) else {
+            return Ok(engine.snapshot());
+        };
+        let listen = engine.settings.listen;
+        engine.scheduler = Some(spawn_scheduler(state.clone(), generation));
+        engine.spotlight_scheduler = Some(spawn_spotlight_scheduler(state.clone(), generation));
+        drop(engine);
+        // Invalidate delayed listen publications and capture-resume admissions
+        // before reflecting the new consent. Explicit captions keep their task.
+        crate::captions::retire_orcle_speech(state).await;
+        crate::captions::stop_listen(state).await;
+        clear_transcript(state);
+        if consent {
+            crate::captions::grant_orcle_speech(state).await;
+        }
+        start_listen_if_wanted(state, &session_id, consent, listen).await;
+        let snapshot = state.cohost.lock().await.snapshot();
+        before_state_emit.await;
+        emit_state(state, &snapshot, &lifecycle_delivery);
+        return Ok(snapshot);
     }
     engine.stop_session();
     let generation = engine.start_session(
@@ -4223,7 +4316,12 @@ where
     engine.spotlight_scheduler = Some(spawn_spotlight_scheduler(state.clone(), generation));
     let listen = engine.settings.listen;
     drop(engine);
+    crate::captions::retire_orcle_speech(state).await;
+    crate::captions::stop_listen(state).await;
     clear_transcript(state);
+    if consent {
+        crate::captions::grant_orcle_speech(state).await;
+    }
     // The listen intent joins after the session exists (it reports into the
     // session) and before the first state emit (so the renderer sees it at
     // once). It never fails or delays the session.
@@ -4261,6 +4359,7 @@ where
     let snapshot = engine.snapshot();
     drop(engine);
     if stopped {
+        crate::captions::retire_orcle_speech(state).await;
         clear_transcript(state);
         crate::captions::stop_listen_with(state, listen_stop).await;
     }
@@ -4327,6 +4426,7 @@ async fn stop_cohost_for_session_end_if_matching_impl<F>(
     let snapshot = engine.snapshot();
     drop(engine);
     if stopped {
+        crate::captions::retire_orcle_speech(state).await;
         clear_transcript(state);
         // The recording monitor retires its capture next: the listen task
         // drains there (`finish_captions_for_capture`) instead of aborting.
@@ -4790,6 +4890,39 @@ fn spawn_spotlight_scheduler(state: AppState, generation: u64) -> JoinHandle<()>
     })
 }
 
+/// Read and prepare one spotlight admission under the authoritative lifecycle
+/// fence. A consent/session boundary must also retire the transcript snapshot.
+async fn prepare_spotlight_pass<F>(
+    state: &AppState,
+    generation: u64,
+    signed_in: bool,
+    premium: bool,
+    before_delivery: F,
+) -> (OwnedMutexGuard<()>, Option<CohostState>, SpotlightPass)
+where
+    F: std::future::Future<Output = ()>,
+{
+    before_delivery.await;
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    let now = Instant::now();
+    let transcript = state
+        .cohost_transcript
+        .lock()
+        .map(|window| window.snapshot(now))
+        .unwrap_or_default();
+    let (expired, pass) = {
+        let mut engine = state.cohost.lock().await;
+        // The pull-up leaves the state the second it is stale, whether or
+        // not a call goes out.
+        let expired = engine
+            .expire_spotlight(generation, now)
+            .then(|| engine.snapshot());
+        let pass = engine.prepare_spotlight(generation, signed_in, premium, &transcript, now);
+        (expired, pass)
+    };
+    (lifecycle_delivery, expired, pass)
+}
+
 /// One pass of the spotlight lane (plan 060 S3). Its own loop, not the tick
 /// scheduler's: that pass awaits the tick request inline (up to 12 s) and
 /// D7 says the lane never waits on the tick. Both share the engine lock, so
@@ -4798,23 +4931,14 @@ fn spawn_spotlight_scheduler(state: AppState, generation: u64) -> JoinHandle<()>
 async fn run_spotlight_pass(state: &AppState, generation: u64) -> bool {
     let token = crate::account::stored_session_token();
     let premium = premium_entitled();
-    let now = Instant::now();
-    let transcript = state
-        .cohost_transcript
-        .lock()
-        .map(|window| window.snapshot(now))
-        .unwrap_or_default();
-    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
-    let (expired, pass) = {
-        let mut engine = state.cohost.lock().await;
-        // The pull-up leaves the state the second it is stale, whether or
-        // not a call goes out.
-        let expired = engine
-            .expire_spotlight(generation, now)
-            .then(|| engine.snapshot());
-        let pass = engine.prepare_spotlight(generation, token.is_some(), premium, &transcript, now);
-        (expired, pass)
-    };
+    let (lifecycle_delivery, expired, pass) = prepare_spotlight_pass(
+        state,
+        generation,
+        token.is_some(),
+        premium,
+        std::future::ready(()),
+    )
+    .await;
     if let Some(snapshot) = expired {
         emit_state(state, &snapshot, &lifecycle_delivery);
     }
@@ -9296,6 +9420,7 @@ mod tests {
                 presented: false,
                 mark_target: None,
             },
+            true,
         );
         assert_eq!(
             state
@@ -9349,6 +9474,316 @@ mod tests {
         let t2 = t1 + Duration::from_secs(10);
         note_voice_frame(&state, &[0.1; 640], &loud, t2);
         assert_eq!(voice_activity(&state).live_since, Some(t2));
+    }
+
+    #[tokio::test]
+    async fn same_chat_start_applies_consent_in_both_directions_without_resetting_history() {
+        let state = test_state();
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("session-1".to_string(), Vec::new());
+        set_cohost_settings(
+            &state,
+            CohostSettingsPatch {
+                enabled: Some(true),
+                listen: Some(true),
+                ..CohostSettingsPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut params = CohostStartParams {
+            session_id: "session-1".into(),
+            consent_to_process_chat: true,
+            stream_title: Some("Same stream".into()),
+        };
+        start_cohost(&state, params.clone()).await.unwrap();
+        assert!(crate::captions::listen_wanted_for_test(&state).await);
+        let now = Instant::now();
+        let (started_at, before) = {
+            let mut engine = state.cohost.lock().await;
+            let generation = engine.session.as_ref().unwrap().generation;
+            let rows = messages("session-1", 0..5);
+            engine.note_messages_at(&rows, now);
+            engine.apply_tick_result(
+                generation,
+                0,
+                Ok(response(vec![question("q_keep", &[rows[0].id.as_str()])])),
+                now,
+                "before",
+            );
+            (
+                engine.session.as_ref().unwrap().started_at,
+                engine.snapshot(),
+            )
+        };
+        let mut events = state.events.subscribe();
+
+        params.consent_to_process_chat = false;
+        let revoked = start_cohost(&state, params.clone()).await.unwrap();
+        {
+            let mut engine = state.cohost.lock().await;
+            let session = engine.session.as_ref().unwrap();
+            assert!(
+                !session.consent,
+                "same-session RPC must store revoked consent"
+            );
+            assert_eq!(session.started_at, started_at);
+            assert_eq!(revoked.questions, before.questions);
+            assert_eq!(revoked.tick_seq, before.tick_seq);
+            let generation = session.generation;
+            assert!(
+                engine
+                    .prepare_tick(generation, true, true, now + secs(30))
+                    .is_err()
+            );
+        }
+        assert_eq!(revoked.status, CohostStatus::Paused);
+        assert_eq!(revoked.reason, Some(CohostReason::ConsentRequired));
+        assert_eq!(
+            revoked.listening,
+            Some(CohostListening::blocked(
+                "consent-required",
+                "Orcle can hear you once cloud AI consent is on."
+            ))
+        );
+        assert!(!crate::captions::listen_wanted_for_test(&state).await);
+        let published = events.try_recv().unwrap();
+        assert_eq!(published.event, COHOST_STATE_EVENT);
+        assert_eq!(published.payload, serde_json::to_value(&revoked).unwrap());
+
+        params.consent_to_process_chat = true;
+        let granted = start_cohost(&state, params.clone()).await.unwrap();
+        assert_eq!(granted.questions, before.questions);
+        assert_eq!(granted.status, CohostStatus::Listening);
+        assert_eq!(granted.reason, None);
+        assert!(crate::captions::listen_wanted_for_test(&state).await);
+        let generation = {
+            let mut engine = state.cohost.lock().await;
+            let session = engine.session.as_ref().unwrap();
+            assert!(session.consent);
+            assert_eq!(session.started_at, started_at);
+            let generation = session.generation;
+            let prepared = engine
+                .prepare_tick(generation, true, true, now + secs(40))
+                .unwrap();
+            assert!(prepared.request.consent_to_process_chat);
+            generation
+        };
+        let published = events.try_recv().unwrap();
+        assert_eq!(published.event, COHOST_STATE_EVENT);
+        assert_eq!(published.payload, serde_json::to_value(&granted).unwrap());
+        let again = start_cohost(&state, params).await.unwrap();
+        assert!(again.tick_in_flight);
+        assert_eq!(
+            state
+                .cohost
+                .lock()
+                .await
+                .session
+                .as_ref()
+                .unwrap()
+                .generation,
+            generation
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "unchanged consent stays idempotent"
+        );
+        assert_eq!(state.live_chat.lock().await.session_id(), Some("session-1"));
+        stop_cohost(&state).await;
+    }
+
+    #[tokio::test]
+    async fn spotlight_admission_reads_transcript_after_the_lifecycle_boundary() {
+        let state = test_state();
+        let now = Instant::now();
+        let generation = {
+            let mut engine = state.cohost.lock().await;
+            engine.settings = enabled_settings();
+            let generation = engine.start_session("session-1".into(), true, None, now);
+            engine.note_messages_at(&messages("session-1", 0..5), now);
+            generation
+        };
+        state
+            .cohost_transcript
+            .lock()
+            .unwrap()
+            .push("retired speech", now - secs(1));
+        let held_delivery = state.live_chat_persistence.begin_delivery().await;
+        let (queued_tx, queued_rx) = tokio::sync::oneshot::channel();
+        let pass_state = state.clone();
+        let admission = tokio::spawn(async move {
+            prepare_spotlight_pass(&pass_state, generation, true, true, async {
+                queued_tx.send(()).unwrap();
+            })
+            .await
+        });
+        tokio::time::timeout(secs(1), queued_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        // Consent/session retirement owns this same fence and clears speech
+        // before acknowledging the boundary. The queued scheduler must read it
+        // afterward, even when its generation already belongs to the new intent.
+        clear_transcript(&state);
+        drop(held_delivery);
+        let (_delivery, _, pass) = tokio::time::timeout(secs(1), admission)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            pass,
+            SpotlightPass::Idle,
+            "retired snapshot cannot admit new-generation spotlight work"
+        );
+    }
+
+    #[tokio::test]
+    async fn consent_epochs_drop_delayed_tick_spotlight_and_speech_without_losing_chat() {
+        let state = test_state();
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("session-1".into(), Vec::new());
+        set_cohost_settings(
+            &state,
+            CohostSettingsPatch {
+                enabled: Some(true),
+                listen: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let params = CohostStartParams {
+            session_id: "session-1".into(),
+            consent_to_process_chat: true,
+            stream_title: None,
+        };
+        start_cohost(&state, params.clone()).await.unwrap();
+        let now = Instant::now();
+        let rows = messages("session-1", 0..5);
+        let (tick, spotlight) = {
+            let mut engine = state.cohost.lock().await;
+            let generation = engine.session.as_ref().unwrap().generation;
+            engine.note_messages_at(&rows, now);
+            let tick = engine
+                .prepare_tick(generation, true, true, now + secs(1))
+                .unwrap();
+            let spotlight = send_spotlight(&mut engine, generation, 1, now + secs(1)).unwrap();
+            (tick, spotlight)
+        };
+        let listen_epoch = crate::captions::current_listen_epoch(&state).await;
+        let revoked = start_cohost(
+            &state,
+            CohostStartParams {
+                consent_to_process_chat: false,
+                ..params.clone()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!revoked.tick_in_flight);
+        assert_eq!(
+            revoked.pending_messages as usize,
+            tick.request.messages.len() + 1,
+            "retired tick restores its chat delta"
+        );
+        let mut events = state.events.subscribe();
+        for grant in [false, true] {
+            if grant {
+                start_cohost(&state, params.clone()).await.unwrap();
+            }
+            let expected = state.cohost.lock().await.snapshot();
+            {
+                let mut engine = state.cohost.lock().await;
+                let generation = engine.session.as_ref().unwrap().generation;
+                assert_ne!(generation, tick.generation);
+                assert_eq!(engine.generation, generation);
+                assert!(!engine.scheduler.as_ref().unwrap().is_finished());
+                assert!(!engine.spotlight_scheduler.as_ref().unwrap().is_finished());
+                assert!(!engine.apply_tick_result(
+                    tick.generation,
+                    0,
+                    Ok(response(vec![question("q_late", &[rows[0].id.as_str()])])),
+                    now + secs(2),
+                    "late"
+                ));
+                assert!(
+                    engine
+                        .apply_spotlight_result(
+                            spotlight.generation,
+                            Ok(spotlight_response(vec![spotlight_match(
+                                &rows[0].id,
+                                0.95,
+                                None
+                            )])),
+                            now + secs(2),
+                            "late"
+                        )
+                        .is_none()
+                );
+                assert_eq!(
+                    engine.note_speech(tick.generation, &speech(&[(now, "stale words")])),
+                    0
+                );
+                let mut actual = engine.snapshot();
+                // nextTickAt projects a monotonic deadline onto wall time on
+                // each snapshot, so its sub-microsecond spelling can drift.
+                assert_eq!(
+                    actual.next_tick_at.is_some(),
+                    expected.next_tick_at.is_some()
+                );
+                actual.next_tick_at = expected.next_tick_at.clone();
+                assert_eq!(actual, expected);
+                if grant {
+                    let next = engine
+                        .prepare_tick(generation, true, true, now + secs(30))
+                        .unwrap();
+                    assert_eq!(
+                        &next.request.messages[..tick.request.messages.len()],
+                        tick.request.messages.as_slice()
+                    );
+                    assert!(next.request.transcript.is_none());
+                } else {
+                    assert!(
+                        engine
+                            .prepare_tick(generation, true, true, now + secs(30))
+                            .is_err()
+                    );
+                    assert_eq!(
+                        engine.prepare_spotlight(
+                            generation,
+                            true,
+                            true,
+                            &TranscriptSnapshot::default(),
+                            now + secs(30)
+                        ),
+                        SpotlightPass::Idle
+                    );
+                }
+            }
+            while events.try_recv().is_ok() {}
+            crate::cohost::publish_listening_for_epoch(
+                &state,
+                listen_epoch,
+                CohostListening::on(Some(120)),
+            )
+            .await;
+            assert!(
+                events.try_recv().is_err(),
+                "stale speech readiness never publishes"
+            );
+            assert_ne!(
+                cohost_status(&state).await.listening,
+                Some(CohostListening::on(Some(120)))
+            );
+        }
+        stop_cohost(&state).await;
     }
 
     #[tokio::test]
@@ -10032,6 +10467,7 @@ mod tests {
                 presented: false,
                 mark_target: None,
             },
+            true,
         );
         state.cohost_voice.lock().unwrap().last_voice_at = Some(start);
         {
