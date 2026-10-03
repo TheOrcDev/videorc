@@ -96,6 +96,7 @@ type _RegistryIconProps = _AssertIconProps<
     | 'Moon'
     | 'NotePencil'
     | 'PaperPlaneRight'
+    | 'Pause'
     | 'PencilSimple'
     | 'Play'
     | 'Pulse'
@@ -212,6 +213,8 @@ export {
   Record as RecordIcon,
   Stop as StopIcon,
   Play as PlayIcon,
+  // The in-app player's pause (plan 119, S11); Stop is the capture action.
+  Pause as PauseIcon,
   FileVideo as VideoFileIcon,
   FilmSlate as ClapperboardIcon,
   FrameCorners as FrameIcon,
