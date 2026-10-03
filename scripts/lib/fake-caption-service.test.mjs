@@ -222,6 +222,51 @@ describe('fake caption service', () => {
     }
   })
 
+  it('blocks only validated authenticated chunks and recovers when the retry fixture clears', async () => {
+    const sessionToken = 'fake-caption-session'
+    const fake = await startFakeCaptionService({
+      smokeSessionToken: sessionToken,
+      smokeRealtimeToken: 'fake-caption-realtime',
+      chunkText: 'Retry recovered.'
+    })
+    const wav = pcm16Wav([0, 4_096, -8_192, 16_384])
+    try {
+      fake.state.chunkFailureCode = 'unauthorized'
+      const auth = await postCaptionChunk(fake.httpOrigin, 'wrong-token', wav, {
+        expectedStatus: 401
+      })
+      assert.equal(auth.error.code, 'unauthorized')
+      const malformed = await postCaptionChunk(
+        fake.httpOrigin,
+        sessionToken,
+        Buffer.from('invalid'),
+        {
+          expectedStatus: 400
+        }
+      )
+      assert.equal(malformed.error.code, 'invalid-caption-wav')
+      const purpose = await postCaptionChunk(fake.httpOrigin, sessionToken, wav, {
+        purpose: 'unknown',
+        expectedStatus: 400
+      })
+      assert.equal(purpose.error.code, 'invalid-caption-purpose')
+      assert.equal(fake.state.chunkRequests, 0)
+      const blocked = await postCaptionChunk(fake.httpOrigin, sessionToken, wav, {
+        expectedStatus: 401
+      })
+      assert.equal(blocked.error.code, 'unauthorized')
+      fake.state.chunkFailureCode = null
+      const recovered = await postCaptionChunk(fake.httpOrigin, sessionToken, wav)
+      assert.equal(recovered.text, 'Retry recovered.')
+      assert.equal(fake.state.chunkRequests, 2)
+      assert.deepEqual(fake.state.chunkPurposes, [null, null])
+      assert.equal(fake.state.chunkAudio[0].peak, 0.5)
+      assert.ok(!('audio' in fake.state.chunkAudio[0]))
+    } finally {
+      await fake.close()
+    }
+  })
+
   it('records the chunk purpose, defaults an absent one to captions, and refuses unknown ones', async () => {
     const sessionToken = 'fake-caption-session'
     const fake = await startFakeCaptionService({

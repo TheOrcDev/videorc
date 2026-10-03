@@ -6597,7 +6597,7 @@ mod tests {
         assert!(!crate::captions::listen_wanted_for_test(&state).await);
         assert!(crate::captions::caption_task_alive_for_test(&state).await);
         *state.recording.lock().await = None;
-        crate::captions::finish_captions_for_capture(&state).await;
+        crate::captions::finish_captions_for_capture(&state, "session-a").await;
         assert!(!crate::captions::caption_task_alive_for_test(&state).await);
 
         // No capture: nothing to drain with.

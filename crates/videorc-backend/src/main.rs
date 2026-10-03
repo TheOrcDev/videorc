@@ -18157,7 +18157,7 @@ mod tests {
         let _probe = captions::install_caption_sign_out_test_session(&state).await;
         let mut events = state.events.subscribe();
 
-        let status = captions::finish_captions_for_capture(&state).await;
+        let status = captions::finish_captions_for_capture(&state, "caption-sign-out-test").await;
 
         assert_eq!(status.state, captions::CaptionsState::Ready);
         let snapshot = captions::caption_sign_out_test_snapshot(&state).await;

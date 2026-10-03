@@ -8935,7 +8935,7 @@ async fn monitor_session(
     // Dropping ActiveRecording stops the native post-controls audio producer.
     // Close the caption bus now, drain the provider's final utterance within a
     // bounded grace period, and only then generate SRT/captioned artifacts.
-    crate::captions::finish_captions_for_capture(&state).await;
+    crate::captions::finish_captions_for_capture(&state, &session_id).await;
     mark_stop_timeline(&state, RecordingStopPhase::CaptionsDrained);
     let finalized_caption_artifact =
         crate::captions::take_finalized_caption_artifact_for_capture(&state).await;
