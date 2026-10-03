@@ -182,6 +182,7 @@ import {
 } from './resource-capabilities'
 import { PersistentDirectoryAuthority } from './persistent-directory-authority'
 import { SmokeAppQuitGuard } from './smoke-app-quit-guard'
+import { PreviewLifecycleSmokeEvidence } from './preview-lifecycle-smoke-evidence'
 import {
   PACKAGED_SMOKE_COMMAND_NAMES,
   SMOKE_BACKEND_RPC_METHOD_NAMES,
@@ -1085,6 +1086,13 @@ const smokeCommandCapability = smokeCommandServerEnabled
   ? (packagedSmokeHarnessCapability ?? createSmokeCommandCapability())
   : ''
 const smokeAppQuitGuard = new SmokeAppQuitGuard(process.env.VIDEORC_PREVIEW_LIFECYCLE_PROBE === '1')
+const previewLifecycleEvidence: PreviewLifecycleSmokeEvidence = new PreviewLifecycleSmokeEvidence({
+  enabled: process.env.VIDEORC_PREVIEW_LIFECYCLE_PROBE === '1',
+  currentMainWindow: () => mainWindow,
+  appIsQuitting: () => appIsQuitting,
+  quitGuard: smokeAppQuitGuard,
+  emit: (line) => safeConsole.log(line)
+})
 const NATIVE_PREVIEW_INVALID_ACTIVATION_WARN_THRESHOLD = 3
 const requireNativePreviewRealSurfaceModule = createRequire(__filename)
 const configuredNativePreviewHostModulePath = process.env.VIDEORC_NATIVE_PREVIEW_HOST_MODULE?.trim()
@@ -2187,7 +2195,7 @@ function createWindow(): void {
     publishWindowVisible(Boolean(mainWindow?.isVisible() && !mainWindow.isMinimized()))
   })
 
-  mainWindow.on('closed', () => {
+  previewLifecycleEvidence.bindMainWindow(mainWindow, () => {
     commentsCommandBroker.rejectAll()
     destroyNativePreviewSurface()
     if (previewWindow && !previewWindow.isDestroyed()) {
@@ -9741,7 +9749,7 @@ async function runSmokePreviewMotionCommand(
   }
 
   if (command === 'preview-lifecycle-allow-app-quit') {
-    smokeAppQuitGuard.allowQuit()
+    previewLifecycleEvidence.allowQuit()
     return { allowed: true }
   }
 
@@ -9883,9 +9891,7 @@ async function runSmokePreviewMotionCommand(
     }
   }
 
-  if (!mainWindow || mainWindow.webContents.isDestroyed()) {
-    throw new Error('Main window is not ready for preview motion smoke.')
-  }
+  previewLifecycleEvidence.requireMainWindow(mainWindow, command)
 
   if (command === 'windows-live-audio-harness') {
     if (!app.isPackaged || !packagedSmokeHarnessCapability || !windowsLiveAudioSmokeMode) {
@@ -14412,24 +14418,24 @@ installPersistentBackendShutdownSignalHandlers(process, (signal) => {
   app.quit()
 })
 
-app.on('before-quit', (event) => {
-  if (smokeAppQuitGuard.shouldPreventQuit()) {
-    event.preventDefault()
+previewLifecycleEvidence.bindBeforeQuit(app, {
+  onPrevented: () => {
     safeConsole.warn('Ignored app quit while the preview lifecycle probe owns the app.')
-    return
+  },
+  onAllowed: (event) => {
+    appIsQuitting = true
+    accountSignInTransactions?.dispose()
+    providerOAuthCallbacks?.dispose()
+    cancelBackendRestart()
+    handleBackendBeforeQuit(event, backendQuitState, {
+      stopBackend,
+      quit: () => app.quit(),
+      onFailure: (error) => {
+        logBackend(
+          'error',
+          `Backend shutdown could not be confirmed; app quit remains blocked: ${errorMessageText(error)}`
+        )
+      }
+    })
   }
-  appIsQuitting = true
-  accountSignInTransactions?.dispose()
-  providerOAuthCallbacks?.dispose()
-  cancelBackendRestart()
-  handleBackendBeforeQuit(event, backendQuitState, {
-    stopBackend,
-    quit: () => app.quit(),
-    onFailure: (error) => {
-      logBackend(
-        'error',
-        `Backend shutdown could not be confirmed; app quit remains blocked: ${errorMessageText(error)}`
-      )
-    }
-  })
 })

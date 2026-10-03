@@ -49,6 +49,10 @@ import {
 } from './lib/process-memory-gate.mjs'
 import { requestSmokeCommandWithRetry } from './lib/smoke-command-client.mjs'
 import {
+  createPreviewLifecycleEvidence,
+  PREVIEW_LIFECYCLE_EVIDENCE_PREFIX
+} from './lib/preview-lifecycle-evidence.mjs'
+import {
   parseWindowsPreviewLifecycleMode,
   previewLifecycleModePlatform,
   windowsPreviewLifecycleDiagnosticFailures,
@@ -130,14 +134,13 @@ let teardownRecovery = null
 let processEndurance = null
 let activeBudgetEvaluation = null
 const memoryCheckpoints = []
+const lifecycleEvidence = createPreviewLifecycleEvidence()
 
 try {
   exitCode = await main()
 } catch (error) {
   console.error(`preview lifecycle probe failed: ${error?.message ?? error}`)
-  if (lastState) {
-    console.error(`last preview state: ${JSON.stringify(lastState)}`)
-  }
+  console.error(`preview lifecycle evidence: ${JSON.stringify(lifecycleEvidence.snapshot())}`)
   failureMessage = error?.message ?? String(error)
   exitCode = 2
 } finally {
@@ -283,6 +286,7 @@ const report = createPerformanceReport({
     teardownClean,
     teardownEvidence,
     teardownRecovery,
+    lifecycleEvidence: lifecycleEvidence.snapshot(),
     scratchDirectory: outputDirectory
   },
   checks: [
@@ -346,10 +350,14 @@ async function main() {
         ? { VIDEORC_WINDOWS_EXPECT_D3D11_FALLBACK: 'natural' }
         : {})
     },
-    onLine: (line) => console.log(line)
+    onLine: (line) => {
+      lifecycleEvidence.observeLine(line)
+      if (!line.startsWith(PREVIEW_LIFECYCLE_EVIDENCE_PREFIX)) console.log(line)
+    }
   })
   smoke = launched.connections['preview-motion-ready']
 
+  lifecycleEvidence.setContext({ cycle: null, action: 'initial-close' })
   const initialState = await ensureClosed('initial close')
   reportMetadataWithDisplayScale = performanceMetadataWithObservedDisplayScale(
     reportMetadata,
@@ -388,12 +396,14 @@ async function main() {
     : null
   await captureMemoryCheckpoint('initial')
   lastSupervisorGeneration = supervisorGeneration(initialState)
+  lifecycleEvidence.setContext({ cycle: null, action: 'quit-attempt' })
   const quitAttempt = await smokeCommand('preview-lifecycle-attempt-app-quit')
   assertProbe(
     quitAttempt?.prevented === true,
     'probe ownership: unrelated app quit was prevented',
     quitAttempt
   )
+  lifecycleEvidence.setContext({ cycle: null, action: 'quit-check' })
   const afterQuitAttempt = await smokeCommand('preview-window-state')
   assertProbe(
     afterQuitAttempt.open === false && afterQuitAttempt.supervisor?.lifecycleState === 'closed',
@@ -409,13 +419,19 @@ async function main() {
   const lifecycleMeasurementStartedAtMs = Date.now()
 
   for (let cycle = 1; cycle <= cycles; cycle += 1) {
+    lifecycleEvidence.setContext({ cycle, action: 'toggle-open' })
     await toggleOpen(`cycle ${cycle}: toggle open`)
+    lifecycleEvidence.setContext({ cycle, action: 'dock' })
     await setPreviewMode('docked', `cycle ${cycle}: dock`)
+    lifecycleEvidence.setContext({ cycle, action: 'undock' })
     await setPreviewMode('floating', `cycle ${cycle}: undock`)
     if (cycle === 1) {
+      lifecycleEvidence.setContext({ cycle, action: 'stale-destroy' })
       await assertStaleDestroyIgnored('cycle 1: stale destroy is ignored')
+      lifecycleEvidence.setContext({ cycle, action: 'permission-required' })
       await assertPermissionRequiredStopsSurface('cycle 1: permission-required stops presentation')
     }
+    lifecycleEvidence.setContext({ cycle, action: 'toggle-close' })
     await toggleClosed(`cycle ${cycle}: toggle close`)
     if (cycle === 1 || cycle === cycles || cycle % 10 === 0) {
       await captureMemoryCheckpoint(`cycle-${cycle}`)
@@ -428,12 +444,18 @@ async function main() {
     }
   }
 
+  lifecycleEvidence.setContext({ cycle: null, action: 'os-close-open' })
   await toggleOpen('os close path: toggle open')
+  lifecycleEvidence.setContext({ cycle: null, action: 'os-close' })
   await closeWithOsFrame('os close path: window frame close')
+  lifecycleEvidence.setContext({ cycle: null, action: 'shortcut-open' })
   await shortcutOpen('shortcut path: Cmd+P after OS close')
+  lifecycleEvidence.setContext({ cycle: null, action: 'shortcut-close' })
   await toggleClosed('shortcut path: cleanup close')
 
+  lifecycleEvidence.setContext({ cycle: null, action: 'final-open' })
   await toggleOpen('final reopen')
+  lifecycleEvidence.setContext({ cycle: null, action: 'final-close' })
   await toggleClosed('final close')
   await captureMemoryCheckpoint('final')
   if (endurancePromise) processEndurance = await endurancePromise
@@ -690,7 +712,7 @@ async function waitForState(predicate, timeoutMsLocal) {
 }
 
 async function smokeCommand(command, params = {}) {
-  return requestSmokeCommandWithRetry(smoke, command, params)
+  return lifecycleEvidence.request(smoke, command, params)
 }
 
 function assertProbe(condition, label, detail) {
