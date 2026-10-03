@@ -21,7 +21,7 @@ export const SHORTCUTS: readonly ShortcutEntry[] = [
   { id: 'nav-captions', keys: ['⌘', '6'], label: 'Captions', group: 'Navigation' },
   { id: 'nav-recording', keys: ['⌘', '7'], label: 'Output', group: 'Navigation' },
   { id: 'nav-library', keys: ['⌘', '8'], label: 'Library', group: 'Navigation' },
-  { id: 'nav-ai', keys: ['⌘', '9'], label: 'Publish', group: 'Navigation' },
+  { id: 'nav-ai', keys: ['⌘', '9'], label: 'Orcle', group: 'Navigation' },
   { id: 'nav-settings', keys: ['⌘', ','], label: 'Settings', group: 'Navigation' },
   { id: 'search', keys: ['⌘', 'K'], label: 'Search & commands', group: 'Navigation' },
 

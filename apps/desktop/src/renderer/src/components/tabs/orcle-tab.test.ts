@@ -1,0 +1,269 @@
+// @vitest-environment happy-dom
+import { act, createElement } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import type { CohostSettings, CohostState } from '@/lib/backend'
+import { CLOUD_AI_KEEPS, CLOUD_AI_USES, ORCLE_LIVE_POWERS } from '@/lib/orcle-tab-view'
+
+import { OrcleTab } from './orcle-tab'
+
+const mocked = vi.hoisted(() => ({
+  core: {} as Record<string, unknown>,
+  chat: { cohostState: null } as Record<string, unknown>,
+  recording: { recording: { state: 'idle' } } as Record<string, unknown>,
+  shell: {} as Record<string, unknown>,
+  account: {} as Record<string, unknown>
+}))
+vi.mock('@/hooks/use-studio', () => ({
+  useStudioCore: () => mocked.core,
+  useStudioChat: () => mocked.chat,
+  useStudioRecordingState: () => mocked.recording,
+  useStudioShell: () => mocked.shell
+}))
+vi.mock('@/hooks/use-account', () => ({ useVideorcAccount: () => mocked.account }))
+
+let root: Root
+let container: HTMLDivElement
+const calls = {
+  setOrcleLive: vi.fn(async (_on: boolean) => undefined),
+  answerOrcleConsent: vi.fn(async (_accepted: boolean) => undefined),
+  setAiConsent: vi.fn((_consent: boolean) => undefined),
+  patchCohostSettings: vi.fn(async () => undefined),
+  openCommentsWindow: vi.fn(async () => undefined),
+  signIn: vi.fn(),
+  openOAuthUrl: vi.fn(async (_url: string) => undefined)
+}
+
+const premium = { allowed: true }
+const basic = {
+  allowed: false,
+  featureId: 'live-cohost',
+  reason: 'Orcle requires Videorc Premium.',
+  upgradeUrl: 'https://www.videorc.com/premium'
+}
+
+function settings(overrides: Partial<CohostSettings> = {}): CohostSettings {
+  return {
+    enabled: false,
+    tone: 'friendly',
+    notes: '',
+    autoHighlight: false,
+    voiceHighlight: false,
+    rules: [],
+    listen: false,
+    ...overrides
+  }
+}
+
+beforeEach(() => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  for (const spy of Object.values(calls)) spy.mockClear()
+  Object.assign(window, { videorc: { openOAuthUrl: calls.openOAuthUrl } })
+  container = document.createElement('div')
+  document.body.append(container)
+  root = createRoot(container)
+})
+
+afterEach(async () => {
+  await act(async () => root.unmount())
+  container.remove()
+  document.body.innerHTML = ''
+  vi.unstubAllGlobals()
+})
+
+async function render({
+  cohost = settings(),
+  gate = premium as Record<string, unknown>,
+  signedIn = true,
+  consented = true,
+  consentRequested = false,
+  live = false,
+  state = null as CohostState | null
+} = {}): Promise<void> {
+  mocked.core = {
+    account: signedIn ? { status: 'signed-in' } : { status: 'signed-out' },
+    aiConsent: consented,
+    cohostGate: gate,
+    cohostSettings: cohost,
+    runtimeInfo: { platform: 'darwin', commentsWindowEnabled: true },
+    orcleConsentRequested: consentRequested,
+    setOrcleLive: calls.setOrcleLive,
+    answerOrcleConsent: calls.answerOrcleConsent,
+    setAiConsent: calls.setAiConsent,
+    patchCohostSettings: calls.patchCohostSettings
+  }
+  mocked.chat = { cohostState: state }
+  mocked.recording = {
+    recording: live
+      ? { state: 'recording', streamUrl: 'rtmp://live.example/app' }
+      : { state: 'idle' }
+  }
+  mocked.shell = { openCommentsWindow: calls.openCommentsWindow }
+  mocked.account = { signIn: calls.signIn }
+  await act(async () => root.render(createElement(OrcleTab)))
+}
+
+function liveSwitch(): HTMLButtonElement {
+  const control = document.getElementById('orcle-live-switch') as HTMLButtonElement | null
+  expect(control).toBeTruthy()
+  return control!
+}
+
+function button(label: string): HTMLButtonElement {
+  const match = [...document.querySelectorAll('button')].find(
+    (candidate) => candidate.textContent?.trim() === label
+  )
+  expect(match, label).toBeTruthy()
+  return match as HTMLButtonElement
+}
+
+function statusLine(): HTMLElement {
+  return document.querySelector('[data-slot="orcle-live-status"]') as HTMLElement
+}
+
+describe('Orcle tab (plan 119 S2)', () => {
+  it('introduces Orcle Live with its switch, its status and its three powers', async () => {
+    await render()
+    const text = document.body.textContent ?? ''
+    expect(text).toContain("Your AI producer while you're live.")
+    expect(text).toContain('Orcle Live')
+    expect(text).toContain('Alpha')
+    expect(text).toContain('Orcle joins my streams')
+    for (const power of ORCLE_LIVE_POWERS) {
+      expect(text).toContain(power.title)
+      expect(text).toContain(power.description)
+    }
+    expect(liveSwitch().getAttribute('data-state')).toBe('unchecked')
+    expect(statusLine().getAttribute('data-status')).toBe('off')
+    // No Publish left on the page, and the Stream Manager waits for a stream.
+    expect(text).not.toContain('Publish')
+    expect(text).not.toContain('Open Stream Manager')
+  })
+
+  it('turns Orcle Live on and off through the one switch', async () => {
+    await render()
+    await act(async () => liveSwitch().click())
+    expect(calls.setOrcleLive).toHaveBeenLastCalledWith(true)
+
+    await render({ cohost: settings({ enabled: true, listen: true }) })
+    expect(statusLine().textContent).toContain('On, joins your next stream')
+    await act(async () => liveSwitch().click())
+    expect(calls.setOrcleLive).toHaveBeenLastCalledWith(false)
+    expect(calls.patchCohostSettings).not.toHaveBeenCalled()
+  })
+
+  it('asks for consent in a dialog that names every cloud use, and answers it', async () => {
+    await render({ consented: false, consentRequested: true })
+    const dialog = document.querySelector('[role="dialog"]')
+    expect(dialog?.textContent).toContain('Turn on Orcle Live?')
+    for (const use of CLOUD_AI_USES) expect(dialog?.textContent).toContain(use)
+    expect(dialog?.textContent).toContain(CLOUD_AI_KEEPS)
+
+    await act(async () => button('Allow and turn on').click())
+    expect(calls.answerOrcleConsent).toHaveBeenLastCalledWith(true)
+
+    await act(async () => button('Not now').click())
+    expect(calls.answerOrcleConsent).toHaveBeenLastCalledWith(false)
+    expect(calls.setAiConsent).not.toHaveBeenCalled()
+  })
+
+  it('shows no consent dialog until Orcle Live asks for one', async () => {
+    await render({ consented: false })
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+  })
+
+  it('asks a signed-out streamer to sign in and keeps the switch off', async () => {
+    await render({ signedIn: false, gate: basic })
+    const unlock = document.querySelector('[data-slot="orcle-live-unlock"]')
+    expect(unlock?.textContent).toContain('Sign in to use Orcle Live, part of Videorc Premium.')
+    expect(liveSwitch().disabled).toBe(true)
+    await act(async () => button('Sign in').click())
+    expect(calls.signIn).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers Premium to a Basic account', async () => {
+    await render({ gate: basic })
+    expect(document.querySelector('[data-slot="orcle-live-unlock"]')?.textContent).toContain(
+      'Orcle requires Videorc Premium.'
+    )
+    expect(liveSwitch().disabled).toBe(true)
+    await act(async () => button('View Premium').click())
+    expect(calls.openOAuthUrl).toHaveBeenCalledWith('https://www.videorc.com/premium')
+  })
+
+  it('is live on air, with the Stream Manager one click away', async () => {
+    await render({
+      cohost: settings({ enabled: true, listen: true }),
+      live: true,
+      state: {
+        sessionId: 'live-1',
+        status: 'listening',
+        reason: null,
+        questions: [],
+        flags: [],
+        mood: null,
+        lastTickAt: null,
+        tickSeq: 1,
+        partial: false
+      }
+    })
+    expect(statusLine().getAttribute('data-status')).toBe('live')
+    expect(statusLine().textContent).toContain('Live now')
+    const open = [...document.querySelectorAll('button')].find((candidate) =>
+      candidate.textContent?.includes('Open Stream Manager')
+    )
+    expect(open?.textContent).toContain('⇧⌘J')
+    await act(async () => open!.click())
+    expect(calls.openCommentsWindow).toHaveBeenCalledTimes(1)
+  })
+
+  it('names what needs attention when cloud AI was revoked with Orcle on', async () => {
+    await render({ cohost: settings({ enabled: true }), consented: false })
+    expect(statusLine().getAttribute('data-status')).toBe('attention')
+    expect(statusLine().textContent).toContain('Needs attention')
+    expect(statusLine().textContent).toContain("Cloud AI is off, so Orcle can't read chat")
+  })
+})
+
+describe('Customize (plan 119 S2)', () => {
+  async function openCustomize(): Promise<void> {
+    const trigger = [...document.querySelectorAll('button')].find((candidate) =>
+      candidate.textContent?.includes('Customize')
+    )
+    expect(trigger).toBeTruthy()
+    await act(async () => trigger!.click())
+  }
+
+  it('starts collapsed', async () => {
+    await render()
+    expect(document.getElementById('orcle-cloud-ai')).toBeNull()
+    expect(document.getElementById('cohost-listen')).toBeNull()
+  })
+
+  it('is the single home of cloud-AI consent: it revokes and grants', async () => {
+    await render({ cohost: settings({ enabled: true, listen: true }) })
+    await openCustomize()
+    const cloudAi = document.getElementById('orcle-cloud-ai') as HTMLButtonElement
+    expect(cloudAi.getAttribute('data-state')).toBe('checked')
+    for (const use of CLOUD_AI_USES) expect(document.body.textContent).toContain(use)
+    await act(async () => cloudAi.click())
+    expect(calls.setAiConsent).toHaveBeenLastCalledWith(false)
+
+    await render({ cohost: settings({ enabled: true, listen: true }), consented: false })
+    const revoked = document.getElementById('orcle-cloud-ai') as HTMLButtonElement
+    expect(revoked.getAttribute('data-state')).toBe('unchecked')
+    await act(async () => revoked.click())
+    expect(calls.setAiConsent).toHaveBeenLastCalledWith(true)
+    // Consent alone never turns Orcle on or off.
+    expect(calls.setOrcleLive).not.toHaveBeenCalled()
+  })
+
+  it("holds Orcle's settings without a second Enable switch", async () => {
+    await render({ cohost: settings({ enabled: true }) })
+    await openCustomize()
+    expect(document.getElementById('cohost-listen')).toBeTruthy()
+    expect(document.getElementById('cohost-enabled')).toBeNull()
+    expect(document.body.textContent).not.toContain('Enable Orcle')
+  })
+})

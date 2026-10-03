@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { OrcleIcon } from './icons'
 import {
   STUDIO_PANELS,
   WORKSPACE_SHORTCUTS,
@@ -7,6 +8,7 @@ import {
   isStudioPanel,
   isWorkspaceTab,
   shortcutDigitFor,
+  sidebarOrderFor,
   workspaceTabLabel,
   type WorkspaceTab
 } from './workspace-nav'
@@ -81,6 +83,38 @@ describe('workspace navigation', () => {
       }
     }
     expect(WORKSPACE_SHORTCUTS).toHaveLength(reachable.length - noDigit.length)
+  })
+
+  // Plan 119: Orcle replaced Publish and sits right under Studio. The id stays
+  // `ai`, so ⌘9, deep links, smokes and data-videorc-tab-trigger keep working.
+  it('shows Orcle under Studio in the stage row, on the old Publish id and ⌘9', () => {
+    const orcle = WORKSPACE_TABS.find((tab) => tab.id === 'ai')
+    expect(orcle).toEqual({ id: 'ai', label: 'Orcle', icon: OrcleIcon, group: 'stage' })
+    expect(WORKSPACE_TABS.filter((tab) => tab.group === 'stage').map((tab) => tab.id)).toEqual([
+      'studio',
+      'ai'
+    ])
+    expect(shortcutDigitFor('ai')).toBe('9')
+    expect(workspaceTabLabel('ai')).toBe('Orcle')
+    expect(WORKSPACE_TABS.some((tab) => tab.label === 'Publish')).toBe(false)
+  })
+
+  it('cascades the shortcut chips down the sidebar, so Orcle (⌘9) arrives second', () => {
+    const rows: WorkspaceTab[] = [
+      'studio',
+      'ai',
+      'sources',
+      'layouts',
+      'assets',
+      'live',
+      'captions',
+      'recording',
+      'library',
+      'settings'
+    ]
+    expect(rows.map((tab) => sidebarOrderFor(tab))).toEqual(rows.map((_, index) => index))
+    // Health has no sidebar row.
+    expect(sidebarOrderFor('diagnostics')).toBe(0)
   })
 
   it('classifies Assets and Captions as Studio panels and labels them', () => {

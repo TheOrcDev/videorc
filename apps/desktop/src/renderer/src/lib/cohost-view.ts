@@ -42,13 +42,14 @@ export const COHOST_CHAT_CONSENT_SENTENCE = 'Orcle reads live chat with Videorc 
 
 /**
  * What Orcle sends (plan 060 D11, plan 068 D3). The consent surfaces that stand
- * alone (the pane notice, the status popover) repeat it verbatim; Settings
- * shows the chat half beside Enable Orcle and the listening half beside its
- * own switch.
+ * alone (the pane notice, the status popover) repeat it verbatim. Turning
+ * Orcle on also turns listening on (Orcle Live, plan 119), so the sentence
+ * names both halves as what happens, not as an option.
  */
-export const COHOST_CONSENT_SENTENCE = `${COHOST_CHAT_CONSENT_SENTENCE} If you turn on listening, your microphone audio also goes to Videorc's cloud speech-to-text while you're live, to be turned into text. Videorc servers don't keep it. The transcript is saved with your recording on this computer.`
+export const COHOST_CONSENT_SENTENCE = `${COHOST_CHAT_CONSENT_SENTENCE} While you're live it also hears you: your microphone audio goes to Videorc's cloud speech-to-text to be turned into text. Videorc servers don't keep it. The transcript is saved with your recording on this computer.`
 
-/** The listening half, as the description of Settings' listening switch. */
+/** The listening half, as the description of the listening switch under the
+ * Orcle tab's Customize. */
 export const COHOST_LISTEN_CONSENT_SENTENCE =
   "While you're live, your microphone audio goes to Videorc's cloud speech-to-text to be turned into text, even with live captions off. Videorc servers don't keep it. The transcript is saved with your recording on this computer."
 
@@ -179,6 +180,13 @@ export type CohostPaneMode =
   | { kind: 'live' }
 
 /**
+ * The Orcle tab's key in running copy: ⌘9 on macOS, Ctrl+9 elsewhere. Read
+ * from the user agent, as the Stream Manager reads its ⌘J, so this pure view
+ * module stays free of lib/platform.ts.
+ */
+const ORCLE_TAB_KEY = /Macintosh/.test(globalThis.navigator?.userAgent ?? '') ? '⌘9' : 'Ctrl+9'
+
+/**
  * Which single-line explanation (if any) replaces the pane. Premium is checked
  * first so a Basic user never sees a consent prompt for a feature they cannot
  * run; consent is renderer-owned, so it is checked before the engine's own
@@ -207,7 +215,11 @@ export function cohostPaneMode({
     }
   }
   if (!enabled) {
-    return { kind: 'disabled', reason: 'Orcle is off. Turn it on in Settings → Orcle.' }
+    // The Comments window cannot switch the main window's tab: copy only.
+    return {
+      kind: 'disabled',
+      reason: `Orcle is off. Turn it on in the Orcle tab (${ORCLE_TAB_KEY}).`
+    }
   }
   return { kind: 'live' }
 }

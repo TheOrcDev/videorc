@@ -1,8 +1,23 @@
-import type { CohostErrorDetail, CohostQuestion, CohostReason, CohostState } from './backend'
+import type {
+  CohostErrorDetail,
+  CohostQuestion,
+  CohostReason,
+  CohostSettingsPatch,
+  CohostState
+} from './backend'
 
 // The co-host helpers the studio provider needs at startup. Kept apart from
 // cohost-view.ts (which re-exports them) so the pane-only view code stays out
 // of the eager renderer bundle.
+
+/**
+ * Orcle Live's one switch (plan 119): on means Orcle reads chat AND hears you,
+ * in one save; off only stops Orcle joining and leaves listening as it was.
+ * The Orcle tab and every Comments-window way on write this one patch.
+ */
+export function orcleLiveSettingsPatch(on: boolean): CohostSettingsPatch {
+  return on ? { enabled: true, listen: true } : { enabled: false }
+}
 
 /**
  * Apply a `cohost.state` event or RPC result.
