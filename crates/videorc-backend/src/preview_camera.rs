@@ -2893,7 +2893,13 @@ pub(crate) fn frame_source_locked(slot: &PreviewCameraRuntime) -> Option<Preview
     Some(PreviewCameraFrameSource {
         shared: Arc::clone(&active.shared),
         layout: active.layout.clone(),
-        source_key: slot.source_key.clone(),
+        // Admission can name replacement B while active A still owns this
+        // store/generation. Frames retain A's immutable canonical identity;
+        // a missing desired key still makes explicit stop admission keyless.
+        source_key: slot
+            .source_key
+            .as_ref()
+            .map(|_| SourceKey::camera(active.camera_id.clone())),
         target_fps: active.effective_fps,
         generation,
     })
@@ -2907,19 +2913,7 @@ pub fn try_preview_camera_frame_source(
     state: &AppState,
 ) -> Result<Option<PreviewCameraFrameSource>, ()> {
     let slot = state.preview_camera.try_lock().map_err(|_| ())?;
-    let Some(active) = slot.active.as_ref() else {
-        return Ok(None);
-    };
-    let Some(generation) = slot.active_generation else {
-        return Ok(None);
-    };
-    Ok(Some(PreviewCameraFrameSource {
-        shared: Arc::clone(&active.shared),
-        layout: active.layout.clone(),
-        source_key: slot.source_key.clone(),
-        target_fps: active.effective_fps,
-        generation,
-    }))
+    Ok(frame_source_locked(&slot))
 }
 
 /// Rolling camera cadence evidence read straight from the active capture
@@ -3561,6 +3555,35 @@ pub(crate) async fn test_install_live_camera_for_layout(
         configured_output: (video.width, video.height),
         capture_target: camera_capture_target_dimensions(layout, video),
     });
+}
+
+/// Admit through the real start boundary without opening a native device.
+/// The caller retains the transition gate and must stop the admitted runtime;
+/// this seam isolates desired-key registration from active-producer retirement.
+#[cfg(test)]
+pub(crate) async fn test_admit_camera_start_for_layout(
+    state: &AppState,
+    camera_id: &str,
+    layout: &LayoutSettings,
+    video: &VideoSettings,
+) -> Option<u64> {
+    let source_key = SourceKey::camera(camera_id);
+    let mut status = idle_status(Some("Controlled camera start admission.".into()));
+    status.state = PreviewCameraState::Starting;
+    status.camera_id = Some(camera_id.into());
+    status.device_unique_id = Some(camera_id.into());
+    status.target_fps = video.fps.clamp(1, 120);
+    let key = PreviewCameraStartKey {
+        source_key,
+        ffmpeg_path: "ffmpeg".into(),
+        video: video.clone(),
+        target_fps: status.target_fps,
+        capture_target: camera_capture_target_dimensions(layout, video),
+    };
+    match begin_camera_start(state, key, layout, status, None).await {
+        PreviewCameraStartRegistration::Started { lease } => Some(lease.generation),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -6381,6 +6404,70 @@ mod tests {
         );
         drop(physical_guard);
         let _ = finish_preview_camera_stop(stop).await;
+    }
+
+    #[tokio::test]
+    async fn published_camera_producer_identity_readers_ignore_different_desired_key() {
+        let state = test_state();
+        let layout = test_layout(false);
+        let video = test_video();
+        let camera_a = "camera:avfoundation-native:producer-a";
+        let camera_b = "camera:avfoundation-native:desired-b";
+        test_install_live_camera_for_layout(&state, camera_a, &layout, &video).await;
+        let captured_at = Instant::now();
+        test_publish_camera_pixels(&state, 7, [0, 0, 255, 255], captured_at).await;
+        let old_generation = preview_camera_frame_source(&state)
+            .await
+            .unwrap()
+            .generation();
+        let gate = acquire_preview_camera_transition(&state).await;
+        let registered =
+            test_admit_camera_start_for_layout(&state, camera_b, &layout, &video).await;
+        let admission_identity = {
+            let slot = state.preview_camera.lock().await;
+            (
+                slot.source_key.clone(),
+                slot.active.as_ref().map(|active| active.camera_id.clone()),
+                source_identity_locked(&slot),
+            )
+        };
+        let async_reader =
+            tokio::time::timeout(Duration::from_secs(1), preview_camera_frame_source(&state)).await;
+        let nonblocking_reader = try_preview_camera_frame_source(&state);
+        let stop = begin_preview_camera_stop(&state).await;
+        drop(gate);
+        let _ = tokio::time::timeout(Duration::from_secs(1), finish_preview_camera_stop(stop))
+            .await
+            .expect("owned admitted runtime must stop");
+
+        assert_ne!(
+            registered.expect("actual B start admission"),
+            old_generation
+        );
+        assert_eq!(
+            admission_identity,
+            (
+                Some(SourceKey::camera(camera_b)),
+                Some(camera_a.into()),
+                Some((SourceKey::camera(camera_b), old_generation)),
+            ),
+            "desired-key admission/CAS remains independent of the active producer"
+        );
+        for reader in [
+            async_reader
+                .expect("bounded async reader")
+                .expect("active A"),
+            nonblocking_reader
+                .expect("available runtime")
+                .expect("active A"),
+        ] {
+            assert_eq!(reader.source_key(), Some(&SourceKey::camera(camera_a)));
+            assert_eq!(reader.generation(), old_generation);
+            let (frame, _) = reader.try_latest_frame_result().unwrap().unwrap();
+            assert_eq!(frame.sequence, 7);
+            assert_eq!(frame.captured_at, captured_at);
+        }
+        assert!(preview_camera_frame_source(&state).await.is_none());
     }
 
     #[tokio::test]

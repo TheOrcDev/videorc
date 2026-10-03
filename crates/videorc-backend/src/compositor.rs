@@ -888,6 +888,45 @@ impl CompositorLiveSources {
         })
     }
 
+    fn refresh_camera_source_nonblocking(
+        &mut self,
+        state: &AppState,
+    ) -> Option<CompositorCameraSourceChange> {
+        let Ok(camera) = try_preview_camera_frame_source(state) else {
+            // A retained handle cannot prove current ownership while the
+            // runtime is contended. Keep its cache/edge, but omit its pixels
+            // until a later publication can verify the authority.
+            self.camera_binding_verified = false;
+            return None;
+        };
+        // Stop admission clears the key before the physical supervisor takes
+        // the old active handle. That keyless handle is no longer a source.
+        let camera = camera.filter(|source| source.source_key().is_some());
+        self.camera_binding_verified = true;
+        let change = if !same_camera_source(self.camera.as_ref(), camera.as_ref()) {
+            let previous_camera_present = self.camera.is_some();
+            self.last_camera_frame = None;
+            self.camera_fetch = LiveSourceFetchState::default();
+            camera
+                .as_ref()
+                .and_then(|source| {
+                    source.source_key().cloned().map(|source_key| {
+                        CompositorCameraSourceChange::Adopted {
+                            source_key,
+                            generation: source.generation(),
+                        }
+                    })
+                })
+                .or_else(|| {
+                    previous_camera_present.then_some(CompositorCameraSourceChange::Removed)
+                })
+        } else {
+            None
+        };
+        self.camera = camera;
+        change
+    }
+
     fn refresh_sources_nonblocking(
         mut self,
         state: &AppState,
@@ -896,30 +935,8 @@ impl CompositorLiveSources {
         Option<CompositorCameraSourceChange>,
         Option<CompositorScreenSourceChange>,
     ) {
-        let mut camera_change = None;
+        let camera_change = self.refresh_camera_source_nonblocking(state);
         let mut screen_change = None;
-        if let Ok(camera) = try_preview_camera_frame_source(state) {
-            self.camera_binding_verified = true;
-            if !same_camera_source(self.camera.as_ref(), camera.as_ref()) {
-                let previous_camera_present = self.camera.is_some();
-                self.last_camera_frame = None;
-                self.camera_fetch = LiveSourceFetchState::default();
-                camera_change = camera
-                    .as_ref()
-                    .and_then(|source| {
-                        source.source_key().cloned().map(|source_key| {
-                            CompositorCameraSourceChange::Adopted {
-                                source_key,
-                                generation: source.generation(),
-                            }
-                        })
-                    })
-                    .or_else(|| {
-                        previous_camera_present.then_some(CompositorCameraSourceChange::Removed)
-                    });
-            }
-            self.camera = camera;
-        }
         if let Ok(screen) = try_preview_screen_frame_source(state) {
             self.screen_binding_verified = true;
             if !same_screen_source(self.screen.as_ref(), screen.as_ref()) {
@@ -947,8 +964,10 @@ impl CompositorLiveSources {
 
     /// Scene commits and capture-handle polling used to run on independent
     /// clocks. Adopt ready handles at the render boundary of either output's
-    /// new revision. A contended registry is retried next frame, never waited
-    /// on and never allowed to prove the old binding belongs to the new scene.
+    /// new revision. Camera ownership is verified even at unchanged revisions:
+    /// a retained FrameStore can outlive stop or same-key replacement. A
+    /// contended authority is retried next frame, never waited on and never
+    /// allowed to prove that retained camera pixels are still eligible.
     fn adopt_for_scene(&mut self, state: &AppState, cache: &CompositorRenderCache) {
         let revisions = (
             cache.snapshot.as_ref().map(|s| s.revision),
@@ -980,6 +999,9 @@ impl CompositorLiveSources {
             && self.screen_binding_verified
             && !missing_binding
         {
+            if let Some(change) = self.refresh_camera_source_nonblocking(state) {
+                self.pending_camera_change = Some(change);
+            }
             return;
         }
         if self.adopted_scene_revisions != Some(revisions) {
@@ -15576,6 +15598,385 @@ mod tests {
         assert_eq!(latest.captured_at, camera_captured_at);
         assert!(latest.metadata.presentation_at().unwrap() > camera_captured_at);
         assert!(result.fallback_frame_age_ms >= 77);
+    }
+
+    const PUBLICATION_CAMERA_ID: &str = "camera:avfoundation:publication-owner";
+
+    async fn installed_camera_publication_fixture() -> (
+        AppState,
+        CompositorLiveSources,
+        CompositorRenderCache,
+        Instant,
+    ) {
+        let state = test_state();
+        let layout = LayoutSettings {
+            layout_preset: LayoutPreset::CameraOnly,
+            ..crate::protocol::default_layout_settings()
+        };
+        let video = tiny_video();
+        let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            sources: crate::protocol::SourceSelection {
+                screen_id: None,
+                window_id: None,
+                camera_id: Some(PUBLICATION_CAMERA_ID.into()),
+                microphone_id: None,
+                test_pattern: false,
+            },
+            layout: layout.clone(),
+            video: Some(video.clone()),
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+            transition_ms: None,
+        });
+        {
+            let mut compositor = state.compositor.lock().await;
+            compositor.run_id = Some("camera-publication-run".into());
+            compositor.scene = Some(CompositorSceneSnapshot {
+                revision: 1,
+                scene: Some(scene),
+                layout: layout.clone(),
+                active_screen: None,
+            });
+        }
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            PUBLICATION_CAMERA_ID,
+            &layout,
+            &video,
+        )
+        .await;
+        let captured_at = Instant::now() - Duration::from_millis(77);
+        crate::preview_camera::test_publish_camera_pixels(&state, 7, [0, 0, 255, 255], captured_at)
+            .await;
+        let mut sources = CompositorLiveSources::default();
+        let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+        assert_eq!(
+            publish_same_revision_camera_frame(&state, &mut sources, &mut cache, 1).await,
+            (captured_at, Some(7))
+        );
+        assert!(sources.camera_binding_verified);
+        assert_eq!(sources.adopted_scene_revisions, Some((Some(1), None)));
+        (state, sources, cache, captured_at)
+    }
+
+    async fn publish_same_revision_camera_frame(
+        state: &AppState,
+        sources: &mut CompositorLiveSources,
+        cache: &mut CompositorRenderCache,
+        sequence: u64,
+    ) -> (Instant, Option<u64>) {
+        publish_camera_frame_for_revision(state, sources, cache, sequence, 1).await
+    }
+
+    async fn publish_camera_frame_for_revision(
+        state: &AppState,
+        sources: &mut CompositorLiveSources,
+        cache: &mut CompositorRenderCache,
+        sequence: u64,
+        scene_revision: u64,
+    ) -> (Instant, Option<u64>) {
+        publish_compositor_frame(
+            state,
+            "camera-publication-run",
+            sequence,
+            8,
+            4,
+            sources,
+            cache,
+            None,
+            CompositorFrameConsumer::RawYuvEncoder,
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+        )
+        .await;
+        let compositor = state.compositor.lock().await;
+        let captured_at = compositor
+            .frame_store
+            .lock()
+            .unwrap()
+            .latest()
+            .expect("actual published frame")
+            .captured_at;
+        let evidence = compositor
+            .frame_evidence
+            .back()
+            .expect("actual frame proof");
+        assert_eq!(evidence.sequence, sequence);
+        assert_eq!(evidence.scene_revision, Some(scene_revision));
+        (captured_at, evidence.camera_sequence)
+    }
+
+    async fn publish_during_different_key_camera_admission(
+        scene_uses_b: bool,
+    ) -> ((Instant, Option<u64>), Instant) {
+        let (state, mut sources, mut cache, old_capture) =
+            installed_camera_publication_fixture().await;
+        let camera_b = "camera:avfoundation:desired-publication-b";
+        let old_generation = sources.camera.as_ref().unwrap().generation();
+        let gate = crate::preview_camera::acquire_preview_camera_transition(&state).await;
+        let registered = crate::preview_camera::test_admit_camera_start_for_layout(
+            &state,
+            camera_b,
+            &cache.snapshot.as_ref().unwrap().layout,
+            &tiny_video(),
+        )
+        .await;
+        let scene_revision = if scene_uses_b {
+            let mut compositor = state.compositor.lock().await;
+            let snapshot = compositor.scene.as_mut().unwrap();
+            let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+                sources: crate::protocol::SourceSelection {
+                    screen_id: None,
+                    window_id: None,
+                    camera_id: Some(camera_b.into()),
+                    microphone_id: None,
+                    test_pattern: false,
+                },
+                layout: snapshot.layout.clone(),
+                video: Some(tiny_video()),
+                background: None,
+                protected_overlay_window_ids: Vec::new(),
+                transition_ms: None,
+            });
+            snapshot.scene = Some(scene);
+            snapshot.revision = 2;
+            2
+        } else {
+            1
+        };
+        let published = tokio::time::timeout(
+            Duration::from_secs(1),
+            publish_camera_frame_for_revision(&state, &mut sources, &mut cache, 2, scene_revision),
+        )
+        .await;
+        let stop = crate::preview_camera::begin_preview_camera_stop(&state).await;
+        drop(gate);
+        let _ = tokio::time::timeout(
+            Duration::from_secs(1),
+            crate::preview_camera::finish_preview_camera_stop(stop),
+        )
+        .await
+        .expect("owned A runtime and desired B admission must retire");
+
+        assert_ne!(
+            registered.expect("actual B start admission"),
+            old_generation
+        );
+        assert!(preview_camera_frame_source(&state).await.is_none());
+        (
+            published.expect("publication must not wait for native transition"),
+            old_capture,
+        )
+    }
+
+    #[tokio::test]
+    async fn published_camera_producer_identity_preserves_scene_a_during_b_admission() {
+        let (published, old_capture) = publish_during_different_key_camera_admission(false).await;
+        assert_eq!(published, (old_capture, Some(7)));
+    }
+
+    #[tokio::test]
+    async fn published_camera_producer_identity_rejects_a_pixels_in_scene_b() {
+        let (published, old_capture) = publish_during_different_key_camera_admission(true).await;
+        assert_eq!(published.1, None, "A pixels cannot prove a B scene");
+        assert_ne!(published.0, old_capture);
+    }
+
+    #[tokio::test]
+    async fn published_same_revision_camera_publication_retires_stopped_owner_before_periodic_refresh()
+     {
+        let (state, mut sources, mut cache, old_capture) =
+            installed_camera_publication_fixture().await;
+        crate::preview_camera::stop_preview_camera(&state).await;
+        assert!(preview_camera_frame_source(&state).await.is_none());
+        let stopped_at = Instant::now();
+
+        // This is the next real publication, not the 250 ms maintenance path.
+        // The scene/run stay unchanged after the stop supervisor retires the
+        // runtime owner; this fixture does not install a native capture thread.
+        let (captured_at, camera_sequence) =
+            publish_same_revision_camera_frame(&state, &mut sources, &mut cache, 2).await;
+
+        assert_eq!(
+            camera_sequence, None,
+            "retired camera pixels must not be composed"
+        );
+        assert_ne!(
+            captured_at, old_capture,
+            "retired content cannot be relabelled fresh"
+        );
+        assert!(captured_at >= stopped_at);
+    }
+
+    #[tokio::test]
+    async fn published_same_revision_camera_publication_adopts_same_key_replacement_owner() {
+        let (state, mut sources, mut cache, old_capture) =
+            installed_camera_publication_fixture().await;
+        let old_generation = sources.camera.as_ref().unwrap().generation();
+        crate::preview_camera::stop_preview_camera(&state).await;
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            PUBLICATION_CAMERA_ID,
+            &cache.snapshot.as_ref().unwrap().layout,
+            &tiny_video(),
+        )
+        .await;
+        let new_capture = Instant::now();
+        crate::preview_camera::test_publish_camera_pixels(
+            &state,
+            43,
+            [0, 255, 0, 255],
+            new_capture,
+        )
+        .await;
+        let new_generation = preview_camera_frame_source(&state)
+            .await
+            .unwrap()
+            .generation();
+        assert_ne!(new_generation, old_generation);
+
+        let published =
+            publish_same_revision_camera_frame(&state, &mut sources, &mut cache, 2).await;
+
+        assert_eq!(published, (new_capture, Some(43)));
+        assert_ne!(published.0, old_capture);
+        assert_eq!(
+            sources.camera.as_ref().unwrap().generation(),
+            new_generation
+        );
+        crate::preview_camera::stop_preview_camera(&state).await;
+    }
+
+    #[tokio::test]
+    async fn published_same_revision_camera_publication_preserves_recording_and_stream_keep_alive()
+    {
+        use crate::source_registry::SourceConsumerReason;
+        for consumer in [
+            SourceConsumerReason::Recording,
+            SourceConsumerReason::Streaming,
+        ] {
+            let (state, mut sources, mut cache, captured_at) =
+                installed_camera_publication_fixture().await;
+            let generation = sources.camera.as_ref().unwrap().generation();
+            let key = SourceKey::camera(PUBLICATION_CAMERA_ID);
+            {
+                let mut registry = state.source_registry.lock().await;
+                registry.acquire(key.clone(), SourceConsumerReason::Preview);
+                registry.acquire(key.clone(), consumer.clone());
+            }
+
+            let status = crate::preview_camera::stop_preview_camera(&state).await;
+            assert_eq!(status.state, PreviewCameraState::Live);
+            assert_eq!(
+                preview_camera_frame_source(&state)
+                    .await
+                    .unwrap()
+                    .generation(),
+                generation
+            );
+            assert_eq!(
+                publish_same_revision_camera_frame(&state, &mut sources, &mut cache, 2).await,
+                (captured_at, Some(7)),
+                "Preview release must preserve a capture-owned source"
+            );
+
+            state.source_registry.lock().await.release(&key, &consumer);
+            crate::preview_camera::stop_preview_camera(&state).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn published_same_revision_camera_publication_refuses_unverified_mutation_without_blocking()
+     {
+        let (state, mut sources, mut cache, old_capture) =
+            installed_camera_publication_fixture().await;
+        let pending_change = sources.pending_camera_change.clone();
+        // Match the existing preview-camera -> admission lock order. A changed
+        // owner is unverified while its runtime authority cannot be read.
+        let slot = state.preview_camera.lock().await;
+        let mutation = state.begin_capture_recovery_explicit_camera_mutation();
+        let published = tokio::time::timeout(
+            Duration::from_secs(1),
+            publish_same_revision_camera_frame(&state, &mut sources, &mut cache, 2),
+        )
+        .await
+        .expect("publication must not await contended capture authority");
+        drop(slot);
+        mutation.finish();
+
+        assert_eq!(
+            published.1, None,
+            "unverified owner cannot supply camera pixels"
+        );
+        assert_ne!(published.0, old_capture);
+        assert!(!sources.camera_binding_verified);
+        assert_eq!(sources.pending_camera_change, pending_change);
+        assert_eq!(
+            publish_same_revision_camera_frame(&state, &mut sources, &mut cache, 3).await,
+            (old_capture, Some(7)),
+            "a verified retry must preserve the legitimate content timestamp"
+        );
+        assert!(sources.camera_binding_verified);
+        crate::preview_camera::stop_preview_camera(&state).await;
+    }
+
+    #[tokio::test]
+    async fn published_same_revision_camera_publication_refuses_keyless_stop_admission() {
+        let (state, mut sources, mut cache, old_capture) =
+            installed_camera_publication_fixture().await;
+        sources.pending_camera_change.take();
+        let generation = sources.camera.as_ref().unwrap().generation();
+        let physical_gate = crate::preview_camera::acquire_preview_camera_transition(&state).await;
+        let stop = crate::preview_camera::begin_preview_camera_stop(&state).await;
+        let admitted =
+            tokio::time::timeout(Duration::from_secs(1), preview_camera_frame_source(&state)).await;
+        let mut attempts = Vec::new();
+        let verified = tokio::time::timeout(Duration::from_secs(1), async {
+            for sequence in 2..34 {
+                attempts.push(
+                    publish_same_revision_camera_frame(&state, &mut sources, &mut cache, sequence)
+                        .await,
+                );
+                if sources.camera_binding_verified {
+                    return true;
+                }
+                // The stop supervisor may briefly hold the runtime while
+                // cloning its transition gate. Wait for that same authority,
+                // without requiring a particular scheduler interleaving.
+                let _ = preview_camera_frame_source(&state).await;
+            }
+            false
+        })
+        .await;
+        let change = sources.pending_camera_change.take();
+        // Release and finish the exact owned stop before any assertion fails.
+        drop(physical_gate);
+        let stopped = tokio::time::timeout(
+            Duration::from_secs(1),
+            crate::preview_camera::finish_preview_camera_stop(stop),
+        )
+        .await
+        .expect("owned stop supervisor must finish after the gate releases");
+
+        let admitted_identity = admitted
+            .expect("bounded stop-admission authority")
+            .map(|source| (source.source_key().cloned(), source.generation()));
+        assert_eq!(admitted_identity, Some((None, generation)));
+        assert!(verified.expect("publication must not await physical stop"));
+        assert!(!attempts.is_empty());
+        assert!(attempts.len() <= 32);
+        assert!(attempts.iter().all(|(captured_at, camera_sequence)| {
+            camera_sequence.is_none() && *captured_at != old_capture
+        }));
+        assert_eq!(change, Some(CompositorCameraSourceChange::Removed));
+        assert!(sources.camera.is_none());
+        assert!(sources.last_camera_frame.is_none());
+        assert_eq!(stopped.state, PreviewCameraState::DeviceMissing);
+        assert!(preview_camera_frame_source(&state).await.is_none());
     }
 
     #[tokio::test]
