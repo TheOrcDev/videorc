@@ -1,4 +1,11 @@
 import {
+  chatDeliveryActivityMatches,
+  chatDeliveryProgress,
+  deliveryCursor,
+  type ChatDelivery,
+  type ChatDeliveryMessage
+} from '../../../../shared/chat-delivery'
+import {
   useCallback,
   useEffect,
   useMemo,
@@ -103,14 +110,35 @@ function usePaneVisible(ref: RefObject<HTMLElement | null>): boolean {
   return visible
 }
 
-/** Items that arrived while a pane was out of sight. */
-function useUnseen(count: number, visible: boolean): number {
-  const [seen, setSeen] = useState(count)
+/** Delivery progress is independent of the bounded painted rows. Non-chat
+ * activity and questions use fresh current identities, not length growth. */
+function useUnseen(
+  delivery: ChatDelivery | undefined,
+  key: string,
+  visible: boolean,
+  matches: (message: ChatDeliveryMessage) => boolean,
+  ids: readonly string[] = []
+): { count: number; incomplete: boolean } {
+  const [unseen, setUnseen] = useState({ count: 0, incomplete: false })
+  const previous = useRef({ key, cursor: deliveryCursor(delivery), ids: new Set(ids) })
   useEffect(() => {
-    // Seen while on screen; a cleared view restarts the count from zero.
-    if (visible || count < seen) setSeen(count)
-  }, [count, seen, visible])
-  return visible ? 0 : Math.max(0, count - seen)
+    const prior = previous.current
+    const sameKey = prior.key === key
+    const progress = chatDeliveryProgress(delivery, sameKey ? prior.cursor : null, matches)
+    const addedIds = sameKey ? ids.filter((id) => !prior.ids.has(id)).length : 0
+    previous.current = { key, cursor: progress.cursor, ids: new Set(ids) }
+    if (visible || !sameKey || (delivery && progress.reset)) {
+      setUnseen((value) =>
+        value.count || value.incomplete ? { count: 0, incomplete: false } : value
+      )
+    } else if (progress.count + addedIds > 0 || progress.incomplete) {
+      setUnseen((value) => ({
+        count: value.count + progress.count + addedIds,
+        incomplete: value.incomplete || progress.incomplete
+      }))
+    }
+  }, [delivery, ids, key, matches, visible])
+  return visible ? { count: 0, incomplete: false } : unseen
 }
 
 function cohostTone(state: CohostState | null): StatusDotTone {
@@ -133,7 +161,7 @@ function PaneLabel({
   onStream = false
 }: {
   label: string
-  unseen: number
+  unseen: { count: number; incomplete: boolean }
   dot?: StatusDotTone
   /** Something only this pane shows is on stream (plan 095, D1). */
   onStream?: boolean
@@ -148,13 +176,13 @@ function PaneLabel({
         </span>
       ) : null}
       {label}
-      {unseen > 0 ? (
+      {unseen.count > 0 || unseen.incomplete ? (
         <Badge
           className="h-4 px-1.5 text-[10px] tabular-nums"
           data-slot="pane-unseen"
           variant="outline"
         >
-          {unseen > 99 ? '99+' : unseen}
+          {unseen.incomplete ? 'New' : unseen.count > 99 ? '99+' : unseen.count}
         </Badge>
       ) : null}
     </span>
@@ -394,19 +422,48 @@ export function StreamManager({
       ),
     [activityAudience, dashboard?.destinationEvents, inHistory, messages]
   )
-  const chatCount = useMemo(
-    () => messages.filter((message) => message.eventType !== 'follow').length,
-    [messages]
+  const arrivalKey = `${viewMode?.kind ?? 'live'}:${snapshot.sessionId ?? ''}`
+  const chatUnseen = useUnseen(
+    inHistory ? undefined : snapshot.delivery,
+    arrivalKey,
+    chatVisible,
+    (message) => message.eventType !== 'follow'
   )
-  const chatUnseen = useUnseen(chatCount, chatVisible)
-  const activityUnseen = useUnseen(items.length, activityVisible)
+  const communityGifts = new Set([
+    ...messages.flatMap((message) =>
+      message.details?.kind === 'subscription' &&
+      message.details.subscription === 'community-sub-gift' &&
+      !message.isDeleted &&
+      message.details.communityGiftId
+        ? [message.details.communityGiftId]
+        : []
+    ),
+    ...(snapshot.delivery?.entries.flatMap(({ message }) =>
+      message.gift === 'community' && message.communityGiftId && !message.isDeleted
+        ? [message.communityGiftId]
+        : []
+    ) ?? [])
+  ])
+  const activityUnseen = useUnseen(
+    inHistory ? undefined : snapshot.delivery,
+    arrivalKey,
+    activityVisible,
+    (message) => chatDeliveryActivityMatches(message, communityGifts),
+    inHistory ? [] : items.filter((item) => !item.messageId).map((item) => item.id)
+  )
   // A follow on stream has no chat row to say so (plan 095, D1): while
   // Activity sits behind a tab, its tab carries the success dot.
   const activityOnStream =
     !activityVisible &&
     liveHighlightId !== null &&
     messages.some((message) => message.id === liveHighlightId && message.eventType === 'follow')
-  const orcleUnseen = useUnseen(shownCohostState?.questions.length ?? 0, orcleVisible)
+  const orcleUnseen = useUnseen(
+    undefined,
+    `${arrivalKey}:${cohostSensitivity}`,
+    orcleVisible,
+    () => false,
+    shownCohostState?.questions.map((question) => question.id) ?? []
+  )
 
   const mentionNames = useMemo(
     () =>
@@ -700,6 +757,8 @@ export function StreamManager({
             live={live}
             mentionNames={mentionNames}
             messages={messages}
+            delivery={inHistory ? undefined : snapshot.delivery}
+            arrivalKey={arrivalKey}
             prefill={prefill}
             providers={snapshot.providers}
             questionMessageIds={questionMessageIds}

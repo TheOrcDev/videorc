@@ -519,3 +519,25 @@ describe('live-chat-view', () => {
     ).toBe('No messages yet. Chat appears here once you go live.')
   })
 })
+
+it('reports a suspended overflow when resume flushes its retained tail after superseded recovery', () => {
+  const notifications: string[] = []
+  const batcher = new LiveChatMessageBatcher({
+    capacity: 2,
+    onOverflow: () => {
+      notifications.push('overflow')
+    },
+    onFlush: (messages) => {
+      notifications.push(messages.map((message) => message.id).join(','))
+    },
+    schedule: () => () => {}
+  })
+  batcher.suspend()
+  batcher.enqueue(message('a', 'youtube', '2026-06-06T10:00:01Z'))
+  batcher.enqueue(message('b', 'twitch', '2026-06-06T10:00:02Z'))
+  batcher.enqueue(message('c', 'x', '2026-06-06T10:00:03Z'))
+  batcher.resume()
+  expect(notifications).toEqual(['overflow', 'b,c'])
+  batcher.flush()
+  expect(notifications).toHaveLength(2)
+})

@@ -1,3 +1,10 @@
+import { chatDeliveryProgress, deliveryCursor } from '../../../shared/chat-delivery'
+import {
+  applyCommentsSnapshotDelta,
+  hydrateCommentsSnapshot,
+  reconcileBrokerCommentsSnapshot
+} from '../../../shared/comments-snapshot-delta'
+import type { CommentsSnapshotDelta, CommentsViewSnapshot } from '../../../shared/backend'
 import { SCENE_LIBRARY_KEY, WORKING_SCENE_KEY, sameSceneVisual } from '../lib/scene-presets'
 import { act, createElement, useEffect, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -2190,6 +2197,278 @@ describe('real StudioProvider lifecycle', () => {
 
     await waitForObservation(() => latest()?.diagnostics.captureRecoveryStatus.phase === 'degraded')
     expect(latest()?.diagnostics.captureRecoveryStatus.revision).toBe(1)
+  })
+
+  it('orders delivery adoption, raw deltas and hydration across bootstrap, clear, session replacement and publisher remounts', async () => {
+    const backend = new StudioBackend()
+    backend.liveChatSnapshot = {
+      sessionId: 'delivery-live',
+      providers: [],
+      messages: [],
+      unreadCount: 0,
+      updatedAt: now
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    let emitIpc: ((name: string, value: unknown) => void) | undefined
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      registerEmitter: (emit) => {
+        emitIpc = emit
+      }
+    })
+    let main: LiveChatSnapshot | null = null
+    let detached: LiveChatSnapshot = { providers: [], messages: [], unreadCount: 0, updatedAt: now }
+    const publications: Array<{
+      kind: string
+      view?: CommentsViewSnapshot
+      delta?: CommentsSnapshotDelta
+    }> = []
+    api.pushCommentsDelta = async (delta) => {
+      publications.push({ kind: delta.kind, delta })
+      const next = applyCommentsSnapshotDelta(main, delta)
+      if (next !== main) detached = applyCommentsSnapshotDelta(detached, delta)
+      main = next
+    }
+    api.pushCommentsSnapshot = async (view) => {
+      publications.push({ kind: 'snapshot', view })
+      if (view.mode.kind === 'live') {
+        main = hydrateCommentsSnapshot(main, view.snapshot)
+        detached = reconcileBrokerCommentsSnapshot(detached, main)
+      }
+    }
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = () => observations.at(-1)
+    const mount = async () => {
+      root = await mountStudioProvider(testDom.container, (value) => {
+        observations.push(value)
+      })
+      await waitForObservation(
+        () =>
+          latest()?.core.wsStatus === 'connected' &&
+          publications.some((entry) => entry.view?.snapshot.sessionId === 'delivery-live')
+      )
+    }
+    const emit = async (event: string, payload: unknown) => {
+      await act(async () => {
+        for (const socket of backend.sockets)
+          socket.onmessage?.({ data: JSON.stringify({ event, payload }) })
+      })
+    }
+    await mount()
+    expect(publications[0].kind).toBe('adopt')
+    expect(main!.sessionId).toBe('delivery-live')
+    expect(main!.delivery!.source).toMatchObject({
+      ownerId: latest()!.chat.liveChatSnapshot.delivery!.ownerId,
+      generation: latest()!.chat.liveChatSnapshot.delivery!.generation
+    })
+    const first = { ...highlightMessage, sessionId: 'delivery-live', id: 'delivery-001' }
+    await emit('liveChat.message', first)
+    expect(main!.delivery!.sequence).toBe(1)
+    const operation: CommentsSendOperation = {
+      id: 'incidental',
+      sessionId: 'delivery-live',
+      text: 'fixture',
+      phase: 'sent',
+      destinations: [],
+      createdAt: now,
+      updatedAt: now
+    }
+    await emit('liveChat.sendOperation', operation)
+    expect(main!.messages.some((message) => message.id === first.id)).toBe(true)
+    expect(main!.delivery!.sequence).toBe(1)
+    await waitForObservation(() => latest()?.chat.liveChatSnapshot.delivery?.sequence === 1)
+    const priorJournal = main!.delivery
+    const socketCount = backend.sockets.length
+    const publicationCount = publications.length
+    await act(async () =>
+      emitIpc!('backend:connection', {
+        host: '127.0.0.1',
+        port: 9993,
+        token: 'delivery-reconnected'
+      })
+    )
+    await waitForObservation(
+      () =>
+        backend.sockets.length > socketCount &&
+        latest()?.core.wsStatus === 'connected' &&
+        publications
+          .slice(publicationCount)
+          .some((entry) => entry.view?.snapshot.sessionId === 'delivery-live')
+    )
+    expect(publications[publicationCount].kind).toBe('adopt')
+    expect(main!.delivery!.ownerId).toBe(priorJournal!.ownerId)
+    expect(main!.delivery!.generation).toBe(priorJournal!.generation)
+    expect(main!.delivery!.sequence).toBe(1)
+    const stale = publications.filter((entry) => entry.view).at(-1)?.view!.snapshot
+    await emit('liveChat.cleared', backend.liveChatSnapshot)
+    const clearGeneration = main!.delivery!.generation
+    const next = { ...first, id: 'delivery-002' }
+    await emit('liveChat.message', next)
+    main = hydrateCommentsSnapshot(main, stale!)
+    expect(main.messages.map((message) => message.id)).toEqual([next.id])
+    expect(main.delivery?.generation).toBe(clearGeneration)
+    expect(main.delivery?.sequence).toBe(1)
+    await emit('liveChat.snapshot', { ...backend.liveChatSnapshot, sessionId: 'delivery-next' })
+    expect(main!.sessionId).toBe('delivery-next')
+    expect(main!.delivery?.sequence).toBe(0)
+    expect(main!.delivery?.source).toMatchObject({
+      ownerId: latest()!.chat.liveChatSnapshot.delivery!.ownerId,
+      generation: latest()!.chat.liveChatSnapshot.delivery!.generation
+    })
+    const retired: LiveChatSnapshot[] = [stale!]
+    for (let index = 0; index < 3; index++) {
+      retired.push(latest()!.chat.liveChatSnapshot)
+      await act(async () => root!.unmount())
+      root = null
+      observations.length = 0
+      publications.length = 0
+      await mount()
+    }
+    for (const old of retired) {
+      const current = main
+      main = hydrateCommentsSnapshot(main, old)
+      expect(main).toBe(current)
+    }
+    expect(detached.delivery).toEqual(main!.delivery)
+    await emit('recording.status', {
+      state: 'idle',
+      sessionId: 'delivery-live',
+      message: 'Fixture completed.'
+    })
+    expect(latest()!.chat.liveChatSnapshot.sessionId).toBeUndefined()
+    expect(main!.sessionId).toBeUndefined()
+    expect(main!.delivery!.sequence).toBe(0)
+    expect(
+      publications.some(
+        (entry) => entry.delta?.kind === 'clear' && entry.delta.sessionId === 'delivery-live'
+      )
+    ).toBe(true)
+  })
+
+  it('marks suspended recovery overflow as incomplete while main keeps every raw admission and retry hydration mints none', async () => {
+    const backend = new StudioBackend()
+    backend.liveChatSnapshot = {
+      sessionId: 'delivery-overflow',
+      providers: [],
+      messages: [],
+      unreadCount: 0,
+      updatedAt: now
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    let main: LiveChatSnapshot | null = null
+    api.pushCommentsDelta = async (delta) => {
+      main = applyCommentsSnapshotDelta(main, delta)
+    }
+    api.pushCommentsSnapshot = async (view) => {
+      if (view.mode.kind === 'live') main = hydrateCommentsSnapshot(main, view.snapshot)
+    }
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = () => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.chat.liveChatSnapshot.sessionId === 'delivery-overflow'
+    )
+    const before = deliveryCursor(latest()!.chat.liveChatSnapshot.delivery)
+    const release = backend.deferResponse('liveChat.status', backend.liveChatSnapshot)
+    const initialRequests = backend.sentCommands.filter(
+      (command) => command.method === 'liveChat.status'
+    ).length
+    const emit = async (event: string, payload: unknown) => {
+      await act(async () => {
+        for (const socket of backend.sockets)
+          socket.onmessage?.({ data: JSON.stringify({ event, payload }) })
+      })
+    }
+    await emit('events.lagged', { skipped: 1 })
+    await waitForObservation(
+      () =>
+        backend.sentCommands.filter((command) => command.method === 'liveChat.status').length >
+        initialRequests
+    )
+    const messages = Array.from({ length: 129 }, (_, index) => ({
+      ...highlightMessage,
+      sessionId: 'delivery-overflow',
+      id: `overflow-${index}`,
+      receivedAt: new Date(Date.parse(now) + index * 1000).toISOString()
+    }))
+    for (const message of messages) await emit('liveChat.message', message)
+    backend.liveChatSnapshot = { ...backend.liveChatSnapshot, messages }
+    await act(async () => release())
+    await waitForObservation(() => latest()?.chat.liveChatSnapshot.messages.length === 129)
+    const recovered = latest()!.chat.liveChatSnapshot
+    expect(recovered.delivery?.lossRevision).toBe(1)
+    expect(chatDeliveryProgress(recovered.delivery, before, () => true)).toMatchObject({
+      count: 0,
+      incomplete: true
+    })
+    expect(main!.delivery?.sequence).toBe(129)
+    expect(main!.delivery?.lossRevision ?? 0).toBe(0)
+    expect(main!.messages).toHaveLength(129)
+  })
+
+  it('replays a clear ahead of delayed bootstrap and permits current post-clear legacy recovery without minting hydration arrivals', async () => {
+    const backend = new StudioBackend()
+    const old = { ...highlightMessage, sessionId: 'delivery-live', id: 'old-before-clear' }
+    backend.liveChatSnapshot = {
+      sessionId: 'delivery-live',
+      providers: [],
+      messages: [old],
+      unreadCount: 0,
+      updatedAt: now
+    }
+    const release = backend.deferResponse('liveChat.status', backend.liveChatSnapshot)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = () => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some((command) => command.method === 'liveChat.status')
+    )
+    const emit = async (event: string, payload: unknown) => {
+      await act(async () => {
+        for (const socket of backend.sockets)
+          socket.onmessage?.({ data: JSON.stringify({ event, payload }) })
+      })
+    }
+    const cleared = { ...backend.liveChatSnapshot, messages: [] }
+    await emit('liveChat.cleared', cleared)
+    await act(async () => release())
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    expect(latest()!.chat.liveChatSnapshot.messages).toEqual([])
+    const missed = { ...old, id: 'valid-post-clear-history' }
+    await emit('liveChat.snapshot', { ...cleared, messages: [missed] })
+    expect(latest()!.chat.liveChatSnapshot.messages).toEqual([missed])
+    expect(latest()!.chat.liveChatSnapshot.delivery?.sequence).toBe(0)
   })
 
   it('reconciles an outcome-unknown local comment highlight toggle', async () => {

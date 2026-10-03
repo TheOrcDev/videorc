@@ -1,3 +1,9 @@
+import {
+  admitChatDelivery,
+  adoptChatDelivery,
+  hydrateChatDelivery,
+  resetChatDelivery
+} from './chat-delivery'
 import type {
   CommentsSnapshotDelta,
   LiveChatMessage,
@@ -36,12 +42,16 @@ export function applyCommentsSnapshotDelta(
     return snapshot
   }
 
+  if (delta.kind === 'adopt')
+    return { ...snapshot, delivery: adoptChatDelivery(snapshot, delta.deliveryBoundary) }
+
   if (delta.kind === 'clear') {
     return {
       ...snapshot,
       sessionId: snapshot.sessionId ?? delta.sessionId,
       messages: [],
       unreadCount: 0,
+      delivery: resetChatDelivery(snapshot, delta.deliveryBoundary),
       updatedAt: delta.updatedAt
     }
   }
@@ -69,6 +79,7 @@ export function applyCommentsSnapshotDelta(
     return {
       ...snapshot,
       messages,
+      delivery: admitChatDelivery(snapshot, [delta.message]),
       updatedAt: delta.message.receivedAt
     }
   }
@@ -86,6 +97,34 @@ export function applyCommentsSnapshotDelta(
       messages.length > MAX_COMMENTS_SNAPSHOT_MESSAGES
         ? messages.slice(messages.length - MAX_COMMENTS_SNAPSHOT_MESSAGES)
         : messages,
+    delivery: admitChatDelivery(snapshot, [delta.message]),
     updatedAt: delta.message.receivedAt
+  }
+}
+
+/** Provider snapshots are hydration into main's raw-delta owner. */
+export function hydrateCommentsSnapshot(
+  current: LiveChatSnapshot | null,
+  incoming: LiveChatSnapshot
+): LiveChatSnapshot {
+  const hydrated = hydrateChatDelivery(incoming, current, { foreignSource: true })
+  if (hydrated === current) return current!
+  const messages = hydrated.messages
+    .slice()
+    .sort(messageOrder)
+    .slice(-MAX_COMMENTS_SNAPSHOT_MESSAGES)
+  return { ...hydrated, messages }
+}
+/** Broker snapshots are the detached store's authority; stale copies cannot
+ * erase deltas already admitted from that same broker owner. */
+export function reconcileBrokerCommentsSnapshot(
+  current: LiveChatSnapshot,
+  incoming: LiveChatSnapshot
+): LiveChatSnapshot {
+  const hydrated = hydrateChatDelivery(incoming, current, { trustOwner: true })
+  if (hydrated === current) return current
+  return {
+    ...hydrated,
+    messages: hydrated.messages.slice().sort(messageOrder).slice(-MAX_COMMENTS_SNAPSHOT_MESSAGES)
   }
 }

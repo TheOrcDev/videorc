@@ -38,7 +38,10 @@ import {
   commentsSendTransportFailureCanReplace
 } from '../../shared/comments-send-operation'
 import { emptyLiveChatSnapshot } from '@/lib/live-chat-view'
-import { applyCommentsSnapshotDelta } from '../../shared/comments-snapshot-delta'
+import {
+  reconcileBrokerCommentsSnapshot,
+  applyCommentsSnapshotDelta
+} from '../../shared/comments-snapshot-delta'
 import type { LiveDashboardState } from '../../shared/live-dashboard'
 import '@/styles.css'
 
@@ -124,6 +127,11 @@ function CommentsWindowApp(): ReactElement {
   useEffect(() => {
     const applyView = (next: CommentsViewSnapshot): void => {
       const previous = viewRef.current
+      if (next.mode.kind === 'live' && previous.mode.kind === 'live')
+        next = {
+          ...next,
+          snapshot: reconcileBrokerCommentsSnapshot(previous.snapshot, next.snapshot)
+        }
       viewRef.current = next
       setView(next)
       const sameLiveSession =

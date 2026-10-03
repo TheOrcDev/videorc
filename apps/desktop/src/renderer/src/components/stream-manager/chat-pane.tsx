@@ -1,3 +1,8 @@
+import {
+  chatDeliveryProgress,
+  deliveryCursor,
+  type ChatDelivery
+} from '../../../../shared/chat-delivery'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   useCallback,
@@ -76,6 +81,8 @@ export interface ChatSendOptions {
 
 export function ChatPane({
   messages,
+  delivery,
+  arrivalKey,
   providers,
   live,
   className,
@@ -100,6 +107,8 @@ export function ChatPane({
   jumpTo = null,
   searchFocusSignal = 0
 }: {
+  delivery?: ChatDelivery
+  arrivalKey?: string
   messages: readonly LiveChatMessage[]
   providers: readonly LiveChatProviderState[]
   /** A live session: the composer, highlights and row actions are available. */
@@ -190,7 +199,8 @@ export function ChatPane({
   const [pinned, setPinned] = useState(true)
   const [unread, setUnread] = useState(0)
   const pinnedRef = useRef(true)
-  const previousCount = useRef(shown.length)
+  const [incomplete, setIncomplete] = useState(false)
+  const arrivalRef = useRef({ key: arrivalKey, cursor: deliveryCursor(delivery) })
   // When the streamer last scrolled by hand (wheel, touch, keys, the
   // scrollbar); programmatic follow and jump scrolls never count.
   const lastUserScrollAtRef = useRef<number | null>(null)
@@ -201,7 +211,10 @@ export function ChatPane({
         viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= BOTTOM_THRESHOLD_PX
       pinnedRef.current = atBottom
       setPinned(atBottom)
-      if (atBottom) setUnread(0)
+      if (atBottom) {
+        setUnread(0)
+        setIncomplete(false)
+      }
     }
     const onUserScroll = (): void => {
       lastUserScrollAtRef.current = Date.now()
@@ -236,22 +249,35 @@ export function ChatPane({
     return followChatOnResize(viewport, () => pinnedRef.current)
   }, [viewport])
 
-  // Follow new chat while pinned; count it while the streamer reads back.
+  // Paint retention and filter refreshes are not delivery evidence.
   useEffect(() => {
-    const added = shown.length - previousCount.current
-    previousCount.current = shown.length
-    if (shown.length === 0) return
-    if (pinnedRef.current) {
-      virtualizer.scrollToIndex(shown.length - 1, { align: 'end' })
-    } else if (added > 0) {
-      setUnread((value) => value + added)
+    const prior = arrivalRef.current
+    const progress = chatDeliveryProgress(
+      delivery,
+      prior.key === arrivalKey ? prior.cursor : null,
+      (message) =>
+        chatPaneMessages([message], filter, { questionMessageIds, mentionNames }).length > 0
+    )
+    arrivalRef.current = { key: arrivalKey, cursor: progress.cursor }
+    if (progress.reset || pinnedRef.current) {
+      setUnread(0)
+      setIncomplete(false)
+    } else {
+      setUnread((value) => value + progress.count)
+      if (progress.incomplete) setIncomplete(true)
     }
-  }, [shown.length, virtualizer])
+  }, [arrivalKey, delivery, filter, mentionNames, questionMessageIds])
+  const newestId = shown.at(-1)?.id
+  useEffect(() => {
+    if (pinnedRef.current && shown.length > 0)
+      virtualizer.scrollToIndex(shown.length - 1, { align: 'end' })
+  }, [newestId, shown.length, virtualizer])
 
   const jumpToLatest = useCallback((): void => {
     pinnedRef.current = true
     setPinned(true)
     setUnread(0)
+    setIncomplete(false)
     if (shown.length > 0) virtualizer.scrollToIndex(shown.length - 1, { align: 'end' })
   }, [shown.length, virtualizer])
 
@@ -535,9 +561,9 @@ export function ChatPane({
             </ol>
           )}
         </ScrollArea>
-        {!pinned && unread > 0 ? (
+        {!pinned && (unread > 0 || incomplete) ? (
           <Button
-            aria-label={`Chat paused: ${unread} new. Jump to the newest`}
+            aria-label={`Chat paused: ${incomplete ? 'New chat' : `${unread} new`}. Jump to the newest`}
             className="absolute inset-x-0 bottom-2 mx-auto h-6 w-fit rounded-full px-2.5 text-xs text-foreground glass-chip hover:text-foreground"
             data-slot="chat-paused"
             size="sm"
@@ -545,7 +571,7 @@ export function ChatPane({
             variant="ghost"
             onClick={jumpToLatest}
           >
-            {unread} new ↓
+            {incomplete ? 'New chat' : `${unread} new`} ↓
           </Button>
         ) : null}
       </div>

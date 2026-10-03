@@ -133,6 +133,7 @@ import { compositorSceneConflictsWithCommitted } from '../shared/native-preview-
 import { isCanonicalWindowsD3d11PreviewStatus } from '../shared/native-preview-capability'
 import {
   applyCommentsSnapshotDelta,
+  hydrateCommentsSnapshot,
   MAX_COMMENTS_SNAPSHOT_MESSAGES
 } from '../shared/comments-snapshot-delta'
 import { normalizeLiveDashboardState, type LiveDashboardState } from '../shared/live-dashboard'
@@ -364,6 +365,7 @@ import {
 } from './release-authority-env'
 import { secureIpcHandle, sendElectronEvent } from './secure-ipc'
 import {
+  validateElectronInvokeArgs,
   type ElectronEventChannel,
   type ElectronIpcEventMap
 } from '../shared/electron-ipc-contract'
@@ -3000,8 +3002,10 @@ function commentsCommandRequestId(value: unknown): string {
 
 function cacheCommentsView(view: CommentsViewSnapshot): void {
   if (view.mode.kind === 'live') {
-    const sessionChanged = latestLiveCommentsSnapshot?.sessionId !== view.snapshot.sessionId
-    latestLiveCommentsSnapshot = view.snapshot
+    const next = hydrateCommentsSnapshot(latestLiveCommentsSnapshot, view.snapshot)
+    if (next === latestLiveCommentsSnapshot) return
+    const sessionChanged = latestLiveCommentsSnapshot?.sessionId !== next.sessionId
+    latestLiveCommentsSnapshot = next
     if (sessionChanged || view.latestSendOperation !== undefined) {
       latestLiveCommentsSendOperation = view.latestSendOperation
         ? reconcileCommentsSendOperation(latestLiveCommentsSendOperation, view.latestSendOperation)
@@ -3021,6 +3025,24 @@ function cacheCommentsView(view: CommentsViewSnapshot): void {
       selectedMode.kind === 'history' ? selectedMode.sessionId : undefined
     )
   }
+}
+
+/** Main owns delivery progress; provider snapshots are independently fenced hydration. */
+function applyLiveCommentsDelta(delta: CommentsSnapshotDelta): CommentsViewSnapshot | null {
+  const current = latestLiveCommentsSnapshot
+  const next = applyCommentsSnapshotDelta(current, delta)
+  if (next === current) return currentCommentsView()
+  latestLiveCommentsSnapshot = next
+  if (
+    commentsViewSelection.current().kind === 'live' &&
+    commentsWindow &&
+    !commentsWindow.webContents.isDestroyed()
+  ) {
+    // Adoption records the publisher only; it does not authorize a detached
+    // journal replacement. Broker snapshots remain its sole owner authority.
+    sendElectronEvent(commentsWindow.webContents, 'comments-window:delta', delta)
+  }
+  return currentCommentsView()
 }
 
 function cacheCommentsSendResult(operation: CommentsSendOperation): 'live' | 'history' {
@@ -10503,6 +10525,9 @@ async function runSmokePreviewMotionCommand(
   }
 
   if (command === 'comments-window-push-snapshot') {
+    // The isolated fixture takes over once; real publisher metadata must not
+    // authorize or reject the probe's independent fixture generation.
+    if (!commentsSmokeSnapshotOverride) latestLiveCommentsSnapshot = null
     commentsSmokeSnapshotOverride = true
     const snapshot = params.snapshot as LiveChatSnapshot
     const requestedMode = params.mode as CommentsViewMode | undefined
@@ -10515,6 +10540,12 @@ async function runSmokePreviewMotionCommand(
     commentsViewSelection.set(mode)
     emitCommentsView()
     return currentCommentsView()
+  }
+
+  if (command === 'comments-window-push-delta') {
+    if (!commentsSmokeSnapshotOverride) throw new Error('Comments fixture has not taken ownership.')
+    const [delta] = validateElectronInvokeArgs('comments-window:push-delta', [params.delta])
+    return applyLiveCommentsDelta(delta)
   }
 
   if (command === 'comments-window-set-view-mode') {
@@ -10899,10 +10930,18 @@ async function runSmokePreviewMotionCommand(
     }
     const rendered = await window.webContents.executeJavaScript(
       `(() => {
+        const viewport = document.querySelector('[data-pane="chat"] [data-slot="scroll-area-viewport"]');
+        const action = ${JSON.stringify(params.chatAction)};
+        if (action === 'back' && viewport) { viewport.scrollTop = 0; viewport.dispatchEvent(new Event('scroll')); }
+        if (action === 'latest') document.querySelector('button[aria-label^="Chat paused:"]')?.click();
         const rows = Array.from(document.querySelectorAll('[data-message-id]'));
         const composer = document.querySelector('input[aria-label="Send a message to all writable destinations"]');
         return {
           open: true,
+          pausedChat: document.querySelector('button[aria-label^="Chat paused:"]')?.textContent ?? null,
+          lastMessageId: rows.at(-1)?.getAttribute('data-message-id') ?? null,
+          chatAtBottom: viewport ? viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 64 : null,
+          paneBadges: Object.fromEntries(Array.from(document.querySelectorAll('[data-slot="pane-tabs-narrow"] button')).map((button) => [button.textContent?.split(/(?=New|[0-9])/)[0]?.trim(), button.querySelector('[data-slot="pane-unseen"]')?.textContent ?? null])),
           text: document.body.innerText,
           messageCount: rows.length,
           composerCount: composer ? 1 : 0,
@@ -13870,25 +13909,7 @@ app.whenReady().then(async () => {
       return currentCommentsView()
     }
 
-    const current = latestLiveCommentsSnapshot
-    const deltaSessionId = delta.kind === 'message' ? delta.message.sessionId : delta.sessionId
-    if (current?.sessionId && deltaSessionId && current.sessionId !== deltaSessionId) {
-      return currentCommentsView()
-    }
-
-    const next = applyCommentsSnapshotDelta(current, delta)
-    if (next === current) {
-      return currentCommentsView()
-    }
-    latestLiveCommentsSnapshot = next
-    if (
-      commentsViewSelection.current().kind === 'live' &&
-      commentsWindow &&
-      !commentsWindow.webContents.isDestroyed()
-    ) {
-      sendElectronEvent(commentsWindow.webContents, 'comments-window:delta', delta)
-    }
-    return currentCommentsView()
+    return applyLiveCommentsDelta(delta)
   })
   // Click-to-highlight relay (Comments upgrade S3): the window clicks, the
   // MAIN renderer owns the lifecycle + rasterization (it has the backend

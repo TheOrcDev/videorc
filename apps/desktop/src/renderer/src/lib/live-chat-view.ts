@@ -1,3 +1,8 @@
+import {
+  admitChatDelivery,
+  hydrateChatDelivery,
+  resetChatDelivery
+} from '../../../shared/chat-delivery'
 // Pure live-chat view logic (slice 7 of the In-App Livestream Comments plan). No React, no
 // DOM, no backend client — just the snapshot/event reducers, chronological ordering, platform
 // filtering, and autoscroll/unread decisions the Live Chat panel renders. Kept pure so it is
@@ -9,7 +14,7 @@ import type {
   LiveChatProviderState,
   LiveChatSnapshot,
   StreamPlatform
-} from '@/lib/backend'
+} from '../../../shared/backend'
 
 /** Platforms that can appear in the unified feed, in display order. */
 export const LIVE_CHAT_PLATFORMS: StreamPlatform[] = ['youtube', 'twitch', 'kick', 'x']
@@ -91,6 +96,7 @@ export class BoundedLiveChatMessageBatch {
 export interface LiveChatMessageBatcherOptions {
   capacity?: number
   onFlush: (messages: LiveChatMessage[]) => void
+  onOverflow?: () => void
   schedule: (flush: () => void) => () => void
 }
 
@@ -100,15 +106,17 @@ export interface LiveChatMessageBatcherOptions {
  */
 export class LiveChatMessageBatcher {
   private readonly batch: BoundedLiveChatMessageBatch
+  private readonly onOverflow?: () => void
   private readonly onFlush: (messages: LiveChatMessage[]) => void
   private readonly schedule: (flush: () => void) => () => void
   private cancelScheduledFlush: (() => void) | null = null
   private disposed = false
   private suspended = false
 
-  constructor({ capacity, onFlush, schedule }: LiveChatMessageBatcherOptions) {
+  constructor({ capacity, onFlush, onOverflow, schedule }: LiveChatMessageBatcherOptions) {
     this.batch = new BoundedLiveChatMessageBatch(capacity)
     this.onFlush = onFlush
+    this.onOverflow = onOverflow
     this.schedule = schedule
   }
 
@@ -137,7 +145,8 @@ export class LiveChatMessageBatcher {
     }
     this.cancelScheduledFlush?.()
     this.cancelScheduledFlush = null
-    const messages = this.batch.drain()
+    const { messages, overflowed } = this.batch.drainWithStatus()
+    if (overflowed) this.onOverflow?.()
     if (messages.length > 0) {
       this.onFlush(messages)
     }
@@ -263,11 +272,13 @@ function boundMessages(messages: LiveChatMessage[]): LiveChatMessage[] {
 }
 
 /** Replace the view with a full snapshot, keeping messages chronological + bounded. */
-export function applyLiveChatSnapshot(snapshot: LiveChatSnapshot): LiveChatSnapshot {
-  return {
-    ...snapshot,
-    messages: boundMessages(sortMessagesChronological(snapshot.messages))
-  }
+export function applyLiveChatSnapshot(
+  snapshot: LiveChatSnapshot,
+  current?: LiveChatSnapshot,
+  reset = false
+): LiveChatSnapshot {
+  const hydrated = hydrateChatDelivery(snapshot, current, { reset, trustOwner: !current })
+  return { ...hydrated, messages: boundMessages(sortMessagesChronological(hydrated.messages)) }
 }
 
 /** Merge one incremental message: tombstones replace originals; other duplicate ids are skipped. */
@@ -281,7 +292,12 @@ export function applyLiveChatMessage(
     if (!message.isDeleted || existing.isDeleted) return snapshot
     const messages = snapshot.messages.slice()
     messages[existingIndex] = message
-    return { ...snapshot, messages, updatedAt: message.receivedAt }
+    return {
+      ...snapshot,
+      messages,
+      delivery: admitChatDelivery(snapshot, [message]),
+      updatedAt: message.receivedAt
+    }
   }
   // The buffer is sorted by construction and messages almost always arrive in
   // order, so scan back from the tail for the insertion point instead of
@@ -292,7 +308,12 @@ export function applyLiveChatMessage(
     insertAt -= 1
   }
   messages.splice(insertAt, 0, message)
-  return { ...snapshot, messages: boundMessages(messages), updatedAt: message.receivedAt }
+  return {
+    ...snapshot,
+    messages: boundMessages(messages),
+    delivery: admitChatDelivery(snapshot, [message]),
+    updatedAt: message.receivedAt
+  }
 }
 
 /** Update (or append) one provider's status row. */
@@ -310,23 +331,27 @@ export function applyLiveChatProviderStatus(
 /** Replay ordered events received while the initial full snapshot was in flight. */
 export function replayLiveChatBootstrapEvents(
   snapshot: LiveChatSnapshot,
-  events: readonly LiveChatBootstrapEvent[]
+  events: readonly LiveChatBootstrapEvent[],
+  current?: LiveChatSnapshot
 ): LiveChatSnapshot {
-  return events.reduce((current, event) => {
-    switch (event.kind) {
-      case 'snapshot':
-        return applyLiveChatSnapshot(event.snapshot)
-      case 'message':
-        return applyLiveChatMessage(current, event.message)
-      case 'provider':
-        return applyLiveChatProviderStatus(current, event.provider)
-    }
-  }, applyLiveChatSnapshot(snapshot))
+  return events.reduce(
+    (current, event) => {
+      switch (event.kind) {
+        case 'snapshot':
+          return applyLiveChatSnapshot(event.snapshot, current)
+        case 'message':
+          return applyLiveChatMessage(current, event.message)
+        case 'provider':
+          return applyLiveChatProviderStatus(current, event.provider)
+      }
+    },
+    applyLiveChatSnapshot(snapshot, current)
+  )
 }
 
 /** Clear the local message view (keep providers + session); the `liveChat.cleared` reducer. */
 export function applyLiveChatCleared(snapshot: LiveChatSnapshot): LiveChatSnapshot {
-  return { ...snapshot, messages: [], unreadCount: 0 }
+  return { ...snapshot, messages: [], unreadCount: 0, delivery: resetChatDelivery(snapshot) }
 }
 
 /** Filter messages to the enabled platforms. An empty enabled set means "show all". */
@@ -430,6 +455,7 @@ export function applyLiveChatMessages(
   return {
     ...snapshot,
     messages,
+    delivery: admitChatDelivery(snapshot, incoming),
     updatedAt: messages[messages.length - 1]?.receivedAt ?? snapshot.updatedAt
   }
 }
@@ -450,7 +476,14 @@ export function reconcileLiveChatRecovery(
   queued: LiveChatMessage[],
   preserveCurrentProviders: boolean
 ): LiveChatSnapshot {
-  const recovered = reconcileLiveChatSnapshot(authoritative, queued)
+  const base = applyLiveChatSnapshot(authoritative, current)
+  const merged = applyLiveChatMessages(base, queued)
+  const admissionBaseline =
+    current.sessionId === authoritative.sessionId ? current : { ...base, messages: [] }
+  const recovered = applyLiveChatSnapshot(
+    { ...merged, delivery: admitChatDelivery(admissionBaseline, queued) },
+    base
+  )
   return preserveCurrentProviders ? { ...recovered, providers: current.providers } : recovered
 }
 

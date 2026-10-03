@@ -1,3 +1,8 @@
+import {
+  validateChatDelivery,
+  validateChatDeliveryBoundary,
+  type ChatDeliveryBoundary
+} from './chat-delivery'
 import { isGlobalShortcutConfigKey } from './global-shortcut-bindings'
 import { GLOBAL_SHORTCUT_ACTIONS, type GlobalShortcutAction } from './global-shortcuts'
 import type {
@@ -964,7 +969,41 @@ const videorcAccountRefreshResultSchema = unionSchema([
   objectSchema({ outcome: literalSchema('deferred') }, { allowUnknown: false })
 ])
 const boundedFallbackInvokeContract = invokeContract(boundedIpcArgsSchema)
+const commentsViewSchema = runtimeSchema<unknown>(
+  'a bounded comments view with valid delivery metadata',
+  (value, path) => {
+    boundedIpcValueSchema.parse(value, path)
+    if (value === null) return value
+    const view = value as CommentsViewSnapshot
+    if (view?.snapshot?.delivery !== undefined) {
+      try {
+        validateChatDelivery(view.snapshot.delivery)
+      } catch {
+        throw new RuntimeSchemaError(`${path}.snapshot.delivery`, 'bounded chat delivery metadata')
+      }
+    }
+    return value
+  }
+)
+const commentsDeltaSchema = runtimeSchema<unknown>('a bounded comments delta', (value, path) => {
+  boundedIpcValueSchema.parse(value, path)
+  const delta = value as CommentsSnapshotDelta
+  if (!delta || !['message', 'provider', 'clear', 'adopt'].includes(delta.kind))
+    throw new RuntimeSchemaError(path, 'a comments delta kind')
+  if (delta.kind === 'adopt' || (delta.kind === 'clear' && delta.deliveryBoundary !== undefined)) {
+    const boundary = delta.deliveryBoundary as ChatDeliveryBoundary
+    try {
+      validateChatDeliveryBoundary(boundary)
+    } catch {
+      throw new RuntimeSchemaError(`${path}.deliveryBoundary`, 'a chat delivery boundary')
+    }
+  }
+  return value
+})
 const specificRuntimeInvokeContracts = {
+  'comments-window:push-snapshot': invokeContract(tupleSchema([commentsViewSchema])),
+  'comments-window:push-delta': invokeContract(tupleSchema([commentsDeltaSchema])),
+  'comments-window:get-snapshot': invokeContract(noArgs, commentsViewSchema),
   'account:begin-sign-in': invokeContract(tupleSchema([accountAuthorizeUrl])),
   'account:refresh': invokeContract(noArgs, videorcAccountRefreshResultSchema),
   'account:sign-out': invokeContract(noArgs, videorcAccountSnapshotSchema),
@@ -1066,9 +1105,6 @@ export const boundedPassthroughElectronInvokeChannels = [
   'comments-window:toggle',
   'comments-window:get-state',
   'comments-window:set-always-on-top',
-  'comments-window:push-snapshot',
-  'comments-window:push-delta',
-  'comments-window:get-snapshot',
   'comments-window:set-view-mode',
   'comments-window:highlight',
   'comments-window:highlight-result-push',
@@ -1170,6 +1206,8 @@ const backendConnectionSchema = objectSchema(
 )
 
 const specificRuntimeEventSchemas = {
+  'comments-window:snapshot': commentsViewSchema,
+  'comments-window:delta': commentsDeltaSchema,
   'account:callback': accountCallbackSchema,
   'backend:connection': backendConnectionSchema,
   'notes-window:document': notesDocumentSchema,
@@ -1214,8 +1252,6 @@ export const boundedPassthroughElectronEventChannels = [
   'preview-window:state',
   'notes-window:state',
   'comments-window:state',
-  'comments-window:snapshot',
-  'comments-window:delta',
   'comments-window:highlight-request',
   'comments-window:highlight-state',
   'comments-window:send-request',

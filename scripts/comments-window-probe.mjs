@@ -18,6 +18,7 @@ import {
   COMMENTS_COMMAND_RELAY_TIMEOUT_MS,
   COMMENTS_SEND_TIMING_CONTRACT
 } from '../apps/desktop/src/shared/comments-command-timing.ts'
+import { probeCommentsArrivals } from './lib/comments-arrival-probe.mjs'
 import { launchDevApp, stopProcess } from './lib/app-launcher.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
@@ -609,6 +610,13 @@ async function main() {
     'reopen: selected live cache survives renderer restart',
     JSON.stringify(reopenedReader.last)
   )
+
+  await probeCommentsArrivals({
+    command: smokeCommand,
+    waitFor,
+    assert: assertProbe,
+    sessionId: NEXT_LIVE_SESSION_ID
+  })
 
   console.log('\n=== Chat window probe summary ===')
   if (failures.length === 0) {
