@@ -1,5 +1,69 @@
 import { spawn } from 'node:child_process'
 
+// This is reduced evidence from the launched process's actual FFmpeg command,
+// not a topology inferred from mode flags or the artifact's received label.
+// The backend refuses unsupported graphs and input timestamp offsets. Never
+// substitute a default: doing so can move the loss window into valid AAC audio.
+export function resolveSourceOutputAudioTiming(evidence, { sessionId, outputProcessId, role }) {
+  const fail = () => {
+    throw new Error('Unambiguous owned output audio timing evidence is required.')
+  }
+  const hasOnlyKeys = (value, keys) =>
+    value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === keys.length &&
+    Object.keys(value).every((key) => keys.includes(key))
+  if (
+    !hasOnlyKeys(evidence, ['sessionId', 'outputProcessId', 'legs']) ||
+    typeof sessionId !== 'string' ||
+    sessionId.length === 0 ||
+    sessionId.length > 256 ||
+    evidence.sessionId !== sessionId ||
+    !Number.isInteger(outputProcessId) ||
+    outputProcessId <= 0 ||
+    outputProcessId > 0xffffffff ||
+    evidence.outputProcessId !== outputProcessId ||
+    !['local', 'stream'].includes(role) ||
+    !Array.isArray(evidence.legs) ||
+    evidence.legs.length === 0 ||
+    evidence.legs.length > 8
+  )
+    fail()
+  const outputs = new Set()
+  for (const leg of evidence.legs) {
+    if (
+      !hasOnlyKeys(leg, ['role', 'outputIndex', 'inputOffsetMs', 'filterShiftMs']) ||
+      !['local', 'stream'].includes(leg.role) ||
+      !Number.isInteger(leg.outputIndex) ||
+      leg.outputIndex < 0 ||
+      leg.outputIndex >= evidence.legs.length ||
+      outputs.has(leg.outputIndex) ||
+      leg.inputOffsetMs !== 0 ||
+      !Number.isInteger(leg.filterShiftMs) ||
+      Math.abs(leg.filterShiftMs) > 1000
+    )
+      fail()
+    outputs.add(leg.outputIndex)
+  }
+  const matching = evidence.legs.filter((leg) => leg.role === role)
+  if (matching.length !== 1) fail()
+  return { ...matching[0] }
+}
+
+export function sourceSampleWindowStart(sample, outputTiming) {
+  if (
+    !Number.isSafeInteger(sample) ||
+    sample < 0 ||
+    outputTiming?.inputOffsetMs !== 0 ||
+    !Number.isInteger(outputTiming.filterShiftMs) ||
+    Math.abs(outputTiming.filterShiftMs) > 1000
+  )
+    throw new Error('The source sample boundary or output audio timing is unavailable.')
+  // Keep the established AAC transition exclusion and the 48 kHz bus clock.
+  return sample / 48000 + outputTiming.filterShiftMs / 1000 + 0.25
+}
+
 export function measureSourceWindow(
   samples,
   { startSeconds, durationSeconds = 0.5, sampleRate = 48000 } = {}

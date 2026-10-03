@@ -9664,19 +9664,30 @@ async fn handle_text_message_with_role(
                 .and_then(|value| value.as_str())
                 .unwrap_or_default()
                 .to_string();
-            let injector = {
+            let (injector, output_audio_timing) = {
                 let recording = state.recording.lock().await;
-                recording
+                let active = recording
                     .as_ref()
                     .filter(|active| active.session_id == session_id)
-                    .and_then(|active| active.native_audio.as_ref())
-                    .and_then(|native_audio| native_audio.caption_contract_test_injector())
+                    .filter(|active| {
+                        command
+                            .params
+                            .get("outputProcessId")
+                            .is_none_or(|pid| pid.as_u64() == Some(u64::from(active.pid)))
+                    });
+                (
+                    active
+                        .and_then(|active| active.native_audio.as_ref())
+                        .and_then(|native_audio| native_audio.caption_contract_test_injector()),
+                    active.and_then(|active| active.source_switch_output_audio_timing()),
+                )
             };
             match injector {
                 Some(injector) => ServerResponse::ok(
                     command.id,
                     serde_json::json!({
                         "disconnected": injector.disconnect_source(),
+                        "outputAudioTiming": output_audio_timing,
                     }),
                 ),
                 None => ServerResponse::error(
@@ -17199,6 +17210,114 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    #[cfg(all(unix, debug_assertions))]
+    #[tokio::test]
+    async fn audio_disconnect_debug_response_keeps_exact_session_and_process_timing_owner() {
+        use std::io::Read;
+        let mut state = test_state();
+        state.smoke_rpc_enabled = true;
+        let directory =
+            std::env::temp_dir().join(format!("videorc-timing-owner-{}", Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let fifo = directory.join("timing-owner.f32le");
+        audio::create_native_audio_fifo(&fifo).unwrap();
+        let reader_path = fifo.clone();
+        let (ready, opened) = tokio::sync::oneshot::channel();
+        let reader = std::thread::spawn(move || {
+            let mut file = std::fs::File::open(reader_path).unwrap();
+            let _ = ready.send(());
+            let mut bytes = [0_u8; 4096];
+            while matches!(file.read(&mut bytes), Ok(count) if count > 0) {}
+        });
+        let settings = audio::AudioProcessingSettings::default();
+        let source = audio::test_native_audio_source(settings);
+        let native_audio = session_audio::attach(
+            Some(source),
+            fifo,
+            None,
+            settings,
+            audio::NATIVE_AUDIO_SOURCE_STALL_TIMEOUT,
+        );
+        timeout(Duration::from_secs(2), opened)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut active = recording::test_active_recording_stub("timing-owner");
+        active.pid = 42;
+        active.native_audio = Some(native_audio);
+        active.install_source_switch_timing_for_test();
+        *state.recording.lock().await = Some(active);
+        let command = |session_id: &str, pid: serde_json::Value| {
+            serde_json::json!({
+                "id": "timing-owner",
+                "method": "audio.test.disconnect",
+                "params": { "sessionId": session_id, "outputProcessId": pid },
+            })
+            .to_string()
+        };
+        let mut refused = Vec::new();
+        for (session_id, pid) in [
+            ("old-session", serde_json::json!(42)),
+            ("timing-owner", serde_json::json!(41)),
+            ("timing-owner", serde_json::json!("42")),
+        ] {
+            let response = handle_text_message_with_role(
+                &state,
+                &command(session_id, pid),
+                BackendRole::Admin,
+            )
+            .await;
+            refused.push(response);
+        }
+        let denied = handle_text_message_with_role(
+            &state,
+            &command("timing-owner", serde_json::json!(42)),
+            BackendRole::Renderer,
+        )
+        .await;
+        let response = handle_text_message_with_role(
+            &state,
+            &command("timing-owner", serde_json::json!(42)),
+            BackendRole::Admin,
+        )
+        .await;
+        // The reader is owned by this fixture and EOF follows the bus's bounded
+        // stop/join. No process, hardware capture, or broad cleanup is involved.
+        drop(state.recording.lock().await.take());
+        let joined = tokio::task::spawn_blocking(move || reader.join().unwrap());
+        timeout(Duration::from_secs(2), joined)
+            .await
+            .unwrap()
+            .unwrap();
+        std::fs::remove_dir(directory).unwrap();
+        let stale = handle_text_message_with_role(
+            &state,
+            &command("timing-owner", serde_json::json!(42)),
+            BackendRole::Admin,
+        )
+        .await;
+        for response in refused {
+            assert!(!response.ok);
+            assert!(response.payload.is_none());
+        }
+        assert!(!denied.ok);
+        assert_eq!(denied.error.unwrap().code, "forbidden-method");
+        assert!(response.ok);
+        assert_eq!(
+            response.payload.unwrap(),
+            serde_json::json!({
+                "disconnected": true,
+                "outputAudioTiming": {
+                    "sessionId": "timing-owner",
+                    "outputProcessId": 42,
+                    "legs": [{ "role": "stream", "outputIndex": 0, "inputOffsetMs": 0, "filterShiftMs": 0 }],
+                },
+            })
+        );
+        assert!(!stale.ok);
+        assert!(stale.payload.is_none());
     }
 
     #[tokio::test]

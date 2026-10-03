@@ -1933,6 +1933,10 @@ pub struct ActiveRecording {
     /// Keep only timed silence alive until video-owned FFmpeg exits.
     native_audio_silent_drain: bool,
     pub native_audio: Option<NativeAudioCaptureSession>,
+    /// Reduced evidence from this process's final arguments, never an argv or
+    /// destination cache. Only the authenticated debug disconnect can read it.
+    #[cfg(debug_assertions)]
+    source_switch_output_audio_timing: Option<Vec<SourceSwitchOutputAudioTiming>>,
     /// The session's System audio switch (plan 069 S4), on every session whose
     /// bus can mix system audio (macOS, and Windows 11 since S8). It opens
     /// nothing until turned on.
@@ -2077,6 +2081,8 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         pipeline: RecordingPipeline::new(false, true, &[]),
         native_audio_silent_drain: false,
         native_audio: None,
+        #[cfg(debug_assertions)]
+        source_switch_output_audio_timing: None,
         system_audio: None,
         system_audio_bypassed: false,
         ffmpeg_live_audio_session: None,
@@ -2409,6 +2415,26 @@ pub struct ActiveLivePreview {
 }
 
 impl ActiveRecording {
+    #[cfg(all(test, debug_assertions))]
+    pub(crate) fn install_source_switch_timing_for_test(&mut self) {
+        self.source_switch_output_audio_timing = Some(vec![SourceSwitchOutputAudioTiming {
+            role: "stream",
+            output_index: 0,
+            input_offset_ms: 0,
+            filter_shift_ms: 0,
+        }]);
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn source_switch_output_audio_timing(&self) -> Option<serde_json::Value> {
+        (self.pid > 0).then_some(())?;
+        Some(serde_json::json!({
+            "sessionId": self.session_id,
+            "outputProcessId": self.pid,
+            "legs": self.source_switch_output_audio_timing.as_ref()?,
+        }))
+    }
+
     pub(crate) fn capture_elapsed_seconds(&self) -> f64 {
         let origin = self
             .capture_epoch
@@ -4510,6 +4536,13 @@ async fn start_session_with_timeline(
         )?
     };
     let ffmpeg_live_audio_filter_count = ffmpeg_live_microphone_filter_count(&args);
+    #[cfg(debug_assertions)]
+    let source_switch_output_audio_timing = inspect_source_switch_output_audio_timing(
+        &args,
+        &capture,
+        output_path.as_deref(),
+        &stream_targets,
+    );
     let retain_ffmpeg_stdin =
         retain_ffmpeg_stdin_for_session(use_encoder_bridge, ffmpeg_live_audio_filter_count);
     let (
@@ -5259,6 +5292,8 @@ async fn start_session_with_timeline(
             encoder_bridge.is_some(),
         ),
         native_audio: attached_native_audio,
+        #[cfg(debug_assertions)]
+        source_switch_output_audio_timing,
         system_audio: session_system_audio,
         system_audio_bypassed,
         ffmpeg_live_audio_session,
@@ -18178,6 +18213,255 @@ fn clamped_microphone_sync_offset_ms(audio: &AudioSettings) -> i32 {
         .clamp(MICROPHONE_SYNC_OFFSET_MIN_MS, MICROPHONE_SYNC_OFFSET_MAX_MS)
 }
 
+#[cfg(debug_assertions)]
+const SOURCE_SWITCH_TIMING_MAX_ARGS: usize = 1_024;
+#[cfg(debug_assertions)]
+const SOURCE_SWITCH_TIMING_MAX_ARG_BYTES: usize = 256 * 1_024;
+#[cfg(debug_assertions)]
+const SOURCE_SWITCH_TIMING_MAX_LEGS: usize = 8;
+
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct SourceSwitchOutputAudioTiming {
+    role: &'static str,
+    output_index: usize,
+    input_offset_ms: i32,
+    filter_shift_ms: i32,
+}
+
+/// Inspect the exact command passed to the child, after every topology and
+/// offset-clamping decision. Destination strings are used transiently only to
+/// locate standalone output boundaries; none survive in the reduced result.
+/// This intentionally supports only an unambiguous native-bus map and its
+/// maintained time-filter chain. Tee/unknown graphs and timestamp options are
+/// unavailable evidence, never a reason to change or reject session startup.
+#[cfg(debug_assertions)]
+fn inspect_source_switch_output_audio_timing(
+    args: &[String],
+    capture: &CaptureInputs,
+    output_path: Option<&Path>,
+    targets: &[StreamTarget],
+) -> Option<Vec<SourceSwitchOutputAudioTiming>> {
+    if args.len() > SOURCE_SWITCH_TIMING_MAX_ARGS
+        || args.iter().map(String::len).sum::<usize>() > SOURCE_SWITCH_TIMING_MAX_ARG_BYTES
+        || targets.len() + usize::from(output_path.is_some()) > SOURCE_SWITCH_TIMING_MAX_LEGS
+        || args.iter().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "-itsoffset"
+                    | "-itsscale"
+                    | "-copyts"
+                    | "-start_at_zero"
+                    | "-output_ts_offset"
+                    | "-avoid_negative_ts"
+                    | "-ss"
+                    | "-sseof"
+                    | "-af:s"
+            ) || arg.starts_with("-filter:a")
+        })
+    {
+        return None;
+    }
+    let bus_path = match capture.microphone.as_ref()? {
+        MicrophoneInput::CoreAudio {
+            fifo_path: Some(path),
+            ..
+        }
+        | MicrophoneInput::SessionPcm { fifo_path: path } => path.display().to_string(),
+        _ => return None,
+    };
+    let inputs = args
+        .windows(2)
+        .enumerate()
+        .filter(|(_, pair)| pair[0] == "-i")
+        .collect::<Vec<_>>();
+    let matching_inputs = inputs
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, pair))| pair[1] == bus_path)
+        .collect::<Vec<_>>();
+    let [(bus_index, (bus_position, _))] = matching_inputs.as_slice() else {
+        return None;
+    };
+    let bus_options_start = bus_index
+        .checked_sub(1)
+        .map_or(0, |previous| inputs[previous].0 + 2);
+    let bus_options = &args[bus_options_start..*bus_position];
+    if bus_options.windows(2).any(|pair| {
+        ["-use_wallclock_as_timestamps", "-timestamp", "-r", "-async"].contains(&pair[0].as_str())
+    }) {
+        return None;
+    }
+    for (name, value) in [("-f", "f32le"), ("-ar", "48000"), ("-ac", "2")] {
+        if unique_arg_value(bus_options, name)? != value {
+            return None;
+        }
+    }
+    // Input timestamp shifts are deliberately refused above. In particular,
+    // atrim+asetpts resets PTS, so adding an itsoffset would not prove a sum.
+    let input_offset_ms = 0;
+    let audio_map = format!("{bus_index}:a?");
+    let output_start = inputs.last()?.0 + 2;
+    let mut outputs = Vec::new();
+    let mut locate_output = |destination: &str, role| {
+        let positions = args
+            .iter()
+            .enumerate()
+            .filter(|(_, arg)| arg.as_str() == destination)
+            .map(|(position, _)| position)
+            .collect::<Vec<_>>();
+        let [position] = positions.as_slice() else {
+            return None;
+        };
+        if *position < output_start {
+            return None;
+        }
+        outputs.push((*position, role));
+        Some(())
+    };
+    if let Some(path) = output_path {
+        locate_output(&ffmpeg_file_path(path), "local")?;
+    }
+    for target in targets {
+        locate_output(&target.url, "stream")?;
+    }
+    outputs.sort_unstable_by_key(|(position, _)| *position);
+    if outputs.is_empty()
+        || outputs.last()?.0 != args.len().checked_sub(1)?
+        || outputs.windows(2).any(|pair| pair[0].0 == pair[1].0)
+    {
+        return None;
+    }
+    let mut timing = Vec::with_capacity(outputs.len());
+    let mut start = output_start;
+    for (output_index, (end, role)) in outputs.into_iter().enumerate() {
+        let options = &args[start..end];
+        if !source_switch_output_options_are_known(options) {
+            return None;
+        }
+        let maps = options
+            .windows(2)
+            .filter(|pair| pair[0] == "-map")
+            .map(|pair| pair[1].as_str())
+            .collect::<Vec<_>>();
+        if maps.iter().filter(|map| **map == audio_map).count() != 1
+            || maps.iter().any(|map| {
+                *map != audio_map
+                    && *map != "[v_main]"
+                    && !map
+                        .strip_suffix(":v")
+                        .is_some_and(|index| index.parse::<usize>().is_ok())
+            })
+            || options.windows(2).any(|pair| {
+                pair[0] == "-filter_complex"
+                    && [":a", "asetpts", "atrim", "adelay", "amix"]
+                        .iter()
+                        .any(|audio| pair[1].contains(audio))
+            })
+            || unique_arg_value(options, "-ar")? != "48000"
+            || unique_arg_value(options, "-ac")? != "2"
+        {
+            return None;
+        }
+        timing.push(SourceSwitchOutputAudioTiming {
+            role,
+            output_index,
+            input_offset_ms,
+            filter_shift_ms: source_switch_filter_shift_ms(unique_arg_value(options, "-af")?)?,
+        });
+        start = end + 1;
+    }
+    Some(timing)
+}
+
+/// Unknown positional tokens could be another output boundary, and unknown
+/// options could change the timeline. Refuse both rather than carrying a prior
+/// output's filter across an unrecognized destination. This is a deliberately
+/// narrow inspection grammar, not another FFmpeg command builder.
+#[cfg(debug_assertions)]
+fn source_switch_output_options_are_known(options: &[String]) -> bool {
+    let mut cursor = 0;
+    while let Some(option) = options.get(cursor) {
+        if option == "-shortest" {
+            cursor += 1;
+        } else if [
+            "-map",
+            "-filter_complex",
+            "-af",
+            "-ar",
+            "-ac",
+            "-c:a",
+            "-c:v",
+            "-b:a",
+            "-tag:v",
+            "-f",
+            "-fifo_format",
+            "-queue_size",
+            "-drop_pkts_on_overflow",
+            "-attempt_recovery",
+            "-recovery_wait_time",
+            "-flvflags",
+            "-colorspace",
+            "-color_primaries",
+            "-color_trc",
+            "-color_range",
+            "-bsf:v",
+        ]
+        .contains(&option.as_str())
+            || option.starts_with("-metadata:s:a:")
+        {
+            if options.get(cursor + 1).is_none() {
+                return false;
+            }
+            cursor += 2;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(debug_assertions)]
+fn unique_arg_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    let mut values = args
+        .windows(2)
+        .filter(|pair| pair[0] == name)
+        .map(|pair| pair[1].as_str());
+    let value = values.next()?;
+    values.next().is_none().then_some(value)
+}
+
+#[cfg(debug_assertions)]
+fn source_switch_filter_shift_ms(filter: &str) -> Option<i32> {
+    let prefix = filter.strip_suffix("aresample=async=1:first_pts=0,apad")?;
+    if prefix.is_empty() {
+        return Some(0);
+    }
+    if let Some(delay) = prefix
+        .strip_prefix("adelay=")
+        .and_then(|value| value.strip_suffix(":all=1,"))
+    {
+        let delay = delay.parse::<i32>().ok()?;
+        return (delay > 0 && delay <= MICROPHONE_SYNC_OFFSET_MAX_MS).then_some(delay);
+    }
+    let trim = prefix
+        .strip_prefix("atrim=start=")?
+        .strip_suffix(",asetpts=PTS-STARTPTS,")?
+        .parse::<f64>()
+        .ok()?;
+    let shift = (trim * 1_000.0).round() as i32;
+    (trim.is_finite()
+        && shift > 0
+        && shift <= -MICROPHONE_SYNC_OFFSET_MIN_MS
+        && prefix
+            == format!(
+                "atrim=start={:.3},asetpts=PTS-STARTPTS,",
+                f64::from(shift) / 1_000.0
+            ))
+    .then_some(-shift)
+}
+
 /// Plan 069 decision 8, fixed at session start: on a platform that can mix
 /// system audio, the microphone offset `o_mic` and the system offset `o_sys`
 /// split into one FFmpeg whole-track shift `min(o_mic, o_sys)` and a
@@ -25964,6 +26248,8 @@ mod tests {
             pipeline: RecordingPipeline::new(false, true, &[]),
             native_audio_silent_drain: false,
             native_audio: None,
+            #[cfg(debug_assertions)]
+            source_switch_output_audio_timing: None,
             system_audio: None,
             system_audio_bypassed: false,
             ffmpeg_live_audio_session: None,
@@ -32182,6 +32468,8 @@ mod tests {
             pipeline: RecordingPipeline::new(true, false, &audio_tracks),
             native_audio_silent_drain: false,
             native_audio: None,
+            #[cfg(debug_assertions)]
+            source_switch_output_audio_timing: None,
             system_audio: None,
             system_audio_bypassed: false,
             ffmpeg_live_audio_session: Some(live_audio_session.clone()),
@@ -36432,6 +36720,218 @@ mod tests {
             let mut params = base_params(record_enabled, stream_enabled);
             params.audio.microphone_sync_offset_ms = offset_ms;
             params
+        }
+
+        #[cfg(debug_assertions)]
+        #[test]
+        fn source_switch_output_audio_timing_uses_actual_record_copy_and_split_arguments() {
+            let capture = bus_capture(VideoInput::TestPattern);
+            let output = Path::new("/tmp/timing-record.mkv");
+            let fifo = Path::new("/tmp/timing-record.ts");
+            let video = EncoderBridgeVideoOutput::VideoToolboxH264MpegTs;
+            let timing = |role, output_index, filter_shift_ms| SourceSwitchOutputAudioTiming {
+                role,
+                output_index,
+                input_offset_ms: 0,
+                filter_shift_ms,
+            };
+            let record_params = params_with_offset(true, false, 0);
+            let record_args =
+                bridge_recording_ffmpeg_args(&capture, &record_params, Some(output), fifo, video)
+                    .unwrap();
+            assert_eq!(
+                inspect_source_switch_output_audio_timing(
+                    &record_args,
+                    &capture,
+                    Some(output),
+                    &[]
+                ),
+                Some(vec![timing("local", 0, 0)])
+            );
+
+            let targets = vec![build_stream_url(&base_params(false, true).output.rtmp).unwrap()];
+            // Stream-only and same-profile combined both use neutral copy
+            // fanout. Mode flags therefore cannot establish an audio advance.
+            for local in [None, Some(output)] {
+                let params = params_with_offset(local.is_some(), true, 0);
+                let args =
+                    bridge_compositor_ffmpeg_args(&capture, &params, local, &targets, fifo, video)
+                        .unwrap();
+                let expected = if local.is_some() {
+                    vec![timing("local", 0, 0), timing("stream", 1, 0)]
+                } else {
+                    vec![timing("stream", 0, 0)]
+                };
+                assert_eq!(
+                    inspect_source_switch_output_audio_timing(&args, &capture, local, &targets),
+                    Some(expected)
+                );
+            }
+
+            let (params, targets) = simulcast_split_params(true);
+            let stream_output = recording_compositor_stream_output(&params, video)
+                .unwrap()
+                .expect("actual split topology");
+            let args = bridge_compositor_split_output_ffmpeg_args(
+                &capture,
+                &params,
+                Some(output),
+                &targets,
+                fifo,
+                Path::new("/tmp/timing-stream.ts"),
+                video,
+                stream_output,
+            )
+            .unwrap();
+            assert_eq!(
+                inspect_source_switch_output_audio_timing(&args, &capture, Some(output), &targets),
+                Some(vec![
+                    timing("local", 0, 0),
+                    timing("stream", 1, -130),
+                    timing("stream", 2, -130)
+                ])
+            );
+        }
+
+        #[cfg(debug_assertions)]
+        #[test]
+        fn source_switch_output_audio_timing_reports_emitted_clamps_not_requested_offsets() {
+            let capture = bus_capture(VideoInput::TestPattern);
+            let output = Path::new("/tmp/timing-clamp.mkv");
+            let fifo = Path::new("/tmp/timing-clamp.ts");
+            let video = EncoderBridgeVideoOutput::VideoToolboxH264MpegTs;
+            for (requested, expected_copy, expected_stream) in [
+                (-5_000, -1_000, -1_000),
+                (-950, -950, -1_000),
+                (-120, -120, -250),
+                (0, 0, -130),
+                (
+                    120,
+                    if system_audio_capable() { 0 } else { 120 },
+                    if system_audio_capable() { -130 } else { -10 },
+                ),
+                (
+                    5_000,
+                    if system_audio_capable() { 0 } else { 1_000 },
+                    if system_audio_capable() { -130 } else { 1_000 },
+                ),
+            ] {
+                let (mut params, targets) = simulcast_split_params(true);
+                params.audio.microphone_sync_offset_ms = requested;
+                let stream_output = recording_compositor_stream_output(&params, video)
+                    .unwrap()
+                    .unwrap();
+                let copy = bridge_compositor_ffmpeg_args(
+                    &capture,
+                    &params,
+                    Some(output),
+                    &targets,
+                    fifo,
+                    video,
+                )
+                .unwrap();
+                let copy_timing = inspect_source_switch_output_audio_timing(
+                    &copy,
+                    &capture,
+                    Some(output),
+                    &targets,
+                )
+                .unwrap();
+                assert!(
+                    copy_timing
+                        .iter()
+                        .all(|leg| leg.filter_shift_ms == expected_copy)
+                );
+                let split = bridge_compositor_split_output_ffmpeg_args(
+                    &capture,
+                    &params,
+                    Some(output),
+                    &targets,
+                    fifo,
+                    Path::new("/tmp/timing-clamp-stream.ts"),
+                    video,
+                    stream_output,
+                )
+                .unwrap();
+                let split_timing = inspect_source_switch_output_audio_timing(
+                    &split,
+                    &capture,
+                    Some(output),
+                    &targets,
+                )
+                .unwrap();
+                assert_eq!(split_timing[0].filter_shift_ms, expected_copy);
+                assert!(
+                    split_timing[1..]
+                        .iter()
+                        .all(|leg| leg.filter_shift_ms == expected_stream)
+                );
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        #[test]
+        fn source_switch_output_audio_timing_refuses_missing_ambiguous_and_unknown_shapes() {
+            let capture = bus_capture(VideoInput::TestPattern);
+            let output = Path::new("/tmp/timing-refuse.mkv");
+            let args = bridge_recording_ffmpeg_args(
+                &capture,
+                &base_params(true, false),
+                Some(output),
+                Path::new("/tmp/timing-refuse.ts"),
+                EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+            )
+            .unwrap();
+            let inspect = |args: &[String], targets: &[StreamTarget]| {
+                inspect_source_switch_output_audio_timing(args, &capture, Some(output), targets)
+            };
+            let mut missing = args.clone();
+            missing.pop();
+            assert!(inspect(&missing, &[]).is_none());
+            for (name, value) in [
+                ("-map", "0:a?"),
+                ("-map", "1:a?"),
+                ("-af", "aresample=async=1:first_pts=0,apad"),
+                ("-itsoffset", "0.080"),
+                ("-filter:a", "adelay=80:all=1"),
+                ("-future_timestamp_option", "80"),
+            ] {
+                let mut ambiguous = args.clone();
+                ambiguous.splice(
+                    ambiguous.len() - 1..ambiguous.len() - 1,
+                    [name.to_string(), value.to_string()],
+                );
+                assert!(
+                    inspect(&ambiguous, &[]).is_none(),
+                    "unsupported option {name}"
+                );
+            }
+            let mut unknown_filter = args.clone();
+            let af = unknown_filter.iter().position(|arg| arg == "-af").unwrap();
+            unknown_filter[af + 1] =
+                "asetpts=PTS+0.080/TB,aresample=async=1:first_pts=0,apad".to_string();
+            assert!(inspect(&unknown_filter, &[]).is_none());
+            let mut duplicate_input = args.clone();
+            duplicate_input.splice(0..0, ["-i".to_string(), BUS_FIFO.to_string()]);
+            assert!(inspect(&duplicate_input, &[]).is_none());
+            let mut unknown_output = args.clone();
+            unknown_output.insert(
+                unknown_output.len() - 1,
+                "/tmp/unowned-output.mkv".to_string(),
+            );
+            assert!(inspect(&unknown_output, &[]).is_none());
+            let target = build_stream_url(&base_params(false, true).output.rtmp).unwrap();
+            assert!(inspect(&args, &vec![target; SOURCE_SWITCH_TIMING_MAX_LEGS]).is_none());
+            assert!(
+                inspect(
+                    &vec!["-n".to_string(); SOURCE_SWITCH_TIMING_MAX_ARGS + 1],
+                    &[]
+                )
+                .is_none()
+            );
+            let mut oversized = args.clone();
+            oversized[0] = "x".repeat(SOURCE_SWITCH_TIMING_MAX_ARG_BYTES + 1);
+            assert!(inspect(&oversized, &[]).is_none());
         }
 
         fn all_values<'a>(args: &'a [String], name: &str) -> Vec<&'a str> {

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createServer, createConnection } from 'node:net'
 import { fileURLToPath } from 'node:url'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -13,7 +13,9 @@ import {
   evaluatePacketDts,
   evaluateSourceIdentity,
   measureSourceWindow,
-  readSourcePackets
+  readSourcePackets,
+  resolveSourceOutputAudioTiming,
+  sourceSampleWindowStart
 } from './lib/live-source-switch-gates.mjs'
 import { probeMedia } from './lib/recording-analyzer.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
@@ -66,6 +68,7 @@ let receiver
 const events = { recording: [], health: [], sources: [] }
 const switches = []
 let lostInput
+let outputAudioTiming
 let report = { pass: false, scope: `native-microphone-${mode}`, completePlanAcceptance: false }
 
 try {
@@ -226,10 +229,29 @@ try {
       const disconnected = await requestSmokeCommand(
         smoke,
         'backend-debug-rpc',
-        { method: 'audio.test.disconnect', params: { sessionId }, timeoutMs },
+        {
+          method: 'audio.test.disconnect',
+          params: { sessionId, outputProcessId },
+          timeoutMs
+        },
         { timeoutMs }
       )
       assert.equal(disconnected.disconnected, true)
+      outputAudioTiming = disconnected.outputAudioTiming
+      // Refuse absent/ambiguous evidence while the exact session is still
+      // owned, before artifact measurements can report a false result.
+      if (recordEnabled)
+        resolveSourceOutputAudioTiming(outputAudioTiming, {
+          sessionId,
+          outputProcessId,
+          role: 'local'
+        })
+      if (streamEnabled)
+        resolveSourceOutputAudioTiming(outputAudioTiming, {
+          sessionId,
+          outputProcessId,
+          role: 'stream'
+        })
       const deadline = Date.now() + 3000
       do {
         snapshot = await request(backend, timeoutMs, 'session.sources.get', { sessionId })
@@ -286,16 +308,6 @@ try {
     assert.equal(transport.connections, 1, 'The stream reconnected during source replacement.')
     assert.ok(!transport.error, transport.error)
   }
-  // Resolve the maintained output path compensation, so receipt sample positions
-  // are mapped through the same atrim/adelay as the actual encoder command.
-  const recordingSource = readFileSync(
-    new URL('../crates/videorc-backend/src/recording.rs', import.meta.url),
-    'utf8'
-  )
-  const streamAdvance = Number(
-    recordingSource.match(/const STREAM_OUTPUT_AUDIO_ADVANCE_MS: i32 = (\d+);/)?.[1]
-  )
-  assert.ok(Number.isFinite(streamAdvance), 'Stream timeline mapping is unavailable.')
   const artifacts = []
   const failures = []
   for (const [leg, file] of [
@@ -315,11 +327,16 @@ try {
     assert.equal(probe.audio[0].sampleRate, 48000)
     assert.equal(probe.audio[0].channels, 2)
     failures.push(...evaluatePacketDts(packets).map((failure) => `${leg}: ${failure}`))
-    const audioOffsetSeconds = leg === 'received' ? -streamAdvance / 1000 : 0
+    const audioTiming = resolveSourceOutputAudioTiming(outputAudioTiming, {
+      sessionId,
+      outputProcessId,
+      role: leg === 'local' ? 'local' : 'stream'
+    })
+    const audioOffsetSeconds = audioTiming.filterShiftMs / 1000
     const measurements = switches.map((operation) => {
       // AAC transform ringing has a separate exclusion window. The raw bus
       // regression proves the precise <=10ms ramp and excludes candidate preroll.
-      const startSeconds = operation.receipt.cutoverSample / 48000 + audioOffsetSeconds + 0.25
+      const startSeconds = sourceSampleWindowStart(operation.receipt.cutoverSample, audioTiming)
       const measurement = measureSourceWindow(pcm, { startSeconds })
       const windowFailures = evaluateSourceIdentity(measurement, operation.expectedFrequency)
       failures.push(...windowFailures.map((failure) => `${leg}/${operation.requestId}: ${failure}`))
@@ -330,7 +347,7 @@ try {
       ...evaluateSourceIdentity(initialSilence, null).map((failure) => `${leg}: ${failure}`)
     )
     const lostSilence = measureSourceWindow(pcm, {
-      startSeconds: lostInput.sample / 48000 + audioOffsetSeconds + 0.25
+      startSeconds: sourceSampleWindowStart(lostInput.sample, audioTiming)
     })
     failures.push(
       ...evaluateSourceIdentity(lostSilence, null).map(
@@ -342,6 +359,7 @@ try {
       file,
       probe,
       audioOffsetSeconds,
+      audioTiming,
       measurements,
       initialSilence,
       lostSilence
@@ -352,6 +370,7 @@ try {
     pass: failures.length === 0,
     sessionId,
     outputProcessId,
+    outputAudioTiming,
     transport,
     artifacts,
     lostInput,
