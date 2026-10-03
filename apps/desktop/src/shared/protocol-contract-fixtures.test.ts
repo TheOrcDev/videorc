@@ -24,7 +24,8 @@ import type {
   Scene,
   SessionCommentsListParams,
   SessionCommentsPage,
-  SessionDeletionOperation
+  SessionDeletionOperation,
+  SessionChatTotals
 } from './backend'
 import { normalizeSessionCommentsListParams } from './backend'
 import {
@@ -39,6 +40,11 @@ import { normalizePreviewSurfaceBounds } from './native-preview-bounds'
 
 interface HighRiskContractFixtures {
   schemaVersion: 2
+  sessionChatTotals: {
+    params: { sessionId: string }
+    available: SessionChatTotals
+    legacy: SessionChatTotals
+  }
   previewSurfaceBounds: {
     wire: PreviewSurfaceBounds
     normalized: PreviewSurfaceBounds
@@ -106,6 +112,18 @@ function jsonShape(value: unknown): unknown {
 }
 
 describe('shared high-risk protocol fixture', () => {
+  it('keeps exact durable totals and unavailable legacy history identical across languages', () => {
+    expect(
+      validateBackendRpcParams('sessions.comments.totals', fixtures.sessionChatTotals.params)
+    ).toStrictEqual(fixtures.sessionChatTotals.params)
+    for (const totals of [
+      fixtures.sessionChatTotals.available,
+      fixtures.sessionChatTotals.legacy
+    ]) {
+      expect(validateBackendRpcResult('sessions.comments.totals', totals)).toStrictEqual(totals)
+      expect(validateBackendEventPayload('liveChat.totals', totals)).toStrictEqual(totals)
+    }
+  })
   it('has the expected schema version', () => {
     expect(fixtures.schemaVersion).toBe(2)
   })

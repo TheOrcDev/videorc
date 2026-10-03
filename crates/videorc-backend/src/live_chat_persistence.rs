@@ -23,7 +23,7 @@ const MAX_TRANSIENT_RETRIES: usize = 3;
 const MAX_WORKER_RESTARTS_PER_BATCH: usize = 1;
 
 pub(crate) type BatchWriter =
-    Arc<dyn Fn(&[LiveChatMessage]) -> anyhow::Result<()> + Send + Sync + 'static>;
+    Arc<dyn Fn(&[LiveChatMessage]) -> anyhow::Result<Vec<LiveChatMessage>> + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LiveChatPersistenceFailureKind {
@@ -71,7 +71,7 @@ impl LiveChatPersistenceFailure {
 
 struct PersistRequest {
     messages: Vec<LiveChatMessage>,
-    acknowledged: oneshot::Sender<Result<(), LiveChatPersistenceFailure>>,
+    acknowledged: oneshot::Sender<Result<Vec<LiveChatMessage>, LiveChatPersistenceFailure>>,
 }
 
 /// Lazy, bounded SQLite writer for provider bursts. Construction remains safe
@@ -112,7 +112,10 @@ impl LiveChatPersistence {
     }
 
     #[cfg(test)]
-    async fn persist(&self, message: LiveChatMessage) -> Result<(), LiveChatPersistenceFailure> {
+    async fn persist(
+        &self,
+        message: LiveChatMessage,
+    ) -> Result<Vec<LiveChatMessage>, LiveChatPersistenceFailure> {
         self.persist_batch(vec![message]).await
     }
 
@@ -120,19 +123,22 @@ impl LiveChatPersistence {
     /// exceed the old 64-message worker chunk, but splitting it would make a
     /// later failure roll back coordinator state while leaving an earlier
     /// prefix committed. The bounded request queue still supplies backpressure.
+    /// Success returns one authoritative persisted row per input, in input order.
+    /// A persisted tombstone wins over replayed content; the caller must validate
+    /// owner/order and reconcile it before admitting any live/cohost publication.
     pub async fn persist_batch(
         &self,
         messages: Vec<LiveChatMessage>,
-    ) -> Result<(), LiveChatPersistenceFailure> {
+    ) -> Result<Vec<LiveChatMessage>, LiveChatPersistenceFailure> {
         self.persist_chunk(messages).await
     }
 
     async fn persist_chunk(
         &self,
         messages: Vec<LiveChatMessage>,
-    ) -> Result<(), LiveChatPersistenceFailure> {
+    ) -> Result<Vec<LiveChatMessage>, LiveChatPersistenceFailure> {
         if messages.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let mut worker_restarts = 0;
         loop {
@@ -161,7 +167,7 @@ impl LiveChatPersistence {
                 ))
             });
             match outcome {
-                Ok(()) => return Ok(()),
+                Ok(messages) => return Ok(messages),
                 Err(error)
                     if error.worker_ended
                         && error.kind == LiveChatPersistenceFailureKind::Retryable
@@ -237,10 +243,10 @@ async fn run_worker(
             let writer = writer.clone();
             let messages = request.messages.clone();
             match tokio::task::spawn_blocking(move || writer(&messages)).await {
-                Ok(Ok(())) => {
+                Ok(Ok(messages)) => {
                     #[cfg(test)]
                     transaction_count.fetch_add(1, Ordering::SeqCst);
-                    let _ = request.acknowledged.send(Ok(()));
+                    let _ = request.acknowledged.send(Ok(messages));
                     break;
                 }
                 Ok(Err(error)) => {
@@ -468,7 +474,7 @@ mod tests {
                 if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
                     return Err(sqlite_error(rusqlite::ErrorCode::DatabaseBusy, 5));
                 }
-                Ok(())
+                Ok(messages.to_vec())
             })
         };
         let persistence = LiveChatPersistence::with_writer(writer);
@@ -496,12 +502,12 @@ mod tests {
         let writer: BatchWriter = {
             let locked = locked.clone();
             let attempts = attempts.clone();
-            Arc::new(move |_| {
+            Arc::new(move |messages| {
                 attempts.fetch_add(1, Ordering::SeqCst);
                 if locked.load(Ordering::SeqCst) {
                     Err(sqlite_error(rusqlite::ErrorCode::DatabaseLocked, 6))
                 } else {
-                    Ok(())
+                    Ok(messages.to_vec())
                 }
             })
         };
@@ -522,11 +528,11 @@ mod tests {
         let attempts = Arc::new(AtomicUsize::new(0));
         let writer: BatchWriter = {
             let attempts = attempts.clone();
-            Arc::new(move |_| {
+            Arc::new(move |messages| {
                 if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                     Err(sqlite_error(rusqlite::ErrorCode::DatabaseCorrupt, 11))
                 } else {
-                    Ok(())
+                    Ok(messages.to_vec())
                 }
             })
         };
@@ -556,7 +562,7 @@ mod tests {
                 if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                     panic!("injected poisoned writer");
                 }
-                Ok(())
+                Ok(messages.to_vec())
             })
         };
         let persistence = LiveChatPersistence::with_writer(writer);

@@ -137,6 +137,7 @@ import {
   MAX_COMMENTS_SNAPSHOT_MESSAGES
 } from '../shared/comments-snapshot-delta'
 import { normalizeLiveDashboardState, type LiveDashboardState } from '../shared/live-dashboard'
+import { sessionChatTotalsSchema } from '../shared/session-chat-totals'
 import { TWITCH_AUDIENCE_SCOPES } from '../shared/platform-scopes'
 import {
   migrateStreamManagerFrame,
@@ -487,6 +488,7 @@ import type {
   SessionViewersPage,
   AudienceSnapshot,
   CommentsHistoryStats,
+  SessionChatTotals,
   VideorcAccountSnapshot,
   ViewerSample
 } from '../shared/backend'
@@ -3069,21 +3071,26 @@ function cacheCommentsSendResult(operation: CommentsSendOperation): 'live' | 'hi
 
 /** The finished session's saved viewer samples and audience, for History. */
 async function loadCommentsHistoryStats(sessionId: string): Promise<CommentsHistoryStats> {
-  const [viewers, audience] = await Promise.all([
+  const [viewers, audience, chatTotals] = await Promise.all([
     requestBackendAdmin<SessionViewersPage>('sessions.viewers.list', { sessionId })
       .then((page) => page.samples)
       .catch(() => []),
     requestBackendAdmin<AudienceSnapshot | null>('sessions.audience.get', { sessionId }).catch(
       () => null
-    )
+    ),
+    requestBackendAdmin<SessionChatTotals | null>('sessions.comments.totals', { sessionId })
+      .then((totals) =>
+        totals?.sessionId === sessionId ? sessionChatTotalsSchema.parse(totals) : null
+      )
+      .catch(() => null)
   ])
-  return { viewers, audience }
+  return { viewers, audience, chatTotals }
 }
 
 async function attachCommentsHistoryStats(sessionId: string): Promise<void> {
   const history = await loadCommentsHistoryStats(sessionId)
   const cached = commentsHistoryCache.peek(sessionId)
-  if (!cached || cached.history) return
+  if (!cached) return
   const selectedMode = commentsViewSelection.current()
   commentsHistoryCache.put(
     { ...cached, history },
@@ -3135,7 +3142,11 @@ async function selectCommentsViewMode(mode: CommentsViewMode): Promise<boolean> 
     commentsViewSelection,
     commentsHistoryCache,
     mode,
-    loadCommentsHistoryView
+    loadCommentsHistoryView,
+    async (historyMode, cached) => ({
+      ...cached,
+      history: await loadCommentsHistoryStats(historyMode.sessionId)
+    })
   )
 }
 
@@ -3166,6 +3177,18 @@ function emitCommentsViewerSample(sample: ViewerSample | null): void {
 
 function emitCommentsDashboard(state: LiveDashboardState | null): void {
   latestDashboardState = state
+  if (state?.chatTotals) {
+    const mode = commentsViewSelection.current()
+    if (
+      commentsHistoryCache.updateTotals(
+        state.chatTotals,
+        mode.kind === 'history' ? mode.sessionId : undefined
+      ) &&
+      mode.kind === 'history' &&
+      mode.sessionId === state.chatTotals.sessionId
+    )
+      emitCommentsView()
+  }
   if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
     sendElectronEvent(commentsWindow.webContents, 'comments-window:dashboard', latestDashboardState)
   }
@@ -9101,6 +9124,7 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'resource.admin.preview_surface_bounds',
   'preview.surface.take_native_host_commands',
   'sessions.comments.list',
+  'sessions.comments.totals',
   'sessions.viewers.list',
   'sessions.audience.get',
   'sessions.delete.resolve',

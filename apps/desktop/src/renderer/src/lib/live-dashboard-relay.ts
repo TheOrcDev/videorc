@@ -3,9 +3,11 @@ import type {
   RecordingStatus,
   StreamHealth,
   StreamTargetsSnapshot,
-  ViewerSample
+  ViewerSample,
+  SessionChatTotals
 } from '@/lib/backend'
 import type { BackendClient } from '@/backendClient'
+import { sessionChatTotalsSchema } from '../../../shared/session-chat-totals'
 
 import {
   createDashboardPushCoalescer,
@@ -16,6 +18,8 @@ import {
   reduceDashboardRecording,
   reduceDashboardTargets,
   reduceDashboardViewers,
+  reduceDashboardChatTotals,
+  normalizeLiveDashboardState,
   type LiveDashboardState
 } from '../../../shared/live-dashboard'
 
@@ -26,6 +30,8 @@ export type DashboardEvent =
   | 'stream.audience'
   | 'stream.health'
   | 'stream.targets'
+  | 'liveChat.totals'
+  | 'events.lagged'
 
 export interface LiveDashboardRelay {
   recording: (status: RecordingStatus) => void
@@ -33,6 +39,7 @@ export interface LiveDashboardRelay {
   audience: (snapshot: AudienceSnapshot) => void
   health: (health: StreamHealth) => void
   targets: (snapshot: StreamTargetsSnapshot) => void
+  chatTotals: (totals: SessionChatTotals) => void
   /** Adopts main's cached state after a renderer reload mid-session. */
   seed: (state: LiveDashboardState | null) => void
   backfillViewers: (sessionId: string, samples: ViewerSample[]) => void
@@ -50,6 +57,8 @@ export function createLiveDashboardRelay(
   now: () => string = () => new Date().toISOString()
 ): LiveDashboardRelay {
   let state = emptyLiveDashboardState(now())
+  let confirmedSessionId: string | null = null
+  let pendingTotals: SessionChatTotals | null = null
   const coalescer = createDashboardPushCoalescer(push)
   const apply = (next: LiveDashboardState): void => {
     if (next === state) return
@@ -57,17 +66,59 @@ export function createLiveDashboardRelay(
     coalescer.schedule(state)
   }
   return {
-    recording: (status) => apply(reduceDashboardRecording(state, status, now())),
-    viewers: (sample) => apply(reduceDashboardViewers(state, sample, now())),
-    audience: (snapshot) => apply(reduceDashboardAudience(state, snapshot, now())),
-    health: (health) => apply(reduceDashboardHealth(state, health, now())),
-    targets: (snapshot) => apply(reduceDashboardTargets(state, snapshot, now())),
+    recording: (status) => {
+      if (
+        status.sessionId &&
+        (status.state === 'idle' || status.state === 'failed') &&
+        confirmedSessionId &&
+        status.sessionId !== confirmedSessionId
+      )
+        return
+      if (status.sessionId && (status.state === 'recording' || status.state === 'streaming'))
+        confirmedSessionId = status.sessionId
+      apply(reduceDashboardRecording(state, status, now()))
+      if (pendingTotals?.sessionId === confirmedSessionId)
+        apply(reduceDashboardChatTotals(state, pendingTotals, now()))
+      pendingTotals = null
+    },
+    viewers: (sample) => {
+      if (!sample || sample.sessionId === confirmedSessionId)
+        apply(reduceDashboardViewers(state, sample, now()))
+    },
+    audience: (snapshot) => {
+      if (snapshot.sessionId === confirmedSessionId)
+        apply(reduceDashboardAudience(state, snapshot, now()))
+    },
+    health: (health) => {
+      if (health.sessionId === confirmedSessionId)
+        apply(reduceDashboardHealth(state, health, now()))
+    },
+    targets: (snapshot) => {
+      if (snapshot.sessionId === confirmedSessionId)
+        apply(reduceDashboardTargets(state, snapshot, now()))
+    },
+    chatTotals: (totals) => {
+      sessionChatTotalsSchema.parse(totals)
+      if (totals.sessionId !== confirmedSessionId) {
+        if (
+          pendingTotals?.sessionId === totals.sessionId &&
+          pendingTotals.status === 'available' &&
+          (totals.status !== 'available' || totals.revision <= pendingTotals.revision)
+        )
+          return
+        pendingTotals = totals
+        return
+      }
+      apply(reduceDashboardChatTotals(state, totals, now()))
+    },
     seed: (seeded) => {
-      if (!seeded || state.sessionId !== null) return
+      if (!seeded || state.sessionId !== null || !normalizeLiveDashboardState(seeded)) return
       state = seeded
     },
-    backfillViewers: (sessionId, samples) =>
-      apply(mergeDashboardViewerHistory(state, sessionId, samples, now())),
+    backfillViewers: (sessionId, samples) => {
+      if (sessionId === confirmedSessionId)
+        apply(mergeDashboardViewerHistory(state, sessionId, samples, now()))
+    },
     current: () => state,
     dispose: () => coalescer.dispose()
   }
@@ -91,9 +142,37 @@ export async function startLiveDashboardRelay({
   })
   relay.seed((await window.videorc?.getDashboard?.().catch(() => null)) ?? null)
   let hydratedSessionId: string | null = null
+  let totalsRequest: Promise<void> | null = null
+  let queuedTotalsSession: string | null = null
+  const refreshTotals = (sessionId: string): void => {
+    if (totalsRequest) {
+      queuedTotalsSession = sessionId
+      return
+    }
+    totalsRequest = client
+      .requestTyped('sessions.comments.totals', { sessionId })
+      .then(
+        (totals) => {
+          if (
+            isCurrent() &&
+            totals?.sessionId === sessionId &&
+            relay.current().sessionId === sessionId
+          )
+            relay.chatTotals(totals)
+        },
+        () => undefined
+      )
+      .finally(() => {
+        totalsRequest = null
+        const next = queuedTotalsSession
+        queuedTotalsSession = null
+        if (isCurrent() && next && relay.current().sessionId === next) refreshTotals(next)
+      })
+  }
   const hydrate = (sessionId: string): void => {
     if (hydratedSessionId === sessionId) return
     hydratedSessionId = sessionId
+    refreshTotals(sessionId)
     void client.requestTyped('sessions.viewers.list', { sessionId }).then(
       (page) => isCurrent() && relay.backfillViewers(sessionId, page.samples),
       () => undefined
@@ -124,6 +203,14 @@ export async function startLiveDashboardRelay({
         return
       case 'stream.targets':
         relay.targets(payload as StreamTargetsSnapshot)
+        return
+      case 'liveChat.totals':
+        relay.chatTotals(payload as SessionChatTotals)
+        return
+      case 'events.lagged': {
+        const sessionId = relay.current().sessionId
+        if (sessionId) refreshTotals(sessionId)
+      }
     }
   }
   return { feed, dispose: () => relay.dispose() }

@@ -1,4 +1,5 @@
-import type { CommentsViewMode, CommentsViewSnapshot } from '../shared/backend'
+import type { CommentsViewMode, CommentsViewSnapshot, SessionChatTotals } from '../shared/backend'
+import { sessionChatTotalsSchema } from '../shared/session-chat-totals'
 
 type HistoryMode = Extract<CommentsViewMode, { kind: 'history' }>
 export type HistoryCommentsView = CommentsViewSnapshot & { mode: HistoryMode }
@@ -61,15 +62,21 @@ export async function prepareAndSelectCommentsView(
   selection: CommentsViewSelection,
   cache: CommentsHistoryCache,
   mode: CommentsViewMode,
-  loadHistory: (mode: HistoryMode) => Promise<HistoryCommentsView>
+  loadHistory: (mode: HistoryMode) => Promise<HistoryCommentsView>,
+  refreshHistory: (
+    mode: HistoryMode,
+    cached: HistoryCommentsView
+  ) => Promise<HistoryCommentsView> = async (_mode, cached) => cached
 ): Promise<boolean> {
   let preparedHistory: HistoryCommentsView | undefined
   return selection.select(
     mode,
     async () => {
       if (mode.kind === 'history') {
-        preparedHistory =
-          cache.get(mode.sessionId) ?? (await cache.load(mode.sessionId, () => loadHistory(mode)))
+        const cached = cache.get(mode.sessionId)
+        preparedHistory = cached
+          ? await refreshHistory(mode, cached)
+          : await cache.load(mode.sessionId, () => loadHistory(mode))
       }
     },
     () => {
@@ -170,6 +177,27 @@ export class CommentsHistoryCache {
     if (view.snapshot.sessionId !== view.mode.sessionId) {
       throw new Error('Chat history snapshot must match its view-mode session.')
     }
+    const incoming = view.history?.chatTotals
+    if (incoming) {
+      sessionChatTotalsSchema.parse(incoming)
+      if (incoming.sessionId !== view.mode.sessionId)
+        throw new Error('History totals must match their session.')
+    }
+    const previous = this.peek(view.mode.sessionId)?.history?.chatTotals
+    if (
+      previous?.status === 'available' &&
+      (!incoming || incoming.status !== 'available' || incoming.revision <= previous.revision)
+    ) {
+      view = {
+        ...view,
+        history: {
+          viewers: view.history?.viewers ?? [],
+          audience: view.history?.audience ?? null,
+          ...view.history,
+          chatTotals: previous
+        }
+      }
+    }
     const boundedView = this.boundView(view)
     const entry = cachedHistory(boundedView)
     this.entries.delete(view.mode.sessionId)
@@ -182,6 +210,24 @@ export class CommentsHistoryCache {
     this.pendingLoads.delete(sessionId)
     this.pendingCacheLoads.delete(sessionId)
     return this.entries.delete(sessionId)
+  }
+
+  updateTotals(totals: SessionChatTotals, protectedSessionId?: string): boolean {
+    const cached = this.peek(totals.sessionId)
+    if (!cached) return false
+    this.put(
+      {
+        ...cached,
+        history: {
+          viewers: cached.history?.viewers ?? [],
+          audience: cached.history?.audience ?? null,
+          ...cached.history,
+          chatTotals: totals
+        }
+      },
+      protectedSessionId
+    )
+    return true
   }
 
   stats(): { sessions: number; messages: number; bytes: number } {

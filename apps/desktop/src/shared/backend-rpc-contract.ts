@@ -53,6 +53,7 @@ import type {
   SessionAiArtifactsPage,
   SessionCommentsListParams,
   SessionCommentsPage,
+  SessionChatTotals,
   SessionDeletionOperation,
   SessionDetailListParams,
   SessionHealthEventsPage,
@@ -77,6 +78,7 @@ import type {
   VideoSettings
 } from './backend'
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
+import { sessionChatIdentifierSchema, sessionChatTotalsSchema } from './session-chat-totals'
 import { LAYOUT_PRESET_VALUES } from './backend'
 import {
   arraySchema,
@@ -233,6 +235,7 @@ export interface BackendRpcMethodMap {
   'sessions.aiArtifacts.list': BackendRpcDefinition<SessionDetailListParams, SessionAiArtifactsPage>
   'sessions.storage': BackendRpcDefinition<undefined, SessionStorageTotals>
   'sessions.comments.list': BackendRpcDefinition<SessionCommentsListParams, SessionCommentsPage>
+  'sessions.comments.totals': BackendRpcDefinition<{ sessionId: string }, SessionChatTotals | null>
   'sessions.viewers.list': BackendRpcDefinition<SessionViewersListParams, SessionViewersPage>
   'sessions.audience.get': BackendRpcDefinition<{ sessionId: string }, AudienceSnapshot | null>
   'stream.audience.snapshot': BackendRpcDefinition<undefined, AudienceSnapshot | null>
@@ -275,6 +278,7 @@ export type BackendRpcResult<TMethod extends BackendRpcMethod> =
   BackendRpcMethodMap[TMethod]['result']
 
 export interface BackendEventMap {
+  'liveChat.totals': SessionChatTotals
   'audio.levels': AudioLevelsEvent
   'scheduledStreams.changed': ScheduledStreamEvent
   'devices.changed': DeviceList
@@ -2578,6 +2582,10 @@ const runtimeContracts = {
       { allowUnknown: false }
     )
   },
+  'sessions.comments.totals': {
+    params: objectSchema({ sessionId: sessionChatIdentifierSchema }, { allowUnknown: false }),
+    result: nullableSchema(sessionChatTotalsSchema)
+  },
   'sessions.comments.list': {
     params: objectSchema(
       {
@@ -2727,7 +2735,8 @@ const runtimeEventSchemas = {
   'performance.check.progress': performanceCheckProgressSchema,
   'performance.check.completed': performanceCheckStateSchema,
   'liveChat.emotes': chatEmotesSettingsSchema,
-  'youtube.quota': youtubeQuotaStatusSchema
+  'youtube.quota': youtubeQuotaStatusSchema,
+  'liveChat.totals': sessionChatTotalsSchema
 } satisfies Record<BackendEvent, RuntimeSchema<unknown>>
 
 export function validateBackendEventPayload(event: string, payload: unknown): unknown {

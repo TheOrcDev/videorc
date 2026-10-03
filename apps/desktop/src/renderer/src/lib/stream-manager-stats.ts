@@ -7,10 +7,11 @@ import type {
   StreamPlatform,
   StreamTargetRuntime,
   StreamTargetState,
-  ViewerSample
+  ViewerSample,
+  SessionChatTotals
 } from '@/lib/backend'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
-import { activityTotals, chatActivity, type ActivityTotals } from '@/lib/stream-activity'
+import { chatActivity, type ActivityTotals } from '@/lib/stream-activity'
 import { formatViewerCount, viewerSampleStale } from '@/lib/viewer-count-view'
 
 import type { LiveDashboardState } from '../../../shared/live-dashboard'
@@ -58,13 +59,39 @@ export interface StatItemModel {
 }
 
 export interface StatsInput {
+  /** The actual view owner, which may advance before the dashboard relay. */
+  sessionId?: string | null
   dashboard: LiveDashboardState | null
   /** The live chip's sample, when the dashboard has not been relayed yet. */
   viewerSample: ViewerSample | null
   messages: readonly LiveChatMessage[]
   providers: readonly LiveChatProviderState[]
   nowMs: number
-  history?: { stats?: CommentsHistoryStats; startedAt: string; title: string }
+  history?: { stats?: CommentsHistoryStats; sessionId?: string; startedAt: string; title: string }
+}
+
+function confirmedTotals(input: StatsInput): SessionChatTotals | null {
+  const totals = input.history ? input.history.stats?.chatTotals : input.dashboard?.chatTotals
+  const owner =
+    input.sessionId !== undefined
+      ? input.sessionId
+      : (input.history?.sessionId ?? input.dashboard?.sessionId)
+  return totals && totals.sessionId === owner ? totals : null
+}
+
+function missingTotal(id: 'supporters' | 'tips', input: StatsInput): StatItemModel {
+  const reason =
+    confirmedTotals(input)?.status === 'legacy-unavailable'
+      ? 'This earlier session has no complete total.'
+      : 'Session total not available yet.'
+  return {
+    id,
+    label: id === 'supporters' ? 'Supporters this stream' : 'Tips this stream',
+    value: '–',
+    tone: 'subtle',
+    details: [{ label: 'This stream', value: 'Not available', note: reason }],
+    description: reason
+  }
 }
 
 /** The bar's order when the streamer has not rearranged it (plan 057, D2). */
@@ -457,17 +484,21 @@ function tipsItem(totals: ActivityTotals): StatItemModel {
 
 function chatItem(input: StatsInput): StatItemModel {
   const pace = chatActivity(input.messages, input.nowMs)
-  const chatters = { label: 'Chatters', value: pace.chatters.toLocaleString() }
+  const confirmed = confirmedTotals(input)
+  const totals = confirmed?.status === 'available' ? confirmed : null
+  const chatters = { label: 'Chatters', value: totals ? totals.chatters.toLocaleString() : '–' }
   if (input.history) {
-    const count = input.messages.length
+    const count = totals?.messageCount
     return {
       id: 'chat',
       label: 'Chat',
-      value: count.toLocaleString(),
+      value: count === undefined ? '–' : count.toLocaleString(),
       unit: count === 1 ? 'message' : 'messages',
       tone: 'neutral',
       details: [chatters],
-      description: `${plural(count, 'message', 'messages')}, ${plural(pace.chatters, 'chatter', 'chatters')}`
+      description: totals
+        ? `${plural(totals.messageCount, 'message', 'messages')}, ${plural(totals.chatters, 'chatter', 'chatters')}`
+        : 'Session chat total not available'
     }
   }
   return {
@@ -480,18 +511,21 @@ function chatItem(input: StatsInput): StatItemModel {
       { label: 'Messages in the last minute', value: pace.perMinute.toLocaleString() },
       chatters
     ],
-    description: `${plural(pace.perMinute, 'message', 'messages')} a minute, ${plural(pace.chatters, 'chatter', 'chatters')}`
+    description: `${plural(pace.perMinute, 'message', 'messages')} a minute${totals ? `, ${plural(totals.chatters, 'chatter', 'chatters')}` : ', session chatters not available'}`
   }
 }
 
 /** Every stat this session can show, in the default order. */
 export function statItems(input: StatsInput): StatItemModel[] {
   const dashboard = input.history ? null : input.dashboard
+  const confirmed = confirmedTotals(input)
+  const totals = confirmed?.status === 'available' ? confirmed : null
   // Tips and subs are only measured where chat is read; viewers can come
   // from any destination with a viewer API.
   const chatPlatforms = new Set<StreamPlatform>([
     ...input.providers.map((provider) => provider.platform),
-    ...input.messages.map((message) => message.platform)
+    ...input.messages.map((message) => message.platform),
+    ...(totals?.platforms ?? [])
   ])
   const livePlatforms = new Set<StreamPlatform>([
     ...chatPlatforms,
@@ -505,10 +539,15 @@ export function statItems(input: StatsInput): StatItemModel[] {
       input.history ? (input.history.stats?.audience ?? null) : (dashboard?.audience ?? null)
     )
   ]
-  const totals = activityTotals(input.messages)
   if ([...chatPlatforms].some((platform) => TIP_PLATFORMS.has(platform))) {
-    items.push(supportersItem(totals, chatPlatforms, dashboard?.audience ?? null), tipsItem(totals))
+    items.push(
+      totals
+        ? supportersItem(totals, chatPlatforms, dashboard?.audience ?? null)
+        : missingTotal('supporters', input),
+      totals ? tipsItem(totals) : missingTotal('tips', input)
+    )
   }
-  if (input.providers.length > 0 || input.messages.length > 0) items.push(chatItem(input))
+  if (input.providers.length > 0 || input.messages.length > 0 || (totals?.messageCount ?? 0) > 0)
+    items.push(chatItem(input))
   return items.filter((item): item is StatItemModel => item !== null)
 }

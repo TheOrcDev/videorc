@@ -196,3 +196,120 @@ describe('CommentsViewSelection', () => {
     expect(cache.peek('b')).toBeUndefined()
   })
 })
+
+describe('durable History accounting', () => {
+  const totals = (
+    sessionId: string,
+    revision: number
+  ): Extract<import('../shared/backend').SessionChatTotals, { status: 'available' }> => ({
+    status: 'available',
+    sessionId,
+    revision,
+    messageCount: revision,
+    chatters: revision,
+    platforms: ['twitch'],
+    supporters: revision,
+    follows: 0,
+    bits: 0,
+    tips: [],
+    raids: 0
+  })
+  const withTotals = (sessionId: string, revision: number) => ({
+    ...history(sessionId),
+    history: { viewers: [], audience: null, chatTotals: totals(sessionId, revision) }
+  })
+
+  it('refreshes cached History while a newer event wins over delayed hydration', async () => {
+    const cache = new CommentsHistoryCache()
+    cache.put(withTotals('a', 1))
+    const selection = new CommentsViewSelection({ kind: 'live' })
+    let resolve!: (view: ReturnType<typeof withTotals>) => void
+    let loads = 0
+    const choosing = prepareAndSelectCommentsView(
+      selection,
+      cache,
+      history('a').mode,
+      async () => {
+        loads += 1
+        return withTotals('a', 1)
+      },
+      async () =>
+        new Promise<ReturnType<typeof withTotals>>((done) => {
+          resolve = done
+        })
+    )
+    expect(cache.updateTotals(totals('a', 8))).toBe(true)
+    resolve(withTotals('a', 4))
+    await expect(choosing).resolves.toBe(true)
+    expect(loads).toBe(0)
+    expect(cache.peek('a')?.history?.chatTotals).toEqual(totals('a', 8))
+    await prepareAndSelectCommentsView(
+      selection,
+      cache,
+      history('a').mode,
+      async () => withTotals('a', 1),
+      async () => withTotals('a', 9)
+    )
+    expect(cache.peek('a')?.history?.chatTotals).toEqual(totals('a', 9))
+    cache.updateTotals(totals('a', 2))
+    expect(cache.peek('a')?.history?.chatTotals).toEqual(totals('a', 9))
+  })
+
+  it('rejects failed and stale cached refresh selections without replacing current history', async () => {
+    const cache = new CommentsHistoryCache()
+    cache.put(withTotals('a', 1))
+    cache.put(withTotals('b', 2))
+    const selection = new CommentsViewSelection(history('b').mode)
+    let resolve!: (view: ReturnType<typeof withTotals>) => void
+    const first = prepareAndSelectCommentsView(
+      selection,
+      cache,
+      history('a').mode,
+      async () => withTotals('a', 1),
+      async () =>
+        new Promise<ReturnType<typeof withTotals>>((done) => {
+          resolve = done
+        })
+    )
+    await prepareAndSelectCommentsView(
+      selection,
+      cache,
+      history('b').mode,
+      async () => withTotals('b', 2),
+      async () => withTotals('b', 3)
+    )
+    resolve(withTotals('a', 9))
+    await expect(first).resolves.toBe(false)
+    expect(selection.current()).toEqual(history('b').mode)
+    expect(cache.peek('a')?.history?.chatTotals).toEqual(totals('a', 1))
+    await expect(
+      prepareAndSelectCommentsView(
+        selection,
+        cache,
+        history('a').mode,
+        async () => withTotals('a', 1),
+        async () => {
+          throw new Error('Unavailable')
+        }
+      )
+    ).rejects.toThrow('Unavailable')
+    expect(selection.current()).toEqual(history('b').mode)
+    expect(cache.updateTotals(totals('uncached', 1))).toBe(false)
+    expect(cache.stats().sessions).toBe(2)
+  })
+
+  it('rejects totals with a foreign owner or invalid accounting facts before caching', () => {
+    const cache = new CommentsHistoryCache()
+    const view = withTotals('a', 1)
+    expect(() =>
+      cache.put({ ...view, history: { ...view.history, chatTotals: totals('b', 1) } })
+    ).toThrow('match')
+    expect(() =>
+      cache.put({
+        ...view,
+        history: { ...view.history, chatTotals: { ...totals('a', 1), revision: Infinity } }
+      })
+    ).toThrow()
+    expect(cache.stats().sessions).toBe(0)
+  })
+})

@@ -16,8 +16,8 @@ use uuid::Uuid;
 
 use crate::diagnostics::permission_pane_for_log;
 use crate::live_chat::{
-    CommentsSendOperation, CommentsSendOperationPhase, LiveChatEventType, LiveChatMessage,
-    LiveChatMessageFragment,
+    CommentsSendOperation, CommentsSendOperationPhase, LiveChatEventDetails, LiveChatEventType,
+    LiveChatMessage, LiveChatMessageFragment, MembershipKind, SubscriptionKind,
 };
 use crate::process_job::output_owned_std_with_timeout;
 use crate::protocol::{
@@ -387,6 +387,163 @@ pub struct LiveChatMessagesPage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
 }
+
+/// Exact totals require coverage from session creation. Older histories are
+/// retained, but erased gift metadata and past identity conflicts cannot be
+/// reconstructed. Never turn their capped recent rows into a session total.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "status",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum SessionChatTotals {
+    Available {
+        #[serde(deserialize_with = "deserialize_chat_identifier")]
+        session_id: String,
+        #[serde(deserialize_with = "deserialize_chat_total")]
+        revision: u64,
+        #[serde(deserialize_with = "deserialize_chat_total")]
+        message_count: u64,
+        #[serde(deserialize_with = "deserialize_chat_total")]
+        chatters: u64,
+        #[serde(deserialize_with = "deserialize_chat_platforms")]
+        platforms: Vec<StreamPlatform>,
+        #[serde(deserialize_with = "deserialize_chat_total")]
+        follows: u64,
+        #[serde(deserialize_with = "deserialize_chat_total")]
+        supporters: u64,
+        #[serde(deserialize_with = "deserialize_chat_total")]
+        bits: u64,
+        #[serde(deserialize_with = "deserialize_chat_tips")]
+        tips: Vec<SessionChatTipTotal>,
+        #[serde(deserialize_with = "deserialize_chat_total")]
+        raids: u64,
+    },
+    LegacyUnavailable {
+        #[serde(deserialize_with = "deserialize_chat_identifier")]
+        session_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionChatTipTotal {
+    #[serde(deserialize_with = "deserialize_chat_currency")]
+    pub currency: String,
+    #[serde(deserialize_with = "deserialize_chat_total")]
+    pub amount_micros: u64,
+}
+
+fn deserialize_chat_total<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<u64, D::Error> {
+    let value = u64::deserialize(deserializer)?;
+    if value > MAX_CHAT_TOTAL {
+        return Err(serde::de::Error::custom("unsafe chat total"));
+    }
+    Ok(value)
+}
+
+fn deserialize_chat_currency<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<String, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    if value.encode_utf16().count() > 64 {
+        return Err(serde::de::Error::custom("unbounded chat currency"));
+    }
+    Ok(value)
+}
+
+fn deserialize_chat_platforms<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<StreamPlatform>, D::Error> {
+    let value = Vec::<StreamPlatform>::deserialize(deserializer)?;
+    let mut seen = HashSet::new();
+    if value.len() > 7
+        || value
+            .iter()
+            .any(|platform| !seen.insert(stream_platform_id(*platform)))
+    {
+        return Err(serde::de::Error::custom(
+            "unbounded or repeated chat platforms",
+        ));
+    }
+    Ok(value)
+}
+
+fn deserialize_chat_tips<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<SessionChatTipTotal>, D::Error> {
+    let value = Vec::<SessionChatTipTotal>::deserialize(deserializer)?;
+    let mut seen = HashSet::new();
+    if value.len() > MAX_CHAT_CURRENCIES || value.iter().any(|tip| !seen.insert(&tip.currency)) {
+        return Err(serde::de::Error::custom(
+            "unbounded or repeated chat currencies",
+        ));
+    }
+    Ok(value)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionChatTotalsParams {
+    #[serde(deserialize_with = "deserialize_chat_identifier")]
+    pub session_id: String,
+}
+
+fn deserialize_chat_identifier<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<String, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty() || value.encode_utf16().count() > 4096 {
+        return Err(serde::de::Error::custom("invalid chat session identifier"));
+    }
+    Ok(value)
+}
+
+impl SessionChatTotals {
+    pub fn empty(session_id: &str) -> Self {
+        Self::Available {
+            session_id: session_id.to_string(),
+            revision: 0,
+            message_count: 0,
+            chatters: 0,
+            platforms: Vec::new(),
+            follows: 0,
+            supporters: 0,
+            bits: 0,
+            tips: Vec::new(),
+            raids: 0,
+        }
+    }
+}
+
+/// This ledger keeps only accounting facts. Deletion clears active monetary
+/// and chatter contributions, while known gift-group ownership survives so
+/// deleted parents cannot promote their children. No deleted text, fragments,
+/// recipient names or paid detail payloads are retained here.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ChatContribution {
+    chatter: Option<String>,
+    follows: i64,
+    supporters: i64,
+    bits: i64,
+    currency: Option<String>,
+    amount_micros: i64,
+    raids: i64,
+    gift_group: Option<String>,
+    gift_parent: bool,
+    gift_child: bool,
+}
+
+const MAX_CHAT_TOTAL: u64 = 9_007_199_254_740_991;
+const MAX_CHAT_CURRENCIES: usize = 256;
+
+#[derive(Debug, thiserror::Error)]
+#[error("Live chat message identity belongs to a different persisted owner.")]
+pub(crate) struct ConflictingLiveChatIdentity;
 
 #[derive(Debug, thiserror::Error)]
 #[error("Live chat message {message_id} references missing session {session_id}.")]
@@ -1329,8 +1486,9 @@ impl Database {
     }
 
     pub fn create_session(&self, session: &NewSession) -> Result<()> {
-        let conn = self.lock()?;
-        conn.execute(
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        transaction.execute(
             "INSERT INTO sessions (
                 id, title, started_at, status, mode, output_path, container, stream_preset,
                 sources_json, layout_json, output_json
@@ -1348,6 +1506,14 @@ impl Database {
                 serde_json::to_string(&session.output)?,
             ],
         )?;
+        transaction.execute(
+            "INSERT INTO session_chat_totals (session_id, totals_json) VALUES (?1, ?2)",
+            params![
+                session.id,
+                serde_json::to_string(&SessionChatTotals::empty(&session.id))?
+            ],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -2781,18 +2947,23 @@ impl Database {
     #[cfg(test)]
     pub fn save_live_chat_message(&self, message: &LiveChatMessage) -> Result<()> {
         self.save_live_chat_messages(std::slice::from_ref(message))
+            .map(|_| ())
     }
 
     /// Persist one provider burst in a single SQLite transaction. The caller's
     /// bounded worker supplies backpressure and never holds the async runtime
     /// while this synchronous transaction is executing.
-    pub fn save_live_chat_messages(&self, messages: &[LiveChatMessage]) -> Result<()> {
+    pub fn save_live_chat_messages(
+        &self,
+        messages: &[LiveChatMessage],
+    ) -> Result<Vec<LiveChatMessage>> {
         if messages.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let mut conn = self.lock()?;
         let transaction = conn.transaction()?;
         let mut existing_sessions = HashSet::new();
+        let mut authoritative = Vec::with_capacity(messages.len());
         for message in messages {
             if !existing_sessions.contains(&message.session_id) {
                 let exists = transaction
@@ -2811,6 +2982,44 @@ impl Database {
                     .into());
                 }
                 existing_sessions.insert(message.session_id.clone());
+            }
+            let owner = transaction
+                .query_row(
+                    "SELECT session_id, platform, target_id, provider_message_id, is_deleted
+                 FROM live_chat_messages WHERE id = ?1",
+                    params![message.id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, bool>(4)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some((session_id, platform, target_id, provider_message_id, deleted)) = &owner {
+                if session_id != &message.session_id
+                    || platform != stream_platform_id(message.platform)
+                    || target_id != &message.target_id
+                    || provider_message_id != &message.provider_message_id
+                {
+                    return Err(ConflictingLiveChatIdentity.into());
+                }
+                // A replay after local clear/buffer eviction cannot resurrect a
+                // persisted tombstone or its accounting contribution.
+                if *deleted && !message.is_deleted {
+                    authoritative.push(transaction.query_row(
+                        "SELECT id, session_id, provider_message_id, platform, target_id, author_id,
+                         author_name, author_avatar_url, author_badges_json, author_roles_json,
+                         published_at, received_at, message_text, fragments_json, event_type,
+                         amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message,
+                         author_affiliation_json FROM live_chat_messages WHERE id = ?1",
+                        params![message.id], live_chat_message_from_row,
+                    )?);
+                    continue;
+                }
             }
             transaction.execute(
                 "INSERT INTO live_chat_messages (
@@ -2872,9 +3081,36 @@ impl Database {
                         .transpose()?,
                 ],
             )?;
+            update_chat_totals(&transaction, message, owner.is_none())?;
+            authoritative.push(message.clone());
         }
         transaction.commit()?;
-        Ok(())
+        Ok(authoritative)
+    }
+
+    pub fn session_chat_totals(&self, session_id: &str) -> Result<Option<SessionChatTotals>> {
+        let conn = self.lock()?;
+        let payload = conn
+            .query_row(
+                "SELECT totals_json FROM session_chat_totals WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(payload) = payload {
+            return Ok(Some(serde_json::from_str(&payload)?));
+        }
+        let exists = conn
+            .query_row(
+                "SELECT 1 FROM sessions WHERE id = ?1",
+                params![session_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        Ok(exists.then(|| SessionChatTotals::LegacyUnavailable {
+            session_id: session_id.to_string(),
+        }))
     }
 
     #[cfg(test)]
@@ -5809,6 +6045,35 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_live_chat_messages_session_received
                 ON live_chat_messages(session_id, received_at, id);
 
+            CREATE TABLE IF NOT EXISTS session_chat_totals (
+                session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+                totals_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS live_chat_contributions (
+                message_id TEXT PRIMARY KEY REFERENCES live_chat_messages(id) ON DELETE CASCADE,
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                contribution_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS session_chat_authors (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                author_key TEXT NOT NULL,
+                message_count INTEGER NOT NULL CHECK(message_count >= 0),
+                PRIMARY KEY(session_id, author_key)
+            );
+            CREATE TABLE IF NOT EXISTS session_chat_currencies (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                currency TEXT NOT NULL,
+                message_count INTEGER NOT NULL CHECK(message_count >= 0),
+                PRIMARY KEY(session_id, currency)
+            );
+            CREATE TABLE IF NOT EXISTS session_chat_gifts (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                gift_group TEXT NOT NULL,
+                parent_count INTEGER NOT NULL CHECK(parent_count >= 0),
+                child_supporters INTEGER NOT NULL CHECK(child_supporters >= 0),
+                PRIMARY KEY(session_id, gift_group)
+            );
+
             CREATE TABLE IF NOT EXISTS live_chat_send_operations (
                 id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -6391,6 +6656,269 @@ fn metadata_is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
     {
         false
     }
+}
+
+fn chat_fact(value: u64) -> Result<i64> {
+    if value > MAX_CHAT_TOTAL {
+        bail!("Live chat accounting fact exceeds the safe wire range.");
+    }
+    Ok(value as i64)
+}
+
+fn chat_contribution(
+    message: &LiveChatMessage,
+    old: &ChatContribution,
+) -> Result<ChatContribution> {
+    if message.is_deleted {
+        let known = if old.gift_group.is_some() {
+            old.clone()
+        } else {
+            let mut visible = message.clone();
+            visible.is_deleted = false;
+            chat_contribution(&visible, old)?
+        };
+        return Ok(ChatContribution {
+            gift_group: known.gift_group,
+            gift_parent: known.gift_parent,
+            gift_child: known.gift_child,
+            ..Default::default()
+        });
+    }
+    let mut next = ChatContribution::default();
+    if matches!(
+        message.event_type,
+        LiveChatEventType::Message | LiveChatEventType::Paid
+    ) {
+        next.chatter = Some(format!(
+            "{}:{}",
+            stream_platform_id(message.platform),
+            message.author_id.as_deref().unwrap_or(&message.author_name)
+        ));
+    }
+    match &message.details {
+        Some(LiveChatEventDetails::Follow { .. }) => next.follows = 1,
+        Some(LiveChatEventDetails::Subscription {
+            subscription,
+            gift_count,
+            community_gift_id,
+            ..
+        }) => {
+            next.supporters = match subscription {
+                SubscriptionKind::CommunitySubGift => i64::from(gift_count.unwrap_or(1)),
+                _ => 1,
+            };
+            next.gift_parent = *subscription == SubscriptionKind::CommunitySubGift;
+            next.gift_child = *subscription == SubscriptionKind::SubGift;
+            if next.gift_parent || next.gift_child {
+                next.gift_group = community_gift_id.clone().filter(|group| !group.is_empty());
+            }
+        }
+        Some(LiveChatEventDetails::Membership {
+            membership,
+            gift_count,
+            ..
+        }) => {
+            next.supporters = match membership {
+                MembershipKind::Gift => i64::from(gift_count.unwrap_or(1)),
+                MembershipKind::GiftReceived => 0,
+                _ => 1,
+            };
+        }
+        Some(LiveChatEventDetails::Cheer { bits }) => next.bits = chat_fact(*bits)?,
+        Some(LiveChatEventDetails::SuperChat {
+            amount_micros,
+            currency,
+            ..
+        })
+        | Some(LiveChatEventDetails::SuperSticker {
+            amount_micros,
+            currency,
+            ..
+        }) => {
+            if currency.encode_utf16().count() > 64 {
+                bail!("Live chat currency exceeds the accounting wire bound.");
+            }
+            next.currency = Some(currency.clone());
+            next.amount_micros = chat_fact(*amount_micros)?;
+        }
+        Some(LiveChatEventDetails::Raid { .. }) => next.raids = 1,
+        _ => {}
+    }
+    Ok(next)
+}
+
+fn adjust_chat_total(total: &mut u64, delta: i64) -> Result<()> {
+    let value = i128::from(*total) + i128::from(delta);
+    if !(0..=i128::from(MAX_CHAT_TOTAL)).contains(&value) {
+        bail!("Live chat total exceeds the safe wire range.");
+    }
+    *total = value as u64;
+    Ok(())
+}
+
+/// Each delivery touches only its row, indexed author reference and gift
+/// group counters. No full-session row scan or in-memory lifetime ID set.
+fn update_chat_totals(conn: &Connection, message: &LiveChatMessage, inserted: bool) -> Result<()> {
+    let payload = conn
+        .query_row(
+            "SELECT totals_json FROM session_chat_totals WHERE session_id = ?1",
+            params![message.session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(payload) = payload else {
+        return Ok(());
+    }; // historical coverage stays unavailable
+    let mut totals: SessionChatTotals = serde_json::from_str(&payload)?;
+    let old = conn
+        .query_row(
+            "SELECT contribution_json FROM live_chat_contributions WHERE message_id = ?1",
+            params![message.id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let old: ChatContribution = old
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?
+        .unwrap_or_default();
+    let next = chat_contribution(message, &old)?;
+    if !inserted && old == next {
+        return Ok(());
+    }
+    let SessionChatTotals::Available {
+        revision,
+        message_count,
+        chatters,
+        platforms,
+        follows,
+        supporters,
+        bits,
+        tips,
+        raids,
+        ..
+    } = &mut totals
+    else {
+        return Ok(());
+    };
+    adjust_chat_total(revision, 1)?;
+    if inserted {
+        adjust_chat_total(message_count, 1)?;
+    }
+    if !platforms.contains(&message.platform) {
+        platforms.push(message.platform);
+    }
+    for (contribution, sign) in [(&old, -1), (&next, 1)] {
+        if let Some(author) = &contribution.chatter {
+            let before = conn.query_row("SELECT message_count FROM session_chat_authors WHERE session_id = ?1 AND author_key = ?2",
+                params![message.session_id, author], |row| row.get::<_, i64>(0)).optional()?.unwrap_or(0);
+            let after = before
+                .checked_add(sign)
+                .filter(|value| (0..=MAX_CHAT_TOTAL as i64).contains(value))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Live chat author accounting exceeds the safe range.")
+                })?;
+            if after < 0 {
+                bail!("Live chat author accounting is inconsistent.");
+            }
+            adjust_chat_total(chatters, i64::from(after > 0) - i64::from(before > 0))?;
+            if after == 0 {
+                conn.execute(
+                    "DELETE FROM session_chat_authors WHERE session_id = ?1 AND author_key = ?2",
+                    params![message.session_id, author],
+                )?;
+            } else {
+                conn.execute("INSERT INTO session_chat_authors (session_id, author_key, message_count) VALUES (?1, ?2, ?3)
+                    ON CONFLICT(session_id, author_key) DO UPDATE SET message_count = excluded.message_count", params![message.session_id, author, after])?;
+            }
+        }
+        adjust_chat_total(follows, sign * contribution.follows)?;
+        adjust_chat_total(bits, sign * contribution.bits)?;
+        adjust_chat_total(raids, sign * contribution.raids)?;
+        if contribution.gift_child && contribution.gift_group.is_some() {
+            // Singles are represented by the group's unsuppressed child sum.
+        } else {
+            adjust_chat_total(supporters, sign * contribution.supporters)?;
+        }
+        if let Some(group) = &contribution.gift_group {
+            let (parents, children) = conn.query_row("SELECT parent_count, child_supporters FROM session_chat_gifts WHERE session_id = ?1 AND gift_group = ?2",
+                params![message.session_id, group], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))).optional()?.unwrap_or((0, 0));
+            let next_parents = parents
+                .checked_add(sign * i64::from(contribution.gift_parent))
+                .filter(|value| (0..=MAX_CHAT_TOTAL as i64).contains(value))
+                .ok_or_else(|| anyhow::anyhow!("Live chat gift parents exceed the safe range."))?;
+            let next_children = children
+                .checked_add(
+                    sign * if contribution.gift_child {
+                        contribution.supporters
+                    } else {
+                        0
+                    },
+                )
+                .filter(|value| (0..=MAX_CHAT_TOTAL as i64).contains(value))
+                .ok_or_else(|| anyhow::anyhow!("Live chat gift children exceed the safe range."))?;
+            if next_parents < 0 || next_children < 0 {
+                bail!("Live chat gift accounting is inconsistent.");
+            }
+            let before = if parents == 0 { children } else { 0 };
+            let after = if next_parents == 0 { next_children } else { 0 };
+            adjust_chat_total(supporters, after - before)?;
+            conn.execute("INSERT INTO session_chat_gifts (session_id, gift_group, parent_count, child_supporters) VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(session_id, gift_group) DO UPDATE SET parent_count = excluded.parent_count, child_supporters = excluded.child_supporters",
+                params![message.session_id, group, next_parents, next_children])?;
+        }
+        if let Some(currency) = &contribution.currency {
+            // Zero-valued active tips still establish a measured currency.
+            // Remove it only after its last active old/new contribution retires.
+            let references = conn.query_row("SELECT message_count FROM session_chat_currencies WHERE session_id = ?1 AND currency = ?2",
+                params![message.session_id, currency], |row| row.get::<_, i64>(0)).optional()?.unwrap_or(0);
+            let next_references = references
+                .checked_add(sign)
+                .filter(|value| (0..=MAX_CHAT_TOTAL as i64).contains(value))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Live chat currency references exceed the safe range.")
+                })?;
+            let index = tips
+                .iter()
+                .position(|tip| &tip.currency == currency)
+                .unwrap_or_else(|| {
+                    tips.push(SessionChatTipTotal {
+                        currency: currency.clone(),
+                        amount_micros: 0,
+                    });
+                    tips.len() - 1
+                });
+            adjust_chat_total(
+                &mut tips[index].amount_micros,
+                sign * contribution.amount_micros,
+            )?;
+            if next_references == 0 {
+                if tips[index].amount_micros != 0 {
+                    bail!("Live chat currency accounting is inconsistent.");
+                }
+                tips.remove(index);
+                conn.execute(
+                    "DELETE FROM session_chat_currencies WHERE session_id = ?1 AND currency = ?2",
+                    params![message.session_id, currency],
+                )?;
+            } else {
+                conn.execute("INSERT INTO session_chat_currencies (session_id, currency, message_count) VALUES (?1, ?2, ?3)
+                    ON CONFLICT(session_id, currency) DO UPDATE SET message_count = excluded.message_count", params![message.session_id, currency, next_references])?;
+            }
+        }
+    }
+    if tips.len() > MAX_CHAT_CURRENCIES {
+        bail!("Live chat currencies exceed the accounting wire bound.");
+    }
+    tips.sort_by(|left, right| right.amount_micros.cmp(&left.amount_micros));
+    conn.execute("INSERT INTO live_chat_contributions (message_id, session_id, contribution_json) VALUES (?1, ?2, ?3)
+        ON CONFLICT(message_id) DO UPDATE SET contribution_json = excluded.contribution_json",
+        params![message.id, message.session_id, serde_json::to_string(&next)?])?;
+    conn.execute(
+        "UPDATE session_chat_totals SET totals_json = ?2 WHERE session_id = ?1",
+        params![message.session_id, serde_json::to_string(&totals)?],
+    )?;
+    Ok(())
 }
 
 fn live_chat_cursor(message: &LiveChatMessage) -> String {
@@ -8247,6 +8775,517 @@ mod tests {
         let second = database.list_live_chat_messages("session-2").unwrap();
         assert_ne!(first[0].id, second[0].id);
         assert_eq!(first[0].provider_message_id, second[0].provider_message_id);
+    }
+
+    #[test]
+    fn reused_global_chat_id_must_not_correct_another_session() {
+        let database = test_database();
+        for session_id in ["session-1", "session-2"] {
+            database
+                .create_session(&sample_session(session_id))
+                .unwrap();
+        }
+        let mut first = sample_live_chat_message("session-1", 1);
+        first.id = "youtube:legacy-provider-id".to_string();
+        first.details = Some(crate::live_chat::LiveChatEventDetails::Cheer { bits: 100 });
+        let mut second = sample_live_chat_message("session-2", 1);
+        second.id = first.id.clone();
+        second.details = Some(crate::live_chat::LiveChatEventDetails::Cheer { bits: 900 });
+        database.save_live_chat_message(&first).unwrap();
+        let error = database.save_live_chat_message(&second).unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<ConflictingLiveChatIdentity>()
+                .is_some()
+        );
+        assert_eq!(
+            database.list_live_chat_messages("session-1").unwrap(),
+            vec![first]
+        );
+        assert!(
+            database
+                .list_live_chat_messages("session-2")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    fn chat_totals_value(database: &Database, session_id: &str) -> serde_json::Value {
+        serde_json::to_value(database.session_chat_totals(session_id).unwrap().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn shared_high_risk_contract_fixture_matches_session_chat_totals() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../protocol-fixtures/high-risk-contracts.json"
+        ))
+        .unwrap();
+        for field in ["available", "legacy"] {
+            let wire = fixture["sessionChatTotals"][field].clone();
+            let parsed: SessionChatTotals = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), wire);
+        }
+        let params: SessionChatTotalsParams =
+            serde_json::from_value(fixture["sessionChatTotals"]["params"].clone()).unwrap();
+        assert_eq!(params.session_id, "session-fixture");
+        for invalid in [
+            serde_json::json!({"sessionId":""}),
+            serde_json::json!({"sessionId":"s","extra":true}),
+        ] {
+            assert!(serde_json::from_value::<SessionChatTotalsParams>(invalid).is_err());
+        }
+        for invalid in [
+            serde_json::json!(null),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!(9_007_199_254_740_992_u64),
+        ] {
+            let mut wire = fixture["sessionChatTotals"]["available"].clone();
+            wire["revision"] = invalid;
+            assert!(serde_json::from_value::<SessionChatTotals>(wire).is_err());
+        }
+        let mut repeated = fixture["sessionChatTotals"]["available"].clone();
+        repeated["platforms"] = serde_json::json!(["twitch", "twitch"]);
+        assert!(serde_json::from_value::<SessionChatTotals>(repeated).is_err());
+        let mut unknown = fixture["sessionChatTotals"]["available"].clone();
+        unknown["messages"] = serde_json::json!([]);
+        assert!(serde_json::from_value::<SessionChatTotals>(unknown).is_err());
+    }
+
+    fn support_message(
+        session_id: &str,
+        sequence: u32,
+        kind: SubscriptionKind,
+        group: Option<&str>,
+        count: u32,
+    ) -> LiveChatMessage {
+        let mut row = sample_live_chat_message(session_id, sequence);
+        row.platform = StreamPlatform::Twitch;
+        row.id = live_chat_message_id(
+            session_id,
+            row.platform,
+            row.target_id.as_deref(),
+            &row.provider_message_id,
+        );
+        row.event_type = LiveChatEventType::Membership;
+        row.details = Some(LiveChatEventDetails::Subscription {
+            subscription: kind,
+            tier: None,
+            is_prime: false,
+            months: None,
+            streak_months: None,
+            gift_count: Some(count),
+            recipient_name: None,
+            community_gift_id: group.map(str::to_string),
+        });
+        row
+    }
+
+    #[test]
+    fn session_chat_totals_survive_more_than_five_thousand_rows_and_reopen() {
+        let directory =
+            std::env::temp_dir().join(format!("videorc-chat-totals-{}", Uuid::new_v4()));
+        let path = directory.join("fixture.sqlite");
+        let database = Database::open_file_for_tests(&path);
+        database
+            .create_session(&sample_session("whole-session"))
+            .unwrap();
+        assert_eq!(
+            chat_totals_value(&database, "whole-session")["messageCount"],
+            0
+        );
+        let sub = support_message("whole-session", 1, SubscriptionKind::Sub, None, 1);
+        let mut tip = sample_live_chat_message("whole-session", 2);
+        tip.author_id = Some("early-tipper".to_string());
+        tip.event_type = LiveChatEventType::Paid;
+        tip.details = Some(LiveChatEventDetails::SuperChat {
+            amount_micros: 20_000_000,
+            currency: "USD".to_string(),
+            amount_display: "$20".to_string(),
+            tier: None,
+        });
+        let mut bits = support_message("whole-session", 3, SubscriptionKind::Sub, None, 1);
+        bits.event_type = LiveChatEventType::Paid;
+        bits.details = Some(LiveChatEventDetails::Cheer { bits: 1500 });
+        let mut rows = vec![sub, tip, bits];
+        for sequence in 4..6004 {
+            let mut row = sample_live_chat_message("whole-session", sequence);
+            row.platform = StreamPlatform::X;
+            row.id = live_chat_message_id(
+                "whole-session",
+                row.platform,
+                row.target_id.as_deref(),
+                &row.provider_message_id,
+            );
+            row.received_at = (chrono::DateTime::parse_from_rfc3339("2026-06-06T00:00:00Z")
+                .unwrap()
+                + chrono::Duration::seconds(i64::from(sequence)))
+            .to_rfc3339();
+            row.published_at = row.received_at.clone();
+            rows.push(row);
+        }
+        database.save_live_chat_messages(&rows).unwrap();
+        let totals = chat_totals_value(&database, "whole-session");
+        assert_eq!(totals["messageCount"], 6003);
+        assert_eq!(totals["chatters"], 6002);
+        assert_eq!(totals["supporters"], 1);
+        assert_eq!(totals["bits"], 1500);
+        assert_eq!(
+            totals["tips"],
+            serde_json::json!([{ "currency": "USD", "amountMicros": 20_000_000 }])
+        );
+        assert_eq!(
+            totals["platforms"],
+            serde_json::json!(["twitch", "youtube", "x"])
+        );
+        assert_eq!(
+            database
+                .list_live_chat_messages_recent("whole-session", 5000)
+                .unwrap()
+                .len(),
+            5000
+        );
+        database.save_live_chat_messages(&rows).unwrap();
+        assert_eq!(
+            chat_totals_value(&database, "whole-session"),
+            totals,
+            "persisted duplicate redelivery does not increase totals or revision"
+        );
+        drop(database);
+        let reopened = Database::open_file_for_tests(&path);
+        assert_eq!(chat_totals_value(&reopened, "whole-session"), totals);
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn session_chat_totals_correct_gifts_tips_and_chatter_references_transactionally() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("corrections"))
+            .unwrap();
+        let child = support_message(
+            "corrections",
+            1,
+            SubscriptionKind::SubGift,
+            Some("group"),
+            1,
+        );
+        let mut parent = support_message(
+            "corrections",
+            2,
+            SubscriptionKind::CommunitySubGift,
+            Some("group"),
+            5,
+        );
+        database.save_live_chat_message(&child).unwrap();
+        assert_eq!(chat_totals_value(&database, "corrections")["supporters"], 1);
+        database.save_live_chat_message(&parent).unwrap();
+        assert_eq!(chat_totals_value(&database, "corrections")["supporters"], 5);
+        parent.details = Some(LiveChatEventDetails::Subscription {
+            subscription: SubscriptionKind::CommunitySubGift,
+            tier: None,
+            is_prime: false,
+            months: None,
+            streak_months: None,
+            gift_count: Some(3),
+            recipient_name: None,
+            community_gift_id: Some("group".to_string()),
+        });
+        database.save_live_chat_message(&parent).unwrap();
+        assert_eq!(chat_totals_value(&database, "corrections")["supporters"], 3);
+        parent.is_deleted = true;
+        parent.details = None;
+        parent.fragments.clear();
+        parent.message_text = "removed".to_string();
+        database.save_live_chat_message(&parent).unwrap();
+        let late_child = support_message(
+            "corrections",
+            3,
+            SubscriptionKind::SubGift,
+            Some("group"),
+            1,
+        );
+        database.save_live_chat_message(&late_child).unwrap();
+        assert_eq!(
+            chat_totals_value(&database, "corrections")["supporters"],
+            0,
+            "known deleted parents keep suppressing late children"
+        );
+        let ledger: String = database
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT contribution_json FROM live_chat_contributions WHERE message_id = ?1",
+                params![parent.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !ledger.contains("removed")
+                && !ledger.contains("recipient")
+                && !ledger.contains("message_text")
+        );
+        let mut paid = sample_live_chat_message("corrections", 4);
+        paid.event_type = LiveChatEventType::Paid;
+        paid.details = Some(LiveChatEventDetails::SuperChat {
+            amount_micros: 20_000_000,
+            currency: "USD".to_string(),
+            amount_display: "$20".to_string(),
+            tier: None,
+        });
+        let mut ordinary = sample_live_chat_message("corrections", 5);
+        ordinary.author_id = paid.author_id.clone();
+        database
+            .save_live_chat_messages(&[paid.clone(), ordinary.clone()])
+            .unwrap();
+        assert_eq!(chat_totals_value(&database, "corrections")["chatters"], 1);
+        paid.details = Some(LiveChatEventDetails::SuperSticker {
+            amount_micros: 5_000_000,
+            currency: "EUR".to_string(),
+            amount_display: "€5".to_string(),
+            alt_text: None,
+        });
+        database.save_live_chat_message(&paid).unwrap();
+        assert_eq!(
+            chat_totals_value(&database, "corrections")["tips"],
+            serde_json::json!([{ "currency": "EUR", "amountMicros": 5_000_000 }])
+        );
+        paid.is_deleted = true;
+        paid.details = None;
+        paid.fragments.clear();
+        paid.message_text = "removed".to_string();
+        database.save_live_chat_message(&paid).unwrap();
+        assert_eq!(chat_totals_value(&database, "corrections")["chatters"], 1);
+        ordinary.is_deleted = true;
+        ordinary.details = None;
+        database.save_live_chat_message(&ordinary).unwrap();
+        assert_eq!(chat_totals_value(&database, "corrections")["chatters"], 0);
+        assert_eq!(
+            chat_totals_value(&database, "corrections")["tips"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            chat_totals_value(&database, "corrections")["messageCount"],
+            5,
+            "row counts include tombstones once"
+        );
+        let before = chat_totals_value(&database, "corrections");
+        let mut replay = paid.clone();
+        replay.is_deleted = false;
+        let outcome = database.save_live_chat_messages(&[replay]).unwrap();
+        assert_eq!(outcome, vec![paid]);
+        assert_eq!(chat_totals_value(&database, "corrections"), before);
+    }
+
+    #[test]
+    fn session_chat_totals_wire_bounds_match_typescript_utf16_units() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../protocol-fixtures/high-risk-contracts.json"
+        ))
+        .unwrap();
+        let mut wire = fixture["sessionChatTotals"]["available"].clone();
+        wire["sessionId"] = serde_json::json!("😀".repeat(2048));
+        wire["tips"] = serde_json::json!([{ "currency": "😀".repeat(32), "amountMicros": 1 }]);
+        assert!(serde_json::from_value::<SessionChatTotals>(wire.clone()).is_ok());
+        assert!(
+            serde_json::from_value::<SessionChatTotalsParams>(
+                serde_json::json!({"sessionId": "😀".repeat(2048)})
+            )
+            .is_ok()
+        );
+        wire["sessionId"] = serde_json::json!("😀".repeat(2049));
+        assert!(serde_json::from_value::<SessionChatTotals>(wire).is_err());
+        let mut currency = fixture["sessionChatTotals"]["available"].clone();
+        currency["tips"] = serde_json::json!([{ "currency": "😀".repeat(33), "amountMicros": 1 }]);
+        assert!(serde_json::from_value::<SessionChatTotals>(currency).is_err());
+    }
+
+    #[test]
+    fn session_chat_totals_do_not_group_empty_gift_ids() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("empty-group"))
+            .unwrap();
+        let parent = support_message(
+            "empty-group",
+            1,
+            SubscriptionKind::CommunitySubGift,
+            Some(""),
+            5,
+        );
+        let child = support_message("empty-group", 2, SubscriptionKind::SubGift, Some(""), 1);
+        database.save_live_chat_messages(&[parent, child]).unwrap();
+        assert_eq!(
+            chat_totals_value(&database, "empty-group")["supporters"],
+            6,
+            "empty group IDs do not suppress independently counted children"
+        );
+    }
+
+    #[test]
+    fn session_chat_totals_preserve_zero_tip_currency_until_last_active_reference_retires() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("zero-tip"))
+            .unwrap();
+        let mut zero = sample_live_chat_message("zero-tip", 1);
+        zero.event_type = LiveChatEventType::Paid;
+        zero.details = Some(LiveChatEventDetails::SuperChat {
+            amount_micros: 0,
+            currency: "USD".to_string(),
+            amount_display: "$0".to_string(),
+            tier: None,
+        });
+        database.save_live_chat_message(&zero).unwrap();
+        assert_eq!(
+            chat_totals_value(&database, "zero-tip")["tips"],
+            serde_json::json!([{ "currency":"USD", "amountMicros":0 }])
+        );
+        let before = chat_totals_value(&database, "zero-tip");
+        database.save_live_chat_message(&zero).unwrap();
+        assert_eq!(chat_totals_value(&database, "zero-tip"), before);
+        let mut positive = sample_live_chat_message("zero-tip", 2);
+        positive.event_type = LiveChatEventType::Paid;
+        positive.details = Some(LiveChatEventDetails::SuperSticker {
+            amount_micros: 5_000_000,
+            currency: "USD".to_string(),
+            amount_display: "$5".to_string(),
+            alt_text: None,
+        });
+        database.save_live_chat_message(&positive).unwrap();
+        positive.is_deleted = true;
+        positive.details = None;
+        database.save_live_chat_message(&positive).unwrap();
+        assert_eq!(
+            chat_totals_value(&database, "zero-tip")["tips"],
+            serde_json::json!([{ "currency":"USD", "amountMicros":0 }])
+        );
+        zero.details = Some(LiveChatEventDetails::SuperChat {
+            amount_micros: 0,
+            currency: "EUR".to_string(),
+            amount_display: "€0".to_string(),
+            tier: None,
+        });
+        database.save_live_chat_message(&zero).unwrap();
+        assert_eq!(
+            chat_totals_value(&database, "zero-tip")["tips"],
+            serde_json::json!([{ "currency":"EUR", "amountMicros":0 }])
+        );
+        zero.is_deleted = true;
+        zero.details = None;
+        database.save_live_chat_message(&zero).unwrap();
+        assert_eq!(
+            chat_totals_value(&database, "zero-tip")["tips"],
+            serde_json::json!([])
+        );
+        assert_eq!(chat_totals_value(&database, "zero-tip")["messageCount"], 2);
+        let references: i64 = database
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM session_chat_currencies WHERE session_id = 'zero-tip'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(references, 0);
+    }
+
+    #[test]
+    fn session_chat_totals_refuse_unsafe_sum_without_partial_rows_or_accounting() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("unsafe-sum"))
+            .unwrap();
+        let mut first = sample_live_chat_message("unsafe-sum", 1);
+        first.details = Some(LiveChatEventDetails::Cheer {
+            bits: MAX_CHAT_TOTAL,
+        });
+        database.save_live_chat_message(&first).unwrap();
+        let before = chat_totals_value(&database, "unsafe-sum");
+        let mut over = sample_live_chat_message("unsafe-sum", 3);
+        over.details = Some(LiveChatEventDetails::Cheer { bits: 1 });
+        let prefix = sample_live_chat_message("unsafe-sum", 2);
+        assert!(database.save_live_chat_messages(&[prefix, over]).is_err());
+        assert_eq!(chat_totals_value(&database, "unsafe-sum"), before);
+        assert_eq!(
+            database.list_live_chat_messages("unsafe-sum").unwrap(),
+            vec![first]
+        );
+    }
+
+    #[test]
+    fn session_chat_totals_fail_closed_for_every_conflicting_identity_and_batch_prefix() {
+        let database = test_database();
+        database.create_session(&sample_session("owner")).unwrap();
+        database.create_session(&sample_session("other")).unwrap();
+        let original = sample_live_chat_message("owner", 1);
+        database.save_live_chat_message(&original).unwrap();
+        let before = chat_totals_value(&database, "owner");
+        for field in ["session", "platform", "target", "provider"] {
+            let mut conflict = original.clone();
+            match field {
+                "session" => conflict.session_id = "other".to_string(),
+                "platform" => conflict.platform = StreamPlatform::Twitch,
+                "target" => conflict.target_id = None,
+                _ => conflict.provider_message_id = "different".to_string(),
+            }
+            let fresh = sample_live_chat_message("other", 2);
+            assert!(
+                database
+                    .save_live_chat_messages(&[fresh, conflict])
+                    .is_err()
+            );
+            assert_eq!(
+                database.list_live_chat_messages("owner").unwrap(),
+                vec![original.clone()]
+            );
+            assert!(
+                database
+                    .list_live_chat_messages("other")
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(chat_totals_value(&database, "owner"), before);
+            assert_eq!(
+                chat_totals_value(&database, "other"),
+                serde_json::to_value(SessionChatTotals::empty("other")).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn session_chat_totals_leave_pre_ledger_history_unavailable_without_backfill() {
+        let database = test_database();
+        database.create_session(&sample_session("legacy")).unwrap();
+        database
+            .save_live_chat_message(&sample_live_chat_message("legacy", 1))
+            .unwrap();
+        database.lock().unwrap().execute_batch("DROP TABLE live_chat_contributions; DROP TABLE session_chat_authors; DROP TABLE session_chat_currencies; DROP TABLE session_chat_gifts; DROP TABLE session_chat_totals;").unwrap();
+        database.migrate().unwrap();
+        assert_eq!(
+            database.session_chat_totals("legacy").unwrap(),
+            Some(SessionChatTotals::LegacyUnavailable {
+                session_id: "legacy".to_string()
+            })
+        );
+        database.ensure_fake_live_chat_session("legacy").unwrap();
+        database
+            .save_live_chat_message(&sample_live_chat_message("legacy", 2))
+            .unwrap();
+        assert_eq!(
+            chat_totals_value(&database, "legacy")["status"],
+            "legacy-unavailable"
+        );
+        assert_eq!(database.list_live_chat_messages("legacy").unwrap().len(), 2);
+        database
+            .ensure_fake_live_chat_session("fresh-fake")
+            .unwrap();
+        assert_eq!(
+            chat_totals_value(&database, "fresh-fake"),
+            serde_json::to_value(SessionChatTotals::empty("fresh-fake")).unwrap()
+        );
     }
 
     #[test]

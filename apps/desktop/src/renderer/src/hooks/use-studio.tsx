@@ -6560,6 +6560,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           sessionId: message.sessionId
         })
       }),
+      nextClient.on('liveChat.totals', (payload) => feedDashboard('liveChat.totals', payload)),
       nextClient.on('liveChat.providerStatus', (payload) => {
         bootstrapGuard.mark('liveChat')
         const provider = payload as LiveChatProviderState
@@ -6627,6 +6628,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('events.lagged', (payload) => {
         const lagged = payload as EventsLaggedPayload
         if (lagged.skipped < 1) return
+        feedDashboard('events.lagged', payload)
         void recoverLiveChatSnapshot().catch((error: unknown) => {
           if (!disposed) reportError(error)
         })

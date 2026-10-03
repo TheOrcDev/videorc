@@ -19,6 +19,7 @@ import {
   COMMENTS_SEND_TIMING_CONTRACT
 } from '../apps/desktop/src/shared/comments-command-timing.ts'
 import { probeCommentsArrivals } from './lib/comments-arrival-probe.mjs'
+import { probeCommentsTotals } from './lib/comments-totals-probe.mjs'
 import { launchDevApp, stopProcess } from './lib/app-launcher.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
@@ -616,6 +617,14 @@ async function main() {
     waitFor,
     assert: assertProbe,
     sessionId: NEXT_LIVE_SESSION_ID
+  })
+
+  await probeCommentsTotals({
+    command: smokeCommand,
+    waitFor,
+    assert: assertProbe,
+    layoutAt,
+    sessionId: `${NEXT_LIVE_SESSION_ID}-totals`
   })
 
   console.log('\n=== Chat window probe summary ===')

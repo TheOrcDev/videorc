@@ -10,6 +10,7 @@ import type {
   LiveChatSnapshot
 } from '@/lib/backend'
 import { EMPTY_COHOST_STATE } from '@/lib/cohost-view'
+import { emptyLiveDashboardState } from '../../../../shared/live-dashboard'
 
 const message = (overrides: Partial<LiveChatMessage>): LiveChatMessage => ({
   id: 's1:twitch:t:m-chat',
@@ -129,4 +130,49 @@ describe('StreamManager highlight slot (plan 095, S2)', () => {
     expect(markup).not.toContain('data-highlight-phase="live"')
     expect(markup).not.toMatch(/data-variant="success"[^>]*>On stream</)
   })
+})
+
+it('uses confirmed whole-session stats only for the visible session owner', () => {
+  const totals = {
+    status: 'available' as const,
+    sessionId: 's1',
+    revision: 6003,
+    messageCount: 6003,
+    chatters: 6002,
+    platforms: ['twitch' as const, 'youtube' as const],
+    supporters: 7,
+    follows: 0,
+    bits: 0,
+    tips: [{ currency: 'USD', amountMicros: 20_000_000 }],
+    raids: 0
+  }
+  const dashboard = { ...emptyLiveDashboardState('now'), sessionId: 's1', chatTotals: totals }
+  const renderStats = (owner: string, history = false) =>
+    renderToStaticMarkup(
+      createElement(StreamManager, {
+        snapshot: {
+          ...snapshot,
+          sessionId: owner,
+          messages: [{ ...chat, platform: 'x', sessionId: owner }]
+        },
+        dashboard,
+        ...(history
+          ? {
+              viewMode: {
+                kind: 'history' as const,
+                sessionId: owner,
+                title: 'Finished',
+                startedAt: 'now'
+              },
+              history: { viewers: [], audience: null, chatTotals: totals }
+            }
+          : {})
+      })
+    )
+  const current = renderStats('s1')
+  expect(current).toContain('aria-label="7 new supporters this stream"')
+  expect(current).toContain('aria-label="Tips this stream: $20"')
+  expect(renderStats('s1', true)).toContain('aria-label="6,003 messages, 6,002 chatters"')
+  expect(renderStats('s2')).not.toContain('7 new supporters this stream')
+  expect(renderStats('s2', true)).not.toContain('6,003 messages, 6,002 chatters')
 })
