@@ -137,7 +137,7 @@ type _RegistryIconProps = _AssertIconProps<
  * Navigation — one slot per sidebar destination. These are the icons the
  * 2026-08-25 semantic audit reviews first: several are placeholders inherited
  * from the pre-audit set (see the audit table in the Nucleo plan). The Orcle
- * tab's slot is `OrcleIcon`, drawn below.
+ * tab's slot is `OrcleIcon`, the Orcle eye, drawn below.
  */
 export {
   VideoCamera as StudioIcon,
@@ -247,7 +247,7 @@ export {
 } from '@phosphor-icons/react'
 /**
  * AI, tooling and appearance. Orcle (code name `cohost`) has its own mark,
- * `OrcleIcon`, drawn below.
+ * the eye: `OrcleIcon` below at icon size, `OrcleEmblem` in full colour.
  */
 export {
   Brain as BrainIcon,
@@ -299,22 +299,42 @@ export const KickIcon: AppIcon = ({ size, weight: _weight, children, ...props })
   </svg>
 )
 
-// The head both Orcle weights share: a broad cranium, ears pointing out and
-// up, and a jaw wider than the brow.
-const ORCLE_HEAD =
-  'M64 84C64 40 96 24 128 24s64 16 64 60l54-22-48 64 12 58c0 30-22 56-52 56H98c-30 0-52-26-52-56l12-58-48-64Z'
+// The Orcle eye (plan 149), drawn from the emblem in
+// `assets/brand/orcle/`: a wide almond with the emblem's horn spiking up
+// from its top-left corner.
+const ORCLE_EYE = 'M14 134L42 104Q30 76 18 44Q44 60 72 72Q112 58 154 64L242 136Q150 238 14 134Z'
+
+// The outline's features, stroked: the scowling brow that runs on from the
+// horn's base, the iris below it, and one plate seam for the cyber half.
+const ORCLE_EYE_FEATURES = 'M42 104L166 122M108 114A32 32 0 1 0 151 120M180 88L196 160'
+
+const ORCLE_PUPIL = 'M114 140a12 12 0 1 0 24 0a12 12 0 1 0-24 0Z'
+
+// The solid eye: the outline's outer edge, with the iris knocked out under
+// the brow (its flat top is the scowl), a brow slit back to the horn and a
+// solid pupil. The seam is dropped: at 16 px it would float as a slot.
+const ORCLE_EYE_SOLID =
+  'M9 140L6 136L7 131L33 102L11 47L10 41L14 37L17 36L22 37L48 52L72 63L95 58L120 54L146 55L155 56L159 58L249 132L250 137L248 141L229 159L210 174L190 185L168 191L146 194L123 193L100 189L76 180L60 173L43 164L18 147Z' +
+  'M56 102L159 117A40 40 0 1 1 94 116L55 110Z' +
+  'M112 140a14 14 0 1 0 28 0a14 14 0 1 0-28 0Z'
 
 /**
- * Orcle's mark (plan 119): the app logo's orc head, simplified to read at
- * 16 px. Pointed ears, slanted eyes under a heavy brow, and two lower tusks.
- * Hand-drawn like `KickIcon` on Phosphor's 256 grid in currentColor, so it
- * sizes and tints like the set. One mark everywhere Orcle appears: the
- * sidebar, the Stream Manager and the Studio session row.
+ * Orcle's glyph (plan 149): the Orcle eye, simplified to read at 16 px. A
+ * wide almond with the horn spike, a brow that scowls across the iris, a
+ * pupil, and one plate seam. Hand-drawn like `KickIcon` on Phosphor's 256
+ * grid in currentColor, so it sizes and tints like the set. One glyph
+ * everywhere Orcle appears at icon size: the sidebar, the Stream Manager,
+ * the Studio session row, popovers and menus.
+ *
+ * It is the small tier of Orcle's mark. The full-colour emblem
+ * (`OrcleEmblem`) turns to mush below 24 px, so it never shrinks to this
+ * slot; and the glyph never carries the emblem's red iris, because red means
+ * record, live and destructive here.
  *
  * Unlike `KickIcon` it honours `weight` the way its Phosphor neighbours do,
  * so the sidebar's regular-to-fill swap still reads: an outline at Phosphor's
- * 16-unit stroke (thin, light, regular), the outline over a 20% head
- * (duotone), and a solid head with knocked-out features (fill, bold).
+ * 16-unit stroke (thin, light, regular), the outline over a 20% eye
+ * (duotone), and a solid eye with the iris knocked out (fill, bold).
  */
 export const OrcleIcon: AppIcon = ({ size, weight, children, ...props }) => (
   <svg
@@ -326,14 +346,21 @@ export const OrcleIcon: AppIcon = ({ size, weight, children, ...props }) => (
     {...props}
   >
     {children}
-    {weight === 'duotone' ? <path d={ORCLE_HEAD} opacity="0.2" /> : null}
-    <path
-      fillRule="evenodd"
-      d={
-        weight === 'fill' || weight === 'bold'
-          ? `${ORCLE_HEAD}M70 102l50 14-6 18q-24 2-40-12Zm116 0-50 14 6 18q24 2 40-12ZM80 204l8-46 16 24h48l16-24 8 46Z`
-          : `${ORCLE_HEAD}m16 4-6 40-12 56c0 22 16 40 36 40h60c20 0 36-18 36-40l-12-56-6-40c0-32-20-48-48-48s-48 16-48 48Zm-2 14 42 13-6 17q-22 2-33-11Zm100 0-42 13 6 17q22 2 33-11ZM84 206l7-46 15 26h44l15-26 7 46Z`
-      }
-    />
+    {weight === 'fill' || weight === 'bold' ? (
+      <path fillRule="evenodd" d={ORCLE_EYE_SOLID} />
+    ) : (
+      <>
+        {weight === 'duotone' ? <path d={ORCLE_EYE} opacity="0.2" /> : null}
+        <path
+          d={`${ORCLE_EYE}${ORCLE_EYE_FEATURES}`}
+          fill="none"
+          stroke="currentColor"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeWidth="16"
+        />
+        <path d={ORCLE_PUPIL} />
+      </>
+    )}
   </svg>
 )
