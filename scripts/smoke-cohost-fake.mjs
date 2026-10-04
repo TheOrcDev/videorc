@@ -6,6 +6,7 @@ import { join } from 'node:path'
 
 import { devAppSpawnOptions, repoRoot, stopProcess } from './lib/app-launcher.mjs'
 import { captionStimulusPngBase64 } from './lib/comment-highlight-artifact.mjs'
+import { startCaptionAudioPump, streamSessionParams } from './lib/cohost-caption-audio.mjs'
 import { startFakeApiRouter } from './lib/fake-api-router.mjs'
 import { startFakeCaptionService } from './lib/fake-caption-service.mjs'
 import {
@@ -93,7 +94,6 @@ const AUTO_HIGHLIGHT_COOLDOWN_MS = 45_000
 const COOLDOWN_TOLERANCE_MS = 1_500
 const PICK_AFTER_COOLDOWN_DEADLINE_MS = 8_000
 const BREAKER_PROOF_MS = 6_000
-const CAPTION_AUDIO_PUMP_MS = 1_000
 // Kick: no scenario before this one chatted there, so every author here is a
 // first-time chatter (plan 068 S6, "Say hi").
 const SPOTLIGHT_LANE = {
@@ -943,7 +943,7 @@ async function runConsentScenario({ ready, startedAt }) {
     // listen-only deliberately stays chunked when captions later present.
     await request(backend, timeoutMs, 'captions.start', { language: 'en' })
     await flip(true)
-    pump = startCaptionAudioPump(admin)
+    pump = startCaptionAudioPump({ ws: admin, request, captionFake })
     await waitForEvent(
       events,
       'cohost.state',
@@ -1161,7 +1161,7 @@ async function runSpotlightScenario({ ready, startedAt }) {
       admin,
       timeoutMs,
       'session.start',
-      streamSessionParams(outputCapability.capabilityId)
+      streamSessionParams(outputCapability.capabilityId, RTMP_PORT)
     )
     expect(
       started.state === 'streaming' && typeof started.sessionId === 'string',
@@ -1287,7 +1287,7 @@ async function runSpotlightScenario({ ready, startedAt }) {
     phase('captions: fake realtime transcription, injected audio')
     const configurationsBefore = captionFake.state.configurations.length
     await request(backend, timeoutMs, 'captions.start', { language: 'en' })
-    pump = startCaptionAudioPump(admin)
+    pump = startCaptionAudioPump({ ws: admin, request, captionFake, streamSessionId })
     await waitUntil(
       () =>
         captionFake.state.configurations.length > configurationsBefore &&
@@ -1777,64 +1777,6 @@ function assertSpotlightRequestShape(body, { streamSessionId, flaggedId }) {
   )
 }
 
-function streamSessionParams(outputDirectoryCapability) {
-  const timestamp = '2026-01-01T00:00:00.000Z'
-  const serverUrl = `rtmp://127.0.0.1:${RTMP_PORT}/live`
-  const target = {
-    id: 'cohost-smoke-rtmp',
-    platform: 'custom',
-    label: 'Local co-host smoke',
-    enabled: true,
-    serverUrl,
-    urlMode: 'server-and-key',
-    streamKey: 'cohost-smoke',
-    streamKeyPresent: true,
-    authMode: 'manual-rtmp',
-    outputPreset: 'stream-safe-1080p30',
-    outputBitrateKbps: 6000,
-    createdAt: timestamp,
-    updatedAt: timestamp
-  }
-  return {
-    sources: { testPattern: true },
-    layout: {
-      layoutPreset: 'screen-only',
-      cameraTransformMode: 'preset',
-      cameraTransform: null,
-      cameraCorner: 'bottom-right',
-      cameraSize: 'medium',
-      cameraShape: 'rectangle',
-      cameraCornerRadiusPct: 12,
-      cameraAspect: 'source',
-      cameraMargin: 32,
-      cameraFit: 'fill',
-      cameraMirror: false,
-      cameraZoom: 100,
-      cameraOffsetX: 0,
-      cameraOffsetY: 0,
-      sideBySideSplit: '70-30',
-      sideBySideCameraSide: 'right'
-    },
-    output: {
-      recordEnabled: false,
-      streamEnabled: true,
-      outputDirectoryCapability,
-      video: { preset: 'custom', width: 640, height: 360, fps: 30, bitrateKbps: 2000 },
-      rtmp: { preset: 'custom', serverUrl, streamKey: target.streamKey }
-    },
-    streaming: {
-      enabled: true,
-      mode: 'single',
-      targets: [target],
-      selectedTargetId: target.id,
-      defaultOutputPreset: target.outputPreset,
-      defaultBitrateKbps: target.outputBitrateKbps,
-      enabledTargetIds: [target.id]
-    },
-    audio: { microphoneGainDb: 0, microphoneMuted: true, microphoneSyncOffsetMs: 0 }
-  }
-}
-
 // Plays the renderer's executor (use-studio.tsx): every new autoHighlight
 // generation becomes ONE comments.highlight.set (always-set: never a clear,
 // never a toggle), and the engine alone decides what and when.
@@ -1876,29 +1818,6 @@ function startAutoHighlightExecutor(ws, sessionId) {
     stop() {
       stopped = true
       ws.removeEventListener('message', onMessage)
-    }
-  }
-}
-
-// Captions stall after 8 s without audio; the debug seam keeps the bus fed.
-function startCaptionAudioPump(ws) {
-  // Both scripted-speech scenarios need provider progress between exact finals:
-  // the healthy energy-positive bus otherwise trips the transcript watchdog.
-  const previousPartialProgress = captionFake.state.realtimePartialProgress
-  captionFake.state.realtimePartialProgress = true
-  let stopped = false
-  const tick = () => {
-    if (stopped) return
-    request(ws, 5_000, 'captions.test.inject-audio', { durationMs: 200 }).catch(() => {})
-  }
-  tick()
-  const timer = setInterval(tick, CAPTION_AUDIO_PUMP_MS)
-  return {
-    stop() {
-      if (stopped) return
-      stopped = true
-      captionFake.state.realtimePartialProgress = previousPartialProgress
-      clearInterval(timer)
     }
   }
 }

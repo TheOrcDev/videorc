@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { assertFakeActivityTotals, probeCommentsTotals } from './comments-totals-probe.mjs'
+import {
+  assertFakeActivityTotals,
+  probeCommentsTotals,
+  waitForFakeActivityReceipts
+} from './comments-totals-probe.mjs'
 
 // ServerResponse::ok converts the actual persisted totals to serde_json::Value
 // before websocket serialization. Its object keys arrive in this order; the
@@ -153,3 +157,249 @@ for (const phase of ['live', 'reopen', 'history'])
     await assert.rejects(probeCommentsTotals(fixture), /accounting observation failed/)
     assert.equal(fixture.checks.at(-1).ok, false)
   })
+
+const activityKinds = [
+  'subscription',
+  'cheer',
+  'raid',
+  'follow',
+  'super-chat',
+  'super-sticker',
+  'membership',
+  'kicks'
+]
+
+function activityReceipts(sessionId = 'owned-activity') {
+  const destinations = {
+    twitch: 'smoke-twitch-events',
+    youtube: 'smoke-youtube-events',
+    kick: 'smoke-kick-events'
+  }
+  return [
+    ['twitch', 'fake-0'],
+    ['youtube', 'fake-0'],
+    ['kick', 'fake-0'],
+    ['twitch', 'fake-event-resub', 'subscription'],
+    ['twitch', 'fake-event-community-sub-gift', 'subscription'],
+    ['twitch', 'fake-event-cheer', 'cheer'],
+    ['twitch', 'fake-event-raid', 'raid'],
+    ['kick', 'fake-event-channel.followed', 'follow'],
+    ['kick', 'fake-event-kicks.gifted', 'kicks'],
+    ['youtube', 'fake-event-super-chat', 'super-chat'],
+    ['youtube', 'fake-event-super-sticker', 'super-sticker'],
+    ['youtube', 'fake-event-membership', 'membership'],
+    ['twitch', 'fake-event-follow', 'follow']
+  ].map(([platform, providerMessageId, kind]) => ({
+    id: `${sessionId}:${platform}:${destinations[platform]}:${providerMessageId}`,
+    sessionId,
+    platform,
+    providerMessageId,
+    details: kind ? { kind } : undefined
+  }))
+}
+
+function controlledActivityDelivery(initial, final = []) {
+  const eventMessages = []
+  const delivered = Promise.withResolvers()
+  const releaseFinal = Promise.withResolvers()
+  const readiness = Promise.withResolvers()
+  let pending = true
+  let check
+  let admissions = 0
+  let waitArguments
+  const owner = waitForFakeActivityReceipts({
+    eventMessages,
+    eventsSessionId: 'owned-activity',
+    expectedKinds: activityKinds,
+    timeoutMs: 90_000,
+    waitFor: (predicate, timeoutMs, label) => {
+      waitArguments = { timeoutMs, label }
+      check = () => {
+        if (pending && predicate()) {
+          pending = false
+          readiness.resolve()
+        }
+      }
+      check()
+      return readiness.promise
+    }
+  }).then(
+    (rows) => {
+      admissions += 1
+      return { rows }
+    },
+    (error) => ({ error })
+  )
+  const producer = (async () => {
+    eventMessages.push(...initial)
+    check()
+    delivered.resolve()
+    await releaseFinal.promise
+    eventMessages.push(...final)
+    check()
+  })()
+  return {
+    async observe() {
+      await delivered.promise
+      // If the actual readiness owner admitted this batch, await that outcome
+      // before observing the next (totals) phase; pending owners stay held.
+      if (!pending) await owner
+      return { pending, admissions }
+    },
+    expire(error) {
+      if (pending) {
+        pending = false
+        readiness.reject(error)
+      }
+    },
+    async finish() {
+      releaseFinal.resolve()
+      await producer
+      if (pending) {
+        pending = false
+        readiness.reject(new Error('Owned delivery fixture disposed.'))
+      }
+      const outcome = await owner
+      return { ...outcome, admissions, waitArguments, producerJoined: true, ownerJoined: true }
+    }
+  }
+}
+
+for (const substitute of [
+  'held',
+  'foreign-session',
+  'duplicate-id',
+  'missing-id',
+  'empty-id',
+  'non-string-id'
+]) {
+  test(`fake activity receipts keep totals pending with the last follow ${substitute}`, async () => {
+    const rows = activityReceipts()
+    const initial = rows.slice(0, 12)
+    if (substitute === 'foreign-session') initial.push(activityReceipts('foreign-activity').at(-1))
+    if (substitute === 'duplicate-id') initial.push({ ...initial[0] })
+    if (substitute === 'missing-id') initial.push({ ...initial[0], id: undefined })
+    if (substitute === 'empty-id') initial.push({ ...initial[0], id: '' })
+    if (substitute === 'non-string-id') initial.push({ ...initial[0], id: 13 })
+    const fixture = controlledActivityDelivery(initial, [rows.at(-1)])
+    let observed
+    let finished
+    try {
+      observed = await fixture.observe()
+    } finally {
+      finished = await fixture.finish()
+    }
+    assert.equal(finished.producerJoined && finished.ownerJoined, true)
+    assert.deepEqual(observed, { pending: true, admissions: 0 })
+    assert.equal(finished.error, undefined)
+    assert.equal(
+      new Set(
+        finished.rows.map((row) => row.id).filter((id) => typeof id === 'string' && id.length > 0)
+      ).size,
+      13
+    )
+    assert.ok(finished.rows.every((row) => row.sessionId === 'owned-activity'))
+    assert.equal(finished.admissions, 1)
+  })
+}
+
+test('complete owned activity receipts admit totals with the original wait budget and label', async () => {
+  const rows = activityReceipts()
+  const fixture = controlledActivityDelivery([...activityReceipts('foreign-activity'), ...rows])
+  let observed
+  let finished
+  try {
+    observed = await fixture.observe()
+  } finally {
+    finished = await fixture.finish()
+  }
+  assert.equal(finished.producerJoined && finished.ownerJoined, true)
+  assert.deepEqual(observed, { pending: false, admissions: 1 })
+  assert.deepEqual(finished.rows, rows)
+  assert.deepEqual(finished.waitArguments, {
+    timeoutMs: 90_000,
+    label: `every activity kind (${activityKinds.join(', ')})`
+  })
+  assert.doesNotThrow(() => assertFakeActivityTotals(fakeActivityWireTotals()))
+})
+
+test('incomplete activity deadline preserves the original rejection object without totals admission', async () => {
+  const fixture = controlledActivityDelivery(
+    activityReceipts().filter((row) => row.details?.kind !== 'raid')
+  )
+  const deadlineError = new Error('Original activity wait deadline.')
+  let observed
+  let finished
+  try {
+    observed = await fixture.observe()
+    fixture.expire(deadlineError)
+  } finally {
+    finished = await fixture.finish()
+  }
+  assert.equal(finished.producerJoined && finished.ownerJoined, true)
+  assert.deepEqual(observed, { pending: true, admissions: 0 })
+  assert.equal(finished.error, deadlineError)
+  assert.equal(finished.admissions, 0)
+  assert.equal(finished.waitArguments.timeoutMs, 90_000)
+})
+
+test('thirteen distinct owned receipts still require every original activity kind', async () => {
+  const rows = activityReceipts().map((row) =>
+    row.details?.kind === 'raid' ? { ...row, details: undefined } : row
+  )
+  const fixture = controlledActivityDelivery(rows)
+  const deadlineError = new Error('Original missing-kind wait deadline.')
+  let observed
+  let finished
+  try {
+    observed = await fixture.observe()
+    fixture.expire(deadlineError)
+  } finally {
+    finished = await fixture.finish()
+  }
+  assert.equal(finished.producerJoined && finished.ownerJoined, true)
+  assert.equal(new Set(rows.map((row) => row.id)).size, 13)
+  assert.deepEqual(observed, { pending: true, admissions: 0 })
+  assert.equal(finished.error, deadlineError)
+  assert.equal(finished.admissions, 0)
+  assert.equal(finished.waitArguments.timeoutMs, 90_000)
+})
+
+test('complete activity receipts still reject incorrect settled accounting', async () => {
+  const fixture = controlledActivityDelivery(activityReceipts())
+  let finished
+  try {
+    await fixture.observe()
+  } finally {
+    finished = await fixture.finish()
+  }
+  assert.equal(finished.producerJoined && finished.ownerJoined, true)
+  assert.equal(finished.error, undefined)
+  assert.equal(finished.rows.length, 13)
+  const incorrect = fakeActivityWireTotals()
+  incorrect.messageCount = 12
+  assert.throws(() => assertFakeActivityTotals(incorrect), /accounting disagreed/)
+})
+
+test('additional owned receipts remain available to the strict over-count assertion', async () => {
+  const rows = activityReceipts()
+  rows.push({
+    ...rows[0],
+    id: 'owned-activity:twitch:smoke-twitch-events:fake-extra',
+    providerMessageId: 'fake-extra'
+  })
+  const fixture = controlledActivityDelivery(rows)
+  let observed
+  let finished
+  try {
+    observed = await fixture.observe()
+  } finally {
+    finished = await fixture.finish()
+  }
+  assert.equal(finished.producerJoined && finished.ownerJoined, true)
+  assert.deepEqual(observed, { pending: false, admissions: 1 })
+  assert.deepEqual(finished.rows, rows)
+  const incorrect = fakeActivityWireTotals()
+  incorrect.messageCount = 14
+  assert.throws(() => assertFakeActivityTotals(incorrect), /accounting disagreed/)
+})

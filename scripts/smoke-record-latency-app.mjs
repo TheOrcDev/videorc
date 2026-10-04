@@ -32,6 +32,13 @@ import { parseArgs } from 'node:util'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import {
+  BackendEventRecorder,
+  disposeRecordLatencyRun,
+  startRecordLatencyCycle,
+  stopRecordLatencyCycle,
+  waitForPublishedMp4
+} from './lib/record-latency-events.mjs'
+import {
   RECORD_LATENCY_BUDGETS,
   evaluateRecordLatencyBudget,
   formatMs,
@@ -46,9 +53,7 @@ import { evaluateRecordingWallDuration } from './lib/recording-duration-gate.mjs
 import {
   connectRemote,
   enableRemoteControl,
-  remoteRequest,
-  waitForRemoteDescribe,
-  waitForRemoteEvent
+  waitForRemoteDescribe
 } from './lib/remote-control-client.mjs'
 import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
@@ -151,80 +156,6 @@ function log(message) {
 }
 
 /**
- * Buffers backend events with a monotonic receive time so a waiter registered
- * before an intent is sent can never miss the transition it waits for.
- */
-class BackendEventRecorder {
-  constructor(ws) {
-    this.events = []
-    this.waiters = new Set()
-    this.latestDiagnostics = null
-    ws.addEventListener('message', (event) => {
-      let message
-      try {
-        message = JSON.parse(event.data)
-      } catch {
-        return
-      }
-      if (!message?.event) return
-      const record = { event: message.event, payload: message.payload, at: performance.now() }
-      if (message.event === 'diagnostics.stats') {
-        this.latestDiagnostics = record
-        return
-      }
-      this.events.push(record)
-      if (debug && message.event === 'recording.status') {
-        console.log(
-          `[event] ${message.event} ${message.payload?.state ?? ''} ${message.payload?.sessionId ?? ''}`
-        )
-      }
-      for (const waiter of this.waiters) {
-        if (waiter.predicate(record)) {
-          this.waiters.delete(waiter)
-          waiter.resolve(record)
-        }
-      }
-    })
-  }
-
-  waitFor(label, predicate, waitTimeoutMs = timeoutMs) {
-    return new Promise((resolveWait, rejectWait) => {
-      const waiter = { predicate, resolve: null }
-      const timer = setTimeout(() => {
-        this.waiters.delete(waiter)
-        rejectWait(new Error(`timed out waiting for ${label}`))
-      }, waitTimeoutMs)
-      waiter.resolve = (record) => {
-        clearTimeout(timer)
-        resolveWait(record)
-      }
-      this.waiters.add(waiter)
-    })
-  }
-}
-
-function statusEvent(state, sessionId) {
-  return (record) =>
-    record.event === 'recording.status' &&
-    record.payload?.state === state &&
-    (sessionId === undefined || record.payload?.sessionId === sessionId)
-}
-
-function terminalStatusEvent(sessionId) {
-  return (record) =>
-    record.event === 'recording.status' &&
-    (record.payload?.state === 'idle' || record.payload?.state === 'failed') &&
-    record.payload?.sessionId === sessionId
-}
-
-function finalizationEvent(sessionId) {
-  return (record) =>
-    record.event === 'recording.finalization' &&
-    record.payload?.sessionId === sessionId &&
-    (record.payload?.state === 'finalized' || record.payload?.state === 'failed')
-}
-
-/**
  * The renderer keeps its capture config in localStorage (lib/capture.ts
  * STORAGE_KEYS.captureConfig) and merges it over the defaults on load. Seed the
  * requested video profile and reload so the Record path uses it.
@@ -293,41 +224,6 @@ async function waitForBackendState(ws, method, predicate, label) {
   fail(`timed out waiting for ${label}; last ${method}: ${JSON.stringify(last)}`)
 }
 
-async function waitForPublishedMp4({ ws, recorder, sessionId, idleRecord }) {
-  const idlePath = idleRecord.payload?.outputPath
-  if (typeof idlePath === 'string' && idlePath.toLowerCase().endsWith('.mp4')) {
-    return { mp4Path: idlePath, finalizedAt: idleRecord.at, source: 'stop-reply' }
-  }
-  const eventPromise = recorder
-    .waitFor(
-      `recording.finalization for ${sessionId}`,
-      finalizationEvent(sessionId),
-      finalizationTimeoutMs
-    )
-    .catch(() => null)
-  const deadline = performance.now() + finalizationTimeoutMs
-  for (;;) {
-    const raced = await Promise.race([eventPromise, sleep(250).then(() => 'poll')])
-    if (raced && raced !== 'poll') {
-      if (raced.payload.state === 'failed') {
-        fail(`finalization failed for ${sessionId}: ${raced.payload.error ?? 'unknown error'}`)
-      }
-      return { mp4Path: raced.payload.mp4Path, finalizedAt: raced.at, source: 'event' }
-    }
-    const page = await request(ws, timeoutMs, 'sessions.list', { limit: 20 })
-    const item = page?.items?.find((entry) => entry.id === sessionId)
-    if (item?.mp4Path) {
-      return { mp4Path: item.mp4Path, finalizedAt: performance.now(), source: 'sessions.list' }
-    }
-    if (item?.finalizationState === 'failed') {
-      fail(`finalization failed for ${sessionId}: ${item.finalizationError ?? 'unknown error'}`)
-    }
-    if (performance.now() > deadline) {
-      fail(`MP4 for ${sessionId} was not published within ${finalizationTimeoutMs}ms`)
-    }
-  }
-}
-
 async function verifyArtifact({ mp4Path, cycleIndex }) {
   if (!mp4Path || !existsSync(mp4Path)) fail(`artifact missing for cycle ${cycleIndex}: ${mp4Path}`)
   const [startupReport, qualityReport] = await Promise.all([
@@ -385,114 +281,40 @@ function timelineSnapshotFor(recorder, key, sessionId) {
 
 async function runCycle({ cycleIndex, renderer, remote, recorder, smoke }) {
   const cold = cycleIndex === 0
-  const startingPromise = recorder
-    .waitFor('recording.status(starting)', statusEvent('starting'), timeoutMs)
-    .catch(() => null)
-  const recordingPromise = recorder.waitFor(
-    'recording.status(recording)',
-    (record) =>
-      record.event === 'recording.status' &&
-      (record.payload?.state === 'recording' || record.payload?.state === 'streaming') &&
-      typeof record.payload?.sessionId === 'string',
-    timeoutMs
-  )
-  const startFailurePromise = recorder
-    .waitFor(
-      'recording.status(failed)',
-      (record) => record.event === 'recording.status' && record.payload?.state === 'failed',
-      timeoutMs
-    )
-    .catch(() => null)
-  const startAckPromise = waitForRemoteEvent(remote, 'remote.ack', () => true, { timeoutMs }).then(
-    (payload) => ({ payload, at: performance.now() })
-  )
-
-  const clickAt = performance.now()
-  const ticket = await remoteRequest(
-    remote,
-    'remote.intent',
-    { kind: 'recordStart' },
-    { timeoutMs }
-  )
-  if (!ticket.payload?.accepted)
-    fail(`recordStart intent was not accepted: ${JSON.stringify(ticket)}`)
-
-  const recordingRecord = await Promise.race([
-    recordingPromise,
-    startFailurePromise.then((record) => {
-      if (record) fail(`start failed: ${record.payload?.message ?? 'no message'}`)
-      return new Promise(() => {})
-    }),
-    // A refused start acks ok=false without ever publishing `recording`.
-    startAckPromise.then(async (ack) => {
-      if (ack.payload?.ok === false) {
-        const detail = await describeRendererFailure(smoke)
-        fail(
-          `recordStart was refused by the renderer: ${ack.payload?.message ?? 'no message'}.${detail}`
-        )
-      }
-      return new Promise(() => {})
+  const { clickAt, sessionId, startAck, startingRecord, recordingRecord } =
+    await startRecordLatencyCycle({
+      remote,
+      recorder,
+      smoke,
+      timeoutMs,
+      describeRendererFailure,
+      fail,
+      sleep
     })
-  ])
-  const sessionId = recordingRecord.payload.sessionId
-  const startAck = await startAckPromise
-  if (startAck.payload?.intentId !== ticket.payload.intentId || startAck.payload?.ok !== true) {
-    fail(`recordStart was not acknowledged successfully: ${JSON.stringify(startAck.payload)}`)
-  }
-  const startingRecord = await Promise.race([startingPromise, sleep(0).then(() => null)])
   const startTimeline = timelineSnapshotFor(recorder, 'recordingStartTimeline', sessionId)
 
   await sleep(recordingMs)
 
-  const stoppingPromise = recorder
-    .waitFor('recording.status(stopping)', statusEvent('stopping', sessionId), timeoutMs)
-    .catch(() => null)
-  const terminalPromise = recorder.waitFor(
-    `terminal recording.status for ${sessionId}`,
-    terminalStatusEvent(sessionId),
-    timeoutMs
-  )
-  const stopAckPromise = waitForRemoteEvent(remote, 'remote.ack', () => true, { timeoutMs }).then(
-    (payload) => ({ payload, at: performance.now() })
-  )
-  const stopClickAt = performance.now()
-  const stopTicket = await remoteRequest(
+  const { stopClickAt, terminalRecord, stopAck, stoppingRecord } = await stopRecordLatencyCycle({
     remote,
-    'remote.intent',
-    { kind: 'recordStop' },
-    { timeoutMs }
-  )
-  if (!stopTicket.payload?.accepted) {
-    fail(`recordStop intent was not accepted: ${JSON.stringify(stopTicket)}`)
-  }
-  const terminalRecord = await Promise.race([
-    terminalPromise,
-    stopAckPromise.then(async (ack) => {
-      if (ack.payload?.ok === false) {
-        const detail = await describeRendererFailure(smoke)
-        fail(
-          `recordStop was refused by the renderer: ${ack.payload?.message ?? 'no message'}.${detail}`
-        )
-      }
-      return new Promise(() => {})
-    })
-  ])
-  if (terminalRecord.payload.state !== 'idle') {
-    fail(
-      `session ${sessionId} ended in ${terminalRecord.payload.state}: ${terminalRecord.payload.message ?? ''}`
-    )
-  }
-  const stopAck = await stopAckPromise
-  if (stopAck.payload?.intentId !== stopTicket.payload.intentId || stopAck.payload?.ok !== true) {
-    fail(`recordStop was not acknowledged successfully: ${JSON.stringify(stopAck.payload)}`)
-  }
-  const stoppingRecord = await Promise.race([stoppingPromise, sleep(0).then(() => null)])
+    recorder,
+    smoke,
+    sessionId,
+    timeoutMs,
+    describeRendererFailure,
+    fail,
+    sleep
+  })
 
   const finalization = await waitForPublishedMp4({
     ws: renderer,
     recorder,
     sessionId,
-    idleRecord: terminalRecord
+    idleRecord: terminalRecord,
+    finalizationTimeoutMs,
+    timeoutMs,
+    fail,
+    sleep
   })
   // Diagnostics publish is asynchronous; give the last stop snapshot a moment.
   await sleep(300)
@@ -564,7 +386,10 @@ function gitHead() {
   return result.status === 0 ? result.stdout.trim() : null
 }
 
-let stopApp = async () => {}
+let stopApp = null
+let renderer = null
+let remote = null
+let recorder = null
 try {
   mkdirSync(outputDirectory, { recursive: true })
   const launch = await launchDevApp({
@@ -585,9 +410,9 @@ try {
     }
   })
   stopApp = launch.stop
-  const renderer = await connectBackend(launch.connections['backend-ready'], timeoutMs)
+  renderer = await connectBackend(launch.connections['backend-ready'], timeoutMs)
   const smoke = launch.connections['preview-motion-ready']
-  const recorder = new BackendEventRecorder(renderer)
+  recorder = new BackendEventRecorder(renderer, { debug, timeoutMs })
 
   const health = await request(renderer, timeoutMs, 'health.ping', { ffmpegPath })
   if (!health?.ffmpeg?.available) {
@@ -612,7 +437,7 @@ try {
   log('synthetic source live; preview compositor rendering')
 
   const { discovery } = await enableRemoteControl(renderer, { timeoutMs })
-  const remote = await connectRemote(discovery.host, discovery.port, discovery.token, { timeoutMs })
+  remote = await connectRemote(discovery.host, discovery.port, discovery.token, { timeoutMs })
   await waitForRemoteDescribe(remote, { timeoutMs })
   log(`remote surface paired; running ${cycles} record cycle(s) of ${recordingMs}ms`)
 
@@ -696,9 +521,15 @@ try {
   console.error(error instanceof Error ? (error.stack ?? error.message) : String(error))
   process.exitCode = 1
 } finally {
-  try {
-    await stopApp()
-  } finally {
-    rmSync(userDataDir, { recursive: true, force: true })
+  const cleanup = await disposeRecordLatencyRun({
+    recorder,
+    renderer,
+    remote,
+    stopApp,
+    removeProfile: () => rmSync(userDataDir, { recursive: true, force: true })
+  })
+  for (const failure of cleanup.failures) {
+    console.error(`record-latency: cleanup failed for ${failure.owner}.`)
+    process.exitCode = 1
   }
 }

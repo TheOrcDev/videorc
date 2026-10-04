@@ -428,6 +428,12 @@ try {
   assert.equal(hiddenRestart.visual.sources.cameraOff, false)
 
   const recordCameraVisibility = async (visual, liveTargetId) => {
+    const recordingDirectory = await requestSmokeCommand(
+      smoke,
+      'authorize-smoke-resource',
+      { path: outputDirectory, kind: 'output-directory' },
+      { timeoutMs }
+    )
     const recording = await request(ws, timeoutMs, 'session.start', {
       sources: visual.sources,
       layout: visual.layout,
@@ -435,7 +441,7 @@ try {
       output: {
         recordEnabled: true,
         streamEnabled: false,
-        outputDirectoryCapability: directory.capabilityId,
+        outputDirectoryCapability: recordingDirectory.capabilityId,
         video: { preset: 'custom', width: 640, height: 360, fps: 30, bitrateKbps: 2000 },
         rtmp: { preset: 'custom', serverUrl: '', streamKey: '' }
       }

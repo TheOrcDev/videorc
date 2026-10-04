@@ -51,3 +51,24 @@ In scope: the OBS smoke, a focused harness contract test, shared command client 
 - [ ] Three fresh `pnpm smoke:obs-import` runs exit 0 with bounded cleanup.
 
 Stop if cleanup cannot establish exact ownership or if a production operation still hangs after the client is corrected. Record the concrete pending operation and add focused IPC evidence before expanding scope. Future launcher API changes must have harness consumers checked for stale property names.
+
+## Current three real-IPC trials
+
+Three predeclared full original runs on main `6dbabec1` all exit 1: trial 1 takes 19.54 seconds, trial 2 18.43 seconds, and trial 3 18.68 seconds. Each launches the real isolated app, passes backend/preview readiness and `obsDiscover`, then times out in `obsRead` at its unchanged 15,000 ms operation deadline. Canvas/scenes/key-stripped setup and the dedicated apply-time key channel remain unexecuted. No timeout extension, ambiguous request replay, fixture substitution or stop-on-green sampling is used.
+
+Each run awaits the maintained owned teardown. The exact controllers 67713, 69292 and 70933 are reaped; their groups and observed app-ledger PIDs are absent. This does not establish cleanup of unrecorded descendants. Private logs and profiles remain under `/tmp/videorc-obs108-final-main6db-20261004`.
+
+A read-only Computer Use observation of the exact QA app times out; later inventory shows no running Electron QA app. No current SecurityAgent prompt or automatic approval rejection is observed. The older Keychain lead remains a hypothesis, not the cause of these current timeouts. Read-only continuation must distinguish pure parsing, synchronous directory-authority persistence, backend capability registration and image import before a supported repair. The original diagnosis scope and protected-storage boundaries above still apply.
+
+## Bounded private stage diagnostic
+
+One predeclared private diagnostic on frozen `6dbabec1` exits 1 after 152.264 seconds. It preserves the original launch, scrubbed fixtures, maintained teardown and 15,000 ms request deadline. Discovery passes; the only setup request fails after 15,002.95 ms. Five main-stage records retained by the wrapper reach `storage.availability.before` after parsing completes. That boundary surrounds `safeStorage.isEncryptionAvailable()` and the optional storage-backend comparison; it does not isolate a particular native call or establish a historical permission dialog.
+
+The trial is incomplete diagnostic evidence: its supervisor records only the wrapper owner and never emits `ownership.ready`, so main/launch identity admission and complete Node proof fail. The external watchdog correctly refuses PASS. The rejected ownership branch is not recorded and remains unassigned. Before another separately declared trial, add minimal private fixed-enum evidence for that admission boundary; retain this failure. Do not change the original request budget, replay the request or weaken protected storage.
+
+Root independently verifies unchanged frozen sources and all 134 compiled artifacts after this attempt. The controller is wait-reaped, its exact group is absent, and recorded PIDs 43138, 43183, 50001 and 50133 are absent. No additional signal is sent; no unrecorded-descendant cleanup is claimed. A fresh read-only Computer Use inventory finds no current owned Electron or SecurityAgent surface, which cannot identify a past prompt. Setup assertions and the dedicated key request remain unexecuted.
+
+Private evidence: `/private/tmp/videorc-obs108-v2-watchdog-run-6db-20261004/root-terminal-review.json`, SHA-256 `05e30ab037789c27c6cfb5e680de871cf80104872b76b4efbe46cd54786ce450`. Before runtime, root independently passes 92 private supervisor/capture controls, 12 unchanged OBS controls and 31 external-watchdog controls. Those controls prove diagnostic contracts; they do not close the product timeout.
+
+
+A subsequent read-only audit finds a distinct private watchdog contract defect: it requires `profile.cleanup.complete`, while the unchanged smoke emits that marker only without an evidence directory and this private wrapper always retains one. A successful retained-evidence run therefore could not receive diagnostic PASS. The hand-authored fake success fixture missed that real caller contract. The private correction plan removes only this unreachable required marker and adds source-derived retention/cleanup controls; awaited teardown, original setup/key assertions, full owner proof and budgets remain required. This cannot explain or reclassify the actual failed request and incomplete owner admission. The executed watchdog and 31-control evidence remain frozen.

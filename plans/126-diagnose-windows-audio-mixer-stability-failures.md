@@ -30,7 +30,7 @@ These are leads, not established causes. Existing failures do not authorize a pr
 
 - [ ] The actual owning boundary and missing/mismatched PCM or meter values are attributed.
 - [ ] A meaningful failing-before regression passes after the smallest reviewed repair.
-- [ ] Affected Windows tests pass25 repetitions and three complete Windows Rust suites.
+- [x] Affected Windows tests pass25 repetitions and three complete Windows Rust suites; original cause remains unassigned.
 - [ ] Applicable final recording/audio and artifact gates complete, with all failed evidence retained.
 
 ## Observation slice — merged, attribution pending
@@ -44,3 +44,17 @@ The optional collector defaults absent and exists only in test builds. Snapshot 
 The actual Windows source job 111339072452/run 37169394914 remains pending its 25 affected-filter repetitions and three full Rust passes. No app/E2E ran for the individual observation slice. The root-owned unchanged final `smoke:local-gates` batch on main 4403adfd passes 2,994 Rust tests and strict Clippy, then stops at the first OAuth app readiness timeout (Plan 127). Its full 60-minute preview and 15-minute recording gates have not started. Final acceptance and Plan 126 done criteria remain incomplete.
 
 An earlier source job, 111330354018/run 37166493873, now completes successfully. Its actual raw log shows all 25 audio repetitions passing 68 tests each, all 25 preview-bounds repetitions, and three full Windows backend suites passing 2,813 tests plus one integration test each (13 existing ignored per backend pass). All later format, lint and audit steps also succeed. The private complete log is `/tmp/videorc-fix124-ci-windows-source-green.log`. This establishes an earlier successful stability cohort; it does not attribute or invalidate the two retained failures, and it does not substitute for the new observation slice's Windows run or Plan 127's new Node ownership coverage.
+
+## Observation-slice Windows acceptance verified
+
+Actual Windows [job111339072452](https://github.com/TheOrcDev/videorc/actions/runs/37169394914/job/111339072452) completes successfully for the observation slice under PowerShell7. Root independently verifies every required step/audit and the private raw log `/tmp/videorc-fix126-ci-windows-source-green.log`: all25 preview passes; all26 affected filter series repeated25times; every `session_audio` iteration68PASS/0FAIL/0ignored; all three full backend runs2,814PASS plus one integration test/13existing ignored each. Windows desktop2,850PASS/2skips and Node1,814PASS/10skips are platform-specific counts. This satisfies this slice's Windows repetition requirement; it does not substitute for the newer OAuth25 or future caption-clock slice.
+
+The workflow captures successful test output, and this successful raw log contains zero `mix-observation` records. No successful Windows PCM/lateness classifications are claimed from hidden stderr. The collector still adds the disclosed test-build overhead, and the two original failed cohorts remain retained and unattributed. A green observed cohort does not establish a production repair or identify the original scheduling/data-loss cause. Final runtime recording/artifact acceptance remains separate.
+
+## New unchanged source-clock failure — 2026-10-04
+
+Windows source [job111388490245](https://github.com/TheOrcDev/videorc/actions/runs/37186191998/job/111388490245) fails `a_source_clock_jump_re_anchors_and_recovers_without_retiring` on `session_audio` pass 22: 67 pass and one fail. Root independently verifies the raw assertion and numeric diagnostic. The original `[288000,384000)` window contains 95,520 expected and 480 zero frames per channel, no missing or altered nonzero samples, a 480-frame microphone overlap delta, and no stale-written frames. Whole-producer send lateness peaks at 58,072 µs; bus lateness at 46,276 µs. These extrema cannot locate the failing delivery or establish the gap's cause.
+
+The whole `session_audio.rs` file remains 371,632 bytes with SHA-256 `94f0e0bc087d5d9a8ba70c06c8fd017ae4fcbd4346826a2296951d074f11f5d0` across source126,137,138. Earlier source126 and137 logs each contain 28 successful executions of this exact case, with successful diagnostics hidden. Those passes do not invalidate this failure. Full Rust and later static/audit gates in the failed job are unexecuted.
+
+[Plan139](139-retain-bounded-source-clock-recovery-evidence.md) calls for opt-in, bounded test-only delivery/write timing and finished-window zero ranges before selecting a repair. Private root review is `/tmp/videorc-fix138-windows-source-job-111388490245-20261004/root-actual-windows138-review.json`. The existing original failures and distinct physical Windows recording-tail/freeze incident remain open; no production repair or acceptance relaxation is inferred.

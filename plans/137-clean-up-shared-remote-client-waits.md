@@ -1,0 +1,42 @@
+# Plan 137: Clean up failed shared remote-client request and event waits
+
+## Evidence and scope
+
+P2; effort S; risk LOW. Written against main `200880ec` on2026-10-04. This concerns maintained Node QA clients, not production remote authentication, protocol, renderer intents or capture behavior.
+
+`scripts/lib/remote-control-client.mjs:30–49` creates a request deadline and installs an owned message listener before `ws.send`. A synchronous send exception rejects the Promise automatically, but neither owner is removed. The actual exported `remoteRequest` is exercised in the Plan134 focused test through an EventEmitter transport and controlled original120000ms deadlines: the original Error remains rejected, while **one shared request timer and one reply listener remain** after the new local ACK/recorder owners have been disposed. This case actually passes its explicit limitation assertion during the19-case Plan134 preparation; it is evidence of existing shared-owner debt, not a claim that cleanup is complete. A successful smoke can avoid this path; an errored client can linger until its ref’d deadline.
+
+The same module's request timeout rejects without unregistering its reply listener. `waitForRemoteEvent` at52–73 likewise rejects at timeout without removing its owned event listener. These are independently reviewed actual source branches. Do not silently modify production start/stop deadlines or weaken any failure verdict to hide the issue.
+
+## Test and smallest repair
+
+1. Read AGENTS.md, the exact shared helper, `scripts/lib/record-latency-events.test.mjs`, and nearby Node test conventions. Use an isolated worktree after Plan134 merges; preserve user files and all original deadline/error/payload behavior.
+2. Add focused tests in `scripts/lib/remote-control-client.test.mjs` against the actual exported helpers. Use EventEmitter plus controlled original timers and explicit send/armed channels, no real socket/child/filesystem fixture or fixed sleeps. Cover actual synchronous send failure, actual request timeout, actual event timeout, registration failure where applicable, successful reply/ACK, wrong reply ID/event predicate and independent listeners that must remain installed. Observe timer/listener counts before bounded fixture cleanup. Keep the actual rejecting Error identity/message and successful payload identity checked. Run RED before correcting shared implementation; retain exact outcomes.
+3. Introduce small local idempotent cleanup closures inside the existing helpers. A matching result, actual deadline and synchronous registration/send failure each clear that operation's timer and remove only its own listener. Preserve rejection, resolve values, random request ID, request serialization and register-before-send order. An abandoned operation must never fabricate an ACK or accepted request. Keep signatures/default90000ms budgets unchanged. Do not use unref, new delays, sockets unrelated to this operation, or global removeAllListeners.
+4. Update Plan134's explicit shared send-throw limitation test to require zero shared request owners after the same actual failure. Keep its local recorder/ACK cleanup and primary Error identity assertions. This is an intentional follow-up to that documented limitation, not a removed regression. Do not change production code, `connectRemote`, parser policy, request filtering/debounce, privacy gates, remote protocol or library dependencies.
+
+## Verification, publication and maintenance
+
+Run the focused new shared-helper and actual latency-owner tests to GREEN, syntax/format checks on changed files, and `pnpm test:scripts`. Review the entire diff and evidence before the immediate complete-worktree Shadscan floor37 gate. In the existing Windows Node25 repetition loop add only the exact new test-file invocation; preserve PowerShell7, readiness/cleanup contracts, original25 affected repetitions and3 full-suite runs. Verify actual repeated raw counts and real exit codes before claiming Windows stability.
+
+Commit/push separately through normal protected-main PR flow, staging only intentional files. Full remote-control/LAN/record-latency and remaining E2E validation runs after all pending fixes, as the user requested; original camera visibility/audio/Windows artifact failures remain distinct. Close the shared-owner correction only after the original send-throw and real timeout branches reject correctly with zero owned timer/listener residue, independent listeners remain intact, and relevant verification actually passes. Future helper changes must route all terminal paths through the same cleanup owner.
+
+## Actual owning regression
+
+The actual exported helpers on unchanged shared-source hashd5e8633c run seven focused cases: EXIT1, five expected owner-cleanup failures and two successful reply/filter controls, with zero skips/cancellations. Send/registration failures retain the original90000ms deadline; actual request/event deadlines leave one owned listener. Rejection Error identity/message and the independent listener remain correct. Observations occur before every synthetic fixture owner is cleaned up; assertions occur afterward, with no real child/socket/OS timer. Minimal repair preparation is authorized; GREEN and source publication are not yet established.
+
+## Source correction published
+
+Reviewed four-file correction is committed27d2942d7c1fff37ac37c04ce00e63ef3c1b458b and normally merged through PR587 to main6dbabec1f2e286df6faf11455edd85dd3d94d89c. Same seven shared-helper cases and nineteen latency-owner cases pass; root independently reruns all26 and proves final files equal the reviewed source after only expected formatting. Full Node1886PASS/0FAIL/0skip/0cancel, syntax/format/diff and frozen offline setup all pass. Immediate whole-worktree Shadscan37 meets baseline/floor37. The latency send-throw regression now requires zero shared and local owners while preserving its original Error. Actual new Windows7shared+19latency cases each25times/fullRust3 and final unchanged remote/LAN/latency app gates remain pending; no per-fix E2E run is claimed.
+
+## Final-batch real-app prefix
+
+The full original local bundle on source6dbabec actually passes the five enforced recording-latency cycles, remote-control and LAN gates, then advances through provider readiness. It subsequently fails at strict fake-provider accounting; Plan138 independently proves a premature readiness defect, while the rejected RPC fields remain unknown. Later stages and long soaks remain unexecuted. Exact child84288/group and14observed app-ledger PIDs are absent after the terminal469.34s run. No source correction, timeout change or per-fix E2E was introduced for these passes. The new Windows shared/latency Node cases each25times and fullRust3 remain pending actual terminal/raw review.
+
+## Actual Windows stability verified — 2026-10-04
+
+Windows source [job111380686785](https://github.com/TheOrcDev/videorc/actions/runs/37183528265/job/111380686785) completes successfully. Reviewed head `27d2942d` and actual CI checkout `c356cb1c` have the same complete Git tree `6361eb53e7782b56edcc1690916036e93850c1df`. Root independently verifies the raw log's size/hash, source hashes, all 1,350 focused Node outcome rows, 25 preview outcomes, all 26 Rust filter series repeated 25 times, and three full Rust runs.
+
+Each of the seven shared-client and nineteen latency-owner cases passes exactly 25 times with zero failures, cancellations or skips. The affected Rust filters total 6,475 passing and 125 ignored case executions; exclusions are counted separately. Each full Rust run passes 2,819 backend cases plus one integration case with 13 ignored cases. Desktop passes 2,850 cases with two skips; full Node passes 1,861 with ten skips and zero failures/cancellations. Rust and desktop do not report literal cancellation counters. All source gate/audit steps succeed; ESLint reports zero errors and one warning. Raw SHA-256 is `9ab07e84d9f3c5c5a7563ade36168fa5cdb6e8334993c2476b48cda6af8ac34d` (54,950,296 bytes). Independent review is `/tmp/videorc-fix137-implementation-preparation-20261004/root-windows137-raw-review.json`.
+
+This establishes source stability for this slice. Physical Windows recording failures, the newer Plan138 job's distinct source-clock failure, complete app acceptance and long soaks remain separate and incomplete.
