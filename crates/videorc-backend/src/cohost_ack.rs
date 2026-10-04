@@ -1375,7 +1375,9 @@ mod tests {
         assert_eq!((counts.manual, counts.on_stream, counts.by_chat), (1, 1, 1));
         assert_eq!(counts.by_voice, 0);
 
-        // Long after "Say hi" forgot everyone, the totals still stand.
+        // "Say hi" publishes the one ungreeted first-timer, then, long after
+        // the window, forgets everyone; the totals still stand.
+        assert!(ledger.say_hi_changed(start + secs(5)));
         assert!(ledger.say_hi_changed(start + SAY_HI_WINDOW + secs(1)));
         assert!(ledger.say_hi(start + SAY_HI_WINDOW + secs(1)).is_empty());
         assert_eq!(ledger.greeting_counts(), counts);
