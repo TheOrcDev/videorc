@@ -5,6 +5,7 @@ import {
   DarkModeIcon,
   DesktopIcon,
   LightModeIcon,
+  OrcleIcon,
   SettingsIcon,
   StopIcon
 } from '@/components/icons'
@@ -22,6 +23,7 @@ import {
   CommandShortcut
 } from '@/components/ui/command'
 import { Kbd } from '@/components/ui/kbd'
+import { ORCLE_TABS } from '@/lib/orcle-tabs'
 import { displayKeyGlyph } from '@/lib/platform'
 import { SETTINGS_TABS } from '@/lib/settings-tabs'
 import {
@@ -41,7 +43,7 @@ export function CommandPalette({
   open: boolean
   onOpenChange: (open: boolean) => void
 }): ReactElement {
-  const { setActive, openStudioPanel, openSettings } = useWorkspaceNav()
+  const { setActive, openStudioPanel, openSettings, openOrcle } = useWorkspaceNav()
   const {
     runtimeInfo,
     savedScenes,
@@ -150,6 +152,22 @@ export function CommandPalette({
               </CommandItem>
             )
           })}
+        </CommandGroup>
+
+        <CommandSeparator />
+
+        {/* Plan 150: every Orcle tab is one jump away, like Settings'. */}
+        <CommandGroup heading="Orcle">
+          {ORCLE_TABS.map((tab) => (
+            <CommandItem
+              key={tab.id}
+              value={`Orcle ${tab.label}`}
+              onSelect={() => run(() => openOrcle(tab.id))}
+            >
+              <OrcleIcon className="size-4" />
+              {tab.label}
+            </CommandItem>
+          ))}
         </CommandGroup>
 
         <CommandSeparator />

@@ -170,6 +170,21 @@ Everything except ⌘K uses the desktop scale.
 - **Sections** (`PanelSection`): flush. A 13 px / 600 header, a 12 px
   secondary description, a hairline between sections, and 16 px padding. No
   border, background, radius, or shadow.
+- **Pages with tabs** (Settings, plan 064; Orcle, plan 150): one segmented
+  `TabsList` in a pinned strip under the toolbar (`border-b px-gutter py-2`).
+  Only the panel under it scrolls, and the shell turns `PaneBody` scroll
+  off for the page. The last tab used is remembered on this device, deep
+  links open a named tab, and ⌘K lists every tab.
+  - Each tab answers one question.
+  - A tab body is a `ConfigGrid` of two sections with `CONFIG_GRID_PAIR`,
+    or a `PageStack` for one.
+  - Settings rows are `FieldGroup variant="grouped"`: label and description
+    on the left, the control on the right.
+  - **Locked means disabled, with one reason.** One `Alert` with its one
+    action leads the tab, and every control under it is disabled. Never
+    put an enabled-looking switch or button beside "isn't available".
+  - Rules a streamer needs (limits, Premium versus free) go in the section's
+    description, never in `text-subtle` footnotes.
 - **Lists, not card stacks.** Sets of like things (destinations, sources,
   devices, settings) are one `GroupedList` of `ListRow`s: 32 px rows (28 px
   compact) with hairline separators. Cards remain only for objects with a
