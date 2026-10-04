@@ -45,6 +45,14 @@ describe('qualityName', () => {
 })
 
 describe('recordingQuality / outputSummary', () => {
+  const portraitCases = [
+    { width: 1080, height: 1920, fps: 30, label: '1080p30', summary: '1080×1920 · 30fps' },
+    { width: 1080, height: 1920, fps: 60, label: '1080p60', summary: '1080×1920 · 60fps' },
+    { width: 1440, height: 2560, fps: 30, label: '2K · 1440p30', summary: '1440×2560 · 30fps' },
+    { width: 1440, height: 2560, fps: 60, label: '2K · 1440p60', summary: '1440×2560 · 60fps' },
+    { width: 2160, height: 3840, fps: 30, label: '4K · 2160p30', summary: '2160×3840 · 30fps' }
+  ]
+
   it('formats quality and output strings', () => {
     const video = { width: 3840, height: 2160, fps: 30 }
     expect(recordingQuality(video)).toBe('4K · 2160p30')
@@ -52,6 +60,31 @@ describe('recordingQuality / outputSummary', () => {
     // When the class IS the height, skip the redundant doubling.
     expect(recordingQuality({ width: 1920, height: 1080, fps: 60 })).toBe('1080p60')
     expect(outputSummary(video)).toBe('3840×2160 · 30fps')
+  })
+  it.each(portraitCases)(
+    'labels portrait $width×$height at $fps fps',
+    ({ width, height, fps, label }) => {
+      expect(recordingQuality({ width, height, fps })).toBe(label)
+    }
+  )
+
+  it('preserves each landscape orientation twin', () => {
+    for (const { width, height, fps, label } of portraitCases) {
+      expect(recordingQuality({ width: height, height: width, fps })).toBe(label)
+    }
+  })
+
+  it('preserves floor and square labels', () => {
+    expect(recordingQuality({ width: 640, height: 360, fps: 24 })).toBe('360p24')
+    expect(recordingQuality({ width: 1080, height: 1080, fps: 60 })).toBe('1080p60')
+    expect(recordingQuality({ width: 1440, height: 1440, fps: 30 })).toBe('2K · 1440p30')
+    expect(recordingQuality({ width: 2160, height: 2160, fps: 30 })).toBe('4K · 2160p30')
+  })
+
+  it('preserves the full portrait dimensions in output summaries', () => {
+    for (const { width, height, fps, summary } of portraitCases) {
+      expect(outputSummary({ width, height, fps })).toBe(summary)
+    }
   })
 })
 
