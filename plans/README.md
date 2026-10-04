@@ -12,7 +12,9 @@ The fresh complete 36-stage recording/device suite passes on source7f345759, inc
 camera/screen and analyzed finished artifacts. Complete consent and Spotlight pass.
 Seven of eight earlier feature gates pass. Current three full scene trials yield one
 complete encoded-camera pass and two camera-hide timeouts; Plan133 stays open.
-Three current real-IPC OBS runs all time out at obsRead; Plan108 stays open.
+Three current real-IPC OBS runs all time out at obsRead. A private stage trial also
+fails at15seconds, retaining a protected-storage availability boundary but incomplete
+supervisor ownership proof; Plan108 stays open.
 The latest unchanged local bundle passes its first26stages, including corrected strict
 fake-provider totals/rollover and Comments, then stops at INVALID glass evidence from
 an intersecting other-app window. A separate recording-ownership diagnostic passes A's
@@ -32,7 +34,7 @@ checkout and unrelated plans are preserved.
 | [107](107-diagnose-floating-preview-input-latency.md) | Diagnose floating native-preview input latency | P1 | — | CAMERA FIX merged PR564; three post-fix native stress PASS unchanged100ms; current complete36-stage recording/device PASS; original samples retained |
 | [110](110-reject-obstructed-glass-probe-evidence.md) | Reject system-dialog-obstructed glass evidence | P1 | — | IMPLEMENTED `d91a7cb7` / PR 551; latest full bundle correctly INVALID at first glass sample due other-app overlap; zero scored rows; clean visual E2E pending |
 | [109](109-diagnose-live-layout-intent-buttons.md) | Diagnose live layout buttons blocking latest intent | P1 | — | IMPLEMENTED PR553; three physical preview stress runs and current36-stage recording/device PASS; full local bundle pending |
-| [108](108-repair-obs-import-smoke-and-owned-teardown.md) | Repair OBS import smoke and owned teardown | P1 | — | IMPLEMENTED `205a6f5e` / PR 550; 47 Node + 43 OBS desktop tests; three current real-IPC runs FAIL at obsRead; owning diagnosis open |
+| [108](108-repair-obs-import-smoke-and-owned-teardown.md) | Repair OBS import smoke and owned teardown | P1 | — | IMPLEMENTED `205a6f5e` / PR 550; 47 Node + 43 OBS desktop tests; three current real-IPC runs FAIL at obsRead; private storage-boundary trace lacks complete owner proof; diagnosis open |
 | [101](101-restore-camera-off-in-saved-scenes.md) | Preserve saved Camera Off | P1 | — | IMPLEMENTED `43716ab3` / PR 552; 263 focused tests; final E2E pending |
 | [103](103-persist-source-visibility-in-scene-snapshots.md) | Preserve saved source visibility | P1 | — | IMPLEMENTED PR554; current three full scene trials: one PASS including final camera artifacts, two hide timeouts; Plan133 cause open |
 | [097](097-scope-voice-clip-marks-to-recordings.md) | Scope clip matcher/dedupe to recording | P1 | — | IMPLEMENTED PR558; one current synthetic-native A-manual/B-voice diagnostic PASS with original caption/artifact checks and B dedupe; 11knownPIDs/two groups absent; full bundle still pending |
@@ -62,8 +64,9 @@ checkout and unrelated plans are preserved.
 | [134](134-dispose-losing-record-latency-waits.md) | Dispose record-latency smoke wait owners | P2 | Full local verification | ActualRED2fail/6controls then GREEN19/fullNode1879; owner repair merged326b988/PR585/maincacc3c7e/Shad37; current original5artifact enforcement PASS, exact controller exit unmeasured; Windowsraw pending |
 | [135](135-diagnose-live-system-audio-toggle-dropout.md) | Diagnose live system-audio dropout | P1 | Full local verification | Original full bundle FAIL; three original six-case controls18/18 and current bundle6/6PASS; original stereo quiet gap/in-phase/continuous AAC confirmed; cause OPEN, later gates/full soaks pending |
 | [136](136-renew-scene-recording-output-capability.md) | Renew scene recording output authority | P2 | Final scene verification | SOURCE FIX mergedb2c985b/PR586/main37f49f45; exactRust1/static/Shad37PASS; full original run proves both final camera artifacts; current133 intermittent timeouts remain distinct |
-| [137](137-clean-up-shared-remote-client-waits.md) | Dispose failed shared request/event owners | P2 | 134 | SOURCE FIX merged27d2942d/PR587/main6dbabec1; RED5/2 then root26/fullNode1886/static/Shad37PASS; current real latency/remote-control/LAN PASS; actualWindows25/raw and complete bundle pending |
-| [138](138-await-complete-fake-activity-receipts.md) | Await complete fake activity receipts | P2 | 125 | FIX merged5e875661/PR589/main26b296ad; actualRED6fail/24controls, rootfocused30/fullNode1897/static/Shad37PASS; unchanged app strict totals/rollover PASS; Windows25/raw and full bundle/soaks pending |
+| [137](137-clean-up-shared-remote-client-waits.md) | Dispose failed shared request/event owners | P2 | 134 | SOURCE FIX merged27d2942d/PR587/main6dbabec1; RED5/2 then root26/fullNode1886/static/Shad37PASS; real latency/remote-control/LAN PASS; actual Windows shared-client7/latency19 each25 and fullRust3 PASS, root raw verified; complete bundle pending |
+| [138](138-await-complete-fake-activity-receipts.md) | Await complete fake activity receipts | P2 | 125 | FIX merged5e875661/PR589/main26b296ad; actualRED6fail/24controls, rootfocused30/fullNode1897/static/Shad37PASS; unchanged app strict totals/rollover PASS; newest Windows Node cases each21 PASS then unrelated Rust recovery FAIL on pass22; 25/full-suite coverage incomplete; bundle/soaks pending |
+| [139](139-retain-bounded-source-clock-recovery-evidence.md) | Retain bounded source-clock recovery evidence | P1 | 126 | DIAGNOSIS PLAN: unchanged Windows recovery assertion sees95,520/96,000 frames,480zero/overlap; per-delivery/write timing absent; bounded test-only trace and attributable repair required |
 
 Execute privacy, remote gesture, and microphone-demand fixes first, repair
 acceptance gates, then close scene
