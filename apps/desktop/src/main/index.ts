@@ -452,6 +452,7 @@ import type {
   CaptionsUpdate,
   CaptionsWindowState,
   CohostActionCommand,
+  CohostCommandRelayCommand,
   CohostEnableCommand,
   CohostState,
   CohostWindowState,
@@ -14145,6 +14146,32 @@ app.whenReady().then(async () => {
   )
   secureIpcHandle(
     'comments-window:cohost-action-result-push',
+    (event, resolution: CommentsCommandResolution<CohostState>) => {
+      if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+      return commentsCommandBroker.resolve(resolution)
+    }
+  )
+  // Answers to Orcle's voice command cards (plan 140, S6 part B), relayed like
+  // the Orcle actions above: the window names the command and its answer,
+  // the MAIN renderer makes the cohost.command.* call.
+  secureIpcHandle(
+    'comments-window:cohost-command',
+    (event, value: unknown): Promise<CohostState> => {
+      if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+        return Promise.reject(new Error('Only the Chat window can answer Orcle.'))
+      }
+      const requestId = commentsCommandRequestId(value)
+      const command = value as CohostCommandRelayCommand
+      assertLiveCommentsCommandSession(command.sessionId)
+      return commentsCommandBroker.request(requestId, () => {
+        if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+        sendElectronEvent(mainWindow.webContents, 'comments-window:cohost-command-request', command)
+        return true
+      })
+    }
+  )
+  secureIpcHandle(
+    'comments-window:cohost-command-result-push',
     (event, resolution: CommentsCommandResolution<CohostState>) => {
       if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
       return commentsCommandBroker.resolve(resolution)

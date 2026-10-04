@@ -472,6 +472,58 @@ describe('Orcle tab: Voice commands (plan 140, S6 part A)', () => {
     expect(authorizeXLive).toHaveBeenCalledTimes(1)
   })
 
+  it('saves the wake word and the confirmation mode (part B)', async () => {
+    calls.patchCohostSettings.mockClear()
+    await render({
+      cohost: settings({ enabled: true, wakeWordRequired: false, removeConfirm: 'confirm' })
+    })
+    const voice = section()
+    expect(voice.textContent).toContain('Commands need “Orcle” first')
+    expect(voice.textContent).toContain('YouTube always asks you to confirm.')
+    expect(voice.textContent).toContain('A removal waits 20 seconds for your answer')
+    const wake = document.getElementById('orcle-wake-word') as HTMLButtonElement
+    await act(async () => wake.click())
+    expect(calls.patchCohostSettings).toHaveBeenLastCalledWith({ wakeWordRequired: true })
+    const countdown = [...voice.querySelectorAll<HTMLButtonElement>('button')].find(
+      (button) => button.textContent === '5-second countdown'
+    )
+    expect(voice.textContent).toContain('Confirm first')
+    await act(async () => countdown!.click())
+    expect(calls.patchCohostSettings).toHaveBeenLastCalledWith({ removeConfirm: 'countdown' })
+  })
+
+  it('names the countdown in the numbers line when it is on', async () => {
+    await render({ cohost: settings({ enabled: true, removeConfirm: 'countdown' }) })
+    const notes = section().querySelector('[data-slot="orcle-voice-commands-notes"]')
+    expect(notes?.textContent).toContain('runs after 5 seconds unless you cancel')
+  })
+
+  it('says when Videorc paused voice commands or removing', async () => {
+    await render({
+      state: {
+        sessionId: null,
+        status: 'off',
+        reason: null,
+        questions: [],
+        flags: [],
+        mood: null,
+        lastTickAt: null,
+        tickSeq: 0,
+        partial: false,
+        commandAvailability: { voiceCommands: 'paused', remove: 'paused' }
+      }
+    })
+    const lines = [...section().querySelectorAll('[data-slot="orcle-voice-commands-paused"]')].map(
+      (line) => line.textContent
+    )
+    expect(lines).toEqual([
+      'Voice commands are paused by Videorc.',
+      'Removing messages is paused by Videorc.'
+    ])
+    await render()
+    expect(section().querySelector('[data-slot="orcle-voice-commands-paused"]')).toBeNull()
+  })
+
   it('says where to connect when no platform is connected', async () => {
     await render({ core: { platformAccounts: [] } })
     expect(section().querySelector('[data-slot="remove-messages-empty"]')?.textContent).toBe(

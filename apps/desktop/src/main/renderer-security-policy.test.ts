@@ -366,6 +366,23 @@ describe('renderer security policy', () => {
     expect(result.slice(0, 400)).toContain('event.sender.id !== mainWindow.webContents.id')
   })
 
+  it('lets only the Chat window answer Orcle, checked by sender (plan 140, S6 part B)', () => {
+    expect(roleCanInvokeChannel('comments', 'comments-window:cohost-command')).toBe(true)
+    expect(roleCanInvokeChannel('notes', 'comments-window:cohost-command')).toBe(false)
+    expect(roleCanInvokeChannel('captions', 'comments-window:cohost-command')).toBe(false)
+    expect(roleCanInvokeChannel('comments', 'comments-window:cohost-command-result-push')).toBe(
+      false
+    )
+    expect(AUXILIARY_API_KEYS.comments).toContain('sendCohostCommand')
+    expect(AUXILIARY_API_KEYS.comments).not.toContain('pushCohostCommandResult')
+    const mainSource = source('./index.ts')
+    const handler = mainSource.split("'comments-window:cohost-command',")[1] ?? ''
+    expect(handler.slice(0, 700)).toContain('event.sender.id !== commentsWindow.webContents.id')
+    expect(handler.slice(0, 700)).toContain('assertLiveCommentsCommandSession(command.sessionId)')
+    const result = mainSource.split("'comments-window:cohost-command-result-push',")[1] ?? ''
+    expect(result.slice(0, 400)).toContain('event.sender.id !== mainWindow.webContents.id')
+  })
+
   it('exposes an invoke to an auxiliary preload only when the channel policy admits that role', () => {
     const channelByApiMethod = new Map<string, string>(
       Object.entries(electronInvokeApiMethods).map(([channel, method]) => [method, channel])

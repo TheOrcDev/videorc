@@ -4,11 +4,23 @@ import { ChatPlatformIcon } from '@/components/chat-platform-icon'
 import { GroupedList, ListRow } from '@/components/list-row'
 import { StatusDot } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
-import { useStudioCore } from '@/hooks/use-studio'
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Switch } from '@/components/ui/switch'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { useStudioChat, useStudioCore } from '@/hooks/use-studio'
+import type { CohostSettingsPatch, RemoveConfirmMode } from '@/lib/backend'
 import { COHOST_ACTS_ON_ASK_COPY } from '@/lib/cohost-view'
 import {
+  REMOVE_CONFIRM_DESCRIPTIONS,
+  REMOVE_CONFIRM_LABELS,
+  WAKE_WORD_DESCRIPTION,
+  WAKE_WORD_LABEL,
+  YOUTUBE_ALWAYS_CONFIRMS,
+  commandAvailabilityLines,
+  removalLimitsLine
+} from '@/lib/orcle-command-view'
+import {
   ORCLE_REMOVAL_FALLBACK,
-  ORCLE_REMOVAL_LIMITS,
   ORCLE_REMOVE_MESSAGES_NO_ACCOUNT,
   ORCLE_VOICE_COMMANDS,
   ORCLE_VOICE_COMMANDS_DESCRIPTION,
@@ -21,17 +33,19 @@ import {
 import { toast } from '@/lib/toast'
 import { permissionReconnectOptions } from '../../../shared/platform-scopes'
 
+const REMOVE_CONFIRM_MODES: readonly RemoveConfirmMode[] = ['confirm', 'countdown']
+
 /**
- * Voice commands inside Orcle Live (plan 140, S6 part A): what you can say,
- * and whether each platform lets Orcle remove messages, with its one fix.
- *
- * Part B adds, in the marked slot below: the settings ("Commands need
- * "Orcle" first", and the confirmation mode "Confirm first" / "5-second
- * countdown") and the kill-switch status line.
+ * Voice commands inside Orcle Live (plan 140, S6): what you can say, whether
+ * each platform lets Orcle remove messages (with its one fix), the two
+ * settings (the wake word and how a removal is confirmed) and Videorc's kill
+ * switches when they are on.
  */
 export function OrcleVoiceCommands(): ReactElement {
   const {
     cohostSettings,
+    cohostGate,
+    patchCohostSettings,
     platformAccounts,
     xNativeCapability,
     connectPlatformAccount,
@@ -41,6 +55,17 @@ export function OrcleVoiceCommands(): ReactElement {
     xLiveAuthorized: xNativeCapability?.nativeAvailable
   })
   const [pending, setPending] = useState<string | null>(null)
+  const { cohostState } = useStudioChat()
+  const paused = commandAvailabilityLines(cohostState?.commandAvailability)
+  const locked = cohostGate?.allowed === false || !cohostSettings
+  const removeConfirm = cohostSettings?.removeConfirm ?? 'confirm'
+  const save = (patch: CohostSettingsPatch): void => {
+    void patchCohostSettings?.(patch).catch((error: unknown) =>
+      toast.error('Could not save the voice command setting', {
+        description: error instanceof Error ? error.message : undefined
+      })
+    )
+  }
 
   const fix = (row: RemoveMessagesRow): void => {
     const run =
@@ -73,6 +98,16 @@ export function OrcleVoiceCommands(): ReactElement {
             {ORCLE_VOICE_COMMANDS_OFF}
           </p>
         )}
+        {paused.map((line) => (
+          <p
+            key={line}
+            className="flex items-center gap-1.5 text-xs text-muted-foreground"
+            data-slot="orcle-voice-commands-paused"
+          >
+            <StatusDot tone="warn" />
+            {line}
+          </p>
+        ))}
       </header>
 
       <GroupedList label="What you can say">
@@ -133,15 +168,48 @@ export function OrcleVoiceCommands(): ReactElement {
         )}
       </GroupedList>
       <p className="text-xs text-subtle" data-slot="orcle-voice-commands-notes">
-        {ORCLE_REMOVAL_LIMITS} {ORCLE_REMOVAL_FALLBACK}
+        {removalLimitsLine(removeConfirm)} {ORCLE_REMOVAL_FALLBACK}
       </p>
 
-      {/* Plan 140, S6 part B: the voice-command settings go here, under the
-          readiness rows: the "Commands need "Orcle" first" switch
-          (`wakeWordRequired`) and the confirmation mode, "Confirm first" or
-          "5-second countdown" (`removeConfirm`, a segmented Tabs), plus the
-          kill-switch status line ("Removing messages is paused by Videorc.").
-          The 20-second line above then names the countdown when it is on. */}
+      <FieldGroup variant="grouped" data-slot="orcle-voice-commands-settings">
+        <Field>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <FieldLabel htmlFor="orcle-wake-word">{WAKE_WORD_LABEL}</FieldLabel>
+              <p className="text-xs text-muted-foreground">{WAKE_WORD_DESCRIPTION}</p>
+            </div>
+            <Switch
+              checked={cohostSettings?.wakeWordRequired === true}
+              disabled={locked}
+              id="orcle-wake-word"
+              onCheckedChange={(wakeWordRequired) => save({ wakeWordRequired })}
+            />
+          </div>
+        </Field>
+        <Field>
+          <FieldLabel htmlFor="orcle-remove-confirm">Before Orcle removes a comment</FieldLabel>
+          <FieldDescription>
+            {REMOVE_CONFIRM_DESCRIPTIONS[removeConfirm]} {YOUTUBE_ALWAYS_CONFIRMS}
+          </FieldDescription>
+          <ToggleGroup
+            className="w-fit"
+            disabled={locked}
+            id="orcle-remove-confirm"
+            size="sm"
+            type="single"
+            value={removeConfirm}
+            onValueChange={(value) => {
+              if (value === 'confirm' || value === 'countdown') save({ removeConfirm: value })
+            }}
+          >
+            {REMOVE_CONFIRM_MODES.map((mode) => (
+              <ToggleGroupItem key={mode} className="px-3 text-xs" value={mode}>
+                {REMOVE_CONFIRM_LABELS[mode]}
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
+        </Field>
+      </FieldGroup>
 
       <p className="text-xs text-subtle" data-slot="orcle-voice-commands-premium">
         {ORCLE_VOICE_PREMIUM}

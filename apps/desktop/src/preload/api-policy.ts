@@ -51,6 +51,8 @@ export const AUXILIARY_API_KEYS = {
     'getCohostWindowState',
     'onCohostWindowState',
     'sendCohostAction',
+    // Answers to Orcle's voice command cards (plan 140, S6 part B).
+    'sendCohostCommand',
     'sendCohostEnable'
   ],
   captions: [

@@ -4324,6 +4324,11 @@ export interface VideorcApi {
   getCohostWindowState: () => Promise<CohostWindowState>
   onCohostWindowState: (callback: (state: CohostWindowState) => void) => () => void
   sendCohostAction: (command: CohostActionCommand) => Promise<CohostState>
+  /** Answers to Orcle's voice command cards (plan 140, S6 part B), relayed
+   * like the other Orcle actions: the MAIN renderer makes the call. */
+  sendCohostCommand: (command: CohostCommandRelayCommand) => Promise<CohostState>
+  onCohostCommandRequest: (callback: (command: CohostCommandRelayCommand) => void) => () => void
+  pushCohostCommandResult: (resolution: CommentsCommandResolution<CohostState>) => Promise<boolean>
   onCohostActionRequest: (callback: (command: CohostActionCommand) => void) => () => void
   pushCohostActionResult: (resolution: CommentsCommandResolution<CohostState>) => Promise<boolean>
   /** Turning co-host on (and granting cloud-AI consent) from the Comments
@@ -5581,6 +5586,27 @@ export const COHOST_ACTION_KINDS: readonly CohostActionKind[] = [
 
 /** Correlated co-host action from the Comments window, brokered through main
  * to the main renderer (which makes the actual `cohost.*` RPC). */
+/**
+ * Stream Manager → main → Studio (plan 140, S6 part B): an answer to Orcle's
+ * open voice command, by its id. `choose` picks from the chooser (0 to 2),
+ * `confirm` and `cancel` answer the card. Studio makes the matching
+ * `cohost.command.*` call; the reply is the state after the answer.
+ */
+export type CohostCommandRelayCommand =
+  | {
+      requestId: string
+      sessionId: string
+      action: 'choose'
+      commandId: string
+      index: number
+    }
+  | {
+      requestId: string
+      sessionId: string
+      action: 'confirm' | 'cancel'
+      commandId: string
+    }
+
 export interface CohostActionCommand {
   requestId: string
   sessionId: string

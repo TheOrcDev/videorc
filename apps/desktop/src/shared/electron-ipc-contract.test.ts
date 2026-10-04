@@ -34,14 +34,15 @@ import {
 describe('Electron IPC contract', () => {
   it('maps every renderer-facing invoke channel to a real async API method', () => {
     expectTypeOf<ElectronInvokeMappingInvariant>().toEqualTypeOf<true>()
-    // 114: plan 140 S6 added the chat removal relay pair (S5 the Stream
+    // 116: plan 140 S6 part B added the Orcle command answer pair (part A
+    // the chat removal relay pair; S5 the Stream
     // Manager's reconnect-scopes channel; plan 119 the in-app player's
     // media:grant-session; plan 095 the highlight card's avatars:read; plan 071
     // the Stream Manager Show who followed channel; plan 068 the mark-clip
     // relay pair; plan 062 the shortcut recorder arm; plan 055 the dashboard
     // push and get; plan 050 retired glass:wallpaper:get).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(114)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(114)
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(116)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(116)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -378,6 +379,62 @@ describe('Electron IPC contract', () => {
       ])
     ).toThrow()
     expect(validateElectronInvokeResult('comments-window:moderation-result-push', true)).toBe(true)
+  })
+
+  it('relays one answer to an Orcle command by id, nothing more (plan 140, S6 part B)', () => {
+    const choose = {
+      requestId: 'r-1',
+      sessionId: 'session-1',
+      action: 'choose',
+      commandId: 'cmd-1',
+      index: 2
+    }
+    const confirm = {
+      requestId: 'r-2',
+      sessionId: 'session-1',
+      action: 'confirm',
+      commandId: 'cmd-1'
+    }
+    const cancel = {
+      requestId: 'r-3',
+      sessionId: 'session-1',
+      action: 'cancel',
+      commandId: 'cmd-1'
+    }
+    for (const command of [choose, confirm, cancel]) {
+      expect(validateElectronInvokeArgs('comments-window:cohost-command', [command])).toEqual([
+        command
+      ])
+      expect(
+        validateElectronEventPayload('comments-window:cohost-command-request', command)
+      ).toEqual(command)
+    }
+    for (const forged of [
+      { ...choose, index: 3 },
+      { ...choose, index: -1 },
+      { ...choose, index: 1.5 },
+      { ...confirm, index: 0 },
+      { ...cancel, commandId: '' },
+      { ...cancel, action: 'remove' },
+      { ...confirm, messageId: 'm-1' },
+      { requestId: 'r-4', action: 'cancel', commandId: 'cmd-1' },
+      null
+    ]) {
+      expect(() => validateElectronInvokeArgs('comments-window:cohost-command', [forged])).toThrow()
+      expect(() =>
+        validateElectronEventPayload('comments-window:cohost-command-request', forged)
+      ).toThrow()
+    }
+    expect(
+      validateElectronInvokeArgs('comments-window:cohost-command-result-push', [
+        { requestId: 'r-1', ok: false, error: 'No such command waits for that answer.' }
+      ])
+    ).toHaveLength(1)
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:cohost-command-result-push', [
+        { requestId: 'r-1', ok: true, extra: 1 }
+      ])
+    ).toThrow()
   })
 
   it('carries a bounded list of removals in a live comments view only (plan 140, S6)', () => {

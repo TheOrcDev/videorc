@@ -1077,3 +1077,37 @@ describe('promises and recaps (plan 068 D8)', () => {
     expect(cohostDeadAirToast(state({ deadAirNudge: { ...nudge, text: ' ' } }), null)).toBeNull()
   })
 })
+
+describe('applyCohostState: voice commands (plan 140, S6)', () => {
+  const base = { ...EMPTY_COHOST_STATE, sessionId: 's1', status: 'listening' as const, tickSeq: 4 }
+  const command = (status: 'confirm' | 'done', at: string) => ({
+    id: 'cmd-1',
+    heard: 'orcle highlight the comment from coders x',
+    kind: 'highlight' as const,
+    status,
+    message: status === 'done' ? "Highlighted coders_x's comment." : 'Show it anyway?',
+    at
+  })
+
+  it('keeps the newer command when an older reply crosses a newer event', () => {
+    const current = { ...base, command: command('done', '2026-10-04T12:00:05Z') }
+    const staleReply = {
+      ...base,
+      mood: 'hype' as const,
+      command: command('confirm', '2026-10-04T12:00:01Z')
+    }
+    const merged = applyCohostState(current, staleReply)
+    expect(merged.command?.status).toBe('done')
+    expect(merged.mood).toBe('hype')
+    expect(applyCohostState(current, base).command?.status).toBe('done')
+  })
+
+  it('takes a newer command, and a new session as it is', () => {
+    const current = { ...base, command: command('confirm', '2026-10-04T12:00:01Z') }
+    expect(
+      applyCohostState(current, { ...base, command: command('done', '2026-10-04T12:00:05Z') })
+        .command?.status
+    ).toBe('done')
+    expect(applyCohostState(current, { ...base, sessionId: 's2' }).command).toBeUndefined()
+  })
+})

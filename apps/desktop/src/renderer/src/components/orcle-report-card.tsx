@@ -166,6 +166,7 @@ function ReportBody({ view }: { view: ShownReport }): ReactElement {
       ) : (
         <ReportStats stats={view.stats} />
       )}
+      <ReportCommands commands={view.commands} />
       <ReportList
         id="missed"
         items={view.missed}
@@ -282,6 +283,32 @@ function StreamLine({ view }: { view: ShownReport }): ReactElement {
           </span>
         ) : null}
       </p>
+    </div>
+  )
+}
+
+/**
+ * What voice commands did this stream (plan 140, S6): one row, counts only,
+ * and only when Orcle counted any.
+ */
+function ReportCommands({ commands }: { commands: ShownReport['commands'] }): ReactElement | null {
+  if (!commands) return null
+  return (
+    <div className="flex min-w-0 flex-col gap-1" data-slot="orcle-report-commands">
+      <GroupedList>
+        <ListRow
+          className={LABEL_STAYS}
+          context={
+            <span className="tabular-nums">
+              {commands.counts.map((count) => `${count.label} ${count.value}`).join(' · ')}
+            </span>
+          }
+          icon={<MicrophoneIcon aria-hidden className="text-muted-foreground" />}
+          interactive={false}
+          meta={<span className="tabular-nums">{commands.total}</span>}
+          title="Commands"
+        />
+      </GroupedList>
     </div>
   )
 }

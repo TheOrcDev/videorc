@@ -14,6 +14,7 @@ import type {
   CaptionsUpdate,
   CaptionsWindowState,
   CohostActionCommand,
+  CohostCommandRelayCommand,
   CohostEnableCommand,
   CohostWindowState,
   CommentHighlightCommand,
@@ -154,6 +155,8 @@ export const electronInvokeApiMethods = {
   'comments-window:cohost-get': 'getCohostWindowState',
   'comments-window:cohost-action': 'sendCohostAction',
   'comments-window:cohost-action-result-push': 'pushCohostActionResult',
+  'comments-window:cohost-command': 'sendCohostCommand',
+  'comments-window:cohost-command-result-push': 'pushCohostCommandResult',
   'comments-window:cohost-enable': 'sendCohostEnable',
   'comments-window:cohost-enable-result-push': 'pushCohostEnableResult',
   'captions-window:open': 'openCaptionsWindow',
@@ -225,6 +228,7 @@ export interface ElectronIpcEventMap {
   'comments-window:dashboard': LiveDashboardState | null
   'comments-window:cohost': CohostWindowState
   'comments-window:cohost-action-request': CohostActionCommand
+  'comments-window:cohost-command-request': CohostCommandRelayCommand
   'comments-window:cohost-enable-request': CohostEnableCommand
   'captions-window:state': CaptionsWindowState
   'captions-window:snapshot': CaptionWindowSnapshot
@@ -266,6 +270,7 @@ export const electronEventChannels = [
   'comments-window:cohost',
   'comments-window:cohost-action-request',
   'comments-window:cohost-enable-request',
+  'comments-window:cohost-command-request',
   'captions-window:state',
   'captions-window:snapshot',
   'captions-window:lines',
@@ -1055,6 +1060,30 @@ const moderationOperationIpcSchema = boundedSemanticValue(
 const relayedModerationOperationsSchema = arraySchema(moderationOperationIpcSchema, {
   maxLength: MAX_RELAYED_MODERATION_OPERATIONS
 })
+// Answers to Orcle's voice command cards (plan 140, S6 part B): a command id
+// and, for the chooser, an index. Nothing else crosses.
+const cohostCommandIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
+const cohostCommandRelaySchema = unionSchema([
+  objectSchema(
+    {
+      requestId: boundedIdentifier,
+      sessionId: boundedIdentifier,
+      action: literalSchema('choose'),
+      commandId: cohostCommandIdSchema,
+      index: numberSchema({ integer: true, min: 0, max: 2 })
+    },
+    { allowUnknown: false }
+  ),
+  objectSchema(
+    {
+      requestId: boundedIdentifier,
+      sessionId: boundedIdentifier,
+      action: enumSchema(['confirm', 'cancel']),
+      commandId: cohostCommandIdSchema
+    },
+    { allowUnknown: false }
+  )
+])
 const commentsViewSchema = runtimeSchema<unknown>(
   'a bounded comments view with valid delivery metadata',
   (value, path) => {
@@ -1153,6 +1182,22 @@ const specificRuntimeInvokeContracts = {
           requestId: boundedIdentifier,
           ok: booleanSchema,
           value: optionalSchema(moderationOperationIpcSchema),
+          error: optionalSchema(boundedStatusText)
+        },
+        { allowUnknown: false }
+      )
+    ]),
+    booleanSchema
+  ),
+  // Plan 140, S6 part B: one answer to Orcle's open voice command.
+  'comments-window:cohost-command': invokeContract(tupleSchema([cohostCommandRelaySchema])),
+  'comments-window:cohost-command-result-push': invokeContract(
+    tupleSchema([
+      objectSchema(
+        {
+          requestId: boundedIdentifier,
+          ok: booleanSchema,
+          value: optionalSchema(boundedIpcValueSchema),
           error: optionalSchema(boundedStatusText)
         },
         { allowUnknown: false }
@@ -1354,6 +1399,7 @@ const specificRuntimeEventSchemas = {
   'comments-window:snapshot': commentsViewSchema,
   'comments-window:delta': commentsDeltaSchema,
   'comments-window:moderation-request': commentsModerationCommandSchema,
+  'comments-window:cohost-command-request': cohostCommandRelaySchema,
   'account:callback': accountCallbackSchema,
   'backend:connection': backendConnectionSchema,
   'notes-window:document': notesDocumentSchema,

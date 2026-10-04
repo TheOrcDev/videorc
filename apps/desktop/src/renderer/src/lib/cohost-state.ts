@@ -30,7 +30,14 @@ export function orcleLiveSettingsPatch(on: boolean): CohostSettingsPatch {
 export function applyCohostState(current: CohostState | null, next: CohostState): CohostState {
   if (!current) return next
   if (current.sessionId !== next.sessionId) return next
-  return next.tickSeq < current.tickSeq ? current : next
+  if (next.tickSeq < current.tickSeq) return current
+  // Plan 140: a voice command moves without a tick. An RPC reply can cross a
+  // newer `cohost.state` event, so the newer command (by `at`) always wins.
+  const kept = current.command
+  if (kept && (!next.command || Date.parse(next.command.at) < Date.parse(kept.at))) {
+    return { ...next, command: kept }
+  }
+  return next
 }
 
 /** `state.detail` is optional on the wire (older backend); absent means null. */

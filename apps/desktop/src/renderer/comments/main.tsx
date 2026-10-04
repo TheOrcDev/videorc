@@ -24,6 +24,8 @@ import {
   normalizeCommentHighlightAnchor,
   offCohostWindowState
 } from '@/lib/backend'
+import { applyCohostState } from '@/lib/cohost-state'
+import type { CommandAnswer } from '@/components/stream-manager/command-cards'
 import {
   cohostHighlightMessageId,
   cohostNudgeDismissedFromStorage,
@@ -370,6 +372,26 @@ function CommentsWindowApp(): ReactElement {
         .finally(() => setCohostActionPending(false))
     }
 
+  // Answers to Orcle's voice command cards (plan 140, S6 part B). The reply
+  // merges like an event: the newer command (by `at`) wins.
+  const [commandAnsweringId, setCommandAnsweringId] = useState<string | null>(null)
+  const answerCommand = (commandId: string, answer: CommandAnswer): void => {
+    const sessionId = snapshot.sessionId
+    const send = window.videorc?.sendCohostCommand
+    if (!sessionId || !send || commandAnsweringId === commandId) return
+    setCommandAnsweringId(commandId)
+    void send({ requestId: crypto.randomUUID(), sessionId, commandId, ...answer })
+      .then((state) =>
+        setCohost((current) => ({ ...current, state: applyCohostState(current.state, state) }))
+      )
+      .catch((error) =>
+        toast.error(error instanceof Error ? error.message : 'Could not answer Orcle.', {
+          id: `cohost-command:${commandId}`
+        })
+      )
+      .finally(() => setCommandAnsweringId((current) => (current === commandId ? null : current)))
+  }
+
   // Orcle Live's one switch (plan 119), relayed: on means Orcle reads chat AND
   // hears you (`listen: true`), off only stops it joining. Every way on (the
   // status popover, the nudge, the consent CTA and the listening card) sends
@@ -449,6 +471,8 @@ function CommentsWindowApp(): ReactElement {
         removalAnsweringIds={removalAnsweringIds}
         removalRequestIds={removalRequestIds}
         onAnswerRemoval={live ? answerRemoval : undefined}
+        commandAnsweringId={commandAnsweringId}
+        onAnswerCommand={live ? answerCommand : undefined}
         onRemoveFromChat={live ? removeFromChat : undefined}
         onCohostAnswered={(question) => void sendCohostAction('answered')(question.id)}
         onCohostRestoreQuestion={(question) => void sendCohostAction('restore')(question.id)}

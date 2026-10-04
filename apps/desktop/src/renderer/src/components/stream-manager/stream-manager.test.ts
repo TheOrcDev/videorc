@@ -242,6 +242,48 @@ describe('StreamManager removal cards (plan 140, S6)', () => {
     expect(markup.match(/data-slot="removal-card"/g)).toHaveLength(1)
   })
 
+  it('puts what Orcle heard, then the chooser, above the removal cards (part B)', () => {
+    const markup = renderWith({
+      onAnswerCommand: () => undefined,
+      cohostState: {
+        ...EMPTY_COHOST_STATE,
+        sessionId: 's1',
+        status: 'listening',
+        command: {
+          id: 'cmd-1',
+          heard: 'orcle remove it',
+          kind: 'remove',
+          status: 'ambiguous',
+          message: 'Which comment?',
+          candidates: [
+            { messageId: chat.id, authorName: 'Ada', platform: 'twitch', excerpt: 'hi' }
+          ],
+          at: '2099-01-01T00:00:00Z',
+          expiresAt: '2099-01-01T00:00:20Z'
+        }
+      }
+    })
+    const orcle = markup.slice(markup.indexOf('data-slot="orcle-pane"'))
+    const strip = orcle.indexOf('data-slot="command-strip"')
+    const chooser = orcle.indexOf('data-slot="command-chooser"')
+    expect(strip).toBeGreaterThan(-1)
+    expect(chooser).toBeGreaterThan(strip)
+    expect(orcle.indexOf('data-slot="removal-cards"')).toBeGreaterThan(chooser)
+    expect(orcle).toContain('Heard: “orcle remove it”')
+    // History never shows a command.
+    expect(
+      renderWith({
+        onAnswerCommand: () => undefined,
+        viewMode: {
+          kind: 'history',
+          sessionId: 's1',
+          title: 'Earlier stream',
+          startedAt: '2026-10-02T10:00:00Z'
+        }
+      })
+    ).not.toContain('data-slot="command-strip"')
+  })
+
   it('never shows a card in history, without a handler, or for a manual removal', () => {
     expect(
       renderWith({

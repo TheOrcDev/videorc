@@ -330,3 +330,41 @@ describe('Orcle report card (plan 119 S3)', () => {
     expect(onSessionChange).toHaveBeenLastCalledWith(null)
   })
 })
+
+describe('OrcleReportCard: the Commands row (plan 140, S6)', () => {
+  it('shows what voice commands did, counts only', async () => {
+    await render({
+      report: {
+        payload: payload({
+          report: {
+            ...REPORT,
+            commands: {
+              highlighted: 3,
+              cleared: 1,
+              removed: 2,
+              hiddenLocally: 0,
+              cancelled: 1,
+              expired: 0,
+              failed: 0,
+              notFound: 0
+            }
+          }
+        }),
+        loading: false,
+        error: null
+      }
+    })
+    const [row] = rows('commands')
+    expect(row).toBeTruthy()
+    expect(row.textContent).toContain('Commands')
+    expect(row.textContent).toContain('Highlighted 3 · Cleared 1 · Removed 2 · Cancelled 1')
+    expect(row.textContent).toContain('7 commands')
+    // Counts only: never a viewer's name or words.
+    expect(row.textContent).not.toContain('coders_x')
+  })
+
+  it('leaves the row out when no command was counted', async () => {
+    await render()
+    expect(document.querySelector('[data-slot="orcle-report-commands"]')).toBeNull()
+  })
+})

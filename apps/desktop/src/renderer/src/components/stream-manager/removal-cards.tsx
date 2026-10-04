@@ -60,6 +60,24 @@ export function removalKeyAnswer(
   return 'cancel'
 }
 
+/**
+ * The chooser's pick key ("1" to "3" as 0 to 2), on the same terms as Enter:
+ * only while nothing else has focus, so a digit typed in the composer or the
+ * search field is always just a digit. Null to leave the key alone.
+ */
+export function orcleCardPickIndex(
+  event: Parameters<typeof removalKeyAnswer>[0],
+  activeElement: Element | null,
+  body: Element | null,
+  count: number
+): number | null {
+  if (event.defaultPrevented || event.repeat || event.isComposing) return null
+  if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return null
+  if (activeElement && activeElement !== body) return null
+  const index = ['1', '2', '3'].indexOf(event.key)
+  return index >= 0 && index < count ? index : null
+}
+
 export function RemovalCards({
   view,
   onAnswer

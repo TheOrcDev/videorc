@@ -89,6 +89,12 @@ import { cn } from '@/lib/utils'
 import { RemoveMessagesReconnectRows } from '@/components/stream-manager/remove-messages-reconnect'
 import { RemovalCards } from '@/components/stream-manager/removal-cards'
 import {
+  CommandCards,
+  CommandStrip,
+  type CommandAnswer
+} from '@/components/stream-manager/command-cards'
+import { commandChooserView, commandConfirmView, commandStripView } from '@/lib/orcle-command-view'
+import {
   removalPaneView,
   removeFromChatAvailable,
   type RemovalAnswer
@@ -239,6 +245,11 @@ export interface StreamManagerProps {
   onRemoveFromChat?: (message: LiveChatMessage) => void
   /** Remove or Cancel on an Orcle removal card. */
   onAnswerRemoval?: (operation: ModerationOperation, answer: RemovalAnswer) => void
+  /** Answer Orcle's open voice command (plan 140, S6 part B): pick from the
+   * chooser, or Show / Cancel a flagged highlight. */
+  onAnswerCommand?: (commandId: string, answer: CommandAnswer) => void
+  /** The command whose answer is on its way. */
+  commandAnsweringId?: string | null
   sendPending?: boolean
   sendOperation?: CommentsSendOperation | null
   sendFailures?: ChatSendFailure[]
@@ -304,6 +315,8 @@ export function StreamManager({
   removalAnsweringIds,
   onRemoveFromChat,
   onAnswerRemoval,
+  onAnswerCommand,
+  commandAnsweringId = null,
   sendPending = false,
   sendOperation = null,
   sendFailures = [],
@@ -355,11 +368,25 @@ export function StreamManager({
     [removalOperations]
   )
   const removalPane = removalPaneView(removalOperations, nowMs, removalAnsweringIds)
-  const removalActive = removalPane.active
+  // Orcle voice commands (plan 140, S6 part B): the strip, the chooser and
+  // the "show it anyway?" card, from the latest command. Live only.
+  const command = live ? (cohostState?.command ?? null) : null
+  const commandStrip = commandStripView(command, nowMs)
+  const commandChooser = commandChooserView(command, nowMs)
+  const commandConfirm = commandConfirmView(
+    command,
+    nowMs,
+    command !== null && command.id === commandAnsweringId
+  )
+  const commandCardId = commandChooser || commandConfirm ? (command?.id ?? '') : ''
+  const orcleCardsActive = removalPane.active || commandStrip !== null || commandCardId !== ''
   useEffect(() => {
-    const timer = setInterval(() => setNowMs(Date.now()), onAir || removalActive ? 1_000 : 15_000)
+    const timer = setInterval(
+      () => setNowMs(Date.now()),
+      onAir || orcleCardsActive ? 1_000 : 15_000
+    )
     return () => clearInterval(timer)
-  }, [onAir, removalActive])
+  }, [onAir, orcleCardsActive])
 
   // --- Orcle (unchanged behaviour, moved into its own pane: D5) ---
   const cohostSensitivity = useCohostSensitivity()
@@ -566,28 +593,31 @@ export function StreamManager({
   // a tab, without taking focus from the composer. Once the cards and their
   // result lines are gone, the pane the streamer was on comes back, unless
   // they moved on themselves.
-  const removalCardIds = removalPane.cards.map((card) => card.operationId).join(' ')
+  const orcleCardIds = [
+    ...removalPane.cards.map((card) => card.operationId),
+    ...(commandCardId ? [commandCardId] : [])
+  ].join(' ')
   const seenRemovalCardsRef = useRef<Set<string>>(new Set())
   const revealedFromRef = useRef<{
     narrow: StreamManagerPane
     right: StreamManagerRightPane
   } | null>(null)
   useEffect(() => {
-    const ids = removalCardIds ? removalCardIds.split(' ') : []
+    const ids = orcleCardIds ? orcleCardIds.split(' ') : []
     const fresh = ids.filter((id) => !seenRemovalCardsRef.current.has(id))
     for (const id of fresh) seenRemovalCardsRef.current.add(id)
     if (fresh.length === 0 || orcleVisible || !cohostPresent) return
     revealedFromRef.current ??= { narrow: narrowPane, right: rightPane }
     setNarrowPane('orcle')
     setRightPane('orcle')
-  }, [cohostPresent, narrowPane, orcleVisible, removalCardIds, rightPane])
+  }, [cohostPresent, narrowPane, orcleVisible, orcleCardIds, rightPane])
   useEffect(() => {
     const from = revealedFromRef.current
-    if (removalActive || !from) return
+    if (orcleCardsActive || !from) return
     revealedFromRef.current = null
     setNarrowPane((current) => (current === 'orcle' ? from.narrow : current))
     setRightPane((current) => (current === 'orcle' ? from.right : current))
-  }, [removalActive])
+  }, [orcleCardsActive])
 
   // ⌘J focuses Orcle wherever it sits; ⌘F searches chat. The pane is shown
   // first, so its own focus handling lands on a visible element.
@@ -677,10 +707,18 @@ export function StreamManager({
           onUpgrade={onCohostUpgrade}
         />
       </div>
-      {/* Plan 140, S6: what Orcle is about to remove because you asked, and
-          how to stop it, above the scroll so it never scrolls away. Part B's
-          command strip ("Heard: …") goes directly above these cards: what
-          Orcle heard, then what it is about to do. */}
+      {/* Plan 140, S6: what Orcle heard and did, what waits for an answer
+          (the chooser, "show it anyway?"), then what Orcle is about to remove
+          because you asked, and how to stop it. Above the scroll, so none of
+          it scrolls away. */}
+      <CommandStrip view={commandStrip} />
+      {onAnswerCommand ? (
+        <CommandCards
+          chooser={commandChooser}
+          confirm={commandConfirm}
+          onAnswer={onAnswerCommand}
+        />
+      ) : null}
       {onAnswerRemoval ? (
         <RemovalCards
           view={removalPane}

@@ -5825,10 +5825,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     // answers, and mirrors an open Orcle card as a toast while the Stream
     // Manager is closed. Events that arrive first wait for it.
     let moderation: typeof chatModerationRef.current = null
+    let stopCohostCommandRelay: (() => void) | null = null
     const moderationBacklog: ModerationOperation[] = []
     void import('@/lib/chat-moderation-relay')
-      .then(({ startChatModerationRelay }) => {
+      .then(({ startChatModerationRelay, startCohostCommandRelay }) => {
         if (!generationIsCurrent()) return
+        // Plan 140, S6 part B: the Stream Manager's answers to Orcle's cards.
+        stopCohostCommandRelay = startCohostCommandRelay({
+          client: nextClient,
+          sessionId: () => liveChatSnapshotRef.current.sessionId,
+          commit: commitCohostState
+        })
         moderation = startChatModerationRelay({
           client: nextClient,
           sessionId: () => liveChatSnapshotRef.current.sessionId,
@@ -7200,6 +7207,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       dashboard?.dispose()
       dashboardBacklog.length = 0
       moderation?.dispose()
+      stopCohostCommandRelay?.()
       if (chatModerationRef.current === moderation) chatModerationRef.current = null
       moderationBacklog.length = 0
       if (liveChatRecoveryRetryTimer !== null) {

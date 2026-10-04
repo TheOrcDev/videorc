@@ -78,6 +78,9 @@ export interface ChatModerationRelay {
   dispose: () => void
 }
 
+// Loaded in the same chunk: answers to Orcle's voice command cards.
+export { startCohostCommandRelay } from '@/lib/cohost-command-relay'
+
 export const REMOVAL_TOAST_ID_PREFIX = 'chat-removal:'
 
 /** The card's toast, and a separate one for what became of it: sonner may
