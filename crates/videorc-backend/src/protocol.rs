@@ -4719,44 +4719,8 @@ pub struct CohostReportPayload {
     pub chat: CohostReportChat,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RunAiWorkflowParams {
-    pub session_id: String,
-    pub consent_to_upload_audio: bool,
-    pub ffmpeg_path: Option<String>,
-    /// Per-kind generation: subset of {publish_pack, creator_intelligence,
-    /// social_posts}. None = the full atomic bundle (older servers too).
-    #[serde(default)]
-    pub outputs: Option<Vec<String>>,
-    /// Title/description/social register: hooky | informative | casual.
-    #[serde(default)]
-    pub tone: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExportPublishPackParams {
-    pub session_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExportPublishPackResult {
-    pub session_id: String,
-    pub markdown_path: String,
-    /// Every file the export wrote (markdown + per-field paste-ready files).
-    #[serde(default)]
-    pub files: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClipSuggestParams {
-    pub session_id: String,
-}
-
-/// A clip-worthy time range, ranked locally from chat activity + captions.
+/// A moment worth a clip: a clip mark or a chat peak, snapped to the
+/// captions. Computed on read for the Orcle report, never stored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipMoment {
@@ -4770,8 +4734,8 @@ pub struct ClipMoment {
     pub source: Option<ClipMomentSource>,
 }
 
-/// What produced a clip suggestion: a spoken "clip that", a manual mark, or
-/// a chat spike.
+/// What produced a moment: a spoken "clip that", a manual mark, or a chat
+/// spike.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ClipMomentSource {
@@ -4821,31 +4785,6 @@ pub struct ClipMarkedEvent {
 #[serde(rename_all = "camelCase")]
 pub struct ClipMarksListParams {
     pub session_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClipSuggestResult {
-    pub session_id: String,
-    pub moments: Vec<ClipMoment>,
-    pub chat_message_count: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClipExportParams {
-    pub session_id: String,
-    pub start_ms: u64,
-    pub end_ms: u64,
-    #[serde(default)]
-    pub ffmpeg_path: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClipExportResult {
-    pub session_id: String,
-    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5213,14 +5152,6 @@ pub struct AiObjectUploadTicket {
 pub struct AiObjectUploadResponse {
     pub job_request: serde_json::Value,
     pub ticket: AiObjectUploadTicket,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AiWorkflowResult {
-    pub session_id: String,
-    pub audio_path: String,
-    pub artifacts: Vec<AiArtifact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

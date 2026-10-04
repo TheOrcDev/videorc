@@ -345,8 +345,8 @@ pub struct CaptionChunkRecord {
     #[serde(skip_serializing)]
     pub provider_item_id: Option<String>,
     /// Captions were presenting when this record landed (plan 068 D1). The
-    /// SRT and the Publish tab keep every record; the cue render and the
-    /// burned copy use presented records only.
+    /// SRT, which the Orcle report's moments read, keeps every record; the cue
+    /// render and the burned copy use presented records only.
     #[serde(skip_serializing)]
     pub presented: bool,
 }
@@ -10400,7 +10400,7 @@ mod tests {
             write_caption_artifacts(&state, "listen-only", &recording_path, artifact).await;
         let srt = tokio::fs::read_to_string(recording_path.with_extension("srt"))
             .await
-            .expect("the Publish tab needs the SRT even when captions never presented");
+            .expect("the Orcle report's moments need the SRT even when captions never presented");
         assert!(srt.contains("orcle heard this"));
         assert_eq!(artifact.presented_chunk_count(), 0);
         assert!(artifact.presented_chunks().is_empty());

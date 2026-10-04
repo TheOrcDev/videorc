@@ -3744,7 +3744,7 @@ impl Database {
                 comment_count: self.live_chat_message_count_for_session_locked(&conn, &id)?,
                 derived_from_session_id,
                 source_title,
-                processing_kind,
+                processing_kind: normalized_processing_kind(processing_kind),
                 finalization_state: crate::recording_finalization::finalization_state_from_column(
                     finalization_state.as_deref(),
                 ),
@@ -3992,7 +3992,7 @@ impl Database {
                     comment_count: row.get::<_, i64>(21)?.max(0) as u64,
                     derived_from_session_id: row.get(13)?,
                     source_title: row.get(14)?,
-                    processing_kind: row.get(15)?,
+                    processing_kind: normalized_processing_kind(row.get(15)?),
                     finalization_state:
                         crate::recording_finalization::finalization_state_from_column(
                             row.get::<_, Option<String>>(22)?.as_deref(),
@@ -7410,6 +7410,32 @@ fn normalized_session_container(value: Option<String>) -> Option<String> {
     })
 }
 
+/// The `processing_kind` values a listed session row may carry to clients.
+/// Keep it equal to the renderer's closed `processingKind` schema
+/// (`apps/desktop/src/shared/backend-rpc-contract.ts`). `performance-check`
+/// is deliberately absent: its rows are always `library_hidden` and never
+/// listed, and clients would reject it if one ever were.
+const LISTED_PROCESSING_KINDS: [&str; 1] = ["noise-cleanup"];
+
+/// The `processing_kind` twin of `normalized_session_container` (plan 119
+/// decision 12): a stored kind clients do not know degrades to "no kind" for
+/// that one row, never a dead list. The renderer validates the field as a
+/// closed literal, so one row written by a newer app into the shared profile
+/// would otherwise reject the whole sessions.list response. This makes reads
+/// tolerant only; writers must still never store a new kind.
+fn normalized_processing_kind(value: Option<String>) -> Option<String> {
+    value.filter(|processing_kind| {
+        let listed = LISTED_PROCESSING_KINDS.contains(&processing_kind.as_str());
+        if !listed {
+            tracing::warn!(
+                processing_kind,
+                "session row carries a processing kind clients do not know; listing it without one"
+            );
+        }
+        listed
+    })
+}
+
 fn clip_mark_source_label(source: crate::protocol::ClipMarkSource) -> &'static str {
     match source {
         crate::protocol::ClipMarkSource::Voice => "voice",
@@ -7680,6 +7706,67 @@ mod tests {
                     panic!("listed container {container:?} must satisfy the protocol enum")
                 });
             }
+        }
+    }
+
+    #[test]
+    fn unknown_processing_kind_degrades_to_one_row_not_a_dead_list() {
+        // Plan 119 decision 12, the container outage's twin: the renderer
+        // validates `processingKind` as a closed literal, so a kind a newer
+        // app wrote into the shared profile must list as kind-less instead of
+        // rejecting every client's Library. A hidden internal kind that
+        // somehow became visible degrades the same way.
+        use super::*;
+        let database = Database {
+            conn: Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
+            path: PathBuf::from(":memory:"),
+        };
+        database.migrate().unwrap();
+        {
+            let conn = database.lock().unwrap();
+            for (id, processing_kind) in [
+                ("cleaned", Some("noise-cleanup")),
+                ("from-a-newer-app", Some("clean-cut")),
+                ("leaked-internal", Some("performance-check")),
+                ("plain", None),
+            ] {
+                conn.execute(
+                    "INSERT INTO sessions
+                        (id, title, started_at, status, mode, processing_kind,
+                         sources_json, layout_json, output_json)
+                     VALUES (?1, ?1, '2026-10-04T00:00:00Z', 'completed', 'record', ?2,
+                             '{}', ?3, '{}')",
+                    params![
+                        id,
+                        processing_kind,
+                        serde_json::to_string(&crate::protocol::default_layout_settings()).unwrap(),
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        let expected = |id: &str| (id == "cleaned").then_some("noise-cleanup");
+
+        let summaries = database.list_sessions(10).unwrap();
+        assert_eq!(summaries.len(), 4, "no row may be dropped");
+        for session in &summaries {
+            assert_eq!(
+                session.processing_kind.as_deref(),
+                expected(session.id.as_str()),
+                "{} must list only a kind clients know",
+                session.id
+            );
+        }
+
+        let page = database.list_session_items_page(None, 10).unwrap();
+        assert_eq!(page.items.len(), 4, "no row may be dropped");
+        for item in &page.items {
+            assert_eq!(
+                item.processing_kind.as_deref(),
+                expected(item.id.as_str()),
+                "{} must list only a kind clients know",
+                item.id
+            );
         }
     }
 
