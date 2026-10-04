@@ -49,7 +49,8 @@ happens underneath.
   catches questions from every platform with a drafted reply you approve,
   flags spam and abuse against your own rules, greets first-timers and reminds
   you of your promises. It never posts or acts on its own. Cloud AI is
-  opt-in, and after each stream a short report stays on your computer.
+  opt-in, and after each stream a short report stays on your computer. See
+  [docs/orcle-live.md](docs/orcle-live.md).
 - **Platform-aware preview.** macOS uses a detached native CAMetalLayer preview.
   Windows Alpha currently uses the documented uncompressed, latest-wins Electron
   proof surface; it must not be described as CAMetalLayer or as final native
