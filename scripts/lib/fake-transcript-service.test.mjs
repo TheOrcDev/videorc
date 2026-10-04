@@ -193,6 +193,16 @@ describe('fake transcript service', () => {
         assert.equal(capabilities.cleanCut.remainingSeconds, 5)
         assert.deepEqual(capabilities.cleanCut.modes, ['clean', 'condensed'])
         assert.equal(capabilities.cleanCut.workflowKind, 'post-recording-clean-cut')
+        // Plan 140 S9: Orcle's cloud command parser is off unless a smoke opts in.
+        assert.equal(capabilities.features.cohostCommandEnabled, false)
+        assert.equal(capabilities.limits.dailyCommandCalls, 300)
+        fake.state.cohostCommandEnabled = true
+        const enabled = await (
+          await fetch(`${fake.httpOrigin}/api/ai/capabilities`, {
+            headers: { authorization: `Bearer ${TOKEN}` }
+          })
+        ).json()
+        assert.equal(enabled.features.cohostCommandEnabled, true)
         assert.equal(fake.state.chunkRequests, 3, 'an invalid chunk is refused before it counts')
       } finally {
         await fake.close()

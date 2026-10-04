@@ -26,6 +26,9 @@ import { inspectPcm16Wav } from './audio-amplitude.mjs'
  * - `keeps`: condensed `[{ fromIndex, toIndex, title }]` by segment index.
  *   Default keeps the first and last segment.
  * - `monthlySecondsLimit`, `remainingSeconds`: the metered allowance.
+ * - `cohostCommandEnabled`: `features.cohostCommandEnabled` (plan 140 S8,
+ *   contract part E). Default false: Orcle's cloud command parser stays off.
+ *   `state.cohostCommandEnabled` changes the next capability read.
  *
  * Knobs on `state`: `chunkFailureCode` answers every chunk upload with that
  * code (status from the contract); `jobFailureCode` fails job creation.
@@ -202,9 +205,14 @@ export async function startFakeTranscriptService({
   keeps = null,
   language = 'en',
   monthlySecondsLimit = 72_000,
-  remainingSeconds = null
+  remainingSeconds = null,
+  // Plan 140 S9: `features.cohostCommandEnabled` in the capabilities block.
+  // Off by default, so Orcle's cloud command parser stays off in every smoke
+  // that does not opt in (`state.cohostCommandEnabled` flips it later).
+  cohostCommandEnabled = false
 }) {
   const state = {
+    cohostCommandEnabled: cohostCommandEnabled === true,
     chunkRequests: 0,
     chunks: [],
     usedSeconds: 0,
@@ -229,7 +237,15 @@ export async function startFakeTranscriptService({
     if (req.method === 'GET' && url.pathname === '/api/ai/capabilities') {
       await drain(req)
       state.capabilityRequests += 1
-      return json(res, 200, capabilitiesDocument({ monthlySecondsLimit, remaining }))
+      return json(
+        res,
+        200,
+        capabilitiesDocument({
+          monthlySecondsLimit,
+          remaining,
+          cohostCommandEnabled: state.cohostCommandEnabled
+        })
+      )
     }
     if (req.method === 'POST' && url.pathname === '/api/ai/transcripts/chunks') {
       const body = await readRequestBody(req, MAX_CHUNK_BYTES + 64 * 1024)
@@ -520,7 +536,11 @@ function serializeJob(job) {
   }
 }
 
-function capabilitiesDocument({ monthlySecondsLimit, remaining }) {
+export function capabilitiesDocument({
+  monthlySecondsLimit,
+  remaining,
+  cohostCommandEnabled = false
+}) {
   const now = new Date().toISOString()
   return {
     entitlement: {
@@ -534,6 +554,7 @@ function capabilitiesDocument({ monthlySecondsLimit, remaining }) {
     features: {
       cleanCutEnabled: true,
       cloudAiEnabled: true,
+      cohostCommandEnabled: cohostCommandEnabled === true,
       gatewayConfigured: true,
       modelTestingEnabled: false,
       multipartAudioJobsEnabled: true,
@@ -548,6 +569,7 @@ function capabilitiesDocument({ monthlySecondsLimit, remaining }) {
     }),
     generatedAt: now,
     limits: {
+      dailyCommandCalls: 300,
       dailyJobs: 20,
       maxAudioBytes: 13_107_200,
       maxAudioMegabytes: 12.5,

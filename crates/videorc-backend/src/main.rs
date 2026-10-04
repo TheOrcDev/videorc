@@ -5470,6 +5470,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         COMMAND_LANE_SMOKE_BLOCK_METHOD
         | "test.youtubeQuota.forceExpiry"
         | "test.youtubeQuota.seedAccount"
+        | "test.youtubeQuota.setBudget"
         | "noiseCleanup.start"
         | "noiseCleanup.cancel"
         | "cleanCut.start"
@@ -8474,6 +8475,38 @@ async fn handle_text_message_with_role(
                         "youtube-quota-not-paused",
                         "YouTube is not paused; nothing to expire.",
                     ),
+                }
+            }
+        }
+        // Plan 140 (S9): the drill sets the daily budget (`limit`, units; null
+        // restores the compiled default) to prove a removal sheds at 100%.
+        // Same gates as the hooks above.
+        #[cfg(debug_assertions)]
+        "test.youtubeQuota.setBudget" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct BudgetParams {
+                #[serde(default)]
+                limit: Option<u64>,
+            }
+            if youtube_quota::youtube_api_base_url_override().is_none() {
+                ServerResponse::error(
+                    command.id,
+                    "youtube-quota-smoke-disabled",
+                    format!(
+                        "{} must point at a local fake for the quota smoke hooks.",
+                        youtube_quota::YOUTUBE_API_BASE_URL_ENV
+                    ),
+                )
+            } else {
+                match serde_json::from_value::<BudgetParams>(command.params) {
+                    Ok(params) => {
+                        youtube_quota::set_daily_budget_limit(state, params.limit);
+                        ServerResponse::ok(command.id, youtube_quota::budget_status(state))
+                    }
+                    Err(error) => {
+                        ServerResponse::error(command.id, "invalid-params", error.to_string())
+                    }
                 }
             }
         }

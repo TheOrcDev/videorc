@@ -4,9 +4,12 @@ import test from 'node:test'
 import {
   FAKE_YOUTUBE_ACCESS_TOKEN,
   chatPage,
+  deleteFailureResponse,
   isDataApiPath,
   quotaExceededBody,
-  startFakeYouTubeApi
+  startFakeYouTubeApi,
+  summarizeYouTubeAttempts,
+  youtubeAttemptCost
 } from './fake-youtube-api.mjs'
 
 test('only Data API paths spend quota', () => {
@@ -110,6 +113,62 @@ test('the fake serves prepare, chat and viewers, then flips to quotaExceeded on 
     assert.equal(api.dataApiRequestsSince(Date.now() + 1000).length, 0)
     assert.equal(dataCalls[0].quotaExhausted, true)
     assert.ok(api.requests.length >= 9)
+  } finally {
+    await api.close()
+  }
+})
+
+test('a chat message delete answers 204, costs 50 units and takes scripted failures', async () => {
+  const api = await startFakeYouTubeApi()
+  try {
+    const headers = { authorization: `Bearer ${FAKE_YOUTUBE_ACCESS_TOKEN}` }
+    const posted = api.postChat('please remove me')
+    const removed = await fetch(`${api.origin}/youtube/v3/liveChat/messages?id=${posted.id}`, {
+      method: 'DELETE',
+      headers
+    })
+    assert.equal(removed.status, 204)
+    assert.equal(await removed.text(), '')
+    assert.deepEqual(api.chat.deleted, [posted.id])
+    // Never a list page: the old fake answered DELETE as one.
+    const page = await (
+      await fetch(`${api.origin}/youtube/v3/liveChat/messages?liveChatId=smoke-live-chat`, {
+        headers
+      })
+    ).json()
+    assert.equal(page.items.length, 1, 'the list keeps its indexes')
+
+    const unknown = await fetch(`${api.origin}/youtube/v3/liveChat/messages?id=nope`, {
+      method: 'DELETE',
+      headers
+    })
+    assert.equal(unknown.status, 404)
+
+    api.controls.deleteFailure = 'forbidden'
+    const forbidden = await fetch(`${api.origin}/youtube/v3/liveChat/messages?id=${posted.id}`, {
+      method: 'DELETE',
+      headers
+    })
+    assert.equal(forbidden.status, 403)
+    assert.equal((await forbidden.json()).error.errors[0].reason, 'insufficientPermissions')
+    api.controls.deleteFailure = 'quota'
+    const quota = await fetch(`${api.origin}/youtube/v3/liveChat/messages?id=${posted.id}`, {
+      method: 'DELETE',
+      headers
+    })
+    assert.equal((await quota.json()).error.errors[0].reason, 'quotaExceeded')
+    assert.equal(deleteFailureResponse('not-found').status, 404)
+    assert.equal(deleteFailureResponse(null), null)
+
+    assert.deepEqual(youtubeAttemptCost('DELETE', '/youtube/v3/liveChat/messages'), {
+      endpoint: 'liveChatMessages.delete',
+      units: 50
+    })
+    const summary = summarizeYouTubeAttempts(api.requests)
+    assert.equal(summary.unknown, 0)
+    assert.equal(summary.endpoints['liveChatMessages.delete'].calls, 4)
+    assert.equal(summary.endpoints['liveChatMessages.delete'].units, 200)
+    assert.equal(summary.endpoints['liveChatMessages.delete'].outcomes['204'], 1)
   } finally {
     await api.close()
   }

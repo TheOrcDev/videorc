@@ -792,6 +792,11 @@ pub enum ChatSenderConfig {
         broadcast_id: String,
     },
     Fake(FakeChatSendBehavior),
+    /// A fake destination with a scripted removal outcome (plan 140 S9).
+    FakeModerated {
+        send: FakeChatSendBehavior,
+        delete: FakeChatDeleteBehavior,
+    },
     #[cfg(test)]
     FakeProbe {
         behavior: FakeChatSendBehavior,
@@ -1726,6 +1731,27 @@ pub struct FakeChatConfig {
     /// on the card, plan 095).
     #[serde(default)]
     pub emote: Option<FakeChatEmote>,
+    /// Author names to rotate through (`authors[seq % len]`) instead of
+    /// "Test Viewer N", so a smoke can say a name ("coders_x", plan 140 S9).
+    #[serde(default)]
+    pub authors: Vec<String>,
+    /// A scripted removal outcome for this destination (plan 140 S9). Absent:
+    /// the removal mirrors `send` (sent removes, failed fails, timeout hangs).
+    #[serde(default)]
+    pub delete: Option<FakeChatDeleteBehavior>,
+}
+
+/// What a fake destination answers a removal with (plan 140 S9's smoke).
+/// Smoke input only: never serialized, never sent to a renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FakeChatDeleteBehavior {
+    /// The platform removed it.
+    Ok,
+    /// The account lacks the moderation scope: hidden in Videorc.
+    MissingScope,
+    /// The platform no longer has it: counted as removed.
+    NotFound,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1742,6 +1768,17 @@ pub enum FakeChatSendBehavior {
     Sent,
     Failed,
     Timeout,
+}
+
+/// The send (and removal) credentials a fake destination registers.
+fn fake_sender(fake: &FakeChatConfig) -> ChatSenderConfig {
+    match fake.delete {
+        Some(delete) => ChatSenderConfig::FakeModerated {
+            send: fake.send,
+            delete,
+        },
+        None => ChatSenderConfig::Fake(fake.send),
+    }
 }
 
 fn default_fake_platform() -> StreamPlatform {
@@ -1876,7 +1913,7 @@ where
             };
         }
         if fake.platform != StreamPlatform::X {
-            coordinator.register_sender(destination_id, ChatSenderConfig::Fake(fake.send));
+            coordinator.register_sender(destination_id, fake_sender(&fake));
         }
         coordinator.attach_task(handle);
     }
@@ -1901,7 +1938,7 @@ where
             };
         }
         if fake.platform != StreamPlatform::X {
-            coordinator.register_sender(destination_id, ChatSenderConfig::Fake(fake.send));
+            coordinator.register_sender(destination_id, fake_sender(&fake));
         }
         coordinator.attach_task(handle);
     }
@@ -2705,7 +2742,8 @@ async fn send_to_destination(
                 provider_message_id: (!timestamp.is_empty()).then_some(timestamp),
             })
         }
-        ChatSenderConfig::Fake(behavior) => match behavior {
+        ChatSenderConfig::Fake(behavior)
+        | ChatSenderConfig::FakeModerated { send: behavior, .. } => match behavior {
             FakeChatSendBehavior::Sent => Ok(ProviderSendReceipt {
                 provider_message_id: Some(format!("fake-sent-{}", uuid::Uuid::new_v4())),
             }),
@@ -3395,7 +3433,7 @@ async fn run_fake_connector(
             )
             .await;
         }
-        let mut message = fake_message(&session_id, platform, config.target_id.as_deref(), seq);
+        let mut message = fake_message_for(&config, &session_id, seq);
         message.author_avatar_url = config.avatar_url.clone();
         if let Some(emote) = &config.emote {
             message.fragments = vec![
@@ -3424,7 +3462,7 @@ async fn run_fake_connector(
             let _ = try_deliver_message(
                 &state,
                 session_generation,
-                fake_message(&session_id, platform, config.target_id.as_deref(), 0),
+                fake_message_for(&config, &session_id, 0),
             )
             .await;
         }
@@ -3606,6 +3644,22 @@ fn fake_events(
         ],
         _ => Vec::new(),
     }
+}
+
+/// One scripted message for a fake lane, with its configured author.
+fn fake_message_for(config: &FakeChatConfig, session_id: &str, seq: u32) -> LiveChatMessage {
+    let mut message = fake_message(
+        session_id,
+        config.platform,
+        config.target_id.as_deref(),
+        seq,
+    );
+    if !config.authors.is_empty() {
+        let author = &config.authors[seq as usize % config.authors.len()];
+        message.author_id = Some(format!("fake-author-{}", author.to_lowercase()));
+        message.author_name = author.clone();
+    }
+    message
 }
 
 fn fake_message(
@@ -5550,6 +5604,45 @@ mod tests {
                 .unwrap(),
             Some(operation)
         );
+    }
+
+    #[test]
+    fn a_fake_lane_takes_scripted_authors_and_a_removal_outcome() {
+        let config: FakeChatConfig = serde_json::from_value(serde_json::json!({
+            "platform": "kick",
+            "targetId": "noscope",
+            "authors": ["coders_x", "Ana Dev"],
+            "delete": "missing-scope"
+        }))
+        .unwrap();
+        assert_eq!(config.delete, Some(FakeChatDeleteBehavior::MissingScope));
+        let names: Vec<String> = (0..3)
+            .map(|seq| fake_message_for(&config, "s1", seq).author_name)
+            .collect();
+        assert_eq!(names, ["coders_x", "Ana Dev", "coders_x"]);
+        assert_eq!(
+            fake_message_for(&config, "s1", 1).author_id.as_deref(),
+            Some("fake-author-ana dev")
+        );
+        assert!(matches!(
+            fake_sender(&config),
+            ChatSenderConfig::FakeModerated {
+                send: FakeChatSendBehavior::Sent,
+                delete: FakeChatDeleteBehavior::MissingScope,
+            }
+        ));
+        // Without them, nothing changes: "Test Viewer N" and a sender that
+        // mirrors `send`.
+        let plain: FakeChatConfig =
+            serde_json::from_value(serde_json::json!({ "platform": "twitch" })).unwrap();
+        assert_eq!(
+            fake_message_for(&plain, "s1", 4).author_name,
+            "Test Viewer 1"
+        );
+        assert!(matches!(
+            fake_sender(&plain),
+            ChatSenderConfig::Fake(FakeChatSendBehavior::Sent)
+        ));
     }
 
     #[tokio::test]

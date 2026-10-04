@@ -145,3 +145,12 @@ and not found. Counts only, never names or words.
 
 Checks: `pnpm smoke:orcle-commands` (plan 140, S9) and the removal steps in
 [live-chat-live-smoke-checklist.md](live-chat-live-smoke-checklist.md).
+
+The smoke drives the real debug backend with fakes only. Its fake chat lanes
+(`liveChat.start` `fakes`, debug input never sent to a renderer) take two
+optional fields: `authors` (names to rotate through instead of "Test Viewer
+N") and `delete` (`ok`, `missing-scope` or `not-found`: what the platform
+answers a removal; absent, a removal mirrors `send`). The fake YouTube API
+answers `liveChatMessages.delete` with 204 and meters it at 50 units, and
+`smoke:youtube-quota` proves a removal while paused or with the daily budget
+used up is hidden in Videorc without a request.

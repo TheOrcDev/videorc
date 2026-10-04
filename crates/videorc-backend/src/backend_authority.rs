@@ -142,6 +142,9 @@ fn renderer_smoke_method(method: &str) -> bool {
             // socket; the handler also requires the loopback API override.
             | "test.youtubeQuota.forceExpiry"
             | "test.youtubeQuota.seedAccount"
+            // Plan 140 (S9): the drill sets the daily budget to prove a
+            // removal sheds at 100% without a request.
+            | "test.youtubeQuota.setBudget"
     )
 }
 
@@ -297,6 +300,7 @@ mod tests {
             "test.captureRecovery.screenCadenceEvidence",
             "test.youtubeQuota.forceExpiry",
             "test.youtubeQuota.seedAccount",
+            "test.youtubeQuota.setBudget",
         ] {
             assert_eq!(
                 authorize_backend_method(BackendRole::Renderer, method, false),
@@ -331,6 +335,7 @@ mod tests {
             "test.captureRecovery.screenCadenceEvidence",
             "test.youtubeQuota.forceExpiry",
             "test.youtubeQuota.seedAccount",
+            "test.youtubeQuota.setBudget",
         ] {
             assert_eq!(
                 authorize_backend_method(BackendRole::Admin, method, false),

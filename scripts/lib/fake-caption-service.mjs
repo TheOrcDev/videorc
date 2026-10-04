@@ -330,6 +330,20 @@ export async function startFakeCaptionService({
       state.emittedFinals.push({ itemId: scriptedItemId, text, at: Date.now(), reached })
       return reached
     },
+    /**
+     * Push several scripted utterances in order, `gapMs` apart: one spoken
+     * sentence the speech model cut into finals (plan 140 S9: a voice command
+     * split across two chunks still completes). Resolves with the clients
+     * each final reached.
+     */
+    async emitRealtimeFinals(texts, { gapMs = 600 } = {}) {
+      const reached = []
+      for (const [index, text] of texts.entries()) {
+        if (index > 0) await new Promise((resolveGap) => setTimeout(resolveGap, gapMs))
+        reached.push(await this.emitRealtimeFinal(text))
+      }
+      return reached
+    },
     close: async () => {
       for (const hold of activeFinalHolds) hold.release()
       for (const client of realtime.clients) client.terminate()
@@ -340,6 +354,19 @@ export async function startFakeCaptionService({
 }
 
 const CHUNK_PURPOSES = new Set(['captions', 'listen'])
+
+/**
+ * Plan 140 S9: Orcle voice commands as a speech model delivers them. The
+ * first is one command cut into two finals; the wake word starts the first.
+ */
+export const ORCLE_COMMAND_FINALS = Object.freeze({
+  highlightByNameSplit: Object.freeze(['Orcle, highlight the comment', 'from coders X.']),
+  clear: Object.freeze(['Orcle, clear the highlight.']),
+  removeThisOne: Object.freeze(['This one is toxic. Remove it from our chat.']),
+  confirm: Object.freeze(['Yes.']),
+  cancel: Object.freeze(['No.']),
+  highlightThisOne: Object.freeze(['Orcle, put this one up.'])
+})
 
 /**
  * The value of one plain (non-file) multipart/form-data field, or null when

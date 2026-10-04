@@ -56,7 +56,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::live_chat::{
-    ChatSenderConfig, FakeChatSendBehavior, LiveChatEventType, LiveChatMessage,
+    ChatSenderConfig, FakeChatDeleteBehavior, FakeChatSendBehavior, LiveChatEventType,
+    LiveChatMessage,
 };
 use crate::protocol::FeatureId;
 use crate::state::AppState;
@@ -1200,8 +1201,29 @@ async fn delete_once(
             .await
         }
         ChatSenderConfig::Fake(behavior) => fake_delete(behavior).await,
+        ChatSenderConfig::FakeModerated { delete, .. } => {
+            fake_scripted_delete(delete, message.platform)
+        }
         #[cfg(test)]
         ChatSenderConfig::FakeProbe { behavior, .. } => fake_delete(behavior).await,
+    }
+}
+
+/// A fake destination's scripted removal outcome (plan 140 S9's smoke).
+fn fake_scripted_delete(
+    behavior: FakeChatDeleteBehavior,
+    platform: StreamPlatform,
+) -> ProviderDeleteOutcome {
+    match behavior {
+        FakeChatDeleteBehavior::Ok => ProviderDeleteOutcome::Deleted,
+        FakeChatDeleteBehavior::NotFound => ProviderDeleteOutcome::NotFound,
+        FakeChatDeleteBehavior::MissingScope => ProviderDeleteOutcome::CannotDelete {
+            code: ModerationOutcomeCode::MissingScope,
+            reason: format!(
+                "Reconnect {} to let Orcle remove messages.",
+                stream_platform_label(platform)
+            ),
+        },
     }
 }
 
@@ -2569,5 +2591,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(again.phase, ModerationPhase::Failed);
+    }
+
+    #[test]
+    fn a_scripted_fake_destination_answers_removals_as_told() {
+        assert_eq!(
+            fake_scripted_delete(FakeChatDeleteBehavior::Ok, StreamPlatform::Kick),
+            ProviderDeleteOutcome::Deleted
+        );
+        assert_eq!(
+            fake_scripted_delete(FakeChatDeleteBehavior::NotFound, StreamPlatform::Kick),
+            ProviderDeleteOutcome::NotFound
+        );
+        assert_eq!(
+            fake_scripted_delete(FakeChatDeleteBehavior::MissingScope, StreamPlatform::Kick),
+            ProviderDeleteOutcome::CannotDelete {
+                code: ModerationOutcomeCode::MissingScope,
+                reason: "Reconnect Kick to let Orcle remove messages.".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fake_destination_without_the_scope_hides_the_message_in_videorc() {
+        let (state, _events) = test_state();
+        let target = message(StreamPlatform::Kick, 1);
+        seed(
+            &state,
+            StreamPlatform::Kick,
+            Some(ChatSenderConfig::FakeModerated {
+                send: FakeChatSendBehavior::Sent,
+                delete: FakeChatDeleteBehavior::MissingScope,
+            }),
+            &[target.clone()],
+        )
+        .await;
+        let operation = request(&state, request_for(&target, ModerationSource::Manual))
+            .await
+            .unwrap();
+        assert_eq!(operation.phase, ModerationPhase::HiddenLocally);
+        assert_eq!(
+            operation.outcome_code,
+            Some(ModerationOutcomeCode::MissingScope)
+        );
+        let row = buffered_message(&state, &target.id).await;
+        assert!(row.is_deleted);
+        assert_eq!(row.raw_provider_type.as_deref(), Some("videorc.hidden"));
     }
 }
