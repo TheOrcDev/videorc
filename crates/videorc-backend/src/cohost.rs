@@ -8713,7 +8713,7 @@ mod tests {
         engine.note_messages_at(&rows, start);
         let mut t = start + secs(2);
         let mut version = 1;
-        let mut fail =
+        let fail =
             |engine: &mut CohostEngine, t: Instant, version: u64, error: CohostApiError| {
                 let prepared = send_spotlight(engine, generation, version, t).expect("lane open");
                 assert_eq!(prepared.generation, generation);
@@ -10752,7 +10752,7 @@ mod tests {
         // the streamer removed; a deletion alone never did.
         let start = Instant::now();
         let (mut engine, generation) = running_engine(start);
-        let rows = messages("session-1", 0..3);
+        let rows = messages("session-1", 0..TICK_BURST_THRESHOLD as u32);
         engine.note_messages(&rows);
         engine
             .prepare_tick(generation, true, true, start + secs(1))
