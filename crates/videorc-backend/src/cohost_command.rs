@@ -420,6 +420,8 @@ struct Detection {
     /// The recent-command dedupe key; `None` for answers and choices, which
     /// the engine consumes as they come.
     dedupe: Option<String>,
+    /// Index in the window of the last word the detection consumed.
+    end: usize,
 }
 
 impl CommandDetector {
@@ -454,7 +456,21 @@ impl CommandDetector {
             return None;
         }
         self.words.extend(words);
-        let Detection { command, dedupe } = detect(&self.words, self.final_index, ctx)?;
+        let Detection {
+            command,
+            dedupe,
+            end,
+        } = detect(&self.words, self.final_index, ctx)?;
+        // A command closed by a sentence mark is finished: its words never
+        // start or extend a later command. Without this, "Orcle, clear the
+        // highlight." followed by "This one is toxic. Remove it from our
+        // chat." read the second sentence as the clear's target and lost the
+        // removal. An unclosed command keeps its words, so a name cut by a
+        // final boundary still grows into the next final.
+        if dedupe.is_some() && self.words[end].sentence_end {
+            let through = self.words[end].ordinal;
+            self.words.retain(|word| word.ordinal > through);
+        }
         if let Some(key) = dedupe {
             if self.recent.iter().any(|(seen, _)| *seen == key) {
                 return None;
@@ -729,6 +745,7 @@ fn detect(words: &[Word], newest: u64, ctx: &DetectContext) -> Option<Detection>
                 wake_word: newest_has_wake,
             },
             dedupe: None,
+            end: words.len() - 1,
         });
     }
     if ctx.awaiting_answer
@@ -744,6 +761,7 @@ fn detect(words: &[Word], newest: u64, ctx: &DetectContext) -> Option<Detection>
                 wake_word: newest_has_wake,
             },
             dedupe: None,
+            end: words.len() - 1,
         });
     }
     // Latest start wins: scan wake words and structured verbs from the end.
@@ -768,9 +786,12 @@ fn detect(words: &[Word], newest: u64, ctx: &DetectContext) -> Option<Detection>
             continue;
         }
         // A wake word earlier in the window owns this verb when its own
-        // parse works ("Orcle, this one is toxic, remove it from our chat").
+        // parse works and reaches it ("Orcle, this one is toxic, remove it
+        // from our chat"). A command that ended before this verb ("Orcle,
+        // clear the highlight. This one is toxic, remove it") does not.
         if let Some(wake) = nearest_wake_before(words, index)
             && let WakeOutcome::Command(detection) = parse_wake(words, wake, newest, ctx)
+            && detection.end >= index
         {
             return Some(detection);
         }
@@ -871,6 +892,7 @@ fn parse_wake(words: &[Word], wake: usize, newest: u64, ctx: &DetectContext) -> 
                 wake_word: true,
             },
             dedupe: None,
+            end: sentence_end,
         });
     }
     match parse_command(words, from, span_end, false) {
@@ -889,6 +911,7 @@ fn parse_wake(words: &[Word], wake: usize, newest: u64, ctx: &DetectContext) -> 
                     wake_word: true,
                 },
                 dedupe,
+                end: parsed.end,
             })
         }
         None => {
@@ -922,6 +945,7 @@ fn parse_structured(words: &[Word], verb: usize, newest: u64) -> Option<Detectio
             wake_word: false,
         },
         dedupe,
+        end: parsed.end,
     })
 }
 
@@ -970,6 +994,7 @@ fn unknown_detection(
             wake_word: true,
         },
         dedupe: Some(format!("unknown|{}", words[wake].ordinal)),
+        end: end - 1,
     })
 }
 
@@ -1819,6 +1844,68 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn a_closed_command_never_extends_into_the_next_sentence() {
+        // Plan 140 S9 (smoke:orcle-commands): the clear's words used to read
+        // the next final as its target, firing a second clear and losing the
+        // removal.
+        let mut detector = CommandDetector::default();
+        let start = Instant::now();
+        let clear = detector
+            .observe_final("c", 1, "Orcle, clear the highlight.", start, &PLAIN)
+            .expect("the clear");
+        assert_eq!(clear.kind, CommandKind::Clear);
+        let removal = detector
+            .observe_final(
+                "c",
+                2,
+                "This one is toxic. Remove it from our chat.",
+                start + Duration::from_secs(1),
+                &PLAIN,
+            )
+            .expect("the removal is heard, not a second clear");
+        assert_eq!(removal.kind, CommandKind::Remove);
+        assert_eq!(removal.target, CommandTarget::Deixis);
+        assert_eq!(removal.reason.as_deref(), Some("toxic"));
+        assert!(!removal.wake_word);
+
+        // A sentence with no command of its own fires nothing.
+        let mut detector = CommandDetector::default();
+        assert!(
+            detector
+                .observe_final("c", 1, "Orcle, clear the highlight.", start, &PLAIN)
+                .is_some()
+        );
+        assert_eq!(
+            detector.observe_final(
+                "c",
+                2,
+                "This one is toxic.",
+                start + Duration::from_secs(1),
+                &PLAIN
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_wake_word_owns_a_later_verb_only_when_its_command_reaches_it() {
+        // One final, two sentences: the latest start wins, and the clear that
+        // ended before "remove" does not swallow it.
+        let command = detect_one(
+            "Orcle, clear the highlight. This one is toxic, remove it from our chat.",
+            &PLAIN,
+        )
+        .expect("a command");
+        assert_eq!(command.kind, CommandKind::Remove);
+        assert_eq!(command.target, CommandTarget::Deixis);
+        // The wake word still owns a verb its own command reaches.
+        let owned = detect_one("Orcle, this one is toxic, remove it from our chat.", &PLAIN)
+            .expect("a command");
+        assert_eq!(owned.kind, CommandKind::Remove);
+        assert!(owned.wake_word);
     }
 
     #[test]
