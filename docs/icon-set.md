@@ -21,10 +21,14 @@ The registry names icons by **meaning**, not by shape: call sites ask for
   variants, two pins, two locks and two spinners — nobody could have answered
   "which icons does Videorc use?" without a grep.
 
-Today (plan 080, 2026-09-30): **91 semantic slots over 86 glyphs**, six of them platform brand marks outside the Nucleo count (`KickIcon` is a hand-drawn inline SVG, plan 063; the other five come from Phosphor). The Stream Manager adds seven slots in its own registry, `components/stream-manager/activity-icons.tsx`: six activity slots (plan 055: follow, supporter, gift, tip, raid, announcement) and the stats bar's viewer count (plan 057). The shared registry ships in every window's eager chunk, and these are only drawn in the Stream Manager. They count toward the same ceiling. Five slots share a glyph
+Today (plan 119, 2026-10-04): **91 semantic slots over 87 glyphs**. Seven of the glyphs sit outside the Nucleo count: six platform brand marks (`KickIcon` is a hand-drawn inline SVG, plan 063; the other five come from Phosphor) and `OrcleIcon`, Orcle's own mark, hand-drawn from the app logo (plan 119). The Stream Manager adds seven slots in its own registry, `components/stream-manager/activity-icons.tsx`: six activity slots (plan 055: follow, supporter, gift, tip, raid, announcement) and the stats bar's viewer count (plan 057). The shared registry ships in every window's eager chunk, and these are only drawn in the Stream Manager. They count toward the same ceiling. Four slots share a glyph
 (`StudioIcon`/`CameraIcon`, `SourcesIcon`/`DisplayIcon`, `AssetsIcon`/`ImageIcon`,
-`OutputIcon`/`RecordIcon`, `PublishIcon`/`SparkleIcon`) — those are exactly the
-places the audit below expects to diverge.
+`OutputIcon`/`RecordIcon`) — those are exactly the places the audit below
+expects to diverge.
+
+Plan 119 retired two slots and added two. `OrcleIcon` replaced both
+`PublishIcon` (Sparkle, a glyph `SparkleIcon` keeps) and `CohostIcon` (Robot,
+freed), and the in-app player added `PauseIcon` (Pause).
 
 Plan 080 freed two glyphs: `ThemeIcon` (PaintBrush) and `KeyboardIcon`
 (Keyboard) only ever decorated Settings section headings, and Settings
@@ -55,8 +59,8 @@ lands**:
 
 1. **Count.** 100 is the hard ceiling. `pnpm icons:build` refuses to build a
    larger export rather than leaving the count to whoever last added a glyph.
-   At 86 glyphs the app has ~14 of headroom; the audit's divergences would
-   spend about 4 of it.
+   At 87 glyphs the app has ~13 of headroom; the audit's divergences would
+   spend about 3 of it.
 
 2. **Where the SVGs may live.** Videorc's repository is public and AGPL, which
    grants everyone downstream the right to redistribute and modify everything
@@ -125,7 +129,6 @@ deliberately behaviour-free. These are the slots where the inherited glyph is
 | -------------------------------------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `SourcesIcon`                                | Monitor                   | **Change.** The Sources page owns screen, window, camera _and_ microphone; a monitor names one of four. Prefer a plug/input or layered-devices glyph.                                          |
 | `OutputIcon`                                 | Record (dot)              | **Change.** The Output page configures destinations and encoding; the record dot is the Record _action_ and must not be diluted. Prefer export/arrow-out or sliders. Splits from `RecordIcon`. |
-| `PublishIcon`                                | Sparkle                   | **Change.** "AI sparkle" says nothing about publishing. Prefer send/share/rocket, and keep sparkle for explicitly-AI actions. Splits from `SparkleIcon`.                                       |
 | `SourcesIcon`/`DisplayIcon`                  | Monitor (shared)          | **Split** once Sources gets its own glyph; `DisplayIcon` keeps the monitor.                                                                                                                    |
 | `AssetsIcon`/`ImageIcon`                     | ImageSquare (shared)      | **Consider splitting.** Assets is a library of media, not one image — a stack/collection glyph would separate them.                                                                            |
 | `StudioIcon`/`CameraIcon`                    | VideoCamera (shared)      | **Keep shared** unless the export offers a distinct "studio/stage" glyph worth the extra count.                                                                                                |
@@ -144,7 +147,8 @@ The 91 slots are the authoritative list — read them straight out of
 per slot name in kebab-case (`sources-icon.svg` → `SourcesIcon`), plus solid
 variants for the filled slots noted above.
 
-Three slots are **not** part of any icon-set migration: `TwitchIcon`,
+Seven slots are **not** part of any icon-set migration. `OrcleIcon` is
+Videorc's own mark. `TwitchIcon`, `TiktokIcon`, `InstagramIcon`, `KickIcon`,
 `XPlatformIcon` and `YoutubeIcon` are third-party brand marks with their own
 trademark rules, and the design language keeps app/source marks as the only
 full-colour icons on screen.

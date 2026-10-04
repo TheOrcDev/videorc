@@ -130,10 +130,8 @@ function labels(items: HTMLElement[]): string[] {
 }
 
 describe('Library → Orcle report (plan 119 S3)', () => {
-  it('has no Publish entry and says where files live', async () => {
+  it('says where files live', async () => {
     await render()
-    expect(document.querySelector('[aria-label="Open in Publish"]')).toBeNull()
-    expect(document.body.textContent).not.toContain('Publish')
     expect(document.querySelector('[data-slot="page-header"]')?.textContent).toContain(
       'Every recording and stream becomes a local session. Files stay on disk.'
     )

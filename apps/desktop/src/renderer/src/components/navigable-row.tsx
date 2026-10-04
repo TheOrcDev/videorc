@@ -6,8 +6,8 @@ import { cn } from '@/lib/utils'
 /**
  * Fact row with an optional navigate affordance (videorc-design): icon · label
  * · value, and a chevron when clicking jumps to the page that OWNS the value.
- * Shared home for the pattern SessionPanel introduced — Settings and Publish
- * rows must render identically (UX rework E0 primitive).
+ * Shared home for the pattern SessionPanel introduced, so every such row
+ * renders identically (UX rework E0 primitive).
  */
 export function NavigableRow({
   icon: RowIcon,

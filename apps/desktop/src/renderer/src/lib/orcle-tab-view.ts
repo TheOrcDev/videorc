@@ -3,10 +3,10 @@ import { COHOST_ERROR_TOAST_MESSAGES, cohostErrorDetail } from './cohost-state'
 import { cohostErrorDetailText, cohostListeningView } from './cohost-view'
 import type { EntitlementUiGate } from './entitlement-ui'
 
-// The Orcle tab (plan 119 S2): Videorc's AI tab, under Studio, where Publish
-// was. Everything here is a pure derivation of what the studio provider
-// already holds, so the tab, its tests and the Comments window cannot
-// disagree about what Orcle Live is doing.
+// The Orcle tab (plan 119 S2): Videorc's AI tab, under Studio. Everything here
+// is a pure derivation of what the studio provider already holds, so the tab,
+// its tests and the Comments window cannot disagree about what Orcle Live is
+// doing.
 
 /** The page's intro line. Clean cut (phase 2) changes it to "Live with you.
  * Edits after." */

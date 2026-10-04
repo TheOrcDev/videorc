@@ -152,8 +152,7 @@ describe('Orcle tab (plan 119 S2)', () => {
     }
     expect(liveSwitch().getAttribute('data-state')).toBe('unchecked')
     expect(statusLine().getAttribute('data-status')).toBe('off')
-    // No Publish left on the page, and the Stream Manager waits for a stream.
-    expect(text).not.toContain('Publish')
+    // The Stream Manager waits for a stream.
     expect(text).not.toContain('Open Stream Manager')
   })
 

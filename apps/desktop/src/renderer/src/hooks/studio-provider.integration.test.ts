@@ -40,7 +40,6 @@ import { sourceVisibilityFromScene } from '@/lib/scene-presets'
 import { isMediaAccessSnapshotReady, systemAccessRows } from '@/lib/system-access'
 import type {
   AccountCallbackEnvelope,
-  AiArtifact,
   AudioMeterResult,
   AudioTrack,
   BackendConnection,
@@ -442,7 +441,6 @@ class StudioBackend {
   sessionListNextCursor: string | undefined
   sessionHealthEvents: HealthEvent[] = []
   sessionLogs: SessionLogEntry[] = []
-  sessionAiArtifacts: AiArtifact[] = []
   cohostSettings: CohostSettings = {
     enabled: true,
     tone: 'friendly',
@@ -1305,8 +1303,6 @@ class StudioBackend {
         return { events: this.sessionHealthEvents }
       case 'sessions.logs.list':
         return { entries: this.sessionLogs }
-      case 'sessions.aiArtifacts.list':
-        return { artifacts: this.sessionAiArtifacts }
       case 'sessions.delete': {
         const deletedSessionIds = new Set(params.sessionIds as string[])
         this.noiseCleanupJobs = this.noiseCleanupJobs.map((job) =>
@@ -6334,7 +6330,7 @@ describe('real StudioProvider lifecycle', () => {
           command.method !== 'sessions.list' &&
           command.method !== 'sessions.storage'
       )
-    ).toHaveLength(3)
+    ).toHaveLength(2)
   })
 
   it('ignores a stale load-more response after the first Library page refreshes', async () => {
@@ -6565,7 +6561,6 @@ describe('real StudioProvider lifecycle', () => {
 
     const releaseHealth = backend.deferResponse('sessions.healthEvents.list', { events: [] })
     const releaseLogs = backend.deferResponse('sessions.logs.list', { entries: [] })
-    const releaseArtifacts = backend.deferResponse('sessions.aiArtifacts.list', { artifacts: [] })
     let detailLoad!: Promise<void>
     await act(async () => {
       detailLoad = latest()!.core.loadSessionDetails('session-1')
@@ -6574,13 +6569,9 @@ describe('real StudioProvider lifecycle', () => {
     await vi.waitFor(() =>
       expect(
         backend.sentCommands.filter((command) =>
-          [
-            'sessions.healthEvents.list',
-            'sessions.logs.list',
-            'sessions.aiArtifacts.list'
-          ].includes(command.method)
+          ['sessions.healthEvents.list', 'sessions.logs.list'].includes(command.method)
         )
-      ).toHaveLength(3)
+      ).toHaveLength(2)
     )
 
     const healthEvent: HealthEvent = {
@@ -6621,7 +6612,6 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       releaseHealth()
       releaseLogs()
-      releaseArtifacts()
       await detailLoad
     })
 
@@ -6629,147 +6619,9 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()?.core.sessionDetails['session-1']?.sessionLogs).toEqual([logEntry])
     expect(
       backend.sentCommands.filter((command) =>
-        ['sessions.healthEvents.list', 'sessions.logs.list', 'sessions.aiArtifacts.list'].includes(
-          command.method
-        )
+        ['sessions.healthEvents.list', 'sessions.logs.list'].includes(command.method)
       )
-    ).toHaveLength(3)
-  })
-
-  it('runs one trailing detail refresh when AI artifacts change during a load', async () => {
-    const backend = new StudioBackend()
-    backend.sessionSummaries = [sessionSummary()]
-    TestWebSocket.backend = backend
-    vi.stubGlobal('WebSocket', TestWebSocket)
-
-    const api = createVideorcApi({
-      acknowledge: async () => true,
-      pending: async () => [],
-      acknowledgeProvider: async () => true,
-      pendingProvider: async () => []
-    })
-    const testDom = installProviderTestEnvironment(api)
-    restoreEnvironment = testDom.restore
-    const observations: StudioObservation[] = []
-    const latest = (): StudioObservation | undefined => observations.at(-1)
-
-    await act(async () => {
-      root = createRoot(testDom.container)
-      root.render(
-        createElement(
-          BackgroundAssetsProvider,
-          null,
-          createElement(
-            StudioProvider,
-            null,
-            createElement(Probe, {
-              observe: (value) => {
-                observations.push(value)
-              }
-            })
-          )
-        )
-      )
-    })
-    await waitForObservation(
-      () => latest()?.core.wsStatus === 'connected' && latest()?.core.sessions.length === 1
-    )
-    await act(async () => latest()!.core.loadSessionDetails('session-1'))
-
-    const releaseHealth = backend.deferResponse('sessions.healthEvents.list', { events: [] })
-    const releaseLogs = backend.deferResponse('sessions.logs.list', { entries: [] })
-    const releaseArtifacts = backend.deferResponse('sessions.aiArtifacts.list', { artifacts: [] })
-    let detailReload!: Promise<void>
-    await act(async () => {
-      detailReload = latest()!.core.loadSessionDetails('session-1')
-      await Promise.resolve()
-    })
-    await vi.waitFor(() =>
-      expect(
-        backend.sentCommands.filter((command) =>
-          [
-            'sessions.healthEvents.list',
-            'sessions.logs.list',
-            'sessions.aiArtifacts.list'
-          ].includes(command.method)
-        )
-      ).toHaveLength(6)
-    )
-
-    const artifact: AiArtifact = {
-      id: 'artifact-live',
-      sessionId: 'session-1',
-      kind: 'summary',
-      status: 'ready',
-      content: { text: 'Fresh summary' },
-      filePath: null,
-      createdAt: '2026-07-12T00:00:02.000Z'
-    }
-    backend.sessionAiArtifacts = [artifact]
-    backend.sessionSummaries = [sessionSummary({ aiArtifactCount: 1 })]
-    await act(async () => {
-      for (const socket of backend.sockets) {
-        socket.onmessage?.({
-          data: JSON.stringify({
-            event: 'ai.artifacts.changed',
-            payload: { sessionId: 'session-1' }
-          })
-        })
-      }
-      await Promise.resolve()
-    })
-
-    const releaseTrailingHealth = backend.deferResponse('sessions.healthEvents.list', {
-      events: []
-    })
-    const releaseTrailingLogs = backend.deferResponse('sessions.logs.list', { entries: [] })
-    const releaseTrailingArtifacts = backend.deferResponse('sessions.aiArtifacts.list', {
-      artifacts: [artifact]
-    })
-    await act(async () => {
-      releaseHealth()
-      releaseLogs()
-      releaseArtifacts()
-      await Promise.resolve()
-    })
-    await vi.waitFor(() =>
-      expect(
-        backend.sentCommands.filter((command) =>
-          [
-            'sessions.healthEvents.list',
-            'sessions.logs.list',
-            'sessions.aiArtifacts.list'
-          ].includes(command.method)
-        )
-      ).toHaveLength(9)
-    )
-
-    await act(async () => {
-      for (const socket of backend.sockets) {
-        socket.onmessage?.({
-          data: JSON.stringify({
-            event: 'ai.artifacts.changed',
-            payload: { sessionId: 'session-1' }
-          })
-        })
-      }
-      await Promise.resolve()
-    })
-    await act(async () => {
-      releaseTrailingHealth()
-      releaseTrailingLogs()
-      releaseTrailingArtifacts()
-      await detailReload
-    })
-
-    expect(latest()?.core.sessionDetails['session-1']?.aiArtifacts).toEqual([artifact])
-    expect(
-      backend.sentCommands.filter((command) =>
-        ['sessions.healthEvents.list', 'sessions.logs.list', 'sessions.aiArtifacts.list'].includes(
-          command.method
-        )
-      )
-    ).toHaveLength(9)
+    ).toHaveLength(2)
   })
 
   it('keeps replacement detail buffers when an invalidated request settles late', async () => {
@@ -6818,11 +6670,7 @@ describe('real StudioProvider lifecycle', () => {
       backend.sentCommands.filter(
         (command) =>
           matchesSessionOne(command) &&
-          [
-            'sessions.healthEvents.list',
-            'sessions.logs.list',
-            'sessions.aiArtifacts.list'
-          ].includes(command.method)
+          ['sessions.healthEvents.list', 'sessions.logs.list'].includes(command.method)
       ).length
 
     const releaseOldHealth = backend.deferResponse(
@@ -6835,17 +6683,12 @@ describe('real StudioProvider lifecycle', () => {
       { entries: [] },
       matchesSessionOne
     )
-    const releaseOldArtifacts = backend.deferResponse(
-      'sessions.aiArtifacts.list',
-      { artifacts: [] },
-      matchesSessionOne
-    )
     let invalidatedLoad!: Promise<void>
     await act(async () => {
       invalidatedLoad = latest()!.core.loadSessionDetails('session-1')
       await Promise.resolve()
     })
-    await vi.waitFor(() => expect(detailCommandCount()).toBe(6))
+    await vi.waitFor(() => expect(detailCommandCount()).toBe(4))
 
     // Fill the bounded detail LRU through the public provider API. Committing
     // session 9 evicts session 1 and invalidates its still-pending request.
@@ -6864,17 +6707,12 @@ describe('real StudioProvider lifecycle', () => {
       { entries: [] },
       matchesSessionOne
     )
-    const releaseNewArtifacts = backend.deferResponse(
-      'sessions.aiArtifacts.list',
-      { artifacts: [] },
-      matchesSessionOne
-    )
     let replacementLoad!: Promise<void>
     await act(async () => {
       replacementLoad = latest()!.core.loadSessionDetails('session-1')
       await Promise.resolve()
     })
-    await vi.waitFor(() => expect(detailCommandCount()).toBe(9))
+    await vi.waitFor(() => expect(detailCommandCount()).toBe(6))
 
     const healthEvent: HealthEvent = {
       id: 'health-replacement',
@@ -6895,15 +6733,6 @@ describe('real StudioProvider lifecycle', () => {
       permissionPane: null,
       createdAt: '2026-07-12T00:00:03.000Z'
     }
-    const artifact: AiArtifact = {
-      id: 'artifact-replacement',
-      sessionId: 'session-1',
-      kind: 'summary',
-      status: 'ready',
-      content: { text: 'Replacement summary' },
-      filePath: null,
-      createdAt: '2026-07-12T00:00:03.000Z'
-    }
     await act(async () => {
       backend.sockets[0]?.onmessage?.({
         data: JSON.stringify({ event: 'health.event', payload: healthEvent })
@@ -6911,57 +6740,28 @@ describe('real StudioProvider lifecycle', () => {
       backend.sockets[0]?.onmessage?.({
         data: JSON.stringify({ event: 'session.log', payload: logEntry })
       })
-      backend.sockets[0]?.onmessage?.({
-        data: JSON.stringify({
-          event: 'ai.artifacts.changed',
-          payload: { sessionId: 'session-1' }
-        })
-      })
       await Promise.resolve()
     })
 
     await act(async () => {
       releaseOldHealth()
       releaseOldLogs()
-      releaseOldArtifacts()
       await invalidatedLoad
     })
 
-    const releaseTrailingHealth = backend.deferResponse(
-      'sessions.healthEvents.list',
-      { events: [healthEvent] },
-      matchesSessionOne
-    )
-    const releaseTrailingLogs = backend.deferResponse(
-      'sessions.logs.list',
-      { entries: [logEntry] },
-      matchesSessionOne
-    )
-    const releaseTrailingArtifacts = backend.deferResponse(
-      'sessions.aiArtifacts.list',
-      { artifacts: [artifact] },
-      matchesSessionOne
-    )
+    // The stale request settled first. The replacement's pages are empty, so
+    // the events can only come from the buffer the stale one had to leave.
     await act(async () => {
       releaseNewHealth()
       releaseNewLogs()
-      releaseNewArtifacts()
-      await Promise.resolve()
-    })
-    await vi.waitFor(() => expect(detailCommandCount()).toBe(12))
-
-    await act(async () => {
-      releaseTrailingHealth()
-      releaseTrailingLogs()
-      releaseTrailingArtifacts()
       await replacementLoad
     })
 
     expect(latest()?.core.sessionDetails['session-1']).toEqual({
       healthEvents: [healthEvent],
-      sessionLogs: [logEntry],
-      aiArtifacts: [artifact]
+      sessionLogs: [logEntry]
     })
+    expect(detailCommandCount()).toBe(6)
   })
 
   it('reads a Linux media-access snapshot as not-applicable and renders no permission chips', async () => {
@@ -8251,11 +8051,11 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()!.core.orcleConsentRequested).toBe(false)
   }, 15_000)
 
-  // The post-stream pack ran itself when a streamed, recorded session Orcle
-  // heard finalized with a transcript. Its switch went with Publish (plan
-  // 119 S2), so the auto-run went too: nothing calls the cloud on Stop.
+  // Stop never starts a cloud job on its own: a streamed, recorded session
+  // Orcle heard finalizes with its transcript, and only the cloud-AI
+  // readiness reads go out.
   it('starts no cloud job when a streamed recording Orcle heard finalizes', async () => {
-    // Cloud AI reads ready, so the removed auto-run would have sent its job.
+    // Cloud AI reads ready, so only a missing trigger keeps a job from going out.
     class CloudReadyBackend extends StudioBackend {
       override response(command: BackendCommand): unknown {
         if (command.method === 'ai.capabilities.get') {
@@ -8326,8 +8126,8 @@ describe('real StudioProvider lifecycle', () => {
         await Promise.resolve()
       })
     }
-    // Everything the old auto-run needed: Orcle heard the stream, the
-    // transcript landed, and the MP4 finalized.
+    // Everything a post-recording job could key on: Orcle heard the stream,
+    // the transcript landed, and the MP4 finalized.
     await emit('liveChat.snapshot', {
       sessionId: 'pack-1',
       providers: [],
@@ -8350,14 +8150,17 @@ describe('real StudioProvider lifecycle', () => {
       mp4Path: '/recordings/pack-1.mp4',
       updatedAt: now
     })
-    // Room for the lazy import the old auto-run went through.
+    // Room for any lazy import a job would go through.
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 100))
     })
 
-    expect(backend.sentCommands.some((command) => command.method === 'ai.run_post_recording')).toBe(
-      false
-    )
+    const readinessReads = new Set(['ai.capabilities.get', 'ai.quota.get'])
+    expect(
+      backend.sentCommands
+        .map((command) => command.method)
+        .filter((method) => method.startsWith('ai.') && !readinessReads.has(method))
+    ).toEqual([])
   }, 15_000)
 
   it('does not reuse a stale permission snapshot when the click-time status read fails', async () => {

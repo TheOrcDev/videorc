@@ -246,7 +246,7 @@ describe('Orcle report card (plan 119 S3)', () => {
     // The switcher names the shown stream by when it ran.
     const trigger = document.querySelector('[aria-label="Stream"]')
     expect(trigger?.textContent).toContain(dayLabel('2026-08-22T10:00:00Z'))
-    expect(text()).not.toMatch(/Publish|co-host/i)
+    expect(text()).not.toMatch(/co-host/i)
   })
 
   it('keeps long lists short until asked', async () => {

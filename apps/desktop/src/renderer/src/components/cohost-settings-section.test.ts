@@ -148,11 +148,10 @@ describe('Show on stream automatically', () => {
 // Plan 119 S2: the section lives under the Orcle tab's Customize, where Orcle
 // Live's switch owns `enabled` and the Premium call to action.
 describe('under the Orcle tab', () => {
-  it('has no Enable switch, no title of its own and no Publish copy', async () => {
+  it('has no Enable switch and no title of its own', async () => {
     await render(settings())
     expect(document.getElementById('cohost-enabled')).toBeNull()
     expect(document.body.textContent).not.toContain('Enable Orcle')
-    expect(document.body.textContent).not.toContain('Publish')
     expect(document.body.textContent).not.toContain('Orcle (alpha)')
     expect(document.querySelector('[data-slot="panel-section"] header')).toBeNull()
   })

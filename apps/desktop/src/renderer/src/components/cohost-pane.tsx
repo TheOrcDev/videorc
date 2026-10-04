@@ -61,10 +61,10 @@ import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { cn } from '@/lib/utils'
 
 /**
- * The Co-host segment above the live message list, in BOTH the in-app rail and
- * the detached Comments window. It renders the backend's `cohost.state` and
- * nothing else — it never decides what is a question, never sends anything, and
- * never acts on a flag.
+ * The Orcle pane in the Stream Manager, which only the detached Comments
+ * window mounts. It renders the backend's `cohost.state` and nothing else: it
+ * never decides what is a question, never sends anything, and never acts on a
+ * flag.
  *
  * Keyboard-first (videorc-design): the rows stay dense single lines and the
  * footer bar carries the actions for the selected row with their key chips.

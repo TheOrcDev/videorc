@@ -46,9 +46,9 @@ export type StudioPanelMeta = {
   legacyTabId: string
 }
 
-// Orcle (plan 119) replaced Publish and joined the stage row, right under
-// Studio. Its id stays `ai`, so deep links, smokes, ⌘9 and the
-// `data-videorc-tab-trigger` value keep working.
+// Orcle (plan 119) sits in the stage row, right under Studio. Its id is `ai`,
+// the id deep links, smokes, ⌘9 and the `data-videorc-tab-trigger` value
+// already use.
 export const WORKSPACE_TABS: WorkspaceTabMeta[] = [
   { id: 'studio', label: 'Studio', icon: StudioIcon, group: 'stage' },
   { id: 'ai', label: 'Orcle', icon: OrcleIcon, group: 'stage' },
@@ -71,8 +71,9 @@ export const STUDIO_PANELS: StudioPanelMeta[] = [
 ]
 
 // Page shortcuts. Studio, the Setup pages and Library take ⌘1–⌘8 in sidebar
-// order. Orcle keeps ⌘9, the key Publish had, although it now sits under Studio
-// (plan 119): muscle memory and deep links outrank a strict sidebar order.
+// order. Orcle takes ⌘9, the key tab id `ai` has always had, although it sits
+// under Studio (plan 119): muscle memory and deep links outrank a strict
+// sidebar order.
 // Settings keeps the platform-standard ⌘,. Health intentionally has NO digit — it
 // stays reachable via ⌘K (and the account menu). The main process emits the raw
 // key ('1'–'9' or ',') and AppShell maps whatever is listed here.

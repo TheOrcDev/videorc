@@ -12,7 +12,7 @@ import { cn } from '@/lib/utils'
  *   Config-grid — Sources / Livestream / Output / Settings: flush sections via
  *                 <ConfigGrid>, one column, two at `lg`, split by hairlines.
  *   Gallery     — Assets / Screens: picture cards via <Gallery>.
- *   Browse      — Library / Publish: a flush list or table in the pane body.
+ *   Browse      — Library: a flush list or table in the pane body.
  *   Inspect     — Health: dense sections of metric rows. Bespoke.
  *
  * `lg` is the one layout breakpoint. Inner form sub-grids use `sm`/`md`.

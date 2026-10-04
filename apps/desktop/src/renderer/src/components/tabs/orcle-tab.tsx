@@ -42,10 +42,10 @@ import { openVideorcWebLink } from '@/lib/videorc-web-links'
 import { sessionIsLive } from '../../../../shared/capture-state'
 
 /**
- * The Orcle tab (plan 119 S2): Videorc's AI tab, right under Studio, where
- * Publish was. Phase 1 holds Orcle Live (one switch, consent, settings under
- * Customize) and the last stream's report (S3); Clean cut (phase 2) joins it
- * here. The toolbar names the page; nothing sits in its corner.
+ * The Orcle tab (plan 119 S2): Videorc's AI tab, right under Studio. Phase 1
+ * holds Orcle Live (one switch, consent, settings under Customize) and the
+ * last stream's report (S3); Clean cut (phase 2) joins it here. The toolbar
+ * names the page; nothing sits in its corner.
  *
  * `reportSessionId` is the Library's "Orcle report" ask: the report opens on
  * that session. Without it the report follows the last stream.

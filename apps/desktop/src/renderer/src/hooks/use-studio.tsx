@@ -229,7 +229,6 @@ import type {
   CommentsSendOperation,
   SessionStorageTotals,
   AiQuotaStatus,
-  AiWorkflowResult,
   AutomaticSourceFallbackEvent,
   AudioMeterResult,
   AudioProcessingUpdateResult,
@@ -241,16 +240,13 @@ import type {
   CompositorFrameReady,
   CompositorStatus,
   DiagnosticStats,
-  ClipExportResult,
   ClipMarkCommand,
   ClipMarkedEvent,
-  ClipSuggestResult,
   Device,
   DeviceList,
   EntitlementsSnapshot,
   NoiseCleanupJob,
   MediaAccessSnapshot,
-  ExportPublishPackResult,
   FileAssessment,
   EventsLaggedPayload,
   GateStatus,
@@ -1176,8 +1172,6 @@ export type StudioContextValue = {
   aiConsent: boolean
   /** Persists across launches (durable preference, not a per-launch answer). */
   setAiConsent: (consent: boolean) => void
-  aiRunningSessionId: string | null
-  exportRunningSessionId: string | null
   startRequestPending: boolean
   stopRequestPending: boolean
   screenImportPending: boolean
@@ -1355,15 +1349,6 @@ export type StudioContextValue = {
   startNoiseCleanup: (sessionId: string) => Promise<NoiseCleanupJob>
   cancelNoiseCleanup: (jobId: string) => Promise<NoiseCleanupJob>
   sessionStorageTotals: SessionStorageTotals | null
-  runAiWorkflow: (
-    sessionId: string,
-    options?: { outputs?: string[]; tone?: string }
-  ) => Promise<void>
-  exportPublishPack: (sessionId: string) => Promise<void>
-  /** Rank clip-worthy moments locally (chat spikes + captions). */
-  suggestClips: (sessionId: string) => Promise<ClipSuggestResult | null>
-  /** Trim a clip out of the recording locally (ffmpeg, next to the file). */
-  exportClip: (sessionId: string, startMs: number, endMs: number) => Promise<void>
   /** Mark the current moment for a clip (plan 068 D6). The `clip.marked`
    * event, not the reply, carries the toast so every source reads the same. */
   markClip: () => Promise<ClipMarkedEvent | null>
@@ -2122,12 +2107,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     sessionId: string
     message: string
   } | null>(null)
-  const sessionDetailsRef = useRef(sessionDetails)
-  sessionDetailsRef.current = sessionDetails
   const sessionDetailRecencyRef = useRef<string[]>([])
   const sessionDetailRequestRef = useRef(new LatestRequestByKey<string>())
   const sessionDetailSingleFlightRef = useRef(new SingleFlightByKey<string, BackendClient>())
-  const sessionDetailAiDirtyRef = useRef(new Set<string>())
   const sessionDetailLiveEntriesRef = useRef(
     new Map<string, { healthEvents: HealthEvent[]; sessionLogs: SessionLogEntry[] }>()
   )
@@ -3149,9 +3131,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return null
     }
   }, [])
-  // Cloud-AI consent is a durable preference, not a per-launch answer: it
-  // silently resetting to off every launch was the top reason publish runs
-  // "did nothing but extract audio" (2026-07-11 report).
+  // Cloud-AI consent is a durable preference, not a per-launch answer: a
+  // consent that silently reset to off on every launch left cloud AI doing
+  // nothing with no visible reason (2026-07-11 report).
   const [aiConsent, setAiConsentState] = useState(
     () => localStorage.getItem(AI_CONSENT_STORAGE_KEY) === '1'
   )
@@ -3159,8 +3141,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     setAiConsentState(consent)
     localStorage.setItem(AI_CONSENT_STORAGE_KEY, consent ? '1' : '0')
   }, [])
-  const [aiRunningSessionId, setAiRunningSessionId] = useState<string | null>(null)
-  const [exportRunningSessionId, setExportRunningSessionId] = useState<string | null>(null)
   const [startRequestPending, setStartRequestPending] = useState(false)
   const [stopRequestPending, setStopRequestPending] = useState(false)
   const [screenImportPending, setScreenImportPending] = useState(false)
@@ -5081,95 +5061,74 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setSessionDetailsLoading((current) => new Set(current).add(sessionId))
         setSessionDetailError((current) => (current?.sessionId === sessionId ? null : current))
         try {
-          sessionDetailAiDirtyRef.current.delete(sessionId)
           sessionDetailLiveEntriesRef.current.delete(sessionId)
-          const loadAndCommitBatch = async (): Promise<boolean> => {
-            const [healthPage, logsPage, artifactsPage] = await Promise.all([
-              activeClient.requestTyped('sessions.healthEvents.list', {
-                sessionId,
-                limit: SESSION_DETAIL_BUFFER_LIMIT
-              }),
-              activeClient.requestTyped('sessions.logs.list', {
-                sessionId,
-                limit: SESSION_DETAIL_BUFFER_LIMIT
-              }),
-              activeClient.requestTyped('sessions.aiArtifacts.list', {
-                sessionId,
-                limit: SESSION_DETAIL_BUFFER_LIMIT
-              })
-            ])
-            if (
-              clientRef.current !== activeClient ||
-              !requestCoordinator.isCurrent(sessionId, requestToken)
-            ) {
-              return false
-            }
-            const liveEntries = sessionDetailLiveEntriesRef.current.get(sessionId)
-            sessionDetailLiveEntriesRef.current.delete(sessionId)
-            const loadedDetails: SessionDetails = {
-              healthEvents: capSessionDetailBuffer(healthPage.events),
-              sessionLogs: capSessionDetailBuffer(logsPage.entries),
-              aiArtifacts: capSessionDetailBuffer(artifactsPage.artifacts)
-            }
-            const recency = [
-              ...sessionDetailRecencyRef.current.filter((candidate) => candidate !== sessionId),
-              sessionId
-            ]
-            const evicted = recency.slice(
-              0,
-              Math.max(0, recency.length - SESSION_DETAIL_CACHE_LIMIT)
-            )
-            sessionDetailRecencyRef.current = recency.slice(-SESSION_DETAIL_CACHE_LIMIT)
+          const [healthPage, logsPage] = await Promise.all([
+            activeClient.requestTyped('sessions.healthEvents.list', {
+              sessionId,
+              limit: SESSION_DETAIL_BUFFER_LIMIT
+            }),
+            activeClient.requestTyped('sessions.logs.list', {
+              sessionId,
+              limit: SESSION_DETAIL_BUFFER_LIMIT
+            })
+          ])
+          if (
+            clientRef.current !== activeClient ||
+            !requestCoordinator.isCurrent(sessionId, requestToken)
+          ) {
+            return
+          }
+          const liveEntries = sessionDetailLiveEntriesRef.current.get(sessionId)
+          sessionDetailLiveEntriesRef.current.delete(sessionId)
+          const loadedDetails: SessionDetails = {
+            healthEvents: capSessionDetailBuffer(healthPage.events),
+            sessionLogs: capSessionDetailBuffer(logsPage.entries)
+          }
+          const recency = [
+            ...sessionDetailRecencyRef.current.filter((candidate) => candidate !== sessionId),
+            sessionId
+          ]
+          const evicted = recency.slice(0, Math.max(0, recency.length - SESSION_DETAIL_CACHE_LIMIT))
+          sessionDetailRecencyRef.current = recency.slice(-SESSION_DETAIL_CACHE_LIMIT)
+          for (const evictedId of evicted) {
+            requestCoordinator.invalidate(evictedId)
+            sessionDetailSingleFlightRef.current.invalidate(evictedId)
+            sessionDetailLiveEntriesRef.current.delete(evictedId)
+          }
+          setSessionDetails((current) => {
+            const currentDetails = current[sessionId]
+            const details: SessionDetails = liveEntries
+              ? {
+                  healthEvents: mergeSessionDetailEntries(
+                    loadedDetails.healthEvents,
+                    currentDetails?.healthEvents ?? [],
+                    liveEntries.healthEvents
+                  ),
+                  sessionLogs: mergeSessionDetailEntries(
+                    loadedDetails.sessionLogs,
+                    currentDetails?.sessionLogs ?? [],
+                    liveEntries.sessionLogs
+                  )
+                }
+              : loadedDetails
+            const next = { ...current, [sessionId]: details }
             for (const evictedId of evicted) {
-              requestCoordinator.invalidate(evictedId)
-              sessionDetailSingleFlightRef.current.invalidate(evictedId)
-              sessionDetailAiDirtyRef.current.delete(evictedId)
-              sessionDetailLiveEntriesRef.current.delete(evictedId)
+              delete next[evictedId]
             }
-            setSessionDetails((current) => {
-              const currentDetails = current[sessionId]
-              const details: SessionDetails = liveEntries
-                ? {
-                    healthEvents: mergeSessionDetailEntries(
-                      loadedDetails.healthEvents,
-                      currentDetails?.healthEvents ?? [],
-                      liveEntries.healthEvents
-                    ),
-                    sessionLogs: mergeSessionDetailEntries(
-                      loadedDetails.sessionLogs,
-                      currentDetails?.sessionLogs ?? [],
-                      liveEntries.sessionLogs
-                    ),
-                    aiArtifacts: loadedDetails.aiArtifacts
-                  }
-                : loadedDetails
-              const next = { ...current, [sessionId]: details }
-              for (const evictedId of evicted) {
-                delete next[evictedId]
+            return next
+          })
+          if (evicted.length > 0) {
+            const evictedIds = new Set(evicted)
+            setSessionDetailsLoading((current) => {
+              const next = new Set(current)
+              for (const evictedId of evictedIds) {
+                next.delete(evictedId)
               }
               return next
             })
-            if (evicted.length > 0) {
-              const evictedIds = new Set(evicted)
-              setSessionDetailsLoading((current) => {
-                const next = new Set(current)
-                for (const evictedId of evictedIds) {
-                  next.delete(evictedId)
-                }
-                return next
-              })
-              setSessionDetailError((current) =>
-                current && evictedIds.has(current.sessionId) ? null : current
-              )
-            }
-            return true
-          }
-
-          const firstBatchCommitted = await loadAndCommitBatch()
-          // Changes are coalesced into one bounded trailing pass. Continuous
-          // event traffic must never keep a detail request alive indefinitely.
-          if (firstBatchCommitted && sessionDetailAiDirtyRef.current.delete(sessionId)) {
-            await loadAndCommitBatch()
+            setSessionDetailError((current) =>
+              current && evictedIds.has(current.sessionId) ? null : current
+            )
           }
         } catch (error) {
           if (
@@ -5185,7 +5144,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             // These buffers belong to the latest request token for this
             // session. A stale request can settle after eviction/replacement;
             // it must not erase events buffered by its successor.
-            sessionDetailAiDirtyRef.current.delete(sessionId)
             sessionDetailLiveEntriesRef.current.delete(sessionId)
             setSessionDetailsLoading((current) => {
               const next = new Set(current)
@@ -5752,7 +5710,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const sessionListMoreSingleFlight = sessionListMoreSingleFlightRef.current
     const sessionDetailRequests = sessionDetailRequestRef.current
     const sessionDetailSingleFlight = sessionDetailSingleFlightRef.current
-    const sessionDetailAiDirty = sessionDetailAiDirtyRef.current
     const sessionDetailLiveEntries = sessionDetailLiveEntriesRef.current
     focusRefreshCoordinator.invalidate()
     sessionListRefreshRequests.clear()
@@ -5761,7 +5718,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     setSessionsLoadingMore(false)
     sessionDetailRequests.clear()
     sessionDetailSingleFlight.clear()
-    sessionDetailAiDirty.clear()
     sessionDetailLiveEntries.clear()
     sessionDetailRecencyRef.current = []
     setSessionDetails({})
@@ -6132,8 +6088,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             }
           })
         }
-        // No cloud job follows a finalized recording: the post-stream pack
-        // auto-run went with Publish and its switch (plan 119 S2).
       }),
       nextClient.on('noiseCleanup.status', (payload) => {
         const job = payload
@@ -6773,23 +6727,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           })
         }
       }),
-      nextClient.on('ai.artifacts.changed', (payload) => {
-        bootstrapGuard.mark('sessions')
-        void refreshSessions(nextClient)
-        const sessionId =
-          typeof payload === 'object' && payload !== null && 'sessionId' in payload
-            ? String(payload.sessionId)
-            : null
-        const detailRequestActive = sessionId
-          ? sessionDetailRequestRef.current.isActive(sessionId)
-          : false
-        if (sessionId && detailRequestActive) {
-          sessionDetailAiDirtyRef.current.add(sessionId)
-        }
-        if (sessionId && (detailRequestActive || sessionDetailsRef.current[sessionId])) {
-          void loadSessionDetailsForClient(nextClient, sessionId)
-        }
-      }),
       nextClient.on('log', (payload) => appendLog(payload as BackendLogEvent)),
       nextClient.on('error', (payload) => {
         const error = payload as { message?: string }
@@ -7176,7 +7113,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSessionsLoadingMore(false)
       sessionDetailRequests.clear()
       sessionDetailSingleFlight.clear()
-      sessionDetailAiDirty.clear()
       sessionDetailLiveEntries.clear()
       cancelCaptionCueRender()
       bootstrapAbort.abort()
@@ -10515,14 +10451,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [isSessionActive, suppressCaptionsForSession])
 
-  // Consent is the USER'S durable intent — no code path may revoke it. An
+  // Consent is the USER'S durable intent: no code path may revoke it. An
   // earlier effect here silently flipped the toggle off whenever cloud AI
-  // readiness was not ready, which also made runAiWorkflow's readiness error
-  // toast unreachable (it checks consent first): every run silently downgraded
-  // to local-only and "nothing worked" with no visible reason (2026-07-16
-  // owner incident — the server had never been configured, and the app never
-  // said so). Readiness gates the RUN and the switch's enabled state, never
-  // the stored consent.
+  // readiness was not ready, so every cloud feature quietly did nothing with
+  // no visible reason (2026-07-16 owner incident: the server had never been
+  // configured, and the app never said so). Readiness gates what runs and the
+  // switch's enabled state, never the stored consent.
 
   // Burn-in driver: a serial latest-wins scheduler replaces the old boolean
   // busy gate, which could permanently drop a final/style update that arrived
@@ -13600,156 +13534,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   remuxSessionRef.current = remuxSession
 
-  const runAiWorkflow = useCallback(
-    async (sessionId: string, options?: { outputs?: string[]; tone?: string }) => {
-      if (!client) {
-        // F-023: this used to be a silent no-op — the button appeared dead.
-        toast.error('AI workflow', {
-          description: 'Backend is not connected. Try again in a moment.'
-        })
-        return
-      }
-      if (aiConsent) {
-        try {
-          const { cloudAiReadiness } = await import('@/lib/ai-readiness')
-          const readiness = cloudAiReadiness({
-            account,
-            capabilities: aiCapabilities,
-            error: aiReadinessError,
-            loading: aiReadinessLoading,
-            quota: aiQuota
-          })
-          if (!readiness.ready) {
-            toast.error(readiness.title, { description: readiness.description })
-            return
-          }
-        } catch (error) {
-          reportError(error)
-          return
-        }
-      }
-
-      try {
-        setLastError(null)
-        setAiRunningSessionId(sessionId)
-        const result = await client.request<AiWorkflowResult>('ai.run_post_recording', {
-          sessionId,
-          consentToUploadAudio: aiConsent,
-          outputs: options?.outputs,
-          tone: options?.tone
-        })
-        await refreshSessions(client)
-        // FX3: the local-only run needs an explicit, named result — "nothing
-        // visibly happened" was the by-eye finding. Name the produced file.
-        if (aiConsent) {
-          toast.success('Publish pack generated.')
-        } else if (
-          result.artifacts.some(
-            (artifact) => artifact.kind === 'transcript' && artifact.status === 'ready'
-          )
-        ) {
-          toast.success('Transcript ready from live captions.', {
-            description:
-              'Enable cloud consent to generate the title, description, and the rest of the pack. The transcript uploads as text only.'
-          })
-        } else {
-          toast.success('Local audio extracted.', {
-            description: result.audioPath
-              ? `Saved ${basename(result.audioPath)} next to the recording. Enable cloud consent to transcribe.`
-              : 'Enable cloud consent to transcribe.'
-          })
-        }
-      } catch (error) {
-        reportError(error)
-      } finally {
-        setAiRunningSessionId(null)
-      }
-    },
-    [
-      aiConsent,
-      account,
-      aiCapabilities,
-      aiQuota,
-      aiReadinessError,
-      aiReadinessLoading,
-      client,
-      refreshSessions,
-      reportError
-    ]
-  )
-
-  const exportPublishPack = useCallback(
-    async (sessionId: string) => {
-      if (!client) {
-        return
-      }
-
-      try {
-        setLastError(null)
-        setExportRunningSessionId(sessionId)
-        const result = await client.request<ExportPublishPackResult>('ai.publish_pack.export', {
-          sessionId
-        })
-        const fileCount = result.files?.length ?? 1
-        toast.success(
-          `Publish pack exported (${fileCount} ${fileCount === 1 ? 'file' : 'files'}).`,
-          {
-            description: result.markdownPath
-          }
-        )
-      } catch (error) {
-        reportError(error)
-      } finally {
-        setExportRunningSessionId(null)
-      }
-    },
-    [client, reportError]
-  )
-
-  const suggestClips = useCallback(
-    async (sessionId: string): Promise<ClipSuggestResult | null> => {
-      if (!client) {
-        toast.error('Clips', { description: 'Backend is not connected. Try again in a moment.' })
-        return null
-      }
-      try {
-        return await client.request<ClipSuggestResult>('ai.clips.suggest', { sessionId })
-      } catch (error) {
-        reportError(error)
-        return null
-      }
-    },
-    [client, reportError]
-  )
-
-  const exportClip = useCallback(
-    async (sessionId: string, startMs: number, endMs: number): Promise<void> => {
-      if (!client) {
-        toast.error('Clips', { description: 'Backend is not connected. Try again in a moment.' })
-        return
-      }
-      try {
-        const result = await client.request<ClipExportResult>('ai.clip.export', {
-          sessionId,
-          startMs,
-          endMs
-        })
-        toast.success('Clip exported next to the recording.', {
-          description: basename(result.path),
-          action: {
-            label: 'Reveal',
-            onClick: () => {
-              void window.videorc?.revealSession?.(sessionId)
-            }
-          }
-        })
-      } catch (error) {
-        reportError(error)
-      }
-    },
-    [client, reportError]
-  )
-
   const markClip = useCallback(async (): Promise<ClipMarkedEvent | null> => {
     if (!client) {
       toast.error('Mark clip', { description: 'Backend is not connected. Try again in a moment.' })
@@ -15019,8 +14803,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       mediaAccess,
       aiConsent,
       setAiConsent,
-      aiRunningSessionId,
-      exportRunningSessionId,
       startRequestPending,
       stopRequestPending,
       screenImportPending,
@@ -15135,10 +14917,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       startNoiseCleanup,
       cancelNoiseCleanup,
       sessionStorageTotals,
-      runAiWorkflow,
-      exportPublishPack,
-      suggestClips,
-      exportClip,
       markClip,
       assessRecording,
       repairRecording,
@@ -15256,8 +15034,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       mediaAccess,
       aiConsent,
       setAiConsent,
-      aiRunningSessionId,
-      exportRunningSessionId,
       startRequestPending,
       stopRequestPending,
       screenImportPending,
@@ -15371,10 +15147,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       startNoiseCleanup,
       cancelNoiseCleanup,
       sessionStorageTotals,
-      runAiWorkflow,
-      exportPublishPack,
-      suggestClips,
-      exportClip,
       markClip,
       assessRecording,
       repairRecording,

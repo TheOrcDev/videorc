@@ -3026,19 +3026,7 @@ export interface SessionLogEntry {
   createdAt: string
 }
 
-export interface RunAiWorkflowParams {
-  sessionId: string
-  consentToUploadAudio: boolean
-  ffmpegPath?: string
-}
-
-export interface AiWorkflowResult {
-  sessionId: string
-  audioPath: string
-  artifacts: AiArtifact[]
-}
-
-/** Where a clip suggestion came from (plan 068 D6). */
+/** Where a moment came from (plan 068 D6). */
 export type ClipMomentSource = 'voice' | 'manual' | 'chat'
 
 /** A clip-worthy time range: a mark the streamer placed, or a chat spike,
@@ -3086,24 +3074,6 @@ export interface ClipMarkCommand {
 export interface FollowNamesCommand {
   requestId: string
   platform: 'twitch'
-}
-
-export interface ClipSuggestResult {
-  sessionId: string
-  moments: ClipMoment[]
-  chatMessageCount: number
-}
-
-export interface ClipExportResult {
-  sessionId: string
-  path: string
-}
-
-export interface ExportPublishPackResult {
-  sessionId: string
-  markdownPath: string
-  /** Every file the export wrote (markdown + per-field paste-ready files). */
-  files?: string[]
 }
 
 export interface AiCapabilities {
@@ -3397,10 +3367,7 @@ export interface SessionAiArtifactsPage {
 export interface SessionDetails {
   healthEvents: HealthEvent[]
   sessionLogs: SessionLogEntry[]
-  aiArtifacts: AiArtifact[]
 }
-
-export type SessionWithDetails = SessionListItem & SessionDetails
 
 export interface SessionStorageTotals {
   count: number

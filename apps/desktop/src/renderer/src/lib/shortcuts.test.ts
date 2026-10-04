@@ -23,7 +23,7 @@ describe('SHORTCUTS registry', () => {
     ).toBe(WORKSPACE_SHORTCUTS.length)
   })
 
-  it('labels ⌘9 Orcle, the tab that replaced Publish (plan 119)', () => {
+  it('labels ⌘9 Orcle (plan 119)', () => {
     expect(SHORTCUTS.find((entry) => entry.id === 'nav-ai')).toMatchObject({
       keys: ['⌘', '9'],
       label: 'Orcle'

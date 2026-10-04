@@ -35,13 +35,6 @@ describe('clip marked toast', () => {
     })
   })
 
-  it('never names Publish any more', () => {
-    for (const source of ['voice', 'manual'] as const) {
-      const toast = clipMarkedToast({ sessionId: 's', atSeconds: 5, source, saved: true })
-      expect(`${toast.title} ${toast.description ?? ''}`).not.toContain('Publish')
-    }
-  })
-
   it('points nowhere for a recording that never went live: it has no stream report', () => {
     expect(
       clipMarkedToast(

@@ -55,8 +55,7 @@ describe('Library Noise Cleanup direct action', () => {
     expect(play).toBeGreaterThan(-1)
     expect(cleanup).toBeGreaterThan(play)
     expect(menu).toBeGreaterThan(cleanup)
-    // Publish is gone (plan 119): the menu's "Orcle report" opens the Orcle tab.
-    expect(rowActions).not.toContain('Open in Publish')
+    // The menu's "Orcle report" opens the Orcle tab (plan 119).
     const menuPlay = rowActions.indexOf('Play\n', menu)
     const orcleReport = rowActions.indexOf('Orcle report', menu)
     const reveal = rowActions.indexOf('{revealInFileManagerLabel()}', menu)

@@ -130,9 +130,7 @@ const METHOD_REQUEST_TIMEOUT_MS: Readonly<Record<string, number>> = {
   'session.stop': 120_000,
   'session.remux_mp4': 10 * 60_000,
   'sessions.import': 10 * 60_000,
-  'repair.repair_file': 10 * 60_000,
-  'ai.run_post_recording': 30 * 60_000,
-  'ai.publish_pack.export': 30 * 60_000
+  'repair.repair_file': 10 * 60_000
 }
 
 export function backendRequestTimeoutMs(method: string): number {
