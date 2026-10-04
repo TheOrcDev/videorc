@@ -133,6 +133,35 @@ A provider's own deletion keeps its provider type (Twitch
 - `candidates` holds at most 3 entries.
 - `operationId` is set for removals.
 
+Additive notes from S3 (the shapes above are unchanged):
+
+- Every optional field is absent, never `null`: `target`, `operationId`,
+  `reason` and `expiresAt` when they do not apply, and `candidates` while
+  empty (only a chooser has them).
+- `at` is when the command reached its current status, so a strip can fade a
+  finished command after a few seconds.
+- `heard` is the command's own words; an answer ("yes", "the first one")
+  updates the same command (same `id`) instead of making a new one.
+- A removal card (`kind: remove`, `status: confirm`) carries `operationId` and
+  `expiresAt` (the operation's `confirmBy`, or `executeAt` in countdown mode).
+  While a confirmed removal runs at the platform, `status` stays `confirm`,
+  `expiresAt` is absent and `message` says "Removing coders_x's comment…": show
+  no buttons then. A removal card without `operationId` is still opening (a
+  few milliseconds); answers wait for it.
+- A highlight of a comment Orcle flagged with high severity is a `confirm`
+  card too (`kind: highlight`, no `operationId`): "Orcle flagged this
+  (harassment). Show it anyway?"
+- `kind: unknown` comes with `status: not-found` and "Orcle didn't catch that:
+  '…'" (only after a clearly addressed "Orcle"; never while a card is open).
+- Choosers and highlight cards expire after 20 s (`expired`); a removal card
+  follows its moderation operation (`expired`: "Nothing was removed.").
+
+`CohostState.commandAvailability?` (additive, S3) carries the kill switches of
+part D: `{ "voiceCommands": "on|paused", "remove": "on|paused" }`. It is absent
+while both are on, and present on every state, Orcle running or not. The
+renderer shows "Voice commands are paused by Videorc." and "Removing messages
+is paused by Videorc." from it.
+
 ### RPCs
 
 | RPC | Params | What it does |
@@ -142,6 +171,14 @@ A provider's own deletion keeps its provider type (Twitch
 | `cohost.command.cancel` | `{commandId}` | Cancels it. |
 
 All three are also reachable through the Comments-window relay.
+
+Each returns the `CohostState` after the answer. `confirm` on a removal
+returns at once (the card reads "Removing…"); the platform's outcome arrives as
+`cohost.state`, so prefer the newest event over an RPC result (compare
+`command.at`). Errors: `invalid-params` (no `commandId`, or an index past the
+chooser) and `not-pending` (no such command waits for that answer: it was
+answered, replaced or expired). They run in the ordinary mutation lane and
+are never LAN routes.
 
 ### `CohostSettings` additions (persisted, `cohost.settings.set` patch fields)
 
@@ -155,6 +192,11 @@ All three are also reachable through the Comments-window relay.
 ```json
 { "highlighted": 0, "cleared": 0, "removed": 0, "hiddenLocally": 0, "cancelled": 0, "expired": 0, "failed": 0, "notFound": 0 }
 ```
+
+Absent when no command was counted (S3). A removal counts once, by its
+outcome; `failed` also counts a refused request (rate limit, not eligible);
+`notFound` also counts "didn't catch that". A card a newer command replaced,
+or a session boundary closed, is not counted as cancelled.
 
 ## C. Highlight source
 

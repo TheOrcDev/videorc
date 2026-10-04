@@ -3,6 +3,7 @@ import type {
   ClipMomentSource,
   CohostAlertKind,
   CohostReportChat,
+  CohostReportCommands,
   CohostReportPayload,
   CohostReportQuestion,
   CohostReportQuestions,
@@ -117,6 +118,29 @@ export interface OrcleReportSessionOption {
   date: string
 }
 
+/** One count of the report's "Commands" row (plan 140 S3). */
+export interface OrcleReportCommandCount {
+  id:
+    | 'highlighted'
+    | 'cleared'
+    | 'removed'
+    | 'hidden-locally'
+    | 'cancelled'
+    | 'expired'
+    | 'failed'
+    | 'not-found'
+  value: string
+  label: string
+}
+
+/** The report's "Commands" row: what voice commands did, counts only. */
+export interface OrcleReportCommandsView {
+  /** "6 commands", "1 command". */
+  total: string
+  /** The non-zero counts, in a fixed order. */
+  counts: OrcleReportCommandCount[]
+}
+
 export type OrcleReportView =
   | { kind: 'empty'; message: string }
   | {
@@ -135,6 +159,8 @@ export type OrcleReportView =
       promises: OrcleReportPromiseRow[]
       moments: OrcleReportMomentRow[]
       alerts: OrcleReportAlertRow[]
+      /** Plan 140 S3: null when no voice command was counted (or Orcle was off). */
+      commands: OrcleReportCommandsView | null
     }
 
 export interface OrcleReportViewInput {
@@ -330,6 +356,39 @@ function reportStats(report: CohostSessionReport): OrcleReportStat[] {
   ]
 }
 
+// --- Voice commands (plan 140 S3) -------------------------------------------------
+
+const COMMAND_COUNT_LABELS: ReadonlyArray<
+  [OrcleReportCommandCount['id'], keyof CohostReportCommands, string]
+> = [
+  ['highlighted', 'highlighted', 'Highlighted'],
+  ['cleared', 'cleared', 'Cleared'],
+  ['removed', 'removed', 'Removed'],
+  ['hidden-locally', 'hiddenLocally', 'Hidden in Videorc'],
+  ['cancelled', 'cancelled', 'Cancelled'],
+  ['expired', 'expired', 'No answer'],
+  ['failed', 'failed', 'Failed'],
+  ['not-found', 'notFound', 'Not found']
+]
+
+/** The "Commands" row: the non-zero counts in a fixed order, null when none. */
+export function reportCommands(
+  commands: CohostReportCommands | undefined
+): OrcleReportCommandsView | null {
+  if (!commands) return null
+  const counts = COMMAND_COUNT_LABELS.map(([id, key, label]) => ({
+    id,
+    count: Math.max(0, Math.round(commands[key])),
+    label
+  })).filter((entry) => entry.count > 0)
+  const total = counts.reduce((sum, entry) => sum + entry.count, 0)
+  if (total === 0) return null
+  return {
+    total: total === 1 ? '1 command' : `${formatReportCount(total)} commands`,
+    counts: counts.map(({ id, count, label }) => ({ id, value: formatReportCount(count), label }))
+  }
+}
+
 // --- The card ------------------------------------------------------------------
 
 export function orcleReportView({
@@ -366,7 +425,8 @@ export function orcleReportView({
       },
       missed: [],
       promises: [],
-      alerts: []
+      alerts: [],
+      commands: null
     }
   }
   return {
@@ -395,7 +455,8 @@ export function orcleReportView({
       viewers:
         alert.peakViewers === 1 ? '1 viewer' : `${formatReportCount(alert.peakViewers)} viewers`,
       at: streamOffsetLabel(alert.firstSeenAt, startedAt)
-    }))
+    })),
+    commands: reportCommands(report.commands)
   }
 }
 
