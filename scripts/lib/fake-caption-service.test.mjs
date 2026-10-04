@@ -79,6 +79,147 @@ describe('fake caption service', () => {
     }
   )
 
+  it('streams opt-in partial progress while keeping held scripted finals authoritative', async () => {
+    const fake = await startFakeCaptionService({
+      smokeSessionToken: 'fake-caption-session',
+      smokeRealtimeToken: 'fake-caption-realtime',
+      autoTranscript: false
+    })
+    const sockets = []
+    let held
+    let completed
+    const observations = {}
+    try {
+      fake.state.realtimePartialProgress = true
+      const first = await openProgressSocket(fake)
+      sockets.push(first.socket)
+      await appendProgressFrame(first.socket)
+      observations.first = [...first.received]
+
+      held = fake.holdNextRealtimeFinal()
+      completed = fake.emitRealtimeFinal('The held scripted utterance is exact.')
+      completed.catch(() => {})
+      await boundedFixture(held.arrived, 'scripted speech admission')
+      await appendProgressFrame(first.socket)
+      observations.held = [...first.received]
+      observations.heldFinals = fake.state.emittedFinals.length
+
+      fake.state.realtimePartialProgress = false
+      await appendProgressFrame(first.socket)
+      observations.disabled = [...first.received]
+      held.release()
+      observations.reached = await boundedFixture(completed, 'scripted final release')
+      await progressSocketBarrier(first.socket)
+      observations.released = [...first.received]
+      await closeProgressSocket(first.socket)
+      observations.closedReached = await fake.emitRealtimeFinal(
+        'No closed socket may receive this.'
+      )
+
+      fake.state.realtimePartialProgress = true
+      const second = await openProgressSocket(fake)
+      sockets.push(second.socket)
+      await appendProgressFrame(second.socket)
+      observations.second = [...second.received]
+      observations.audioAppends = fake.state.audioAppends
+      observations.emittedFinals = [...fake.state.emittedFinals]
+    } finally {
+      held?.release()
+      const outcomes = await Promise.allSettled([
+        ...(completed
+          ? [boundedFixture(Promise.allSettled([completed]), 'owned final cleanup')]
+          : []),
+        ...sockets.map((socket) => closeProgressSocket(socket)),
+        boundedFixture(fake.close(), 'owned fake cleanup')
+      ])
+      const failures = outcomes.filter((outcome) => outcome.status === 'rejected')
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures.map((outcome) => outcome.reason),
+          'Owned progress fixture cleanup failed after every owner was attempted.'
+        )
+      }
+    }
+
+    const partials = (rows) =>
+      rows.filter(
+        (event) => event.rawType === 'conversation.item.input_audio_transcription.updated'
+      )
+    const finals = (rows) => rows.filter((event) => event.type === 'input-transcription-completed')
+    assert.equal(
+      partials(observations.first).length,
+      1,
+      'accepted PCM must produce an opt-in partial'
+    )
+    const progressStart = observations.first.find((event) => event.type === 'speech-started')
+    assert.equal(progressStart.raw.audio_start_ms, 0)
+    assert.equal(partials(observations.first)[0].raw.item_id, progressStart.itemId)
+    assert.equal(partials(observations.held).length, 2)
+    assert.ok(
+      partials(observations.held).every((event) => event.raw.item_id === progressStart.itemId)
+    )
+    assert.equal(finals(observations.held).length, 0, 'progress must not complete held speech')
+    assert.equal(observations.heldFinals, 0)
+    assert.equal(
+      partials(observations.disabled).length,
+      2,
+      'disabled progress must stop at its owner'
+    )
+    assert.equal(observations.reached, 1)
+    assert.equal(finals(observations.released).length, 1)
+    assert.equal(
+      finals(observations.released)[0].transcript,
+      'The held scripted utterance is exact.'
+    )
+    assert.equal(
+      observations.emittedFinals.length,
+      1,
+      'partials never mint canonical scripted finals'
+    )
+    assert.equal(observations.closedReached, 0)
+    assert.equal(partials(observations.second).length, 1)
+    assert.equal(
+      observations.second.find((event) => event.type === 'speech-started').raw.audio_start_ms,
+      0
+    )
+    assert.equal(finals(observations.second).length, 0)
+    assert.equal(observations.audioAppends, 4)
+  })
+
+  it('keeps partial progress disabled for an ordinary scripted-only socket', async () => {
+    const fake = await startFakeCaptionService({
+      smokeSessionToken: 'fake-caption-session',
+      smokeRealtimeToken: 'fake-caption-realtime',
+      autoTranscript: false
+    })
+    let socket
+    let received
+    try {
+      const owner = await openProgressSocket(fake)
+      socket = owner.socket
+      await appendProgressFrame(socket)
+      received = [...owner.received]
+    } finally {
+      const outcomes = await Promise.allSettled([
+        ...(socket ? [closeProgressSocket(socket)] : []),
+        boundedFixture(fake.close(), 'ordinary fake cleanup')
+      ])
+      const failures = outcomes.filter((outcome) => outcome.status === 'rejected')
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures.map((outcome) => outcome.reason),
+          'Ordinary progress fixture cleanup failed after every owner was attempted.'
+        )
+      }
+    }
+    assert.deepEqual(
+      received.map((event) => event.type),
+      ['session-updated']
+    )
+    assert.equal(fake.state.audioAppends, 1)
+    assert.equal(fake.state.emittedFinals.length, 0)
+  })
+
   it('accepts legacy Bearer and current Gateway subprotocol realtime upgrades', async () => {
     const sessionToken = 'fake-caption-session'
     const realtimeToken = 'fake-caption-realtime'
@@ -300,6 +441,83 @@ describe('fake caption service', () => {
     }
   })
 })
+
+async function boundedFixture(promise, label) {
+  let deadline
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        deadline = setTimeout(() => reject(new Error(`Timed out waiting for ${label}.`)), 5_000)
+      })
+    ])
+  } finally {
+    clearTimeout(deadline)
+  }
+}
+
+async function openProgressSocket(fake) {
+  const socket = new WebSocket(`${fake.httpOrigin.replace('http:', 'ws:')}/realtime`, [
+    'ai-gateway-realtime.v1',
+    'ai-gateway-auth.fake-caption-realtime'
+  ])
+  const received = []
+  socket.on('message', (data) => received.push(JSON.parse(data.toString())))
+  const opened = new Promise((resolve, reject) => {
+    socket.once('open', resolve)
+    socket.once('error', reject)
+  })
+  try {
+    await boundedFixture(opened, 'owned socket readiness')
+    socket.send(
+      JSON.stringify({ type: 'session.update', session: { input_audio_format: 'pcm16' } })
+    )
+    await progressSocketBarrier(socket)
+    return { socket, received }
+  } catch (error) {
+    await closeProgressSocket(socket, true)
+    throw error
+  }
+}
+
+async function progressSocketBarrier(socket) {
+  // The pong follows the server's synchronous handling of preceding config/PCM.
+  const pong = new Promise((resolve, reject) => {
+    socket.once('pong', resolve)
+    socket.once('error', reject)
+  })
+  socket.ping()
+  await boundedFixture(pong, 'owned socket response barrier')
+}
+
+async function appendProgressFrame(socket) {
+  socket.send(
+    JSON.stringify({
+      type: 'input_audio_buffer.append',
+      audio: Buffer.alloc(640, 1).toString('base64')
+    })
+  )
+  await progressSocketBarrier(socket)
+}
+
+async function closeProgressSocket(socket, force = false) {
+  if (socket.readyState === WebSocket.CLOSED) return
+  const closed = new Promise((resolve) => socket.once('close', resolve))
+  try {
+    if (force) socket.terminate()
+    else socket.close()
+    // A graceful reply proves the server observed Close before an emit probe.
+    await boundedFixture(closed, 'owned socket close handshake')
+  } catch (error) {
+    socket.terminate()
+    try {
+      await boundedFixture(closed, 'forced owned socket cleanup')
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'Owned socket close and cleanup failed.')
+    }
+    throw error
+  }
+}
 
 function configureAndClose(socket) {
   return new Promise((resolveConfigured, rejectConfigured) => {
