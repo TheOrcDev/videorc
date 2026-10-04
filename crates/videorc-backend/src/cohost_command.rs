@@ -136,7 +136,9 @@ const PARTICLES: &[&str] = &[
     "1st", "2nd", "3rd", "next", "other", "another", "same", "both", "each", "every",
 ];
 
-/// Decisive cancel words, with or without the wake word.
+/// Decisive cancel words, with or without the wake word. While a removal
+/// card is open, any of these anywhere in a sentence cancels it: "Yeah I
+/// don't think so" is a no, never a yes.
 const CANCEL_DECISIVE: &[&str] = &[
     "no",
     "nope",
@@ -155,24 +157,16 @@ const CANCEL_DECISIVE: &[&str] = &[
     "not",
     "hold",
 ];
-/// Decisive confirm words.
-const CONFIRM_DECISIVE: &[&str] = &[
-    "yes",
-    "yeah",
-    "yep",
-    "yup",
-    "yea",
-    "ya",
-    "confirm",
-    "confirmed",
-    "affirmative",
-    "absolutely",
-    "definitely",
-    "proceed",
-    "correct",
+/// Negated verbs ("can't", "won't"): a sentence that negates anything while a
+/// card is open is never consent.
+const NEGATIONS: &[&str] = &[
+    "cant", "wont", "shouldnt", "doesnt", "didnt", "isnt", "wouldnt", "couldnt", "arent", "wasnt",
+    "werent", "aint", "havent", "hasnt", "mustnt", "neednt",
 ];
-/// Confirm words only when they are (almost) the whole answer: "okay".
-const CONFIRM_SHORT: &[&str] = &["ok", "okay", "sure", "fine", "alright", "right", "go"];
+/// The words that consent on their own, and only in a pure answer sentence.
+/// Deleting chat is irreversible, so fillers that also mean "I heard you"
+/// ("okay", "right", "sure", "yeah") never confirm.
+const CONFIRM_WORDS: &[&str] = &["yes", "confirm", "confirmed", "affirmative", "proceed"];
 /// Every word a pure answer may contain.
 const ANSWER_VOCAB: &[&str] = &[
     "no",
@@ -192,24 +186,10 @@ const ANSWER_VOCAB: &[&str] = &[
     "not",
     "hold",
     "yes",
-    "yeah",
-    "yep",
-    "yup",
-    "yea",
-    "ya",
     "confirm",
     "confirmed",
     "affirmative",
-    "absolutely",
-    "definitely",
     "proceed",
-    "correct",
-    "ok",
-    "okay",
-    "sure",
-    "fine",
-    "alright",
-    "right",
     "go",
     "it",
     "that",
@@ -242,9 +222,12 @@ const ANSWER_VOCAB: &[&str] = &[
     "message",
     "on",
 ];
-/// Words stripped before an answer is read.
+/// Words stripped before an answer is read. Fillers that acknowledge without
+/// consenting ("okay", "right", "yeah") are stripped, so "Okay." alone is
+/// nothing and "Okay, yes." is a yes.
 const ANSWER_SKIP: &[&str] = &[
-    "hey", "um", "uh", "oh", "well", "please", "so", "and", "then", "just",
+    "hey", "um", "uh", "oh", "well", "please", "so", "and", "then", "just", "ok", "okay",
+    "alright", "right", "sure", "fine", "yeah", "yea", "ya", "yep", "yup", "hmm", "uhm", "er",
 ];
 /// Words stripped before a choice is read ("I'll take the first one").
 const CHOICE_SKIP: &[&str] = &[
@@ -1269,9 +1252,15 @@ fn nearest_reason(words: &[Word], verb: usize, end: usize) -> Option<String> {
 
 // --- Answers and choices ----------------------------------------------------------
 
-/// Read one sentence as an answer. A pure answer (every word answer
-/// vocabulary, six words at most) decides by its words; while a card is open
-/// a longer sentence decides by its first word ("No, I think we keep it").
+/// Read one sentence as an answer. Deleting chat is irreversible, so consent
+/// must be unambiguous (plan 140 review):
+///
+/// - While a card is open, a cancel or negation word anywhere in the
+///   sentence cancels ("Yeah I don't think so", "I'd rather not").
+/// - Otherwise only a pure answer decides: every word answer vocabulary, six
+///   words at most, after fillers are stripped ("Yes.", "Yes, remove it.",
+///   "Do it", "Go ahead"). A longer sentence that merely starts with "yes"
+///   or "okay" is talk, never consent.
 fn answer_kind(words: &[Word], awaiting: bool) -> Option<CommandKind> {
     let stripped: Vec<&str> = words
         .iter()
@@ -1281,32 +1270,27 @@ fn answer_kind(words: &[Word], awaiting: bool) -> Option<CommandKind> {
     if stripped.is_empty() {
         return None;
     }
-    let pure = stripped.len() <= 6 && stripped.iter().all(|text| ANSWER_VOCAB.contains(text));
-    if pure && let Some(kind) = answer_from_pure(&stripped, awaiting) {
-        return Some(kind);
+    if awaiting && stripped.iter().any(|text| is_cancel_word(text)) {
+        return Some(CommandKind::Cancel);
     }
-    if awaiting {
-        let first = stripped[0];
-        if CANCEL_DECISIVE.contains(&first) {
-            return Some(CommandKind::Cancel);
-        }
-        if CONFIRM_DECISIVE.contains(&first) {
-            return Some(CommandKind::Confirm);
-        }
+    let pure = stripped.len() <= 6 && stripped.iter().all(|text| ANSWER_VOCAB.contains(text));
+    if pure {
+        return answer_from_pure(&stripped, awaiting);
     }
     None
+}
+
+fn is_cancel_word(text: &str) -> bool {
+    CANCEL_DECISIVE.contains(&text) || NEGATIONS.contains(&text)
 }
 
 /// Cancel wins over confirm ("no wait, yes" stays safe). "Remove it" and
 /// "delete it" confirm only while a removal card is open.
 fn answer_from_pure(stripped: &[&str], awaiting: bool) -> Option<CommandKind> {
-    if stripped.iter().any(|text| CANCEL_DECISIVE.contains(text)) {
+    if stripped.iter().any(|text| is_cancel_word(text)) {
         return Some(CommandKind::Cancel);
     }
-    if stripped.iter().any(|text| CONFIRM_DECISIVE.contains(text)) {
-        return Some(CommandKind::Confirm);
-    }
-    if stripped.len() <= 2 && stripped.iter().any(|text| CONFIRM_SHORT.contains(text)) {
+    if stripped.iter().any(|text| CONFIRM_WORDS.contains(text)) {
         return Some(CommandKind::Confirm);
     }
     let has = |word: &str| stripped.contains(&word);
@@ -1319,14 +1303,21 @@ fn answer_from_pure(stripped: &[&str], awaiting: bool) -> Option<CommandKind> {
     None
 }
 
-/// A bare answer in the newest final, last sentence first.
+/// A bare answer in the newest final. Each sentence is read on its own, and
+/// a cancel in any of them wins: "Yes. No, wait." never deletes.
 fn detect_answer(newest: &[Word]) -> Option<(CommandKind, String)> {
+    let mut confirm: Option<String> = None;
     for sentence in sentences(newest).into_iter().rev() {
-        if let Some(kind) = answer_kind(sentence, true) {
-            return Some((kind, text_of(sentence)));
+        match answer_kind(sentence, true) {
+            Some(CommandKind::Cancel) => return Some((CommandKind::Cancel, text_of(sentence))),
+            Some(kind) if confirm.is_none() => {
+                debug_assert_eq!(kind, CommandKind::Confirm);
+                confirm = Some(text_of(sentence));
+            }
+            _ => {}
         }
     }
-    None
+    confirm.map(|heard| (CommandKind::Confirm, heard))
 }
 
 fn ordinal_index(text: &str) -> Option<u8> {
@@ -1663,7 +1654,43 @@ mod tests {
             ("do it", &ANSWERING, hit(Confirm, NoTarget, false, None)),
             ("confirm", &ANSWERING, hit(Confirm, NoTarget, false, None)),
             ("go ahead", &ANSWERING, hit(Confirm, NoTarget, false, None)),
-            ("okay", &ANSWERING, hit(Confirm, NoTarget, false, None)),
+            // Fillers acknowledge, they never consent (plan 140 review).
+            ("okay", &ANSWERING, None),
+            ("ok", &ANSWERING, None),
+            ("sure", &ANSWERING, None),
+            ("right", &ANSWERING, None),
+            ("yeah", &ANSWERING, None),
+            ("Yes.", &ANSWERING, hit(Confirm, NoTarget, false, None)),
+            (
+                "Yes, remove it.",
+                &ANSWERING,
+                hit(Confirm, NoTarget, false, None),
+            ),
+            (
+                "Okay, yes.",
+                &ANSWERING,
+                hit(Confirm, NoTarget, false, None),
+            ),
+            // A cancel or negation anywhere is a no.
+            (
+                "Yeah I don't think so",
+                &ANSWERING,
+                hit(Cancel, NoTarget, false, None),
+            ),
+            (
+                "I'd rather not",
+                &ANSWERING,
+                hit(Cancel, NoTarget, false, None),
+            ),
+            (
+                "Yes, I can't decide",
+                &ANSWERING,
+                hit(Cancel, NoTarget, false, None),
+            ),
+            // A sentence that only starts like an answer is talk.
+            ("Okay. Let's read the next question.", &ANSWERING, None),
+            ("Right. So anyway", &ANSWERING, None),
+            ("Yes, that is a great point from bob", &ANSWERING, None),
             ("no", &ANSWERING, hit(Cancel, NoTarget, false, None)),
             ("cancel", &ANSWERING, hit(Cancel, NoTarget, false, None)),
             ("never mind", &ANSWERING, hit(Cancel, NoTarget, false, None)),
@@ -1790,6 +1817,23 @@ mod tests {
                 "text: {text:?}, context: {ctx:?}, found: {found:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_cancel_anywhere_in_the_final_beats_a_yes() {
+        for text in ["Yes. No, wait.", "No. Yes.", "Yes. I don't want that."] {
+            assert_eq!(
+                detect_one(text, &ANSWERING).map(|command| command.kind),
+                Some(CommandKind::Cancel),
+                "text: {text:?}"
+            );
+        }
+        // A confirm is only taken from a pure sentence.
+        assert_eq!(
+            detect_one("So that was the last question. Yes.", &ANSWERING)
+                .map(|command| (command.kind, command.heard)),
+            Some((CommandKind::Confirm, "yes".to_string()))
+        );
     }
 
     #[test]

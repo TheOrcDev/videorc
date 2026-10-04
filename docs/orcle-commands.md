@@ -28,6 +28,13 @@ The wake word also accepts close misses (orkle, orcel, orkel, orcl, orcal).
 so "Oracle database is slow" never fires. Anything else after a clear "Orcle"
 shows "Orcle didn't catch that: '…'" in the strip.
 
+Removing a message can't be undone, so an answer has to be clear. "Yes",
+"Yes, remove it", "Do it", "Go ahead" or "Orcle, yes" confirms when you say it
+on its own. "Okay", "right", "sure" and "yeah" never confirm, and a sentence
+that only starts with "yes" is talk, not an answer. A "no", "cancel", "don't"
+or "not" anywhere in what you say cancels. A new "Orcle, …" command replaces
+the open card instead of answering it.
+
 Commands come from what Orcle already hears, so they need Orcle Live on and a
 live stream. With Orcle off or not listening, nothing happens.
 
