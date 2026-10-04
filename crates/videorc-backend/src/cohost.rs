@@ -1917,11 +1917,14 @@ struct CommandRecord {
     resolved: Vec<String>,
     /// The moderation phase last applied: 0 none, 1 pending, 2 running, 3 over.
     operation_rank: u8,
+    /// The command may remove on a countdown (`NewCommand::countdown_allowed`);
+    /// a removal picked from its chooser keeps the rule.
+    countdown_allowed: bool,
 }
 
 impl CommandRecord {
     fn new(command: &NewCommand, ctx: &CommandContext) -> Self {
-        Self::with(
+        let mut record = Self::with(
             command.intent.kind(),
             Some(command.intent),
             &command.heard,
@@ -1931,7 +1934,19 @@ impl CommandRecord {
                 .clone()
                 .filter(|_| command.intent == CommandIntent::Remove),
             ctx,
-        )
+        );
+        record.countdown_allowed = command.countdown_allowed();
+        record
+    }
+
+    /// The confirm mode a removal from this command runs in: the setting,
+    /// unless the command may not count down.
+    fn removal_mode(&self, setting: RemoveConfirmMode) -> RemoveConfirmMode {
+        if self.countdown_allowed {
+            setting
+        } else {
+            RemoveConfirmMode::Confirm
+        }
     }
 
     fn unheard(heard: &str, ctx: &CommandContext) -> Self {
@@ -1964,6 +1979,7 @@ impl CommandRecord {
             heard_at: ctx.now,
             resolved: Vec::new(),
             operation_rank: 0,
+            countdown_allowed: false,
         }
     }
 
@@ -2026,6 +2042,19 @@ struct NewCommand {
     spec: CommandTargetSpec,
     heard: String,
     reason: Option<String>,
+    /// Addressed with the wake word ("Orcle, ..."). A structured phrase
+    /// heard without it is `false`.
+    wake_word: bool,
+}
+
+impl NewCommand {
+    /// Only an explicit command may remove on a countdown: the wake word,
+    /// read by the local grammar. A structured phrase without the wake word,
+    /// or a target the cloud parser picked, always waits for a yes (plan 140
+    /// review): deleting chat is irreversible.
+    fn countdown_allowed(&self) -> bool {
+        self.wake_word && matches!(self.spec, CommandTargetSpec::Spoken { .. })
+    }
 }
 
 /// An answer to the open card, by voice or through `cohost.command.*`.
@@ -3905,7 +3934,7 @@ impl CohostSession {
             command_id: record.wire.id.clone(),
             message_id: message_id.to_string(),
             reason: record.wire.reason.clone(),
-            confirm_mode,
+            confirm_mode: record.removal_mode(confirm_mode),
         });
     }
 
@@ -6358,6 +6387,7 @@ async fn run_detected_command(
             },
             heard: command.heard,
             reason: command.reason,
+            wake_word: command.wake_word,
         },
         premium,
     )
@@ -6590,6 +6620,9 @@ pub(crate) async fn execute_resolved_command(
             spec: CommandTargetSpec::Resolved(target_message_ids),
             heard,
             reason,
+            // Heard through the wake word, but the cloud parser picked the
+            // target: `countdown_allowed` is false either way.
+            wake_word: true,
         },
         premium_entitled(),
     )
@@ -14611,6 +14644,7 @@ mod tests {
             },
             heard: "orcle test".to_string(),
             reason: None,
+            wake_word: true,
         }
     }
 
@@ -14620,6 +14654,7 @@ mod tests {
             spec: CommandTargetSpec::Resolved(vec![message_id.to_string()]),
             heard: "orcle remove that one".to_string(),
             reason: Some("toxic".to_string()),
+            wake_word: true,
         }
     }
 
@@ -15231,6 +15266,7 @@ mod tests {
                     spec: CommandTargetSpec::Resolved(vec![owner.id.clone(), raid.id.clone()]),
                     heard: "orcle show that".to_string(),
                     reason: None,
+                    wake_word: true,
                 },
                 &ctx,
             )
@@ -15624,6 +15660,7 @@ mod tests {
                     spec: CommandTargetSpec::Resolved(vec![rows[0].id.clone(), rows[1].id.clone()]),
                     heard: "orcle show one of those".to_string(),
                     reason: None,
+                    wake_word: true,
                 },
                 &command_ctx(now + secs(30)),
             )
@@ -16094,6 +16131,116 @@ mod tests {
         .await;
         assert_eq!(removed.message, "Removed coders_x's comment from Twitch.");
         assert_eq!(state_counts(&state).await.removed, 1);
+    }
+
+    #[test]
+    fn only_an_explicit_spoken_command_removes_on_a_countdown() {
+        let now = Instant::now();
+        let rows = vec![
+            command_row(1, "ada", StreamPlatform::Twitch, "spam link"),
+            command_row(2, "coders_x", StreamPlatform::Twitch, "spam one"),
+            command_row(3, "coders_y", StreamPlatform::Twitch, "spam two"),
+        ];
+        let (mut engine, scope) = command_engine(now, &rows);
+        engine.settings.remove_confirm = RemoveConfirmMode::Countdown;
+        let mut at = 0;
+        let mut mode_for = |engine: &mut CohostEngine, command: NewCommand| {
+            at += 60;
+            engine
+                .begin_command(&scope, command, &command_ctx(now + secs(at)))
+                .unwrap()
+                .request_removal
+                .map(|request| request.confirm_mode)
+        };
+        // "Orcle, remove ada's comment": the setting applies.
+        assert_eq!(
+            mode_for(&mut engine, spoken(CommandIntent::Remove, named("ada"))),
+            Some(RemoveConfirmMode::Countdown)
+        );
+        // The structured phrase heard without the wake word waits for a yes.
+        let mut structured = spoken(CommandIntent::Remove, named("ada"));
+        structured.wake_word = false;
+        assert!(!structured.countdown_allowed());
+        assert_eq!(
+            mode_for(&mut engine, structured),
+            Some(RemoveConfirmMode::Confirm)
+        );
+        // A target the cloud parser picked waits for a yes.
+        let resolved = resolved_removal(&rows[0].id);
+        assert!(!resolved.countdown_allowed());
+        assert_eq!(
+            mode_for(&mut engine, resolved),
+            Some(RemoveConfirmMode::Confirm)
+        );
+        // A removal picked from a structured command's chooser keeps the rule.
+        let mut chooser = spoken(CommandIntent::Remove, named("coders"));
+        chooser.wake_word = false;
+        assert_eq!(mode_for(&mut engine, chooser), None);
+        let request = engine
+            .answer_command(
+                &scope,
+                None,
+                CommandAnswer::Choose(0),
+                &command_ctx(now + secs(at + 1)),
+            )
+            .unwrap()
+            .request_removal
+            .unwrap();
+        assert_eq!(request.confirm_mode, RemoveConfirmMode::Confirm);
+    }
+
+    #[tokio::test]
+    async fn a_structured_removal_waits_for_a_yes_in_countdown_mode() {
+        let rows = vec![command_row(
+            1,
+            "coders_x",
+            StreamPlatform::Twitch,
+            "spam link",
+        )];
+        let (state, scope) = command_state(&rows, fake_deletes()).await;
+        state.cohost.lock().await.settings.remove_confirm = RemoveConfirmMode::Countdown;
+        show_on_stream(&state, &rows[0].id).await;
+        let mut command = detected(
+            CommandKind::Remove,
+            CommandTarget::Deixis,
+            "remove it from our chat",
+            None,
+        );
+        command.wake_word = false;
+        run_detected_command(&state, &scope, command, true).await;
+        let card = state_command(&state).await;
+        assert_eq!(card.status, CohostCommandStatus::Confirm);
+        let operation = state
+            .database
+            .get_chat_moderation_operation(card.operation_id.as_deref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(operation.confirm_mode, RemoveConfirmMode::Confirm);
+        assert_eq!(operation.execute_at, None, "no countdown runs it");
+        assert_eq!(operation.phase, ModerationPhase::PendingConfirm);
+    }
+
+    #[tokio::test]
+    async fn a_cloud_parsed_removal_waits_for_a_yes_in_countdown_mode() {
+        let rows = vec![command_row(
+            1,
+            "coders_x",
+            StreamPlatform::Twitch,
+            "spam link",
+        )];
+        let (state, scope) = command_state(&rows, fake_deletes()).await;
+        state.cohost.lock().await.settings.remove_confirm = RemoveConfirmMode::Countdown;
+        // What `execute_resolved_command` builds for the cloud parser's pick.
+        run_new_command(&state, &scope, resolved_removal(&rows[0].id), true).await;
+        let card = state_command(&state).await;
+        assert_eq!(card.status, CohostCommandStatus::Confirm);
+        let operation = state
+            .database
+            .get_chat_moderation_operation(card.operation_id.as_deref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(operation.confirm_mode, RemoveConfirmMode::Confirm);
+        assert_eq!(operation.execute_at, None, "no countdown runs it");
     }
 
     #[tokio::test]

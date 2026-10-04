@@ -78,7 +78,10 @@ plain toast with Remove and Cancel, and it leaves when the removal ends.
 - **Confirm first** is the default. The card waits for "yes", Enter or a
   click. After 20 seconds it expires and nothing is removed.
 - **5-second countdown** (opt-in) removes the comment unless you say "no",
-  press Esc or click Cancel. **Remove now** skips the wait.
+  press Esc or click Cancel. **Remove now** skips the wait. It applies only
+  to a command you start with "Orcle". "Remove it from our chat" without the
+  name, or a request Orcle had to work out in the cloud, always waits for
+  your yes.
 - **YouTube always asks you to confirm**, in both modes (YouTube API policy:
   express consent before a delete).
 - **Remove from chat** in a comment's ⋯ menu, or on a flag in the Orcle pane

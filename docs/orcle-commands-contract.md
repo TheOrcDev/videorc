@@ -81,7 +81,9 @@ every change. **Never add it to `LAN_EVENTS`.**
   - In `confirm` mode, `confirmBy` is 20 s out. With no answer the operation
     becomes `expired`.
   - In `countdown` mode, `executeAt` is 5 s out. The operation runs then
-    unless cancelled.
+    unless cancelled. Only a wake-word command read by the local grammar
+    asks for `countdown`; a structured phrase heard without the wake word,
+    or a target the cloud parser picked (S8), always asks for `confirm`.
   - On YouTube, `requiresExplicitConfirm` is always true and the countdown
     never runs.
 - On restart, `pending-confirm` becomes `cancelled` and `executing` becomes
