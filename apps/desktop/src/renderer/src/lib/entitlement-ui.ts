@@ -113,9 +113,13 @@ export function videoProfileEntitlementGate({
     'maxBitrateKbps' in limits && typeof limits.maxBitrateKbps === 'number'
       ? limits.maxBitrateKbps
       : undefined
+  const overSize =
+    kind === 'recording'
+      ? Math.max(video.width, video.height) > Math.max(limits.maxWidth, limits.maxHeight) ||
+        Math.min(video.width, video.height) > Math.min(limits.maxWidth, limits.maxHeight)
+      : video.width > limits.maxWidth || video.height > limits.maxHeight
   const overLimit =
-    video.width > limits.maxWidth ||
-    video.height > limits.maxHeight ||
+    overSize ||
     video.fps > limits.maxFps ||
     (bitrateLimit !== undefined && video.bitrateKbps > bitrateLimit)
 
