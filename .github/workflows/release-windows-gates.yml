@@ -11,8 +11,8 @@ jobs:
   gates:
     name: Windows release source gates
     runs-on: windows-latest
-    # Cold compile, mandatory 25x/3x stability checks, and auditor installation need headroom.
-    timeout-minutes: 75
+    # A 75-minute source run timed out during auditor install after completing 25x/3x checks.
+    timeout-minutes: 120
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
