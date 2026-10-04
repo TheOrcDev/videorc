@@ -229,7 +229,6 @@ import type {
   CommentsSendOperation,
   SessionStorageTotals,
   AiQuotaStatus,
-  AiWorkflowResult,
   AutomaticSourceFallbackEvent,
   AudioMeterResult,
   AudioProcessingUpdateResult,
@@ -241,16 +240,13 @@ import type {
   CompositorFrameReady,
   CompositorStatus,
   DiagnosticStats,
-  ClipExportResult,
   ClipMarkCommand,
   ClipMarkedEvent,
-  ClipSuggestResult,
   Device,
   DeviceList,
   EntitlementsSnapshot,
   NoiseCleanupJob,
   MediaAccessSnapshot,
-  ExportPublishPackResult,
   FileAssessment,
   EventsLaggedPayload,
   GateStatus,
@@ -387,7 +383,12 @@ import {
   type EntitlementUiGate
 } from '@/lib/entitlement-ui'
 import { commentCanHighlight, CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
-import { applyCohostState, cohostErrorToast, cohostHighlightMessageId } from '@/lib/cohost-state'
+import {
+  applyCohostState,
+  cohostErrorToast,
+  cohostHighlightMessageId,
+  orcleLiveSettingsPatch
+} from '@/lib/cohost-state'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import { upsertNoiseCleanupJob } from '@/lib/noise-cleanup-jobs'
 import {
@@ -1115,6 +1116,18 @@ export type StudioContextValue = {
   cohostGate: EntitlementUiGate
   cohostActionPending: boolean
   patchCohostSettings: (patch: CohostSettingsPatch) => Promise<void>
+  /**
+   * Orcle Live's one switch (plan 119). On without cloud-AI consent only
+   * raises `orcleConsentRequested` (the Orcle tab's consent dialog) and writes
+   * nothing; on with consent writes `{enabled: true, listen: true}` in one
+   * `cohost.settings.set`; off writes `{enabled: false}`.
+   */
+  setOrcleLive: (on: boolean) => Promise<void>
+  /** The consent dialog Orcle Live asked for is waiting for an answer. */
+  orcleConsentRequested: boolean
+  /** Accept: grant cloud-AI consent, then the one Orcle Live patch. Decline:
+   * close the dialog and change nothing. */
+  answerOrcleConsent: (accepted: boolean) => Promise<void>
   markCohostQuestionAnswered: (questionId: string, sessionId?: string) => void
   dismissCohostQuestion: (questionId: string, sessionId?: string) => void
   /** Put a voice-resolved question back (`cohost.question.restore`, plan 060 D9). */
@@ -1160,8 +1173,6 @@ export type StudioContextValue = {
   aiConsent: boolean
   /** Persists across launches (durable preference, not a per-launch answer). */
   setAiConsent: (consent: boolean) => void
-  aiRunningSessionId: string | null
-  exportRunningSessionId: string | null
   startRequestPending: boolean
   stopRequestPending: boolean
   screenImportPending: boolean
@@ -1339,15 +1350,6 @@ export type StudioContextValue = {
   startNoiseCleanup: (sessionId: string) => Promise<NoiseCleanupJob>
   cancelNoiseCleanup: (jobId: string) => Promise<NoiseCleanupJob>
   sessionStorageTotals: SessionStorageTotals | null
-  runAiWorkflow: (
-    sessionId: string,
-    options?: { outputs?: string[]; tone?: string }
-  ) => Promise<void>
-  exportPublishPack: (sessionId: string) => Promise<void>
-  /** Rank clip-worthy moments locally (chat spikes + captions). */
-  suggestClips: (sessionId: string) => Promise<ClipSuggestResult | null>
-  /** Trim a clip out of the recording locally (ffmpeg, next to the file). */
-  exportClip: (sessionId: string, startMs: number, endMs: number) => Promise<void>
   /** Mark the current moment for a clip (plan 068 D6). The `clip.marked`
    * event, not the reply, carries the toast so every source reads the same. */
   markClip: () => Promise<ClipMarkedEvent | null>
@@ -2095,14 +2097,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const sessionsRef = useRef<SessionSummary[]>([])
   sessionsRef.current = sessions
   const remuxSessionRef = useRef<((sessionId: string) => Promise<void>) | null>(null)
-  // Plan 068 D10: sessions whose transcript SRT landed (`captions-srt-written`
-  // precedes their `finalized` event), and the lazy post-stream pack trigger.
-  const transcriptWrittenSessionIdsRef = useRef(new Set<string>())
-  // Sessions whose Orcle listening reached `on`: only those make the pack.
-  const orcleListenedSessionIdsRef = useRef(new Set<string>())
-  const autoRunPostStreamPackRef = useRef<((event: RecordingFinalizationEvent) => void) | null>(
-    null
-  )
   const [sessionsNextCursor, setSessionsNextCursor] = useState<string | null>(null)
   const [sessionsLoadingMore, setSessionsLoadingMore] = useState(false)
   const sessionListGenerationRef = useRef(0)
@@ -2114,12 +2108,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     sessionId: string
     message: string
   } | null>(null)
-  const sessionDetailsRef = useRef(sessionDetails)
-  sessionDetailsRef.current = sessionDetails
   const sessionDetailRecencyRef = useRef<string[]>([])
   const sessionDetailRequestRef = useRef(new LatestRequestByKey<string>())
   const sessionDetailSingleFlightRef = useRef(new SingleFlightByKey<string, BackendClient>())
-  const sessionDetailAiDirtyRef = useRef(new Set<string>())
   const sessionDetailLiveEntriesRef = useRef(
     new Map<string, { healthEvents: HealthEvent[]; sessionLogs: SessionLogEntry[] }>()
   )
@@ -3141,9 +3132,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return null
     }
   }, [])
-  // Cloud-AI consent is a durable preference, not a per-launch answer: it
-  // silently resetting to off every launch was the top reason publish runs
-  // "did nothing but extract audio" (2026-07-11 report).
+  // Cloud-AI consent is a durable preference, not a per-launch answer: a
+  // consent that silently reset to off on every launch left cloud AI doing
+  // nothing with no visible reason (2026-07-11 report).
   const [aiConsent, setAiConsentState] = useState(
     () => localStorage.getItem(AI_CONSENT_STORAGE_KEY) === '1'
   )
@@ -3151,8 +3142,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     setAiConsentState(consent)
     localStorage.setItem(AI_CONSENT_STORAGE_KEY, consent ? '1' : '0')
   }, [])
-  const [aiRunningSessionId, setAiRunningSessionId] = useState<string | null>(null)
-  const [exportRunningSessionId, setExportRunningSessionId] = useState<string | null>(null)
   const [startRequestPending, setStartRequestPending] = useState(false)
   const [stopRequestPending, setStopRequestPending] = useState(false)
   const [screenImportPending, setScreenImportPending] = useState(false)
@@ -3906,9 +3895,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (merged === previous) return
     cohostStateRef.current = merged
     setCohostState(merged)
-    if (merged.sessionId && merged.listening?.state === 'on') {
-      orcleListenedSessionIdsRef.current.add(merged.sessionId)
-    }
     // Toast discipline: the pane and the destination chip already show every
     // co-host state. Only a NEW failure (reason + server error code) is news;
     // backoff retries of the same failure stay silent.
@@ -3982,6 +3968,50 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [client]
   )
+
+  // Orcle Live's one switch (plan 119 S2). Consent comes first: on without it
+  // only asks (the Orcle tab's consent dialog), and nothing is written until
+  // the streamer accepts. On is one save: chat and listening together.
+  const [orcleConsentRequested, setOrcleConsentRequested] = useState(false)
+  const setOrcleLive = useCallback(
+    async (on: boolean): Promise<void> => {
+      if (on && !aiConsent) {
+        setOrcleConsentRequested(true)
+        return
+      }
+      await patchCohostSettings(orcleLiveSettingsPatch(on))
+    },
+    [aiConsent, patchCohostSettings]
+  )
+  const answerOrcleConsent = useCallback(
+    async (accepted: boolean): Promise<void> => {
+      setOrcleConsentRequested(false)
+      if (!accepted) return
+      setAiConsent(true)
+      await patchCohostSettings(orcleLiveSettingsPatch(true))
+    },
+    [patchCohostSettings, setAiConsent]
+  )
+
+  // Plan 119 S15: with "Make a clean cut of every recording" on, a finished
+  // recording starts its clean cut once. The decision, the ledger and the
+  // call live in lib/clean-cut-auto.ts, loaded only when a session finalizes.
+  const autoRunCleanCutRef = useRef<((event: RecordingFinalizationEvent) => void) | null>(null)
+  autoRunCleanCutRef.current = (event) => {
+    const activeClient = clientRef.current
+    if (!activeClient) return
+    void import('@/lib/clean-cut-auto')
+      .then((auto) =>
+        auto.autoRunCleanCut(event, {
+          request: activeClient.request.bind(activeClient),
+          sessions: sessionsRef.current,
+          consent: aiConsent,
+          entitlements,
+          capabilities: aiCapabilities
+        })
+      )
+      .catch(() => undefined)
+  }
 
   const runCohostAction = useCallback(
     async (
@@ -4138,20 +4168,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     void window.videorc?.pushCohostWindowState?.(cohostWindowState)
   }, [cohostWindowState])
 
-  // "Turn on co-host" from the Comments window's presence popover or nudge, and
-  // "Turn on" listening from its one-time card (plan 068 D3). The settings
-  // (engine enabled, listening, cloud-AI consent) are main-renderer owned, so
-  // the window asks and gets the resolved window state back.
+  // Orcle Live's one switch from the Comments window (plan 119): its presence
+  // popover, nudge, consent CTA and one-time listening card. On is the same
+  // single `{enabled: true, listen: true}` save as the Orcle tab (the window
+  // sends `listen: true` too), off only `{enabled: false}`. The settings and
+  // cloud-AI consent are main-renderer owned, so the window asks and gets the
+  // resolved window state back; its consent CTA grants consent in the click.
   useEffect(() => {
     const off = window.videorc?.onCohostEnableRequest?.((command: CohostEnableCommand) => {
       void (async () => {
         if (command.grantConsent === true) setAiConsent(true)
-        const settingsPatch: CohostSettingsPatch = {
-          enabled: command.enabled,
-          ...(typeof command.listen === 'boolean' ? { listen: command.listen } : {})
-        }
         if (!client) throw new Error('Backend socket is not connected.')
-        const next = await client.request<CohostSettings>('cohost.settings.set', settingsPatch)
+        const next = await client.request<CohostSettings>(
+          'cohost.settings.set',
+          orcleLiveSettingsPatch(command.enabled)
+        )
         setCohostSettings(next)
         return {
           ...cohostWindowStateRef.current,
@@ -5051,95 +5082,74 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setSessionDetailsLoading((current) => new Set(current).add(sessionId))
         setSessionDetailError((current) => (current?.sessionId === sessionId ? null : current))
         try {
-          sessionDetailAiDirtyRef.current.delete(sessionId)
           sessionDetailLiveEntriesRef.current.delete(sessionId)
-          const loadAndCommitBatch = async (): Promise<boolean> => {
-            const [healthPage, logsPage, artifactsPage] = await Promise.all([
-              activeClient.requestTyped('sessions.healthEvents.list', {
-                sessionId,
-                limit: SESSION_DETAIL_BUFFER_LIMIT
-              }),
-              activeClient.requestTyped('sessions.logs.list', {
-                sessionId,
-                limit: SESSION_DETAIL_BUFFER_LIMIT
-              }),
-              activeClient.requestTyped('sessions.aiArtifacts.list', {
-                sessionId,
-                limit: SESSION_DETAIL_BUFFER_LIMIT
-              })
-            ])
-            if (
-              clientRef.current !== activeClient ||
-              !requestCoordinator.isCurrent(sessionId, requestToken)
-            ) {
-              return false
-            }
-            const liveEntries = sessionDetailLiveEntriesRef.current.get(sessionId)
-            sessionDetailLiveEntriesRef.current.delete(sessionId)
-            const loadedDetails: SessionDetails = {
-              healthEvents: capSessionDetailBuffer(healthPage.events),
-              sessionLogs: capSessionDetailBuffer(logsPage.entries),
-              aiArtifacts: capSessionDetailBuffer(artifactsPage.artifacts)
-            }
-            const recency = [
-              ...sessionDetailRecencyRef.current.filter((candidate) => candidate !== sessionId),
-              sessionId
-            ]
-            const evicted = recency.slice(
-              0,
-              Math.max(0, recency.length - SESSION_DETAIL_CACHE_LIMIT)
-            )
-            sessionDetailRecencyRef.current = recency.slice(-SESSION_DETAIL_CACHE_LIMIT)
+          const [healthPage, logsPage] = await Promise.all([
+            activeClient.requestTyped('sessions.healthEvents.list', {
+              sessionId,
+              limit: SESSION_DETAIL_BUFFER_LIMIT
+            }),
+            activeClient.requestTyped('sessions.logs.list', {
+              sessionId,
+              limit: SESSION_DETAIL_BUFFER_LIMIT
+            })
+          ])
+          if (
+            clientRef.current !== activeClient ||
+            !requestCoordinator.isCurrent(sessionId, requestToken)
+          ) {
+            return
+          }
+          const liveEntries = sessionDetailLiveEntriesRef.current.get(sessionId)
+          sessionDetailLiveEntriesRef.current.delete(sessionId)
+          const loadedDetails: SessionDetails = {
+            healthEvents: capSessionDetailBuffer(healthPage.events),
+            sessionLogs: capSessionDetailBuffer(logsPage.entries)
+          }
+          const recency = [
+            ...sessionDetailRecencyRef.current.filter((candidate) => candidate !== sessionId),
+            sessionId
+          ]
+          const evicted = recency.slice(0, Math.max(0, recency.length - SESSION_DETAIL_CACHE_LIMIT))
+          sessionDetailRecencyRef.current = recency.slice(-SESSION_DETAIL_CACHE_LIMIT)
+          for (const evictedId of evicted) {
+            requestCoordinator.invalidate(evictedId)
+            sessionDetailSingleFlightRef.current.invalidate(evictedId)
+            sessionDetailLiveEntriesRef.current.delete(evictedId)
+          }
+          setSessionDetails((current) => {
+            const currentDetails = current[sessionId]
+            const details: SessionDetails = liveEntries
+              ? {
+                  healthEvents: mergeSessionDetailEntries(
+                    loadedDetails.healthEvents,
+                    currentDetails?.healthEvents ?? [],
+                    liveEntries.healthEvents
+                  ),
+                  sessionLogs: mergeSessionDetailEntries(
+                    loadedDetails.sessionLogs,
+                    currentDetails?.sessionLogs ?? [],
+                    liveEntries.sessionLogs
+                  )
+                }
+              : loadedDetails
+            const next = { ...current, [sessionId]: details }
             for (const evictedId of evicted) {
-              requestCoordinator.invalidate(evictedId)
-              sessionDetailSingleFlightRef.current.invalidate(evictedId)
-              sessionDetailAiDirtyRef.current.delete(evictedId)
-              sessionDetailLiveEntriesRef.current.delete(evictedId)
+              delete next[evictedId]
             }
-            setSessionDetails((current) => {
-              const currentDetails = current[sessionId]
-              const details: SessionDetails = liveEntries
-                ? {
-                    healthEvents: mergeSessionDetailEntries(
-                      loadedDetails.healthEvents,
-                      currentDetails?.healthEvents ?? [],
-                      liveEntries.healthEvents
-                    ),
-                    sessionLogs: mergeSessionDetailEntries(
-                      loadedDetails.sessionLogs,
-                      currentDetails?.sessionLogs ?? [],
-                      liveEntries.sessionLogs
-                    ),
-                    aiArtifacts: loadedDetails.aiArtifacts
-                  }
-                : loadedDetails
-              const next = { ...current, [sessionId]: details }
-              for (const evictedId of evicted) {
-                delete next[evictedId]
+            return next
+          })
+          if (evicted.length > 0) {
+            const evictedIds = new Set(evicted)
+            setSessionDetailsLoading((current) => {
+              const next = new Set(current)
+              for (const evictedId of evictedIds) {
+                next.delete(evictedId)
               }
               return next
             })
-            if (evicted.length > 0) {
-              const evictedIds = new Set(evicted)
-              setSessionDetailsLoading((current) => {
-                const next = new Set(current)
-                for (const evictedId of evictedIds) {
-                  next.delete(evictedId)
-                }
-                return next
-              })
-              setSessionDetailError((current) =>
-                current && evictedIds.has(current.sessionId) ? null : current
-              )
-            }
-            return true
-          }
-
-          const firstBatchCommitted = await loadAndCommitBatch()
-          // Changes are coalesced into one bounded trailing pass. Continuous
-          // event traffic must never keep a detail request alive indefinitely.
-          if (firstBatchCommitted && sessionDetailAiDirtyRef.current.delete(sessionId)) {
-            await loadAndCommitBatch()
+            setSessionDetailError((current) =>
+              current && evictedIds.has(current.sessionId) ? null : current
+            )
           }
         } catch (error) {
           if (
@@ -5155,7 +5165,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             // These buffers belong to the latest request token for this
             // session. A stale request can settle after eviction/replacement;
             // it must not erase events buffered by its successor.
-            sessionDetailAiDirtyRef.current.delete(sessionId)
             sessionDetailLiveEntriesRef.current.delete(sessionId)
             setSessionDetailsLoading((current) => {
               const next = new Set(current)
@@ -5722,7 +5731,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const sessionListMoreSingleFlight = sessionListMoreSingleFlightRef.current
     const sessionDetailRequests = sessionDetailRequestRef.current
     const sessionDetailSingleFlight = sessionDetailSingleFlightRef.current
-    const sessionDetailAiDirty = sessionDetailAiDirtyRef.current
     const sessionDetailLiveEntries = sessionDetailLiveEntriesRef.current
     focusRefreshCoordinator.invalidate()
     sessionListRefreshRequests.clear()
@@ -5731,7 +5739,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     setSessionsLoadingMore(false)
     sessionDetailRequests.clear()
     sessionDetailSingleFlight.clear()
-    sessionDetailAiDirty.clear()
     sessionDetailLiveEntries.clear()
     sessionDetailRecencyRef.current = []
     setSessionDetails({})
@@ -6092,6 +6099,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (finalizationEventNeedsRefresh(sessionsRef.current, event)) {
           void refreshSessions(nextClient)
         }
+        if (event.state === 'finalized') {
+          autoRunCleanCutRef.current?.(event)
+        }
         if (event.state === 'failed') {
           toast.error('MP4 export failed', {
             id: `finalization-${event.sessionId}`,
@@ -6102,9 +6112,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             }
           })
         }
-        if (event.state === 'finalized') {
-          autoRunPostStreamPackRef.current?.(event)
-        }
+      }),
+      // A clean cut that finished out of view (plan 119 S15): its copy joins
+      // the Library, and the ready toast says so once per cut-list revision.
+      nextClient.on('cleanCut.status', (job) => {
+        if (job.state !== 'completed') return
+        void refreshSessions(nextClient)
+        void import('@/lib/clean-cut-notify')
+          .then((notify) => notify.announceCleanCutReady(job))
+          .catch(() => undefined)
       }),
       nextClient.on('noiseCleanup.status', (payload) => {
         const job = payload
@@ -6297,9 +6313,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
         if (event.code.startsWith('recording-quality-')) {
           void refreshSessions(nextClient)
-        }
-        if (event.code === 'captions-srt-written' && event.sessionId) {
-          transcriptWrittenSessionIdsRef.current.add(event.sessionId)
         }
         // isSessionAudioLossCode lives in the lazy recovery chunk; this stays
         // byte-cheap for the eager renderer budget.
@@ -6613,7 +6626,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // Clip that (plan 068 D6): one toast per mark, whether it came from a
       // spoken phrase, a shortcut, a deck key, or the Stream Manager.
       nextClient.on('clip.marked', (payload) => {
-        const copy = clipMarkedToast(payload as ClipMarkedEvent)
+        // A recording that never went live has no stream report to point at.
+        const copy = clipMarkedToast(payload as ClipMarkedEvent, {
+          streaming: sessionIsLive(recordingRef.current)
+        })
         ;(copy.kind === 'success' ? toast.success : toast.warning)(copy.title, {
           id: 'clip-marked',
           description: copy.description
@@ -6742,23 +6758,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             xPlaybackToastsRef.current.add(toastKey)
             runtime.showXPlaybackEvent(event)
           })
-        }
-      }),
-      nextClient.on('ai.artifacts.changed', (payload) => {
-        bootstrapGuard.mark('sessions')
-        void refreshSessions(nextClient)
-        const sessionId =
-          typeof payload === 'object' && payload !== null && 'sessionId' in payload
-            ? String(payload.sessionId)
-            : null
-        const detailRequestActive = sessionId
-          ? sessionDetailRequestRef.current.isActive(sessionId)
-          : false
-        if (sessionId && detailRequestActive) {
-          sessionDetailAiDirtyRef.current.add(sessionId)
-        }
-        if (sessionId && (detailRequestActive || sessionDetailsRef.current[sessionId])) {
-          void loadSessionDetailsForClient(nextClient, sessionId)
         }
       }),
       nextClient.on('log', (payload) => appendLog(payload as BackendLogEvent)),
@@ -7147,7 +7146,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSessionsLoadingMore(false)
       sessionDetailRequests.clear()
       sessionDetailSingleFlight.clear()
-      sessionDetailAiDirty.clear()
       sessionDetailLiveEntries.clear()
       cancelCaptionCueRender()
       bootstrapAbort.abort()
@@ -10486,14 +10484,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [isSessionActive, suppressCaptionsForSession])
 
-  // Consent is the USER'S durable intent — no code path may revoke it. An
+  // Consent is the USER'S durable intent: no code path may revoke it. An
   // earlier effect here silently flipped the toggle off whenever cloud AI
-  // readiness was not ready, which also made runAiWorkflow's readiness error
-  // toast unreachable (it checks consent first): every run silently downgraded
-  // to local-only and "nothing worked" with no visible reason (2026-07-16
-  // owner incident — the server had never been configured, and the app never
-  // said so). Readiness gates the RUN and the switch's enabled state, never
-  // the stored consent.
+  // readiness was not ready, so every cloud feature quietly did nothing with
+  // no visible reason (2026-07-16 owner incident: the server had never been
+  // configured, and the app never said so). Readiness gates what runs and the
+  // switch's enabled state, never the stored consent.
 
   // Burn-in driver: a serial latest-wins scheduler replaces the old boolean
   // busy gate, which could permanently drop a final/style update that arrived
@@ -13571,186 +13567,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   remuxSessionRef.current = remuxSession
 
-  const runAiWorkflow = useCallback(
-    async (sessionId: string, options?: { outputs?: string[]; tone?: string }) => {
-      if (!client) {
-        // F-023: this used to be a silent no-op — the button appeared dead.
-        toast.error('AI workflow', {
-          description: 'Backend is not connected. Try again in a moment.'
-        })
-        return
-      }
-      if (aiConsent) {
-        try {
-          const { cloudAiReadiness } = await import('@/lib/ai-readiness')
-          const readiness = cloudAiReadiness({
-            account,
-            capabilities: aiCapabilities,
-            error: aiReadinessError,
-            loading: aiReadinessLoading,
-            quota: aiQuota
-          })
-          if (!readiness.ready) {
-            toast.error(readiness.title, { description: readiness.description })
-            return
-          }
-        } catch (error) {
-          reportError(error)
-          return
-        }
-      }
-
-      try {
-        setLastError(null)
-        setAiRunningSessionId(sessionId)
-        const result = await client.request<AiWorkflowResult>('ai.run_post_recording', {
-          sessionId,
-          consentToUploadAudio: aiConsent,
-          outputs: options?.outputs,
-          tone: options?.tone
-        })
-        await refreshSessions(client)
-        // FX3: the local-only run needs an explicit, named result — "nothing
-        // visibly happened" was the by-eye finding. Name the produced file.
-        if (aiConsent) {
-          toast.success('Publish pack generated.')
-        } else if (
-          result.artifacts.some(
-            (artifact) => artifact.kind === 'transcript' && artifact.status === 'ready'
-          )
-        ) {
-          toast.success('Transcript ready from live captions.', {
-            description:
-              'Enable cloud consent to generate the title, description, and the rest of the pack. The transcript uploads as text only.'
-          })
-        } else {
-          toast.success('Local audio extracted.', {
-            description: result.audioPath
-              ? `Saved ${basename(result.audioPath)} next to the recording. Enable cloud consent to transcribe.`
-              : 'Enable cloud consent to transcribe.'
-          })
-        }
-      } catch (error) {
-        reportError(error)
-      } finally {
-        setAiRunningSessionId(null)
-      }
-    },
-    [
-      aiConsent,
-      account,
-      aiCapabilities,
-      aiQuota,
-      aiReadinessError,
-      aiReadinessLoading,
-      client,
-      refreshSessions,
-      reportError
-    ]
-  )
-  // Plan 068 D10: a finished streamed + recorded session with a transcript
-  // makes its own publish pack, once (lib/post-stream-pack.ts, lazy).
-  autoRunPostStreamPackRef.current = (event) => {
-    const activeClient = clientRef.current
-    const transcriptWritten = transcriptWrittenSessionIdsRef.current.delete(event.sessionId)
-    const orcleListened = orcleListenedSessionIdsRef.current.delete(event.sessionId)
-    if (!activeClient) return
-    void import('@/lib/post-stream-pack')
-      .then((pack) =>
-        pack.autoRunPostStreamPack(event, {
-          request: activeClient.request.bind(activeClient),
-          sessions: sessionsRef.current,
-          transcriptWritten,
-          orcleListened,
-          listenOn: cohostListen,
-          consent: aiConsent,
-          runningSessionId: aiRunningSessionId,
-          readiness: {
-            account,
-            capabilities: aiCapabilities,
-            error: aiReadinessError,
-            loading: aiReadinessLoading,
-            quota: aiQuota
-          },
-          setRunningSessionId: setAiRunningSessionId,
-          refreshSessions: () => refreshSessions(activeClient)
-        })
-      )
-      .catch(() => undefined)
-  }
-
-  const exportPublishPack = useCallback(
-    async (sessionId: string) => {
-      if (!client) {
-        return
-      }
-
-      try {
-        setLastError(null)
-        setExportRunningSessionId(sessionId)
-        const result = await client.request<ExportPublishPackResult>('ai.publish_pack.export', {
-          sessionId
-        })
-        const fileCount = result.files?.length ?? 1
-        toast.success(
-          `Publish pack exported (${fileCount} ${fileCount === 1 ? 'file' : 'files'}).`,
-          {
-            description: result.markdownPath
-          }
-        )
-      } catch (error) {
-        reportError(error)
-      } finally {
-        setExportRunningSessionId(null)
-      }
-    },
-    [client, reportError]
-  )
-
-  const suggestClips = useCallback(
-    async (sessionId: string): Promise<ClipSuggestResult | null> => {
-      if (!client) {
-        toast.error('Clips', { description: 'Backend is not connected. Try again in a moment.' })
-        return null
-      }
-      try {
-        return await client.request<ClipSuggestResult>('ai.clips.suggest', { sessionId })
-      } catch (error) {
-        reportError(error)
-        return null
-      }
-    },
-    [client, reportError]
-  )
-
-  const exportClip = useCallback(
-    async (sessionId: string, startMs: number, endMs: number): Promise<void> => {
-      if (!client) {
-        toast.error('Clips', { description: 'Backend is not connected. Try again in a moment.' })
-        return
-      }
-      try {
-        const result = await client.request<ClipExportResult>('ai.clip.export', {
-          sessionId,
-          startMs,
-          endMs
-        })
-        toast.success('Clip exported next to the recording.', {
-          description: basename(result.path),
-          action: {
-            label: 'Reveal',
-            onClick: () => {
-              void window.videorc?.revealSession?.(sessionId)
-            }
-          }
-        })
-      } catch (error) {
-        reportError(error)
-      }
-    },
-    [client, reportError]
-  )
-
   const markClip = useCallback(async (): Promise<ClipMarkedEvent | null> => {
     if (!client) {
       toast.error('Mark clip', { description: 'Backend is not connected. Try again in a moment.' })
@@ -14983,6 +14799,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cohostGate,
       cohostActionPending,
       patchCohostSettings,
+      setOrcleLive,
+      orcleConsentRequested,
+      answerOrcleConsent,
       markCohostQuestionAnswered,
       dismissCohostQuestion,
       restoreCohostQuestion,
@@ -15017,8 +14836,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       mediaAccess,
       aiConsent,
       setAiConsent,
-      aiRunningSessionId,
-      exportRunningSessionId,
       startRequestPending,
       stopRequestPending,
       screenImportPending,
@@ -15133,10 +14950,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       startNoiseCleanup,
       cancelNoiseCleanup,
       sessionStorageTotals,
-      runAiWorkflow,
-      exportPublishPack,
-      suggestClips,
-      exportClip,
       markClip,
       assessRecording,
       repairRecording,
@@ -15217,6 +15030,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cohostGate,
       cohostActionPending,
       patchCohostSettings,
+      setOrcleLive,
+      orcleConsentRequested,
+      answerOrcleConsent,
       markCohostQuestionAnswered,
       dismissCohostQuestion,
       restoreCohostQuestion,
@@ -15251,8 +15067,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       mediaAccess,
       aiConsent,
       setAiConsent,
-      aiRunningSessionId,
-      exportRunningSessionId,
       startRequestPending,
       stopRequestPending,
       screenImportPending,
@@ -15366,10 +15180,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       startNoiseCleanup,
       cancelNoiseCleanup,
       sessionStorageTotals,
-      runAiWorkflow,
-      exportPublishPack,
-      suggestClips,
-      exportClip,
       markClip,
       assessRecording,
       repairRecording,

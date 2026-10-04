@@ -13101,6 +13101,36 @@ async fn resolve_linux_h264_encoder_uncached(
     Ok(resolved)
 }
 
+/// Plan 119 S13: what a background render (Clean cut) may encode with, from
+/// the same decision the recording path makes. On Linux this is the cached
+/// render-node probe: a usable VAAPI device and the argument profile it
+/// accepted, or none with the reason. Elsewhere there is no device to report
+/// and the platform encoder table decides.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct BackgroundEncodeDecision {
+    pub vaapi_device: Option<PathBuf>,
+    pub vaapi_arg_profile: LinuxVaapiArgProfile,
+    pub fallback_reason: Option<String>,
+}
+
+pub(crate) async fn background_h264_encode_decision(ffmpeg_path: &str) -> BackgroundEncodeDecision {
+    match default_h264_encode_backend(ffmpeg_path).await {
+        Ok(resolved) => BackgroundEncodeDecision {
+            vaapi_device: if resolved.platform == FfmpegH264Platform::LinuxVaapi {
+                resolved.vaapi_device.clone()
+            } else {
+                None
+            },
+            vaapi_arg_profile: resolved.vaapi_arg_profile,
+            fallback_reason: resolved.fallback_reason,
+        },
+        Err(error) => BackgroundEncodeDecision {
+            fallback_reason: Some(error.to_string()),
+            ..BackgroundEncodeDecision::default()
+        },
+    }
+}
+
 async fn default_h264_encode_backend(ffmpeg_path: &str) -> Result<ResolvedFfmpegH264Encoder> {
     #[cfg(target_os = "linux")]
     {

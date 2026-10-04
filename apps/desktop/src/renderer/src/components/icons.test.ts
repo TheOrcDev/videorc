@@ -7,7 +7,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
-import { CameraIcon, StudioIcon, BrainIcon, KickIcon, type AppIconProps } from './icons'
+import { CameraIcon, StudioIcon, BrainIcon, KickIcon, OrcleIcon, type AppIconProps } from './icons'
 
 describe('semantic icon registry', () => {
   it('keeps optional glyph modules outside the initial chunk through the actual registry', async () => {
@@ -89,5 +89,25 @@ describe('semantic icon registry', () => {
     expect(renderToStaticMarkup(createElement(KickIcon, { size: 32, weight: 'bold' }))).toContain(
       'width="32"'
     )
+  })
+
+  // Plan 119: Orcle's hand-drawn mark follows its Phosphor neighbours' weights,
+  // so the sidebar's regular-to-fill swap still reads.
+  it('draws Orcle as an outline, a duotone or a solid head in currentColor', () => {
+    const markup = (weight?: AppIconProps['weight']): string =>
+      renderToStaticMarkup(createElement(OrcleIcon, { size: 16, weight, className: 'orcle' }))
+    const outline = markup()
+    expect(outline).toContain('viewBox="0 0 256 256"')
+    expect(outline).toContain('width="16"')
+    expect(outline).toContain('fill="currentColor"')
+    expect(outline).toContain('class="orcle"')
+    expect(outline).not.toContain('opacity')
+    expect(markup('regular')).toBe(outline)
+    expect(markup('light')).toBe(outline)
+    expect(markup('thin')).toBe(outline)
+    expect(markup('fill')).not.toBe(outline)
+    expect(markup('bold')).toBe(markup('fill'))
+    expect(markup('duotone')).toContain('opacity="0.2"')
+    expect(markup('duotone')).toContain(outline.match(/fill-rule="evenodd" d="[^"]+"/)?.[0])
   })
 })

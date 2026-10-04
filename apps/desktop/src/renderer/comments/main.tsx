@@ -287,18 +287,19 @@ function CommentsWindowApp(): ReactElement {
         .finally(() => setCohostActionPending(false))
     }
 
-  // Turning the co-host on (and, from the consent CTA, granting cloud-AI
-  // consent, or from the one-time card, listening) is main-renderer owned; the
-  // relay reply carries the truth back so the switch reflects what actually
-  // happened, not what was clicked. The listening card shows only while Orcle
-  // is on, so its Turn on keeps `enabled` true.
-  const setCohostEnabled = (enabled: boolean, grantConsent = false, listen?: boolean): void => {
+  // Orcle Live's one switch (plan 119), relayed: on means Orcle reads chat AND
+  // hears you (`listen: true`), off only stops it joining. Every way on (the
+  // status popover, the nudge, the consent CTA and the listening card) sends
+  // the same command; the consent CTA also grants cloud-AI consent in the same
+  // click. The settings are main-renderer owned, and the relay reply carries
+  // the truth back so the switch reflects what happened, not what was clicked.
+  const setOrcleLive = (on: boolean, grantConsent = false): void => {
     void window.videorc
       ?.sendCohostEnable?.({
         requestId: crypto.randomUUID(),
-        enabled,
+        enabled: on,
         grantConsent,
-        ...(listen === undefined ? {} : { listen })
+        ...(on ? { listen: true } : {})
       })
       .then((state) => state && setCohost(state))
       .catch((error) =>
@@ -370,9 +371,9 @@ function CommentsWindowApp(): ReactElement {
         }
         onCohostRecapDraft={() => sendCohostAction('recap-draft')(snapshot.sessionId ?? '')}
         onCohostAuthorGreeted={(entry) => void sendCohostAction('author-greeted')(entry.authorKey)}
-        onCohostEnable={(enabled) => setCohostEnabled(enabled)}
-        onCohostEnableConsent={() => setCohostEnabled(true, true)}
-        onCohostListenOn={() => setCohostEnabled(true, false, true)}
+        onCohostEnable={(enabled) => setOrcleLive(enabled)}
+        onCohostEnableConsent={() => setOrcleLive(true, true)}
+        onCohostListenOn={() => setOrcleLive(true)}
         onCohostNudgeDismiss={() => {
           setCohostNudgeDismissed(true)
           localStorage.setItem(COHOST_NUDGE_STORAGE_KEY, '1')

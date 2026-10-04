@@ -38,7 +38,10 @@ export function deriveNoiseCleanupView({
   job,
   captureActive
 }: NoiseCleanupViewInput): NoiseCleanupView {
-  if (session.processingKind === 'noise-cleanup') {
+  // Any managed copy (noise-cleaned, or a Clean cut copy, plan 119 S14)
+  // points back at its source and is never cleaned again: the backend
+  // refuses a session that is derived from another one.
+  if (session.processingKind === 'noise-cleanup' || session.derivedFromSessionId) {
     return view({
       menuAction: session.derivedFromSessionId ? 'show-source' : null,
       menuLabel: session.derivedFromSessionId ? 'Show source recording' : null,

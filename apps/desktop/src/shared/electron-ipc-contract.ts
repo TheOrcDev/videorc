@@ -168,6 +168,7 @@ export const electronInvokeApiMethods = {
   'resource:reveal-session': 'revealSession',
   'resource:reveal-background': 'revealBackgroundAsset',
   'resource:open-session': 'openSession',
+  'media:grant-session': 'grantSessionMedia',
   'resource:trash-session-deletion': 'trashSessionDeletion',
   'system:pick-file': 'pickFile',
   'system:pick-directory': 'pickDirectory',
@@ -457,6 +458,31 @@ const boundedUrl = runtimeSchema<string>('an allowed URL', (value, path) => {
   }
   return input
 })
+
+/** A session media grant URL (plan 119, S11): the scoped host plus a 128-bit hex id, nothing else. */
+const sessionMediaGrantUrlSchema = runtimeSchema<string>(
+  'a videorc-asset://session-media/<grantId> URL',
+  (value, path) => {
+    const input = stringSchema({ minLength: 1, maxLength: 256 }).parse(value, path)
+    if (!/^videorc-asset:\/\/session-media\/[0-9a-f]{32}$/.test(input)) {
+      throw new RuntimeSchemaError(path, 'a videorc-asset://session-media/<grantId> URL')
+    }
+    return input
+  }
+)
+const sessionMediaGrantResultSchema = unionSchema([
+  objectSchema(
+    {
+      url: sessionMediaGrantUrlSchema,
+      expiresAt: numberSchema({ integer: true, min: 0 })
+    },
+    { allowUnknown: false }
+  ),
+  objectSchema(
+    { error: enumSchema(['not-found', 'not-mp4', 'not-ready']) },
+    { allowUnknown: false }
+  )
+])
 
 const oauthCallbackIdentifierSchema = runtimeSchema<string>(
   'a provider OAuth callback identifier',
@@ -1078,6 +1104,10 @@ const specificRuntimeInvokeContracts = {
   'resource:reveal-session': invokeContract(tupleSchema([boundedIdentifier])),
   'resource:reveal-background': invokeContract(tupleSchema([boundedIdentifier])),
   'resource:open-session': invokeContract(tupleSchema([boundedIdentifier])),
+  'media:grant-session': invokeContract(
+    tupleSchema([boundedIdentifier]),
+    sessionMediaGrantResultSchema
+  ),
   'resource:trash-session-deletion': invokeContract(tupleSchema([boundedIdentifier])),
   'system:check-directory': invokeContract(tupleSchema([boundedIdentifier])),
   'backgrounds:asset-exists': invokeContract(tupleSchema([boundedIdentifier])),

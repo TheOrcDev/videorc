@@ -23,6 +23,13 @@ describe('SHORTCUTS registry', () => {
     ).toBe(WORKSPACE_SHORTCUTS.length)
   })
 
+  it('labels ⌘9 Orcle (plan 119)', () => {
+    expect(SHORTCUTS.find((entry) => entry.id === 'nav-ai')).toMatchObject({
+      keys: ['⌘', '9'],
+      label: 'Orcle'
+    })
+  })
+
   it('has unique ids and non-empty key lists', () => {
     const ids = SHORTCUTS.map((entry) => entry.id)
     expect(new Set(ids).size).toBe(ids.length)

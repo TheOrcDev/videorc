@@ -5,6 +5,12 @@ import { describe, expect, it } from 'vitest'
 import { normalizeLayoutSettings } from '../renderer/src/lib/capture'
 import type {
   AccountCallbackEnvelope,
+  CleanCutEdl,
+  CleanCutGetResult,
+  CleanCutJob,
+  CleanCutStartParams,
+  CleanCutTranscript,
+  CleanCutUpdateEdlParams,
   ClipMark,
   ClipMarkedEvent,
   CohostAuthorParams,
@@ -12,6 +18,10 @@ import type {
   CohostPromiseParams,
   CohostQuestionParams,
   CohostRecapParams,
+  CohostReportGetParams,
+  CohostReportPayload,
+  CohostReportSavedEvent,
+  CohostSessionReport,
   CohostSettings,
   CohostSettingsPatch,
   CohostStartParams,
@@ -91,12 +101,35 @@ interface HighRiskContractFixtures {
     timeoutState: CohostState
     stateV2: CohostState
     legacyState: CohostState
+    reportGetParams: CohostReportGetParams
+    report: CohostSessionReport
+    reportPayload: CohostReportPayload
+    reportPayloadWithoutReport: CohostReportPayload
+    reportSaved: CohostReportSavedEvent
   }
   clip: {
     markedSaved: ClipMarkedEvent
     markedUnsaved: ClipMarkedEvent
     listParams: BackendRpcParams<'clip.marks.list'>
     marks: ClipMark[]
+  }
+  cleanCut: {
+    startParams: CleanCutStartParams
+    condensedStartParams: CleanCutStartParams
+    getParams: BackendRpcParams<'cleanCut.get'>
+    queuedJob: CleanCutJob
+    readyJob: CleanCutJob
+    failedJob: CleanCutJob
+    edl: CleanCutEdl
+    getResult: CleanCutGetResult
+    updateEdlParams: CleanCutUpdateEdlParams
+    renderParams: BackendRpcParams<'cleanCut.render'>
+    transcriptParams: BackendRpcParams<'cleanCut.transcript'>
+    renderingJob: CleanCutJob
+    completedJob: CleanCutJob
+    transcript: CleanCutTranscript
+    transcriptWithoutLanguage: CleanCutTranscript
+    condensedGetResult: CleanCutGetResult
   }
 }
 
@@ -486,6 +519,54 @@ describe('shared high-risk protocol fixture', () => {
     }
   })
 
+  it('keeps the Orcle report, its payload and the saved event identical across languages (plan 119 S1)', () => {
+    expect(
+      validateBackendRpcParams('cohost.report.get', fixtures.cohost.reportGetParams)
+    ).toStrictEqual(fixtures.cohost.reportGetParams)
+    expect(
+      validateBackendRpcResult('cohost.report.get', fixtures.cohost.reportPayload)
+    ).toStrictEqual(fixtures.cohost.reportPayload)
+    expect(
+      validateBackendRpcResult('cohost.report.latest', fixtures.cohost.reportPayload)
+    ).toStrictEqual(fixtures.cohost.reportPayload)
+    expect(validateBackendRpcResult('cohost.report.latest', null)).toBeNull()
+    expect(
+      validateBackendRpcResult('cohost.report.get', fixtures.cohost.reportPayloadWithoutReport)
+    ).toStrictEqual(fixtures.cohost.reportPayloadWithoutReport)
+    expect(fixtures.cohost.reportPayloadWithoutReport.report).toBeNull()
+    expect(fixtures.cohost.reportPayloadWithoutReport.moments).toStrictEqual([])
+    expect(
+      validateBackendEventPayload('cohost.report.saved', fixtures.cohost.reportSaved)
+    ).toStrictEqual(fixtures.cohost.reportSaved)
+
+    // The full report carries every optional list; the payload's report is
+    // the minimal shape, which proves the serde-null rule: absent, never null.
+    const full = fixtures.cohost.report
+    expect(
+      validateBackendRpcResult('cohost.report.get', {
+        ...fixtures.cohost.reportPayload,
+        report: full
+      })
+    ).toStrictEqual({ ...fixtures.cohost.reportPayload, report: full })
+    expect(full.version).toBe(1)
+    expect(full.questions.items).toHaveLength(2)
+    expect(full.questions.items?.[1]).not.toHaveProperty('askers')
+    expect(full.questions.items?.[1]).not.toHaveProperty('platforms')
+    const minimal = fixtures.cohost.reportPayload.report as CohostSessionReport
+    expect(minimal.segments).toBe(2)
+    for (const key of ['streamTitle', 'alerts']) {
+      expect(key in minimal).toBe(false)
+    }
+    expect('items' in minimal.questions).toBe(false)
+    expect('byKind' in minimal.flags).toBe(false)
+    expect('open' in minimal.promises).toBe(false)
+    expect(fixtures.cohost.reportPayload.moments.map((moment) => moment.source)).toStrictEqual([
+      'voice',
+      'manual',
+      'chat'
+    ])
+  })
+
   it('keeps clip marks and the marked event identical across languages (plan 068 D6)', () => {
     for (const event of [fixtures.clip.markedSaved, fixtures.clip.markedUnsaved]) {
       expect(validateBackendEventPayload('clip.marked', event)).toStrictEqual(event)
@@ -500,6 +581,94 @@ describe('shared high-risk protocol fixture', () => {
       fixtures.clip.marks
     )
     expect(fixtures.clip.marks[1]).not.toHaveProperty('phrase')
+  })
+
+  it('keeps Clean cut jobs, the cut list and its params identical across languages (plan 119)', () => {
+    const { cleanCut } = fixtures
+    expect(validateBackendRpcParams('cleanCut.start', cleanCut.startParams)).toStrictEqual(
+      cleanCut.startParams
+    )
+    expect(validateBackendRpcParams('cleanCut.start', cleanCut.condensedStartParams)).toStrictEqual(
+      cleanCut.condensedStartParams
+    )
+    expect(validateBackendRpcParams('cleanCut.get', cleanCut.getParams)).toStrictEqual(
+      cleanCut.getParams
+    )
+    for (const job of [cleanCut.queuedJob, cleanCut.readyJob, cleanCut.failedJob]) {
+      expect(validateBackendRpcResult('cleanCut.start', job)).toStrictEqual(job)
+      expect(validateBackendRpcResult('cleanCut.cancel', job)).toStrictEqual(job)
+      expect(validateBackendEventPayload('cleanCut.status', job)).toStrictEqual(job)
+    }
+    expect(
+      validateBackendRpcResult('cleanCut.list', [cleanCut.queuedJob, cleanCut.failedJob])
+    ).toStrictEqual([cleanCut.queuedJob, cleanCut.failedJob])
+    expect(validateBackendRpcResult('cleanCut.get', cleanCut.getResult)).toStrictEqual(
+      cleanCut.getResult
+    )
+    expect(validateBackendRpcParams('cleanCut.updateEdl', cleanCut.updateEdlParams)).toStrictEqual(
+      cleanCut.updateEdlParams
+    )
+    expect(
+      validateBackendRpcResult('cleanCut.updateEdl', { job: cleanCut.readyJob, edl: cleanCut.edl })
+    ).toStrictEqual({ job: cleanCut.readyJob, edl: cleanCut.edl })
+    // Omitted, never null: the serde-null trap.
+    expect(cleanCut.queuedJob).not.toHaveProperty('edlSummary')
+    expect(cleanCut.readyJob).not.toHaveProperty('errorCode')
+    expect(cleanCut.edl.removals[0]).not.toHaveProperty('confidence')
+    expect(cleanCut.updateEdlParams).not.toHaveProperty('removeManual')
+    expect(() =>
+      validateBackendEventPayload('cleanCut.status', {
+        ...cleanCut.failedJob,
+        errorCode: undefined
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendEventPayload('cleanCut.status', {
+        ...cleanCut.readyJob,
+        edlSummary: undefined
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcParams('cleanCut.start', { ...cleanCut.startParams, mode: 'tight' })
+    ).toThrow()
+  })
+
+  it('keeps the Clean cut render and transcript shapes identical across languages (plan 119 S13)', () => {
+    const { cleanCut } = fixtures
+    expect(validateBackendRpcParams('cleanCut.render', cleanCut.renderParams)).toStrictEqual(
+      cleanCut.renderParams
+    )
+    expect(
+      validateBackendRpcParams('cleanCut.transcript', cleanCut.transcriptParams)
+    ).toStrictEqual(cleanCut.transcriptParams)
+    for (const job of [cleanCut.renderingJob, cleanCut.completedJob]) {
+      expect(validateBackendRpcResult('cleanCut.render', job)).toStrictEqual(job)
+      expect(validateBackendEventPayload('cleanCut.status', job)).toStrictEqual(job)
+    }
+    expect(cleanCut.renderingJob.step).toBe('render')
+    expect(cleanCut.renderingJob).not.toHaveProperty('outputSessionId')
+    expect(cleanCut.completedJob.outputSessionId).toBe('session-fixture-clean-cut')
+    expect(validateBackendRpcResult('cleanCut.transcript', cleanCut.transcript)).toStrictEqual(
+      cleanCut.transcript
+    )
+    expect(
+      validateBackendRpcResult('cleanCut.transcript', cleanCut.transcriptWithoutLanguage)
+    ).toStrictEqual(cleanCut.transcriptWithoutLanguage)
+    // `filler` is written only when true; `language` is null, never absent.
+    expect(cleanCut.transcript.words[0]).not.toHaveProperty('filler')
+    expect(cleanCut.transcript.words[1].filler).toBe(true)
+    expect(cleanCut.transcriptWithoutLanguage.language).toBeNull()
+    expect(() =>
+      validateBackendRpcResult('cleanCut.transcript', {
+        ...cleanCut.transcript,
+        words: [{ ...cleanCut.transcript.words[0], filler: false }]
+      })
+    ).toThrow()
+    expect(validateBackendRpcResult('cleanCut.get', cleanCut.condensedGetResult)).toStrictEqual(
+      cleanCut.condensedGetResult
+    )
+    expect(cleanCut.condensedGetResult.jobs[0].condensedKeeps).toHaveLength(2)
+    expect(cleanCut.getResult.jobs[0]).not.toHaveProperty('condensedKeeps')
   })
 
   it('loads chat rows with and without structured event details', () => {

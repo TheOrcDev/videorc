@@ -1091,6 +1091,9 @@ pub struct AppState {
     pub x_oauth1: Arc<crate::x_oauth1::XOauth1Sessions>,
     pub ffmpeg_work: Arc<FfmpegWorkCoordinator>,
     pub noise_cleanup: Arc<crate::noise_cleanup::NoiseCleanupRegistry>,
+    /// Live Clean cut workers by job id (plan 119): cancel and shutdown
+    /// interrupt reach the running worker through it.
+    pub clean_cut: Arc<crate::clean_cut::CleanCutRegistry>,
     /// Set once the first session start is admitted in this process; the
     /// start latency timeline reports that first start as `cold`.
     pub recording_started_once: Arc<AtomicBool>,
@@ -1327,6 +1330,7 @@ impl AppState {
             x_oauth1: Arc::new(crate::x_oauth1::XOauth1Sessions::default()),
             ffmpeg_work: Arc::new(FfmpegWorkCoordinator::new()),
             noise_cleanup: Arc::new(crate::noise_cleanup::NoiseCleanupRegistry::default()),
+            clean_cut: Arc::new(crate::clean_cut::CleanCutRegistry::default()),
             recording_started_once: Arc::new(AtomicBool::new(false)),
             recording_stop_timeline: Arc::new(StdMutex::new(None)),
             recording_finalization: Arc::new(

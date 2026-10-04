@@ -3896,6 +3896,14 @@ pub struct SessionSummary {
     pub source_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub processing_kind: Option<String>,
+    /// Plan 119 S13: present only on a derived row Clean cut rendered, from a
+    /// join on `clean_cut_jobs.output_session_id`. `processing_kind` stays
+    /// absent for these rows (decision 12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_cut_of_session_id: Option<String>,
+    /// `clean` or `condensed`, next to `clean_cut_of_session_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_cut_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finalization_state: Option<RecordingFinalizationState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3943,6 +3951,14 @@ pub struct SessionListItem {
     pub source_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub processing_kind: Option<String>,
+    /// Plan 119 S13: the source session of a Clean cut output row, from a
+    /// join on `clean_cut_jobs.output_session_id`. Never set together with a
+    /// `processing_kind` (decision 12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_cut_of_session_id: Option<String>,
+    /// `clean` or `condensed`, next to `clean_cut_of_session_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_cut_mode: Option<String>,
     /// Background MP4 finalization (instant-record P2). Absent for rows that
     /// finished inline (legacy) or never recorded a file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4111,6 +4127,380 @@ pub struct NoiseCleanupStartParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NoiseCleanupCancelParams {
     pub job_id: String,
+}
+
+// ---------------------------------------------------------------------------
+// Clean cut (plan 119 S12a/S12b): a durable job per (source session, mode)
+// that transcribes a finished recording word for word, finds what to cut and
+// builds a frame-exact cut list (the EDL). S13 renders it into a derived
+// session. Wire shapes are mirrored in `shared/backend.ts` and validated by
+// the closed schemas in `shared/backend-rpc-contract.ts`.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum CleanCutMode {
+    Clean,
+    Condensed,
+}
+
+impl CleanCutMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Condensed => "condensed",
+        }
+    }
+}
+
+impl std::str::FromStr for CleanCutMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "clean" => Ok(Self::Clean),
+            "condensed" => Ok(Self::Condensed),
+            _ => Err(format!("Unknown Clean cut mode: {value}")),
+        }
+    }
+}
+
+/// `queued → transcribing → analyzing → ready` is built here (S12a/S12b);
+/// `ready → rendering → validating → completed` is S13's. `failed` and
+/// `cancelled` are terminal; a failed job is resumed by starting a new one for
+/// the same source and mode, which reuses every chunk already transcribed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CleanCutJobState {
+    Queued,
+    Transcribing,
+    Analyzing,
+    Ready,
+    Rendering,
+    Validating,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl CleanCutJobState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Transcribing => "transcribing",
+            Self::Analyzing => "analyzing",
+            Self::Ready => "ready",
+            Self::Rendering => "rendering",
+            Self::Validating => "validating",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// A worker owns the job: it holds (or waits for) the maintenance slot
+    /// and the source recording must not be mutated underneath it. `ready`
+    /// is neither active nor final: it waits for review or a render.
+    pub fn is_active(self) -> bool {
+        matches!(
+            self,
+            Self::Queued
+                | Self::Transcribing
+                | Self::Analyzing
+                | Self::Rendering
+                | Self::Validating
+        )
+    }
+}
+
+impl std::str::FromStr for CleanCutJobState {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "queued" => Ok(Self::Queued),
+            "transcribing" => Ok(Self::Transcribing),
+            "analyzing" => Ok(Self::Analyzing),
+            "ready" => Ok(Self::Ready),
+            "rendering" => Ok(Self::Rendering),
+            "validating" => Ok(Self::Validating),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(format!("Unknown Clean cut job state: {value}")),
+        }
+    }
+}
+
+/// Why a span is removed. `false_start` keeps the server's spelling.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanCutRemovalKind {
+    Head,
+    Tail,
+    Silence,
+    Gap,
+    Filler,
+    Retake,
+    FalseStart,
+    Condensed,
+    Manual,
+}
+
+/// The source frame grid (ffprobe `r_frame_rate` as `num/den`). Every cut
+/// boundary is a frame index on it, so audio and video segments have equal
+/// lengths when S13 renders.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutFrameRate {
+    pub num: u32,
+    pub den: u32,
+}
+
+/// Path, size and modification time of the source MP4 the cut list was built
+/// from. S13 refuses to render when the file no longer matches.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutSourceIdentity {
+    pub path: String,
+    pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutRemoval {
+    pub id: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    /// Frame indices on the source grid; `end_frame` is exclusive. These are
+    /// exact where the millisecond values are rounded for display.
+    pub start_frame: u64,
+    pub end_frame: u64,
+    pub kind: CleanCutRemovalKind,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutKindStat {
+    pub kind: CleanCutRemovalKind,
+    pub count: u32,
+    pub ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutEdlStats {
+    /// Enabled removals only, one entry per kind present, in kind order.
+    #[serde(default)]
+    pub by_kind: Vec<CleanCutKindStat>,
+    pub kept_ms: u64,
+}
+
+/// The cut list, version 1. Stored as `clean_cut_jobs.edl_json` and returned
+/// whole by `cleanCut.get` and `cleanCut.updateEdl`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutEdl {
+    pub version: u32,
+    pub source_identity: CleanCutSourceIdentity,
+    pub frame_rate: CleanCutFrameRate,
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub removals: Vec<CleanCutRemoval>,
+    pub stats: CleanCutEdlStats,
+}
+
+/// The small part of the cut list that rides on every job snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutEdlSummary {
+    pub duration_ms: u64,
+    pub kept_ms: u64,
+    pub removal_count: u32,
+    #[serde(default)]
+    pub by_kind: Vec<CleanCutKindStat>,
+}
+
+impl CleanCutEdl {
+    /// The snapshot-sized view of a cut list.
+    pub fn summary(&self) -> CleanCutEdlSummary {
+        CleanCutEdlSummary {
+            duration_ms: self.duration_ms,
+            kept_ms: self.stats.kept_ms,
+            removal_count: u32::try_from(self.removals.len()).unwrap_or(u32::MAX),
+            by_kind: self.stats.by_kind.clone(),
+        }
+    }
+}
+
+/// Durable Clean cut job state, also the `cleanCut.status` event payload.
+/// The renderer never infers completion from anything else.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutJob {
+    pub id: String,
+    pub source_session_id: String,
+    pub mode: CleanCutMode,
+    pub state: CleanCutJobState,
+    /// Free-form, bounded: `extract-audio`, `probe`, `upload`, `stitch`,
+    /// `analyze`, `cut-list`. Never a closed enum on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    /// 0..1 across the whole job.
+    pub progress: f64,
+    pub edl_revision: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edl_summary: Option<CleanCutEdlSummary>,
+    /// `<Artifacts>/<sessionId>/clean-cut/transcript.words.json` once stitched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One kept range of a Condensed selection, mapped from the analysis `keeps`
+/// (segment ids) to recording time. S13 adds it to `cleanCut.get` entries.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutCondensedKeep {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutJobDetail {
+    pub job: CleanCutJob,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edl: Option<CleanCutEdl>,
+    /// Condensed jobs only, and only once the analysis answered; omitted for
+    /// clean jobs and when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub condensed_keeps: Vec<CleanCutCondensedKeep>,
+}
+
+/// `cleanCut.render`: render the current cut list revision again.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutRenderParams {
+    pub job_id: String,
+}
+
+/// `cleanCut.transcript`: the stitched words and sentence segments of a job.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutTranscriptParams {
+    pub job_id: String,
+}
+
+/// One word of `cleanCut.transcript`. `filler` is written only when true.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutTranscriptWord {
+    pub text: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub filler: bool,
+}
+
+/// One sentence of `cleanCut.transcript`: the analysis job's segment ids.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutTranscriptSegment {
+    pub id: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+/// `cleanCut.transcript` result. `language` is `null` when the provider
+/// reported none: the S13/S14 interface spells it `string | null`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutTranscript {
+    pub job_id: String,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub words: Vec<CleanCutTranscriptWord>,
+    #[serde(default)]
+    pub segments: Vec<CleanCutTranscriptSegment>,
+}
+
+/// `cleanCut.get`: the latest job per mode for one source session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutGetResult {
+    pub session_id: String,
+    #[serde(default)]
+    pub jobs: Vec<CleanCutJobDetail>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutStartParams {
+    pub session_id: String,
+    pub mode: CleanCutMode,
+    /// The Cloud AI consent the renderer holds; `false` is refused.
+    pub consent_to_upload_audio: bool,
+    /// Condensed only: 120..3600 seconds, default 900.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_duration_seconds: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutGetParams {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutCancelParams {
+    pub job_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutRemovalToggle {
+    pub id: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutManualRange {
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+/// `cleanCut.updateEdl`: optimistic on `revision`. Toggles flip `enabled` on
+/// existing removals; `addManual` adds frame-snapped `manual` removals;
+/// `removeManual` deletes manual removals by id. Nothing is re-merged.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutUpdateEdlParams {
+    pub job_id: String,
+    pub revision: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removals: Vec<CleanCutRemovalToggle>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add_manual: Vec<CleanCutManualRange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove_manual: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4326,44 +4716,401 @@ pub struct CohostSettingsPatch {
     pub listen: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// --- Orcle report (plan 119 S1; mirrored in shared/backend.ts) ---
+
+/// The report format this build writes and reads. A stored report with any
+/// other version reads as unavailable, never as an error.
+pub const COHOST_SESSION_REPORT_VERSION: u32 = 1;
+/// Questions logged per report (first seen first).
+pub const COHOST_REPORT_QUESTIONS_CAP: usize = 200;
+/// Open promises kept at stop.
+pub const COHOST_REPORT_OPEN_PROMISES_CAP: usize = 20;
+/// Asker names kept per logged question.
+pub const COHOST_REPORT_ASKERS_CAP: usize = 5;
+
+/// `cohost.report.get`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct RunAiWorkflowParams {
+pub struct CohostReportGetParams {
     pub session_id: String,
-    pub consent_to_upload_audio: bool,
-    pub ffmpeg_path: Option<String>,
-    /// Per-kind generation: subset of {publish_pack, creator_intelligence,
-    /// social_posts}. None = the full atomic bundle (older servers too).
+}
+
+/// `cohost.report.saved`: a report for this session was written (or folded
+/// into the one already there).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportSavedEvent {
+    pub session_id: String,
+}
+
+/// What became of a question Orcle caught. The latest outcome wins; a
+/// restore puts it back to `open`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostReportQuestionOutcome {
+    Open,
+    AnsweredOnAir,
+    Replied,
+    MarkedAnswered,
+    Dismissed,
+    /// Still open, but its comment was on stream.
+    Shown,
+}
+
+/// One question in the report's log. Optional lists are omitted while empty,
+/// never null.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportQuestion {
+    pub id: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub askers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<crate::streaming::StreamPlatform>,
+    pub priority: crate::cohost::CohostPriority,
+    pub first_seen_at: String,
+    pub outcome: CohostReportQuestionOutcome,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportQuestions {
+    /// Distinct question ids Orcle surfaced.
     #[serde(default)]
-    pub outputs: Option<Vec<String>>,
-    /// Title/description/social register: hooky | informative | casual.
+    pub total: u64,
     #[serde(default)]
-    pub tone: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExportPublishPackParams {
-    pub session_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExportPublishPackResult {
-    pub session_id: String,
-    pub markdown_path: String,
-    /// Every file the export wrote (markdown + per-field paste-ready files).
+    pub marked_answered: u64,
     #[serde(default)]
-    pub files: Vec<String>,
+    pub dismissed: u64,
+    #[serde(default)]
+    pub replied: u64,
+    #[serde(default)]
+    pub answered_on_air: u64,
+    #[serde(default)]
+    pub restored: u64,
+    #[serde(default)]
+    pub shown_on_stream: u64,
+    /// First seen first, at most `COHOST_REPORT_QUESTIONS_CAP`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<CohostReportQuestion>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct ClipSuggestParams {
-    pub session_id: String,
+pub struct CohostReportFlagKindCount {
+    pub kind: crate::cohost::CohostFlagKind,
+    pub count: u64,
 }
 
-/// A clip-worthy time range, ranked locally from chat activity + captions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportFlagSeverityCount {
+    pub severity: crate::cohost::CohostFlagSeverity,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportFlags {
+    /// Each flagged message id counted once.
+    #[serde(default)]
+    pub raised: u64,
+    #[serde(default)]
+    pub dismissed: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by_kind: Vec<CohostReportFlagKindCount>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by_severity: Vec<CohostReportFlagSeverityCount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportOpenPromise {
+    pub text: String,
+    pub first_seen_at: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportPromises {
+    /// New promise ids heard this session.
+    #[serde(default)]
+    pub heard: u64,
+    /// Marked done, or the transcript showed they were kept.
+    #[serde(default)]
+    pub kept: u64,
+    #[serde(default)]
+    pub dismissed: u64,
+    #[serde(default)]
+    pub reminded: u64,
+    /// Still open when the session ended, oldest first, at most
+    /// `COHOST_REPORT_OPEN_PROMISES_CAP`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open: Vec<CohostReportOpenPromise>,
+}
+
+/// Greeting totals over every chatter of the session (plan 068 D9).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportGreetings {
+    /// Viewers whose first message in the channel landed this session.
+    #[serde(default)]
+    pub first_timers: u64,
+    #[serde(default)]
+    pub first_timers_greeted: u64,
+    #[serde(default)]
+    pub by_voice: u64,
+    #[serde(default)]
+    pub by_chat: u64,
+    /// Their comment went on stream.
+    #[serde(default)]
+    pub on_stream: u64,
+    /// The streamer pressed Greeted.
+    #[serde(default)]
+    pub manual: u64,
+}
+
+/// One alert kind viewers raised, with the most distinct viewers who said it
+/// at once and whether it was ever corroborated (two viewers within 60 s).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportAlert {
+    pub kind: crate::cohost::CohostAlertKind,
+    pub peak_viewers: u32,
+    pub active: bool,
+    pub first_seen_at: String,
+}
+
+/// Recaps are never posted by Orcle, so posting leaves no count.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportRecap {
+    /// The server offered one (viewers asked what they missed).
+    #[serde(default)]
+    pub offered: u64,
+    #[serde(default)]
+    pub drafted: u64,
+    #[serde(default)]
+    pub dismissed: u64,
+}
+
+/// What Orcle caught in one stream, saved on this computer when the session
+/// ends and deleted with the recording (plan 119 decision 6). Counts and the
+/// question log; never raw chat or drafts. Every optional field is omitted,
+/// never null; the blocks always ride and default on read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostSessionReport {
+    pub version: u32,
+    pub session_id: String,
+    pub started_at: String,
+    pub ended_at: String,
+    /// Orcle sessions folded into this report: turning Orcle off and on
+    /// mid-stream adds one.
+    #[serde(default)]
+    pub segments: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_title: Option<String>,
+    #[serde(default)]
+    pub messages_seen: u64,
+    /// Distinct comments that went on stream, automatically or by hand.
+    #[serde(default)]
+    pub shown_on_stream: u64,
+    #[serde(default)]
+    pub questions: CohostReportQuestions,
+    #[serde(default)]
+    pub flags: CohostReportFlags,
+    #[serde(default)]
+    pub promises: CohostReportPromises,
+    #[serde(default)]
+    pub greetings: CohostReportGreetings,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alerts: Vec<CohostReportAlert>,
+    #[serde(default)]
+    pub recap: CohostReportRecap,
+}
+
+impl CohostSessionReport {
+    /// A stored report, or `None` for anything this build cannot read: another
+    /// version, or a shape that no longer parses. Never an error.
+    pub fn from_stored_json(json: &str) -> Option<Self> {
+        let report: Self = serde_json::from_str(json).ok()?;
+        (report.version == COHOST_SESSION_REPORT_VERSION).then_some(report)
+    }
+
+    /// Fold a later report of the same session into this one (Orcle turned
+    /// off and on mid-stream, or a replacing start): counts add up, questions
+    /// union by id with the later outcome winning, open promises union by
+    /// text, and the span covers both.
+    pub fn merged_with(mut self, later: Self) -> Self {
+        self.version = COHOST_SESSION_REPORT_VERSION;
+        if rfc3339_is_earlier(&later.started_at, &self.started_at) {
+            self.started_at = later.started_at;
+        }
+        if rfc3339_is_earlier(&self.ended_at, &later.ended_at) {
+            self.ended_at = later.ended_at;
+        }
+        self.segments = self.segments.saturating_add(later.segments);
+        if later.stream_title.is_some() {
+            self.stream_title = later.stream_title;
+        }
+        self.messages_seen = self.messages_seen.saturating_add(later.messages_seen);
+        self.shown_on_stream = self.shown_on_stream.saturating_add(later.shown_on_stream);
+
+        let questions = &mut self.questions;
+        questions.total = questions.total.saturating_add(later.questions.total);
+        questions.marked_answered = questions
+            .marked_answered
+            .saturating_add(later.questions.marked_answered);
+        questions.dismissed = questions
+            .dismissed
+            .saturating_add(later.questions.dismissed);
+        questions.replied = questions.replied.saturating_add(later.questions.replied);
+        questions.answered_on_air = questions
+            .answered_on_air
+            .saturating_add(later.questions.answered_on_air);
+        questions.restored = questions.restored.saturating_add(later.questions.restored);
+        questions.shown_on_stream = questions
+            .shown_on_stream
+            .saturating_add(later.questions.shown_on_stream);
+        for item in later.questions.items {
+            if let Some(existing) = questions
+                .items
+                .iter_mut()
+                .find(|existing| existing.id == item.id)
+            {
+                *existing = item;
+            } else if questions.items.len() < COHOST_REPORT_QUESTIONS_CAP {
+                questions.items.push(item);
+            }
+        }
+
+        let flags = &mut self.flags;
+        flags.raised = flags.raised.saturating_add(later.flags.raised);
+        flags.dismissed = flags.dismissed.saturating_add(later.flags.dismissed);
+        for count in later.flags.by_kind {
+            match flags
+                .by_kind
+                .iter_mut()
+                .find(|existing| existing.kind == count.kind)
+            {
+                Some(existing) => existing.count = existing.count.saturating_add(count.count),
+                None => flags.by_kind.push(count),
+            }
+        }
+        for count in later.flags.by_severity {
+            match flags
+                .by_severity
+                .iter_mut()
+                .find(|existing| existing.severity == count.severity)
+            {
+                Some(existing) => existing.count = existing.count.saturating_add(count.count),
+                None => flags.by_severity.push(count),
+            }
+        }
+
+        let promises = &mut self.promises;
+        promises.heard = promises.heard.saturating_add(later.promises.heard);
+        promises.kept = promises.kept.saturating_add(later.promises.kept);
+        promises.dismissed = promises.dismissed.saturating_add(later.promises.dismissed);
+        promises.reminded = promises.reminded.saturating_add(later.promises.reminded);
+        for open in later.promises.open {
+            if promises.open.len() >= COHOST_REPORT_OPEN_PROMISES_CAP {
+                break;
+            }
+            if !promises
+                .open
+                .iter()
+                .any(|existing| existing.text == open.text)
+            {
+                promises.open.push(open);
+            }
+        }
+
+        let greetings = &mut self.greetings;
+        greetings.first_timers = greetings
+            .first_timers
+            .saturating_add(later.greetings.first_timers);
+        greetings.first_timers_greeted = greetings
+            .first_timers_greeted
+            .saturating_add(later.greetings.first_timers_greeted);
+        greetings.by_voice = greetings.by_voice.saturating_add(later.greetings.by_voice);
+        greetings.by_chat = greetings.by_chat.saturating_add(later.greetings.by_chat);
+        greetings.on_stream = greetings
+            .on_stream
+            .saturating_add(later.greetings.on_stream);
+        greetings.manual = greetings.manual.saturating_add(later.greetings.manual);
+
+        for alert in later.alerts {
+            match self
+                .alerts
+                .iter_mut()
+                .find(|existing| existing.kind == alert.kind)
+            {
+                Some(existing) => {
+                    existing.peak_viewers = existing.peak_viewers.max(alert.peak_viewers);
+                    existing.active |= alert.active;
+                    if rfc3339_is_earlier(&alert.first_seen_at, &existing.first_seen_at) {
+                        existing.first_seen_at = alert.first_seen_at;
+                    }
+                }
+                None => self.alerts.push(alert),
+            }
+        }
+
+        self.recap.offered = self.recap.offered.saturating_add(later.recap.offered);
+        self.recap.drafted = self.recap.drafted.saturating_add(later.recap.drafted);
+        self.recap.dismissed = self.recap.dismissed.saturating_add(later.recap.dismissed);
+        self
+    }
+}
+
+/// `a` is strictly before `b`. Both are RFC 3339; when one does not parse the
+/// comparison falls back to the text, which orders same-format UTC stamps.
+fn rfc3339_is_earlier(a: &str, b: &str) -> bool {
+    match (
+        chrono::DateTime::parse_from_rfc3339(a),
+        chrono::DateTime::parse_from_rfc3339(b),
+    ) {
+        (Ok(a), Ok(b)) => a < b,
+        _ => a < b,
+    }
+}
+
+/// Chat rows of one platform in a session (plan 119 S1).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportChatPlatformCount {
+    pub platform: crate::streaming::StreamPlatform,
+    pub messages: u64,
+}
+
+/// Every chat row the session kept, by platform (busiest first).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportChat {
+    pub messages: u64,
+    #[serde(default)]
+    pub by_platform: Vec<CohostReportChatPlatformCount>,
+}
+
+/// `cohost.report.get` / `cohost.report.latest`: the saved report (null when
+/// Orcle left none), the session's moments (computed on read, never stored)
+/// and its chat totals.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportPayload {
+    pub session_id: String,
+    pub report: Option<CohostSessionReport>,
+    #[serde(default)]
+    pub moments: Vec<ClipMoment>,
+    #[serde(default)]
+    pub chat: CohostReportChat,
+}
+
+/// A moment worth a clip: a clip mark or a chat peak, snapped to the
+/// captions. Computed on read for the Orcle report, never stored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipMoment {
@@ -4377,8 +5124,8 @@ pub struct ClipMoment {
     pub source: Option<ClipMomentSource>,
 }
 
-/// What produced a clip suggestion: a spoken "clip that", a manual mark, or
-/// a chat spike.
+/// What produced a moment: a spoken "clip that", a manual mark, or a chat
+/// spike.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ClipMomentSource {
@@ -4432,43 +5179,16 @@ pub struct ClipMarksListParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ClipSuggestResult {
-    pub session_id: String,
-    pub moments: Vec<ClipMoment>,
-    pub chat_message_count: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClipExportParams {
-    pub session_id: String,
-    pub start_ms: u64,
-    pub end_ms: u64,
-    #[serde(default)]
-    pub ffmpeg_path: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClipExportResult {
-    pub session_id: String,
-    pub path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AiJobGetParams {
-    pub job_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AiCapabilities {
     /// Live-caption transport readiness from videorc-web. Optional so desktop
     /// remains compatible while older web deployments roll forward; callers
     /// that opted into captions intentionally fail closed when it is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub captions: Option<AiCapabilitiesCaptions>,
+    /// Clean cut readiness (plan 119, contract part B). A server that omits
+    /// the block does not offer Clean cut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_cut: Option<AiCapabilitiesCleanCut>,
     pub entitlement: AiCapabilitiesEntitlement,
     /// Ed25519-signed entitlement proof (`v1.<payload>.<sig>`) minted by
     /// videorc.com. Optional: older web deploys (or an unconfigured signing
@@ -4552,6 +5272,10 @@ pub struct AiCapabilitiesEntitlement {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiCapabilitiesFeatures {
+    /// Clean cut kill switch off and its provider configured (plan 119).
+    /// Older servers omit it.
+    #[serde(default)]
+    pub clean_cut_enabled: bool,
     pub cloud_ai_enabled: bool,
     pub gateway_configured: bool,
     pub model_testing_enabled: bool,
@@ -4559,6 +5283,33 @@ pub struct AiCapabilitiesFeatures {
     pub object_backed_jobs_enabled: bool,
     pub transcript_jobs_enabled: bool,
     pub upload_tickets_enabled: bool,
+}
+
+/// `cleanCut` from `GET /api/ai/capabilities` (docs/clean-cut-contract.md,
+/// part B). Every field defaults so a partial block never breaks the load;
+/// `reason_code` is an open string (`disabled`, `blocked`, `premium-required`,
+/// `provider-unconfigured`, `quota-exhausted`, or newer codes).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesCleanCut {
+    #[serde(default)]
+    pub supported: bool,
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_chunk_seconds: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_chunk_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monthly_seconds_limit: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4733,101 +5484,6 @@ pub struct AiQuotaWindow {
     pub remaining: u32,
     pub reset_at: String,
     pub used: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AiJobSnapshot {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artifacts: Option<AiJobOwnerArtifacts>,
-    pub client_request_id: Option<String>,
-    pub completed_at: Option<String>,
-    pub cost_estimate_cents: Option<u32>,
-    pub created_at: String,
-    pub error_code: Option<String>,
-    pub error_message: Option<String>,
-    #[serde(default)]
-    pub fallback_models: Vec<String>,
-    pub id: String,
-    pub input_tokens: Option<u32>,
-    pub model: Option<String>,
-    pub output_json: serde_json::Value,
-    pub output_tokens: Option<u32>,
-    pub provider: String,
-    pub run_attempts: u32,
-    pub session_client_id: String,
-    pub started_at: Option<String>,
-    pub status: String,
-    pub workflow_kind: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AiJobOwnerArtifacts {
-    pub creator_intelligence: serde_json::Value,
-    pub publish_pack: serde_json::Value,
-    /// Present only when the job requested the social_posts output kind.
-    #[serde(default)]
-    pub social_posts: serde_json::Value,
-    pub transcript: Option<AiJobTranscriptArtifact>,
-    pub transcription_metadata: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AiJobTranscriptArtifact {
-    pub text: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AiJobEnvelope {
-    pub job: AiJobSnapshot,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AiJobCreateResponse {
-    #[serde(default)]
-    pub daily_limit: Option<u32>,
-    #[serde(default)]
-    pub idempotent: bool,
-    pub job: AiJobSnapshot,
-    #[serde(default)]
-    pub monthly_limit: Option<u32>,
-    #[serde(default)]
-    pub remaining_this_month: Option<u32>,
-    #[serde(default)]
-    pub remaining_today: Option<u32>,
-    #[serde(default)]
-    pub transcription: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AiObjectUploadTicket {
-    pub expires_at: Option<String>,
-    pub max_bytes: Option<u64>,
-    pub object_key: String,
-    #[serde(default)]
-    pub upload_headers: BTreeMap<String, String>,
-    pub upload_method: String,
-    pub upload_url: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AiObjectUploadResponse {
-    pub job_request: serde_json::Value,
-    pub ticket: AiObjectUploadTicket,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AiWorkflowResult {
-    pub session_id: String,
-    pub audio_path: String,
-    pub artifacts: Vec<AiArtifact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5839,6 +6495,168 @@ mod tests {
     }
 
     #[test]
+    fn shared_high_risk_contract_fixture_matches_clean_cut_dtos() {
+        let start_wire = shared_high_risk_contract_fixture_value("/cleanCut/startParams");
+        let start: CleanCutStartParams = serde_json::from_value(start_wire.clone()).unwrap();
+        assert_eq!(start.mode, CleanCutMode::Clean);
+        assert!(start.consent_to_upload_audio);
+        assert_eq!(start.target_duration_seconds, None);
+        // Omitted, never null: the serde-null trap.
+        assert_eq!(serde_json::to_value(start).unwrap(), start_wire);
+        let condensed_wire =
+            shared_high_risk_contract_fixture_value("/cleanCut/condensedStartParams");
+        let condensed: CleanCutStartParams =
+            serde_json::from_value(condensed_wire.clone()).unwrap();
+        assert_eq!(condensed.mode, CleanCutMode::Condensed);
+        assert_eq!(condensed.target_duration_seconds, Some(900));
+        assert_eq!(serde_json::to_value(condensed).unwrap(), condensed_wire);
+        let get_wire = shared_high_risk_contract_fixture_value("/cleanCut/getParams");
+        let get: CleanCutGetParams = serde_json::from_value(get_wire).unwrap();
+        assert_eq!(get.session_id, "session-fixture");
+
+        for pointer in [
+            "/cleanCut/queuedJob",
+            "/cleanCut/readyJob",
+            "/cleanCut/failedJob",
+        ] {
+            let wire = shared_high_risk_contract_fixture_value(pointer);
+            let job: CleanCutJob = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(job).unwrap(), wire, "{pointer}");
+        }
+        let ready: CleanCutJob = serde_json::from_value(shared_high_risk_contract_fixture_value(
+            "/cleanCut/readyJob",
+        ))
+        .unwrap();
+        assert_eq!(ready.state, CleanCutJobState::Ready);
+        assert!(!ready.state.is_active());
+        let ready_summary = ready.edl_summary.clone().unwrap();
+        assert_eq!(ready_summary.removal_count, 3);
+        let failed: CleanCutJob = serde_json::from_value(shared_high_risk_contract_fixture_value(
+            "/cleanCut/failedJob",
+        ))
+        .unwrap();
+        assert_eq!(
+            failed.error_code.as_deref(),
+            Some("clean-cut-monthly-quota-exhausted")
+        );
+        assert_eq!(failed.step.as_deref(), Some("upload"));
+
+        let edl_wire = shared_high_risk_contract_fixture_value("/cleanCut/edl");
+        let edl: CleanCutEdl = serde_json::from_value(edl_wire.clone()).unwrap();
+        assert_eq!(
+            edl.frame_rate,
+            CleanCutFrameRate {
+                num: 30_000,
+                den: 1_001
+            }
+        );
+        assert_eq!(edl.removals[1].kind, CleanCutRemovalKind::Retake);
+        assert_eq!(edl.removals[2].kind, CleanCutRemovalKind::FalseStart);
+        assert!(!edl.removals[2].enabled);
+        assert_eq!(edl.removals[0].confidence, None);
+        assert_eq!(edl.summary(), ready_summary);
+        assert_eq!(serde_json::to_value(edl).unwrap(), edl_wire);
+
+        let result_wire = shared_high_risk_contract_fixture_value("/cleanCut/getResult");
+        let result: CleanCutGetResult = serde_json::from_value(result_wire.clone()).unwrap();
+        assert_eq!(result.jobs.len(), 1);
+        assert!(result.jobs[0].edl.is_some());
+        assert_eq!(serde_json::to_value(result).unwrap(), result_wire);
+
+        let update_wire = shared_high_risk_contract_fixture_value("/cleanCut/updateEdlParams");
+        let update: CleanCutUpdateEdlParams = serde_json::from_value(update_wire.clone()).unwrap();
+        assert_eq!(update.revision, 0);
+        assert!(update.remove_manual.is_empty());
+        assert_eq!(update.add_manual[0].end_ms, 601_000);
+        assert_eq!(update.removals[0].id, "r3");
+        assert_eq!(serde_json::to_value(update).unwrap(), update_wire);
+    }
+
+    #[test]
+    fn shared_high_risk_contract_fixture_matches_clean_cut_render_dtos() {
+        // Plan 119 S13: `cleanCut.render`, `cleanCut.transcript` and the
+        // Condensed keeps on `cleanCut.get`.
+        let render_wire = shared_high_risk_contract_fixture_value("/cleanCut/renderParams");
+        let render: CleanCutRenderParams = serde_json::from_value(render_wire.clone()).unwrap();
+        assert_eq!(render.job_id, "clean-cut-fixture-1");
+        assert_eq!(serde_json::to_value(render).unwrap(), render_wire);
+        let transcript_params: CleanCutTranscriptParams = serde_json::from_value(
+            shared_high_risk_contract_fixture_value("/cleanCut/transcriptParams"),
+        )
+        .unwrap();
+        assert_eq!(transcript_params.job_id, "clean-cut-fixture-1");
+
+        for pointer in ["/cleanCut/renderingJob", "/cleanCut/completedJob"] {
+            let wire = shared_high_risk_contract_fixture_value(pointer);
+            let job: CleanCutJob = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(job).unwrap(), wire, "{pointer}");
+        }
+        let rendering: CleanCutJob = serde_json::from_value(
+            shared_high_risk_contract_fixture_value("/cleanCut/renderingJob"),
+        )
+        .unwrap();
+        assert_eq!(rendering.state, CleanCutJobState::Rendering);
+        assert!(rendering.state.is_active());
+        assert_eq!(rendering.step.as_deref(), Some("render"));
+        assert_eq!(rendering.output_session_id, None);
+        let completed: CleanCutJob = serde_json::from_value(
+            shared_high_risk_contract_fixture_value("/cleanCut/completedJob"),
+        )
+        .unwrap();
+        assert_eq!(completed.state, CleanCutJobState::Completed);
+        assert!(!completed.state.is_active());
+        assert_eq!(
+            completed.output_session_id.as_deref(),
+            Some("session-fixture-clean-cut")
+        );
+
+        let transcript_wire = shared_high_risk_contract_fixture_value("/cleanCut/transcript");
+        let transcript: CleanCutTranscript =
+            serde_json::from_value(transcript_wire.clone()).unwrap();
+        assert_eq!(transcript.language.as_deref(), Some("en"));
+        assert!(!transcript.words[0].filler && transcript.words[1].filler);
+        assert_eq!(transcript.segments[0].id, "s1");
+        assert_eq!(
+            serde_json::to_value(transcript).unwrap(),
+            transcript_wire,
+            "filler is written only when true"
+        );
+        let without_wire =
+            shared_high_risk_contract_fixture_value("/cleanCut/transcriptWithoutLanguage");
+        let without: CleanCutTranscript = serde_json::from_value(without_wire.clone()).unwrap();
+        assert_eq!(without.language, None);
+        assert!(without.words.is_empty() && without.segments.is_empty());
+        assert_eq!(
+            serde_json::to_value(without).unwrap(),
+            without_wire,
+            "language is null, never absent"
+        );
+
+        let condensed_wire =
+            shared_high_risk_contract_fixture_value("/cleanCut/condensedGetResult");
+        let condensed: CleanCutGetResult = serde_json::from_value(condensed_wire.clone()).unwrap();
+        assert_eq!(condensed.jobs[0].job.mode, CleanCutMode::Condensed);
+        assert_eq!(condensed.jobs[0].condensed_keeps.len(), 2);
+        assert_eq!(
+            condensed.jobs[0].condensed_keeps[1].title,
+            "Deploying to Vercel"
+        );
+        assert_eq!(serde_json::to_value(condensed).unwrap(), condensed_wire);
+        let clean: CleanCutGetResult = serde_json::from_value(
+            shared_high_risk_contract_fixture_value("/cleanCut/getResult"),
+        )
+        .unwrap();
+        assert!(clean.jobs[0].condensed_keeps.is_empty());
+        assert!(
+            serde_json::to_value(&clean.jobs[0])
+                .unwrap()
+                .get("condensedKeeps")
+                .is_none(),
+            "omitted when empty"
+        );
+    }
+
+    #[test]
     fn shared_high_risk_contract_fixture_matches_cohost_dtos() {
         let start_wire = shared_high_risk_contract_fixture_value("/cohost/startParams");
         let start: CohostStartParams = serde_json::from_value(start_wire.clone()).unwrap();
@@ -6054,6 +6872,197 @@ mod tests {
         );
         assert!(legacy.say_hi.is_empty());
         assert_eq!(legacy.dead_air_nudge, None);
+    }
+
+    #[test]
+    fn shared_high_risk_contract_fixture_matches_cohost_report_dtos() {
+        let params_wire = shared_high_risk_contract_fixture_value("/cohost/reportGetParams");
+        let params: CohostReportGetParams = serde_json::from_value(params_wire.clone()).unwrap();
+        assert_eq!(params.session_id, "session-fixture");
+        assert_eq!(serde_json::to_value(params).unwrap(), params_wire);
+
+        let saved_wire = shared_high_risk_contract_fixture_value("/cohost/reportSaved");
+        let saved: CohostReportSavedEvent = serde_json::from_value(saved_wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(saved).unwrap(), saved_wire);
+
+        let report_wire = shared_high_risk_contract_fixture_value("/cohost/report");
+        let report: CohostSessionReport = serde_json::from_value(report_wire.clone()).unwrap();
+        assert_eq!(report.version, COHOST_SESSION_REPORT_VERSION);
+        assert_eq!(report.questions.items.len(), 2);
+        assert_eq!(
+            report.questions.items[0].outcome,
+            CohostReportQuestionOutcome::Replied
+        );
+        assert!(report.questions.items[1].askers.is_empty());
+        assert_eq!(report.alerts[0].kind, crate::cohost::CohostAlertKind::Audio);
+        assert_eq!(
+            report.flags.by_kind[0].kind,
+            crate::cohost::CohostFlagKind::SelfPromo
+        );
+        // Optional lists ride only when they have entries: no null anywhere.
+        assert_eq!(serde_json::to_value(&report).unwrap(), report_wire);
+        assert_eq!(
+            CohostSessionReport::from_stored_json(&report_wire.to_string()),
+            Some(report.clone())
+        );
+
+        let payload_wire = shared_high_risk_contract_fixture_value("/cohost/reportPayload");
+        let payload: CohostReportPayload = serde_json::from_value(payload_wire.clone()).unwrap();
+        let minimal = payload
+            .report
+            .as_ref()
+            .expect("the payload carries the minimal report");
+        assert_eq!(minimal.segments, 2);
+        assert_eq!(minimal.stream_title, None);
+        assert!(minimal.alerts.is_empty() && minimal.questions.items.is_empty());
+        assert_eq!(payload.moments.len(), 3);
+        assert_eq!(payload.moments[0].source, Some(ClipMomentSource::Voice));
+        assert_eq!(payload.chat.messages, 84);
+        assert_eq!(serde_json::to_value(&payload).unwrap(), payload_wire);
+
+        let empty_wire =
+            shared_high_risk_contract_fixture_value("/cohost/reportPayloadWithoutReport");
+        let empty: CohostReportPayload = serde_json::from_value(empty_wire.clone()).unwrap();
+        assert_eq!(empty.report, None);
+        assert!(empty.moments.is_empty() && empty.chat.by_platform.is_empty());
+        // `report` is the one explicit null: the renderer keys on it.
+        assert_eq!(serde_json::to_value(&empty).unwrap(), empty_wire);
+    }
+
+    #[test]
+    fn cohost_session_report_defaults_missing_blocks_and_reads_other_versions_as_unavailable() {
+        let minimal: CohostSessionReport = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "sessionId": "s-1",
+            "startedAt": "2026-10-04T10:00:00Z",
+            "endedAt": "2026-10-04T11:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(minimal.segments, 0);
+        assert_eq!(minimal.questions, CohostReportQuestions::default());
+        assert_eq!(minimal.greetings, CohostReportGreetings::default());
+        let wire = serde_json::to_value(&minimal).unwrap();
+        for key in ["streamTitle", "alerts"] {
+            assert!(wire.get(key).is_none(), "{key} is omitted, never null");
+        }
+        assert!(wire["questions"].get("items").is_none());
+        assert!(wire["flags"].get("byKind").is_none());
+        assert!(wire["promises"].get("open").is_none());
+        assert_eq!(
+            CohostSessionReport::from_stored_json(&wire.to_string()),
+            Some(minimal)
+        );
+        assert_eq!(
+            CohostSessionReport::from_stored_json(
+                r#"{"version":2,"sessionId":"s-1","startedAt":"t","endedAt":"t"}"#
+            ),
+            None,
+            "a newer format reads as unavailable, never as an error"
+        );
+        assert_eq!(CohostSessionReport::from_stored_json("not json"), None);
+        assert_eq!(
+            CohostSessionReport::from_stored_json(
+                r#"{"version":1,"sessionId":"s","startedAt":"t","endedAt":"t","questions":{"items":[{"id":"q","text":"?","priority":"high","firstSeenAt":"t","outcome":"teleported"}]}}"#
+            ),
+            None,
+            "an outcome this build does not know"
+        );
+    }
+
+    #[test]
+    fn cohost_session_report_merge_sums_counts_and_keeps_the_later_outcome() {
+        let base: CohostSessionReport =
+            serde_json::from_value(shared_high_risk_contract_fixture_value("/cohost/report"))
+                .unwrap();
+        let mut later = base.clone();
+        later.started_at = "2026-08-22T11:31:00Z".to_string();
+        later.ended_at = "2026-08-22T12:00:00Z".to_string();
+        later.stream_title = None;
+        later.questions.items.truncate(1);
+        later.questions.items[0].outcome = CohostReportQuestionOutcome::MarkedAnswered;
+        later.questions.items.push(CohostReportQuestion {
+            id: "q_new".to_string(),
+            text: "Is this live?".to_string(),
+            askers: Vec::new(),
+            platforms: Vec::new(),
+            priority: crate::cohost::CohostPriority::Low,
+            first_seen_at: "2026-08-22T11:45:00Z".to_string(),
+            outcome: CohostReportQuestionOutcome::Open,
+        });
+        later.promises.open.push(CohostReportOpenPromise {
+            text: "Raid someone after".to_string(),
+            first_seen_at: "2026-08-22T11:50:00Z".to_string(),
+        });
+        later.flags.by_kind = vec![CohostReportFlagKindCount {
+            kind: crate::cohost::CohostFlagKind::Spam,
+            count: 3,
+        }];
+        later.alerts[0].peak_viewers = 5;
+        later.alerts[0].first_seen_at = "2026-08-22T11:40:00Z".to_string();
+        later.alerts.push(CohostReportAlert {
+            kind: crate::cohost::CohostAlertKind::Video,
+            peak_viewers: 1,
+            active: false,
+            first_seen_at: "2026-08-22T11:55:00Z".to_string(),
+        });
+
+        let merged = base.clone().merged_with(later);
+        assert_eq!(merged.version, COHOST_SESSION_REPORT_VERSION);
+        assert_eq!(merged.started_at, "2026-08-22T10:00:00Z");
+        assert_eq!(merged.ended_at, "2026-08-22T12:00:00Z");
+        assert_eq!(merged.segments, 2);
+        assert_eq!(
+            merged.stream_title.as_deref(),
+            Some("Rust night"),
+            "a later report without a title keeps the earlier one"
+        );
+        assert_eq!(merged.messages_seen, 168);
+        assert_eq!(merged.shown_on_stream, 4);
+        assert_eq!(merged.questions.total, 10);
+        assert_eq!(merged.questions.replied, 2);
+        assert_eq!(merged.questions.items.len(), 3);
+        assert_eq!(
+            merged.questions.items[0].outcome,
+            CohostReportQuestionOutcome::MarkedAnswered,
+            "the later outcome wins"
+        );
+        assert_eq!(merged.questions.items[1].id, "q_fixture_2");
+        assert_eq!(merged.questions.items[2].id, "q_new");
+        assert_eq!(merged.promises.heard, 4);
+        assert_eq!(
+            merged
+                .promises
+                .open
+                .iter()
+                .map(|open| open.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Giveaway at 100 viewers", "Raid someone after"],
+            "open promises union by text"
+        );
+        assert_eq!(merged.flags.raised, 4);
+        assert_eq!(merged.flags.by_kind.len(), 2);
+        assert_eq!(
+            merged.flags.by_kind[1].kind,
+            crate::cohost::CohostFlagKind::Spam
+        );
+        assert_eq!(merged.flags.by_kind[1].count, 4);
+        assert_eq!(merged.flags.by_severity[0].count, 4);
+        assert_eq!(merged.alerts.len(), 2);
+        assert_eq!(merged.alerts[0].peak_viewers, 5);
+        assert!(merged.alerts[0].active);
+        assert_eq!(merged.alerts[0].first_seen_at, "2026-08-22T10:40:00Z");
+        assert_eq!(merged.alerts[1].kind, crate::cohost::CohostAlertKind::Video);
+        assert_eq!(merged.greetings.first_timers, 6);
+        assert_eq!(merged.recap.offered, 2);
+
+        // A later report that started earlier moves the start back, and a
+        // shorter one never shortens the span.
+        let mut earlier = base.clone();
+        earlier.started_at = "2026-08-22T09:00:00Z".to_string();
+        earlier.ended_at = "2026-08-22T09:30:00Z".to_string();
+        let merged = base.merged_with(earlier);
+        assert_eq!(merged.started_at, "2026-08-22T09:00:00Z");
+        assert_eq!(merged.ended_at, "2026-08-22T11:30:00Z");
     }
 
     #[test]

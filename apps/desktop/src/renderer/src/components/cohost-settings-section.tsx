@@ -1,9 +1,7 @@
-import { AlertIcon, CloseIcon } from '@/components/icons'
+import { CloseIcon } from '@/components/icons'
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Button } from '@/components/ui/button'
 import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
 import {
   InputGroup,
@@ -19,7 +17,6 @@ import { setCohostSensitivity, useCohostSensitivity } from '@/hooks/use-cohost-s
 import { useStudioChat, useStudioCore } from '@/hooks/use-studio'
 import type { CohostSettings, CohostSettingsPatch, CohostTone } from '@/lib/backend'
 import {
-  COHOST_CHAT_CONSENT_SENTENCE,
   COHOST_LISTEN_CONSENT_SENTENCE,
   COHOST_SENSITIVITIES,
   COHOST_SENSITIVITY_LABELS,
@@ -75,9 +72,13 @@ export function cohostShowOnStreamMode(
 }
 
 /**
- * Settings → Co-host. Persisted per profile through `cohost.settings.get/set`
- * (the engine reads the same row when it builds a tick), NOT through local
+ * Orcle's settings, under Customize in the Orcle tab (plan 119; Settings →
+ * Orcle before). Persisted per profile through `cohost.settings.get/set` (the
+ * engine reads the same row when it builds a tick), NOT through local
  * settings — so what the streamer types here is what the model is given.
+ *
+ * Orcle Live's switch owns `enabled` and the Premium gate's call to action,
+ * so neither repeats here: a locked account sees these controls disabled.
  */
 export function CohostSettingsSection(): ReactElement | null {
   const { cohostSettings, cohostGate, patchCohostSettings } = useStudioCore()
@@ -122,49 +123,8 @@ export function CohostSettingsSection(): ReactElement | null {
   }
 
   return (
-    <PanelSection
-      description="Alpha: expect rough edges. An AI producer reads your live chat, groups the questions people are actually asking, and drafts replies you approve. Nothing is ever sent without you."
-      title="Orcle (alpha)"
-    >
-      {locked ? (
-        <Alert variant="warning">
-          <AlertIcon weight="fill" />
-          <AlertTitle>Orcle is Premium</AlertTitle>
-          <AlertDescription>
-            {cohostGate.allowed ? null : cohostGate.reason}
-            {!cohostGate.allowed && cohostGate.upgradeUrl ? (
-              <Button
-                className="ml-2 h-auto p-0 align-baseline"
-                size="xs"
-                variant="link"
-                onClick={() => openExternalUrl(cohostGate.upgradeUrl as string)}
-              >
-                View Premium
-              </Button>
-            ) : null}
-          </AlertDescription>
-        </Alert>
-      ) : null}
-
+    <PanelSection>
       <FieldGroup variant="grouped">
-        <Field>
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex min-w-0 flex-col gap-0.5">
-              <FieldLabel htmlFor="cohost-enabled">Enable Orcle</FieldLabel>
-              <p className="text-xs text-muted-foreground">
-                Starts with your next livestream. {COHOST_CHAT_CONSENT_SENTENCE} It needs the
-                cloud-AI consent you set in Publish.
-              </p>
-            </div>
-            <Switch
-              checked={cohostSettings.enabled}
-              disabled={locked}
-              id="cohost-enabled"
-              onCheckedChange={(enabled) => save({ enabled })}
-            />
-          </div>
-        </Field>
-
         <Field>
           <div className="flex items-center justify-between gap-3">
             <div className="flex min-w-0 flex-col gap-0.5">
@@ -406,13 +366,4 @@ function CohostListenAllowance(): ReactElement | null {
       {allowance}
     </p>
   )
-}
-
-function openExternalUrl(url: string): void {
-  const opener = window.videorc?.openOAuthUrl
-  if (opener) {
-    void opener(url)
-    return
-  }
-  window.open(url, '_blank', 'noopener,noreferrer')
 }

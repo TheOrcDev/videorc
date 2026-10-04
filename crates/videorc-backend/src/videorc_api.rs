@@ -7,8 +7,6 @@
 //! `http://localhost:3000` and may override via `VIDEORC_API_BASE_URL`, so local
 //! sign-in testing works out of the box.
 
-use std::path::Path;
-
 use anyhow::{Context, Result, bail};
 use reqwest::multipart;
 use serde::Deserialize;
@@ -72,10 +70,7 @@ use crate::cohost::{
 };
 use crate::streaming::StreamPlatform;
 
-use crate::protocol::{
-    AiCapabilities, AiJobCreateResponse, AiJobEnvelope, AiJobSnapshot, AiObjectUploadResponse,
-    AiObjectUploadTicket, AiQuotaStatus,
-};
+use crate::protocol::{AiCapabilities, AiQuotaStatus};
 
 // WWW is load-bearing: the apex 307-redirects every path to www.videorc.com,
 // and reqwest strips Authorization on cross-host redirects — Bearer calls to
@@ -133,32 +128,6 @@ pub enum SessionStatus {
         image: Option<String>,
     },
     Unauthorized,
-}
-
-pub struct AiAudioJobRequest<'a> {
-    pub audio_path: &'a Path,
-    pub client_request_id: &'a str,
-    pub client_version: &'a str,
-    pub diagnostic_summary: Option<&'a str>,
-    pub health_events_json: &'a str,
-    pub session_client_id: &'a str,
-    /// Per-kind generation extras; only sent when the server advertises them.
-    pub outputs: Option<&'a [String]>,
-    pub tone: Option<&'a str>,
-    pub chat_context_json: Option<&'a str>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AiObjectUploadRequest<'a> {
-    pub client_request_id: &'a str,
-    pub client_version: &'a str,
-    pub consent_to_upload_audio: bool,
-    pub file_name: &'a str,
-    pub mime_type: &'a str,
-    pub session_client_id: &'a str,
-    pub size_bytes: u64,
-    pub workflow_kind: &'a str,
 }
 
 // --- Live Co-host tick wire types (contract v3, additive over v2 over v1; field names are load-bearing) ---
@@ -675,36 +644,6 @@ impl VideorcApiClient {
             .with_context(|| format!("Could not read Videorc API response for {path}."))
     }
 
-    async fn post_bearer_json<T, B>(&self, path: &str, bearer_token: &str, body: &B) -> Result<T>
-    where
-        T: DeserializeOwned,
-        B: Serialize + ?Sized,
-    {
-        let response = self
-            .http
-            .post(self.endpoint(path))
-            .bearer_auth(bearer_token)
-            .json(body)
-            .send()
-            .await
-            .with_context(|| format!("Could not reach Videorc API path {path}."))?;
-
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            bail!("Sign in to use cloud AI.");
-        }
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let message = read_safe_error_message(response).await;
-            bail!("Videorc API request failed ({status}): {message}");
-        }
-
-        response
-            .json()
-            .await
-            .with_context(|| format!("Could not read Videorc API response for {path}."))
-    }
-
     /// Exchange an encrypted, state + PKCE-bound desktop authorization code for
     /// a durable Better Auth session token and account identity.
     pub async fn verify_desktop_authorization(
@@ -909,73 +848,6 @@ impl VideorcApiClient {
         self.get_bearer_json("/api/ai/quota", bearer_token).await
     }
 
-    /// Fetch a user-owned AI job snapshot by id.
-    pub async fn get_ai_job(&self, bearer_token: &str, job_id: &str) -> Result<AiJobSnapshot> {
-        let response: AiJobEnvelope = self
-            .get_bearer_json(&format!("/api/ai/jobs/{job_id}"), bearer_token)
-            .await?;
-        Ok(response.job)
-    }
-
-    /// Create a post-recording job by uploading extracted audio as multipart form data.
-    pub async fn create_ai_job_from_audio(
-        &self,
-        bearer_token: &str,
-        request: AiAudioJobRequest<'_>,
-    ) -> Result<AiJobCreateResponse> {
-        let audio = tokio::fs::read(request.audio_path)
-            .await
-            .with_context(|| format!("Could not read {}", request.audio_path.display()))?;
-        let file_part = multipart::Part::bytes(audio)
-            .file_name("videorc-audio.m4a")
-            .mime_str("audio/mp4")?;
-        let mut form = multipart::Form::new()
-            .text("clientRequestId", request.client_request_id.to_string())
-            .text("clientVersion", request.client_version.to_string())
-            .text("consentToUploadAudio", "true")
-            .text("healthEventsJson", request.health_events_json.to_string())
-            .text("sessionClientId", request.session_client_id.to_string())
-            .text("workflowKind", "post-recording-publish-pack")
-            .part("audio", file_part);
-
-        if let Some(summary) = request.diagnostic_summary {
-            form = form.text("diagnosticSummary", summary.to_string());
-        }
-        if let Some(outputs) = request.outputs {
-            form = form.text("outputs", outputs.join(","));
-        }
-        if let Some(tone) = request.tone {
-            form = form.text("tone", tone.to_string());
-        }
-        if let Some(chat_context) = request.chat_context_json {
-            form = form.text("chatContext", chat_context.to_string());
-        }
-
-        let response = self
-            .http
-            .post(self.endpoint("/api/ai/jobs/from-audio"))
-            .bearer_auth(bearer_token)
-            .multipart(form)
-            .send()
-            .await
-            .context("Could not create the Videorc AI audio job.")?;
-
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            bail!("Sign in to use cloud AI.");
-        }
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let message = read_safe_error_message(response).await;
-            bail!("Videorc AI audio job failed ({status}): {message}");
-        }
-
-        response
-            .json()
-            .await
-            .context("Could not read the Videorc AI audio job response.")
-    }
-
     /// Transcribe one live-caption chunk (16kHz mono WAV, ~3s). Errors are
     /// split into terminal (premium required, quota exhausted, signed out,
     /// captions disabled — stop the session) and transient (retry/skip).
@@ -1125,51 +997,255 @@ impl VideorcApiClient {
         Ok(())
     }
 
-    pub async fn request_ai_object_upload(
+    // --- Clean cut (plan 119; docs/clean-cut-contract.md) --------------------
+
+    /// One verbatim, word-timed transcript chunk (contract part A). The WAV
+    /// is canonical PCM s16le mono 16 kHz, at most 120 s and 4 000 000 bytes.
+    /// Every failure keeps the server's `error.code`, so the job can tell a
+    /// used-up allowance from a network blip.
+    pub async fn transcribe_transcript_chunk(
         &self,
         bearer_token: &str,
-        request: &AiObjectUploadRequest<'_>,
-    ) -> Result<AiObjectUploadResponse> {
-        self.post_bearer_json("/api/ai/objects/upload", bearer_token, request)
-            .await
-    }
-
-    pub async fn upload_ai_object(
-        &self,
-        ticket: &AiObjectUploadTicket,
-        audio_path: &Path,
-    ) -> Result<()> {
-        let audio = tokio::fs::read(audio_path)
-            .await
-            .with_context(|| format!("Could not read {}", audio_path.display()))?;
-        let method = match ticket.upload_method.as_str() {
-            "POST" => reqwest::Method::POST,
-            "PUT" => reqwest::Method::PUT,
-            other => bail!("Unsupported AI object upload method: {other}"),
-        };
-        let mut request = self.http.request(method, &ticket.upload_url).body(audio);
-        for (key, value) in &ticket.upload_headers {
-            request = request.header(key, value);
+        request: TranscriptChunkRequest,
+    ) -> std::result::Result<TranscriptChunkResponse, AiApiFailure> {
+        let file_part = multipart::Part::bytes(request.wav)
+            .file_name(format!("clean-cut-chunk-{}.wav", request.chunk_index))
+            .mime_str("audio/wav")
+            .map_err(|error| AiApiFailure::Transport {
+                message: format!("Could not build the transcript chunk upload: {error}"),
+            })?;
+        let mut form = multipart::Form::new()
+            .text("sessionClientId", request.session_client_id)
+            .text("chunkIndex", request.chunk_index.to_string())
+            .text("chunkStartMs", request.chunk_start_ms.to_string())
+            .part("audio", file_part);
+        if let Some(language) = request.language {
+            form = form.text("language", language);
         }
 
-        let response = request
+        let response = self
+            .http
+            .post(self.endpoint(TRANSCRIPT_CHUNKS_PATH))
+            .bearer_auth(bearer_token)
+            .multipart(form)
+            .timeout(TRANSCRIPT_CHUNK_UPLOAD_TIMEOUT)
             .send()
             .await
-            .context("Could not upload the Videorc AI input object.")?;
-        if !response.status().is_success() {
-            bail!("Videorc AI object upload failed ({}).", response.status());
+            .map_err(|error| AiApiFailure::Transport {
+                message: format!("Could not reach the transcription service: {error}"),
+            })?;
+        let status = response.status();
+        if status.is_success() {
+            return response
+                .json::<TranscriptChunkResponse>()
+                .await
+                .map_err(|error| AiApiFailure::Transport {
+                    message: format!("Could not read the transcript chunk response: {error}"),
+                });
         }
-        Ok(())
+        let (code, message) = read_error_code_and_message(response).await;
+        Err(AiApiFailure::Http {
+            status: status.as_u16(),
+            code,
+            message,
+        })
     }
 
-    pub async fn create_ai_job(
+    /// `POST /api/ai/jobs` keeping the error envelope's code. The publish
+    /// path's `create_ai_job` flattens the code into a message and stays as
+    /// it is.
+    pub async fn create_ai_job_checked(
         &self,
         bearer_token: &str,
         body: &serde_json::Value,
-    ) -> Result<AiJobCreateResponse> {
-        self.post_bearer_json("/api/ai/jobs", bearer_token, body)
+    ) -> std::result::Result<AiJobPollSnapshot, AiApiFailure> {
+        let response = self
+            .http
+            .post(self.endpoint("/api/ai/jobs"))
+            .bearer_auth(bearer_token)
+            .json(body)
+            .timeout(AI_JOB_REQUEST_TIMEOUT)
+            .send()
             .await
+            .map_err(|error| AiApiFailure::Transport {
+                message: format!("Could not reach the Videorc AI job service: {error}"),
+            })?;
+        read_ai_job_poll_response(response).await
     }
+
+    /// `GET /api/ai/jobs/{id}` as a lenient snapshot: only the fields the
+    /// Clean cut poller reads, every one of them defaulted.
+    pub async fn get_ai_job_checked(
+        &self,
+        bearer_token: &str,
+        job_id: &str,
+    ) -> std::result::Result<AiJobPollSnapshot, AiApiFailure> {
+        let response = self
+            .http
+            .get(self.endpoint(&format!("/api/ai/jobs/{job_id}")))
+            .bearer_auth(bearer_token)
+            .timeout(AI_JOB_REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| AiApiFailure::Transport {
+                message: format!("Could not reach the Videorc AI job service: {error}"),
+            })?;
+        read_ai_job_poll_response(response).await
+    }
+}
+
+const TRANSCRIPT_CHUNKS_PATH: &str = "/api/ai/transcripts/chunks";
+// A 120 s chunk is under 4 MB; a provider call sits behind the upload.
+const TRANSCRIPT_CHUNK_UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+const AI_JOB_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+async fn read_ai_job_poll_response(
+    response: reqwest::Response,
+) -> std::result::Result<AiJobPollSnapshot, AiApiFailure> {
+    let status = response.status();
+    if status.is_success() {
+        let envelope: AiJobPollEnvelope =
+            response
+                .json()
+                .await
+                .map_err(|error| AiApiFailure::Transport {
+                    message: format!("Could not read the Videorc AI job response: {error}"),
+                })?;
+        return Ok(envelope.job);
+    }
+    let (code, message) = read_error_code_and_message(response).await;
+    Err(AiApiFailure::Http {
+        status: status.as_u16(),
+        code,
+        message,
+    })
+}
+
+/// A failed `/api/ai/*` call with the envelope's code kept whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AiApiFailure {
+    /// The server answered with `{ error: { code, message } }` (or a body that
+    /// was not the envelope: then `code` is `unknown`).
+    Http {
+        status: u16,
+        code: String,
+        message: String,
+    },
+    /// No usable answer: network, timeout, or an unreadable body.
+    Transport { message: String },
+}
+
+impl AiApiFailure {
+    /// Worth another attempt after a pause: the network, a timeout or a
+    /// server-side failure. Quota, auth, consent and validation answers are
+    /// final until something changes.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Transport { .. } => true,
+            Self::Http { status, .. } => *status >= 500 || *status == 408,
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Http { message, .. } | Self::Transport { message } => message.as_str(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TranscriptChunkRequest {
+    pub session_client_id: String,
+    pub chunk_index: u32,
+    pub chunk_start_ms: u64,
+    pub language: Option<String>,
+    pub wav: Vec<u8>,
+}
+
+/// One word of a transcript chunk, timed relative to the chunk start. Times
+/// are read as numbers (the contract says integers; a provider rounding slip
+/// must not fail a whole chunk).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptChunkWord {
+    pub text: String,
+    pub start_ms: f64,
+    pub end_ms: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filler: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptChunkResponse {
+    #[serde(default)]
+    pub chunk_index: u32,
+    #[serde(default)]
+    pub chunk_seconds: f64,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub words: Vec<TranscriptChunkWord>,
+    #[serde(default)]
+    pub remaining_seconds: Option<u64>,
+    #[serde(default)]
+    pub monthly_seconds_limit: Option<u64>,
+}
+
+/// The owner job snapshot as the Clean cut poller reads it (contract part C).
+/// Publish-pack fields are ignored; nothing here is required.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiJobPollSnapshot {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub workflow_kind: Option<String>,
+    #[serde(default)]
+    pub error_code: Option<String>,
+    #[serde(default)]
+    pub error_message: Option<String>,
+    #[serde(default)]
+    pub artifacts: Option<AiJobPollArtifacts>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiJobPollArtifacts {
+    /// `artifacts.cleanCut`: present only once the job is completed.
+    #[serde(default)]
+    pub clean_cut: Option<serde_json::Value>,
+    /// `artifacts.cleanCutProgress`: present while the job runs.
+    #[serde(default)]
+    pub clean_cut_progress: Option<AiJobCleanCutProgress>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiJobCleanCutProgress {
+    #[serde(default)]
+    pub windows: AiJobCleanCutWindows,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiJobCleanCutWindows {
+    #[serde(default)]
+    pub total: u32,
+    #[serde(default)]
+    pub completed: u32,
+}
+
+#[derive(Deserialize)]
+struct AiJobPollEnvelope {
+    job: AiJobPollSnapshot,
 }
 
 #[derive(Debug, Clone, Deserialize)]

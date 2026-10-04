@@ -741,6 +741,141 @@
       "lastTickAt": null,
       "tickSeq": 0,
       "partial": false
+    },
+    "reportGetParams": { "sessionId": "session-fixture" },
+    "reportSaved": { "sessionId": "session-fixture" },
+    "report": {
+      "version": 1,
+      "sessionId": "session-fixture",
+      "startedAt": "2026-08-22T10:00:00Z",
+      "endedAt": "2026-08-22T11:30:00Z",
+      "segments": 1,
+      "streamTitle": "Rust night",
+      "messagesSeen": 84,
+      "shownOnStream": 2,
+      "questions": {
+        "total": 5,
+        "markedAnswered": 1,
+        "dismissed": 1,
+        "replied": 1,
+        "answeredOnAir": 1,
+        "restored": 0,
+        "shownOnStream": 1,
+        "items": [
+          {
+            "id": "q_fixture",
+            "text": "What keyboard is that?",
+            "askers": ["Viewer"],
+            "platforms": ["twitch"],
+            "priority": "high",
+            "firstSeenAt": "2026-08-22T10:00:00Z",
+            "outcome": "replied"
+          },
+          {
+            "id": "q_fixture_2",
+            "text": "Which editor theme?",
+            "priority": "normal",
+            "firstSeenAt": "2026-08-22T10:20:00Z",
+            "outcome": "open"
+          }
+        ]
+      },
+      "flags": {
+        "raised": 2,
+        "dismissed": 1,
+        "byKind": [
+          { "kind": "self-promo", "count": 1 },
+          { "kind": "spam", "count": 1 }
+        ],
+        "bySeverity": [{ "severity": "low", "count": 2 }]
+      },
+      "promises": {
+        "heard": 2,
+        "kept": 1,
+        "dismissed": 0,
+        "reminded": 1,
+        "open": [{ "text": "Giveaway at 100 viewers", "firstSeenAt": "2026-08-22T10:05:00Z" }]
+      },
+      "greetings": {
+        "firstTimers": 3,
+        "firstTimersGreeted": 2,
+        "byVoice": 1,
+        "byChat": 1,
+        "onStream": 0,
+        "manual": 1
+      },
+      "alerts": [
+        { "kind": "audio", "peakViewers": 2, "active": true, "firstSeenAt": "2026-08-22T10:40:00Z" }
+      ],
+      "recap": { "offered": 1, "drafted": 0, "dismissed": 1 }
+    },
+    "reportPayload": {
+      "sessionId": "session-fixture",
+      "report": {
+        "version": 1,
+        "sessionId": "session-fixture",
+        "startedAt": "2026-08-22T10:00:00Z",
+        "endedAt": "2026-08-22T11:30:00Z",
+        "segments": 2,
+        "messagesSeen": 0,
+        "shownOnStream": 0,
+        "questions": {
+          "total": 0,
+          "markedAnswered": 0,
+          "dismissed": 0,
+          "replied": 0,
+          "answeredOnAir": 0,
+          "restored": 0,
+          "shownOnStream": 0
+        },
+        "flags": { "raised": 0, "dismissed": 0 },
+        "promises": { "heard": 0, "kept": 0, "dismissed": 0, "reminded": 0 },
+        "greetings": {
+          "firstTimers": 0,
+          "firstTimersGreeted": 0,
+          "byVoice": 0,
+          "byChat": 0,
+          "onStream": 0,
+          "manual": 0
+        },
+        "recap": { "offered": 0, "drafted": 0, "dismissed": 0 }
+      },
+      "moments": [
+        {
+          "startMs": 275400,
+          "endMs": 312000,
+          "reason": "You said 'clip that'",
+          "excerpt": "and it actually works first try clip that",
+          "source": "voice"
+        },
+        {
+          "startMs": 724200,
+          "endMs": 754200,
+          "reason": "Marked",
+          "excerpt": "",
+          "source": "manual"
+        },
+        {
+          "startMs": 280000,
+          "endMs": 325000,
+          "reason": "Chat spiked: 9 messages in 30s",
+          "excerpt": "chat is going wild right now",
+          "source": "chat"
+        }
+      ],
+      "chat": {
+        "messages": 84,
+        "byPlatform": [
+          { "platform": "twitch", "messages": 60 },
+          { "platform": "youtube", "messages": 24 }
+        ]
+      }
+    },
+    "reportPayloadWithoutReport": {
+      "sessionId": "session-fixture",
+      "report": null,
+      "moments": [],
+      "chat": { "messages": 0, "byPlatform": [] }
     }
   },
   "clip": {
@@ -775,5 +910,284 @@
         "createdAt": "2026-09-27T10:12:34Z"
       }
     ]
+  },
+  "cleanCut": {
+    "startParams": {
+      "sessionId": "session-fixture",
+      "mode": "clean",
+      "consentToUploadAudio": true
+    },
+    "condensedStartParams": {
+      "sessionId": "session-fixture",
+      "mode": "condensed",
+      "consentToUploadAudio": true,
+      "targetDurationSeconds": 900
+    },
+    "getParams": { "sessionId": "session-fixture" },
+    "queuedJob": {
+      "id": "clean-cut-fixture-1",
+      "sourceSessionId": "session-fixture",
+      "mode": "clean",
+      "state": "queued",
+      "progress": 0.0,
+      "edlRevision": 0,
+      "createdAt": "2026-10-04T10:00:00Z",
+      "updatedAt": "2026-10-04T10:00:00Z"
+    },
+    "readyJob": {
+      "id": "clean-cut-fixture-1",
+      "sourceSessionId": "session-fixture",
+      "mode": "clean",
+      "state": "ready",
+      "progress": 1.0,
+      "edlRevision": 0,
+      "edlSummary": {
+        "durationMs": 1834200,
+        "keptMs": 1499965,
+        "removalCount": 3,
+        "byKind": [
+          { "kind": "head", "count": 1, "ms": 1702 },
+          { "kind": "retake", "count": 1, "ms": 332532 }
+        ]
+      },
+      "transcriptPath": "Artifacts/session-fixture/clean-cut/transcript.words.json",
+      "createdAt": "2026-10-04T10:00:00Z",
+      "updatedAt": "2026-10-04T10:09:30Z"
+    },
+    "failedJob": {
+      "id": "clean-cut-fixture-2",
+      "sourceSessionId": "session-fixture",
+      "mode": "condensed",
+      "state": "failed",
+      "step": "upload",
+      "progress": 0.45,
+      "edlRevision": 0,
+      "errorCode": "clean-cut-monthly-quota-exhausted",
+      "errorMessage": "This month's Clean cut minutes are used up. Start it again next month; it resumes where it stopped.",
+      "createdAt": "2026-10-04T11:00:00Z",
+      "updatedAt": "2026-10-04T11:02:00Z"
+    },
+    "edl": {
+      "version": 1,
+      "sourceIdentity": {
+        "path": "Recordings/talk.mp4",
+        "sizeBytes": 734003200,
+        "modifiedUnixMs": 1759572000000
+      },
+      "frameRate": { "num": 30000, "den": 1001 },
+      "durationMs": 1834200,
+      "removals": [
+        {
+          "id": "r1",
+          "startMs": 0,
+          "endMs": 1702,
+          "startFrame": 0,
+          "endFrame": 51,
+          "kind": "head",
+          "reason": "Before the first word",
+          "enabled": true
+        },
+        {
+          "id": "r2",
+          "startMs": 120120,
+          "endMs": 452652,
+          "startFrame": 3600,
+          "endFrame": 13566,
+          "kind": "retake",
+          "reason": "Restarted the same sentence; the later take is kept.",
+          "confidence": 0.82,
+          "enabled": true
+        },
+        {
+          "id": "r3",
+          "startMs": 500500,
+          "endMs": 501501,
+          "startFrame": 15000,
+          "endFrame": 15030,
+          "kind": "false_start",
+          "reason": "An abandoned start",
+          "confidence": 0.55,
+          "enabled": false
+        }
+      ],
+      "stats": {
+        "byKind": [
+          { "kind": "head", "count": 1, "ms": 1702 },
+          { "kind": "retake", "count": 1, "ms": 332532 }
+        ],
+        "keptMs": 1499965
+      }
+    },
+    "getResult": {
+      "sessionId": "session-fixture",
+      "jobs": [
+        {
+          "job": {
+            "id": "clean-cut-fixture-1",
+            "sourceSessionId": "session-fixture",
+            "mode": "clean",
+            "state": "ready",
+            "progress": 1.0,
+            "edlRevision": 0,
+            "edlSummary": {
+              "durationMs": 1834200,
+              "keptMs": 1832498,
+              "removalCount": 1,
+              "byKind": [{ "kind": "head", "count": 1, "ms": 1702 }]
+            },
+            "transcriptPath": "Artifacts/session-fixture/clean-cut/transcript.words.json",
+            "createdAt": "2026-10-04T10:00:00Z",
+            "updatedAt": "2026-10-04T10:09:30Z"
+          },
+          "edl": {
+            "version": 1,
+            "sourceIdentity": {
+              "path": "Recordings/talk.mp4",
+              "sizeBytes": 734003200,
+              "modifiedUnixMs": 1759572000000
+            },
+            "frameRate": { "num": 30000, "den": 1001 },
+            "durationMs": 1834200,
+            "removals": [
+              {
+                "id": "r1",
+                "startMs": 0,
+                "endMs": 1702,
+                "startFrame": 0,
+                "endFrame": 51,
+                "kind": "head",
+                "reason": "Before the first word",
+                "enabled": true
+              }
+            ],
+            "stats": {
+              "byKind": [{ "kind": "head", "count": 1, "ms": 1702 }],
+              "keptMs": 1832498
+            }
+          }
+        }
+      ]
+    },
+    "updateEdlParams": {
+      "jobId": "clean-cut-fixture-1",
+      "revision": 0,
+      "removals": [{ "id": "r3", "enabled": true }],
+      "addManual": [{ "startMs": 600000, "endMs": 601000 }]
+    },
+    "renderParams": { "jobId": "clean-cut-fixture-1" },
+    "transcriptParams": { "jobId": "clean-cut-fixture-1" },
+    "renderingJob": {
+      "id": "clean-cut-fixture-1",
+      "sourceSessionId": "session-fixture",
+      "mode": "clean",
+      "state": "rendering",
+      "step": "render",
+      "progress": 0.42,
+      "edlRevision": 1,
+      "edlSummary": {
+        "durationMs": 1834200,
+        "keptMs": 1499965,
+        "removalCount": 3,
+        "byKind": [
+          { "kind": "head", "count": 1, "ms": 1702 },
+          { "kind": "retake", "count": 1, "ms": 332532 }
+        ]
+      },
+      "transcriptPath": "Artifacts/session-fixture/clean-cut/transcript.words.json",
+      "createdAt": "2026-10-04T10:00:00Z",
+      "updatedAt": "2026-10-04T10:12:00Z"
+    },
+    "completedJob": {
+      "id": "clean-cut-fixture-1",
+      "sourceSessionId": "session-fixture",
+      "mode": "clean",
+      "state": "completed",
+      "progress": 1.0,
+      "edlRevision": 1,
+      "edlSummary": {
+        "durationMs": 1834200,
+        "keptMs": 1499965,
+        "removalCount": 3,
+        "byKind": [
+          { "kind": "head", "count": 1, "ms": 1702 },
+          { "kind": "retake", "count": 1, "ms": 332532 }
+        ]
+      },
+      "transcriptPath": "Artifacts/session-fixture/clean-cut/transcript.words.json",
+      "outputSessionId": "session-fixture-clean-cut",
+      "createdAt": "2026-10-04T10:00:00Z",
+      "updatedAt": "2026-10-04T10:15:00Z"
+    },
+    "transcript": {
+      "jobId": "clean-cut-fixture-1",
+      "language": "en",
+      "words": [
+        { "text": "So", "startMs": 1702, "endMs": 1900 },
+        { "text": "um", "startMs": 1950, "endMs": 2300, "filler": true },
+        { "text": "today.", "startMs": 2350, "endMs": 2800 }
+      ],
+      "segments": [{ "id": "s1", "startMs": 1702, "endMs": 2800 }]
+    },
+    "transcriptWithoutLanguage": {
+      "jobId": "clean-cut-fixture-2",
+      "language": null,
+      "words": [],
+      "segments": []
+    },
+    "condensedGetResult": {
+      "sessionId": "session-fixture",
+      "jobs": [
+        {
+          "job": {
+            "id": "clean-cut-fixture-3",
+            "sourceSessionId": "session-fixture",
+            "mode": "condensed",
+            "state": "completed",
+            "progress": 1.0,
+            "edlRevision": 0,
+            "edlSummary": {
+              "durationMs": 1834200,
+              "keptMs": 900900,
+              "removalCount": 1,
+              "byKind": [{ "kind": "condensed", "count": 1, "ms": 933300 }]
+            },
+            "transcriptPath": "Artifacts/session-fixture/clean-cut/transcript.words.json",
+            "outputSessionId": "session-fixture-condensed",
+            "createdAt": "2026-10-04T12:00:00Z",
+            "updatedAt": "2026-10-04T12:20:00Z"
+          },
+          "edl": {
+            "version": 1,
+            "sourceIdentity": {
+              "path": "Recordings/talk.mp4",
+              "sizeBytes": 734003200,
+              "modifiedUnixMs": 1759572000000
+            },
+            "frameRate": { "num": 30000, "den": 1001 },
+            "durationMs": 1834200,
+            "removals": [
+              {
+                "id": "r1",
+                "startMs": 900900,
+                "endMs": 1834200,
+                "startFrame": 27000,
+                "endFrame": 54970,
+                "kind": "condensed",
+                "reason": "Outside the condensed selection",
+                "enabled": true
+              }
+            ],
+            "stats": {
+              "byKind": [{ "kind": "condensed", "count": 1, "ms": 933300 }],
+              "keptMs": 900900
+            }
+          },
+          "condensedKeeps": [
+            { "startMs": 0, "endMs": 540540, "title": "Intro" },
+            { "startMs": 540540, "endMs": 900900, "title": "Deploying to Vercel" }
+          ]
+        }
+      ]
+    }
   }
 }

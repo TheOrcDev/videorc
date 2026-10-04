@@ -353,7 +353,7 @@ describe('BackendClient request lifetime', () => {
     expect(backendRequestTimeoutMs('screens.importImage')).toBe(45_000)
     expect(backendRequestTimeoutMs('sessions.delete')).toBe(45_000)
     expect(backendRequestTimeoutMs('stream.output.topology.probe')).toBe(120_000)
-    expect(backendRequestTimeoutMs('ai.run_post_recording')).toBe(30 * 60_000)
+    expect(backendRequestTimeoutMs('session.remux_mp4')).toBe(10 * 60_000)
   })
 
   it('keeps warm layout requests above the complete backend source transaction budget', () => {

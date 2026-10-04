@@ -137,12 +137,35 @@ describe('Show on stream automatically', () => {
     }
   })
 
-  it('names the transcript in the consent sentence', async () => {
+  it('names the transcript in the listening consent sentence', async () => {
     await render(settings())
-    expect(document.body.textContent).toContain('Orcle reads live chat with Videorc cloud AI.')
     expect(document.body.textContent).toContain(
       "While you're live, your microphone audio goes to Videorc's cloud speech-to-text to be turned into text, even with live captions off. Videorc servers don't keep it. The transcript is saved with your recording on this computer."
     )
+  })
+})
+
+// Plan 119 S2: the section lives under the Orcle tab's Customize, where Orcle
+// Live's switch owns `enabled` and the Premium call to action.
+describe('under the Orcle tab', () => {
+  it('has no Enable switch and no title of its own', async () => {
+    await render(settings())
+    expect(document.getElementById('cohost-enabled')).toBeNull()
+    expect(document.body.textContent).not.toContain('Enable Orcle')
+    expect(document.body.textContent).not.toContain('Orcle (alpha)')
+    expect(document.querySelector('[data-slot="panel-section"] header')).toBeNull()
+  })
+
+  it('leaves the Premium call to action to Orcle Live: a Basic account sees it disabled', async () => {
+    await render(settings(), {
+      allowed: false,
+      featureId: 'live-cohost',
+      reason: 'Orcle requires Videorc Premium.',
+      upgradeUrl: 'https://www.videorc.com/premium'
+    })
+    expect(document.body.textContent).not.toContain('View Premium')
+    expect((document.getElementById('cohost-listen') as HTMLButtonElement).disabled).toBe(true)
+    expect((document.getElementById('cohost-notes') as HTMLTextAreaElement).disabled).toBe(true)
   })
 })
 

@@ -21,10 +21,12 @@ use crate::live_chat::{
 };
 use crate::process_job::output_owned_std_with_timeout;
 use crate::protocol::{
-    AiArtifact, AiArtifactKind, AiArtifactStatus, DiagnosticStats, HealthEvent, HealthLevel,
-    LayoutSettings, NoiseCleanupJob, NoiseCleanupJobStatus, OutputSettings, SessionAiArtifactsPage,
-    SessionHealthEventsPage, SessionListItem, SessionListPage, SessionLogEntry, SessionLogsPage,
-    SessionStorageTotals, SessionSummary, SourceSelection, StreamScreen, StreamScreenStatus,
+    AiArtifact, AiArtifactKind, AiArtifactStatus, CleanCutEdl, CleanCutJob, CleanCutJobState,
+    CleanCutMode, CohostReportChatPlatformCount, CohostSessionReport, DiagnosticStats, HealthEvent,
+    HealthLevel, LayoutSettings, NoiseCleanupJob, NoiseCleanupJobStatus, OutputSettings,
+    SessionAiArtifactsPage, SessionHealthEventsPage, SessionListItem, SessionListPage,
+    SessionLogEntry, SessionLogsPage, SessionStorageTotals, SessionSummary, SourceSelection,
+    StreamScreen, StreamScreenStatus,
 };
 use crate::repair::{GateStatus, RepairJob, RepairJobStatus};
 use crate::streaming::{
@@ -34,6 +36,11 @@ use crate::streaming::{
 };
 
 const MAX_NOISE_CLEANUP_JOB_LIST: usize = 1_000;
+const MAX_CLEAN_CUT_JOB_LIST: usize = 1_000;
+/// The states in which a Clean cut worker owns the job (plan 119). Must match
+/// `CleanCutJobState::is_active` and the partial unique index.
+const CLEAN_CUT_ACTIVE_STATES_SQL: &str =
+    "('queued', 'transcribing', 'analyzing', 'rendering', 'validating')";
 // Stays below both the renderer's 30s backend request contract and the
 // backend's 30s post-finalization hard-exit grace. The child is killed/reaped
 // by `output_owned_std_with_timeout` before this operation returns.
@@ -60,6 +67,14 @@ pub struct SessionCloneFacts {
     pub title: String,
     pub output_path: Option<String>,
     pub mp4_path: Option<String>,
+}
+
+/// When a session started and how long it ran, for readers that place events
+/// on its timeline (plan 119: moments, the Orcle report).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionTiming {
+    pub started_at: String,
+    pub duration_ms: Option<i64>,
 }
 
 const PERFORMANCE_CHECK_PROCESSING_KIND: &str = "performance-check";
@@ -96,6 +111,44 @@ pub(crate) struct PersistedNoiseCleanupJob {
     pub job: NoiseCleanupJob,
     pub source_identity: SessionFileBoundIdentity,
     pub source_full_sha256: String,
+}
+
+/// The session facts Clean cut eligibility reads (plan 119 decision 11), and
+/// the title S13 names the derived session after.
+#[derive(Debug, Clone)]
+pub(crate) struct CleanCutSource {
+    pub title: String,
+    pub status: String,
+    pub mode: String,
+    pub mp4_path: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub derived_from_session_id: Option<String>,
+    pub processing_kind: Option<String>,
+}
+
+/// A `clean_cut_jobs` row: the renderer snapshot plus the JSON columns the
+/// worker owns and the renderer never sees whole.
+#[derive(Debug, Clone)]
+pub(crate) struct PersistedCleanCutJob {
+    pub job: CleanCutJob,
+    pub source_identity_json: Option<String>,
+    pub analysis_json: Option<String>,
+    pub edl_json: Option<String>,
+    /// Plan 119 S13: the render's staging and final paths, recorded before
+    /// FFmpeg writes a byte so startup can sweep a stray partial file. Clean
+    /// cut deliberately stays out of the shared `session_file_operations`
+    /// journal (see `complete_clean_cut_derivative`).
+    pub render_json: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum CleanCutJobCreation {
+    Created(PersistedCleanCutJob),
+    /// A worker already owns a job for this source and mode.
+    AlreadyActive,
+    /// The latest job for this source and mode has a cut list waiting for
+    /// review; starting again returns it instead of discarding edits.
+    Ready(PersistedCleanCutJob),
 }
 
 #[derive(Debug, Clone)]
@@ -2435,6 +2488,23 @@ impl Database {
         Ok(())
     }
 
+    /// When one session ran; `None` when its row is gone.
+    pub fn session_timing(&self, session_id: &str) -> Result<Option<SessionTiming>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT started_at, duration_ms FROM sessions WHERE id = ?1",
+            params![session_id],
+            |row| {
+                Ok(SessionTiming {
+                    started_at: row.get(0)?,
+                    duration_ms: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     /// Every recorded media path for a session, in preference order (mp4 export
     /// first, then the original container). Callers that hand a path to FFmpeg
     /// must pick the first one that still EXISTS on disk — the DB records where
@@ -2867,6 +2937,402 @@ impl Database {
             [],
         )
         .map(|jobs| jobs.into_iter().map(|job| job.job).collect())
+    }
+
+    // --- Clean cut jobs (plan 119 S12a) ---------------------------------------
+
+    pub(crate) fn clean_cut_source(&self, session_id: &str) -> Result<Option<CleanCutSource>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT status, mode, mp4_path, duration_ms, derived_from_session_id, processing_kind,
+                    title
+             FROM sessions WHERE id = ?1 AND library_hidden = 0",
+            params![session_id],
+            |row| {
+                Ok(CleanCutSource {
+                    status: row.get(0)?,
+                    mode: row.get(1)?,
+                    mp4_path: row.get(2)?,
+                    duration_ms: row.get(3)?,
+                    derived_from_session_id: row.get(4)?,
+                    processing_kind: row.get(5)?,
+                    title: row.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Create a queued job for one source and mode, unless a worker already
+    /// owns one (`AlreadyActive`) or a cut list is waiting for review
+    /// (`Ready`). Failed, cancelled and completed jobs stay as history and a
+    /// new row is created next to them.
+    pub(crate) fn create_clean_cut_job(
+        &self,
+        source_session_id: &str,
+        mode: CleanCutMode,
+    ) -> Result<CleanCutJobCreation> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let active_filter = format!(
+            "WHERE source_session_id = ?1 AND mode = ?2 AND state IN {CLEAN_CUT_ACTIVE_STATES_SQL}
+             ORDER BY created_at ASC, id ASC LIMIT 1"
+        );
+        if query_one_clean_cut_job(
+            &transaction,
+            &active_filter,
+            params![source_session_id, mode.as_str()],
+        )?
+        .is_some()
+        {
+            transaction.commit()?;
+            return Ok(CleanCutJobCreation::AlreadyActive);
+        }
+        if let Some(ready) = query_one_clean_cut_job(
+            &transaction,
+            "WHERE source_session_id = ?1 AND mode = ?2 AND state = 'ready'
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+            params![source_session_id, mode.as_str()],
+        )? {
+            transaction.commit()?;
+            return Ok(CleanCutJobCreation::Ready(ready));
+        }
+        let id = Uuid::new_v4().to_string();
+        transaction.execute(
+            "INSERT INTO clean_cut_jobs
+                (id, source_session_id, mode, state, progress, edl_revision, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'queued', 0.0, 0, ?4, ?4)",
+            params![id, source_session_id, mode.as_str(), now],
+        )?;
+        let job = query_one_clean_cut_job(&transaction, "WHERE id = ?1", params![id])?
+            .context("New Clean cut job disappeared")?;
+        transaction.commit()?;
+        Ok(CleanCutJobCreation::Created(job))
+    }
+
+    pub(crate) fn clean_cut_job(&self, job_id: &str) -> Result<Option<PersistedCleanCutJob>> {
+        let conn = self.lock()?;
+        query_one_clean_cut_job(&conn, "WHERE id = ?1", params![job_id])
+    }
+
+    /// The newest job of each mode for one source, newest first.
+    pub(crate) fn latest_clean_cut_jobs_for_source(
+        &self,
+        source_session_id: &str,
+    ) -> Result<Vec<PersistedCleanCutJob>> {
+        let conn = self.lock()?;
+        query_clean_cut_jobs(
+            &conn,
+            "WHERE id IN (
+                SELECT id FROM (
+                    SELECT id, ROW_NUMBER() OVER (
+                        PARTITION BY mode ORDER BY created_at DESC, id DESC
+                    ) AS mode_rank
+                    FROM clean_cut_jobs
+                    WHERE source_session_id = ?1
+                ) WHERE mode_rank = 1
+             ) ORDER BY created_at DESC, id DESC",
+            params![source_session_id],
+        )
+    }
+
+    pub(crate) fn active_clean_cut_job_for_source(
+        &self,
+        source_session_id: &str,
+    ) -> Result<Option<CleanCutJob>> {
+        let conn = self.lock()?;
+        let filter = format!(
+            "WHERE source_session_id = ?1 AND state IN {CLEAN_CUT_ACTIVE_STATES_SQL}
+             ORDER BY created_at ASC, id ASC LIMIT 1"
+        );
+        Ok(query_one_clean_cut_job(&conn, &filter, params![source_session_id])?.map(|job| job.job))
+    }
+
+    /// Active jobs first, then the newest finished job per source and mode.
+    pub(crate) fn list_clean_cut_jobs(&self) -> Result<Vec<CleanCutJob>> {
+        let conn = self.lock()?;
+        let active_filter = format!(
+            "WHERE state IN {CLEAN_CUT_ACTIVE_STATES_SQL}
+             ORDER BY updated_at DESC, id DESC LIMIT ?1"
+        );
+        let mut jobs = query_clean_cut_jobs(
+            &conn,
+            &active_filter,
+            params![MAX_CLEAN_CUT_JOB_LIST as i64],
+        )?;
+        let remaining = MAX_CLEAN_CUT_JOB_LIST.saturating_sub(jobs.len());
+        if remaining > 0 {
+            let finished_filter = format!(
+                "WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id, ROW_NUMBER() OVER (
+                            PARTITION BY source_session_id, mode
+                            ORDER BY updated_at DESC, id DESC
+                        ) AS source_rank
+                        FROM clean_cut_jobs
+                        WHERE state NOT IN {CLEAN_CUT_ACTIVE_STATES_SQL}
+                    ) WHERE source_rank = 1
+                 ) ORDER BY updated_at DESC, id DESC LIMIT ?1"
+            );
+            jobs.extend(query_clean_cut_jobs(
+                &conn,
+                &finished_filter,
+                params![remaining as i64],
+            )?);
+        }
+        Ok(jobs.into_iter().map(|job| job.job).collect())
+    }
+
+    /// Persist everything the worker owns. `edl_revision` is only ever moved
+    /// by `update_clean_cut_edl`.
+    pub(crate) fn save_clean_cut_job(&self, persisted: &PersistedCleanCutJob) -> Result<()> {
+        let job = &persisted.job;
+        let conn = self.lock()?;
+        let updated = conn.execute(
+            "UPDATE clean_cut_jobs
+             SET state = ?2, step = ?3, progress = ?4, source_identity_json = ?5,
+                 transcript_path = ?6, analysis_json = ?7, edl_json = ?8,
+                 output_session_id = ?9, error_code = ?10, error_message = ?11,
+                 updated_at = ?12, render_json = ?13
+             WHERE id = ?1",
+            params![
+                job.id,
+                job.state.as_str(),
+                job.step,
+                job.progress.clamp(0.0, 1.0),
+                persisted.source_identity_json,
+                job.transcript_path,
+                persisted.analysis_json,
+                persisted.edl_json,
+                job.output_session_id,
+                job.error_code,
+                job.error_message,
+                job.updated_at,
+                persisted.render_json,
+            ],
+        )?;
+        if updated != 1 {
+            bail!("Clean cut job {} was not found.", job.id);
+        }
+        Ok(())
+    }
+
+    /// Replace the cut list when `expected_revision` is still current;
+    /// `None` means someone else saved first and the caller must reload.
+    pub(crate) fn update_clean_cut_edl(
+        &self,
+        job_id: &str,
+        expected_revision: u32,
+        edl_json: &str,
+    ) -> Result<Option<PersistedCleanCutJob>> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let updated = transaction.execute(
+            "UPDATE clean_cut_jobs
+             SET edl_json = ?3, edl_revision = edl_revision + 1, updated_at = ?4
+             WHERE id = ?1 AND edl_revision = ?2",
+            params![job_id, i64::from(expected_revision), edl_json, now],
+        )?;
+        if updated != 1 {
+            transaction.commit()?;
+            return Ok(None);
+        }
+        let job = query_one_clean_cut_job(&transaction, "WHERE id = ?1", params![job_id])?;
+        transaction.commit()?;
+        Ok(job)
+    }
+
+    /// Startup: every job a dead process owned goes back to `queued` with its
+    /// chunk files, transcript, analysis and cut list intact, so the worker
+    /// resumes at the first missing step. `ready` jobs come back too: since
+    /// S13 a built cut list renders by itself, so a `ready` row at startup is
+    /// a render that was waiting for the maintenance slot.
+    pub(crate) fn reconcile_interrupted_clean_cut_jobs(&self) -> Result<Vec<CleanCutJob>> {
+        let now = Utc::now().to_rfc3339();
+        self.lock()?.execute(
+            "UPDATE clean_cut_jobs
+             SET state = 'queued', error_code = NULL, error_message = NULL, updated_at = ?1
+             WHERE state IN ('transcribing', 'analyzing', 'rendering', 'validating')",
+            params![now],
+        )?;
+        let conn = self.lock()?;
+        query_clean_cut_jobs(
+            &conn,
+            "WHERE state IN ('queued', 'ready') ORDER BY created_at ASC, id ASC",
+            [],
+        )
+        .map(|jobs| jobs.into_iter().map(|job| job.job).collect())
+    }
+
+    /// Every job that recorded a render in progress (plan 119 S13): startup
+    /// sweeps their staging files, the requeued worker renders again.
+    pub(crate) fn clean_cut_jobs_with_render_record(&self) -> Result<Vec<PersistedCleanCutJob>> {
+        let conn = self.lock()?;
+        query_clean_cut_jobs(
+            &conn,
+            "WHERE render_json IS NOT NULL ORDER BY created_at ASC, id ASC",
+            [],
+        )
+    }
+
+    /// The source changed under a built cut list (S15 rebind): drop the list
+    /// and bump the revision, so a `cleanCut.updateEdl` against the old list
+    /// is refused, then let the worker rebuild from transcription.
+    pub(crate) fn reset_clean_cut_edl(&self, job_id: &str) -> Result<Option<PersistedCleanCutJob>> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        transaction.execute(
+            "UPDATE clean_cut_jobs
+             SET edl_json = NULL, edl_revision = edl_revision + 1, updated_at = ?2
+             WHERE id = ?1",
+            params![job_id, now],
+        )?;
+        let job = query_one_clean_cut_job(&transaction, "WHERE id = ?1", params![job_id])?;
+        transaction.commit()?;
+        Ok(job)
+    }
+
+    /// The derived session an earlier render of the same source and mode
+    /// published, when its row still exists: a later job renders into it
+    /// instead of creating "(Clean cut) 2" (decision 11: re-rendering
+    /// replaces the same derived file and row). `(output_session_id, mp4_path)`.
+    pub(crate) fn clean_cut_adoptable_output(
+        &self,
+        source_session_id: &str,
+        mode: CleanCutMode,
+    ) -> Result<Option<(String, Option<String>)>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT sessions.id, sessions.mp4_path
+             FROM clean_cut_jobs
+             JOIN sessions ON sessions.id = clean_cut_jobs.output_session_id
+             WHERE clean_cut_jobs.source_session_id = ?1 AND clean_cut_jobs.mode = ?2
+             ORDER BY clean_cut_jobs.updated_at DESC, clean_cut_jobs.id DESC
+             LIMIT 1",
+            params![source_session_id, mode.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Plan 119 S15: whether the post-recording quality gate for this file is
+    /// still ahead of a clean cut. A fresh `pending` row (no reason) is the
+    /// gate's idle delay or its wait for the maintenance slot; `running` is
+    /// the gate at work, possibly repairing the file in place. A deferred
+    /// gate (`pending` with a reason) resumes only at the next launch, so it
+    /// never holds a clean cut back; the identity check catches its repair.
+    pub(crate) fn quality_gate_blocking_for_path(&self, path: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM repair_jobs
+                 WHERE file_path = ?1
+                   AND (status = 'running' OR (status = 'pending' AND reason IS NULL))
+                 LIMIT 1",
+                params![path],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Plan 119 S13: publish a Clean cut render as a derived session row, in
+    /// one transaction with the job's completion. The first render inserts
+    /// the row, copying the source's sources, layout and output settings as
+    /// Noise Cleanup does, with `processing_kind` NULL (decision 12). A
+    /// re-render, or a later job for the same source and mode, updates the
+    /// row named by `output_session_id` in place. The file is already at
+    /// `output_path` when this runs: a crash before the commit leaves a file
+    /// the requeued render overwrites, never a torn row. Clean cut stays out
+    /// of the shared `session_file_operations` journal on purpose: that
+    /// journal's startup reconcile ignores `kind`, deletes the `sessions` row
+    /// of any entry without a bound identity, and assumes a no-replace
+    /// publish, so an older backend meeting a re-render entry would delete
+    /// the existing derived session. Returns `false` when the source is gone.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn complete_clean_cut_derivative(
+        &self,
+        job_id: &str,
+        source_session_id: &str,
+        output_session_id: &str,
+        title: &str,
+        source_title: &str,
+        output_path: &str,
+        duration_ms: Option<i64>,
+        file_size_bytes: i64,
+    ) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let exists = transaction
+            .query_row(
+                "SELECT 1 FROM sessions WHERE id = ?1",
+                params![output_session_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        let changed = if exists {
+            transaction.execute(
+                "UPDATE sessions
+                 SET title = ?2, ended_at = ?3, status = 'completed', output_path = NULL,
+                     mp4_path = ?4, container = NULL, duration_ms = ?5, file_size_bytes = ?6,
+                     derived_from_session_id = ?7, source_title = ?8, processing_kind = NULL
+                 WHERE id = ?1",
+                params![
+                    output_session_id,
+                    title,
+                    now,
+                    output_path,
+                    duration_ms,
+                    file_size_bytes,
+                    source_session_id,
+                    source_title,
+                ],
+            )?
+        } else {
+            transaction.execute(
+                "INSERT INTO sessions
+                    (id, title, started_at, ended_at, status, mode, output_path, mp4_path,
+                     stream_preset, container, duration_ms, sources_json, layout_json, output_json,
+                     diagnostics_json, file_size_bytes, derived_from_session_id, source_title,
+                     processing_kind)
+                 SELECT ?2, ?3, ?5, ?5, 'completed', mode, NULL, ?6, stream_preset, NULL,
+                        COALESCE(?7, duration_ms), sources_json, layout_json, output_json,
+                        NULL, ?8, ?1, ?4, NULL
+                 FROM sessions WHERE id = ?1",
+                params![
+                    source_session_id,
+                    output_session_id,
+                    title,
+                    source_title,
+                    now,
+                    output_path,
+                    duration_ms,
+                    file_size_bytes,
+                ],
+            )?
+        };
+        if changed != 1 {
+            return Ok(false);
+        }
+        let completed = transaction.execute(
+            "UPDATE clean_cut_jobs
+             SET state = 'completed', step = NULL, progress = 1.0, output_session_id = ?2,
+                 render_json = NULL, error_code = NULL, error_message = NULL, updated_at = ?3
+             WHERE id = ?1 AND source_session_id = ?4 AND state IN ('rendering', 'validating')",
+            params![job_id, output_session_id, now, source_session_id],
+        )?;
+        if completed != 1 {
+            bail!("Clean cut job {job_id} was no longer rendering at derivative commit.");
+        }
+        transaction.commit()?;
+        Ok(true)
     }
 
     /// Commit the managed derivative row and its completed job state in one
@@ -3335,6 +3801,9 @@ impl Database {
         Ok(count)
     }
 
+    /// Old Publish rows stay readable (sessions.list, the support bundle);
+    /// nothing writes new ones since plan 119, so this is a test fixture.
+    #[cfg(test)]
     pub fn save_ai_artifact(
         &self,
         session_id: &str,
@@ -3368,11 +3837,6 @@ impl Database {
             ],
         )?;
         Ok(artifact)
-    }
-
-    pub fn list_ai_artifacts(&self, session_id: &str) -> Result<Vec<AiArtifact>> {
-        let conn = self.lock()?;
-        self.ai_artifacts_for_session_locked(&conn, session_id)
     }
 
     pub fn list_ai_artifacts_page(
@@ -3630,7 +4094,15 @@ impl Database {
             "SELECT id, title, started_at, ended_at, status, mode, output_path, mp4_path,
                     stream_preset, container, duration_ms, sources_json, layout_json,
                     diagnostics_json, file_size_bytes, derived_from_session_id, source_title,
-                    processing_kind, finalization_state, finalization_error
+                    processing_kind, finalization_state, finalization_error,
+                    (SELECT source_session_id FROM clean_cut_jobs
+                      WHERE clean_cut_jobs.output_session_id = sessions.id
+                      ORDER BY clean_cut_jobs.updated_at DESC, clean_cut_jobs.id DESC
+                      LIMIT 1),
+                    (SELECT mode FROM clean_cut_jobs
+                      WHERE clean_cut_jobs.output_session_id = sessions.id
+                      ORDER BY clean_cut_jobs.updated_at DESC, clean_cut_jobs.id DESC
+                      LIMIT 1)
              FROM sessions
              WHERE library_hidden = 0
              ORDER BY started_at DESC
@@ -3662,6 +4134,8 @@ impl Database {
                 row.get::<_, Option<String>>(17)?,
                 row.get::<_, Option<String>>(18)?,
                 row.get::<_, Option<String>>(19)?,
+                row.get::<_, Option<String>>(20)?,
+                row.get::<_, Option<String>>(21)?,
             ))
         })?;
 
@@ -3688,6 +4162,8 @@ impl Database {
                 processing_kind,
                 finalization_state,
                 finalization_error,
+                clean_cut_of_session_id,
+                clean_cut_mode,
             ) = row?;
 
             // Size truth (Library rewrite L1): stat the VISIBLE file live while
@@ -3718,7 +4194,9 @@ impl Database {
                 comment_count: self.live_chat_message_count_for_session_locked(&conn, &id)?,
                 derived_from_session_id,
                 source_title,
-                processing_kind,
+                processing_kind: normalized_processing_kind(processing_kind),
+                clean_cut_of_session_id,
+                clean_cut_mode,
                 finalization_state: crate::recording_finalization::finalization_state_from_column(
                     finalization_state.as_deref(),
                 ),
@@ -3897,6 +4375,21 @@ impl Database {
                           gate_status IN ('ready', 'repaired')
                           AND (job_status = 'running' OR COALESCE(reason, '') <> '')
                       )
+                ),
+                clean_cut_outputs AS (
+                    SELECT output_session_id, source_session_id, mode
+                    FROM (
+                        SELECT clean_cut_jobs.output_session_id,
+                               clean_cut_jobs.source_session_id, clean_cut_jobs.mode,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY clean_cut_jobs.output_session_id
+                                   ORDER BY clean_cut_jobs.updated_at DESC,
+                                            clean_cut_jobs.id DESC
+                               ) AS rank
+                        FROM clean_cut_jobs
+                        JOIN page_sessions
+                          ON page_sessions.id = clean_cut_jobs.output_session_id
+                    ) WHERE rank = 1
                 )
              SELECT page_sessions.id, page_sessions.title, page_sessions.started_at,
                     page_sessions.ended_at, page_sessions.status, page_sessions.mode,
@@ -3909,7 +4402,8 @@ impl Database {
                     COALESCE(health_counts.count, 0), COALESCE(log_counts.count, 0),
                     COALESCE(artifact_summaries.count, 0), artifact_summaries.ready_kinds,
                     COALESCE(comment_counts.count, 0),
-                    page_sessions.finalization_state, page_sessions.finalization_error
+                    page_sessions.finalization_state, page_sessions.finalization_error,
+                    clean_cut_outputs.source_session_id, clean_cut_outputs.mode
              FROM page_sessions
              LEFT JOIN health_counts ON health_counts.session_id = page_sessions.id
              LEFT JOIN log_counts ON log_counts.session_id = page_sessions.id
@@ -3918,6 +4412,8 @@ impl Database {
              LEFT JOIN quality_candidates
                     ON quality_candidates.session_id = page_sessions.id
                    AND quality_candidates.rank = 1
+             LEFT JOIN clean_cut_outputs
+                    ON clean_cut_outputs.output_session_id = page_sessions.id
              ORDER BY page_sessions.started_at DESC, page_sessions.id DESC",
         )?;
 
@@ -3966,7 +4462,9 @@ impl Database {
                     comment_count: row.get::<_, i64>(21)?.max(0) as u64,
                     derived_from_session_id: row.get(13)?,
                     source_title: row.get(14)?,
-                    processing_kind: row.get(15)?,
+                    processing_kind: normalized_processing_kind(row.get(15)?),
+                    clean_cut_of_session_id: row.get(24)?,
+                    clean_cut_mode: row.get(25)?,
                     finalization_state:
                         crate::recording_finalization::finalization_state_from_column(
                             row.get::<_, Option<String>>(22)?.as_deref(),
@@ -4993,6 +5491,136 @@ impl Database {
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    /// Orcle report (plan 119 S1): save one session's report, folding it into
+    /// the report already there when the same session comes back (Orcle off
+    /// and on mid-stream), in one transaction. `Ok(false)` when the session
+    /// row is gone: a report without its session is skipped, never an error.
+    /// A stored report this build cannot read is replaced.
+    pub fn upsert_cohost_report(&self, report: &CohostSessionReport) -> Result<bool> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let session_exists = transaction
+            .query_row(
+                "SELECT 1 FROM sessions WHERE id = ?1",
+                params![report.session_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !session_exists {
+            return Ok(false);
+        }
+        let stored: Option<String> = transaction
+            .query_row(
+                "SELECT report_json FROM cohost_reports WHERE session_id = ?1",
+                params![report.session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let merged = match stored
+            .as_deref()
+            .and_then(CohostSessionReport::from_stored_json)
+        {
+            Some(existing) => existing.merged_with(report.clone()),
+            None => report.clone(),
+        };
+        transaction.execute(
+            "INSERT INTO cohost_reports (session_id, version, report_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(session_id) DO UPDATE SET
+                version = excluded.version,
+                report_json = excluded.report_json,
+                updated_at = excluded.updated_at",
+            params![
+                merged.session_id,
+                merged.version,
+                serde_json::to_string(&merged)?,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    /// The saved Orcle report of a session; `None` when there is none or it
+    /// was written in a format this build does not read.
+    pub fn get_cohost_report(&self, session_id: &str) -> Result<Option<CohostSessionReport>> {
+        let conn = self.lock()?;
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT report_json FROM cohost_reports WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(stored
+            .as_deref()
+            .and_then(CohostSessionReport::from_stored_json))
+    }
+
+    /// The newest Library session that has an Orcle report.
+    pub fn latest_cohost_report_session_id(&self) -> Result<Option<String>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT reports.session_id
+             FROM cohost_reports AS reports
+             JOIN sessions ON sessions.id = reports.session_id
+             WHERE sessions.library_hidden = 0
+             ORDER BY sessions.started_at DESC, reports.updated_at DESC
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// The newest Library session that streamed (`stream` or
+    /// `record+stream`), report or not.
+    pub fn latest_streamed_session_id(&self) -> Result<Option<String>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id FROM sessions
+             WHERE library_hidden = 0 AND mode LIKE '%stream%'
+             ORDER BY started_at DESC
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Chat rows of a session by platform, busiest first. Counts every kept
+    /// row, like the Library's comment count.
+    pub fn live_chat_message_counts_by_platform(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<CohostReportChatPlatformCount>> {
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT platform, COUNT(*) FROM live_chat_messages
+             WHERE session_id = ?1
+             GROUP BY platform
+             ORDER BY COUNT(*) DESC, platform ASC",
+        )?;
+        let rows = statement.query_map(params![session_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut counts = Vec::new();
+        for row in rows {
+            let (platform_id, messages) = row?;
+            let Some(platform) = stream_platform_from_id(&platform_id) else {
+                continue;
+            };
+            counts.push(CohostReportChatPlatformCount {
+                platform,
+                messages: u64::try_from(messages).unwrap_or(0),
+            });
+        }
+        Ok(counts)
     }
 
     pub(crate) fn remove_caption_private_artifact(&self, id: &str) -> Result<bool> {
@@ -6217,6 +6845,13 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_clip_marks_session_at
                 ON clip_marks(session_id, at_seconds);
+
+            CREATE TABLE IF NOT EXISTS cohost_reports (
+                session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+                version INTEGER NOT NULL,
+                report_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             ",
         )?;
         ensure_column(&conn, "sessions", "container", "container TEXT")?;
@@ -6360,6 +6995,37 @@ impl Database {
              CREATE INDEX IF NOT EXISTS idx_ai_artifacts_session_created
                 ON ai_artifacts(session_id, created_at DESC, id DESC);",
         )?;
+        // Clean cut jobs (plan 119 S12a). A new table only: older backends
+        // ignore it, and `sessions.processing_kind` never gains a value.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS clean_cut_jobs (
+                id TEXT PRIMARY KEY,
+                source_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                mode TEXT NOT NULL,
+                state TEXT NOT NULL,
+                step TEXT,
+                progress REAL,
+                source_identity_json TEXT,
+                transcript_path TEXT,
+                analysis_json TEXT,
+                edl_json TEXT,
+                edl_revision INTEGER NOT NULL DEFAULT 0,
+                output_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+                error_code TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_clean_cut_one_active_per_source_mode
+                ON clean_cut_jobs(source_session_id, mode)
+                WHERE state IN ('queued', 'transcribing', 'analyzing', 'rendering', 'validating');
+             CREATE INDEX IF NOT EXISTS idx_clean_cut_source_mode_created
+                ON clean_cut_jobs(source_session_id, mode, created_at DESC, id DESC);",
+        )?;
+        // Plan 119 S13: the render's staging and final paths. A column on
+        // Clean cut's own table, never a new `session_file_operations` kind:
+        // older readers name their columns and never see it.
+        ensure_column(&conn, "clean_cut_jobs", "render_json", "render_json TEXT")?;
         ensure_column(
             &conn,
             "health_events",
@@ -7119,6 +7785,82 @@ fn query_one_noise_cleanup_job<P: rusqlite::Params>(
     Ok(jobs.pop())
 }
 
+fn clean_cut_text_column_error(index: usize, error: String) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        index,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+    )
+}
+
+fn clean_cut_job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersistedCleanCutJob> {
+    let mode_text: String = row.get(2)?;
+    let mode: CleanCutMode = mode_text
+        .parse()
+        .map_err(|error: String| clean_cut_text_column_error(2, error))?;
+    let state_text: String = row.get(3)?;
+    let state: CleanCutJobState = state_text
+        .parse()
+        .map_err(|error: String| clean_cut_text_column_error(3, error))?;
+    let progress: Option<f64> = row.get(5)?;
+    let edl_json: Option<String> = row.get(9)?;
+    let edl_revision: i64 = row.get(10)?;
+    // A cut list that no longer parses is reported as absent rather than
+    // failing every list; the worker rebuilds it on the next start.
+    let edl_summary = edl_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<CleanCutEdl>(json).ok())
+        .map(|edl| edl.summary());
+    Ok(PersistedCleanCutJob {
+        job: CleanCutJob {
+            id: row.get(0)?,
+            source_session_id: row.get(1)?,
+            mode,
+            state,
+            step: row.get(4)?,
+            progress: progress.unwrap_or(0.0).clamp(0.0, 1.0),
+            edl_revision: u32::try_from(edl_revision.max(0)).unwrap_or(u32::MAX),
+            edl_summary,
+            transcript_path: row.get(7)?,
+            output_session_id: row.get(11)?,
+            error_code: row.get(12)?,
+            error_message: row.get(13)?,
+            created_at: row.get(14)?,
+            updated_at: row.get(15)?,
+        },
+        source_identity_json: row.get(6)?,
+        analysis_json: row.get(8)?,
+        edl_json,
+        render_json: row.get(16)?,
+    })
+}
+
+fn query_clean_cut_jobs<P: rusqlite::Params>(
+    conn: &Connection,
+    filter: &str,
+    params: P,
+) -> Result<Vec<PersistedCleanCutJob>> {
+    let sql = format!(
+        "SELECT id, source_session_id, mode, state, step, progress, source_identity_json,
+                transcript_path, analysis_json, edl_json, edl_revision, output_session_id,
+                error_code, error_message, created_at, updated_at, render_json
+         FROM clean_cut_jobs {filter}"
+    );
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement.query_map(params, clean_cut_job_from_row)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn query_one_clean_cut_job<P: rusqlite::Params>(
+    conn: &Connection,
+    filter: &str,
+    params: P,
+) -> Result<Option<PersistedCleanCutJob>> {
+    let mut jobs = query_clean_cut_jobs(conn, filter, params)?;
+    Ok(jobs.pop())
+}
+
 fn query_repair_jobs(conn: &Connection, filter: &str) -> Result<Vec<RepairJob>> {
     let sql = format!(
         "SELECT id, file_path, status, intended_fps, expect_audio, outcome_json, reason, created_at, updated_at, pipeline_reported_audio_loss
@@ -7244,6 +7986,32 @@ fn normalized_session_container(value: Option<String>) -> Option<String> {
             );
         }
         recognised
+    })
+}
+
+/// The `processing_kind` values a listed session row may carry to clients.
+/// Keep it equal to the renderer's closed `processingKind` schema
+/// (`apps/desktop/src/shared/backend-rpc-contract.ts`). `performance-check`
+/// is deliberately absent: its rows are always `library_hidden` and never
+/// listed, and clients would reject it if one ever were.
+const LISTED_PROCESSING_KINDS: [&str; 1] = ["noise-cleanup"];
+
+/// The `processing_kind` twin of `normalized_session_container` (plan 119
+/// decision 12): a stored kind clients do not know degrades to "no kind" for
+/// that one row, never a dead list. The renderer validates the field as a
+/// closed literal, so one row written by a newer app into the shared profile
+/// would otherwise reject the whole sessions.list response. This makes reads
+/// tolerant only; writers must still never store a new kind.
+fn normalized_processing_kind(value: Option<String>) -> Option<String> {
+    value.filter(|processing_kind| {
+        let listed = LISTED_PROCESSING_KINDS.contains(&processing_kind.as_str());
+        if !listed {
+            tracing::warn!(
+                processing_kind,
+                "session row carries a processing kind clients do not know; listing it without one"
+            );
+        }
+        listed
     })
 }
 
@@ -7518,6 +8286,599 @@ mod tests {
                 });
             }
         }
+    }
+
+    #[test]
+    fn unknown_processing_kind_degrades_to_one_row_not_a_dead_list() {
+        // Plan 119 decision 12, the container outage's twin: the renderer
+        // validates `processingKind` as a closed literal, so a kind a newer
+        // app wrote into the shared profile must list as kind-less instead of
+        // rejecting every client's Library. A hidden internal kind that
+        // somehow became visible degrades the same way.
+        use super::*;
+        let database = Database {
+            conn: Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
+            path: PathBuf::from(":memory:"),
+        };
+        database.migrate().unwrap();
+        {
+            let conn = database.lock().unwrap();
+            for (id, processing_kind) in [
+                ("cleaned", Some("noise-cleanup")),
+                ("from-a-newer-app", Some("clean-cut")),
+                ("leaked-internal", Some("performance-check")),
+                ("plain", None),
+            ] {
+                conn.execute(
+                    "INSERT INTO sessions
+                        (id, title, started_at, status, mode, processing_kind,
+                         sources_json, layout_json, output_json)
+                     VALUES (?1, ?1, '2026-10-04T00:00:00Z', 'completed', 'record', ?2,
+                             '{}', ?3, '{}')",
+                    params![
+                        id,
+                        processing_kind,
+                        serde_json::to_string(&crate::protocol::default_layout_settings()).unwrap(),
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        let expected = |id: &str| (id == "cleaned").then_some("noise-cleanup");
+
+        let summaries = database.list_sessions(10).unwrap();
+        assert_eq!(summaries.len(), 4, "no row may be dropped");
+        for session in &summaries {
+            assert_eq!(
+                session.processing_kind.as_deref(),
+                expected(session.id.as_str()),
+                "{} must list only a kind clients know",
+                session.id
+            );
+        }
+
+        let page = database.list_session_items_page(None, 10).unwrap();
+        assert_eq!(page.items.len(), 4, "no row may be dropped");
+        for item in &page.items {
+            assert_eq!(
+                item.processing_kind.as_deref(),
+                expected(item.id.as_str()),
+                "{} must list only a kind clients know",
+                item.id
+            );
+        }
+    }
+
+    #[test]
+    fn clean_cut_derivative_inserts_then_updates_in_place_and_lists_the_join_fields() {
+        // Plan 119 S13 and decision 12: the derived row carries
+        // `derived_from_session_id` and NO `processing_kind`; the Library
+        // learns it is a Clean cut from the join on
+        // `clean_cut_jobs.output_session_id`. A later render of the same
+        // source and mode replaces the same file and row.
+        use super::*;
+        use crate::protocol::{CleanCutJobState, CleanCutMode};
+        let database = test_database();
+        let dir =
+            std::env::temp_dir().join(format!("videorc-clean-cut-storage-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source_mp4 = dir.join("Talk.mp4");
+        std::fs::write(&source_mp4, b"source").unwrap();
+        let mut source = sample_session("source");
+        source.title = "Talk".to_string();
+        database
+            .create_completed_session(
+                &source,
+                "2026-10-04T10:00:00Z",
+                Some(source_mp4.to_str().unwrap()),
+                Some(60_000),
+                Some(6),
+            )
+            .unwrap();
+
+        let CleanCutJobCreation::Created(mut job) = database
+            .create_clean_cut_job("source", CleanCutMode::Clean)
+            .unwrap()
+        else {
+            panic!("expected a new job");
+        };
+        let output_mp4 = dir.join("Talk (Clean cut).mp4");
+        std::fs::write(&output_mp4, b"cut").unwrap();
+        assert!(
+            database
+                .complete_clean_cut_derivative(
+                    &job.job.id,
+                    "source",
+                    "out-1",
+                    "Talk (Clean cut)",
+                    "Talk",
+                    output_mp4.to_str().unwrap(),
+                    Some(31_000),
+                    3,
+                )
+                .is_err(),
+            "a job that is not rendering cannot publish"
+        );
+        job.job.state = CleanCutJobState::Rendering;
+        job.render_json = Some(r#"{"version":1}"#.to_string());
+        database.save_clean_cut_job(&job).unwrap();
+        assert!(
+            database
+                .complete_clean_cut_derivative(
+                    &job.job.id,
+                    "source",
+                    "out-1",
+                    "Talk (Clean cut)",
+                    "Talk",
+                    output_mp4.to_str().unwrap(),
+                    Some(31_000),
+                    3,
+                )
+                .unwrap()
+        );
+        let completed = database.clean_cut_job(&job.job.id).unwrap().unwrap();
+        assert_eq!(completed.job.state, CleanCutJobState::Completed);
+        assert_eq!(completed.job.output_session_id.as_deref(), Some("out-1"));
+        assert_eq!(completed.job.progress, 1.0);
+        assert!(completed.job.step.is_none());
+        assert!(
+            completed.render_json.is_none(),
+            "the render record retires with the commit"
+        );
+
+        let summaries = database.list_sessions(10).unwrap();
+        let output = summaries
+            .iter()
+            .find(|session| session.id == "out-1")
+            .expect("the derived row lists");
+        assert_eq!(output.title, "Talk (Clean cut)");
+        assert_eq!(output.derived_from_session_id.as_deref(), Some("source"));
+        assert_eq!(output.source_title.as_deref(), Some("Talk"));
+        assert_eq!(
+            output.processing_kind, None,
+            "decision 12: never a new processing kind"
+        );
+        assert_eq!(output.clean_cut_of_session_id.as_deref(), Some("source"));
+        assert_eq!(output.clean_cut_mode.as_deref(), Some("clean"));
+        assert_eq!(output.mp4_path.as_deref(), output_mp4.to_str());
+        assert!(output.output_path.is_none() && output.container.is_none());
+        assert_eq!(output.duration_ms, Some(31_000));
+        assert_eq!(output.mode, "record", "copied from the source");
+        let source_row = summaries
+            .iter()
+            .find(|session| session.id == "source")
+            .unwrap();
+        assert_eq!(source_row.clean_cut_of_session_id, None);
+        assert_eq!(source_row.clean_cut_mode, None);
+        let output_json = serde_json::to_value(output).unwrap();
+        assert!(output_json.get("processingKind").is_none());
+        assert_eq!(
+            output_json["cleanCutOfSessionId"],
+            serde_json::json!("source")
+        );
+        assert_eq!(output_json["cleanCutMode"], serde_json::json!("clean"));
+        let source_json = serde_json::to_value(source_row).unwrap();
+        assert!(
+            source_json.get("cleanCutOfSessionId").is_none()
+                && source_json.get("cleanCutMode").is_none(),
+            "absent, never null"
+        );
+        let page = database.list_session_items_page(None, 10).unwrap();
+        let item = page.items.iter().find(|item| item.id == "out-1").unwrap();
+        assert_eq!(item.clean_cut_of_session_id.as_deref(), Some("source"));
+        assert_eq!(item.clean_cut_mode.as_deref(), Some("clean"));
+        assert_eq!(item.processing_kind, None);
+        assert!(
+            page.items
+                .iter()
+                .find(|item| item.id == "source")
+                .unwrap()
+                .clean_cut_of_session_id
+                .is_none()
+        );
+
+        // A later job for the same source and mode adopts the row and file.
+        assert_eq!(
+            database
+                .clean_cut_adoptable_output("source", CleanCutMode::Clean)
+                .unwrap(),
+            Some(("out-1".to_string(), Some(output_mp4.display().to_string())))
+        );
+        assert_eq!(
+            database
+                .clean_cut_adoptable_output("source", CleanCutMode::Condensed)
+                .unwrap(),
+            None
+        );
+        let CleanCutJobCreation::Created(mut second) = database
+            .create_clean_cut_job("source", CleanCutMode::Clean)
+            .unwrap()
+        else {
+            panic!("a completed job is history; a new start makes a new row");
+        };
+        second.job.state = CleanCutJobState::Validating;
+        database.save_clean_cut_job(&second).unwrap();
+        std::fs::write(&output_mp4, b"cut again").unwrap();
+        assert!(
+            database
+                .complete_clean_cut_derivative(
+                    &second.job.id,
+                    "source",
+                    "out-1",
+                    "Talk (Clean cut)",
+                    "Talk",
+                    output_mp4.to_str().unwrap(),
+                    Some(30_000),
+                    9,
+                )
+                .unwrap()
+        );
+        let summaries = database.list_sessions(10).unwrap();
+        assert_eq!(
+            summaries.len(),
+            2,
+            "updated in place: no second derived row"
+        );
+        let output = summaries
+            .iter()
+            .find(|session| session.id == "out-1")
+            .unwrap();
+        assert_eq!(output.duration_ms, Some(30_000));
+        assert_eq!(output.file_size_bytes, Some(9));
+        assert_eq!(
+            output.clean_cut_of_session_id.as_deref(),
+            Some("source"),
+            "two jobs name the row; it lists once"
+        );
+        assert_eq!(
+            database
+                .list_session_items_page(None, 10)
+                .unwrap()
+                .items
+                .len(),
+            2
+        );
+
+        // The source vanished: nothing is inserted and the job stays as it was.
+        let CleanCutJobCreation::Created(mut orphan) = database
+            .create_clean_cut_job("source", CleanCutMode::Condensed)
+            .unwrap()
+        else {
+            panic!("expected a new job");
+        };
+        orphan.job.state = CleanCutJobState::Rendering;
+        database.save_clean_cut_job(&orphan).unwrap();
+        assert!(
+            !database
+                .complete_clean_cut_derivative(
+                    &orphan.job.id,
+                    "missing-source",
+                    "out-2",
+                    "x",
+                    "x",
+                    "/rec/x.mp4",
+                    None,
+                    1,
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            database
+                .clean_cut_job(&orphan.job.id)
+                .unwrap()
+                .unwrap()
+                .job
+                .state,
+            CleanCutJobState::Rendering
+        );
+
+        // A Noise Cleanup derivative keeps its kind and gains no Clean cut fields.
+        {
+            let conn = database.lock().unwrap();
+            conn.execute(
+                "INSERT INTO sessions
+                    (id, title, started_at, status, mode, processing_kind,
+                     derived_from_session_id, sources_json, layout_json, output_json)
+                 VALUES ('cleaned', 'Talk - Noise Cleaned', '2026-10-04T11:00:00Z', 'completed',
+                         'record', 'noise-cleanup', 'source', '{}', ?1, '{}')",
+                params![
+                    serde_json::to_string(&crate::protocol::default_layout_settings()).unwrap()
+                ],
+            )
+            .unwrap();
+        }
+        let cleaned = database
+            .list_sessions(10)
+            .unwrap()
+            .into_iter()
+            .find(|session| session.id == "cleaned")
+            .unwrap();
+        assert_eq!(cleaned.processing_kind.as_deref(), Some("noise-cleanup"));
+        assert_eq!(cleaned.clean_cut_of_session_id, None);
+        assert_eq!(cleaned.clean_cut_mode, None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn clean_cut_stays_out_of_the_shared_journal_whose_reconcile_would_delete_a_derived_row() {
+        // Decision 12 asked for proof before using the shared file-operation
+        // journal with a new kind. The proof: `reconcile_session_file_operations`
+        // never reads `kind`, and an entry without a bound identity deletes the
+        // `sessions` row it names. A Clean cut re-render publishes over an
+        // existing derived session, so an older backend meeting such an entry
+        // after a crash would delete that session. Clean cut therefore keeps
+        // its render paths on `clean_cut_jobs.render_json` instead.
+        use super::*;
+        let database = test_database();
+        let dir =
+            std::env::temp_dir().join(format!("videorc-clean-cut-journal-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let staging = dir.join(".Talk (Clean cut).job.videorc-partial.mp4");
+        let output = dir.join("Talk (Clean cut).mp4");
+        assert!(
+            database
+                .begin_session_file_operation("clean-cut", "out-1", &staging, &output)
+                .is_err(),
+            "this backend refuses the kind outright"
+        );
+
+        database
+            .create_completed_session(
+                &sample_session("source"),
+                "2026-10-04T10:00:00Z",
+                None,
+                Some(60_000),
+                None,
+            )
+            .unwrap();
+        std::fs::write(&output, b"published earlier").unwrap();
+        {
+            let conn = database.lock().unwrap();
+            conn.execute(
+                "INSERT INTO sessions
+                    (id, title, started_at, status, mode, derived_from_session_id, mp4_path,
+                     sources_json, layout_json, output_json)
+                 VALUES ('out-1', 'Talk (Clean cut)', '2026-10-04T10:00:00Z', 'completed',
+                         'record', 'source', ?1, '{}', ?2, '{}')",
+                params![
+                    output.to_str().unwrap(),
+                    serde_json::to_string(&crate::protocol::default_layout_settings()).unwrap()
+                ],
+            )
+            .unwrap();
+            // What a crash mid re-render would have left, had Clean cut used
+            // the journal: the entry, no bound identity, the old file in place.
+            conn.execute(
+                "INSERT INTO session_file_operations
+                    (id, kind, session_id, staging_path, final_path, created_at)
+                 VALUES ('op-1', 'clean-cut', 'out-1', ?1, ?2, '2026-10-04T10:05:00Z')",
+                params![staging.to_str().unwrap(), output.to_str().unwrap()],
+            )
+            .unwrap();
+        }
+        let summary = database.reconcile_session_file_operations().unwrap();
+        assert_eq!(summary.discarded, 1, "{summary:?}");
+        assert!(
+            database
+                .list_sessions(10)
+                .unwrap()
+                .iter()
+                .all(|session| session.id != "out-1"),
+            "the derived session is gone: the shared journal is not safe for a replace-in-place publish"
+        );
+        assert!(
+            output.exists(),
+            "the file is orphaned, the row that owned it is not"
+        );
+
+        // Clean cut's own commit leaves the journal untouched.
+        let CleanCutJobCreation::Created(mut job) = database
+            .create_clean_cut_job("source", crate::protocol::CleanCutMode::Clean)
+            .unwrap()
+        else {
+            panic!("expected a new job");
+        };
+        job.job.state = crate::protocol::CleanCutJobState::Validating;
+        database.save_clean_cut_job(&job).unwrap();
+        assert!(
+            database
+                .complete_clean_cut_derivative(
+                    &job.job.id,
+                    "source",
+                    "out-2",
+                    "Talk (Clean cut)",
+                    "Talk",
+                    output.to_str().unwrap(),
+                    Some(30_000),
+                    17,
+                )
+                .unwrap()
+        );
+        assert!(
+            database
+                .pending_session_file_operations()
+                .unwrap()
+                .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn clean_cut_render_column_is_added_to_an_older_table_and_invisible_to_older_readers() {
+        // The S12 backend created `clean_cut_jobs` without `render_json`; the
+        // migration adds it, and a reader that names its columns (as every
+        // Videorc backend does) never sees it: downgrade-safe by construction.
+        use super::*;
+        let database = test_database();
+        {
+            let conn = database.lock().unwrap();
+            conn.execute("ALTER TABLE clean_cut_jobs DROP COLUMN render_json", [])
+                .unwrap();
+        }
+        database.migrate().unwrap();
+        {
+            let conn = database.lock().unwrap();
+            let mut statement = conn.prepare("PRAGMA table_info(clean_cut_jobs)").unwrap();
+            let columns: Vec<String> = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap();
+            assert!(columns.iter().any(|column| column == "render_json"));
+        }
+        database
+            .create_completed_session(
+                &sample_session("source"),
+                "2026-10-04T10:00:00Z",
+                None,
+                Some(60_000),
+                None,
+            )
+            .unwrap();
+        let CleanCutJobCreation::Created(mut job) = database
+            .create_clean_cut_job("source", crate::protocol::CleanCutMode::Clean)
+            .unwrap()
+        else {
+            panic!("expected a new job");
+        };
+        assert!(job.render_json.is_none());
+        job.render_json =
+            Some(r#"{"version":1,"stagingPath":"a","finalPath":"b","revision":0}"#.to_string());
+        database.save_clean_cut_job(&job).unwrap();
+        let with_record = database.clean_cut_jobs_with_render_record().unwrap();
+        assert_eq!(with_record.len(), 1);
+        assert_eq!(with_record[0].render_json, job.render_json);
+        // The S12 reader, column for column.
+        let conn = database.lock().unwrap();
+        let (state, revision): (String, i64) = conn
+            .query_row(
+                "SELECT id, source_session_id, mode, state, step, progress, source_identity_json,
+                        transcript_path, analysis_json, edl_json, edl_revision, output_session_id,
+                        error_code, error_message, created_at, updated_at
+                 FROM clean_cut_jobs WHERE id = ?1",
+                params![job.job.id],
+                |row| Ok((row.get(3)?, row.get(10)?)),
+            )
+            .unwrap();
+        assert_eq!((state.as_str(), revision), ("queued", 0));
+    }
+
+    #[test]
+    fn quality_gate_blocking_follows_fresh_pending_and_running_rows_only() {
+        // Plan 119 S15: a clean cut waits while the post-recording quality
+        // gate for its source is queued or running, never for a gate that was
+        // deferred by a capture (those resume only at the next launch).
+        use super::*;
+        let database = test_database();
+        let path = "/rec/talk.mp4";
+        assert!(!database.quality_gate_blocking_for_path(path).unwrap());
+        let mut job = RepairJob::pending(
+            "gate".into(),
+            path.into(),
+            &crate::repair::QualityExpectations::default(),
+            "t0".into(),
+        );
+        database.upsert_repair_job(&job).unwrap();
+        assert!(
+            database.quality_gate_blocking_for_path(path).unwrap(),
+            "queued for its idle delay"
+        );
+        assert!(
+            !database
+                .quality_gate_blocking_for_path("/rec/other.mp4")
+                .unwrap()
+        );
+        job.mark_running("t1".into());
+        database.upsert_repair_job(&job).unwrap();
+        assert!(
+            database.quality_gate_blocking_for_path(path).unwrap(),
+            "at work"
+        );
+        job.defer(
+            "quality check deferred because capture started".into(),
+            "t2".into(),
+        );
+        database.upsert_repair_job(&job).unwrap();
+        assert!(
+            !database.quality_gate_blocking_for_path(path).unwrap(),
+            "a deferred gate must not hold a clean cut for 30 minutes"
+        );
+        job.fail("done".into(), "t3".into());
+        database.upsert_repair_job(&job).unwrap();
+        assert!(!database.quality_gate_blocking_for_path(path).unwrap());
+    }
+
+    #[test]
+    fn startup_requeues_ready_clean_cut_jobs_and_a_reset_bumps_the_revision() {
+        use super::*;
+        use crate::protocol::{CleanCutJobState, CleanCutMode};
+        let database = test_database();
+        database
+            .create_completed_session(
+                &sample_session("source"),
+                "2026-10-04T10:00:00Z",
+                None,
+                Some(60_000),
+                None,
+            )
+            .unwrap();
+        let CleanCutJobCreation::Created(mut ready) = database
+            .create_clean_cut_job("source", CleanCutMode::Clean)
+            .unwrap()
+        else {
+            panic!("expected a new job");
+        };
+        ready.job.state = CleanCutJobState::Ready;
+        ready.edl_json = Some(r#"{"version":1}"#.to_string());
+        database.save_clean_cut_job(&ready).unwrap();
+        let CleanCutJobCreation::Created(mut rendering) = database
+            .create_clean_cut_job("source", CleanCutMode::Condensed)
+            .unwrap()
+        else {
+            panic!("expected a new job");
+        };
+        rendering.job.state = CleanCutJobState::Rendering;
+        database.save_clean_cut_job(&rendering).unwrap();
+
+        let resumed = database.reconcile_interrupted_clean_cut_jobs().unwrap();
+        let mut ids: Vec<&str> = resumed.iter().map(|job| job.id.as_str()).collect();
+        ids.sort_unstable();
+        let mut expected = vec![ready.job.id.as_str(), rendering.job.id.as_str()];
+        expected.sort_unstable();
+        assert_eq!(
+            ids, expected,
+            "ready jobs render by themselves after a restart"
+        );
+        assert_eq!(
+            database
+                .clean_cut_job(&ready.job.id)
+                .unwrap()
+                .unwrap()
+                .job
+                .state,
+            CleanCutJobState::Ready,
+            "a ready job keeps its state while it waits"
+        );
+        assert_eq!(
+            database
+                .clean_cut_job(&rendering.job.id)
+                .unwrap()
+                .unwrap()
+                .job
+                .state,
+            CleanCutJobState::Queued
+        );
+
+        let reset = database
+            .reset_clean_cut_edl(&ready.job.id)
+            .unwrap()
+            .unwrap();
+        assert!(reset.edl_json.is_none() && reset.job.edl_summary.is_none());
+        assert_eq!(
+            reset.job.edl_revision, 1,
+            "a stale updateEdl against the old list is refused"
+        );
+        assert!(database.reset_clean_cut_edl("nope").unwrap().is_none());
     }
 
     #[test]
@@ -7845,6 +9206,265 @@ mod tests {
         );
         let page = database.list_session_items_page(None, 20).unwrap();
         assert_eq!(page.items.len(), 1, "the user's capture must survive");
+    }
+
+    fn sample_cohost_report(
+        session_id: &str,
+        started_at: &str,
+        ended_at: &str,
+    ) -> CohostSessionReport {
+        use crate::protocol::{
+            COHOST_SESSION_REPORT_VERSION, CohostReportQuestion, CohostReportQuestionOutcome,
+        };
+        CohostSessionReport {
+            version: COHOST_SESSION_REPORT_VERSION,
+            session_id: session_id.to_string(),
+            started_at: started_at.to_string(),
+            ended_at: ended_at.to_string(),
+            segments: 1,
+            stream_title: Some("Rust night".to_string()),
+            messages_seen: 10,
+            shown_on_stream: 1,
+            questions: crate::protocol::CohostReportQuestions {
+                total: 2,
+                marked_answered: 1,
+                items: vec![
+                    CohostReportQuestion {
+                        id: "q_1".to_string(),
+                        text: "What keyboard is that?".to_string(),
+                        askers: vec!["Viewer 0".to_string()],
+                        platforms: vec![StreamPlatform::Twitch],
+                        priority: crate::cohost::CohostPriority::High,
+                        first_seen_at: started_at.to_string(),
+                        outcome: CohostReportQuestionOutcome::Open,
+                    },
+                    CohostReportQuestion {
+                        id: "q_2".to_string(),
+                        text: "Which editor?".to_string(),
+                        askers: Vec::new(),
+                        platforms: Vec::new(),
+                        priority: crate::cohost::CohostPriority::Normal,
+                        first_seen_at: started_at.to_string(),
+                        outcome: CohostReportQuestionOutcome::MarkedAnswered,
+                    },
+                ],
+                ..crate::protocol::CohostReportQuestions::default()
+            },
+            flags: crate::protocol::CohostReportFlags::default(),
+            promises: crate::protocol::CohostReportPromises {
+                heard: 1,
+                open: vec![crate::protocol::CohostReportOpenPromise {
+                    text: "Giveaway at 100 viewers".to_string(),
+                    first_seen_at: started_at.to_string(),
+                }],
+                ..crate::protocol::CohostReportPromises::default()
+            },
+            greetings: crate::protocol::CohostReportGreetings {
+                first_timers: 3,
+                manual: 1,
+                ..crate::protocol::CohostReportGreetings::default()
+            },
+            alerts: Vec::new(),
+            recap: crate::protocol::CohostReportRecap::default(),
+        }
+    }
+
+    #[test]
+    fn cohost_reports_merge_on_the_same_session_and_follow_deletes() {
+        use crate::protocol::CohostReportQuestionOutcome;
+        let database = test_database();
+        database.create_session(&sample_session("s-1")).unwrap();
+        database.create_session(&sample_session("s-2")).unwrap();
+        assert_eq!(database.get_cohost_report("s-1").unwrap(), None);
+
+        let first = sample_cohost_report("s-1", "2026-10-04T10:00:00Z", "2026-10-04T10:30:00Z");
+        assert!(database.upsert_cohost_report(&first).unwrap());
+        assert_eq!(
+            database.get_cohost_report("s-1").unwrap(),
+            Some(first.clone())
+        );
+        assert_eq!(database.get_cohost_report("s-2").unwrap(), None);
+
+        // Orcle came back mid-stream: the second report folds into the first.
+        let mut second =
+            sample_cohost_report("s-1", "2026-10-04T10:31:00Z", "2026-10-04T11:00:00Z");
+        second.questions.total = 1;
+        second.questions.marked_answered = 0;
+        second.questions.replied = 1;
+        second.questions.items.truncate(1);
+        second.questions.items[0].outcome = CohostReportQuestionOutcome::Replied;
+        second.promises.open = vec![crate::protocol::CohostReportOpenPromise {
+            text: "Raid someone after".to_string(),
+            first_seen_at: "2026-10-04T10:40:00Z".to_string(),
+        }];
+        second.flags.raised = 1;
+        second.flags.by_kind = vec![crate::protocol::CohostReportFlagKindCount {
+            kind: crate::cohost::CohostFlagKind::Spam,
+            count: 1,
+        }];
+        assert!(database.upsert_cohost_report(&second).unwrap());
+
+        let merged = database.get_cohost_report("s-1").unwrap().unwrap();
+        assert_eq!(merged.version, 1);
+        assert_eq!(merged.segments, 2);
+        assert_eq!(merged.started_at, "2026-10-04T10:00:00Z");
+        assert_eq!(merged.ended_at, "2026-10-04T11:00:00Z");
+        assert_eq!(merged.messages_seen, 20);
+        assert_eq!(merged.questions.total, 3);
+        assert_eq!(merged.questions.marked_answered, 1);
+        assert_eq!(merged.questions.replied, 1);
+        assert_eq!(merged.questions.items.len(), 2);
+        assert_eq!(
+            merged.questions.items[0].outcome,
+            CohostReportQuestionOutcome::Replied,
+            "the later outcome wins"
+        );
+        assert_eq!(
+            merged.questions.items[1].outcome,
+            CohostReportQuestionOutcome::MarkedAnswered
+        );
+        assert_eq!(merged.promises.heard, 2);
+        assert_eq!(merged.promises.open.len(), 2);
+        assert_eq!(merged.flags.raised, 1);
+        assert_eq!(merged.flags.by_kind.len(), 1);
+        assert_eq!(merged.greetings.first_timers, 6);
+
+        // Deleting the session takes its report with it.
+        database
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM sessions WHERE id = 's-1'", [])
+            .unwrap();
+        assert_eq!(database.get_cohost_report("s-1").unwrap(), None);
+        let rows: i64 = database
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM cohost_reports", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn cohost_report_for_a_missing_session_is_skipped_not_an_error() {
+        let database = test_database();
+        let report = sample_cohost_report("nope", "2026-10-04T10:00:00Z", "2026-10-04T10:30:00Z");
+        assert!(!database.upsert_cohost_report(&report).unwrap());
+        assert_eq!(database.get_cohost_report("nope").unwrap(), None);
+        assert_eq!(database.latest_cohost_report_session_id().unwrap(), None);
+    }
+
+    #[test]
+    fn cohost_report_in_an_unknown_version_reads_as_unavailable_and_is_replaced() {
+        let database = test_database();
+        database.create_session(&sample_session("s-1")).unwrap();
+        database
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO cohost_reports (session_id, version, report_json, updated_at)
+                 VALUES ('s-1', 99, '{\"version\":99,\"sessionId\":\"s-1\",\"startedAt\":\"t\",\"endedAt\":\"t\"}', 't')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(database.get_cohost_report("s-1").unwrap(), None);
+        // The newest-report lookup still finds the row; the reader says None.
+        assert_eq!(
+            database.latest_cohost_report_session_id().unwrap(),
+            Some("s-1".to_string())
+        );
+
+        let report = sample_cohost_report("s-1", "2026-10-04T10:00:00Z", "2026-10-04T10:30:00Z");
+        assert!(database.upsert_cohost_report(&report).unwrap());
+        let read = database.get_cohost_report("s-1").unwrap().unwrap();
+        assert_eq!(
+            read.segments, 1,
+            "an unreadable report is replaced, not merged"
+        );
+        assert_eq!(read, report);
+    }
+
+    #[test]
+    fn latest_cohost_report_prefers_a_report_then_the_newest_streamed_session() {
+        let database = test_database();
+        for (id, mode, started_at) in [
+            ("old-stream", "record+stream", "2026-01-01T00:00:00Z"),
+            ("mid-stream", "stream", "2026-02-01T00:00:00Z"),
+            ("new-record", "record", "2026-03-01T00:00:00Z"),
+        ] {
+            database
+                .create_session(&NewSession {
+                    mode: mode.to_string(),
+                    started_at: started_at.to_string(),
+                    ..sample_session(id)
+                })
+                .unwrap();
+        }
+        assert_eq!(database.latest_cohost_report_session_id().unwrap(), None);
+        assert_eq!(
+            database.latest_streamed_session_id().unwrap(),
+            Some("mid-stream".to_string()),
+            "a recording that never streamed is not the newest stream"
+        );
+
+        let report =
+            sample_cohost_report("old-stream", "2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z");
+        assert!(database.upsert_cohost_report(&report).unwrap());
+        assert_eq!(
+            database.latest_cohost_report_session_id().unwrap(),
+            Some("old-stream".to_string())
+        );
+        assert_eq!(
+            database.session_timing("mid-stream").unwrap(),
+            Some(SessionTiming {
+                started_at: "2026-02-01T00:00:00Z".to_string(),
+                duration_ms: None,
+            })
+        );
+        assert_eq!(database.session_timing("missing").unwrap(), None);
+    }
+
+    #[test]
+    fn live_chat_message_counts_by_platform_group_every_kept_row() {
+        let database = test_database();
+        database.create_session(&sample_session("s-1")).unwrap();
+        assert!(
+            database
+                .live_chat_message_counts_by_platform("s-1")
+                .unwrap()
+                .is_empty()
+        );
+        database
+            .save_live_chat_message(&sample_live_chat_message("s-1", 1))
+            .unwrap();
+        database
+            .save_live_chat_message(&sample_live_chat_message("s-1", 2))
+            .unwrap();
+        let mut twitch = sample_live_chat_message("s-1", 3);
+        twitch.platform = StreamPlatform::Twitch;
+        twitch.target_id = Some("target-twitch".to_string());
+        twitch.id = live_chat_message_id(
+            "s-1",
+            StreamPlatform::Twitch,
+            Some("target-twitch"),
+            &twitch.provider_message_id,
+        );
+        database.save_live_chat_message(&twitch).unwrap();
+
+        assert_eq!(
+            database
+                .live_chat_message_counts_by_platform("s-1")
+                .unwrap(),
+            vec![
+                CohostReportChatPlatformCount {
+                    platform: StreamPlatform::Youtube,
+                    messages: 2,
+                },
+                CohostReportChatPlatformCount {
+                    platform: StreamPlatform::Twitch,
+                    messages: 1,
+                },
+            ]
+        );
     }
 
     #[test]

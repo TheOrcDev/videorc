@@ -31,7 +31,22 @@ const ENCODERS_FULL_GPL = [
 ].join('\n')
 
 const PROTOCOLS_WITH_TLS = ['Input:', '  file', '  rtmp', '  rtmps', '  tls'].join('\n')
-const FILTERS_WITH_NOISE_CLEANUP = 'Filters:\n TS afftdn A->A Denoise audio samples using FFT.'
+const CLEAN_CUT_FILTER_LINES = [
+  ' ... trim             V->V       Pick one continuous section from the input, drop the rest.',
+  ' ... atrim            A->A       Pick one continuous section from the input, drop the rest.',
+  ' ... concat           N->N       Concatenate audio and video streams.',
+  ' T.. afade            A->A       Fade in/out input audio.',
+  ' ... split            V->N       Pass on the input to N video outputs.',
+  ' ... asplit           A->N       Pass on the audio input to N audio outputs.',
+  ' ... setpts           V->V       Set PTS for the output video frame.',
+  ' ... asetpts          A->A       Set PTS for the output audio frame.',
+  ' ... format           V->V       Convert the input video to one of the specified pixel formats.'
+]
+const FILTERS_WITH_NOISE_CLEANUP = [
+  'Filters:',
+  ' TS afftdn A->A Denoise audio samples using FFT.',
+  ...CLEAN_CUT_FILTER_LINES
+].join('\n')
 
 test('parses encoder names out of -encoders output', () => {
   const names = parseEncoderNames(ENCODERS_LGPL_MACOS)
@@ -87,8 +102,31 @@ test('a bundle without videotoolbox or TLS fails closed with named gaps', () => 
     'protocol:tls',
     'encoder:h264_videotoolbox',
     'encoder:pcm_s16le',
-    'filter:afftdn'
+    ...REQUIRED_MACOS_FFMPEG_FILTERS.map((name) => `filter:${name}`)
   ])
+})
+
+test('the macOS bundle requires every filter the Clean cut render uses (plan 119 S13)', () => {
+  assert.deepEqual(REQUIRED_MACOS_FFMPEG_FILTERS, [
+    'afftdn',
+    'trim',
+    'atrim',
+    'concat',
+    'afade',
+    'split',
+    'asplit',
+    'setpts',
+    'asetpts',
+    'format'
+  ])
+  const withoutConcat = assessMacosFfmpegCapabilities({
+    protocolsOutput: PROTOCOLS_WITH_TLS,
+    encodersOutput: ENCODERS_LGPL_MACOS,
+    filtersOutput: FILTERS_WITH_NOISE_CLEANUP.split('\n')
+      .filter((line) => !/ concat /.test(line))
+      .join('\n')
+  })
+  assert.deepEqual(withoutConcat.missing, ['filter:concat'])
 })
 
 test('the macOS bundle requires PCM for MKV Noise Cleanup outputs', () => {
@@ -101,11 +139,15 @@ test('the macOS bundle requires PCM for MKV Noise Cleanup outputs', () => {
 })
 
 test('the macOS bundle requires the model-free noise cleanup filter', () => {
-  assert.deepEqual(REQUIRED_MACOS_FFMPEG_FILTERS, ['afftdn'])
+  assert.ok(REQUIRED_MACOS_FFMPEG_FILTERS.includes('afftdn'))
   const result = assessMacosFfmpegCapabilities({
     protocolsOutput: PROTOCOLS_WITH_TLS,
     encodersOutput: ENCODERS_LGPL_MACOS,
-    filtersOutput: 'Filters:\n T. loudnorm A->A EBU R128 loudness normalization'
+    filtersOutput: [
+      'Filters:',
+      ' T. loudnorm A->A EBU R128 loudness normalization',
+      ...CLEAN_CUT_FILTER_LINES
+    ].join('\n')
   })
   assert.deepEqual(result.missing, ['filter:afftdn'])
 })

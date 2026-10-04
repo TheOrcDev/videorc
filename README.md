@@ -9,9 +9,8 @@
 # Videorc
 
 Videorc is an open-source, AI-native desktop studio for creators: record your
-screen and camera, stream to multiple platforms at once, and walk away with a
-transcript, titles, chapters, and a ready-to-paste publish pack — all from one
-window.
+screen and camera, stream to multiple platforms at once, and bring Orcle, an AI
+producer that keeps up with your chat while you're live. All from one window.
 
 **Current release tracks**
 
@@ -31,7 +30,7 @@ and occasional recording or streaming bugs while the app is being hardened.
 Most capture tools make you choose between "simple but shallow" and "powerful
 but a cockpit". Videorc aims for the third option: a studio that is genuinely
 simple to run — pick a scene, hit record — while the heavy lifting (a native
-capture engine, multi-platform streaming, live captions, post-recording AI)
+capture engine, multi-platform streaming, live captions, an AI producer)
 happens underneath.
 
 - **Scenes, not knobs.** Screen + camera, screen only, camera only, or
@@ -46,9 +45,12 @@ happens underneath.
   YouTube (other platforms ingest up to 1080p).
 - **Live captions.** Streaming speech-to-text (~1s latency) with optional
   caption burn-in on the stream, the recording, both, or neither.
-- **Post-recording AI.** Transcript, title/description suggestions, summaries,
-  chapters, highlights, and an exportable publish pack — explicit-consent,
-  post-recording only.
+- **Orcle, your AI producer.** One switch, "Orcle joins my streams", and Orcle
+  catches questions from every platform with a drafted reply you approve,
+  flags spam and abuse against your own rules, greets first-timers and reminds
+  you of your promises. It never posts or acts on its own. Cloud AI is
+  opt-in, and after each stream a short report stays on your computer. See
+  [docs/orcle-live.md](docs/orcle-live.md).
 - **Platform-aware preview.** macOS uses a detached native CAMetalLayer preview.
   Windows Alpha currently uses the documented uncompressed, latest-wins Electron
   proof surface; it must not be described as CAMetalLayer or as final native
@@ -63,8 +65,8 @@ happens underneath.
 - **Rust backend** owns capture, composition, recording, and streaming; the
   shell talks to it over an authenticated localhost WebSocket protocol.
 - **FFmpeg** (an LGPL-compliant build, bundled) drives encoding and output.
-- **SQLite** local session library — your recordings and AI artifacts stay on
-  your machine.
+- **SQLite** local session library — your recordings and Orcle's stream
+  reports stay on your machine.
 
 ## Open source & pricing
 
@@ -72,10 +74,9 @@ The desktop app — capture, scenes, recording, streaming, captions UI — is fr
 software under **AGPL-3.0**. You can build it, run it, and audit every line
 that touches your camera, microphone, and screen.
 
-Cloud AI features (transcription, titles, chapters, highlights) run through a
-signed-in Videorc account: the desktop app never holds AI provider keys, and
-nothing is uploaded without explicit per-session consent. Local audio
-extraction works without any account. Hosted AI is what funds the project.
+Cloud AI features (live captions and Orcle) run through a signed-in Videorc
+account: the desktop app never holds AI provider keys, and nothing goes to the
+cloud until you turn it on. Hosted AI is what funds the project.
 
 ## Build from source
 

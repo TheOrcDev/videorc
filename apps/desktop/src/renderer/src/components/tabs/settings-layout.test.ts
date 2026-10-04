@@ -27,14 +27,12 @@ const panelSources = Object.fromEntries(
 
 /** Sections rendered by a component that carries its own title prop. */
 const SECTION_COMPONENTS: Record<string, string> = {
-  CohostSettingsSection: 'Orcle (alpha)',
   PhoneRemoteSection: 'Phone remote',
   AboutAndUpdates: 'About & updates'
 }
 
 /** Files rendered only under Settings that carry their own `PanelSection`. */
 const SECTION_FILES: Record<string, string> = {
-  CohostSettingsSection: '../cohost-settings-section.tsx',
   PhoneRemoteSection: '../phone-remote-section.tsx'
 }
 
@@ -123,9 +121,13 @@ describe('Settings layout', () => {
       permissions: ['System access'],
       shortcuts: ['Global shortcuts', 'App shortcuts'],
       remote: ['Remote control', 'Phone remote'],
-      orcle: ['Orcle (alpha)'],
       about: ['About & updates', 'Support']
     })
+  })
+
+  it('has no Orcle panel: Orcle is configured in its own tab (plan 119)', () => {
+    expect(shellSource).not.toContain('CohostSettingsSection')
+    expect(tabPanels().map((panel) => panel.value)).not.toContain('orcle')
   })
 
   it('never puts an icon beside a Settings section heading', () => {

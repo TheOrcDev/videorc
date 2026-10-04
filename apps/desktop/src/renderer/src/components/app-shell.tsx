@@ -25,6 +25,12 @@ import {
 import { StudioMicVisualProvider } from '@/hooks/use-studio-mic-visual'
 import { useWhatsNew } from '@/hooks/use-whats-new'
 import { ONBOARDING_DISMISSED_VALUE, STORAGE_KEYS } from '@/lib/capture'
+import {
+  OPEN_CLEAN_CUT_EVENT,
+  readCleanCutOpenRequest,
+  type CleanCutOpenRequest,
+  type CleanCutTabRequest
+} from '@/lib/clean-cut-events'
 import { displayKeyGlyph } from '@/lib/platform'
 import {
   isSettingsTabId,
@@ -46,7 +52,6 @@ import {
 const StudioTab = lazy(async () => ({
   default: (await import('@/components/tabs/studio-tab')).StudioTab
 }))
-const AiTab = lazy(async () => ({ default: (await import('@/components/tabs/ai-tab')).AiTab }))
 const AssetsTab = lazy(async () => ({
   default: (await import('@/components/tabs/assets-tab')).AssetsTab
 }))
@@ -60,6 +65,9 @@ const loadLayoutTab = () => import('@/components/tabs/layout-tab')
 const LayoutTab = lazy(async () => ({ default: (await loadLayoutTab()).LayoutTab }))
 const LibraryTab = lazy(async () => ({
   default: (await import('@/components/tabs/library-tab')).LibraryTab
+}))
+const OrcleTab = lazy(async () => ({
+  default: (await import('@/components/tabs/orcle-tab')).OrcleTab
 }))
 const RecordingTab = lazy(async () => ({
   default: (await import('@/components/tabs/recording-tab')).RecordingTab
@@ -163,8 +171,41 @@ export function AppShell(): ReactElement {
     toggleCaptionsWindow
   } = useStudioShell()
   const { recording } = useStudioRecordingState()
-  const [active, setActive] = useState<WorkspaceTab>('studio')
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
+  const [active, setActiveTab] = useState<WorkspaceTab>('studio')
+  // Library's "Orcle report" opens the Orcle tab on one session's report (plan
+  // 119 S3). Any other way to a page drops that ask, so the next visit to
+  // Orcle shows the last stream again.
+  const [orcleReportSessionId, setOrcleReportSessionId] = useState<string | null>(null)
+  // Clean cut (plan 119 S14): Library's "Clean cut" selects a recording in
+  // the Orcle tab, and the ready toast opens a cut's review there. The card's
+  // "Open in Library" focuses the cut copy's row. Like the report ask, any
+  // other way to a page drops them.
+  const [cleanCutRequest, setCleanCutRequest] = useState<CleanCutTabRequest | null>(null)
+  const [libraryFocusSessionId, setLibraryFocusSessionId] = useState<string | null>(null)
+  const cleanCutNonceRef = useRef(0)
+  const setActive = useCallback((tab: WorkspaceTab) => {
+    setOrcleReportSessionId(null)
+    setCleanCutRequest(null)
+    setLibraryFocusSessionId(null)
+    setActiveTab(tab)
+  }, [])
+  const openOrcleReport = useCallback((sessionId: string) => {
+    setCleanCutRequest(null)
+    setOrcleReportSessionId(sessionId)
+    setActiveTab('ai')
+  }, [])
+  const openCleanCut = useCallback((request: CleanCutOpenRequest) => {
+    cleanCutNonceRef.current += 1
+    setOrcleReportSessionId(null)
+    setCleanCutRequest({ ...request, nonce: cleanCutNonceRef.current })
+    setActiveTab('ai')
+  }, [])
+  const openLibrarySession = useCallback((sessionId: string) => {
+    setOrcleReportSessionId(null)
+    setCleanCutRequest(null)
+    setLibraryFocusSessionId(sessionId)
+    setActiveTab('library')
+  }, [])
   const [commandOpen, setCommandOpen] = useState(false)
   const [onboardingOpen, setOnboardingOpen] = useState(false)
   const whatsNew = useWhatsNew(runtimeInfo?.version, runtimeInfo?.platform)
@@ -187,13 +228,16 @@ export function AppShell(): ReactElement {
   }, [])
 
   // Studio control pages are ordinary tabs grouped under "Studio" in the sidebar.
-  const openStudioPanel = useCallback((panel: StudioPanel) => {
-    setActive(panel)
-  }, [])
+  const openStudioPanel = useCallback(
+    (panel: StudioPanel) => {
+      setActive(panel)
+    },
+    [setActive]
+  )
 
   const closeStudioPanel = useCallback(() => {
     setActive('studio')
-  }, [])
+  }, [setActive])
 
   // Plan 064: Settings reopens on the tab used last; a link that names a tab
   // (update chip, FFmpeg banner, ⌘K, toasts) selects it before opening.
@@ -209,7 +253,7 @@ export function AppShell(): ReactElement {
       }
       setActive('settings')
     },
-    [selectSettingsTab]
+    [selectSettingsTab, setActive]
   )
 
   const completeOnboarding = useCallback(() => {
@@ -221,24 +265,6 @@ export function AppShell(): ReactElement {
   // dismissal flag — no flag clearing, closing just re-dismisses.
   const openPermissionsSetup = useCallback(() => {
     setOnboardingOpen(true)
-  }, [])
-
-  const openInAi = useCallback((sessionId: string) => {
-    setSelectedSessionId(sessionId)
-    setActive('ai')
-  }, [])
-
-  // D6: the post-recording toasts funnel here. A `detail.sessionId` (the
-  // post-stream pack toast, plan 068 D10) selects that session; without one,
-  // clearing the selection lets Publish preselect the newest completed one.
-  useEffect(() => {
-    const onOpenPublish = (event: Event): void => {
-      const sessionId = (event as CustomEvent<{ sessionId?: unknown } | null>).detail?.sessionId
-      setSelectedSessionId(typeof sessionId === 'string' ? sessionId : null)
-      setActive('ai')
-    }
-    window.addEventListener('videorc:open-publish', onOpenPublish)
-    return () => window.removeEventListener('videorc:open-publish', onOpenPublish)
   }, [])
 
   useEffect(() => {
@@ -311,7 +337,7 @@ export function AppShell(): ReactElement {
       }
     })
     return off
-  }, [])
+  }, [setActive])
 
   useEffect(() => {
     const onWorkspaceNavigate = (event: Event): void => {
@@ -325,7 +351,16 @@ export function AppShell(): ReactElement {
     }
     window.addEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
     return () => window.removeEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
-  }, [openSettings])
+  }, [openSettings, setActive])
+
+  useEffect(() => {
+    const onOpenCleanCut = (event: Event): void => {
+      const request = readCleanCutOpenRequest((event as CustomEvent<unknown>).detail)
+      if (request) openCleanCut(request)
+    }
+    window.addEventListener(OPEN_CLEAN_CUT_EVENT, onOpenCleanCut)
+    return () => window.removeEventListener(OPEN_CLEAN_CUT_EVENT, onOpenCleanCut)
+  }, [openCleanCut])
 
   const live = isActiveRecordingState(recordingState)
   const statusTone: StatusDotTone = live
@@ -389,11 +424,18 @@ export function AppShell(): ReactElement {
                   {active === 'live' ? <StreamingTab /> : null}
                   {active === 'captions' ? <CaptionsTab /> : null}
                   {active === 'recording' ? <RecordingTab /> : null}
-                  {active === 'library' ? <LibraryTab onOpenInAi={openInAi} /> : null}
+                  {active === 'library' ? (
+                    <LibraryTab
+                      focusSessionId={libraryFocusSessionId}
+                      onOpenCleanCut={(sessionId) => openCleanCut({ sessionId })}
+                      onOpenOrcleReport={openOrcleReport}
+                    />
+                  ) : null}
                   {active === 'ai' ? (
-                    <AiTab
-                      selectedSessionId={selectedSessionId}
-                      setSelectedSessionId={setSelectedSessionId}
+                    <OrcleTab
+                      cleanCutRequest={cleanCutRequest}
+                      reportSessionId={orcleReportSessionId}
+                      onOpenLibrarySession={openLibrarySession}
                     />
                   ) : null}
                   {active === 'diagnostics' ? <DiagnosticsTab /> : null}

@@ -119,26 +119,3 @@ describe('mergeStreamHealth', () => {
     expect(update).not.toHaveProperty('duplicatedFrames')
   })
 })
-
-describe('latestArtifactAnyStatus', () => {
-  it('returns pending/failed stubs that the ready-only lookup hides', async () => {
-    const { latestArtifact, latestArtifactAnyStatus } = await import('./format')
-    const artifact = (kind: string, status: string, id: string) =>
-      ({ id, sessionId: 's1', kind, status, content: {}, createdAt: '2026-07-06' }) as never
-    const session = {
-      aiArtifacts: [
-        artifact('transcript', 'pending-consent', 'a1'),
-        artifact('chapters', 'failed', 'a2')
-      ]
-    } as never
-
-    // Regression (2026-07-06): a finished consent-off run looked like "Not
-    // run" because the cards only consulted ready artifacts.
-    expect(latestArtifact(session, 'transcript')).toBeUndefined()
-    expect(latestArtifactAnyStatus(session, 'transcript')).toMatchObject({
-      status: 'pending-consent'
-    })
-    expect(latestArtifactAnyStatus(session, 'chapters')).toMatchObject({ status: 'failed' })
-    expect(latestArtifactAnyStatus(session, 'summary')).toBeUndefined()
-  })
-})

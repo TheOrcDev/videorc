@@ -4,8 +4,15 @@
 //! chat rows, batches the delta into periodic `POST /api/ai/cohost/tick`
 //! calls (bearer-authed, Premium + consent gated), merges the server's
 //! open-question set, flags, and mood, and publishes every change to renderers
-//! as the non-coalescible `cohost.state` event. Raw drafts live only in memory
-//! and are cleared when the session stops. The renderer never talks to the web.
+//! as the non-coalescible `cohost.state` event. The renderer never talks to
+//! the web.
+//!
+//! Live state stays in memory: raw drafts, chat text and the transcript are
+//! cleared when the session stops. After each stream a short report (counts
+//! by outcome, the questions and what became of them, the promises still
+//! open) is saved on this computer in `cohost_reports` and deleted with the
+//! recording (plan 119 decision 6). It never holds chat text beyond the
+//! question wording, and nothing of it reaches a server.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -21,8 +28,13 @@ use crate::cohost_ack::{AuthorLedger, DeadAirLane, GreetedHow, dead_air_due, dea
 use crate::comment_highlight::{CommentHighlightPhase, CommentHighlightState};
 use crate::live_chat::{LiveChatEventType, LiveChatMessage};
 use crate::protocol::{
-    CohostAuthorParams, CohostFlagParams, CohostPromiseParams, CohostQuestionParams,
-    CohostRecapParams, CohostSettingsPatch, CohostStartParams, FeatureId,
+    COHOST_REPORT_ASKERS_CAP, COHOST_REPORT_OPEN_PROMISES_CAP, COHOST_REPORT_QUESTIONS_CAP,
+    COHOST_SESSION_REPORT_VERSION, CohostAuthorParams, CohostFlagParams, CohostPromiseParams,
+    CohostQuestionParams, CohostRecapParams, CohostReportAlert, CohostReportChat,
+    CohostReportFlagKindCount, CohostReportFlagSeverityCount, CohostReportFlags,
+    CohostReportGreetings, CohostReportOpenPromise, CohostReportPayload, CohostReportPromises,
+    CohostReportQuestion, CohostReportQuestionOutcome, CohostReportQuestions, CohostReportRecap,
+    CohostReportSavedEvent, CohostSessionReport, CohostSettingsPatch, CohostStartParams, FeatureId,
 };
 use crate::state::AppState;
 use crate::storage::Database;
@@ -35,6 +47,8 @@ use crate::videorc_api::{
 };
 
 pub const COHOST_STATE_EVENT: &str = "cohost.state";
+/// Plan 119 S1: a session's report was saved (or folded into the one there).
+pub const COHOST_REPORT_SAVED_EVENT: &str = "cohost.report.saved";
 /// Pinned by the desktop; the server rejects unknown versions with 400
 /// `prompt-version-unsupported`. A session that gets that answer drops one
 /// step down `COHOST_PROMPT_VERSION_LADDER` (3 → 2 → 1) until it ends
@@ -1323,6 +1337,10 @@ struct CohostSession {
     /// and who was greeted, and the dead-air nudge.
     ledger: AuthorLedger,
     dead_air: DeadAirLane,
+    /// Wall-clock start, for the report (plan 119 S1).
+    started_at_iso: String,
+    /// What this session's report will say (plan 119 S1).
+    report: ReportLedger,
 }
 
 /// What the engine remembers about one chat row it noted.
@@ -1414,6 +1432,165 @@ struct AutoHighlightLedger {
     voice_refreshed: Option<String>,
 }
 
+/// Plan 119 S1: the counters and logs behind one session's report. Every
+/// user or engine action bumps exactly one counter, when it changed the
+/// state; the question log keeps the latest outcome per id. Built into a
+/// `CohostSessionReport` once, at stop.
+#[derive(Debug, Default)]
+struct ReportLedger {
+    questions_marked_answered: u64,
+    questions_dismissed: u64,
+    questions_replied: u64,
+    questions_answered_on_air: u64,
+    questions_restored: u64,
+    questions_shown_on_stream: u64,
+    /// Distinct comments on stream this session, automatic or by hand.
+    shown_on_stream: u64,
+    flags_raised: u64,
+    flags_dismissed: u64,
+    flag_kinds: Vec<CohostReportFlagKindCount>,
+    flag_severities: Vec<CohostReportFlagSeverityCount>,
+    promises_heard: u64,
+    promises_kept: u64,
+    promises_dismissed: u64,
+    promises_reminded: u64,
+    recap_offered: u64,
+    recap_drafted: u64,
+    recap_dismissed: u64,
+    alerts: Vec<CohostReportAlert>,
+    /// First seen first, at most `COHOST_REPORT_QUESTIONS_CAP`.
+    questions: Vec<CohostReportQuestion>,
+}
+
+impl ReportLedger {
+    /// A question in the open set after a tick (new, or kept): log it, or
+    /// refresh its wording, askers, platforms and priority. Its outcome and
+    /// first-seen time stay.
+    fn note_question(&mut self, question: &CohostQuestion) {
+        let askers: Vec<String> = question
+            .askers
+            .iter()
+            .take(COHOST_REPORT_ASKERS_CAP)
+            .cloned()
+            .collect();
+        if let Some(entry) = self
+            .questions
+            .iter_mut()
+            .find(|entry| entry.id == question.id)
+        {
+            entry.text = question.text.clone();
+            entry.askers = askers;
+            entry.platforms = question.platforms.clone();
+            entry.priority = question.priority;
+            return;
+        }
+        if self.questions.len() >= COHOST_REPORT_QUESTIONS_CAP {
+            return;
+        }
+        self.questions.push(CohostReportQuestion {
+            id: question.id.clone(),
+            text: question.text.clone(),
+            askers,
+            platforms: question.platforms.clone(),
+            priority: question.priority,
+            first_seen_at: question.first_seen_at.clone(),
+            outcome: CohostReportQuestionOutcome::Open,
+        });
+    }
+
+    /// An open question left the open set for `outcome`.
+    fn question_closed(&mut self, question_id: &str, outcome: CohostReportQuestionOutcome) {
+        match outcome {
+            CohostReportQuestionOutcome::MarkedAnswered => self.questions_marked_answered += 1,
+            CohostReportQuestionOutcome::Dismissed => self.questions_dismissed += 1,
+            CohostReportQuestionOutcome::Replied => self.questions_replied += 1,
+            CohostReportQuestionOutcome::AnsweredOnAir => self.questions_answered_on_air += 1,
+            // Not closes; callers never pass them.
+            CohostReportQuestionOutcome::Open | CohostReportQuestionOutcome::Shown => {}
+        }
+        self.set_outcome(question_id, outcome);
+    }
+
+    /// A voice-resolved question went back to the open set.
+    fn question_restored(&mut self, question_id: &str) {
+        self.questions_restored += 1;
+        self.set_outcome(question_id, CohostReportQuestionOutcome::Open);
+    }
+
+    /// A comment went on stream, counted once per message. When it carries an
+    /// open question, that question reads `shown` until something closes it.
+    fn comment_shown(&mut self, question_id: Option<&str>) {
+        self.shown_on_stream += 1;
+        let Some(question_id) = question_id else {
+            return;
+        };
+        self.questions_shown_on_stream += 1;
+        if let Some(entry) = self
+            .questions
+            .iter_mut()
+            .find(|entry| entry.id == question_id)
+            && entry.outcome == CohostReportQuestionOutcome::Open
+        {
+            entry.outcome = CohostReportQuestionOutcome::Shown;
+        }
+    }
+
+    fn set_outcome(&mut self, question_id: &str, outcome: CohostReportQuestionOutcome) {
+        if let Some(entry) = self
+            .questions
+            .iter_mut()
+            .find(|entry| entry.id == question_id)
+        {
+            entry.outcome = outcome;
+        }
+    }
+
+    /// A new flagged message id (each counted once, whatever later ticks say).
+    fn flag_raised(&mut self, kind: CohostFlagKind, severity: CohostFlagSeverity) {
+        self.flags_raised += 1;
+        match self.flag_kinds.iter_mut().find(|count| count.kind == kind) {
+            Some(count) => count.count += 1,
+            None => self
+                .flag_kinds
+                .push(CohostReportFlagKindCount { kind, count: 1 }),
+        }
+        match self
+            .flag_severities
+            .iter_mut()
+            .find(|count| count.severity == severity)
+        {
+            Some(count) => count.count += 1,
+            None => self
+                .flag_severities
+                .push(CohostReportFlagSeverityCount { severity, count: 1 }),
+        }
+    }
+
+    /// The alerts as the state shows them after a tick that reported some:
+    /// the peak distinct-viewer count per kind, and whether it was ever
+    /// corroborated.
+    fn note_alerts(&mut self, alerts: &[CohostAlert], now_iso: &str) {
+        for alert in alerts {
+            match self
+                .alerts
+                .iter_mut()
+                .find(|entry| entry.kind == alert.kind)
+            {
+                Some(entry) => {
+                    entry.peak_viewers = entry.peak_viewers.max(alert.viewers);
+                    entry.active |= alert.active;
+                }
+                None => self.alerts.push(CohostReportAlert {
+                    kind: alert.kind,
+                    peak_viewers: alert.viewers,
+                    active: alert.active,
+                    first_seen_at: now_iso.to_string(),
+                }),
+            }
+        }
+    }
+}
+
 impl CohostSession {
     fn new(
         session_id: String,
@@ -1487,6 +1664,70 @@ impl CohostSession {
             discard_in_flight: false,
             ledger: AuthorLedger::default(),
             dead_air: DeadAirLane::default(),
+            started_at_iso: chrono::Utc::now().to_rfc3339(),
+            report: ReportLedger::default(),
+        }
+    }
+
+    /// What this session's report says (plan 119 S1): the counters and logs
+    /// kept while live, the open promises, and the ledger's greetings. Built
+    /// once, at stop; `ended_at` is the stop time.
+    fn report(&self, ended_at: &str) -> CohostSessionReport {
+        let greetings = self.ledger.greeting_counts();
+        CohostSessionReport {
+            version: COHOST_SESSION_REPORT_VERSION,
+            session_id: self.session_id.clone(),
+            started_at: self.started_at_iso.clone(),
+            ended_at: ended_at.to_string(),
+            segments: 1,
+            stream_title: self.stream_title.clone(),
+            messages_seen: self.messages_seen,
+            shown_on_stream: self.report.shown_on_stream,
+            questions: CohostReportQuestions {
+                total: self.questions_total,
+                marked_answered: self.report.questions_marked_answered,
+                dismissed: self.report.questions_dismissed,
+                replied: self.report.questions_replied,
+                answered_on_air: self.report.questions_answered_on_air,
+                restored: self.report.questions_restored,
+                shown_on_stream: self.report.questions_shown_on_stream,
+                items: self.report.questions.clone(),
+            },
+            flags: CohostReportFlags {
+                raised: self.report.flags_raised,
+                dismissed: self.report.flags_dismissed,
+                by_kind: self.report.flag_kinds.clone(),
+                by_severity: self.report.flag_severities.clone(),
+            },
+            promises: CohostReportPromises {
+                heard: self.report.promises_heard,
+                kept: self.report.promises_kept,
+                dismissed: self.report.promises_dismissed,
+                reminded: self.report.promises_reminded,
+                open: self
+                    .promises
+                    .iter()
+                    .take(COHOST_REPORT_OPEN_PROMISES_CAP)
+                    .map(|promise| CohostReportOpenPromise {
+                        text: promise.text.clone(),
+                        first_seen_at: promise.first_seen_at.clone(),
+                    })
+                    .collect(),
+            },
+            greetings: CohostReportGreetings {
+                first_timers: greetings.first_timers,
+                first_timers_greeted: greetings.first_timers_greeted,
+                by_voice: greetings.by_voice,
+                by_chat: greetings.by_chat,
+                on_stream: greetings.on_stream,
+                manual: greetings.manual,
+            },
+            alerts: self.report.alerts.clone(),
+            recap: CohostReportRecap {
+                offered: self.report.recap_offered,
+                drafted: self.report.recap_drafted,
+                dismissed: self.report.recap_dismissed,
+            },
         }
     }
 
@@ -1898,6 +2139,13 @@ impl CohostSession {
             self.topic = (!topic.is_empty()).then_some(topic);
         }
         let fulfilled: HashSet<String> = response.fulfilled_promise_ids.into_iter().collect();
+        // The transcript showed an open promise was kept (plan 119 report).
+        let kept_now = self
+            .promises
+            .iter()
+            .filter(|promise| fulfilled.contains(&promise.id))
+            .count() as u64;
+        self.report.promises_kept = self.report.promises_kept.saturating_add(kept_now);
         for id in &fulfilled {
             self.closed_promises.insert(id.clone());
         }
@@ -1919,6 +2167,7 @@ impl CohostSession {
             .map(|recap| truncate_utf16(recap.trim(), RECAP_MAX_CHARS))
             .filter(|recap| !recap.is_empty())
         {
+            self.report.recap_offered += 1;
             self.set_recap(recap, now, now_iso);
         }
 
@@ -1941,13 +2190,15 @@ impl CohostSession {
                     also_kinds.push(kind);
                 }
             }
+            let severity = match flag.severity {
+                CohostFlagSeverity::Unknown => CohostFlagSeverity::Medium,
+                known => known,
+            };
+            self.report.flag_raised(flag.kind, severity);
             self.flags.push(CohostFlag {
                 message_id: flag.message_id,
                 kind: flag.kind,
-                severity: match flag.severity {
-                    CohostFlagSeverity::Unknown => CohostFlagSeverity::Medium,
-                    known => known,
-                },
+                severity,
                 reason: flag.reason,
                 at: now_iso.to_string(),
                 confidence: flag.confidence.and_then(unit_interval),
@@ -2023,6 +2274,7 @@ impl CohostSession {
 
         self.alert_reports
             .retain(|report| now.saturating_duration_since(report.at) < ALERT_EXPIRY);
+        let mut alerts_reported = false;
         for alert in response.alerts {
             let Some(author) = self.known.get(&alert.message_id) else {
                 continue;
@@ -2036,6 +2288,11 @@ impl CohostSession {
                 at: now,
                 at_iso: now_iso.to_string(),
             });
+            alerts_reported = true;
+        }
+        if alerts_reported {
+            let current = self.alerts_at(now);
+            self.report.note_alerts(&current, now_iso);
         }
     }
 
@@ -2071,7 +2328,7 @@ impl CohostSession {
             if self.counted_question_ids.insert(incoming.id.clone()) {
                 self.questions_total = self.questions_total.saturating_add(1);
             }
-            next_questions.push(CohostQuestion {
+            let question = CohostQuestion {
                 id: incoming.id,
                 // Bounded like the renderer contract (UTF-16), whatever the
                 // server sent: one oversized string would drop every state.
@@ -2094,7 +2351,9 @@ impl CohostSession {
                     .unwrap_or_else(|| now_iso.to_string()),
                 updated_at: now_iso.to_string(),
                 on_topic: incoming.on_topic,
-            });
+            };
+            self.report.note_question(&question);
+            next_questions.push(question);
             if next_questions.len() >= TICK_OPEN_QUESTIONS_CAP {
                 break;
             }
@@ -2123,6 +2382,7 @@ impl CohostSession {
                 // the same promise.
                 None => self.promises.iter().find(|p| p.text == text),
             };
+            let heard_now = existing.is_none();
             let id = match (existing, id) {
                 (Some(existing), _) => existing.id.clone(),
                 (None, Some(id)) => id,
@@ -2151,6 +2411,9 @@ impl CohostSession {
                     .flatten(),
             };
             self.promise_seen.entry(id.clone()).or_insert(now);
+            if heard_now {
+                self.report.promises_heard += 1;
+            }
             next.push(CohostPromise {
                 id,
                 text,
@@ -2196,13 +2459,15 @@ impl CohostSession {
             return false;
         };
         self.reminded_promises.insert(reminder.promise_id.clone());
+        self.report.promises_reminded += 1;
         self.promise_reminder = Some(reminder);
         true
     }
 
-    /// Done and dismiss share one outcome: the promise leaves, its id never
-    /// returns, and a reminder about it leaves with it.
-    fn close_promise(&mut self, promise_id: &str) -> bool {
+    /// Done and dismiss share one engine outcome: the promise leaves, its id
+    /// never returns, and a reminder about it leaves with it. The report
+    /// counts them apart (`kept`).
+    fn close_promise(&mut self, promise_id: &str, kept: bool) -> bool {
         let before = self.promises.len();
         self.promises.retain(|promise| promise.id != promise_id);
         self.promise_seen.remove(promise_id);
@@ -2214,7 +2479,15 @@ impl CohostSession {
         {
             self.promise_reminder = None;
         }
-        before != self.promises.len()
+        let changed = before != self.promises.len();
+        if changed {
+            if kept {
+                self.report.promises_kept += 1;
+            } else {
+                self.report.promises_dismissed += 1;
+            }
+        }
+        changed
     }
 
     fn set_recap(&mut self, text: String, now: Instant, now_iso: &str) {
@@ -2230,6 +2503,9 @@ impl CohostSession {
         let had = self.recap_at(now).is_some();
         self.recap = None;
         self.recap_expires_at = None;
+        if had {
+            self.report.recap_dismissed += 1;
+        }
         had
     }
 
@@ -2239,6 +2515,7 @@ impl CohostSession {
         if draft.is_empty() {
             return Err(CohostError::NoSummary);
         }
+        self.report.recap_drafted += 1;
         self.set_recap(draft, now, now_iso);
         Ok(())
     }
@@ -2292,7 +2569,7 @@ impl CohostSession {
             for author in askers {
                 changed |= self.ledger.greet(&author, GreetedHow::Chat, now);
             }
-            changed |= self.mark_answered(question_id);
+            changed |= self.close_question(question_id, CohostReportQuestionOutcome::Replied);
         }
         changed |= self.ledger.greet_by_chat(text, now) > 0;
         changed
@@ -2368,11 +2645,27 @@ impl CohostSession {
         changed
     }
 
-    fn mark_answered(&mut self, question_id: &str) -> bool {
+    /// Answered, dismissed, replied and answered on air share one engine
+    /// outcome: the question leaves the open set and its id never returns
+    /// from a later tick. The report tells them apart by `outcome`, counted
+    /// only when the question was open.
+    fn close_question(&mut self, question_id: &str, outcome: CohostReportQuestionOutcome) -> bool {
         let before = self.questions.len();
         self.questions.retain(|question| question.id != question_id);
         self.dismissed_questions.insert(question_id.to_string());
-        before != self.questions.len()
+        let changed = before != self.questions.len();
+        if changed {
+            self.report.question_closed(question_id, outcome);
+        }
+        changed
+    }
+
+    fn mark_answered(&mut self, question_id: &str) -> bool {
+        self.close_question(question_id, CohostReportQuestionOutcome::MarkedAnswered)
+    }
+
+    fn dismiss_question(&mut self, question_id: &str) -> bool {
+        self.close_question(question_id, CohostReportQuestionOutcome::Dismissed)
     }
 
     fn dismiss_flag(&mut self, message_id: &str) -> bool {
@@ -2382,7 +2675,11 @@ impl CohostSession {
         self.flags.retain(|flag| flag.message_id != message_id);
         self.dismissed_flags.insert(message_id.to_string());
         self.drop_spotlight_for(message_id);
-        before != self.flags.len()
+        let changed = before != self.flags.len();
+        if changed {
+            self.report.flags_dismissed += 1;
+        }
+        changed
     }
 
     // --- Spotlight lane (plan 060 S3) ----------------------------------------
@@ -2457,7 +2754,7 @@ impl CohostSession {
         else {
             return false;
         };
-        self.mark_answered(question_id);
+        self.close_question(question_id, CohostReportQuestionOutcome::AnsweredOnAir);
         self.recently_resolved
             .retain(|record| now.saturating_duration_since(record.at) < RECENTLY_RESOLVED_TTL);
         self.recently_resolved.push(ResolvedRecord {
@@ -2497,6 +2794,7 @@ impl CohostSession {
         {
             self.questions.push(record.entry.question);
         }
+        self.report.question_restored(question_id);
         true
     }
 
@@ -2795,7 +3093,16 @@ impl CohostSession {
                     engine_set,
                     expires_at: observed_expiry,
                 });
-                self.auto.shown.insert(message_id.to_string());
+                if self.auto.shown.insert(message_id.to_string()) {
+                    // Plan 119: the report counts each comment on stream once
+                    // and marks the open question it carries as shown.
+                    let question_id = self
+                        .questions
+                        .iter()
+                        .find(|question| question.message_ids.iter().any(|id| id == message_id))
+                        .map(|question| question.id.clone());
+                    self.report.comment_shown(question_id.as_deref());
+                }
                 // Plan 068 D9: their message on stream acknowledges them.
                 if let Some(author) = self.known.get(message_id).map(|known| known.author.clone()) {
                     self.ledger.greet(&author, GreetedHow::Highlight, now);
@@ -3567,7 +3874,10 @@ impl CohostEngine {
         self.generation
     }
 
-    fn stop_session(&mut self) -> bool {
+    /// End the session: abort its schedulers, retire its generation and hand
+    /// back its report (plan 119 S1) for the caller to save once the engine
+    /// lock is released. `None` when nothing was running.
+    fn stop_session(&mut self) -> Option<CohostSessionReport> {
         if let Some(handle) = self.scheduler.take() {
             handle.abort();
         }
@@ -3575,7 +3885,8 @@ impl CohostEngine {
             handle.abort();
         }
         self.generation = self.generation.wrapping_add(1);
-        self.session.take().is_some()
+        let session = self.session.take()?;
+        Some(session.report(&chrono::Utc::now().to_rfc3339()))
     }
 
     pub(crate) fn note_messages(&mut self, messages: &[LiveChatMessage]) -> usize {
@@ -3824,13 +4135,19 @@ impl CohostEngine {
     }
 
     fn mark_answered(&mut self, session_id: &str, question_id: &str) -> Result<bool, CohostError> {
-        let Some(session) = self.session.as_mut() else {
-            return Err(CohostError::SessionMismatch);
-        };
-        if session.session_id != session_id {
-            return Err(CohostError::SessionMismatch);
-        }
-        Ok(session.mark_answered(question_id))
+        Ok(self.session_for_mut(session_id)?.mark_answered(question_id))
+    }
+
+    /// `cohost.question.dismiss`: the same engine outcome as answered, counted
+    /// apart in the report.
+    fn dismiss_question(
+        &mut self,
+        session_id: &str,
+        question_id: &str,
+    ) -> Result<bool, CohostError> {
+        Ok(self
+            .session_for_mut(session_id)?
+            .dismiss_question(question_id))
     }
 
     /// The recent-speech version the running session (of `generation`) last
@@ -3932,8 +4249,15 @@ impl CohostEngine {
         }
     }
 
-    fn close_promise(&mut self, session_id: &str, promise_id: &str) -> Result<bool, CohostError> {
-        Ok(self.session_for_mut(session_id)?.close_promise(promise_id))
+    fn close_promise(
+        &mut self,
+        session_id: &str,
+        promise_id: &str,
+        kept: bool,
+    ) -> Result<bool, CohostError> {
+        Ok(self
+            .session_for_mut(session_id)?
+            .close_promise(promise_id, kept))
     }
 
     fn dismiss_recap(&mut self, session_id: &str, now: Instant) -> Result<bool, CohostError> {
@@ -4189,13 +4513,19 @@ pub async fn set_cohost_settings(
         .map_err(|error| CohostError::Storage(error.to_string()))?;
     let listen_changed = engine.settings.listen != next.listen;
     engine.settings = next.clone();
-    let stopped = !next.enabled && engine.session.is_some() && engine.stop_session();
+    let report = if !next.enabled && engine.session.is_some() {
+        engine.stop_session()
+    } else {
+        None
+    };
+    let stopped = report.is_some();
     let running = engine
         .session
         .as_ref()
         .map(|session| (session.session_id.clone(), session.consent));
     let snapshot = engine.snapshot();
     drop(engine);
+    save_session_report(state, report);
     if stopped {
         crate::captions::retire_orcle_speech(state).await;
         clear_transcript(state);
@@ -4290,7 +4620,9 @@ where
         emit_state(state, &snapshot, &lifecycle_delivery);
         return Ok(snapshot);
     }
-    engine.stop_session();
+    // A replacing start ends the previous session: its report is saved
+    // below, once the engine lock is released.
+    let replaced = engine.stop_session();
     let generation = engine.start_session(
         session_id.clone(),
         params.consent_to_process_chat,
@@ -4304,6 +4636,7 @@ where
     engine.spotlight_scheduler = Some(spawn_spotlight_scheduler(state.clone(), generation));
     let listen = engine.settings.listen;
     drop(engine);
+    save_session_report(state, replaced);
     crate::captions::retire_orcle_speech(state).await;
     crate::captions::stop_listen(state).await;
     clear_transcript(state);
@@ -4343,9 +4676,11 @@ where
     F: std::future::Future<Output = ()>,
 {
     let mut engine = state.cohost.lock().await;
-    let stopped = engine.stop_session();
+    let report = engine.stop_session();
+    let stopped = report.is_some();
     let snapshot = engine.snapshot();
     drop(engine);
+    save_session_report(state, report);
     if stopped {
         crate::captions::retire_orcle_speech(state).await;
         clear_transcript(state);
@@ -4410,9 +4745,11 @@ async fn stop_cohost_for_session_end_if_matching_impl<F>(
     if !engine.is_running_for(expected_session_id) {
         return;
     }
-    let stopped = engine.stop_session();
+    let report = engine.stop_session();
+    let stopped = report.is_some();
     let snapshot = engine.snapshot();
     drop(engine);
+    save_session_report(state, report);
     if stopped {
         crate::captions::retire_orcle_speech(state).await;
         clear_transcript(state);
@@ -4425,6 +4762,83 @@ async fn stop_cohost_for_session_end_if_matching_impl<F>(
         state.emit_log("info", "Orcle stopped.");
         emit_state(state, &snapshot, lifecycle_delivery);
     }
+}
+
+/// Plan 119 S1: save the report a stopped session left and tell renderers,
+/// once the engine lock is released. The session row may be gone (a chat
+/// session that was never persisted, or a deleted recording): then the report
+/// is skipped and logged. Nothing here fails the stop.
+fn save_session_report(state: &AppState, report: Option<CohostSessionReport>) {
+    let Some(report) = report else {
+        return;
+    };
+    let session_id = report.session_id.clone();
+    match state.database.upsert_cohost_report(&report) {
+        Ok(true) => {
+            state.emit_log(
+                "info",
+                format!(
+                    "Orcle saved the report for session {session_id}: {} question(s), {} flag(s), {} open promise(s).",
+                    report.questions.total,
+                    report.flags.raised,
+                    report.promises.open.len()
+                ),
+            );
+            state.emit_event(
+                COHOST_REPORT_SAVED_EVENT,
+                CohostReportSavedEvent { session_id },
+            );
+        }
+        Ok(false) => state.emit_log(
+            "info",
+            format!("Orcle report for session {session_id} skipped: the session row is gone."),
+        ),
+        Err(error) => state.emit_log(
+            "warn",
+            format!("Orcle report for session {session_id} could not be saved: {error}"),
+        ),
+    }
+}
+
+/// `cohost.report.get`: the saved report (null when Orcle left none), the
+/// session's moments (computed now, never stored) and its chat totals.
+pub async fn get_session_report(
+    state: &AppState,
+    session_id: &str,
+) -> anyhow::Result<CohostReportPayload> {
+    let report = state.database.get_cohost_report(session_id)?;
+    let moments = crate::moments::session_moments(state, session_id)
+        .await?
+        .map(|found| found.moments)
+        .unwrap_or_default();
+    let by_platform = state
+        .database
+        .live_chat_message_counts_by_platform(session_id)?;
+    let messages: u64 = by_platform.iter().map(|count| count.messages).sum();
+    Ok(CohostReportPayload {
+        session_id: session_id.to_string(),
+        report,
+        moments,
+        chat: CohostReportChat {
+            messages,
+            by_platform,
+        },
+    })
+}
+
+/// `cohost.report.latest`: the newest session that has a report, else the
+/// newest session that streamed; `None` when there is neither.
+pub async fn latest_session_report(
+    state: &AppState,
+) -> anyhow::Result<Option<CohostReportPayload>> {
+    let session_id = match state.database.latest_cohost_report_session_id()? {
+        Some(session_id) => Some(session_id),
+        None => state.database.latest_streamed_session_id()?,
+    };
+    let Some(session_id) = session_id else {
+        return Ok(None);
+    };
+    Ok(Some(get_session_report(state, &session_id).await?))
 }
 
 /// Delivery-path hook: remember eligible rows for the next tick. Rows from a
@@ -4488,12 +4902,24 @@ pub async fn mark_question_answered(
 }
 
 /// Dismiss and answered share one outcome for the engine: the question leaves
-/// the open set and its id never returns from a later tick.
+/// the open set and its id never returns from a later tick. The report counts
+/// a dismiss apart from an answer (plan 119).
 pub async fn dismiss_question(
     state: &AppState,
     params: CohostQuestionParams,
 ) -> Result<CohostState, CohostError> {
-    mark_question_answered(state, params).await
+    if params.session_id.trim().is_empty() || params.question_id.trim().is_empty() {
+        return Err(CohostError::InvalidParams);
+    }
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    let mut engine = state.cohost.lock().await;
+    let changed = engine.dismiss_question(&params.session_id, &params.question_id)?;
+    let snapshot = engine.snapshot();
+    drop(engine);
+    if changed {
+        emit_state(state, &snapshot, &lifecycle_delivery);
+    }
+    Ok(snapshot)
 }
 
 /// `cohost.question.restore` (D9): put a voice-resolved question back. The
@@ -4598,18 +5024,35 @@ pub async fn dismiss_flag(
     Ok(snapshot)
 }
 
-/// `cohost.promise.done` / `cohost.promise.dismiss` (plan 068 D8): both close
-/// the promise; the id never returns from a later tick.
-pub async fn close_promise(
+/// `cohost.promise.done` (plan 068 D8): the promise leaves and its id never
+/// returns from a later tick; the report counts it kept (plan 119).
+pub async fn promise_done(
     state: &AppState,
     params: CohostPromiseParams,
+) -> Result<CohostState, CohostError> {
+    close_promise_with(state, params, true).await
+}
+
+/// `cohost.promise.dismiss`: the same engine outcome as done, counted as
+/// dismissed in the report.
+pub async fn dismiss_promise(
+    state: &AppState,
+    params: CohostPromiseParams,
+) -> Result<CohostState, CohostError> {
+    close_promise_with(state, params, false).await
+}
+
+async fn close_promise_with(
+    state: &AppState,
+    params: CohostPromiseParams,
+    kept: bool,
 ) -> Result<CohostState, CohostError> {
     if params.session_id.trim().is_empty() || params.promise_id.trim().is_empty() {
         return Err(CohostError::InvalidParams);
     }
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     let mut engine = state.cohost.lock().await;
-    let changed = engine.close_promise(&params.session_id, &params.promise_id)?;
+    let changed = engine.close_promise(&params.session_id, &params.promise_id, kept)?;
     let snapshot = engine.snapshot();
     drop(engine);
     if changed {
@@ -5007,7 +5450,7 @@ mod tests {
     use super::*;
     use crate::live_chat::live_chat_message_id;
     use crate::storage::Database;
-    use crate::videorc_api::{CohostTickFlag, CohostTickQuestion};
+    use crate::videorc_api::{CohostTickAlert, CohostTickFlag, CohostTickQuestion};
     use tokio::sync::broadcast;
 
     fn test_state() -> AppState {
@@ -7554,14 +7997,14 @@ mod tests {
 
         // Done/dismiss close the promise, its id never returns, and a
         // reminder about it leaves with it.
-        assert!(engine.close_promise("session-1", "p_5").unwrap());
-        assert!(!engine.close_promise("session-1", "p_5").unwrap());
+        assert!(engine.close_promise("session-1", "p_5", true).unwrap());
+        assert!(!engine.close_promise("session-1", "p_5", true).unwrap());
         assert_eq!(engine.snapshot().promise_reminder, None);
         assert_eq!(
-            engine.close_promise("session-2", "p_1"),
+            engine.close_promise("session-2", "p_1", false),
             Err(CohostError::SessionMismatch)
         );
-        assert!(engine.close_promise("session-1", "p_1").unwrap());
+        assert!(engine.close_promise("session-1", "p_1", false).unwrap());
 
         // The next full set: echoed ids keep first_seen_at, a closed id is
         // ignored, a new promise with an existing text keeps that id, an
@@ -8154,7 +8597,7 @@ mod tests {
         let prepared = engine
             .prepare_tick(generation, true, true, start + secs(1))
             .unwrap();
-        assert!(engine.stop_session());
+        assert!(engine.stop_session().is_some());
         assert_eq!(engine.snapshot(), CohostState::off());
         // Same generation id, but no session: dropped.
         assert!(!engine.apply_tick_result(
@@ -10621,5 +11064,549 @@ mod tests {
         crate::captions::install_listen_only_test_task(&state).await;
         stop_cohost(&state).await;
         assert!(!crate::captions::caption_task_alive_for_test(&state).await);
+    }
+
+    // --- Plan 119 S1: the Orcle report -------------------------------------------
+
+    fn overlay(message_id: &str, remaining: Duration) -> OverlayObservation {
+        OverlayObservation {
+            live_message_id: Some(message_id.to_string()),
+            remaining,
+        }
+    }
+
+    #[test]
+    fn report_counts_each_question_outcome_exactly_once() {
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine(start);
+        let rows = messages("session-1", 0..6);
+        engine.note_messages(&rows);
+        engine
+            .prepare_tick(generation, true, true, start + secs(1))
+            .unwrap();
+        assert!(
+            engine.apply_tick_result(
+                generation,
+                0,
+                Ok(response(
+                    (1..=6)
+                        .map(|index| question(
+                            &format!("q_{index}"),
+                            &[rows[index - 1].id.as_str()]
+                        ))
+                        .collect()
+                )),
+                start + secs(2),
+                "t1"
+            )
+        );
+
+        assert!(engine.mark_answered("session-1", "q_1").unwrap());
+        assert!(engine.dismiss_question("session-1", "q_2").unwrap());
+        assert!(engine.own_send_delivered(
+            "session-1",
+            "Keychron Q1!",
+            Some("q_3"),
+            start + secs(3)
+        ));
+        {
+            let session = engine.session.as_mut().unwrap();
+            assert!(session.resolve_by_voice("q_4", start + secs(4), "t4"));
+            assert!(session.restore_question("q_4", start + secs(5)));
+            session.observe_overlay(&overlay(&rows[4].id, secs(10)), start + secs(6));
+            // The same card observed again is not a second showing.
+            session.observe_overlay(&overlay(&rows[4].id, secs(9)), start + secs(7));
+        }
+        // Closing a question that already left changes nothing.
+        assert!(!engine.mark_answered("session-1", "q_1").unwrap());
+        assert!(!engine.dismiss_question("session-1", "q_3").unwrap());
+
+        let report = engine
+            .stop_session()
+            .expect("a running session leaves a report");
+        assert_eq!(engine.snapshot(), CohostState::off());
+        assert_eq!(report.version, 1);
+        assert_eq!(report.session_id, "session-1");
+        assert_eq!(report.segments, 1);
+        assert_eq!(report.stream_title.as_deref(), Some("Rust night"));
+        assert_eq!(report.messages_seen, 6);
+        assert_eq!(report.shown_on_stream, 1);
+        let questions = &report.questions;
+        assert_eq!(questions.total, 6);
+        assert_eq!(
+            (
+                questions.marked_answered,
+                questions.dismissed,
+                questions.replied,
+                questions.answered_on_air,
+                questions.restored,
+                questions.shown_on_stream,
+            ),
+            (1, 1, 1, 1, 1, 1)
+        );
+        let outcome = |id: &str| {
+            questions
+                .items
+                .iter()
+                .find(|item| item.id == id)
+                .unwrap_or_else(|| panic!("{id} is logged"))
+                .outcome
+        };
+        assert_eq!(outcome("q_1"), CohostReportQuestionOutcome::MarkedAnswered);
+        assert_eq!(outcome("q_2"), CohostReportQuestionOutcome::Dismissed);
+        assert_eq!(outcome("q_3"), CohostReportQuestionOutcome::Replied);
+        assert_eq!(
+            outcome("q_4"),
+            CohostReportQuestionOutcome::Open,
+            "a restore reopens"
+        );
+        assert_eq!(outcome("q_5"), CohostReportQuestionOutcome::Shown);
+        assert_eq!(outcome("q_6"), CohostReportQuestionOutcome::Open);
+        assert_eq!(questions.items[0].askers, vec!["Viewer 0", "Viewer 1"]);
+        assert_eq!(questions.items[0].platforms, vec![StreamPlatform::Twitch]);
+        assert_eq!(questions.items[0].priority, CohostPriority::High);
+        assert_eq!(questions.items[0].first_seen_at, "t1");
+        assert!(report.flags.by_kind.is_empty() && report.alerts.is_empty());
+    }
+
+    #[test]
+    fn report_counts_flags_promises_recap_and_alerts_once_each() {
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine(start);
+        let rows = messages("session-1", 0..6);
+        engine.note_messages(&rows);
+        engine
+            .prepare_tick(generation, true, true, start + secs(1))
+            .unwrap();
+        let mut answer = response(Vec::new());
+        answer.flags = vec![
+            flag(
+                rows[0].id.as_str(),
+                CohostFlagKind::Spam,
+                CohostFlagSeverity::Low,
+            ),
+            flag(
+                rows[1].id.as_str(),
+                CohostFlagKind::Spam,
+                CohostFlagSeverity::High,
+            ),
+            flag(
+                rows[2].id.as_str(),
+                CohostFlagKind::Toxicity,
+                CohostFlagSeverity::Unknown,
+            ),
+            // The same message flagged again is the same flag.
+            flag(
+                rows[0].id.as_str(),
+                CohostFlagKind::Scam,
+                CohostFlagSeverity::High,
+            ),
+        ];
+        answer.promises = Some(vec![
+            tick_promise(
+                None,
+                "Giveaway at 100 viewers",
+                CohostPromiseTriggerKind::Viewers,
+                Some(100.0),
+            ),
+            tick_promise(
+                None,
+                "Raid someone after",
+                CohostPromiseTriggerKind::None,
+                None,
+            ),
+            tick_promise(None, "Show the repo", CohostPromiseTriggerKind::None, None),
+        ]);
+        answer.summary = Some("We built the thing and it works.".to_string());
+        answer.recap = Some("Recap: we built the thing.".to_string());
+        // Two different viewers say the audio broke: an active alert.
+        answer.alerts = vec![
+            CohostTickAlert {
+                message_id: rows[3].id.clone(),
+                kind: CohostAlertKind::Audio,
+                confidence: None,
+            },
+            CohostTickAlert {
+                message_id: rows[4].id.clone(),
+                kind: CohostAlertKind::Audio,
+                confidence: None,
+            },
+        ];
+        assert!(engine.apply_tick_result(generation, 0, Ok(answer), start + secs(2), "t1"));
+
+        // Flags: dismissing one counts once.
+        assert!(
+            engine
+                .dismiss_flag("session-1", rows[0].id.as_str())
+                .unwrap()
+        );
+        assert!(
+            !engine
+                .dismiss_flag("session-1", rows[0].id.as_str())
+                .unwrap()
+        );
+
+        // Promises: a met trigger reminds once; done and dismiss count apart.
+        let promise_ids: Vec<String> = engine
+            .snapshot()
+            .promises
+            .iter()
+            .map(|promise| promise.id.clone())
+            .collect();
+        assert_eq!(promise_ids.len(), 3);
+        assert!(engine.check_promises(generation, Some(150), start + secs(3), "t2"));
+        assert!(
+            engine
+                .close_promise("session-1", &promise_ids[0], true)
+                .unwrap()
+        );
+        assert!(
+            engine
+                .close_promise("session-1", &promise_ids[1], false)
+                .unwrap()
+        );
+        assert!(
+            !engine
+                .close_promise("session-1", &promise_ids[1], false)
+                .unwrap()
+        );
+
+        // Recap: offered by the server, dismissed, then drafted by hand.
+        assert!(engine.dismiss_recap("session-1", start + secs(3)).unwrap());
+        assert!(!engine.dismiss_recap("session-1", start + secs(3)).unwrap());
+        engine
+            .draft_recap("session-1", start + secs(4), "t3")
+            .unwrap();
+
+        // The transcript shows the last promise was kept.
+        engine.note_messages(&messages("session-1", 6..12));
+        engine
+            .prepare_tick(generation, true, true, start + secs(30))
+            .unwrap();
+        let mut second = response(Vec::new());
+        second.fulfilled_promise_ids = vec![promise_ids[2].clone()];
+        second.promises = Some(Vec::new());
+        assert!(engine.apply_tick_result(generation, 0, Ok(second), start + secs(31), "t4"));
+        assert!(engine.snapshot().promises.is_empty());
+
+        let report = engine.stop_session().unwrap();
+        assert_eq!(report.flags.raised, 3);
+        assert_eq!(report.flags.dismissed, 1);
+        assert_eq!(
+            report.flags.by_kind,
+            vec![
+                CohostReportFlagKindCount {
+                    kind: CohostFlagKind::Spam,
+                    count: 2,
+                },
+                CohostReportFlagKindCount {
+                    kind: CohostFlagKind::Toxicity,
+                    count: 1,
+                },
+            ]
+        );
+        assert_eq!(
+            report.flags.by_severity,
+            vec![
+                CohostReportFlagSeverityCount {
+                    severity: CohostFlagSeverity::Low,
+                    count: 1,
+                },
+                CohostReportFlagSeverityCount {
+                    severity: CohostFlagSeverity::High,
+                    count: 1,
+                },
+                CohostReportFlagSeverityCount {
+                    severity: CohostFlagSeverity::Medium,
+                    count: 1,
+                },
+            ],
+            "an unknown severity reads medium"
+        );
+        assert_eq!(
+            (
+                report.promises.heard,
+                report.promises.kept,
+                report.promises.dismissed,
+                report.promises.reminded,
+            ),
+            (3, 2, 1, 1)
+        );
+        assert!(report.promises.open.is_empty());
+        assert_eq!(
+            (
+                report.recap.offered,
+                report.recap.drafted,
+                report.recap.dismissed
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!(
+            report.alerts,
+            vec![CohostReportAlert {
+                kind: CohostAlertKind::Audio,
+                peak_viewers: 2,
+                active: true,
+                first_seen_at: "t1".to_string(),
+            }]
+        );
+        assert_eq!(report.messages_seen, 12);
+    }
+
+    #[test]
+    fn open_promises_ride_the_report_and_the_question_log_is_capped() {
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine(start);
+        let rows = messages("session-1", 0..5);
+        engine.note_messages(&rows);
+        engine
+            .prepare_tick(generation, true, true, start + secs(1))
+            .unwrap();
+        let mut answer = response(Vec::new());
+        answer.promises = Some(vec![tick_promise(
+            None,
+            "Giveaway at 100 viewers",
+            CohostPromiseTriggerKind::Viewers,
+            Some(100.0),
+        )]);
+        assert!(engine.apply_tick_result(generation, 0, Ok(answer), start + secs(2), "t1"));
+        // The log caps at 200 questions; the lifetime count keeps growing.
+        {
+            let session = engine.session.as_mut().unwrap();
+            for index in 0..(COHOST_REPORT_QUESTIONS_CAP + 25) {
+                session.counted_question_ids.insert(format!("q_{index}"));
+                session.questions_total += 1;
+                session.report.note_question(&CohostQuestion {
+                    id: format!("q_{index}"),
+                    text: "?".to_string(),
+                    message_ids: Vec::new(),
+                    askers: (0..8).map(|asker| format!("Viewer {asker}")).collect(),
+                    platforms: Vec::new(),
+                    priority: CohostPriority::Normal,
+                    suggested_reply: String::new(),
+                    from_notes: false,
+                    first_seen_at: "t".to_string(),
+                    updated_at: "t".to_string(),
+                    on_topic: false,
+                });
+            }
+        }
+        let report = engine.stop_session().unwrap();
+        assert_eq!(report.promises.heard, 1);
+        assert_eq!(
+            report.promises.open,
+            vec![CohostReportOpenPromise {
+                text: "Giveaway at 100 viewers".to_string(),
+                first_seen_at: "t1".to_string(),
+            }]
+        );
+        assert_eq!(
+            report.questions.total,
+            COHOST_REPORT_QUESTIONS_CAP as u64 + 25
+        );
+        assert_eq!(report.questions.items.len(), COHOST_REPORT_QUESTIONS_CAP);
+        assert_eq!(
+            report.questions.items[0].askers.len(),
+            COHOST_REPORT_ASKERS_CAP,
+            "at most five asker names per logged question"
+        );
+    }
+
+    fn saved_report_ids(
+        events: &mut broadcast::Receiver<crate::protocol::ServerEvent>,
+    ) -> Vec<String> {
+        let mut ids = Vec::new();
+        loop {
+            match events.try_recv() {
+                Ok(event) if event.event == COHOST_REPORT_SAVED_EVENT => ids.push(
+                    event.payload["sessionId"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+                Ok(_) => {}
+                Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                Err(_) => break,
+            }
+        }
+        ids
+    }
+
+    fn start_params(session_id: &str) -> CohostStartParams {
+        CohostStartParams {
+            session_id: session_id.to_string(),
+            consent_to_process_chat: true,
+            stream_title: Some("Night one".to_string()),
+        }
+    }
+
+    async fn enable_orcle(state: &AppState, enabled: bool) {
+        set_cohost_settings(
+            state,
+            CohostSettingsPatch {
+                enabled: Some(enabled),
+                ..CohostSettingsPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Every stop path leaves a report once the engine lock is released, and
+    /// announces it. A missing session row skips the save instead of failing.
+    #[tokio::test]
+    async fn every_stop_path_saves_a_report_and_announces_it() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+
+        // Settings off.
+        state
+            .database
+            .ensure_fake_live_chat_session("s-settings")
+            .unwrap();
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("s-settings".to_string(), Vec::new());
+        enable_orcle(&state, true).await;
+        start_cohost(&state, start_params("s-settings"))
+            .await
+            .unwrap();
+        note_messages(&state, &messages("s-settings", 0..3)).await;
+        enable_orcle(&state, false).await;
+        let report = state
+            .database
+            .get_cohost_report("s-settings")
+            .unwrap()
+            .expect("turning Orcle off saves the report");
+        assert_eq!(report.messages_seen, 3);
+        assert_eq!(report.stream_title.as_deref(), Some("Night one"));
+        assert_eq!(report.segments, 1);
+        assert_eq!(saved_report_ids(&mut events), vec!["s-settings"]);
+
+        // Explicit stop.
+        enable_orcle(&state, true).await;
+        state
+            .database
+            .ensure_fake_live_chat_session("s-stop")
+            .unwrap();
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("s-stop".to_string(), Vec::new());
+        start_cohost(&state, start_params("s-stop")).await.unwrap();
+        stop_cohost(&state).await;
+        assert!(
+            state
+                .database
+                .get_cohost_report("s-stop")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(saved_report_ids(&mut events), vec!["s-stop"]);
+
+        // A replacing start saves the session it replaces.
+        state.database.ensure_fake_live_chat_session("s-a").unwrap();
+        state.database.ensure_fake_live_chat_session("s-b").unwrap();
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("s-a".to_string(), Vec::new());
+        start_cohost(&state, start_params("s-a")).await.unwrap();
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("s-b".to_string(), Vec::new());
+        start_cohost(&state, start_params("s-b")).await.unwrap();
+        assert!(state.database.get_cohost_report("s-a").unwrap().is_some());
+        assert_eq!(state.database.get_cohost_report("s-b").unwrap(), None);
+        assert_eq!(saved_report_ids(&mut events), vec!["s-a"]);
+
+        // The recording monitor's session-end stop.
+        let fence = state.live_chat_persistence.begin_delivery().await;
+        stop_cohost_for_session_end_if_matching_before_emit(
+            &state,
+            "s-b",
+            &fence,
+            std::future::ready(()),
+        )
+        .await;
+        drop(fence);
+        assert!(state.database.get_cohost_report("s-b").unwrap().is_some());
+        assert_eq!(saved_report_ids(&mut events), vec!["s-b"]);
+
+        // Nothing running: nothing saved, nothing announced.
+        stop_cohost(&state).await;
+        assert!(saved_report_ids(&mut events).is_empty());
+
+        // No session row (a chat session nothing persisted): skipped.
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("s-ghost".to_string(), Vec::new());
+        start_cohost(&state, start_params("s-ghost")).await.unwrap();
+        stop_cohost(&state).await;
+        assert_eq!(state.database.get_cohost_report("s-ghost").unwrap(), None);
+        assert!(saved_report_ids(&mut events).is_empty());
+        assert_eq!(
+            state.database.latest_cohost_report_session_id().unwrap(),
+            Some("s-b".to_string()),
+            "the newest session with a report"
+        );
+    }
+
+    /// Orcle turned off and back on mid-stream: one report, merged.
+    #[tokio::test]
+    async fn orcle_off_and_on_mid_stream_folds_into_one_report() {
+        let state = test_state();
+        state.database.ensure_fake_live_chat_session("s-1").unwrap();
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("s-1".to_string(), Vec::new());
+        enable_orcle(&state, true).await;
+        start_cohost(&state, start_params("s-1")).await.unwrap();
+        note_messages(&state, &messages("s-1", 0..3)).await;
+        enable_orcle(&state, false).await;
+        assert_eq!(
+            state
+                .database
+                .get_cohost_report("s-1")
+                .unwrap()
+                .unwrap()
+                .messages_seen,
+            3
+        );
+
+        enable_orcle(&state, true).await;
+        start_cohost(&state, start_params("s-1")).await.unwrap();
+        note_messages(&state, &messages("s-1", 3..8)).await;
+        stop_cohost(&state).await;
+
+        let merged = state.database.get_cohost_report("s-1").unwrap().unwrap();
+        assert_eq!(merged.segments, 2);
+        assert_eq!(merged.messages_seen, 8);
+        assert_eq!(merged.version, 1);
+
+        let payload = get_session_report(&state, "s-1").await.unwrap();
+        assert_eq!(payload.session_id, "s-1");
+        assert_eq!(payload.report, Some(merged));
+        assert!(payload.moments.is_empty());
+        assert_eq!(
+            payload.chat.messages, 0,
+            "noted rows were never persisted here"
+        );
+        let latest = latest_session_report(&state).await.unwrap().unwrap();
+        assert_eq!(latest.session_id, "s-1");
+        assert_eq!(
+            get_session_report(&state, "missing").await.unwrap().report,
+            None
+        );
     }
 }

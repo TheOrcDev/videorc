@@ -6,7 +6,6 @@
 #![allow(clippy::chunks_exact_to_as_chunks)]
 
 mod account;
-mod ai;
 mod atomic_file;
 mod audience;
 mod audio;
@@ -18,6 +17,7 @@ mod capture_health;
 mod capture_input;
 mod capture_interruption;
 mod capture_recovery;
+mod clean_cut;
 mod clip_marks;
 mod cohost;
 mod cohost_ack;
@@ -55,6 +55,7 @@ mod live_render;
 mod live_scene;
 mod live_source_switch;
 mod metal_compositor;
+mod moments;
 mod mpeg_ts;
 mod native_preview_host;
 mod noise_cleanup;
@@ -71,7 +72,6 @@ mod preview_screen;
 mod preview_surface;
 mod process_job;
 mod protocol;
-mod publish_clips;
 mod recording;
 mod recording_finalization;
 mod recording_timeline;
@@ -108,6 +108,7 @@ mod system_audio_capture;
 #[cfg(any(windows, all(test, target_os = "macos")))]
 mod system_audio_capture_windows;
 mod system_audio_session;
+mod transcript;
 mod twitch;
 mod twitch_chat;
 #[cfg(target_os = "macos")]
@@ -605,6 +606,7 @@ async fn run_backend() -> Result<()> {
     // Resume interrupted repair jobs through the idle-only maintenance queue.
     tokio::spawn(resume_pending_repair_jobs(state.clone()));
     noise_cleanup::resume_interrupted(&state);
+    clean_cut::resume_interrupted(&state);
     recording::resume_pending_recording_finalizations(&state);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(state.clone()))
@@ -689,6 +691,7 @@ async fn cleanup_process_owners_after_finalization(state: AppState) {
     crate::remote_lan_server::stop(&state);
     captions::shutdown_caption_runtime(&state).await;
     state.noise_cleanup.interrupt_all_for_shutdown();
+    state.clean_cut.interrupt_all_for_shutdown();
     if !compositor::shutdown_compositor(&state).await {
         state.emit_log(
             "warn",
@@ -4489,7 +4492,6 @@ const WEBSOCKET_LIVE_LAYOUT_MAX_EXECUTION_AGE: Duration = Duration::from_secs(30
 const WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE: Duration = Duration::from_secs(30);
 const WEBSOCKET_PROVIDER_MUTATION_MAX_EXECUTION_AGE: Duration = Duration::from_secs(25);
 const WEBSOCKET_MEDIA_MUTATION_MAX_EXECUTION_AGE: Duration = Duration::from_secs(9 * 60);
-const WEBSOCKET_AI_MUTATION_MAX_EXECUTION_AGE: Duration = Duration::from_secs(29 * 60);
 const WEBSOCKET_PROBE_MUTATION_MAX_EXECUTION_AGE: Duration = Duration::from_secs(110);
 #[cfg(not(test))]
 const WEBSOCKET_MUTATION_EXECUTOR_THREADS: usize = 4;
@@ -5431,18 +5433,12 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "streamTargets.x.publish"
         | "streamTargets.x.end"
         | "repair.restore_file"
-        | "ai.clips.suggest"
-        | "ai.clip.export"
         | "preview.snapshot" => Some(Mutation {
             max_execution_age: WEBSOCKET_PROVIDER_MUTATION_MAX_EXECUTION_AGE,
         }),
 
         "session.remux_mp4" | "sessions.import" | "repair.repair_file" => Some(Mutation {
             max_execution_age: WEBSOCKET_MEDIA_MUTATION_MAX_EXECUTION_AGE,
-        }),
-
-        "ai.run_post_recording" | "ai.publish_pack.export" => Some(Mutation {
-            max_execution_age: WEBSOCKET_AI_MUTATION_MAX_EXECUTION_AGE,
         }),
 
         "encoder_bridge.synthetic_record" => Some(Mutation {
@@ -5454,6 +5450,10 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "test.youtubeQuota.seedAccount"
         | "noiseCleanup.start"
         | "noiseCleanup.cancel"
+        | "cleanCut.start"
+        | "cleanCut.cancel"
+        | "cleanCut.updateEdl"
+        | "cleanCut.render"
         | "performance.check.run"
         | "performance.check.cancel"
         | "encoder.preference.set" => Some(DEFAULT_MUTATION_POLICY),
@@ -5484,9 +5484,10 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "comments.highlight.canvases"
         | "cohost.status"
         | "cohost.settings.get"
+        | "cohost.report.get"
+        | "cohost.report.latest"
         | "ai.capabilities.get"
         | "ai.quota.get"
-        | "ai.jobs.get"
         | "devices.list"
         | "diagnostics.stats"
         | "capture.recovery.status"
@@ -5535,7 +5536,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "screens.list"
         | "repair.assess_file"
         | "noiseCleanup.list"
-        | "ai.artifacts.list"
+        | "cleanCut.get"
+        | "cleanCut.list"
+        | "cleanCut.transcript"
         | "clip.marks.list"
         | "preview.live.status"
         | "session.sources.get"
@@ -9136,9 +9139,22 @@ async fn handle_text_message_with_role(
                 }
             }
         }
-        "cohost.promise.done" | "cohost.promise.dismiss" => {
+        "cohost.promise.done" => {
             match serde_json::from_value::<protocol::CohostPromiseParams>(command.params) {
-                Ok(params) => match cohost::close_promise(state, params).await {
+                Ok(params) => match cohost::promise_done(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.promise.dismiss" => {
+            match serde_json::from_value::<protocol::CohostPromiseParams>(command.params) {
+                Ok(params) => match cohost::dismiss_promise(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
                     Err(error) => {
                         ServerResponse::error(command.id, error.code(), error.to_string())
@@ -9204,6 +9220,32 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        "cohost.report.get" => {
+            match serde_json::from_value::<protocol::CohostReportGetParams>(command.params) {
+                Ok(params) if params.session_id.trim().is_empty() => {
+                    ServerResponse::error(command.id, "invalid-params", "sessionId is required")
+                }
+                Ok(params) => {
+                    match cohost::get_session_report(state, params.session_id.trim()).await {
+                        Ok(payload) => ServerResponse::ok(command.id, payload),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "cohost-report-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.report.latest" => match cohost::latest_session_report(state).await {
+            Ok(payload) => ServerResponse::ok(command.id, payload),
+            Err(error) => {
+                ServerResponse::error(command.id, "cohost-report-failed", error.to_string())
+            }
+        },
         "captions.overlay.clear" => {
             match serde_json::from_value::<captions::ClearCaptionOverlayParams>(command.params) {
                 Ok(params) => {
@@ -9256,15 +9298,6 @@ async fn handle_text_message_with_role(
         "ai.quota.get" => match get_ai_quota().await {
             Ok(quota) => ServerResponse::ok(command.id, quota),
             Err(error) => ServerResponse::error(command.id, "ai-quota-failed", error.to_string()),
-        },
-        "ai.jobs.get" => match serde_json::from_value::<protocol::AiJobGetParams>(command.params) {
-            Ok(params) => match get_ai_job(&params.job_id).await {
-                Ok(job) => ServerResponse::ok(command.id, job),
-                Err(error) => {
-                    ServerResponse::error(command.id, "ai-job-get-failed", error.to_string())
-                }
-            },
-            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
         },
         "devices.list" => {
             let ffmpeg_path = resolve_trusted_ffmpeg_path(
@@ -10454,6 +10487,17 @@ async fn handle_text_message_with_role(
                         "This recording cannot be deleted while Noise Cleanup is active.",
                     )
                 }
+                Ok(params)
+                    if params.session_ids.iter().any(|session_id| {
+                        clean_cut::session_mutation_blocked(state, session_id).unwrap_or(true)
+                    }) =>
+                {
+                    ServerResponse::error(
+                        command.id,
+                        "clean-cut-mutation-blocked",
+                        "This recording cannot be deleted while Clean cut is working on it.",
+                    )
+                }
                 Ok(params) => {
                     // A deletion wins over an in-flight background export: stop
                     // the export so it cannot publish an MP4 into a Trashed row.
@@ -10572,6 +10616,13 @@ async fn handle_text_message_with_role(
                     command.id,
                     "noise-cleanup-mutation-blocked",
                     "This recording cannot be duplicated while Noise Cleanup is active.",
+                );
+            }
+            if clean_cut::session_mutation_blocked(state, session_id).unwrap_or(true) {
+                return ServerResponse::error(
+                    command.id,
+                    "clean-cut-mutation-blocked",
+                    "This recording cannot be duplicated while Clean cut is working on it.",
                 );
             }
             match session_ops::duplicate_session(state, session_id).await {
@@ -11630,6 +11681,16 @@ async fn handle_text_message_with_role(
                         "This recording cannot be remuxed while Noise Cleanup is active.",
                     )
                 }
+                Ok(params)
+                    if clean_cut::session_mutation_blocked(state, &params.session_id)
+                        .unwrap_or(true) =>
+                {
+                    ServerResponse::error(
+                        command.id,
+                        "clean-cut-mutation-blocked",
+                        "This recording cannot be remuxed while Clean cut is working on it.",
+                    )
+                }
                 Ok(params) => match remux_session(state.clone(), params).await {
                     Ok(mp4_path) => {
                         ServerResponse::ok(command.id, serde_json::json!({ "mp4Path": mp4_path }))
@@ -11667,6 +11728,22 @@ async fn handle_text_message_with_role(
                     "This recording cannot be repaired while Noise Cleanup is active.",
                 )
             }
+            Ok(params)
+                if state
+                    .database
+                    .session_id_for_media_path(&params.path)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|session_id| {
+                        clean_cut::session_mutation_blocked(state, &session_id).unwrap_or(true)
+                    }) =>
+            {
+                ServerResponse::error(
+                    command.id,
+                    "clean-cut-mutation-blocked",
+                    "This recording cannot be repaired while Clean cut is working on it.",
+                )
+            }
             Ok(params) => match repair_service::repair_file(state.clone(), params).await {
                 Ok(status) => ServerResponse::ok(command.id, status),
                 Err(error) => ServerResponse::error(command.id, "repair-failed", error),
@@ -11688,6 +11765,22 @@ async fn handle_text_message_with_role(
                     command.id,
                     "noise-cleanup-mutation-blocked",
                     "This recording cannot be restored while Noise Cleanup is active.",
+                )
+            }
+            Ok(params)
+                if state
+                    .database
+                    .session_id_for_media_path(&params.path)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|session_id| {
+                        clean_cut::session_mutation_blocked(state, &session_id).unwrap_or(true)
+                    }) =>
+            {
+                ServerResponse::error(
+                    command.id,
+                    "clean-cut-mutation-blocked",
+                    "This recording cannot be restored while Clean cut is working on it.",
                 )
             }
             Ok(params) => match repair_service::restore_file(state.clone(), params).await {
@@ -11748,12 +11841,12 @@ async fn handle_text_message_with_role(
                 }
             }
         }
-        "ai.run_post_recording" => {
-            match serde_json::from_value::<protocol::RunAiWorkflowParams>(command.params) {
-                Ok(params) => match ai::run_ai_workflow(state.clone(), params).await {
-                    Ok(result) => ServerResponse::ok(command.id, result),
-                    Err(error) => {
-                        ServerResponse::error(command.id, "ai-workflow-failed", error.to_string())
+        "cleanCut.start" => {
+            match serde_json::from_value::<protocol::CleanCutStartParams>(command.params) {
+                Ok(params) => match clean_cut::start(state.clone(), params).await {
+                    Ok(job) => ServerResponse::ok(command.id, job),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
                     }
                 },
                 Err(error) => {
@@ -11761,12 +11854,37 @@ async fn handle_text_message_with_role(
                 }
             }
         }
-        "ai.clips.suggest" => {
-            match serde_json::from_value::<protocol::ClipSuggestParams>(command.params) {
-                Ok(params) => match publish_clips::suggest_clips(state.clone(), params).await {
+        "cleanCut.get" => {
+            match serde_json::from_value::<protocol::CleanCutGetParams>(command.params) {
+                Ok(params) => match clean_cut::get(state, params).await {
                     Ok(result) => ServerResponse::ok(command.id, result),
+                    Err(error) => ServerResponse::error(command.id, "clean-cut-get-failed", error),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cleanCut.list" => {
+            if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "cleanCut.list does not accept parameters.",
+                )
+            } else {
+                match clean_cut::list(state).await {
+                    Ok(jobs) => ServerResponse::ok(command.id, jobs),
+                    Err(error) => ServerResponse::error(command.id, "clean-cut-list-failed", error),
+                }
+            }
+        }
+        "cleanCut.cancel" => {
+            match serde_json::from_value::<protocol::CleanCutCancelParams>(command.params) {
+                Ok(params) => match clean_cut::cancel(state.clone(), params).await {
+                    Ok(job) => ServerResponse::ok(command.id, job),
                     Err(error) => {
-                        ServerResponse::error(command.id, "clip-suggest-failed", error.to_string())
+                        ServerResponse::error(command.id, "clean-cut-cancel-failed", error)
                     }
                 },
                 Err(error) => {
@@ -11774,12 +11892,38 @@ async fn handle_text_message_with_role(
                 }
             }
         }
-        "ai.clip.export" => {
-            match serde_json::from_value::<protocol::ClipExportParams>(command.params) {
-                Ok(params) => match publish_clips::export_clip(state.clone(), params).await {
-                    Ok(result) => ServerResponse::ok(command.id, result),
-                    Err(error) => {
-                        ServerResponse::error(command.id, "clip-export-failed", error.to_string())
+        "cleanCut.updateEdl" => {
+            match serde_json::from_value::<protocol::CleanCutUpdateEdlParams>(command.params) {
+                Ok(params) => match clean_cut::update_edl(state, params).await {
+                    Ok(detail) => ServerResponse::ok(command.id, detail),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cleanCut.render" => {
+            match serde_json::from_value::<protocol::CleanCutRenderParams>(command.params) {
+                Ok(params) => match clean_cut::render(state.clone(), params).await {
+                    Ok(job) => ServerResponse::ok(command.id, job),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cleanCut.transcript" => {
+            match serde_json::from_value::<protocol::CleanCutTranscriptParams>(command.params) {
+                Ok(params) => match clean_cut::transcript(state, params).await {
+                    Ok(transcript) => ServerResponse::ok(command.id, transcript),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
                     }
                 },
                 Err(error) => {
@@ -11798,40 +11942,6 @@ async fn handle_text_message_with_role(
                     Err(error) => {
                         ServerResponse::error(command.id, "clip-marks-failed", error.to_string())
                     }
-                },
-                Err(error) => {
-                    ServerResponse::error(command.id, "invalid-params", error.to_string())
-                }
-            }
-        }
-        "ai.artifacts.list" => {
-            let session_id = command
-                .params
-                .get("sessionId")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default();
-            if session_id.is_empty() {
-                ServerResponse::error(command.id, "invalid-params", "sessionId is required")
-            } else {
-                match ai::list_ai_artifacts(state, session_id) {
-                    Ok(artifacts) => ServerResponse::ok(command.id, artifacts),
-                    Err(error) => ServerResponse::error(
-                        command.id,
-                        "ai-artifacts-list-failed",
-                        error.to_string(),
-                    ),
-                }
-            }
-        }
-        "ai.publish_pack.export" => {
-            match serde_json::from_value::<protocol::ExportPublishPackParams>(command.params) {
-                Ok(params) => match ai::export_publish_pack(state.clone(), params).await {
-                    Ok(result) => ServerResponse::ok(command.id, result),
-                    Err(error) => ServerResponse::error(
-                        command.id,
-                        "publish-pack-export-failed",
-                        error.to_string(),
-                    ),
                 },
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
@@ -12136,16 +12246,6 @@ async fn get_ai_quota() -> Result<protocol::AiQuotaStatus> {
     let token = stored_ai_session_token()?;
     let client = videorc_api::VideorcApiClient::new()?;
     client.get_ai_quota(&token).await
-}
-
-async fn get_ai_job(job_id: &str) -> Result<protocol::AiJobSnapshot> {
-    let job_id = job_id.trim();
-    if job_id.is_empty() {
-        anyhow::bail!("jobId is required");
-    }
-    let token = stored_ai_session_token()?;
-    let client = videorc_api::VideorcApiClient::new()?;
-    client.get_ai_job(&token, job_id).await
 }
 
 async fn backend_health(state: &AppState, ffmpeg_path: &str) -> BackendHealth {
@@ -18552,92 +18652,6 @@ mod tests {
             }
         }
         false
-    }
-
-    // The publish workflow must reuse a live-captions transcript: Transcript
-    // Ready from the .srt, no audio extraction, no consent needed — the exact
-    // fix for "Title & description just downloads sound" (2026-07-11).
-    #[tokio::test]
-    async fn publish_workflow_reuses_live_captions_transcript_without_consent() {
-        let state = test_state();
-        let dir = std::env::temp_dir().join(format!("videorc-ai-srt-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let recording = dir.join("session-a.mp4");
-        std::fs::write(&recording, b"stub-video").unwrap();
-        std::fs::write(
-            dir.join("session-a.srt"),
-            "1\n00:00:01,000 --> 00:00:02,000\nhello from captions\n\n",
-        )
-        .unwrap();
-        state
-            .database
-            .create_session(&crate::storage::NewSession {
-                id: "session-a".to_string(),
-                title: "Captions session".to_string(),
-                started_at: "2026-07-11T00:00:00Z".to_string(),
-                mode: "record".to_string(),
-                output_path: Some(recording.display().to_string()),
-                container: None,
-                stream_preset: None,
-                sources: serde_json::from_str("{}").unwrap(),
-                layout: protocol::default_layout_settings(),
-                output: serde_json::from_value(serde_json::json!({
-                    "recordEnabled": true,
-                    "streamEnabled": false,
-                    "video": {
-                        "preset": "tutorial-1080p30",
-                        "width": 1920,
-                        "height": 1080,
-                        "fps": 30,
-                        "bitrateKbps": 6000
-                    },
-                    "rtmp": { "preset": "custom", "serverUrl": "", "streamKey": "" }
-                }))
-                .unwrap(),
-            })
-            .unwrap();
-
-        let result = ai::run_ai_workflow(
-            state.clone(),
-            protocol::RunAiWorkflowParams {
-                session_id: "session-a".to_string(),
-                consent_to_upload_audio: false,
-                ffmpeg_path: None,
-                outputs: None,
-                tone: None,
-            },
-        )
-        .await
-        .unwrap();
-
-        assert!(
-            result.audio_path.is_empty(),
-            "captions transcript must skip audio extraction"
-        );
-        let artifacts = state.database.list_ai_artifacts("session-a").unwrap();
-        assert!(
-            artifacts
-                .iter()
-                .all(|artifact| artifact.kind != protocol::AiArtifactKind::AudioExtract)
-        );
-        let transcript = artifacts
-            .iter()
-            .find(|artifact| artifact.kind == protocol::AiArtifactKind::Transcript)
-            .expect("transcript artifact");
-        assert_eq!(transcript.status, protocol::AiArtifactStatus::Ready);
-        assert_eq!(
-            transcript.content.get("source").and_then(|v| v.as_str()),
-            Some("live-captions")
-        );
-        assert!(
-            transcript
-                .content
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .contains("hello from captions")
-        );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[derive(Clone)]

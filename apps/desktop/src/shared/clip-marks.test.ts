@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { clipMarkedToast, formatClipMarkClock } from './clip-marks'
+import { CLIP_MARK_IN_REPORT, clipMarkedToast, formatClipMarkClock } from './clip-marks'
 
 describe('clip mark clock', () => {
   it('reads m:ss below an hour and h:mm:ss from one hour', () => {
@@ -14,13 +14,34 @@ describe('clip mark clock', () => {
 })
 
 describe('clip marked toast', () => {
-  it('says where a saved mark landed', () => {
+  it('points every saved mark at the stream report in Orcle (plan 119 S3)', () => {
+    expect(CLIP_MARK_IN_REPORT).toBe("It's in your stream report in Orcle.")
     expect(
       clipMarkedToast({ sessionId: 's', atSeconds: 754.2, source: 'manual', saved: true })
-    ).toEqual({ kind: 'success', title: 'Clip marked at 12:34', description: undefined })
+    ).toEqual({
+      kind: 'success',
+      title: 'Clip marked at 12:34',
+      description: "It's in your stream report in Orcle."
+    })
     expect(
-      clipMarkedToast({ sessionId: 's', atSeconds: 3725, source: 'voice', saved: true })
-    ).toMatchObject({ kind: 'success', title: 'Clip marked at 1:02:05' })
+      clipMarkedToast(
+        { sessionId: 's', atSeconds: 3725, source: 'voice', saved: true },
+        { streaming: true }
+      )
+    ).toEqual({
+      kind: 'success',
+      title: 'Clip marked at 1:02:05',
+      description: "It's in your stream report in Orcle."
+    })
+  })
+
+  it('points nowhere for a recording that never went live: it has no stream report', () => {
+    expect(
+      clipMarkedToast(
+        { sessionId: 's', atSeconds: 754.2, source: 'manual', saved: true },
+        { streaming: false }
+      )
+    ).toEqual({ kind: 'success', title: 'Clip marked at 12:34', description: undefined })
   })
 
   it('explains an unsaved mark instead of confirming it', () => {
@@ -31,7 +52,10 @@ describe('clip marked toast', () => {
       saved: false,
       reason: 'recording-off'
     })
-    expect(toast.kind).toBe('warning')
-    expect(toast.title).toBe("Recording is off, so this clip can't be saved.")
+    expect(toast).toEqual({
+      kind: 'warning',
+      title: "Recording is off, so this clip can't be saved.",
+      description: 'Turn on Record in the Studio to keep clips from a stream.'
+    })
   })
 })

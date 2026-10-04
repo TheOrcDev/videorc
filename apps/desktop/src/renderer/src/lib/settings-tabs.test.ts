@@ -39,14 +39,13 @@ const throwingStorage: Storage = {
 }
 
 describe('SETTINGS_TABS', () => {
-  it('lists the seven tabs in strip order', () => {
+  it('lists the six tabs in strip order', () => {
     expect(SETTINGS_TABS.map((tab) => tab.id)).toEqual([
       'general',
       'recording',
       'permissions',
       'shortcuts',
       'remote',
-      'orcle',
       'about'
     ])
     expect(SETTINGS_TABS.map((tab) => tab.label)).toEqual([
@@ -55,9 +54,13 @@ describe('SETTINGS_TABS', () => {
       'Permissions',
       'Shortcuts',
       'Remote',
-      'Orcle',
       'About'
     ])
+  })
+
+  it('has no Orcle tab: its settings live in the Orcle tab (plan 119)', () => {
+    expect(SETTINGS_TABS.map((tab) => tab.id)).not.toContain('orcle')
+    expect(isSettingsTabId('orcle')).toBe(false)
   })
 
   it('opens on General by default', () => {
@@ -89,6 +92,11 @@ describe('readLastSettingsTab', () => {
 
   it('falls back to General for an id that is not a tab (a renamed or removed tab)', () => {
     const storage = memoryStorage({ [STORAGE_KEYS.settingsTab]: 'co-host' })
+    expect(readLastSettingsTab(storage)).toBe('general')
+  })
+
+  it('falls back to General when the remembered tab is the removed Orcle tab (plan 119)', () => {
+    const storage = memoryStorage({ [STORAGE_KEYS.settingsTab]: 'orcle' })
     expect(readLastSettingsTab(storage)).toBe('general')
   })
 

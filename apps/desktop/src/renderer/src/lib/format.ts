@@ -1,10 +1,8 @@
 import type {
-  AiArtifact,
   AudioMeterResult,
   BackendHealth,
   Device,
   RecordingStatus,
-  SessionWithDetails,
   StreamHealth
 } from '../../../shared/backend'
 import { isActiveRecordingState as isSharedActiveRecordingState } from '../../../shared/capture-state'
@@ -200,103 +198,6 @@ export function setupChecklist({
       tone: streamReady ? 'good' : 'warn'
     }
   ]
-}
-
-export function latestArtifact(
-  session: SessionWithDetails,
-  kind: AiArtifact['kind']
-): AiArtifact | undefined {
-  return session.aiArtifacts
-    .filter((artifact) => artifact.kind === kind && artifact.status === 'ready')
-    .at(-1)
-}
-
-// The pipeline cards need the run's OUTCOME even when a step produced no
-// reviewable content — a pending-consent or failed stub is the proof a run
-// happened. The ready-only lookup above made finished runs read as "Not run".
-export function latestArtifactAnyStatus(
-  session: SessionWithDetails,
-  kind: AiArtifact['kind']
-): AiArtifact | undefined {
-  return session.aiArtifacts.filter((artifact) => artifact.kind === kind).at(-1)
-}
-
-export function artifactField(artifact: AiArtifact, field: string): string {
-  if (typeof artifact.content !== 'object' || artifact.content === null) {
-    return ''
-  }
-
-  const value = (artifact.content as Record<string, unknown>)[field]
-  return typeof value === 'string' ? value : ''
-}
-
-export function artifactChapters(
-  artifact: AiArtifact
-): Array<{ timestamp: string; title: string }> {
-  if (typeof artifact.content !== 'object' || artifact.content === null) {
-    return []
-  }
-
-  const chapters = (artifact.content as Record<string, unknown>).chapters
-  if (!Array.isArray(chapters)) {
-    return []
-  }
-
-  return chapters.flatMap((chapter) => {
-    if (typeof chapter !== 'object' || chapter === null) {
-      return []
-    }
-
-    const item = chapter as Record<string, unknown>
-    return typeof item.timestamp === 'string' && typeof item.title === 'string'
-      ? [{ timestamp: item.timestamp, title: item.title }]
-      : []
-  })
-}
-
-export function artifactText(artifact: AiArtifact): string {
-  if (typeof artifact.content !== 'object' || artifact.content === null) {
-    return ''
-  }
-
-  const content = artifact.content as Record<string, unknown>
-  const text = content.text
-  const message = content.message
-
-  if (typeof text === 'string') {
-    return text
-  }
-
-  if (typeof message === 'string') {
-    return message
-  }
-
-  return artifact.status
-}
-
-export function artifactObjects(
-  artifact: AiArtifact | undefined,
-  field: string
-): Record<string, unknown>[] {
-  if (!artifact || typeof artifact.content !== 'object' || artifact.content === null) {
-    return []
-  }
-
-  const value = (artifact.content as Record<string, unknown>)[field]
-  if (!Array.isArray(value)) {
-    return []
-  }
-
-  return value.filter(isObjectRecord)
-}
-
-export function objectField(item: Record<string, unknown>, field: string): string {
-  const value = item[field]
-  return typeof value === 'string' ? value : ''
-}
-
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /** "742 MB" / "1.2 GB" — the Library's size column and storage footer. */
