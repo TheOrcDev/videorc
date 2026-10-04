@@ -1,22 +1,38 @@
-import { spawn } from 'node:child_process'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import { launchDevApp } from './lib/app-launcher.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
-const repoRoot = resolve(import.meta.dirname, '..')
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
 const stateRoot = process.env.VIDEORC_SMOKE_STATE_DIR
   ? resolve(process.env.VIDEORC_SMOKE_STATE_DIR)
   : mkdtempSync(join(tmpdir(), 'videorc-oauth-guards-'))
 
-let appProcess
-let stopping = false
+let launched
 
 try {
-  const connection = await launchAndReadConnection()
+  launched = await launchDevApp({
+    timeoutMs,
+    requiredMarkers: ['backend-ready'],
+    env: {
+      VIDEORC_SMOKE_PRINT_BACKEND_READY: '1',
+      VIDEORC_SMOKE_STATE_DIR: stateRoot,
+      VIDEORC_USER_DATA_DIR: join(stateRoot, 'user-data'),
+      VIDEORC_DATABASE_PATH: join(stateRoot, 'videorc.sqlite'),
+      VIDEORC_SECRETS_PATH: join(stateRoot, 'videorc-secrets.json'),
+      VIDEORC_TWITCH_CLIENT_ID: 'smoke-twitch-client-id',
+      VIDEORC_X_CLIENT_ID: 'smoke-x-client-id',
+      VIDEORC_TWITCH_CLIENT_SECRET: '',
+      VIDEORC_KICK_CLIENT_ID: 'smoke-kick-client-id',
+      VIDEORC_KICK_CLIENT_SECRET: '',
+      VIDEORC_YOUTUBE_CLIENT_ID: 'smoke-youtube-client-id',
+      VIDEORC_YOUTUBE_CLIENT_SECRET: ''
+    },
+    onLine: console.log
+  })
+  const connection = launched.connections['backend-ready']
   const ws = await connectBackend(connection, timeoutMs)
   try {
     const credentials = await request(ws, timeoutMs, 'platformAccounts.oauth.providerCredentials')
@@ -78,7 +94,7 @@ try {
     ws.close()
   }
 } finally {
-  await stopApp()
+  await launched?.stop()
 }
 
 function assertBackfilledOverrides(draft) {
@@ -381,74 +397,4 @@ function requestRaw(ws, timeoutMs, method, params) {
     ws.addEventListener('message', onMessage)
     ws.send(JSON.stringify({ id, method, params }))
   })
-}
-
-function launchAndReadConnection() {
-  return new Promise((resolveConnection, rejectConnection) => {
-    const timer = setTimeout(() => {
-      rejectConnection(new Error(`Timed out waiting for dev backend READY after ${timeoutMs}ms.`))
-    }, timeoutMs)
-
-    appProcess = spawn('pnpm', ['dev'], {
-      cwd: repoRoot,
-      detached: true,
-      env: smokeAppEnv({
-        VIDEORC_SMOKE_PRINT_BACKEND_READY: '1',
-        VIDEORC_SMOKE_STATE_DIR: stateRoot,
-        VIDEORC_USER_DATA_DIR: join(stateRoot, 'user-data'),
-        VIDEORC_DATABASE_PATH: join(stateRoot, 'videorc.sqlite'),
-        VIDEORC_SECRETS_PATH: join(stateRoot, 'videorc-secrets.json'),
-        VIDEORC_TWITCH_CLIENT_ID: 'smoke-twitch-client-id',
-        VIDEORC_X_CLIENT_ID: 'smoke-x-client-id',
-        VIDEORC_TWITCH_CLIENT_SECRET: '',
-        VIDEORC_KICK_CLIENT_ID: 'smoke-kick-client-id',
-        VIDEORC_KICK_CLIENT_SECRET: '',
-        VIDEORC_YOUTUBE_CLIENT_ID: 'smoke-youtube-client-id',
-        VIDEORC_YOUTUBE_CLIENT_SECRET: ''
-      }),
-      stdio: ['ignore', 'pipe', 'pipe']
-    })
-
-    appProcess.stdout.setEncoding('utf8')
-    appProcess.stderr.setEncoding('utf8')
-    appProcess.stdout.on('data', (text) => handleAppOutput(text, resolveConnection, timer))
-    appProcess.stderr.on('data', (text) => handleAppOutput(text, resolveConnection, timer))
-    appProcess.on('error', (error) => {
-      clearTimeout(timer)
-      rejectConnection(error)
-    })
-    appProcess.on('exit', (code, signal) => {
-      clearTimeout(timer)
-      rejectConnection(
-        new Error(
-          `Dev app exited before OAuth guard smoke completed: code=${code} signal=${signal}`
-        )
-      )
-    })
-  })
-}
-
-function handleAppOutput(text, resolveConnection, timer) {
-  for (const line of text.split(/\r?\n/)) {
-    if (line.trim() && !stopping) {
-      console.log(line)
-    }
-
-    const marker = '[smoke] backend-ready '
-    const index = line.indexOf(marker)
-    if (index === -1) {
-      continue
-    }
-
-    clearTimeout(timer)
-    resolveConnection(JSON.parse(line.slice(index + marker.length)))
-  }
-}
-
-async function stopApp() {
-  if (!appProcess?.pid || appProcess.killed) {
-    return
-  }
-  stopping = true
-  await stopProcess(appProcess)
 }

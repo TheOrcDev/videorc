@@ -1,17 +1,21 @@
-import { spawn } from 'node:child_process'
-import { resolve } from 'node:path'
-
-import { smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import { launchDevApp } from './lib/app-launcher.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
-const repoRoot = resolve(import.meta.dirname, '..')
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
 
-let appProcess
-let stopping = false
+let launched
 
 try {
-  const connection = await launchAndReadConnection()
+  launched = await launchDevApp({
+    timeoutMs,
+    requiredMarkers: ['backend-ready'],
+    env: {
+      VIDEORC_X_CLIENT_ID: 'smoke-x-client-id',
+      VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
+    },
+    onLine: console.log
+  })
+  const connection = launched.connections['backend-ready']
   const ws = await connectBackend(connection, timeoutMs)
   try {
     const callbackPromise = waitForOAuthCallback(ws)
@@ -110,7 +114,7 @@ try {
     ws.close()
   }
 } finally {
-  await stopApp()
+  await launched?.stop()
 }
 
 function waitForOAuthCallback(ws) {
@@ -138,62 +142,4 @@ function waitForOAuthCallback(ws) {
 
     ws.addEventListener('message', onMessage)
   })
-}
-
-function launchAndReadConnection() {
-  return new Promise((resolveConnection, rejectConnection) => {
-    const timer = setTimeout(() => {
-      rejectConnection(new Error(`Timed out waiting for dev backend READY after ${timeoutMs}ms.`))
-    }, timeoutMs)
-
-    appProcess = spawn('pnpm', ['dev'], {
-      cwd: repoRoot,
-      detached: true,
-      env: smokeAppEnv({
-        VIDEORC_X_CLIENT_ID: 'smoke-x-client-id',
-        VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
-      }),
-      stdio: ['ignore', 'pipe', 'pipe']
-    })
-
-    appProcess.stdout.setEncoding('utf8')
-    appProcess.stderr.setEncoding('utf8')
-    appProcess.stdout.on('data', (text) => handleAppOutput(text, resolveConnection, timer))
-    appProcess.stderr.on('data', (text) => handleAppOutput(text, resolveConnection, timer))
-    appProcess.on('error', (error) => {
-      clearTimeout(timer)
-      rejectConnection(error)
-    })
-    appProcess.on('exit', (code, signal) => {
-      clearTimeout(timer)
-      rejectConnection(
-        new Error(`Dev app exited before OAuth smoke completed: code=${code} signal=${signal}`)
-      )
-    })
-  })
-}
-
-function handleAppOutput(text, resolveConnection, timer) {
-  for (const line of text.split(/\r?\n/)) {
-    if (line.trim() && !stopping) {
-      console.log(line)
-    }
-
-    const marker = '[smoke] backend-ready '
-    const index = line.indexOf(marker)
-    if (index === -1) {
-      continue
-    }
-
-    clearTimeout(timer)
-    resolveConnection(JSON.parse(line.slice(index + marker.length)))
-  }
-}
-
-async function stopApp() {
-  if (!appProcess?.pid || appProcess.killed) {
-    return
-  }
-  stopping = true
-  await stopProcess(appProcess)
 }
