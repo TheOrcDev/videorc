@@ -16,8 +16,8 @@ use super::rules::{
 use super::silence::{RmsFrames, silence_threshold_dbfs, speech_bounds_ms};
 use super::transcribe::{TranscriptWord, is_filler};
 use crate::protocol::{
-    CleanCutEdl, CleanCutEdlStats, CleanCutFrameRate, CleanCutKindStat, CleanCutRemoval,
-    CleanCutRemovalKind, CleanCutSourceIdentity, CleanCutUpdateEdlParams,
+    CleanCutCondensedKeep, CleanCutEdl, CleanCutEdlStats, CleanCutFrameRate, CleanCutKindStat,
+    CleanCutRemoval, CleanCutRemovalKind, CleanCutSourceIdentity, CleanCutUpdateEdlParams,
 };
 
 pub const EDL_VERSION: u32 = 1;
@@ -440,6 +440,27 @@ pub fn condensed_removals(
     if cursor < duration_ms {
         out.push(condensed_removal(cursor, duration_ms));
     }
+    out
+}
+
+/// The Condensed selection in recording time, for `cleanCut.get` (S13/S19):
+/// each keep mapped through its segment ids, sorted, unknown ids skipped.
+pub fn condensed_keeps(keeps: &[CloudKeep], segments: &[Segment]) -> Vec<CleanCutCondensedKeep> {
+    let index = segment_index(segments);
+    let mut out: Vec<CleanCutCondensedKeep> = keeps
+        .iter()
+        .filter_map(|keep| {
+            let (from, to) = id_range(&index, &keep.from_id, &keep.to_id)?;
+            let start_ms = segments[from].start_ms;
+            let end_ms = segments[to].end_ms;
+            (end_ms > start_ms).then(|| CleanCutCondensedKeep {
+                start_ms,
+                end_ms,
+                title: truncate_chars(keep.title.trim(), MAX_REASON_CHARS),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.start_ms.cmp(&b.start_ms).then(a.end_ms.cmp(&b.end_ms)));
     out
 }
 

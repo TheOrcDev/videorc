@@ -9,6 +9,7 @@ import type {
   CleanCutGetResult,
   CleanCutJob,
   CleanCutStartParams,
+  CleanCutTranscript,
   CleanCutUpdateEdlParams,
   ClipMark,
   ClipMarkedEvent,
@@ -122,6 +123,13 @@ interface HighRiskContractFixtures {
     edl: CleanCutEdl
     getResult: CleanCutGetResult
     updateEdlParams: CleanCutUpdateEdlParams
+    renderParams: BackendRpcParams<'cleanCut.render'>
+    transcriptParams: BackendRpcParams<'cleanCut.transcript'>
+    renderingJob: CleanCutJob
+    completedJob: CleanCutJob
+    transcript: CleanCutTranscript
+    transcriptWithoutLanguage: CleanCutTranscript
+    condensedGetResult: CleanCutGetResult
   }
 }
 
@@ -623,6 +631,44 @@ describe('shared high-risk protocol fixture', () => {
     expect(() =>
       validateBackendRpcParams('cleanCut.start', { ...cleanCut.startParams, mode: 'tight' })
     ).toThrow()
+  })
+
+  it('keeps the Clean cut render and transcript shapes identical across languages (plan 119 S13)', () => {
+    const { cleanCut } = fixtures
+    expect(validateBackendRpcParams('cleanCut.render', cleanCut.renderParams)).toStrictEqual(
+      cleanCut.renderParams
+    )
+    expect(
+      validateBackendRpcParams('cleanCut.transcript', cleanCut.transcriptParams)
+    ).toStrictEqual(cleanCut.transcriptParams)
+    for (const job of [cleanCut.renderingJob, cleanCut.completedJob]) {
+      expect(validateBackendRpcResult('cleanCut.render', job)).toStrictEqual(job)
+      expect(validateBackendEventPayload('cleanCut.status', job)).toStrictEqual(job)
+    }
+    expect(cleanCut.renderingJob.step).toBe('render')
+    expect(cleanCut.renderingJob).not.toHaveProperty('outputSessionId')
+    expect(cleanCut.completedJob.outputSessionId).toBe('session-fixture-clean-cut')
+    expect(validateBackendRpcResult('cleanCut.transcript', cleanCut.transcript)).toStrictEqual(
+      cleanCut.transcript
+    )
+    expect(
+      validateBackendRpcResult('cleanCut.transcript', cleanCut.transcriptWithoutLanguage)
+    ).toStrictEqual(cleanCut.transcriptWithoutLanguage)
+    // `filler` is written only when true; `language` is null, never absent.
+    expect(cleanCut.transcript.words[0]).not.toHaveProperty('filler')
+    expect(cleanCut.transcript.words[1].filler).toBe(true)
+    expect(cleanCut.transcriptWithoutLanguage.language).toBeNull()
+    expect(() =>
+      validateBackendRpcResult('cleanCut.transcript', {
+        ...cleanCut.transcript,
+        words: [{ ...cleanCut.transcript.words[0], filler: false }]
+      })
+    ).toThrow()
+    expect(validateBackendRpcResult('cleanCut.get', cleanCut.condensedGetResult)).toStrictEqual(
+      cleanCut.condensedGetResult
+    )
+    expect(cleanCut.condensedGetResult.jobs[0].condensedKeeps).toHaveLength(2)
+    expect(cleanCut.getResult.jobs[0]).not.toHaveProperty('condensedKeeps')
   })
 
   it('loads chat rows with and without structured event details', () => {

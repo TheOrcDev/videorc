@@ -72,3 +72,38 @@ pub const CONDENSED_MAX_TARGET_SECONDS: u32 = 3_600;
 /// How long the analysis job may run on the server before the desktop gives
 /// up polling. A 4-hour recording is about 25 windows.
 pub const ANALYSIS_POLL_TIMEOUT_SECS: u64 = 90 * 60;
+
+// Render (plan 119 S13, decisions 16 and 17).
+/// Audio fade at each internal join; video cuts are hard. Calibrate after S0.
+pub const JOIN_FADE_MS: u64 = 10;
+/// Kept ranges one FFmpeg pass may carry: every range is a `split` output, a
+/// `trim`, an `atrim` per audio track and a `concat` input. Beyond this the
+/// render refuses with a plain message instead of a graph FFmpeg chokes on.
+pub const RENDER_MAX_KEPT_RANGES: usize = 2_000;
+/// A filter graph longer than this is written to a file and passed with
+/// `-/filter_complex <file>` (FFmpeg 7+), never on the command line.
+pub const RENDER_GRAPH_INLINE_MAX_BYTES: usize = 4_096;
+/// Free space the render needs before it starts: this many tenths of the
+/// source size (1.2x).
+pub const RENDER_FREE_SPACE_TENTHS: u64 = 12;
+/// The output video bitrate never drops under this, whatever the source says.
+pub const RENDER_MIN_VIDEO_KBPS: u32 = 2_000;
+/// Sources with no usable stream bitrate use this share of the container
+/// bitrate (per mille).
+pub const RENDER_FORMAT_BITRATE_PER_MILLE: u64 = 950;
+/// AAC per audio track, or the source track's bitrate when that is lower.
+pub const RENDER_MAX_AUDIO_KBPS: u32 = 192;
+/// Progress events while rendering are throttled to this interval.
+pub const RENDER_PROGRESS_INTERVAL_MS: u64 = 250;
+/// The output's video and audio durations may differ from the kept duration
+/// by at most this many frames (decision 17).
+pub const RENDER_DURATION_TOLERANCE_FRAMES: u64 = 1;
+/// Minutes a worker waits for the source's post-recording quality gate before
+/// binding the source identity (S15); past this it proceeds and relies on the
+/// identity check to re-run if the gate repairs the file later.
+pub const GATE_WAIT_MAX_SECS: u64 = 30 * 60;
+/// How often the gate wait re-checks.
+pub const GATE_WAIT_POLL_MS: u64 = 2_000;
+/// Re-timed SRT built from words when the source has no `.srt`: cue caps.
+pub const SRT_CUE_MAX_MS: u64 = 7_000;
+pub const SRT_CUE_MAX_CHARS: usize = 42;
