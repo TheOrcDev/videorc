@@ -624,6 +624,7 @@ struct UncommittedCaptureProcess {
     rejected_start_cleanup: Option<PostSpawnRejectedStartCleanup>,
     rejected_start_terminal: Option<PublishedSessionStartTerminal>,
     stderr_monitor: Option<tokio::task::JoinHandle<()>>,
+    preview_stdout_monitor: Option<tokio::task::JoinHandle<()>>,
     #[cfg(test)]
     cleanup_completed: Option<oneshot::Sender<()>>,
 }
@@ -636,6 +637,7 @@ impl UncommittedCaptureProcess {
             rejected_start_cleanup: None,
             rejected_start_terminal: None,
             stderr_monitor: None,
+            preview_stdout_monitor: None,
             #[cfg(test)]
             cleanup_completed: None,
         }
@@ -691,6 +693,7 @@ impl UncommittedCaptureProcess {
         // where deleting a named-pipe registration before reap can let a new
         // session collide with the retiring process.
         drain_ffmpeg_stderr_monitor(self.stderr_monitor.take(), FFMPEG_STDERR_DRAIN_TIMEOUT).await;
+        abort_ffmpeg_preview_monitor(self.preview_stdout_monitor.take()).await;
         if let Some(terminal) = self.rejected_start_terminal.as_ref() {
             terminal.persist_failed_diagnostics().await;
         }
@@ -723,6 +726,9 @@ impl UncommittedCaptureProcess {
             .child
             .take()
             .expect("uncommitted capture process must own its child");
+        // The committed process owns stdout EOF from here; retain the existing
+        // running reader rather than aborting it when this startup guard drops.
+        drop(self.preview_stdout_monitor.take());
         (child, session_start_admission, self.stderr_monitor.take())
     }
 }
@@ -741,6 +747,10 @@ impl Drop for UncommittedCaptureProcess {
         let cleanup = self.rejected_start_cleanup.take();
         let terminal = self.rejected_start_terminal.take();
         let stderr_monitor = self.stderr_monitor.take();
+        let preview_stdout_monitor = self.preview_stdout_monitor.take();
+        if let Some(monitor) = preview_stdout_monitor.as_ref() {
+            monitor.abort();
+        }
         #[cfg(test)]
         let cleanup_completed = self.cleanup_completed.take();
         if child.is_none()
@@ -748,6 +758,7 @@ impl Drop for UncommittedCaptureProcess {
             && cleanup.is_none()
             && terminal.is_none()
             && stderr_monitor.is_none()
+            && preview_stdout_monitor.is_none()
         {
             return;
         }
@@ -757,6 +768,7 @@ impl Drop for UncommittedCaptureProcess {
                     let _ = child.wait().await;
                 }
                 drain_ffmpeg_stderr_monitor(stderr_monitor, FFMPEG_STDERR_DRAIN_TIMEOUT).await;
+                abort_ffmpeg_preview_monitor(preview_stdout_monitor).await;
                 if let Some(terminal) = terminal.as_ref() {
                     terminal.persist_failed_diagnostics().await;
                 }
@@ -4727,18 +4739,27 @@ async fn start_session_with_timeline(
         .with_rejected_start_terminal(published_session_start.take_terminal());
     session_row_guard.disarm();
     let ffmpeg_output_startup_started_at = Instant::now();
-    let (ffmpeg_output_startup_sender, mut ffmpeg_output_startup_receiver) = if use_encoder_bridge {
-        let (sender, receiver) = oneshot::channel();
-        (Some(sender), Some(receiver))
-    } else {
-        (None, None)
-    };
+    // Legacy FFmpeg has no bridge first-frame proof. Process spawn alone must
+    // not admit Recording: initialization time would consume the user's take.
+    // Every path observes positive output; only proven VideoToolbox bridges
+    // may defer this ACK using their existing encoded-frame watchdog.
+    let (ffmpeg_output_startup_sender, ffmpeg_output_startup_receiver) = oneshot::channel();
+    let mut ffmpeg_output_startup_receiver = Some(ffmpeg_output_startup_receiver);
     let ffmpeg_progress = FfmpegProgressBeacon::default();
     let mut ffmpeg_stderr_events = spawn_ffmpeg_stderr_reader(
         stderr,
-        ffmpeg_output_startup_sender,
+        Some(ffmpeg_output_startup_sender),
         ffmpeg_progress.clone(),
     );
+    // Legacy capture also writes preview JPEGs to stdout. Drain before waiting
+    // for media progress so that a full preview pipe cannot block that proof.
+    // The startup owner aborts this task on rejection/cancellation; commit
+    // transfers its lifetime to the running FFmpeg process's stdout EOF.
+    if let Some(stdout) = stdout {
+        uncommitted_capture_process.preview_stdout_monitor = Some(tokio::spawn(
+            publish_preview_stdout(state.clone(), None, stdout),
+        ));
+    }
     let stream_tee_has_recording_leg =
         output_path.is_some() && !(use_encoder_bridge && encoder_bridge_stream_profile.is_some());
     let (stream_runtime, slave_positions, stream_url_positions) = build_stream_runtime(
@@ -5549,10 +5570,6 @@ async fn start_session_with_timeline(
             crate::captions::resume_listen_for_capture(&listen_state).await;
         });
     }
-    if let Some(stdout) = stdout {
-        tokio::spawn(publish_preview_stdout(state.clone(), None, stdout));
-    }
-
     let initial_stream_targets_snapshot = stream_targets_snapshot_value(&stream_targets_snapshot);
     if !initial_stream_targets_snapshot.targets.is_empty() {
         state.emit_event("stream.targets", initial_stream_targets_snapshot);
@@ -8671,6 +8688,13 @@ async fn drain_ffmpeg_stderr_monitor(
             let _ = timeout(FFMPEG_STDERR_ABORT_JOIN_TIMEOUT, monitor).await;
             false
         }
+    }
+}
+
+async fn abort_ffmpeg_preview_monitor(monitor: Option<tokio::task::JoinHandle<()>>) {
+    if let Some(monitor) = monitor {
+        monitor.abort();
+        let _ = timeout(FFMPEG_STDERR_ABORT_JOIN_TIMEOUT, monitor).await;
     }
 }
 
@@ -18226,13 +18250,17 @@ fn append_audio_encoding_with_video_clock(
         .any(|input| input.track.source == AudioTrackSource::Microphone);
     if preserve_bridge_shortest || microphone_is_padded {
         args.push("-shortest".to_string());
-        if input_layout.microphone_is_linux_pulse && !streaming {
-            // Live Pulse PCM and raw video can stall FFmpeg's pre-encode sync
-            // queue after the first audio packets. Its default 10-second
-            // buffering window outlasts our 8-second output-progress deadline.
-            // These are dense live A/V streams, not sparse subtitle inputs:
-            // bound the queue to 250 ms so its overflow heartbeat can advance
-            // the lagging stream, retaining PCM audio, apad and video-owned EOF.
+        if !streaming
+            && (input_layout.microphone_is_linux_pulse
+                || (microphone_is_padded && !preserve_bridge_shortest))
+        {
+            // Live PCM can stall FFmpeg's pre-encode sync queue after the first
+            // audio packets: both Pulse/raw bridge inputs and legacy capture
+            // with padded microphone audio reproduce it. The default 10-second
+            // window can retain an entire short recording. Bound these dense
+            // live A/V queues to 250 ms so the overflow heartbeat advances the
+            // lagging stream, retaining PCM, apad and video-owned EOF. Encoded
+            // bridges and AAC outputs keep their existing synchronization.
             args.extend(["-shortest_buf_duration".to_string(), "0.25".to_string()]);
         }
     }
@@ -28552,6 +28580,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn legacy_pcm_sync_bound_preserves_aac_and_bridge_policies() {
+        let layout = microphone_input_layout(false);
+        for streaming in [false, true] {
+            for bridge in [false, true] {
+                let mut args = Vec::new();
+                append_audio_encoding_with_video_clock(
+                    &mut args,
+                    &layout,
+                    &AudioSettings::default(),
+                    streaming,
+                    bridge,
+                );
+                assert_eq!(
+                    arg_value(&args, "-shortest_buf_duration"),
+                    (!streaming && !bridge).then_some("0.25"),
+                    "streaming={streaming}, bridge={bridge}: {args:?}"
+                );
+                assert_eq!(
+                    arg_value(&args, "-c:a"),
+                    Some(if streaming { "aac" } else { "pcm_s16le" })
+                );
+                assert!(arg_value(&args, "-af").unwrap().ends_with(",apad"));
+                assert!(args.iter().any(|arg| arg == "-shortest"));
+            }
+        }
+    }
+
     #[tokio::test]
     async fn camera_only_resolves_windows_camera_as_primary_video_input() {
         let mut params = base_params(true, false);
@@ -31270,6 +31326,20 @@ mod tests {
             let mut process =
                 UncommittedCaptureProcess::new(child, CaptureStartupResources::default())
                     .with_rejected_start_terminal(terminal.take_terminal());
+            let (preview_started_sender, preview_started) = oneshot::channel();
+            let (preview_release_sender, preview_release) = oneshot::channel();
+            let (preview_dropped_sender, mut preview_dropped) = oneshot::channel::<()>();
+            process.preview_stdout_monitor = Some(tokio::spawn(async move {
+                // Closing this channel proves the actual task future was
+                // dropped, rather than only its detached JoinHandle.
+                let _drop_evidence = preview_dropped_sender;
+                preview_started_sender.send(()).unwrap();
+                let _ = preview_release.await;
+            }));
+            let preview_started = matches!(
+                timeout(TEST_LIVE_AUDIO_EVENT_TIMEOUT, preview_started).await,
+                Ok(Ok(()))
+            );
             let (release_sender, release) = oneshot::channel();
             let (ready_sender, ready) = oneshot::channel();
             let log_state = state.clone();
@@ -31288,11 +31358,29 @@ mod tests {
             release_sender.send(()).unwrap();
             if committed {
                 let (mut child, admission, monitor) = process.commit();
-                assert!(monitor.is_some());
-                assert!(drain_ffmpeg_stderr_monitor(monitor, Duration::from_secs(1)).await);
+                let preview_retained = matches!(
+                    preview_dropped.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                );
+                let preview_released = preview_release_sender.send(()).is_ok();
+                let preview_completed = matches!(
+                    timeout(Duration::from_secs(1), preview_dropped).await,
+                    Ok(Err(_))
+                );
+                let stderr_owned = monitor.is_some();
+                let stderr_drained =
+                    drain_ffmpeg_stderr_monitor(monitor, Duration::from_secs(1)).await;
                 drop(stdin);
                 wait_for_test_stdin_sink(&mut child).await;
                 drop(admission);
+                // Report a failed reader contract only after the owned child
+                // has completed the bounded EOF/kill-and-reap cleanup.
+                assert!(preview_started);
+                assert!(preview_retained);
+                assert!(preview_released);
+                assert!(preview_completed);
+                assert!(stderr_owned);
+                assert!(stderr_drained);
                 assert_ne!(
                     state
                         .database
@@ -31307,7 +31395,15 @@ mod tests {
                     "original startup timeout rtmp://private.example/live/secret-key",
                 );
                 process.terminate_and_reap_before_fifo_writer_join().await;
+                let preview_completed = matches!(
+                    timeout(Duration::from_secs(1), preview_dropped).await,
+                    Ok(Err(_))
+                );
+                let preview_release_refused = preview_release_sender.send(()).is_err();
                 drop(stdin);
+                assert!(preview_started);
+                assert!(preview_completed);
+                assert!(preview_release_refused);
                 assert_eq!(
                     state
                         .database
@@ -31458,6 +31554,7 @@ mod tests {
             rejected_start_cleanup: None,
             rejected_start_terminal: terminal.take_terminal(),
             stderr_monitor: Some(monitor),
+            preview_stdout_monitor: None,
             cleanup_completed: Some(completed_sender),
         };
         row_guard.disarm();
@@ -34156,6 +34253,117 @@ mod tests {
 
         cleanup_prepared_mp4_export_staging(&staging).unwrap();
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// The legacy 4K60 command must advance while its live PCM bus remains
+    /// open, including its second preview output. A short file after Stop is
+    /// not evidence that the six-second recording clock ever advanced.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore = "spawns bundled ffmpeg/ffprobe and the live PCM bus; run on recording-studio hosts"]
+    async fn real_ffmpeg_legacy_pcm_recording_advances_before_stop() {
+        let directory =
+            std::env::temp_dir().join(format!("videorc-real-legacy-pcm-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let fifo = directory.join("audio.f32le");
+        crate::audio::create_native_audio_fifo(&fifo).unwrap();
+        let output = directory.join("recording.mkv");
+        let mut params = base_params(true, false);
+        params.output.video.width = 3840;
+        params.output.video.height = 2160;
+        params.output.video.fps = 60;
+        params.output.video.bitrate_kbps = 50_000;
+        let capture = CaptureInputs {
+            video: VideoInput::TestPattern,
+            camera_index: None,
+            microphone: Some(MicrophoneInput::SessionPcm {
+                fifo_path: fifo.clone(),
+            }),
+        };
+        let args = ffmpeg_args(&capture, &params, Some(&output), &[], None).unwrap();
+        let mut child = Command::new("ffmpeg")
+            .args(args)
+            .kill_on_drop(true)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("ffmpeg should be on PATH for this ignored test");
+        let audio = crate::session_audio::attach_prepared(
+            None,
+            fifo,
+            None,
+            AudioProcessingSettings::default(),
+            crate::audio::NATIVE_AUDIO_SOURCE_STALL_TIMEOUT,
+        );
+        let mut stdout = child.stdout.take().unwrap();
+        let preview =
+            tokio::spawn(async move { tokio::io::copy(&mut stdout, &mut tokio::io::sink()).await });
+        let mut stderr = BufReader::new(child.stderr.take().unwrap()).lines();
+        let (sender, mut progress) = mpsc::unbounded_channel();
+        let evidence = tokio::spawn(async move {
+            let mut lines = Vec::new();
+            while let Ok(Some(line)) = stderr.next_line().await {
+                if let Some(seconds) = parse_ffmpeg_progress_media_seconds(&line) {
+                    let _ = sender.send(seconds);
+                }
+                lines.push(line);
+            }
+            lines
+        });
+        let advanced = timeout(Duration::from_secs(8), async {
+            while let Some(seconds) = progress.recv().await {
+                if seconds >= 3.0 {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false);
+        audio.request_stop();
+        let mut stdin = child.stdin.take().unwrap();
+        let _ = stdin.write_all(b"q\n").await;
+        drop(stdin);
+        let clean_exit = match timeout(Duration::from_secs(3), child.wait()).await {
+            Ok(result) => result.unwrap().success(),
+            Err(_) => {
+                let _ = child.start_kill();
+                child.wait().await.unwrap();
+                false
+            }
+        };
+        audio.request_stop();
+        drop(audio);
+        let lines = evidence.await.unwrap();
+        preview.await.unwrap().unwrap();
+        let probe = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-count_frames",
+                "-show_entries",
+                "stream=nb_read_frames",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+            ])
+            .arg(&output)
+            .output()
+            .await
+            .unwrap();
+        let frames = String::from_utf8_lossy(&probe.stdout)
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(0);
+        std::fs::remove_dir_all(directory).unwrap();
+        assert!(advanced, "live PCM recording stalled: {lines:?}");
+        assert!(clean_exit, "legacy FFmpeg did not stop cleanly: {lines:?}");
+        assert!(
+            probe.status.success() && frames >= 180,
+            "only {frames} video frames survived"
+        );
     }
 
     /// Runs the production microphone filter/duration policy through real
