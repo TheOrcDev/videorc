@@ -196,6 +196,11 @@ describe('Orcle tab (plan 119 S2)', () => {
     }
     expect(liveSwitch().getAttribute('data-state')).toBe('unchecked')
     expect(statusLine().getAttribute('data-status')).toBe('off')
+    // Plan 149: Orcle's emblem leads the tab's intro line, at 32 px.
+    const header = document.querySelector('[data-slot="page-header"]')
+    const emblem = header?.querySelector('[data-slot="orcle-emblem"]')
+    expect(emblem?.getAttribute('src')).toContain('orcle-emblem-64')
+    expect(emblem?.nextElementSibling?.textContent).toContain('Live with you. Edits after.')
     // The Stream Manager waits for a stream.
     expect(text).not.toContain('Open Stream Manager')
   })
@@ -216,6 +221,10 @@ describe('Orcle tab (plan 119 S2)', () => {
     await render({ consented: false, consentRequested: true })
     const dialog = document.querySelector('[role="dialog"]')
     expect(dialog?.textContent).toContain('Turn on Orcle Live?')
+    // Plan 149: Orcle's emblem leads the dialog, at its large size.
+    const emblem = dialog?.querySelector('[data-slot="orcle-emblem"]')
+    expect(emblem?.getAttribute('src')).toContain('orcle-emblem-112')
+    expect(emblem?.getAttribute('alt')).toBe('')
     for (const use of CLOUD_AI_USES) expect(dialog?.textContent).toContain(use)
     expect(dialog?.textContent).toContain(CLOUD_AI_KEEPS)
 

@@ -7,6 +7,7 @@ import {
   type CleanCutReviewTarget
 } from '@/components/clean-cut/clean-cut-card'
 import { CohostSettingsSection } from '@/components/cohost-settings-section'
+import { OrcleEmblem } from '@/components/orcle-emblem'
 import { OrcleReportCard } from '@/components/orcle-report-card'
 import { OrcleVoiceCommands } from '@/components/orcle-voice-commands'
 import { PageHeader } from '@/components/page'
@@ -115,7 +116,11 @@ export function OrcleTab({
         </Suspense>
       ) : (
         <div className="flex flex-col" data-slot="orcle-tab">
-          <PageHeader description={ORCLE_TAB_DESCRIPTION} title="Orcle" />
+          <PageHeader
+            description={ORCLE_TAB_DESCRIPTION}
+            media={<OrcleEmblem size="md" />}
+            title="Orcle"
+          />
           <OrcleLiveSection />
           <OrcleReportCard sessionId={reportSession} onSessionChange={setReportSession} />
           <CleanCutCard
@@ -357,10 +362,17 @@ function OrcleConsentDialog(): ReactElement {
     >
       <DialogContent showCloseButton={false}>
         <DialogHeader>
-          <DialogTitle>Turn on Orcle Live?</DialogTitle>
-          <DialogDescription>
-            Orcle uses Videorc&apos;s cloud AI while you&apos;re live.
-          </DialogDescription>
+          {/* Orcle's emblem leads, the way the Videorc logo leads
+              permissions onboarding (plan 149). */}
+          <div className="flex items-center gap-3">
+            <OrcleEmblem size="lg" />
+            <div className="flex flex-col gap-1">
+              <DialogTitle>Turn on Orcle Live?</DialogTitle>
+              <DialogDescription>
+                Orcle uses Videorc&apos;s cloud AI while you&apos;re live.
+              </DialogDescription>
+            </div>
+          </div>
         </DialogHeader>
         <ul className="flex list-disc flex-col gap-1 pl-4 text-sm text-muted-foreground">
           {CLOUD_AI_USES.map((use) => (
