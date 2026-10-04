@@ -145,7 +145,7 @@ pub(crate) struct PersistedCleanCutJob {
 pub(crate) enum CleanCutJobCreation {
     Created(PersistedCleanCutJob),
     /// A worker already owns a job for this source and mode.
-    AlreadyActive(PersistedCleanCutJob),
+    AlreadyActive,
     /// The latest job for this source and mode has a cut list waiting for
     /// review; starting again returns it instead of discarding edits.
     Ready(PersistedCleanCutJob),
@@ -2980,13 +2980,15 @@ impl Database {
             "WHERE source_session_id = ?1 AND mode = ?2 AND state IN {CLEAN_CUT_ACTIVE_STATES_SQL}
              ORDER BY created_at ASC, id ASC LIMIT 1"
         );
-        if let Some(active) = query_one_clean_cut_job(
+        if query_one_clean_cut_job(
             &transaction,
             &active_filter,
             params![source_session_id, mode.as_str()],
-        )? {
+        )?
+        .is_some()
+        {
             transaction.commit()?;
-            return Ok(CleanCutJobCreation::AlreadyActive(active));
+            return Ok(CleanCutJobCreation::AlreadyActive);
         }
         if let Some(ready) = query_one_clean_cut_job(
             &transaction,
@@ -3799,6 +3801,9 @@ impl Database {
         Ok(count)
     }
 
+    /// Old Publish rows stay readable (sessions.list, the support bundle);
+    /// nothing writes new ones since plan 119, so this is a test fixture.
+    #[cfg(test)]
     pub fn save_ai_artifact(
         &self,
         session_id: &str,
@@ -3832,11 +3837,6 @@ impl Database {
             ],
         )?;
         Ok(artifact)
-    }
-
-    pub fn list_ai_artifacts(&self, session_id: &str) -> Result<Vec<AiArtifact>> {
-        let conn = self.lock()?;
-        self.ai_artifacts_for_session_locked(&conn, session_id)
     }
 
     pub fn list_ai_artifacts_page(

@@ -2,7 +2,7 @@
 //!
 //! Live captions and Orcle listening write one `.srt` next to the finished
 //! recording (`captions.rs`). Everything that reads it back (clip moments,
-//! the Orcle report, the Publish workflow until it is removed) shares this
+//! the Orcle report, Clean cut's re-timed captions) shares this
 //! parser so a cue means the same thing everywhere.
 
 /// One caption cue from a live-captions `.srt` (kept with timing for
@@ -63,7 +63,8 @@ fn srt_timestamp_ms(value: &str) -> Option<u64> {
     Some(((hours * 60 + minutes) * 60 + seconds) * 1000 + millis)
 }
 
-/// Plain prose, one cue per line.
+/// Plain prose, one cue per line (test fixture since plan 119 removed Publish).
+#[cfg(test)]
 pub fn caption_cues_text(cues: &[CaptionCue]) -> String {
     cues.iter()
         .map(|cue| cue.text.as_str())

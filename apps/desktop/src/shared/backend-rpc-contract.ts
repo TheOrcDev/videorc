@@ -29,7 +29,6 @@ import type {
   ClipMark,
   ClipMarkedEvent,
   ClipMoment,
-  CleanCutEdl,
   CleanCutGetResult,
   CleanCutJob,
   CleanCutJobDetail,

@@ -274,7 +274,7 @@ fn admit_start(
             spawn_job(state.clone(), persisted.job.id.clone());
             Ok(persisted.job)
         }
-        Ok(CleanCutJobCreation::AlreadyActive(_)) => Err(CleanCutRefusal::new(
+        Ok(CleanCutJobCreation::AlreadyActive) => Err(CleanCutRefusal::new(
             REFUSAL_ALREADY_RUNNING,
             "Clean cut is already working on this recording.",
         )),
@@ -1456,7 +1456,7 @@ mod tests {
                 database
                     .create_clean_cut_job("good", CleanCutMode::Clean)
                     .unwrap(),
-                CleanCutJobCreation::AlreadyActive(_)
+                CleanCutJobCreation::AlreadyActive
             ),
             "the partial unique index backs the refusal"
         );

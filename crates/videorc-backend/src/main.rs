@@ -6,7 +6,6 @@
 #![allow(clippy::chunks_exact_to_as_chunks)]
 
 mod account;
-mod ai;
 mod atomic_file;
 mod audience;
 mod audio;
@@ -4493,7 +4492,6 @@ const WEBSOCKET_LIVE_LAYOUT_MAX_EXECUTION_AGE: Duration = Duration::from_secs(30
 const WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE: Duration = Duration::from_secs(30);
 const WEBSOCKET_PROVIDER_MUTATION_MAX_EXECUTION_AGE: Duration = Duration::from_secs(25);
 const WEBSOCKET_MEDIA_MUTATION_MAX_EXECUTION_AGE: Duration = Duration::from_secs(9 * 60);
-const WEBSOCKET_AI_MUTATION_MAX_EXECUTION_AGE: Duration = Duration::from_secs(29 * 60);
 const WEBSOCKET_PROBE_MUTATION_MAX_EXECUTION_AGE: Duration = Duration::from_secs(110);
 #[cfg(not(test))]
 const WEBSOCKET_MUTATION_EXECUTOR_THREADS: usize = 4;
@@ -12187,16 +12185,6 @@ async fn get_ai_quota() -> Result<protocol::AiQuotaStatus> {
     let token = stored_ai_session_token()?;
     let client = videorc_api::VideorcApiClient::new()?;
     client.get_ai_quota(&token).await
-}
-
-async fn get_ai_job(job_id: &str) -> Result<protocol::AiJobSnapshot> {
-    let job_id = job_id.trim();
-    if job_id.is_empty() {
-        anyhow::bail!("jobId is required");
-    }
-    let token = stored_ai_session_token()?;
-    let client = videorc_api::VideorcApiClient::new()?;
-    client.get_ai_job(&token, job_id).await
 }
 
 async fn backend_health(state: &AppState, ffmpeg_path: &str) -> BackendHealth {
