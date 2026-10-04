@@ -5,6 +5,7 @@ import { describe, it } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import {
+  REQUIRED_LINUX_FFMPEG_FILTERS,
   assessFfmpegLinuxPin,
   assessLinuxFfmpegCapabilities,
   linuxAutobuildDurability
@@ -42,9 +43,10 @@ describe('Linux FFmpeg pin', () => {
       /LGPL/
     )
     assert.match(
-      assessFfmpegLinuxPin({ url: DURABLE_URL.replace('linux64', 'win64'), sha256: SHA }).problems.join(
-        '\n'
-      ),
+      assessFfmpegLinuxPin({
+        url: DURABLE_URL.replace('linux64', 'win64'),
+        sha256: SHA
+      }).problems.join('\n'),
       /Linux x64 LGPL/
     )
     assert.match(
@@ -67,28 +69,75 @@ describe('Linux FFmpeg capability policy', () => {
     'ffmpeg version 8.1.2',
     'configuration: --disable-gpl --disable-nonfree --enable-vaapi --enable-libopenh264 --disable-libx264 --disable-libx265 --disable-libfdk-aac'
   ].join('\n')
-  const encodersOutput = [' V..... h264_vaapi VAAPI H.264 encoder', ' V..... libopenh264 OpenH264'].join(
-    '\n'
-  )
+  const encodersOutput = [
+    ' V..... h264_vaapi VAAPI H.264 encoder',
+    ' V..... libopenh264 OpenH264'
+  ].join('\n')
+  const filtersOutput = [
+    'Filters:',
+    ' ... trim             V->V       Pick one continuous section from the input, drop the rest.',
+    ' ... atrim            A->A       Pick one continuous section from the input, drop the rest.',
+    ' ... concat           N->N       Concatenate audio and video streams.',
+    ' T.. afade            A->A       Fade in/out input audio.',
+    ' ... split            V->N       Pass on the input to N video outputs.',
+    ' ... asplit           A->N       Pass on the audio input to N audio outputs.',
+    ' ... setpts           V->V       Set PTS for the output video frame.',
+    ' ... asetpts          A->A       Set PTS for the output audio frame.',
+    ' ... format           V->V       Convert the input video to one of the specified pixel formats.',
+    ' ... hwupload         V->V       Upload a normal frame to a hardware frame'
+  ].join('\n')
 
-  it('accepts exactly the LGPL VAAPI plus OpenH264 contract', () => {
-    assert.deepEqual(assessLinuxFfmpegCapabilities({ versionOutput, encodersOutput }), {
-      ok: true,
-      problems: []
-    })
+  it('accepts exactly the LGPL VAAPI plus OpenH264 contract with the Clean cut filters', () => {
+    assert.deepEqual(
+      assessLinuxFfmpegCapabilities({ versionOutput, encodersOutput, filtersOutput }),
+      {
+        ok: true,
+        problems: []
+      }
+    )
+    assert.deepEqual(REQUIRED_LINUX_FFMPEG_FILTERS, [
+      'trim',
+      'atrim',
+      'concat',
+      'afade',
+      'split',
+      'asplit',
+      'setpts',
+      'asetpts',
+      'format',
+      'hwupload'
+    ])
   })
 
   it('rejects GPL/nonfree flags, missing fallbacks, and incomplete configuration', () => {
     const assessment = assessLinuxFfmpegCapabilities({
       versionOutput: versionOutput.replace('--disable-gpl', '--enable-gpl'),
-      encodersOutput: ' V..... h264_vaapi VAAPI H.264 encoder'
+      encodersOutput: ' V..... h264_vaapi VAAPI H.264 encoder',
+      filtersOutput
     })
     assert.match(assessment.problems.join('\n'), /forbidden configure flag --enable-gpl/)
     assert.match(assessment.problems.join('\n'), /missing H.264 encoder libopenh264/)
     assert.match(
-      assessLinuxFfmpegCapabilities({ versionOutput: 'ffmpeg version 8.1.2', encodersOutput })
-        .problems.join('\n'),
+      assessLinuxFfmpegCapabilities({
+        versionOutput: 'ffmpeg version 8.1.2',
+        encodersOutput,
+        filtersOutput
+      }).problems.join('\n'),
       /configuration line/
     )
+  })
+
+  it('fails closed on a missing filter or a missing -filters listing (plan 119 S13)', () => {
+    const withoutUpload = assessLinuxFfmpegCapabilities({
+      versionOutput,
+      encodersOutput,
+      filtersOutput: filtersOutput
+        .split('\n')
+        .filter((line) => !/ hwupload /.test(line))
+        .join('\n')
+    })
+    assert.deepEqual(withoutUpload.problems, ['missing filter hwupload'])
+    const unlisted = assessLinuxFfmpegCapabilities({ versionOutput, encodersOutput })
+    assert.deepEqual(unlisted.problems, ['ffmpeg -filters output was not provided'])
   })
 })

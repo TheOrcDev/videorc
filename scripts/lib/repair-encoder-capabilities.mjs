@@ -11,6 +11,8 @@
 // Pure parsing lives here (covered by test:scripts); running the binary is the
 // caller's job.
 
+import { CLEAN_CUT_FFMPEG_FILTERS } from './clean-cut-ffmpeg-filters.mjs'
+
 /** Repair-encoder preference, mirroring RepairVideoEncoder in repair.rs:
  * quality-controllable software x264 first (dev/full builds), then the
  * platform hardware encoders the LGPL bundles ship. */
@@ -28,9 +30,10 @@ export const REPAIR_ENCODER_ARGS = {
  * path, AAC for MP4 audio, and PCM for Noise Cleanup's MKV output policy. */
 export const REQUIRED_MACOS_FFMPEG_ENCODERS = ['h264_videotoolbox', 'aac', 'pcm_s16le']
 
-/** Audio filters required by Premium local creative transforms. `afftdn` is
- * built into the LGPL FFmpeg bundle and needs no separately licensed model. */
-export const REQUIRED_MACOS_FFMPEG_FILTERS = ['afftdn']
+/** Filters required by Premium local creative transforms: `afftdn` for Noise
+ * Cleanup (built into the LGPL FFmpeg bundle, no separately licensed model)
+ * and the trim/concat set Clean cut renders with (plan 119 S13). */
+export const REQUIRED_MACOS_FFMPEG_FILTERS = ['afftdn', ...CLEAN_CUT_FFMPEG_FILTERS]
 
 /** Protocols every shipped macOS ffmpeg must expose. rtmps implies a TLS
  * backend was linked (static OpenSSL since 0.9.23); tls is listed separately

@@ -1,3 +1,5 @@
+import { CLEAN_CUT_FFMPEG_FILTERS } from './clean-cut-ffmpeg-filters.mjs'
+
 const AUTOBUILD_DOWNLOAD =
   /^https:\/\/github\.com\/BtbN\/FFmpeg-Builds\/releases\/download\/autobuild-(\d{4})-(\d{2})-(\d{2})-\d{2}-\d{2}\/(.+linux64-lgpl.+\.tar\.xz)$/
 
@@ -12,6 +14,10 @@ export const REQUIRED_LINUX_FFMPEG_CONFIGURATION = [
 ]
 
 export const REQUIRED_LINUX_H264_ENCODERS = ['h264_vaapi', 'libopenh264']
+
+/** The filters Clean cut renders with (plan 119 S13), plus `hwupload` for the
+ * VAAPI arm. Required from `ffmpeg -filters`; a missing listing fails closed. */
+export const REQUIRED_LINUX_FFMPEG_FILTERS = [...CLEAN_CUT_FFMPEG_FILTERS, 'hwupload']
 
 export function lastDayOfMonth(year, month) {
   return new Date(Date.UTC(year, month, 0)).getUTCDate()
@@ -62,7 +68,7 @@ function configurationLine(versionOutput) {
     .find((line) => line.startsWith('configuration:'))
 }
 
-export function assessLinuxFfmpegCapabilities({ versionOutput, encodersOutput }) {
+export function assessLinuxFfmpegCapabilities({ versionOutput, encodersOutput, filtersOutput }) {
   const problems = []
   const configuration = configurationLine(versionOutput)
   if (!configuration) {
@@ -79,6 +85,16 @@ export function assessLinuxFfmpegCapabilities({ versionOutput, encodersOutput })
   const encoders = String(encodersOutput ?? '')
   for (const encoder of REQUIRED_LINUX_H264_ENCODERS) {
     if (!encoders.split(/\s+/).includes(encoder)) problems.push(`missing H.264 encoder ${encoder}`)
+  }
+
+  // Fail closed: a caller that forgot `-filters` cannot pass the gate.
+  if (typeof filtersOutput !== 'string') {
+    problems.push('ffmpeg -filters output was not provided')
+  } else {
+    const filters = filtersOutput.split(/\s+/)
+    for (const filter of REQUIRED_LINUX_FFMPEG_FILTERS) {
+      if (!filters.includes(filter)) problems.push(`missing filter ${filter}`)
+    }
   }
 
   return { ok: problems.length === 0, problems }
