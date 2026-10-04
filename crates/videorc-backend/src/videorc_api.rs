@@ -557,12 +557,7 @@ impl CohostCommandRequest {
                     request.focus_message_id.as_deref() != Some(candidate.id.as_str())
                 })
                 .filter(|_| request.candidates.len() > 1);
-            match drop_index {
-                Some(index) => {
-                    request.candidates.remove(index);
-                }
-                None => return None,
-            }
+            request.candidates.remove(drop_index?);
         }
         Some(request)
     }

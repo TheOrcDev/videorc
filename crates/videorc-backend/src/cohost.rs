@@ -9098,14 +9098,13 @@ mod tests {
         engine.note_messages_at(&rows, start);
         let mut t = start + secs(2);
         let mut version = 1;
-        let fail =
-            |engine: &mut CohostEngine, t: Instant, version: u64, error: CohostApiError| {
-                let prepared = send_spotlight(engine, generation, version, t).expect("lane open");
-                assert_eq!(prepared.generation, generation);
-                engine
-                    .apply_spotlight_result(generation, Err(error), t, ISO)
-                    .unwrap()
-            };
+        let fail = |engine: &mut CohostEngine, t: Instant, version: u64, error: CohostApiError| {
+            let prepared = send_spotlight(engine, generation, version, t).expect("lane open");
+            assert_eq!(prepared.generation, generation);
+            engine
+                .apply_spotlight_result(generation, Err(error), t, ISO)
+                .unwrap()
+        };
 
         // Two failures in a row: the lane stays open.
         for _ in 0..2 {

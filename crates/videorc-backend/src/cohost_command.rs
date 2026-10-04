@@ -1234,11 +1234,7 @@ fn nearest_reason(words: &[Word], verb: usize, end: usize) -> Option<String> {
         let Some(reason) = reason_for(&word.text) else {
             continue;
         };
-        let distance = if index < verb {
-            verb - index
-        } else {
-            index - verb
-        };
+        let distance = index.abs_diff(verb);
         if best.is_none_or(|(best_distance, _)| distance < best_distance) {
             best = Some((distance, reason));
         }
