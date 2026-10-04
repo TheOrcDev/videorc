@@ -44,6 +44,8 @@ export const DEFAULT_GATES = Object.freeze({
   avSyncTargetMs: 100, // A/V skew target (warn above)
   avSyncHardFailMs: 150, // A/V skew hard fail above
   frameCountTolerance: 0.02, // observed vs expected (duration × fps) frame count
+  // Opt-in requested take coverage, independent of the artifact's own frame count.
+  minDurationSeconds: null,
   // Duplicate container PTS = broken timestamping, full stop (plan 023: the
   // split-output wallclock path wrote bursts of frames on IDENTICAL stamps —
   // 353 of them in the owner's 52s file). Tolerate a lone rounding pair.
@@ -75,6 +77,8 @@ export const DEFAULT_GATES = Object.freeze({
   // Max keyframe interval in seconds (recordings pin a 2s GOP); null disables
   // the check (it decodes frame metadata — the matrix smoke enables it).
   keyframeMaxIntervalSeconds: null,
+  // Opt-in proof that an armed cadence gate actually measured an interval.
+  requireKeyframeEvidence: false,
   // Max A/V stream tail mismatch in ms (stop drain); null keeps the combined
   // avSkew gates as the only sync check.
   maxTailMismatchMs: null,
@@ -591,6 +595,17 @@ export function evaluateGates(metrics, gates = DEFAULT_GATES) {
     )
   }
 
+  if (
+    gates.minDurationSeconds != null &&
+    (!Number.isFinite(metrics.durationSeconds) ||
+      metrics.durationSeconds < gates.minDurationSeconds)
+  ) {
+    failures.push(
+      `recording duration ${fmt(metrics.durationSeconds, 3)}s is below the requested ` +
+        `minimum ${gates.minDurationSeconds}s or is unavailable`
+    )
+  }
+
   // Frame count vs expected (dropped-frame evidence).
   if (
     metrics.expectedFrames != null &&
@@ -694,6 +709,17 @@ export function evaluateGates(metrics, gates = DEFAULT_GATES) {
   }
 
   // Keyframe cadence (recordings pin a 2s GOP for seekability).
+  if (
+    gates.requireKeyframeEvidence &&
+    gates.keyframeMaxIntervalSeconds != null &&
+    (!Number.isFinite(metrics.keyframeCount) ||
+      metrics.keyframeCount < 2 ||
+      !Number.isFinite(metrics.maxKeyframeIntervalSeconds))
+  ) {
+    failures.push(
+      'keyframe evidence requires at least two sampled keyframes and a finite measured interval'
+    )
+  }
   if (
     gates.keyframeMaxIntervalSeconds != null &&
     metrics.maxKeyframeIntervalSeconds != null &&

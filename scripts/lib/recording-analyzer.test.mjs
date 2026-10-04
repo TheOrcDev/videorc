@@ -565,6 +565,110 @@ describe('evaluateGates', () => {
     assert.equal(gated.pass, false)
   })
 
+  describe('matrix artifact coverage', () => {
+    const complete = {
+      ...clean,
+      intendedFps: 60,
+      durationSeconds: 6,
+      frameDerivedDurationSeconds: 6,
+      expectedFrames: 360,
+      observedFrames: 360,
+      keyframeCount: 4,
+      maxKeyframeIntervalSeconds: 2
+    }
+    const gates = {
+      ...DEFAULT_GATES,
+      minDurationSeconds: 5.88,
+      requireKeyframeEvidence: true,
+      keyframeMaxIntervalSeconds: 2.5
+    }
+    const truncated = {
+      ...complete,
+      durationSeconds: 0.333,
+      frameDerivedDurationSeconds: 20 / 60,
+      expectedFrames: 20,
+      observedFrames: 20,
+      keyframeCount: 1,
+      maxKeyframeIntervalSeconds: null
+    }
+
+    it('rejects the otherwise self-consistent 20-frame truncated take', () => {
+      const verdict = evaluateGates(truncated, gates)
+      assert.equal(verdict.pass, false)
+      assert.ok(verdict.failures.some((failure) => /recording duration/.test(failure)))
+    })
+
+    it('independently rejects a full take without measurable keyframe cadence', () => {
+      const verdict = evaluateGates(
+        { ...complete, keyframeCount: 1, maxKeyframeIntervalSeconds: null },
+        gates
+      )
+      assert.equal(verdict.pass, false)
+      assert.ok(verdict.failures.some((failure) => /keyframe evidence/.test(failure)))
+    })
+
+    it('accepts the complete requested take with normal two-second GOPs', () => {
+      assert.equal(evaluateGates(complete, gates).pass, true)
+    })
+
+    it('preserves default and unarmed short-file behavior', () => {
+      assert.equal(evaluateGates(truncated).pass, true)
+      assert.equal(
+        evaluateGates(truncated, { ...DEFAULT_GATES, keyframeMaxIntervalSeconds: 2.5 }).pass,
+        true
+      )
+    })
+
+    it('keeps the requested-duration floor when stress disables cadence and frame counts', () => {
+      const stressGates = {
+        ...gates,
+        frameCountTolerance: Infinity,
+        cadenceMismatchTolerancePct: Infinity,
+        maxDurationStretchRatio: Infinity,
+        keyframeMaxIntervalSeconds: null
+      }
+      assert.equal(
+        evaluateGates(
+          {
+            ...complete,
+            observedFrames: 20,
+            keyframeCount: null,
+            maxKeyframeIntervalSeconds: null
+          },
+          stressGates
+        ).pass,
+        true
+      )
+      assert.equal(evaluateGates(truncated, stressGates).pass, false)
+    })
+
+    it('accepts the existing two-percent duration boundary and rejects less coverage', () => {
+      assert.equal(evaluateGates({ ...complete, durationSeconds: 5.88 }, gates).pass, true)
+      assert.equal(evaluateGates({ ...complete, durationSeconds: 5.879 }, gates).pass, false)
+    })
+
+    it('rejects absent or nonfinite duration evidence only when the floor is armed', () => {
+      for (const durationSeconds of [undefined, null, NaN, Infinity, -Infinity]) {
+        const metrics = { ...complete, durationSeconds }
+        assert.equal(evaluateGates(metrics, gates).pass, false)
+        assert.equal(evaluateGates(metrics).pass, true)
+      }
+    })
+
+    it('rejects insufficient keyframe counts or nonfinite interval evidence when armed', () => {
+      for (const keyframeCount of [undefined, null, 0, 1, NaN, Infinity]) {
+        const verdict = evaluateGates({ ...complete, keyframeCount }, gates)
+        assert.equal(verdict.pass, false)
+        assert.ok(verdict.failures.some((failure) => /keyframe evidence/.test(failure)))
+      }
+      for (const maxKeyframeIntervalSeconds of [undefined, null, NaN, Infinity, -Infinity]) {
+        const verdict = evaluateGates({ ...complete, maxKeyframeIntervalSeconds }, gates)
+        assert.equal(verdict.pass, false)
+        assert.ok(verdict.failures.some((failure) => /keyframe evidence/.test(failure)))
+      }
+    })
+  })
+
   it('requiredH264Level matches the shipping recording matrix', () => {
     // Mirrors crates/videorc-backend/src/h264_profile.rs test vectors.
     assert.equal(requiredH264Level(1920, 1080, 30), 40)
