@@ -9,14 +9,67 @@
 
 ## Status and decisions
 
-- Status: **EXECUTING 2026-10-03.** The owner said: "Pick defaults and execute
-  the entire plan and create a pr."
+- Status: **EXECUTED 2026-10-04, in review.** The owner said: "Pick defaults
+  and execute the entire plan and create a pr."
   - Desktop branch: `feat/119-orcle-tab`. Web branch: `feat/119-orcle-clean-cut`.
+  - All slices are built except S8 (deferred) and the owner-only parts of
+    S0, S7, S17 and S20. The execution record and gate results are below.
   - Owner-only work stays owed:
     - S0 calibration on the owner's recordings (decision 16 defaults are used
       until then);
     - acceptance A1–A3;
     - the verbatim-transcription provider key in the Vercel env.
+- Execution record, desktop:
+
+  | Slice | Commits | Notes |
+  | --- | --- | --- |
+  | S1 | `0a4f63fa`, `0d6f9679`, `41cbfdc0`, test fix `8a41c397` | |
+  | S2 | `4e55e15a` | |
+  | S3 | `5cf9a436` | |
+  | S4 | `e02fca38`, `929ab2f2`, dead code `923b1500` | |
+  | S6 | `f2b7f7bc` | |
+  | S11 | `63f2b597`, `58ed926b` | |
+  | S12a | `56cb5ed8` | |
+  | S12b | `de230f95` | |
+  | S13 + S15 backend | `2ed7e639`, `8f61f2d6`, `bda8d313` | Clean cut stays out of the shared journal: an older reconcile would delete a re-rendered derived row. Crash safety lives in `clean_cut_jobs.render_json` instead. |
+  | S14, S15 and S19 UI | `98475bbc`, `89ca78de`, `17722314`, `840aaaa4`, `7cd9004e` | |
+  | S16 | `a3e1be2c`, `c713d2e9` | |
+
+  Latest `main` (`180b509c`) is merged in.
+- Execution record, web:
+
+  | Slice | Commits |
+  | --- | --- |
+  | S5 | `1c697aad`, plus `f39e03d7` (Clean cut sentences are deleted once their job finishes) |
+  | S9 | `e28bc697` |
+  | S10 | `8691f861` |
+  | S18 | `50c83080` |
+- Gates on the final desktop state:
+  - **Rust:** `cargo fmt` OK. `cargo clippy -p videorc-backend -- -D warnings`
+    OK. `cargo test -p videorc-backend`: 80 + 2,980 + 1 pass, 0 fail.
+  - **Release build:** passes with `CARGO_PROFILE_RELEASE_STRIP=false`. This
+    toolchain's sysroot has no `rust-objcopy`, and pristine `main` fails the
+    same way without the override.
+  - **TypeScript:** typecheck, lint, format and text-files OK. Desktop vitest
+    3,077 pass; `test:scripts` 1,871 pass.
+  - **Build:** `pnpm build` OK. `check:renderer-assets`: eager 1,810,877 raw /
+    353,957 gzip.
+  - **Smokes passing:**
+    - `smoke:clean-cut`: 37.9 s → 16.9 s with 7 cuts, frame-exact. It passes
+      with both the PATH FFmpeg and the bundled LGPL 8.1.1.
+    - `smoke:captions-contract`, `smoke:remote-control`, `smoke:session-ops`,
+      `smoke:noise-cleanup`, `probe:comments-window`, `smoke:dev`, and
+      `smoke:repair-encoder` (with the bundled FFmpeg).
+  - **Smokes that also fail on `main`:** both fail identically on pristine
+    `180b509c`.
+    - `smoke:cohost-fake`: the main scenario passes, including the new report
+      assertions. The plan 098/128 consent scenario stops at "lost its caption
+      socket".
+    - `smoke:live-chat-fake-providers`: "fake activity accounting disagreed".
+  - **Not run:** `smoke:recording-studio`. `recording.rs` only gained a
+    read-only accessor for the cached encoder probe.
+- Web gates: typecheck shows only the 2 baseline errors; `pnpm test` 709 pass,
+  0 fail; lint 0 errors.
 - Defaults picked by the orchestrator, 2026-10-03:
   - Decision 7: no clip-mark file export. Marks are moments in the report and
     pins in Clean cut review.
