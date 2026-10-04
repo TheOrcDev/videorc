@@ -424,3 +424,31 @@ describe('Clean cut card (plan 119 S14)', () => {
     )
   })
 })
+
+describe('Clean cut tab layout (plan 150 S7)', () => {
+  it('sets the settings beside the recordings, in two titled columns', async () => {
+    await render()
+    const titles = [...document.querySelectorAll('[data-slot="panel-section"] h3')].map(
+      (heading) => heading.textContent
+    )
+    expect(titles).toEqual(['Clean cut', 'Recordings'])
+    const [settings, recordings] = [
+      ...document.querySelectorAll<HTMLElement>('[data-slot="panel-section"]')
+    ]
+    expect(settings.querySelector('#clean-cut-auto-switch')).toBeTruthy()
+    expect(recordings.querySelector('[data-slot="clean-cut"]')).toBeTruthy()
+  })
+
+  it('locks the switch and the cut, never a live-looking control, while Videorc cannot cut', async () => {
+    await render({
+      cut: client({
+        capabilities: { ...AVAILABLE, available: false, reasonCode: 'provider-unconfigured' }
+      })
+    })
+    expect(document.querySelector('[data-slot="clean-cut-unlock"]')?.textContent).toContain(
+      "Clean cut isn't set up on Videorc's side yet."
+    )
+    expect(autoSwitch().disabled).toBe(true)
+    expect(button('Make a clean cut').disabled).toBe(true)
+  })
+})

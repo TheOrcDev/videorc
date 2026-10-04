@@ -177,7 +177,7 @@ export function OrcleTab({
           className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain"
           data-slot="orcle-scroll"
         >
-          <TabsContent className="flex flex-col" value="live">
+          <TabsContent className="flex flex-1 flex-col" value="live">
             <ConfigGrid className={CONFIG_GRID_PAIR}>
               <OrcleLiveSection />
               <div className="flex flex-col">
@@ -204,7 +204,7 @@ export function OrcleTab({
               <OrcleReportCard sessionId={reportSession} onSessionChange={setReportSession} />
             </PageStack>
           </TabsContent>
-          <TabsContent className="flex flex-col" value="clean-cut">
+          <TabsContent className="flex flex-1 flex-col" value="clean-cut">
             {review ? (
               <Suspense fallback={<CleanCutReviewFallback />}>
                 <CleanCutReview
@@ -215,14 +215,14 @@ export function OrcleTab({
                 />
               </Suspense>
             ) : (
-              <PageStack>
+              <ConfigGrid className={CONFIG_GRID_PAIR}>
                 <CleanCutCard
                   client={cleanCut}
                   focus={focus}
                   onOpenLibrarySession={openLibrarySession}
                   onReview={setReview}
                 />
-              </PageStack>
+              </ConfigGrid>
             )}
           </TabsContent>
         </div>

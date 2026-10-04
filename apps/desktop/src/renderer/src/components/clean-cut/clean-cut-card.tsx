@@ -85,9 +85,12 @@ function errorMessage(error: unknown): string | undefined {
 }
 
 /**
- * The Clean cut section of the Orcle tab (plan 119 S14, S19): the "every
- * recording" switch, the chosen recording's cut with what to do next, and
- * the monthly allowance. Starting needs the same sign-in, Premium and Cloud
+ * The Orcle tab's Clean cut tab (plan 119 S14, S19; plan 150 S7), in Settings'
+ * two columns: Clean cut (the "every recording" switch, the monthly allowance
+ * and, when it can't run, the one reason why) beside Recordings (the chosen
+ * recording's cut with what to do next). Locked means disabled with one
+ * reason: the switch and "Make a clean cut" are off while the reason shows;
+ * the picker stays, because cuts already made stay reviewable. Starting needs the same sign-in, Premium and Cloud
  * AI consent as Orcle Live; consent is asked here, in a dialog that names
  * the audio upload.
  */
@@ -257,47 +260,51 @@ export function CleanCutCard({
         description={CLEAN_CUT_DESCRIPTION}
         title={CLEAN_CUT_TITLE}
       >
+        <Field orientation="horizontal">
+          <FieldContent>
+            <FieldLabel htmlFor="clean-cut-auto-switch">{CLEAN_CUT_AUTO_LABEL}</FieldLabel>
+            <CleanCutAutoStatusLine status={autoStatus} />
+          </FieldContent>
+          <Switch
+            checked={auto}
+            disabled={!auto && unlock !== null}
+            id="clean-cut-auto-switch"
+            onCheckedChange={turnAuto}
+          />
+        </Field>
+
+        {unlock ? (
+          <Alert data-slot="clean-cut-unlock">
+            <LockIcon />
+            <AlertTitle className="font-normal text-muted-foreground">{unlock.reason}</AlertTitle>
+            {unlockAction ? (
+              <AlertAction>
+                <Button
+                  size="xs"
+                  type="button"
+                  variant="outline"
+                  onClick={() =>
+                    unlockAction.kind === 'sign-in'
+                      ? signIn()
+                      : openVideorcWebLink(unlockAction.url)
+                  }
+                >
+                  {unlockAction.kind === 'sign-in' ? 'Sign in' : 'View Premium'}
+                </Button>
+              </AlertAction>
+            ) : null}
+          </Alert>
+        ) : null}
+      </PanelSection>
+      <PanelSection
+        description="Pick a recording to cut, or review a cut you made."
+        title="Recordings"
+      >
         <div
           className="flex min-w-0 scroll-mt-3 flex-col gap-3"
           data-slot="clean-cut"
           ref={sectionRef}
         >
-          <Field orientation="horizontal">
-            <FieldContent>
-              <FieldLabel htmlFor="clean-cut-auto-switch">{CLEAN_CUT_AUTO_LABEL}</FieldLabel>
-              <CleanCutAutoStatusLine status={autoStatus} />
-            </FieldContent>
-            <Switch
-              checked={auto}
-              disabled={!auto && accountLocked}
-              id="clean-cut-auto-switch"
-              onCheckedChange={turnAuto}
-            />
-          </Field>
-
-          {unlock ? (
-            <Alert data-slot="clean-cut-unlock">
-              <LockIcon />
-              <AlertTitle className="font-normal text-muted-foreground">{unlock.reason}</AlertTitle>
-              {unlockAction ? (
-                <AlertAction>
-                  <Button
-                    size="xs"
-                    type="button"
-                    variant="outline"
-                    onClick={() =>
-                      unlockAction.kind === 'sign-in'
-                        ? signIn()
-                        : openVideorcWebLink(unlockAction.url)
-                    }
-                  >
-                    {unlockAction.kind === 'sign-in' ? 'Sign in' : 'View Premium'}
-                  </Button>
-                </AlertAction>
-              ) : null}
-            </Alert>
-          ) : null}
-
           {selected ? (
             <div className="flex min-w-0 flex-col gap-2" data-slot="clean-cut-recording">
               <div className="flex flex-wrap items-center gap-2">
