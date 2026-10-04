@@ -464,7 +464,9 @@ export const STORAGE_KEYS = {
   // check only suggests, never applies.
   outputChosenByUser: 'videorc.outputChosenByUser',
   // The Settings tab used last (plan 064), so Settings reopens where it was left.
-  settingsTab: 'videorc.settingsTab'
+  settingsTab: 'videorc.settingsTab',
+  // The Orcle tab's own tab used last (plan 150), so Orcle reopens where it was left.
+  orcleTab: 'videorc.orcleTab'
 } as const
 
 // Permissions onboarding: ANY stored value means "seen/dismissed" — the gate

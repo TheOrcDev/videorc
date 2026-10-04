@@ -48,6 +48,7 @@ import { toast } from '@/lib/toast'
 import { cn } from '@/lib/utils'
 import { openVideorcWebLink } from '@/lib/videorc-web-links'
 import type { CleanCutTabRequest } from '@/lib/clean-cut-events'
+import type { OrcleTabId } from '@/lib/orcle-tabs'
 import { sessionIsLive } from '../../../../shared/capture-state'
 
 // The review is the heaviest part of Clean cut (player, transcript editor):
@@ -83,6 +84,8 @@ export function OrcleTab({
 }: {
   reportSessionId?: string | null
   cleanCutRequest?: CleanCutTabRequest | null
+  tab?: OrcleTabId
+  onTabChange?: (tab: OrcleTabId) => void
   onOpenLibrarySession?: (sessionId: string) => void
 }): ReactElement {
   const [reportSession, setReportSession] = useState<string | null>(reportSessionId)
