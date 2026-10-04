@@ -11,8 +11,14 @@
 
 ## Status and decisions
 
-- **Status: EXECUTING 2026-10-04.**
+- **Status: EXECUTED, in review, 2026-10-04.**
   - The owner said: "Execute the entire plan and create a PR."
+  - All slices S1–S9 are built. The S10 review's seven desktop findings and
+    one web finding are fixed. The owner acceptance B1–B3 is still owed.
+  - Owner settings owed:
+    - enable `moderation:chat_message:manage` in the Kick developer app;
+    - set `VIDEORC_AI_COHOST_COMMAND_ENABLED=true` on the web only when the
+      cloud parser should run, after `pnpm eval:cohost-command`.
   - Desktop branch and web branch: `feat/140-orcle-voice-commands`.
   - Owner-only work stays owed:
     - acceptance B1–B3;
