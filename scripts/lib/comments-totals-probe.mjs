@@ -1,4 +1,23 @@
 import { randomUUID } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
+
+export function assertFakeActivityTotals(eventTotals) {
+  if (
+    eventTotals?.status !== 'available' ||
+    eventTotals.messageCount !== 13 ||
+    eventTotals.supporters !== 7 ||
+    eventTotals.bits !== 1500 ||
+    eventTotals.follows !== 2 ||
+    eventTotals.raids !== 1 ||
+    eventTotals.chatters !== 7 ||
+    !isDeepStrictEqual(eventTotals.tips, [
+      { currency: 'USD', amountMicros: 5_000_000 },
+      { currency: 'EUR', amountMicros: 2_000_000 }
+    ])
+  ) {
+    throw new Error('Confirmed fake activity accounting disagreed with the normalized fixture.')
+  }
+}
 
 /** Confirmed reduced accounting, with every paid row outside the 2,000-row
  * fixture window. SQLite correctness is exercised independently by the fake

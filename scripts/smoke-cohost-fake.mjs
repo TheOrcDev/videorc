@@ -187,6 +187,7 @@ try {
         VIDEORC_API_BASE_URL: router.httpOrigin,
         // Debug-only caption seam for the spotlight scenario: captions run
         // without a microphone and take injected audio (never in release).
+        VIDEORC_ENABLE_SMOKE_RPC: '1',
         VIDEORC_CAPTION_CONTRACT_TEST: '1',
         VIDEORC_CAPTION_CONTRACT_ALLOW_IDLE: '1',
         VIDEORC_DISABLE_AUTO_PREVIEW: '1',
@@ -938,8 +939,10 @@ async function runConsentScenario({ ready, startedAt }) {
       destinations: [{ platform: 'twitch', targetId: 'consent', read: 'ready', write: 'ready' }],
       fakes: [{ platform: 'twitch', targetId: 'consent', count: 5, intervalMs: 200, send: 'sent' }]
     })
-    await flip(true)
+    // Captions own the realtime task before Orcle joins: a task started
+    // listen-only deliberately stays chunked when captions later present.
     await request(backend, timeoutMs, 'captions.start', { language: 'en' })
+    await flip(true)
     pump = startCaptionAudioPump(admin)
     await waitForEvent(
       events,

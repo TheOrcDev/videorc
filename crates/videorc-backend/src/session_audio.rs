@@ -1119,6 +1119,8 @@ struct AudioShared {
     after_ramp: Option<Arc<dyn Fn(u64) + Send + Sync>>,
     #[cfg(test)]
     cancellation_input: Option<(u64, fn(&mut AudioTimeline))>,
+    #[cfg(test)]
+    mix_observation: Option<Arc<std::sync::Mutex<MixTestObservation>>>,
     #[cfg(debug_assertions)]
     caption_injector: Option<crate::audio::CaptionContractTestAudioInjector>,
 }
@@ -1516,13 +1518,28 @@ impl AudioSwitchHandle {
     /// levels never takes the recording lock.
     pub fn take_levels(&self) -> BusLevels {
         let mut shared = self.shared.lock().unwrap_or_else(|p| p.into_inner());
+        #[cfg(test)]
+        if let Some(observation) = &shared.mix_observation {
+            observation
+                .lock()
+                .unwrap()
+                .boundary("levels-before-take", &shared);
+        }
         let levels = &mut shared.levels;
-        BusLevels {
+        let reading = BusLevels {
             microphone: levels.microphone.take(),
             system_audio: levels.system.take(),
             master: levels.master.take(),
             master_clipped_samples: std::mem::take(&mut levels.master_clipped_samples),
+        };
+        #[cfg(test)]
+        if let Some(observation) = &shared.mix_observation {
+            observation
+                .lock()
+                .unwrap()
+                .boundary("levels-after-take", &shared);
         }
+        reading
     }
 
     fn request_silent_drain(&self) -> bool {
@@ -1851,6 +1868,8 @@ pub fn attach_prepared_with(
         after_ramp: None,
         #[cfg(test)]
         cancellation_input: None,
+        #[cfg(test)]
+        mix_observation: None,
         #[cfg(debug_assertions)]
         caption_injector: source.as_ref().and_then(|source| source.caption_injector()),
     }));
@@ -2374,6 +2393,216 @@ fn ingest_pending(
 struct BusDiagnostics {
     max_write_stall: Duration,
     max_lateness: Duration,
+}
+
+// Observation only: these owners exist in the five timed mixer fixtures, never
+// in a production bus. Counter boundaries survive omitted individual chunks.
+// Lock order is AudioShared -> observation; producer observations never acquire
+// AudioShared. Instrumented fixtures can incur observation-lock overhead.
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct MixCounterSnapshot {
+    cursor: u64,
+    microphone: AudioBusCounters,
+    microphone_losses: BusLosses,
+    system: Option<(AudioBusCounters, BusLosses)>,
+    diagnostics: BusDiagnostics,
+}
+
+#[cfg(test)]
+impl MixCounterSnapshot {
+    fn capture(
+        timeline: &AudioTimeline,
+        system: Option<&SourceSlot>,
+        diagnostics: BusDiagnostics,
+    ) -> Self {
+        Self {
+            cursor: timeline.cursor(),
+            microphone: timeline.counters(),
+            microphone_losses: timeline.losses(),
+            system: system.map(|slot| (slot.timeline.counters(), slot.timeline.losses())),
+            diagnostics,
+        }
+    }
+
+    fn value(self) -> serde_json::Value {
+        serde_json::json!({
+            "cursor": self.cursor, "microphone": self.microphone,
+            "microphoneLosses": mix_loss_values(self.microphone_losses, BusLosses::default()),
+            "system": self.system.map(|(counters, losses)| serde_json::json!({
+                "counters": counters, "losses": mix_loss_values(losses, BusLosses::default())
+            })),
+            "maxWriteStallUs": self.diagnostics.max_write_stall.as_micros(),
+            "maxLatenessUs": self.diagnostics.max_lateness.as_micros()
+        })
+    }
+}
+
+#[cfg(test)]
+fn mix_loss_values(after: BusLosses, before: BusLosses) -> serde_json::Value {
+    serde_json::json!({
+        "aheadOfCap": after.dropped_ahead_of_cap.saturating_sub(before.dropped_ahead_of_cap),
+        "outputBehind": after.dropped_output_behind.saturating_sub(before.dropped_output_behind),
+        "malformed": after.dropped_malformed.saturating_sub(before.dropped_malformed),
+        "producerFull": after.producer_queue_full.saturating_sub(before.producer_queue_full),
+        "stale": after.discarded_stale.saturating_sub(before.discarded_stale),
+        "beforeEpoch": after.discarded_before_epoch.saturating_sub(before.discarded_before_epoch),
+        "overlap": after.discarded_overlap.saturating_sub(before.discarded_overlap),
+        "duplicate": after.discarded_duplicate.saturating_sub(before.discarded_duplicate),
+        "behindCap": after.discarded_behind_cap.saturating_sub(before.discarded_behind_cap),
+        "staleWritten": after.stale_written.saturating_sub(before.stale_written)
+    })
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct MixDeliveryObservation {
+    packets: u64,
+    frames: u64,
+    first_end_frame: Option<u64>,
+    last_end_frame: Option<u64>,
+    max_send_lateness_us: u128,
+    late_playout_frames: u64,
+    late_100ms_frames: u64,
+}
+
+#[cfg(test)]
+struct MixTestObservation {
+    epoch: Instant,
+    playout: Duration,
+    reader: Option<tokio::sync::watch::Receiver<usize>>,
+    first: Option<MixCounterSnapshot>,
+    last: Option<MixCounterSnapshot>,
+    window: Option<(u64, u64)>,
+    window_before: Option<MixCounterSnapshot>,
+    window_after: Option<MixCounterSnapshot>,
+    window_includes_first_ingest: Option<bool>,
+    window_frames: u64,
+    window_stale_frames: u64,
+    completed_chunks: u64,
+    boundaries: VecDeque<serde_json::Value>,
+    omitted_boundaries: u64,
+    delivery: [MixDeliveryObservation; 2],
+}
+
+#[cfg(test)]
+impl MixTestObservation {
+    fn new(epoch: Instant, playout: Duration) -> Self {
+        Self {
+            epoch,
+            playout,
+            reader: None,
+            first: None,
+            last: None,
+            window: None,
+            window_before: None,
+            window_after: None,
+            window_frames: 0,
+            window_includes_first_ingest: None,
+            window_stale_frames: 0,
+            completed_chunks: 0,
+            boundaries: VecDeque::new(),
+            omitted_boundaries: 0,
+            delivery: Default::default(),
+        }
+    }
+
+    fn delivered(&mut self, role: SourceRole, end: Instant, frames: u64, sent: Instant) {
+        let delivery = &mut self.delivery[match role {
+            SourceRole::Microphone => 0,
+            SourceRole::System => 1,
+        }];
+        let end_frame =
+            (end.saturating_duration_since(self.epoch).as_secs_f64() * 48_000.0).round() as u64;
+        let lateness = sent.saturating_duration_since(end);
+        delivery.packets += 1;
+        delivery.frames += frames;
+        delivery.first_end_frame.get_or_insert(end_frame);
+        delivery.last_end_frame = Some(end_frame);
+        delivery.max_send_lateness_us = delivery.max_send_lateness_us.max(lateness.as_micros());
+        if lateness >= self.playout {
+            delivery.late_playout_frames += frames;
+        }
+        if lateness >= Duration::from_millis(100) {
+            delivery.late_100ms_frames += frames;
+        }
+    }
+
+    fn completed(
+        &mut self,
+        before: MixCounterSnapshot,
+        after: MixCounterSnapshot,
+        stale_from: Option<usize>,
+    ) {
+        self.first.get_or_insert(before);
+        let preceding = self.last.unwrap_or(before);
+        if let Some((from, to)) = self.window {
+            let start = before.cursor.max(from);
+            let end = after.cursor.min(to);
+            if start < end {
+                self.window_includes_first_ingest
+                    .get_or_insert(self.last.is_some());
+                self.window_before.get_or_insert(preceding);
+                self.window_after = Some(after);
+                self.window_frames += end - start;
+                if let Some(stale) = stale_from {
+                    self.window_stale_frames +=
+                        end.saturating_sub(start.max(before.cursor + stale as u64));
+                }
+            }
+        }
+        self.last = Some(after);
+        self.completed_chunks += 1;
+    }
+
+    fn boundary(&mut self, name: &'static str, shared: &AudioShared) {
+        if self.boundaries.len() == 64 {
+            self.boundaries.pop_front();
+            self.omitted_boundaries += 1;
+        }
+        let level = |window: LevelWindow| {
+            serde_json::json!({
+                "samples": window.samples, "peak": window.peak, "sumSquares": window.sum_squares
+            })
+        };
+        self.boundaries.push_back(serde_json::json!({
+            "boundary": name, "readerAck": self.reader.as_ref().map(|reader| *reader.borrow()),
+            "committedCursor": shared.status.sample_cursor, "counters": shared.status.counters,
+            "lastCompletedWrite": self.last.map(MixCounterSnapshot::value),
+            "microphoneLevelWindow": level(shared.levels.microphone),
+            "systemLevelWindow": level(shared.levels.system),
+            "masterLevelWindow": level(shared.levels.master)
+        }));
+    }
+
+    fn value(&self) -> serde_json::Value {
+        let delta = self.window_before.zip(self.window_after).map(|(before, after)| serde_json::json!({
+            "microphone": mix_loss_values(after.microphone_losses, before.microphone_losses),
+            "system": before.system.zip(after.system).map(|((_, before), (_, after))| mix_loss_values(after, before))
+        }));
+        serde_json::json!({
+            "first": self.first.map(MixCounterSnapshot::value), "last": self.last.map(MixCounterSnapshot::value),
+            "requestedWindow": self.window, "windowBefore": self.window_before.map(MixCounterSnapshot::value),
+            "windowAfter": self.window_after.map(MixCounterSnapshot::value), "windowLossDelta": delta,
+            "observedWindowFrames": self.window_frames, "windowStaleWrittenFrames": self.window_stale_frames,
+            "completeWindowWriteCoverage": self.window.is_some_and(|(from, to)| self.window_frames == to - from),
+            "counterDeltaIncludesFirstWindowIngest": self.window_includes_first_ingest,
+            "counterBoundaryFrameRange": self.window_before.zip(self.window_after).map(|(before, after)| (before.cursor, after.cursor)),
+            "counterDeltasCoverCompletedChunksNotIndividualSamples": true,
+            "initialIngestMayPrecedeFirstSnapshot": true,
+            "individualChunkTimelineRetained": false, "completedChunks": self.completed_chunks,
+            "boundaries": self.boundaries, "omittedBoundaries": self.omitted_boundaries,
+            "deliveryLatenessScope": "entire-observed-producer",
+            "individualDeliveryTimelineRetained": false, "playoutUs": self.playout.as_micros(),
+            "delivery": self.delivery.iter().enumerate().map(|(role, delivery)| serde_json::json!({
+                "role": if role == 0 { "microphone" } else { "system" },
+                "packets": delivery.packets, "frames": delivery.frames,
+                "firstIntendedEndFrame": delivery.first_end_frame, "lastIntendedEndFrame": delivery.last_end_frame,
+                "maxSendLatenessUs": delivery.max_send_lateness_us,
+                "latePlayoutFrames": delivery.late_playout_frames, "late100msFrames": delivery.late_100ms_frames
+            })).collect::<Vec<_>>()
+        })
+    }
 }
 
 fn log_bus_summary(timeline: &AudioTimeline, diagnostics: &BusDiagnostics, outcome: &str) {
@@ -4393,6 +4622,8 @@ fn run_bus_owned(
             prepare_input(&mut timeline);
         }
         let start = timeline.cursor();
+        #[cfg(test)]
+        let mix_before = MixCounterSnapshot::capture(&timeline, system.as_ref(), diagnostics);
         let mut raw = timeline.render_with_provenance();
         if ramp_old {
             ramp_through_zero(&mut raw.samples, false);
@@ -4635,6 +4866,14 @@ fn run_bus_owned(
                 shared.levels.system.add(system_levels);
             }
             shared.levels.master.add(master_levels);
+            #[cfg(test)]
+            if let Some(observation) = &shared.mix_observation {
+                observation.lock().unwrap().completed(
+                    mix_before,
+                    MixCounterSnapshot::capture(&timeline, system.as_ref(), diagnostics),
+                    stale_from,
+                );
+            }
         }
         if draining.load(Ordering::Acquire) {
             cancel_drain_observation(&mut observe);
@@ -6746,13 +6985,15 @@ mod mix_tests {
     async fn level_windows_read_the_mic_before_the_sum_and_the_mix_as_written() {
         let epoch = Instant::now() + Duration::from_millis(100);
         let microphone = signal_packets(epoch, 0, 96_000, 512, |_| (0.6, 0.6));
-        let bus = start_bus(
+        let (bus, evidence) = start_observed_bus(
             epoch,
             Some(microphone),
             AudioProcessingSettings::default(),
             system_options(),
+            None,
         )
         .await;
+        set_mix_window(&evidence, 36_000, 60_000);
         let system = bus.session.system_audio();
         let producer = prepare_system(
             &system,
@@ -6767,7 +7008,14 @@ mod mix_tests {
         let _ = levels_handle.take_levels();
         bus.wait_for_frames(60_000).await;
         let levels = levels_handle.take_levels();
-        let _ = bus.finish();
+        let (bytes, _) = bus.finish();
+        report_mix_evidence(
+            "level-windows",
+            &evidence,
+            &decode(&bytes),
+            (LIMITER_CEILING, LIMITER_CEILING * 0.3 / 1.3),
+            1.0e-4,
+        );
 
         let microphone = levels.microphone.expect("a microphone reading");
         let mic_db = 20.0 * 0.6_f32.log10();
@@ -6870,6 +7118,16 @@ mod mix_tests {
         packets: Vec<AudioFrame>,
         failure: Option<Arc<std::sync::Mutex<Option<String>>>>,
     ) -> ProducerSource {
+        timed_source_observed(id, packets, failure, None, SourceRole::Microphone)
+    }
+
+    fn timed_source_observed(
+        id: &str,
+        packets: Vec<AudioFrame>,
+        failure: Option<Arc<std::sync::Mutex<Option<String>>>>,
+        observation: Option<Arc<std::sync::Mutex<MixTestObservation>>>,
+        role: SourceRole,
+    ) -> ProducerSource {
         let (sender, receiver) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
@@ -6884,8 +7142,19 @@ mod mix_tests {
                         None => break,
                     }
                 }
+                let delivery = observation
+                    .as_ref()
+                    .map(|_| (packet.captured_at, packet.frame_count() as u64));
                 if sender.send(packet).is_err() {
                     return;
+                }
+                if let Some((end, frames)) = delivery {
+                    let sent = Instant::now();
+                    let observation = observation.as_ref().unwrap();
+                    observation
+                        .lock()
+                        .unwrap()
+                        .delivered(role, end, frames, sent);
                 }
             }
             while !worker_stop.load(Ordering::Acquire) {
@@ -7022,6 +7291,9 @@ mod mix_tests {
             losses.extend(observation.losses);
             stalls.extend(observation.output_stalls);
             if !stalls.is_empty() || Instant::now() >= deadline {
+                if bus.observation.is_some() {
+                    record_mix_boundary(&bus.session, "stall-reported");
+                }
                 return (
                     losses,
                     stalls,
@@ -7313,6 +7585,7 @@ mod mix_tests {
         session: SessionAudio,
         reader: thread::JoinHandle<Vec<u8>>,
         progress: tokio::sync::watch::Receiver<usize>,
+        observation: Option<Arc<std::sync::Mutex<MixTestObservation>>>,
     }
     impl Bus {
         async fn wait_for_frames(&self, frames: usize) {
@@ -7324,6 +7597,9 @@ mod mix_tests {
             .await
             .expect("bus output progressed")
             .unwrap();
+            if self.observation.is_some() {
+                record_mix_boundary(&self.session, "reader-ack");
+            }
         }
         fn finish(self) -> (Vec<u8>, AudioBusStatus) {
             let status = self.session.status();
@@ -7349,11 +7625,54 @@ mod mix_tests {
         options: SessionAudioOptions,
         reader_stall: Option<(usize, Duration)>,
     ) -> Bus {
+        start_bus_observed(epoch, microphone, settings, options, reader_stall, None).await
+    }
+
+    async fn start_observed_bus(
+        epoch: Instant,
+        microphone: Option<Vec<AudioFrame>>,
+        settings: AudioProcessingSettings,
+        options: SessionAudioOptions,
+        reader_stall: Option<(usize, Duration)>,
+    ) -> (Bus, Arc<std::sync::Mutex<MixTestObservation>>) {
+        let observation = Arc::new(std::sync::Mutex::new(MixTestObservation::new(
+            epoch,
+            options.playout_delay,
+        )));
+        let bus = start_bus_observed(
+            epoch,
+            microphone,
+            settings,
+            options,
+            reader_stall,
+            Some(observation.clone()),
+        )
+        .await;
+        (bus, observation)
+    }
+
+    async fn start_bus_observed(
+        epoch: Instant,
+        microphone: Option<Vec<AudioFrame>>,
+        settings: AudioProcessingSettings,
+        options: SessionAudioOptions,
+        reader_stall: Option<(usize, Duration)>,
+        observation: Option<Arc<std::sync::Mutex<MixTestObservation>>>,
+    ) -> Bus {
         let source = match microphone {
             Some(packets) => {
                 let count = Arc::new(AtomicU64::new(0));
+                let source_observation = observation.clone();
                 let producer = prepare_producer_with(
-                    move || Ok(timed_source("microphone:coreaudio:41", packets, None)),
+                    move || {
+                        Ok(timed_source_observed(
+                            "microphone:coreaudio:41",
+                            packets,
+                            None,
+                            source_observation,
+                            SourceRole::Microphone,
+                        ))
+                    },
                     Arc::new(AtomicBool::new(false)),
                     count.clone(),
                     spawn_owner,
@@ -7382,10 +7701,15 @@ mod mix_tests {
             crate::audio::NATIVE_AUDIO_SOURCE_STALL_TIMEOUT,
             options,
         );
+        if let Some(observation) = &observation {
+            observation.lock().unwrap().reader = Some(progress.clone());
+            session.handle.shared.lock().unwrap().mix_observation = Some(observation.clone());
+        }
         Bus {
             session,
             reader,
             progress,
+            observation,
         }
     }
 
@@ -7394,10 +7718,17 @@ mod mix_tests {
         packets: Vec<AudioFrame>,
         failure: ProducerFailure,
     ) -> SystemAudioProducer {
+        let observation = handle.shared.lock().unwrap().mix_observation.clone();
         handle
             .prepare(
                 move || {
-                    let source = timed_source("system-audio:default", packets, None);
+                    let source = timed_source_observed(
+                        "system-audio:default",
+                        packets,
+                        None,
+                        observation,
+                        SourceRole::System,
+                    );
                     let ProducerSource {
                         receiver,
                         stats,
@@ -7455,6 +7786,59 @@ mod mix_tests {
             .count()
     }
 
+    fn record_mix_boundary(session: &SessionAudio, name: &'static str) {
+        let shared = session.handle.shared.lock().unwrap();
+        if let Some(observation) = &shared.mix_observation {
+            observation.lock().unwrap().boundary(name, &shared);
+        }
+    }
+
+    fn set_mix_window(evidence: &Arc<std::sync::Mutex<MixTestObservation>>, from: u64, to: u64) {
+        evidence.lock().unwrap().window = Some((from, to));
+    }
+
+    // This classification is evidence, never an acceptance predicate. Each
+    // existing assertion below still inspects its original samples/tolerance.
+    // Report only after the actual bus/reader cleanup; no PCM is retained here.
+    fn report_mix_evidence(
+        case: &'static str,
+        evidence: &Arc<std::sync::Mutex<MixTestObservation>>,
+        samples: &[f32],
+        expected: (f32, f32),
+        tolerance: f32,
+    ) {
+        let evidence = evidence.lock().unwrap();
+        let histogram = evidence.window.map(|(from, to)| {
+            let available = samples.len() as u64 / 2;
+            let lane = |channel: usize, expected: f32| {
+                let (mut zero, mut matching, mut altered_nonzero) = (0_u64, 0_u64, 0_u64);
+                for frame in from.min(available)..to.min(available) {
+                    let sample = samples[frame as usize * 2 + channel];
+                    if sample == 0.0 {
+                        zero += 1;
+                    } else if (sample - expected).abs() <= tolerance {
+                        matching += 1;
+                    } else {
+                        altered_nonzero += 1;
+                    }
+                }
+                serde_json::json!({"zero": zero, "expected": matching, "alteredNonzero": altered_nonzero})
+            };
+            serde_json::json!({
+                "from": from, "to": to, "availableFrames": available,
+                "missingFrames": (to - from).saturating_sub(to.min(available).saturating_sub(from.min(available))),
+                "expectedLeft": expected.0, "expectedRight": expected.1, "classificationTolerance": tolerance,
+                "left": lane(0, expected.0), "right": lane(1, expected.1)
+            })
+        });
+        eprintln!(
+            "mix-observation: {}",
+            serde_json::json!({
+                "case": case, "observation": evidence.value(), "inspectedWindow": histogram
+            })
+        );
+    }
+
     /// Plan 076, the owner's stream 1: FFmpeg stopped draining the audio
     /// FIFO for about 3 s (its audio input paused while video was late). The
     /// microphone kept delivering, so it is never retired: the stretch the
@@ -7466,7 +7850,7 @@ mod mix_tests {
         for options in [SessionAudioOptions::default(), system_options()] {
             let epoch = Instant::now() + Duration::from_millis(100);
             let microphone = signal_packets(epoch, 0, 48_000 * 30, 480, |_| (0.2, 0.2));
-            let bus = start_bus_with_stall(
+            let (bus, evidence) = start_observed_bus(
                 epoch,
                 Some(microphone),
                 AudioProcessingSettings::default(),
@@ -7475,11 +7859,23 @@ mod mix_tests {
             )
             .await;
             let (losses, stalls, input_state, caught_up) = observe_until_stall_reported(&bus).await;
+            set_mix_window(
+                &evidence,
+                (caught_up + 48_000) as u64,
+                (caught_up + 96_000) as u64,
+            );
             // One second of output after the bus caught up.
             bus.wait_for_frames(caught_up + 48_000 * 2).await;
             assert!(bus.session.microphone_owner_present(), "never retired");
             let (bytes, _) = bus.finish();
             let samples = decode(&bytes);
+            report_mix_evidence(
+                "microphone-after-stall",
+                &evidence,
+                &samples,
+                (0.2, 0.2),
+                0.0,
+            );
             assert_eq!(losses, vec![], "not a source loss");
             assert_eq!(input_state, NativeAudioInputState::Live);
             // Scheduling jitter may split the episode; together they cover
@@ -7504,7 +7900,7 @@ mod mix_tests {
     async fn an_output_stall_keeps_system_audio_in_the_mix() {
         let epoch = Instant::now() + Duration::from_millis(100);
         let microphone = signal_packets(epoch, 0, 48_000 * 30, 480, |_| (0.2, 0.2));
-        let bus = start_bus_with_stall(
+        let (bus, evidence) = start_observed_bus(
             epoch,
             Some(microphone),
             AudioProcessingSettings::default(),
@@ -7521,11 +7917,17 @@ mod mix_tests {
         .await;
         bus.session.attach_system(producer).await.unwrap();
         let (losses, stalls, _, caught_up) = observe_until_stall_reported(&bus).await;
+        set_mix_window(
+            &evidence,
+            (caught_up + 48_000) as u64,
+            (caught_up + 96_000) as u64,
+        );
         bus.wait_for_frames(caught_up + 48_000 * 2).await;
         assert!(system.observation().attached, "still in the mix");
         assert_eq!(system.claim_loss(), None, "no system loss");
         let (bytes, _) = bus.finish();
         let samples = decode(&bytes);
+        report_mix_evidence("system-after-stall", &evidence, &samples, (0.7, 0.45), 0.0);
         assert_eq!(losses, vec![]);
         assert!(!stalls.is_empty(), "the stall is reported");
         assert_eq!(
@@ -7546,18 +7948,27 @@ mod mix_tests {
         for packet in microphone.iter_mut().skip(200) {
             packet.timestamp_micros += 5_000_000;
         }
-        let bus = start_bus(
+        let (bus, evidence) = start_observed_bus(
             epoch,
             Some(microphone),
             AudioProcessingSettings::default(),
             SessionAudioOptions::default(),
+            None,
         )
         .await;
+        set_mix_window(&evidence, 288_000, 384_000);
         bus.wait_for_frames(48_000 * 8).await;
         let observation = bus.session.observation(false);
         assert!(bus.session.microphone_owner_present(), "never retired");
         let (bytes, _) = bus.finish();
         let samples = decode(&bytes);
+        report_mix_evidence(
+            "source-clock-recovery",
+            &evidence,
+            &samples,
+            (0.2, 0.2),
+            0.0,
+        );
         assert_eq!(
             observation
                 .losses
@@ -8015,13 +8426,15 @@ mod mix_tests {
     async fn mixed_sum_is_limited_counted_stereo_and_the_caption_tap_hears_only_the_mic() {
         let epoch = Instant::now() + Duration::from_millis(100);
         let microphone = signal_packets(epoch, 0, 72_000, 512, |_| (0.6, 0.6));
-        let bus = start_bus(
+        let (bus, evidence) = start_observed_bus(
             epoch,
             Some(microphone),
             AudioProcessingSettings::default(),
             system_options(),
+            None,
         )
         .await;
+        set_mix_window(&evidence, 40_000, 40_001);
         let tapped = Arc::new(std::sync::Mutex::new(Vec::<f32>::new()));
         let tap = tapped.clone();
         bus.session.handle.shared.lock().unwrap().caption_observer =
@@ -8041,6 +8454,13 @@ mod mix_tests {
         let microphone_peak = bus.session.observation(false).live_peak;
         let (bytes, _) = bus.finish();
         let samples = decode(&bytes);
+        report_mix_evidence(
+            "limited-stereo-sample",
+            &evidence,
+            &samples,
+            (LIMITER_CEILING, LIMITER_CEILING * 0.3 / 1.3),
+            1.0e-4,
+        );
         assert!(
             samples
                 .iter()
@@ -8092,6 +8512,7 @@ mod mix_tests {
             session,
             reader,
             progress,
+            observation: None,
         };
         let system = bus.session.system_audio();
         let producer = prepare_system(
@@ -8654,6 +9075,7 @@ mod mix_tests {
             session,
             reader,
             progress,
+            observation: None,
         };
         bus.wait_for_frames(4_800).await;
         // A system capture whose close takes as long as the test says.

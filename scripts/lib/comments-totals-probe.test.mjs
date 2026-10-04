@@ -1,6 +1,88 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { probeCommentsTotals } from './comments-totals-probe.mjs'
+import { assertFakeActivityTotals, probeCommentsTotals } from './comments-totals-probe.mjs'
+
+// ServerResponse::ok converts the actual persisted totals to serde_json::Value
+// before websocket serialization. Its object keys arrive in this order; the
+// ordered currency rows and every accounting value remain unchanged.
+function fakeActivityWireTotals() {
+  return JSON.parse(
+    '{"bits":1500,"chatters":7,"follows":2,"messageCount":13,"raids":1,"status":"available","supporters":7,"tips":[{"amountMicros":5000000,"currency":"USD"},{"amountMicros":2000000,"currency":"EUR"}]}'
+  )
+}
+
+test('normalized fake activity accounting accepts the actual RPC tip property order', () => {
+  assert.doesNotThrow(() => assertFakeActivityTotals(fakeActivityWireTotals()))
+})
+
+test('normalized fake activity accounting accepts the equivalent fixture property order', () => {
+  const totals = fakeActivityWireTotals()
+  totals.tips = totals.tips.map(({ currency, amountMicros }) => ({ currency, amountMicros }))
+  assert.doesNotThrow(() => assertFakeActivityTotals(totals))
+})
+
+for (const [field, value] of [
+  ['status', 'legacy-unavailable'],
+  ['messageCount', 12],
+  ['supporters', 6],
+  ['bits', 1499],
+  ['follows', 1],
+  ['raids', 0],
+  ['chatters', 6]
+]) {
+  test(`normalized fake activity accounting refuses an incorrect ${field}`, () => {
+    const totals = fakeActivityWireTotals()
+    totals.tips = totals.tips.map(({ currency, amountMicros }) => ({ currency, amountMicros }))
+    totals[field] = value
+    assert.throws(() => assertFakeActivityTotals(totals), /accounting disagreed/)
+  })
+}
+
+for (const [label, tips] of [
+  [
+    'amount',
+    [
+      { currency: 'USD', amountMicros: 4_999_999 },
+      { currency: 'EUR', amountMicros: 2_000_000 }
+    ]
+  ],
+  [
+    'currency',
+    [
+      { currency: 'GBP', amountMicros: 5_000_000 },
+      { currency: 'EUR', amountMicros: 2_000_000 }
+    ]
+  ],
+  [
+    'order',
+    [
+      { currency: 'EUR', amountMicros: 2_000_000 },
+      { currency: 'USD', amountMicros: 5_000_000 }
+    ]
+  ],
+  ['missing row', [{ currency: 'USD', amountMicros: 5_000_000 }]],
+  [
+    'extra row',
+    [
+      { currency: 'USD', amountMicros: 5_000_000 },
+      { currency: 'EUR', amountMicros: 2_000_000 },
+      { currency: 'GBP', amountMicros: 0 }
+    ]
+  ],
+  [
+    'extra property',
+    [
+      { currency: 'USD', amountMicros: 5_000_000, unexpected: true },
+      { currency: 'EUR', amountMicros: 2_000_000 }
+    ]
+  ]
+]) {
+  test(`normalized fake activity accounting refuses an incorrect tip ${label}`, () => {
+    const totals = fakeActivityWireTotals()
+    totals.tips = tips
+    assert.throws(() => assertFakeActivityTotals(totals), /accounting disagreed/)
+  })
+}
 
 function harness(failPhase) {
   const calls = []

@@ -89,9 +89,34 @@ test('replacement proof requires a Studio-renderer scene commit with an exact AC
 })
 
 test('production lane cannot dispatch without an independent deadline', () => {
+  const wrapper = backend.match(
+    /\nfn spawn_websocket_mutation_execution<Retention>\([\s\S]*?\n\}/
+  )?.[0]
+  const helper = backend.match(
+    /\nfn spawn_websocket_mutation_execution_with_deadline<Retention, Arm>\([\s\S]*?\n\}/
+  )?.[0]
+  const responseOwner = backend.match(
+    /\nasync fn run_websocket_mutation_with_deadline\([\s\S]*?\n\}/
+  )?.[0]
+  assert.ok(wrapper, 'production mutation wrapper must exist')
+  assert.ok(helper, 'production mutation execution helper must exist')
+  assert.ok(responseOwner, 'production mutation response owner must exist')
   assert.match(
-    backend,
-    /let Some\(execution_deadline_completion\)[\s\S]*arm_runtime_independent_mutation_deadline[\s\S]*else \{[\s\S]*"command-not-applied"/
+    wrapper,
+    /spawn_websocket_mutation_execution_with_deadline\(\s*executor,\s*state,\s*text,\s*handler,\s*retention,\s*stateful_tracker,\s*move \|deadline_state\| \{\s*arm_runtime_independent_mutation_deadline\(deadline_state, max_execution_age\)\s*\},\s*\)/
+  )
+  const missingDeadline = helper.match(
+    /let Some\(execution_deadline_completion\) = arm\(state\.clone\(\)\) else \{[\s\S]*?return Err\(WebSocketMutationStartFailure::DeadlineUnavailable\);\s*\};/
+  )
+  assert.ok(missingDeadline, 'missing completion must return DeadlineUnavailable')
+  const dispatch = helper.indexOf('executor.spawn(')
+  assert.ok(
+    dispatch > missingDeadline.index + missingDeadline[0].length,
+    'missing-deadline refusal must precede the first executor dispatch'
+  )
+  assert.match(
+    responseOwner,
+    /let mut execution = match spawn_websocket_mutation_execution\([\s\S]*?max_execution_age,\s*\) \{[\s\S]*?Err\(_failure\) => \{[\s\S]*?ServerResponse::error\(\s*command_id,\s*"command-not-applied",[\s\S]*?return WebSocketMutationDispatchResult \{\s*response_queued,\s*handler_terminal: true,\s*\};\s*\}\s*\};/
   )
   assert.match(backend, /worker_threads\(backend_runtime_worker_threads\(\)\)/)
   assert.match(backend, /\.unwrap_or\(2\)[\s\S]*\.max\(2\)/)
