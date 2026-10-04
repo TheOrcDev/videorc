@@ -5,6 +5,11 @@ import { describe, expect, it } from 'vitest'
 import { normalizeLayoutSettings } from '../renderer/src/lib/capture'
 import type {
   AccountCallbackEnvelope,
+  CleanCutEdl,
+  CleanCutGetResult,
+  CleanCutJob,
+  CleanCutStartParams,
+  CleanCutUpdateEdlParams,
   ClipMark,
   ClipMarkedEvent,
   CohostAuthorParams,
@@ -106,6 +111,17 @@ interface HighRiskContractFixtures {
     markedUnsaved: ClipMarkedEvent
     listParams: BackendRpcParams<'clip.marks.list'>
     marks: ClipMark[]
+  }
+  cleanCut: {
+    startParams: CleanCutStartParams
+    condensedStartParams: CleanCutStartParams
+    getParams: BackendRpcParams<'cleanCut.get'>
+    queuedJob: CleanCutJob
+    readyJob: CleanCutJob
+    failedJob: CleanCutJob
+    edl: CleanCutEdl
+    getResult: CleanCutGetResult
+    updateEdlParams: CleanCutUpdateEdlParams
   }
 }
 
@@ -557,6 +573,56 @@ describe('shared high-risk protocol fixture', () => {
       fixtures.clip.marks
     )
     expect(fixtures.clip.marks[1]).not.toHaveProperty('phrase')
+  })
+
+  it('keeps Clean cut jobs, the cut list and its params identical across languages (plan 119)', () => {
+    const { cleanCut } = fixtures
+    expect(validateBackendRpcParams('cleanCut.start', cleanCut.startParams)).toStrictEqual(
+      cleanCut.startParams
+    )
+    expect(validateBackendRpcParams('cleanCut.start', cleanCut.condensedStartParams)).toStrictEqual(
+      cleanCut.condensedStartParams
+    )
+    expect(validateBackendRpcParams('cleanCut.get', cleanCut.getParams)).toStrictEqual(
+      cleanCut.getParams
+    )
+    for (const job of [cleanCut.queuedJob, cleanCut.readyJob, cleanCut.failedJob]) {
+      expect(validateBackendRpcResult('cleanCut.start', job)).toStrictEqual(job)
+      expect(validateBackendRpcResult('cleanCut.cancel', job)).toStrictEqual(job)
+      expect(validateBackendEventPayload('cleanCut.status', job)).toStrictEqual(job)
+    }
+    expect(
+      validateBackendRpcResult('cleanCut.list', [cleanCut.queuedJob, cleanCut.failedJob])
+    ).toStrictEqual([cleanCut.queuedJob, cleanCut.failedJob])
+    expect(validateBackendRpcResult('cleanCut.get', cleanCut.getResult)).toStrictEqual(
+      cleanCut.getResult
+    )
+    expect(validateBackendRpcParams('cleanCut.updateEdl', cleanCut.updateEdlParams)).toStrictEqual(
+      cleanCut.updateEdlParams
+    )
+    expect(
+      validateBackendRpcResult('cleanCut.updateEdl', { job: cleanCut.readyJob, edl: cleanCut.edl })
+    ).toStrictEqual({ job: cleanCut.readyJob, edl: cleanCut.edl })
+    // Omitted, never null: the serde-null trap.
+    expect(cleanCut.queuedJob).not.toHaveProperty('edlSummary')
+    expect(cleanCut.readyJob).not.toHaveProperty('errorCode')
+    expect(cleanCut.edl.removals[0]).not.toHaveProperty('confidence')
+    expect(cleanCut.updateEdlParams).not.toHaveProperty('removeManual')
+    expect(() =>
+      validateBackendEventPayload('cleanCut.status', {
+        ...cleanCut.failedJob,
+        errorCode: undefined
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendEventPayload('cleanCut.status', {
+        ...cleanCut.readyJob,
+        edlSummary: undefined
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcParams('cleanCut.start', { ...cleanCut.startParams, mode: 'tight' })
+    ).toThrow()
   })
 
   it('loads chat rows with and without structured event details', () => {

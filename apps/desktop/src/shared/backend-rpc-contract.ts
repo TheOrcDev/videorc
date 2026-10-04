@@ -29,6 +29,12 @@ import type {
   ClipMark,
   ClipMarkedEvent,
   ClipMoment,
+  CleanCutEdl,
+  CleanCutGetResult,
+  CleanCutJob,
+  CleanCutJobDetail,
+  CleanCutStartParams,
+  CleanCutUpdateEdlParams,
   CompositorFrameReady,
   CompositorStatus,
   SceneEditorDraftAck,
@@ -250,6 +256,11 @@ export interface BackendRpcMethodMap {
   'noiseCleanup.start': BackendRpcDefinition<{ sessionId: string }, NoiseCleanupJob>
   'noiseCleanup.cancel': BackendRpcDefinition<{ jobId: string }, NoiseCleanupJob>
   'noiseCleanup.list': BackendRpcDefinition<undefined, NoiseCleanupJob[]>
+  'cleanCut.start': BackendRpcDefinition<CleanCutStartParams, CleanCutJob>
+  'cleanCut.get': BackendRpcDefinition<{ sessionId: string }, CleanCutGetResult>
+  'cleanCut.list': BackendRpcDefinition<undefined, CleanCutJob[]>
+  'cleanCut.cancel': BackendRpcDefinition<{ jobId: string }, CleanCutJob>
+  'cleanCut.updateEdl': BackendRpcDefinition<CleanCutUpdateEdlParams, CleanCutJobDetail>
   'repair.assess_file': BackendRpcDefinition<{ sessionId: string }, FileAssessment>
   'repair.repair_file': BackendRpcDefinition<
     { sessionId: string; expectAudio?: boolean; intendedFps?: number },
@@ -291,6 +302,7 @@ export interface BackendEventMap {
   'devices.changed': DeviceList
   'entitlements.updated': EntitlementsSnapshot
   'noiseCleanup.status': NoiseCleanupJob
+  'cleanCut.status': CleanCutJob
   'recording.finalization': RecordingFinalizationEvent
   'platformAccounts.oauth.callback': OAuthCallbackResult
   'recording.status': RecordingStatus
@@ -1748,6 +1760,164 @@ const noiseCleanupJobSchema = runtimeSchema<NoiseCleanupJob>(
   }
 )
 
+// --- Clean cut (plan 119 S12a/S12b); mirrors `CleanCut*` in protocol.rs -----
+const cleanCutModeSchema = enumSchema(['clean', 'condensed'])
+const cleanCutJobStateSchema = enumSchema([
+  'queued',
+  'transcribing',
+  'analyzing',
+  'ready',
+  'rendering',
+  'validating',
+  'completed',
+  'failed',
+  'cancelled'
+])
+const cleanCutRemovalKindSchema = enumSchema([
+  'head',
+  'tail',
+  'silence',
+  'gap',
+  'filler',
+  'retake',
+  'false_start',
+  'condensed',
+  'manual'
+])
+const cleanCutKindStatSchema = objectSchema(
+  {
+    kind: cleanCutRemovalKindSchema,
+    count: nonNegativeInteger,
+    ms: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
+const cleanCutKindStatsSchema = arraySchema(cleanCutKindStatSchema, { maxLength: 16 })
+const cleanCutEdlSummarySchema = objectSchema(
+  {
+    durationMs: nonNegativeInteger,
+    keptMs: nonNegativeInteger,
+    removalCount: nonNegativeInteger,
+    byKind: cleanCutKindStatsSchema
+  },
+  { allowUnknown: false }
+)
+const cleanCutJobFieldsSchema = objectSchema(
+  {
+    id: boundedString,
+    sourceSessionId: boundedString,
+    mode: cleanCutModeSchema,
+    state: cleanCutJobStateSchema,
+    step: optionalText,
+    progress: numberSchema({ min: 0, max: 1 }),
+    edlRevision: nonNegativeInteger,
+    edlSummary: optionalSchema(cleanCutEdlSummarySchema),
+    transcriptPath: optionalSchema(boundedPath),
+    outputSessionId: optionalSchema(boundedString),
+    errorCode: optionalText,
+    errorMessage: optionalText,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  },
+  { allowUnknown: false }
+)
+const cleanCutJobSchema = runtimeSchema<CleanCutJob>('a Clean cut job', (value, path) => {
+  const job = cleanCutJobFieldsSchema.parse(value, path) as CleanCutJob
+  if (job.state === 'failed' && (!job.errorCode || !job.errorMessage)) {
+    throw new Error(`${path} must include a stable failure code and message.`)
+  }
+  if (job.state === 'ready' && !job.edlSummary) {
+    throw new Error(`${path} must carry the cut list summary once ready.`)
+  }
+  return job
+})
+const cleanCutRemovalSchema = objectSchema(
+  {
+    id: boundedString,
+    startMs: nonNegativeInteger,
+    endMs: nonNegativeInteger,
+    startFrame: nonNegativeInteger,
+    endFrame: nonNegativeInteger,
+    kind: cleanCutRemovalKindSchema,
+    reason: stringSchema({ maxLength: 2_000 }),
+    confidence: optionalSchema(numberSchema({ min: 0, max: 1 })),
+    enabled: booleanSchema
+  },
+  { allowUnknown: false }
+)
+const cleanCutEdlSchema = objectSchema(
+  {
+    version: literalSchema(1),
+    sourceIdentity: objectSchema(
+      {
+        path: boundedPath,
+        sizeBytes: nonNegativeInteger,
+        modifiedUnixMs: optionalSchema(numberSchema({ integer: true }))
+      },
+      { allowUnknown: false }
+    ),
+    frameRate: objectSchema(
+      {
+        num: numberSchema({ integer: true, min: 1 }),
+        den: numberSchema({ integer: true, min: 1 })
+      },
+      { allowUnknown: false }
+    ),
+    durationMs: nonNegativeInteger,
+    removals: arraySchema(cleanCutRemovalSchema, { maxLength: 100_000 }),
+    stats: objectSchema(
+      { byKind: cleanCutKindStatsSchema, keptMs: nonNegativeInteger },
+      { allowUnknown: false }
+    )
+  },
+  { allowUnknown: false }
+)
+const cleanCutJobDetailSchema = objectSchema(
+  { job: cleanCutJobSchema, edl: optionalSchema(cleanCutEdlSchema) },
+  { allowUnknown: false }
+)
+const cleanCutGetResultSchema = objectSchema(
+  {
+    sessionId: boundedString,
+    jobs: arraySchema(cleanCutJobDetailSchema, { maxLength: 8 })
+  },
+  { allowUnknown: false }
+)
+const cleanCutStartParamsSchema = objectSchema(
+  {
+    sessionId: boundedString,
+    mode: cleanCutModeSchema,
+    consentToUploadAudio: booleanSchema,
+    targetDurationSeconds: optionalSchema(numberSchema({ integer: true, min: 120, max: 3_600 }))
+  },
+  { allowUnknown: false }
+)
+const cleanCutUpdateEdlParamsSchema = objectSchema(
+  {
+    jobId: boundedString,
+    revision: nonNegativeInteger,
+    removals: optionalSchema(
+      arraySchema(
+        objectSchema({ id: boundedString, enabled: booleanSchema }, { allowUnknown: false }),
+        {
+          maxLength: 100_000
+        }
+      )
+    ),
+    addManual: optionalSchema(
+      arraySchema(
+        objectSchema(
+          { startMs: nonNegativeInteger, endMs: nonNegativeInteger },
+          { allowUnknown: false }
+        ),
+        { maxLength: 10_000 }
+      )
+    ),
+    removeManual: optionalSchema(arraySchema(boundedString, { maxLength: 10_000 }))
+  },
+  { allowUnknown: false }
+)
+
 const fileAssessmentSchema = boundedSemanticValue(
   'a file assessment',
   objectSchema(
@@ -2818,6 +2988,26 @@ const runtimeContracts = {
     params: undefinedSchema,
     result: arraySchema(noiseCleanupJobSchema, { maxLength: 1000 })
   },
+  'cleanCut.start': {
+    params: cleanCutStartParamsSchema,
+    result: cleanCutJobSchema
+  },
+  'cleanCut.get': {
+    params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
+    result: cleanCutGetResultSchema
+  },
+  'cleanCut.list': {
+    params: undefinedSchema,
+    result: arraySchema(cleanCutJobSchema, { maxLength: 1000 })
+  },
+  'cleanCut.cancel': {
+    params: objectSchema({ jobId: boundedString }, { allowUnknown: false }),
+    result: cleanCutJobSchema
+  },
+  'cleanCut.updateEdl': {
+    params: cleanCutUpdateEdlParamsSchema,
+    result: cleanCutJobDetailSchema
+  },
   'repair.assess_file': {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
     result: fileAssessmentSchema
@@ -2897,6 +3087,7 @@ const runtimeEventSchemas = {
   'devices.changed': deviceListSchema,
   'entitlements.updated': entitlementsSchema,
   'noiseCleanup.status': noiseCleanupJobSchema,
+  'cleanCut.status': cleanCutJobSchema,
   'recording.finalization': recordingFinalizationEventSchema,
   'platformAccounts.oauth.callback': oauthCallbackResultSchema,
   'recording.status': recordingStatusSchema,

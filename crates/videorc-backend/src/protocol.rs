@@ -4113,6 +4113,318 @@ pub struct NoiseCleanupCancelParams {
     pub job_id: String,
 }
 
+// ---------------------------------------------------------------------------
+// Clean cut (plan 119 S12a/S12b): a durable job per (source session, mode)
+// that transcribes a finished recording word for word, finds what to cut and
+// builds a frame-exact cut list (the EDL). S13 renders it into a derived
+// session. Wire shapes are mirrored in `shared/backend.ts` and validated by
+// the closed schemas in `shared/backend-rpc-contract.ts`.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum CleanCutMode {
+    Clean,
+    Condensed,
+}
+
+impl CleanCutMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Clean => "clean",
+            Self::Condensed => "condensed",
+        }
+    }
+}
+
+impl std::str::FromStr for CleanCutMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "clean" => Ok(Self::Clean),
+            "condensed" => Ok(Self::Condensed),
+            _ => Err(format!("Unknown Clean cut mode: {value}")),
+        }
+    }
+}
+
+/// `queued → transcribing → analyzing → ready` is built here (S12a/S12b);
+/// `ready → rendering → validating → completed` is S13's. `failed` and
+/// `cancelled` are terminal; a failed job is resumed by starting a new one for
+/// the same source and mode, which reuses every chunk already transcribed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CleanCutJobState {
+    Queued,
+    Transcribing,
+    Analyzing,
+    Ready,
+    Rendering,
+    Validating,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl CleanCutJobState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Transcribing => "transcribing",
+            Self::Analyzing => "analyzing",
+            Self::Ready => "ready",
+            Self::Rendering => "rendering",
+            Self::Validating => "validating",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// A worker owns the job: it holds (or waits for) the maintenance slot
+    /// and the source recording must not be mutated underneath it. `ready`
+    /// is neither active nor final: it waits for review or a render.
+    pub fn is_active(self) -> bool {
+        matches!(
+            self,
+            Self::Queued
+                | Self::Transcribing
+                | Self::Analyzing
+                | Self::Rendering
+                | Self::Validating
+        )
+    }
+}
+
+impl std::str::FromStr for CleanCutJobState {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "queued" => Ok(Self::Queued),
+            "transcribing" => Ok(Self::Transcribing),
+            "analyzing" => Ok(Self::Analyzing),
+            "ready" => Ok(Self::Ready),
+            "rendering" => Ok(Self::Rendering),
+            "validating" => Ok(Self::Validating),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(format!("Unknown Clean cut job state: {value}")),
+        }
+    }
+}
+
+/// Why a span is removed. `false_start` keeps the server's spelling.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanCutRemovalKind {
+    Head,
+    Tail,
+    Silence,
+    Gap,
+    Filler,
+    Retake,
+    FalseStart,
+    Condensed,
+    Manual,
+}
+
+/// The source frame grid (ffprobe `r_frame_rate` as `num/den`). Every cut
+/// boundary is a frame index on it, so audio and video segments have equal
+/// lengths when S13 renders.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutFrameRate {
+    pub num: u32,
+    pub den: u32,
+}
+
+/// Path, size and modification time of the source MP4 the cut list was built
+/// from. S13 refuses to render when the file no longer matches.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutSourceIdentity {
+    pub path: String,
+    pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_unix_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutRemoval {
+    pub id: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    /// Frame indices on the source grid; `end_frame` is exclusive. These are
+    /// exact where the millisecond values are rounded for display.
+    pub start_frame: u64,
+    pub end_frame: u64,
+    pub kind: CleanCutRemovalKind,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutKindStat {
+    pub kind: CleanCutRemovalKind,
+    pub count: u32,
+    pub ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutEdlStats {
+    /// Enabled removals only, one entry per kind present, in kind order.
+    #[serde(default)]
+    pub by_kind: Vec<CleanCutKindStat>,
+    pub kept_ms: u64,
+}
+
+/// The cut list, version 1. Stored as `clean_cut_jobs.edl_json` and returned
+/// whole by `cleanCut.get` and `cleanCut.updateEdl`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutEdl {
+    pub version: u32,
+    pub source_identity: CleanCutSourceIdentity,
+    pub frame_rate: CleanCutFrameRate,
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub removals: Vec<CleanCutRemoval>,
+    pub stats: CleanCutEdlStats,
+}
+
+/// The small part of the cut list that rides on every job snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutEdlSummary {
+    pub duration_ms: u64,
+    pub kept_ms: u64,
+    pub removal_count: u32,
+    #[serde(default)]
+    pub by_kind: Vec<CleanCutKindStat>,
+}
+
+impl CleanCutEdl {
+    /// The snapshot-sized view of a cut list.
+    pub fn summary(&self) -> CleanCutEdlSummary {
+        CleanCutEdlSummary {
+            duration_ms: self.duration_ms,
+            kept_ms: self.stats.kept_ms,
+            removal_count: u32::try_from(self.removals.len()).unwrap_or(u32::MAX),
+            by_kind: self.stats.by_kind.clone(),
+        }
+    }
+}
+
+/// Durable Clean cut job state, also the `cleanCut.status` event payload.
+/// The renderer never infers completion from anything else.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutJob {
+    pub id: String,
+    pub source_session_id: String,
+    pub mode: CleanCutMode,
+    pub state: CleanCutJobState,
+    /// Free-form, bounded: `extract-audio`, `probe`, `upload`, `stitch`,
+    /// `analyze`, `cut-list`. Never a closed enum on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    /// 0..1 across the whole job.
+    pub progress: f64,
+    pub edl_revision: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edl_summary: Option<CleanCutEdlSummary>,
+    /// `<Artifacts>/<sessionId>/clean-cut/transcript.words.json` once stitched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutJobDetail {
+    pub job: CleanCutJob,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edl: Option<CleanCutEdl>,
+}
+
+/// `cleanCut.get`: the latest job per mode for one source session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutGetResult {
+    pub session_id: String,
+    #[serde(default)]
+    pub jobs: Vec<CleanCutJobDetail>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutStartParams {
+    pub session_id: String,
+    pub mode: CleanCutMode,
+    /// The Cloud AI consent the renderer holds; `false` is refused.
+    pub consent_to_upload_audio: bool,
+    /// Condensed only: 120..3600 seconds, default 900.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_duration_seconds: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutGetParams {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutCancelParams {
+    pub job_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutRemovalToggle {
+    pub id: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutManualRange {
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+/// `cleanCut.updateEdl`: optimistic on `revision`. Toggles flip `enabled` on
+/// existing removals; `addManual` adds frame-snapped `manual` removals;
+/// `removeManual` deletes manual removals by id. Nothing is re-merged.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutUpdateEdlParams {
+    pub job_id: String,
+    pub revision: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removals: Vec<CleanCutRemovalToggle>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add_manual: Vec<CleanCutManualRange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove_manual: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionStorageTotals {
@@ -4862,6 +5174,10 @@ pub struct AiCapabilities {
     /// that opted into captions intentionally fail closed when it is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub captions: Option<AiCapabilitiesCaptions>,
+    /// Clean cut readiness (plan 119, contract part B). A server that omits
+    /// the block does not offer Clean cut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_cut: Option<AiCapabilitiesCleanCut>,
     pub entitlement: AiCapabilitiesEntitlement,
     /// Ed25519-signed entitlement proof (`v1.<payload>.<sig>`) minted by
     /// videorc.com. Optional: older web deploys (or an unconfigured signing
@@ -4945,6 +5261,10 @@ pub struct AiCapabilitiesEntitlement {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiCapabilitiesFeatures {
+    /// Clean cut kill switch off and its provider configured (plan 119).
+    /// Older servers omit it.
+    #[serde(default)]
+    pub clean_cut_enabled: bool,
     pub cloud_ai_enabled: bool,
     pub gateway_configured: bool,
     pub model_testing_enabled: bool,
@@ -4952,6 +5272,33 @@ pub struct AiCapabilitiesFeatures {
     pub object_backed_jobs_enabled: bool,
     pub transcript_jobs_enabled: bool,
     pub upload_tickets_enabled: bool,
+}
+
+/// `cleanCut` from `GET /api/ai/capabilities` (docs/clean-cut-contract.md,
+/// part B). Every field defaults so a partial block never breaks the load;
+/// `reason_code` is an open string (`disabled`, `blocked`, `premium-required`,
+/// `provider-unconfigured`, `quota-exhausted`, or newer codes).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesCleanCut {
+    #[serde(default)]
+    pub supported: bool,
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_chunk_seconds: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_chunk_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monthly_seconds_limit: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6229,6 +6576,84 @@ mod tests {
         assert_eq!(marks[0].phrase.as_deref(), Some("clip that"));
         assert_eq!(marks[1].phrase, None);
         assert_eq!(serde_json::to_value(marks).unwrap(), marks_wire);
+    }
+
+    #[test]
+    fn shared_high_risk_contract_fixture_matches_clean_cut_dtos() {
+        let start_wire = shared_high_risk_contract_fixture_value("/cleanCut/startParams");
+        let start: CleanCutStartParams = serde_json::from_value(start_wire.clone()).unwrap();
+        assert_eq!(start.mode, CleanCutMode::Clean);
+        assert!(start.consent_to_upload_audio);
+        assert_eq!(start.target_duration_seconds, None);
+        // Omitted, never null: the serde-null trap.
+        assert_eq!(serde_json::to_value(start).unwrap(), start_wire);
+        let condensed_wire =
+            shared_high_risk_contract_fixture_value("/cleanCut/condensedStartParams");
+        let condensed: CleanCutStartParams =
+            serde_json::from_value(condensed_wire.clone()).unwrap();
+        assert_eq!(condensed.mode, CleanCutMode::Condensed);
+        assert_eq!(condensed.target_duration_seconds, Some(900));
+        assert_eq!(serde_json::to_value(condensed).unwrap(), condensed_wire);
+        let get_wire = shared_high_risk_contract_fixture_value("/cleanCut/getParams");
+        let get: CleanCutGetParams = serde_json::from_value(get_wire).unwrap();
+        assert_eq!(get.session_id, "session-fixture");
+
+        for pointer in [
+            "/cleanCut/queuedJob",
+            "/cleanCut/readyJob",
+            "/cleanCut/failedJob",
+        ] {
+            let wire = shared_high_risk_contract_fixture_value(pointer);
+            let job: CleanCutJob = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(job).unwrap(), wire, "{pointer}");
+        }
+        let ready: CleanCutJob = serde_json::from_value(shared_high_risk_contract_fixture_value(
+            "/cleanCut/readyJob",
+        ))
+        .unwrap();
+        assert_eq!(ready.state, CleanCutJobState::Ready);
+        assert!(!ready.state.is_active());
+        let ready_summary = ready.edl_summary.clone().unwrap();
+        assert_eq!(ready_summary.removal_count, 3);
+        let failed: CleanCutJob = serde_json::from_value(shared_high_risk_contract_fixture_value(
+            "/cleanCut/failedJob",
+        ))
+        .unwrap();
+        assert_eq!(
+            failed.error_code.as_deref(),
+            Some("clean-cut-monthly-quota-exhausted")
+        );
+        assert_eq!(failed.step.as_deref(), Some("upload"));
+
+        let edl_wire = shared_high_risk_contract_fixture_value("/cleanCut/edl");
+        let edl: CleanCutEdl = serde_json::from_value(edl_wire.clone()).unwrap();
+        assert_eq!(
+            edl.frame_rate,
+            CleanCutFrameRate {
+                num: 30_000,
+                den: 1_001
+            }
+        );
+        assert_eq!(edl.removals[1].kind, CleanCutRemovalKind::Retake);
+        assert_eq!(edl.removals[2].kind, CleanCutRemovalKind::FalseStart);
+        assert!(!edl.removals[2].enabled);
+        assert_eq!(edl.removals[0].confidence, None);
+        assert_eq!(edl.summary(), ready_summary);
+        assert_eq!(serde_json::to_value(edl).unwrap(), edl_wire);
+
+        let result_wire = shared_high_risk_contract_fixture_value("/cleanCut/getResult");
+        let result: CleanCutGetResult = serde_json::from_value(result_wire.clone()).unwrap();
+        assert_eq!(result.jobs.len(), 1);
+        assert!(result.jobs[0].edl.is_some());
+        assert_eq!(serde_json::to_value(result).unwrap(), result_wire);
+
+        let update_wire = shared_high_risk_contract_fixture_value("/cleanCut/updateEdlParams");
+        let update: CleanCutUpdateEdlParams = serde_json::from_value(update_wire.clone()).unwrap();
+        assert_eq!(update.revision, 0);
+        assert!(update.remove_manual.is_empty());
+        assert_eq!(update.add_manual[0].end_ms, 601_000);
+        assert_eq!(update.removals[0].id, "r3");
+        assert_eq!(serde_json::to_value(update).unwrap(), update_wire);
     }
 
     #[test]

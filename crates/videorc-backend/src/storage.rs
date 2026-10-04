@@ -21,11 +21,12 @@ use crate::live_chat::{
 };
 use crate::process_job::output_owned_std_with_timeout;
 use crate::protocol::{
-    AiArtifact, AiArtifactKind, AiArtifactStatus, CohostReportChatPlatformCount,
-    CohostSessionReport, DiagnosticStats, HealthEvent, HealthLevel, LayoutSettings,
-    NoiseCleanupJob, NoiseCleanupJobStatus, OutputSettings, SessionAiArtifactsPage,
-    SessionHealthEventsPage, SessionListItem, SessionListPage, SessionLogEntry, SessionLogsPage,
-    SessionStorageTotals, SessionSummary, SourceSelection, StreamScreen, StreamScreenStatus,
+    AiArtifact, AiArtifactKind, AiArtifactStatus, CleanCutEdl, CleanCutJob, CleanCutJobState,
+    CleanCutMode, CohostReportChatPlatformCount, CohostSessionReport, DiagnosticStats, HealthEvent,
+    HealthLevel, LayoutSettings, NoiseCleanupJob, NoiseCleanupJobStatus, OutputSettings,
+    SessionAiArtifactsPage, SessionHealthEventsPage, SessionListItem, SessionListPage,
+    SessionLogEntry, SessionLogsPage, SessionStorageTotals, SessionSummary, SourceSelection,
+    StreamScreen, StreamScreenStatus,
 };
 use crate::repair::{GateStatus, RepairJob, RepairJobStatus};
 use crate::streaming::{
@@ -35,6 +36,11 @@ use crate::streaming::{
 };
 
 const MAX_NOISE_CLEANUP_JOB_LIST: usize = 1_000;
+const MAX_CLEAN_CUT_JOB_LIST: usize = 1_000;
+/// The states in which a Clean cut worker owns the job (plan 119). Must match
+/// `CleanCutJobState::is_active` and the partial unique index.
+const CLEAN_CUT_ACTIVE_STATES_SQL: &str =
+    "('queued', 'transcribing', 'analyzing', 'rendering', 'validating')";
 // Stays below both the renderer's 30s backend request contract and the
 // backend's 30s post-finalization hard-exit grace. The child is killed/reaped
 // by `output_owned_std_with_timeout` before this operation returns.
@@ -105,6 +111,37 @@ pub(crate) struct PersistedNoiseCleanupJob {
     pub job: NoiseCleanupJob,
     pub source_identity: SessionFileBoundIdentity,
     pub source_full_sha256: String,
+}
+
+/// The session facts Clean cut eligibility reads (plan 119 decision 11).
+#[derive(Debug, Clone)]
+pub(crate) struct CleanCutSource {
+    pub status: String,
+    pub mode: String,
+    pub mp4_path: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub derived_from_session_id: Option<String>,
+    pub processing_kind: Option<String>,
+}
+
+/// A `clean_cut_jobs` row: the renderer snapshot plus the three JSON columns
+/// the worker owns and the renderer never sees whole.
+#[derive(Debug, Clone)]
+pub(crate) struct PersistedCleanCutJob {
+    pub job: CleanCutJob,
+    pub source_identity_json: Option<String>,
+    pub analysis_json: Option<String>,
+    pub edl_json: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum CleanCutJobCreation {
+    Created(PersistedCleanCutJob),
+    /// A worker already owns a job for this source and mode.
+    AlreadyActive(PersistedCleanCutJob),
+    /// The latest job for this source and mode has a cut list waiting for
+    /// review; starting again returns it instead of discarding edits.
+    Ready(PersistedCleanCutJob),
 }
 
 #[derive(Debug, Clone)]
@@ -2890,6 +2927,227 @@ impl Database {
         query_noise_cleanup_jobs(
             &conn,
             "WHERE status = 'queued' ORDER BY created_at ASC, id ASC",
+            [],
+        )
+        .map(|jobs| jobs.into_iter().map(|job| job.job).collect())
+    }
+
+    // --- Clean cut jobs (plan 119 S12a) ---------------------------------------
+
+    pub(crate) fn clean_cut_source(&self, session_id: &str) -> Result<Option<CleanCutSource>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT status, mode, mp4_path, duration_ms, derived_from_session_id, processing_kind
+             FROM sessions WHERE id = ?1 AND library_hidden = 0",
+            params![session_id],
+            |row| {
+                Ok(CleanCutSource {
+                    status: row.get(0)?,
+                    mode: row.get(1)?,
+                    mp4_path: row.get(2)?,
+                    duration_ms: row.get(3)?,
+                    derived_from_session_id: row.get(4)?,
+                    processing_kind: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Create a queued job for one source and mode, unless a worker already
+    /// owns one (`AlreadyActive`) or a cut list is waiting for review
+    /// (`Ready`). Failed, cancelled and completed jobs stay as history and a
+    /// new row is created next to them.
+    pub(crate) fn create_clean_cut_job(
+        &self,
+        source_session_id: &str,
+        mode: CleanCutMode,
+    ) -> Result<CleanCutJobCreation> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let active_filter = format!(
+            "WHERE source_session_id = ?1 AND mode = ?2 AND state IN {CLEAN_CUT_ACTIVE_STATES_SQL}
+             ORDER BY created_at ASC, id ASC LIMIT 1"
+        );
+        if let Some(active) = query_one_clean_cut_job(
+            &transaction,
+            &active_filter,
+            params![source_session_id, mode.as_str()],
+        )? {
+            transaction.commit()?;
+            return Ok(CleanCutJobCreation::AlreadyActive(active));
+        }
+        if let Some(ready) = query_one_clean_cut_job(
+            &transaction,
+            "WHERE source_session_id = ?1 AND mode = ?2 AND state = 'ready'
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+            params![source_session_id, mode.as_str()],
+        )? {
+            transaction.commit()?;
+            return Ok(CleanCutJobCreation::Ready(ready));
+        }
+        let id = Uuid::new_v4().to_string();
+        transaction.execute(
+            "INSERT INTO clean_cut_jobs
+                (id, source_session_id, mode, state, progress, edl_revision, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'queued', 0.0, 0, ?4, ?4)",
+            params![id, source_session_id, mode.as_str(), now],
+        )?;
+        let job = query_one_clean_cut_job(&transaction, "WHERE id = ?1", params![id])?
+            .context("New Clean cut job disappeared")?;
+        transaction.commit()?;
+        Ok(CleanCutJobCreation::Created(job))
+    }
+
+    pub(crate) fn clean_cut_job(&self, job_id: &str) -> Result<Option<PersistedCleanCutJob>> {
+        let conn = self.lock()?;
+        query_one_clean_cut_job(&conn, "WHERE id = ?1", params![job_id])
+    }
+
+    /// The newest job of each mode for one source, newest first.
+    pub(crate) fn latest_clean_cut_jobs_for_source(
+        &self,
+        source_session_id: &str,
+    ) -> Result<Vec<PersistedCleanCutJob>> {
+        let conn = self.lock()?;
+        query_clean_cut_jobs(
+            &conn,
+            "WHERE id IN (
+                SELECT id FROM (
+                    SELECT id, ROW_NUMBER() OVER (
+                        PARTITION BY mode ORDER BY created_at DESC, id DESC
+                    ) AS mode_rank
+                    FROM clean_cut_jobs
+                    WHERE source_session_id = ?1
+                ) WHERE mode_rank = 1
+             ) ORDER BY created_at DESC, id DESC",
+            params![source_session_id],
+        )
+    }
+
+    pub(crate) fn active_clean_cut_job_for_source(
+        &self,
+        source_session_id: &str,
+    ) -> Result<Option<CleanCutJob>> {
+        let conn = self.lock()?;
+        let filter = format!(
+            "WHERE source_session_id = ?1 AND state IN {CLEAN_CUT_ACTIVE_STATES_SQL}
+             ORDER BY created_at ASC, id ASC LIMIT 1"
+        );
+        Ok(query_one_clean_cut_job(&conn, &filter, params![source_session_id])?.map(|job| job.job))
+    }
+
+    /// Active jobs first, then the newest finished job per source and mode.
+    pub(crate) fn list_clean_cut_jobs(&self) -> Result<Vec<CleanCutJob>> {
+        let conn = self.lock()?;
+        let active_filter = format!(
+            "WHERE state IN {CLEAN_CUT_ACTIVE_STATES_SQL}
+             ORDER BY updated_at DESC, id DESC LIMIT ?1"
+        );
+        let mut jobs = query_clean_cut_jobs(
+            &conn,
+            &active_filter,
+            params![MAX_CLEAN_CUT_JOB_LIST as i64],
+        )?;
+        let remaining = MAX_CLEAN_CUT_JOB_LIST.saturating_sub(jobs.len());
+        if remaining > 0 {
+            let finished_filter = format!(
+                "WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id, ROW_NUMBER() OVER (
+                            PARTITION BY source_session_id, mode
+                            ORDER BY updated_at DESC, id DESC
+                        ) AS source_rank
+                        FROM clean_cut_jobs
+                        WHERE state NOT IN {CLEAN_CUT_ACTIVE_STATES_SQL}
+                    ) WHERE source_rank = 1
+                 ) ORDER BY updated_at DESC, id DESC LIMIT ?1"
+            );
+            jobs.extend(query_clean_cut_jobs(
+                &conn,
+                &finished_filter,
+                params![remaining as i64],
+            )?);
+        }
+        Ok(jobs.into_iter().map(|job| job.job).collect())
+    }
+
+    /// Persist everything the worker owns. `edl_revision` is only ever moved
+    /// by `update_clean_cut_edl`.
+    pub(crate) fn save_clean_cut_job(&self, persisted: &PersistedCleanCutJob) -> Result<()> {
+        let job = &persisted.job;
+        let conn = self.lock()?;
+        let updated = conn.execute(
+            "UPDATE clean_cut_jobs
+             SET state = ?2, step = ?3, progress = ?4, source_identity_json = ?5,
+                 transcript_path = ?6, analysis_json = ?7, edl_json = ?8,
+                 output_session_id = ?9, error_code = ?10, error_message = ?11,
+                 updated_at = ?12
+             WHERE id = ?1",
+            params![
+                job.id,
+                job.state.as_str(),
+                job.step,
+                job.progress.clamp(0.0, 1.0),
+                persisted.source_identity_json,
+                job.transcript_path,
+                persisted.analysis_json,
+                persisted.edl_json,
+                job.output_session_id,
+                job.error_code,
+                job.error_message,
+                job.updated_at,
+            ],
+        )?;
+        if updated != 1 {
+            bail!("Clean cut job {} was not found.", job.id);
+        }
+        Ok(())
+    }
+
+    /// Replace the cut list when `expected_revision` is still current;
+    /// `None` means someone else saved first and the caller must reload.
+    pub(crate) fn update_clean_cut_edl(
+        &self,
+        job_id: &str,
+        expected_revision: u32,
+        edl_json: &str,
+    ) -> Result<Option<PersistedCleanCutJob>> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let updated = transaction.execute(
+            "UPDATE clean_cut_jobs
+             SET edl_json = ?3, edl_revision = edl_revision + 1, updated_at = ?4
+             WHERE id = ?1 AND edl_revision = ?2",
+            params![job_id, i64::from(expected_revision), edl_json, now],
+        )?;
+        if updated != 1 {
+            transaction.commit()?;
+            return Ok(None);
+        }
+        let job = query_one_clean_cut_job(&transaction, "WHERE id = ?1", params![job_id])?;
+        transaction.commit()?;
+        Ok(job)
+    }
+
+    /// Startup: every job a dead process owned goes back to `queued` with its
+    /// chunk files, transcript, analysis and cut list intact, so the worker
+    /// resumes at the first missing step.
+    pub(crate) fn reconcile_interrupted_clean_cut_jobs(&self) -> Result<Vec<CleanCutJob>> {
+        let now = Utc::now().to_rfc3339();
+        self.lock()?.execute(
+            "UPDATE clean_cut_jobs
+             SET state = 'queued', error_code = NULL, error_message = NULL, updated_at = ?1
+             WHERE state IN ('transcribing', 'analyzing', 'rendering', 'validating')",
+            params![now],
+        )?;
+        let conn = self.lock()?;
+        query_clean_cut_jobs(
+            &conn,
+            "WHERE state = 'queued' ORDER BY created_at ASC, id ASC",
             [],
         )
         .map(|jobs| jobs.into_iter().map(|job| job.job).collect())
@@ -6523,6 +6781,33 @@ impl Database {
              CREATE INDEX IF NOT EXISTS idx_ai_artifacts_session_created
                 ON ai_artifacts(session_id, created_at DESC, id DESC);",
         )?;
+        // Clean cut jobs (plan 119 S12a). A new table only: older backends
+        // ignore it, and `sessions.processing_kind` never gains a value.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS clean_cut_jobs (
+                id TEXT PRIMARY KEY,
+                source_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                mode TEXT NOT NULL,
+                state TEXT NOT NULL,
+                step TEXT,
+                progress REAL,
+                source_identity_json TEXT,
+                transcript_path TEXT,
+                analysis_json TEXT,
+                edl_json TEXT,
+                edl_revision INTEGER NOT NULL DEFAULT 0,
+                output_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+                error_code TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_clean_cut_one_active_per_source_mode
+                ON clean_cut_jobs(source_session_id, mode)
+                WHERE state IN ('queued', 'transcribing', 'analyzing', 'rendering', 'validating');
+             CREATE INDEX IF NOT EXISTS idx_clean_cut_source_mode_created
+                ON clean_cut_jobs(source_session_id, mode, created_at DESC, id DESC);",
+        )?;
         ensure_column(
             &conn,
             "health_events",
@@ -7279,6 +7564,81 @@ fn query_one_noise_cleanup_job<P: rusqlite::Params>(
     params: P,
 ) -> Result<Option<PersistedNoiseCleanupJob>> {
     let mut jobs = query_noise_cleanup_jobs(conn, filter, params)?;
+    Ok(jobs.pop())
+}
+
+fn clean_cut_text_column_error(index: usize, error: String) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        index,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+    )
+}
+
+fn clean_cut_job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersistedCleanCutJob> {
+    let mode_text: String = row.get(2)?;
+    let mode: CleanCutMode = mode_text
+        .parse()
+        .map_err(|error: String| clean_cut_text_column_error(2, error))?;
+    let state_text: String = row.get(3)?;
+    let state: CleanCutJobState = state_text
+        .parse()
+        .map_err(|error: String| clean_cut_text_column_error(3, error))?;
+    let progress: Option<f64> = row.get(5)?;
+    let edl_json: Option<String> = row.get(9)?;
+    let edl_revision: i64 = row.get(10)?;
+    // A cut list that no longer parses is reported as absent rather than
+    // failing every list; the worker rebuilds it on the next start.
+    let edl_summary = edl_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<CleanCutEdl>(json).ok())
+        .map(|edl| edl.summary());
+    Ok(PersistedCleanCutJob {
+        job: CleanCutJob {
+            id: row.get(0)?,
+            source_session_id: row.get(1)?,
+            mode,
+            state,
+            step: row.get(4)?,
+            progress: progress.unwrap_or(0.0).clamp(0.0, 1.0),
+            edl_revision: u32::try_from(edl_revision.max(0)).unwrap_or(u32::MAX),
+            edl_summary,
+            transcript_path: row.get(7)?,
+            output_session_id: row.get(11)?,
+            error_code: row.get(12)?,
+            error_message: row.get(13)?,
+            created_at: row.get(14)?,
+            updated_at: row.get(15)?,
+        },
+        source_identity_json: row.get(6)?,
+        analysis_json: row.get(8)?,
+        edl_json,
+    })
+}
+
+fn query_clean_cut_jobs<P: rusqlite::Params>(
+    conn: &Connection,
+    filter: &str,
+    params: P,
+) -> Result<Vec<PersistedCleanCutJob>> {
+    let sql = format!(
+        "SELECT id, source_session_id, mode, state, step, progress, source_identity_json,
+                transcript_path, analysis_json, edl_json, edl_revision, output_session_id,
+                error_code, error_message, created_at, updated_at
+         FROM clean_cut_jobs {filter}"
+    );
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement.query_map(params, clean_cut_job_from_row)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn query_one_clean_cut_job<P: rusqlite::Params>(
+    conn: &Connection,
+    filter: &str,
+    params: P,
+) -> Result<Option<PersistedCleanCutJob>> {
+    let mut jobs = query_clean_cut_jobs(conn, filter, params)?;
     Ok(jobs.pop())
 }
 
