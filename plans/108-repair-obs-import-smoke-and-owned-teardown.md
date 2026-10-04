@@ -51,3 +51,11 @@ In scope: the OBS smoke, a focused harness contract test, shared command client 
 - [ ] Three fresh `pnpm smoke:obs-import` runs exit 0 with bounded cleanup.
 
 Stop if cleanup cannot establish exact ownership or if a production operation still hangs after the client is corrected. Record the concrete pending operation and add focused IPC evidence before expanding scope. Future launcher API changes must have harness consumers checked for stale property names.
+
+## Current three real-IPC trials
+
+Three predeclared full original runs on main `6dbabec1` all exit 1: trial 1 takes 19.54 seconds, trial 2 18.43 seconds, and trial 3 18.68 seconds. Each launches the real isolated app, passes backend/preview readiness and `obsDiscover`, then times out in `obsRead` at its unchanged 15,000 ms operation deadline. Canvas/scenes/key-stripped setup and the dedicated apply-time key channel remain unexecuted. No timeout extension, ambiguous request replay, fixture substitution or stop-on-green sampling is used.
+
+Each run awaits the maintained owned teardown. The exact controllers 67713, 69292 and 70933 are reaped; their groups and observed app-ledger PIDs are absent. This does not establish cleanup of unrecorded descendants. Private logs and profiles remain under `/tmp/videorc-obs108-final-main6db-20261004`.
+
+A read-only Computer Use observation of the exact QA app times out; later inventory shows no running Electron QA app. No current SecurityAgent prompt or automatic approval rejection is observed. The older Keychain lead remains a hypothesis, not the cause of these current timeouts. Read-only continuation must distinguish pure parsing, synchronous directory-authority persistence, backend capability registration and image import before a supported repair. The original diagnosis scope and protected-storage boundaries above still apply.
