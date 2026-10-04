@@ -865,6 +865,10 @@ impl CohostState {
 pub enum CohostError {
     #[error("Orcle is turned off in Settings.")]
     Disabled,
+    /// Plan 140 S1: Orcle is Premium only, enforced here and not just by the
+    /// renderer's `liveCohostGate`.
+    #[error("Orcle requires Videorc Premium.")]
+    PremiumRequired,
     #[error("Orcle needs the active live chat session; sessionId did not match.")]
     SessionMismatch,
     #[error("sessionId and the question, message, promise or author id are required.")]
@@ -879,6 +883,7 @@ impl CohostError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Disabled => "cohost-disabled",
+            Self::PremiumRequired => "premium-required",
             Self::SessionMismatch => "cohost-session-mismatch",
             Self::InvalidParams => "invalid-params",
             Self::NoSummary => "cohost-no-summary",
@@ -4554,6 +4559,22 @@ pub async fn start_cohost(
     state: &AppState,
     params: CohostStartParams,
 ) -> Result<CohostState, CohostError> {
+    start_cohost_if_entitled(state, params, premium_entitled()).await
+}
+
+/// Plan 140 S1: Orcle is Premium only, in the backend too. The renderer gate
+/// (`liveCohostGate`) stays, but a `cohost.start` from a Basic account is
+/// refused here with `premium-required`, whatever the renderer believes. The
+/// decision is passed in, like `prepare_tick`'s, so the gate is testable
+/// without touching the process-wide entitlement snapshot.
+async fn start_cohost_if_entitled(
+    state: &AppState,
+    params: CohostStartParams,
+    premium: bool,
+) -> Result<CohostState, CohostError> {
+    if !premium {
+        return Err(CohostError::PremiumRequired);
+    }
     start_cohost_after_chat_validation(
         state,
         params,
@@ -4662,8 +4683,45 @@ pub async fn stop_cohost(state: &AppState) -> CohostState {
         &lifecycle_delivery,
         std::future::ready(()),
         ListenStop::Abort,
+        None,
     )
     .await
+}
+
+/// Plan 140 S1: Orcle is Premium only. Called after every
+/// `entitlements.updated` publication: when `LiveCohost` is no longer
+/// entitled, a running session stops through the normal stop path (its report
+/// is saved) and the stopped state carries the reason, so the renderer can
+/// tell the streamer in one line. A signed-out account has no Premium either;
+/// its reason says so instead. Returns whether a session was stopped.
+pub(crate) async fn stop_cohost_if_premium_lapsed(state: &AppState) -> bool {
+    if premium_entitled() {
+        return false;
+    }
+    let reason = if crate::account::stored_session_token().is_some() {
+        CohostReason::PremiumRequired
+    } else {
+        CohostReason::SignedOut
+    };
+    stop_cohost_for_premium_lapse(state, reason).await
+}
+
+/// The lapse stop with the decision made: the same fence and stop path as
+/// `cohost.stop`, plus the reason on the published off state.
+async fn stop_cohost_for_premium_lapse(state: &AppState, reason: CohostReason) -> bool {
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    if state.cohost.lock().await.session.is_none() {
+        return false;
+    }
+    let snapshot = stop_cohost_under_lifecycle_fence(
+        state,
+        &lifecycle_delivery,
+        std::future::ready(()),
+        ListenStop::Abort,
+        Some(reason),
+    )
+    .await;
+    snapshot.reason == Some(reason)
 }
 
 async fn stop_cohost_under_lifecycle_fence<F>(
@@ -4671,6 +4729,7 @@ async fn stop_cohost_under_lifecycle_fence<F>(
     lifecycle_delivery: &OwnedMutexGuard<()>,
     before_state_emit: F,
     listen_stop: ListenStop,
+    stopped_reason: Option<CohostReason>,
 ) -> CohostState
 where
     F: std::future::Future<Output = ()>,
@@ -4678,17 +4737,35 @@ where
     let mut engine = state.cohost.lock().await;
     let report = engine.stop_session();
     let stopped = report.is_some();
-    let snapshot = engine.snapshot();
+    let mut snapshot = engine.snapshot();
     drop(engine);
     save_session_report(state, report);
     if stopped {
+        // The off state names why the backend ended the session (a Premium
+        // lapse); a streamer's own Stop carries no reason, as before.
+        snapshot.reason = stopped_reason;
         crate::captions::retire_orcle_speech(state).await;
         clear_transcript(state);
         crate::captions::stop_listen_with(state, listen_stop).await;
     }
     before_state_emit.await;
     if stopped {
-        state.emit_log("info", "Orcle stopped.");
+        match stopped_reason {
+            Some(CohostReason::PremiumRequired) => {
+                state.emit_log("warn", "Orcle stopped: Videorc Premium is required.");
+            }
+            Some(CohostReason::SignedOut) => {
+                state.emit_log("warn", "Orcle stopped: sign in to Videorc to use it.");
+            }
+            Some(reason) => state.emit_log(
+                "warn",
+                format!(
+                    "Orcle stopped: {}.",
+                    serde_json::to_string(&reason).unwrap_or_default()
+                ),
+            ),
+            None => state.emit_log("info", "Orcle stopped."),
+        }
         emit_state(state, &snapshot, lifecycle_delivery);
     }
     snapshot
@@ -4709,6 +4786,7 @@ pub(crate) async fn stop_cohost_for_session_end_under_lifecycle_fence(
         lifecycle_delivery,
         std::future::ready(()),
         listen_stop,
+        None,
     )
     .await;
 }
@@ -11558,6 +11636,101 @@ mod tests {
             Some("s-b".to_string()),
             "the newest session with a report"
         );
+    }
+
+    /// Plan 140 S1: Orcle is Premium only in the backend too. A Basic account's
+    /// start is refused before any chat validation or state publication, with
+    /// the plan's code and copy; the same start with Premium runs.
+    #[tokio::test]
+    async fn start_is_refused_without_premium() {
+        let state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session("s-basic")
+            .unwrap();
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("s-basic".to_string(), Vec::new());
+        enable_orcle(&state, true).await;
+        let mut events = state.events.subscribe();
+
+        let refused = start_cohost_if_entitled(&state, start_params("s-basic"), false)
+            .await
+            .expect_err("a Basic account cannot start Orcle");
+        assert_eq!(refused, CohostError::PremiumRequired);
+        assert_eq!(refused.code(), "premium-required");
+        assert_eq!(refused.to_string(), "Orcle requires Videorc Premium.");
+        assert_eq!(cohost_status(&state).await, CohostState::off());
+        // Nothing was published: the renderer keeps its locked Orcle card.
+        assert!(events.try_recv().is_err());
+
+        let started = start_cohost_if_entitled(&state, start_params("s-basic"), true)
+            .await
+            .expect("Premium starts Orcle");
+        assert_eq!(started.session_id.as_deref(), Some("s-basic"));
+        stop_cohost(&state).await;
+    }
+
+    /// Plan 140 S1: a mid-session Premium lapse ends Orcle through the normal
+    /// stop path. The report is saved and announced, the published off state
+    /// names the reason, and nothing happens while Premium holds or when
+    /// nothing is running.
+    #[tokio::test]
+    async fn a_premium_lapse_stops_orcle_and_saves_its_report() {
+        let state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session("s-lapse")
+            .unwrap();
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("s-lapse".to_string(), Vec::new());
+        enable_orcle(&state, true).await;
+        start_cohost(&state, start_params("s-lapse")).await.unwrap();
+        note_messages(&state, &messages("s-lapse", 0..4)).await;
+        // A debug build without the Basic override resolves to the Developer
+        // tier, so the live check keeps the session.
+        assert!(!stop_cohost_if_premium_lapsed(&state).await);
+        assert_eq!(
+            cohost_status(&state).await.session_id.as_deref(),
+            Some("s-lapse")
+        );
+        let mut events = state.events.subscribe();
+
+        assert!(stop_cohost_for_premium_lapse(&state, CohostReason::PremiumRequired).await);
+        assert_eq!(cohost_status(&state).await, CohostState::off());
+        let report = state
+            .database
+            .get_cohost_report("s-lapse")
+            .unwrap()
+            .expect("the lapse saves the report");
+        assert_eq!(report.messages_seen, 4);
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            seen.push(event);
+        }
+        assert!(
+            seen.iter().any(|event| {
+                event.event == COHOST_REPORT_SAVED_EVENT && event.payload["sessionId"] == "s-lapse"
+            }),
+            "the saved report is announced"
+        );
+        let published = seen
+            .iter()
+            .filter(|event| event.event == COHOST_STATE_EVENT)
+            .last()
+            .expect("the stopped state is published");
+        assert_eq!(published.payload["status"], "off");
+        assert_eq!(published.payload["sessionId"], serde_json::Value::Null);
+        assert_eq!(published.payload["reason"], "premium-required");
+
+        // Nothing running: nothing to stop, nothing published.
+        assert!(!stop_cohost_for_premium_lapse(&state, CohostReason::PremiumRequired).await);
+        assert!(events.try_recv().is_err());
     }
 
     /// Orcle turned off and back on mid-stream: one report, merged.

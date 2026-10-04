@@ -8777,10 +8777,7 @@ async fn handle_text_message_with_role(
                 clear_result = Some(clear_account_credentials_fail_closed(
                     || {
                         if entitlements::clear_account_entitlements() {
-                            state.emit_event(
-                                "entitlements.updated",
-                                entitlements::current_entitlements(),
-                            );
+                            publish_entitlements_updated(state);
                         }
                     },
                     account::clear_persisted_account_and_advance_intent,
@@ -8923,10 +8920,7 @@ async fn handle_text_message_with_role(
                         // hydration directly, so spawning the revocation would
                         // expose a SignedOut/Premium race.
                         if entitlements::clear_account_entitlements() {
-                            state.emit_event(
-                                "entitlements.updated",
-                                entitlements::current_entitlements(),
-                            );
+                            publish_entitlements_updated(state);
                         }
                     },
                 ) {
@@ -12237,9 +12231,31 @@ async fn refresh_account_entitlements(state: &AppState) {
     // concurrent sign-out must not emit Basic and then be followed by a stale
     // Premium event from the refresh that it superseded.
     if changed {
-        state.emit_event("entitlements.updated", entitlements::current_entitlements());
+        publish_entitlements_updated(state);
     }
     drop(transition);
+}
+
+/// Every `entitlements.updated` goes out through here (plan 140 S1): publish
+/// the effective snapshot, then let Orcle react to it. A session running
+/// without `LiveCohost` stops through its normal stop path, with its report
+/// saved. The stop runs on its own task: two of the three emitters call from a
+/// synchronous closure under `account_auth_transition`, and the stop takes the
+/// live-chat lifecycle fence, which must never be awaited there. The spawned
+/// task re-reads the entitlements itself, so a stale order of events cannot
+/// stop a session that is entitled again by the time it runs.
+fn publish_entitlements_updated(state: &AppState) {
+    state.emit_event("entitlements.updated", entitlements::current_entitlements());
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        tracing::warn!(
+            "Entitlements changed outside the runtime; Orcle re-checks on its next start."
+        );
+        return;
+    };
+    let lapse_state = state.clone();
+    handle.spawn(async move {
+        cohost::stop_cohost_if_premium_lapsed(&lapse_state).await;
+    });
 }
 
 async fn get_ai_quota() -> Result<protocol::AiQuotaStatus> {

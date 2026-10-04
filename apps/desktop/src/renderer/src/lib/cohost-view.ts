@@ -24,11 +24,13 @@ import type { EntitlementUiGate } from './entitlement-ui'
 export {
   applyCohostState,
   COHOST_ERROR_TOAST_MESSAGES,
+  COHOST_STOPPED_TOAST_MESSAGES,
   cohostErrorDetail,
   cohostErrorToast,
   cohostErrorToastKey,
   cohostErrorToastMessage,
   cohostHighlightMessageId,
+  cohostStoppedToast,
   type CohostErrorToast
 } from './cohost-state'
 

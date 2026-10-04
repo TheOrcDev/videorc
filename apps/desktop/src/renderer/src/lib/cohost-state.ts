@@ -113,3 +113,27 @@ export function cohostErrorToast(
   if (previous?.status === 'error' && cohostErrorToastKey(previous) === key) return null
   return { reason: next.reason, key, message: cohostErrorToastMessage(next.reason, next.detail) }
 }
+
+// --- Stopped toast (plan 140 S1) --------------------------------------------
+
+/**
+ * Why the backend ended a running session on its own: Premium lapsed
+ * mid-stream, or the account signed out. Plain copy; the toast is untinted.
+ * Every other `off` state (a streamer's own Stop, the session ending) has no
+ * reason and no toast.
+ */
+export const COHOST_STOPPED_TOAST_MESSAGES: Partial<Record<CohostReason, string>> = {
+  'premium-required': 'Orcle stopped. Premium ended.',
+  'signed-out': 'Orcle stopped. You signed out.'
+}
+
+/**
+ * The one line for a session the backend stopped: `off` with a reason, after a
+ * state that was running (listening, paused or in error). Returns null for
+ * the first state the renderer sees and for every ordinary off.
+ */
+export function cohostStoppedToast(previous: CohostState | null, next: CohostState): string | null {
+  if (next.status !== 'off' || !next.reason) return null
+  if (!previous || previous.status === 'off') return null
+  return COHOST_STOPPED_TOAST_MESSAGES[next.reason] ?? null
+}

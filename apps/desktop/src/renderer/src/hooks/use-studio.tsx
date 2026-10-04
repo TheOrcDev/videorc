@@ -387,6 +387,7 @@ import {
   applyCohostState,
   cohostErrorToast,
   cohostHighlightMessageId,
+  cohostStoppedToast,
   orcleLiveSettingsPatch
 } from '@/lib/cohost-state'
 import { entitlementDisabledReason } from '@/lib/entitlements'
@@ -3901,6 +3902,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const errorToast = cohostErrorToast(previous, merged)
     if (errorToast) {
       toast.error(errorToast.message, { id: 'cohost-error' })
+    }
+    // Plan 140 S1: the backend ends a running session when Premium lapses
+    // mid-stream (or the account signs out). The chip only turns "off", so
+    // one plain, untinted line says why; a streamer's own Stop stays silent.
+    const stoppedToast = cohostStoppedToast(previous, merged)
+    if (stoppedToast) {
+      toast(stoppedToast, { id: 'cohost-stopped' })
     }
   }, [])
 
