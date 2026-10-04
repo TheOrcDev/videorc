@@ -98,6 +98,11 @@ pub const REASON_MAX_UNITS: usize = 40;
 /// Attempts per execution: one try and one bounded retry.
 const MAX_ATTEMPTS: u32 = 2;
 
+/// The longest `outcome` sentence stored or emitted (UTF-16 units). A
+/// provider's error text is echoed into it, and the renderer contract caps
+/// the field at 2000; 500 keeps the card readable well inside that.
+pub const OUTCOME_MAX_UNITS: usize = 500;
+
 /// Tombstone text and provider types (see the module doc).
 pub const REMOVED_BY_YOU_TEXT: &str = "Removed by you";
 pub const HIDDEN_IN_VIDEORC_TEXT: &str = "Hidden in Videorc";
@@ -764,6 +769,7 @@ fn finish_locked(
     operation: &mut ModerationOperation,
 ) {
     operation.updated_at = now_iso();
+    cap_outcome(operation);
     if let Err(error) = state.database.save_chat_moderation_operation(operation) {
         state.emit_log(
             "warn",
@@ -778,6 +784,20 @@ fn finish_locked(
     }
     state.emit_event(MODERATION_OPERATION_EVENT, operation.clone());
     crate::cohost::note_moderation_operation(state, operation);
+}
+
+/// Cut a long `outcome` (a provider's error text can be any length) to
+/// `OUTCOME_MAX_UNITS`, ending in an ellipsis.
+fn cap_outcome(operation: &mut ModerationOperation) {
+    let Some(outcome) = operation.outcome.as_mut() else {
+        return;
+    };
+    if outcome.encode_utf16().count() <= OUTCOME_MAX_UNITS {
+        return;
+    }
+    let mut capped = crate::cohost::truncate_utf16(outcome, OUTCOME_MAX_UNITS - 1);
+    capped.push('\u{2026}');
+    *outcome = capped;
 }
 
 /// Who moves a pending operation to `executing`.
@@ -1370,11 +1390,16 @@ mod tests {
         state.live_chat.lock().await.message(id).cloned().unwrap()
     }
 
+    /// A scripted status that answers only after the provider timeout.
+    const HANG: u16 = 0;
+
     #[derive(Clone)]
     struct Script {
         statuses: Arc<Mutex<VecDeque<u16>>>,
         hits: Arc<AtomicUsize>,
         queries: Arc<Mutex<Vec<String>>>,
+        /// Helix's `message` in every error body.
+        message: Arc<Mutex<String>>,
     }
 
     async fn scripted(
@@ -1387,15 +1412,17 @@ mod tests {
             .lock()
             .unwrap()
             .push(request.uri().to_string());
-        let status = script.statuses.lock().unwrap().pop_front().unwrap_or(204);
-        (
-            StatusCode::from_u16(status).unwrap(),
-            if status == 204 {
-                ""
-            } else {
-                r#"{"message":"scripted"}"#
-            },
-        )
+        let mut status = script.statuses.lock().unwrap().pop_front().unwrap_or(204);
+        if status == HANG {
+            tokio::time::sleep(PROVIDER_TIMEOUT + Duration::from_millis(200)).await;
+            status = 204;
+        }
+        let body = if status == 204 {
+            String::new()
+        } else {
+            serde_json::json!({ "message": script.message.lock().unwrap().clone() }).to_string()
+        };
+        (StatusCode::from_u16(status).unwrap(), body)
     }
 
     /// A Helix mock answering `DELETE /helix/moderation/chat` from a script.
@@ -1404,6 +1431,7 @@ mod tests {
             statuses: Arc::new(Mutex::new(statuses.iter().copied().collect())),
             hits: Arc::new(AtomicUsize::new(0)),
             queries: Arc::new(Mutex::new(Vec::new())),
+            message: Arc::new(Mutex::new("scripted".to_string())),
         };
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -2563,6 +2591,45 @@ mod tests {
         assert_eq!(operation.phase, ModerationPhase::DeliveryUnknown);
         assert_eq!(operation.attempts, 2);
         assert!(!buffered_message(&state, &target.id).await.is_deleted);
+    }
+
+    #[tokio::test]
+    async fn a_long_provider_message_is_cut_to_the_outcome_cap() {
+        let (state, mut events) = test_state();
+        let target = message(StreamPlatform::Twitch, 1);
+        let (base, script) = twitch_server(&[418]).await;
+        *script.message.lock().unwrap() = "x".repeat(5000);
+        seed(
+            &state,
+            StreamPlatform::Twitch,
+            Some(twitch_sender(&base)),
+            &[target.clone()],
+        )
+        .await;
+        let operation = request(&state, request_for(&target, ModerationSource::Manual))
+            .await
+            .unwrap();
+        assert_eq!(operation.phase, ModerationPhase::Failed);
+        let outcome = operation.outcome.clone().unwrap();
+        assert_eq!(outcome.encode_utf16().count(), OUTCOME_MAX_UNITS);
+        assert!(outcome.starts_with("Twitch removal failed (418)"));
+        assert!(outcome.ends_with('\u{2026}'));
+        let stored = state
+            .database
+            .get_chat_moderation_operation(&operation.operation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.outcome.as_deref(), Some(outcome.as_str()));
+        let emitted = next_event(&mut events);
+        assert_eq!(
+            emitted.last().and_then(|op| op.outcome.as_deref()),
+            Some(outcome.as_str())
+        );
+        // A short outcome is left alone.
+        let mut short = operation.clone();
+        short.outcome = Some("Removed from Twitch.".to_string());
+        cap_outcome(&mut short);
+        assert_eq!(short.outcome.as_deref(), Some("Removed from Twitch."));
     }
 
     #[tokio::test]
