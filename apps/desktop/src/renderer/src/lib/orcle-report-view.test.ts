@@ -10,6 +10,7 @@ import type {
 } from './backend'
 import { dayLabel } from './format'
 import {
+  isAutoSessionTitle,
   capReportList,
   chatMessagesLabel,
   formatMomentRange,
@@ -593,5 +594,15 @@ describe('stream switcher', () => {
     expect(reportSessionChoice('new', 'new')).toBeNull()
     expect(reportSessionChoice('old', 'new')).toBe('old')
     expect(reportSessionChoice('old', null)).toBe('old')
+  })
+})
+
+describe('isAutoSessionTitle (plan 150)', () => {
+  it("matches only the backend's start-time name", () => {
+    expect(isAutoSessionTitle('Session 2026-10-02 14:55')).toBe(true)
+    expect(isAutoSessionTitle(' Session 2026-10-02 14:55 ')).toBe(true)
+    expect(isAutoSessionTitle('Session 2026-10-02')).toBe(false)
+    expect(isAutoSessionTitle('Rust night')).toBe(false)
+    expect(isAutoSessionTitle('Session with chat 2026-10-02 14:55')).toBe(false)
   })
 })

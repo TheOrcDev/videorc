@@ -193,7 +193,7 @@ describe('Settings layout', () => {
 
   it('pins the strip: Settings owns its scroll and only the region under the strip scrolls', () => {
     expect(appShellSource).toContain(
-      "<PaneBody scroll={active !== 'library' && active !== 'settings'}>"
+      "<PaneBody scroll={active !== 'library' && active !== 'settings' && active !== 'ai'}>"
     )
     const strip = shellSource.indexOf('<TabsList')
     const scroll = shellSource.indexOf('data-slot="settings-scroll"')
