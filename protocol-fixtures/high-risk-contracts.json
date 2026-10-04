@@ -878,6 +878,91 @@
       "chat": { "messages": 0, "byPlatform": [] }
     }
   },
+  "moderation": {
+    "requestParams": {
+      "operationId": "0f1e2d3c-4b5a-4968-8777-66554433aabb",
+      "messageId": "session-fixture:twitch:default:message-fixture",
+      "source": "orcle-voice",
+      "reason": "toxic",
+      "confirmMode": "confirm"
+    },
+    "manualRequestParams": {
+      "operationId": "1a2b3c4d-5e6f-4071-8293-a4b5c6d7e8f9",
+      "messageId": "session-fixture:twitch:default:message-fixture",
+      "source": "manual"
+    },
+    "confirmParams": { "operationId": "0f1e2d3c-4b5a-4968-8777-66554433aabb" },
+    "listParams": { "sessionId": "session-fixture" },
+    "pendingOperation": {
+      "operationId": "0f1e2d3c-4b5a-4968-8777-66554433aabb",
+      "sessionId": "session-fixture",
+      "messageId": "session-fixture:twitch:default:message-fixture",
+      "platform": "twitch",
+      "authorName": "coders_x",
+      "excerpt": "this stream is trash",
+      "source": "orcle-voice",
+      "reason": "toxic",
+      "phase": "pending-confirm",
+      "confirmMode": "confirm",
+      "requiresExplicitConfirm": true,
+      "confirmBy": "2026-10-04T12:00:20Z",
+      "createdAt": "2026-10-04T12:00:00Z",
+      "updatedAt": "2026-10-04T12:00:00Z"
+    },
+    "removedOperation": {
+      "operationId": "1a2b3c4d-5e6f-4071-8293-a4b5c6d7e8f9",
+      "sessionId": "session-fixture",
+      "messageId": "session-fixture:twitch:default:message-fixture",
+      "platform": "twitch",
+      "targetId": "twitch-target-fixture",
+      "authorName": "coders_x",
+      "excerpt": "this stream is trash",
+      "source": "manual",
+      "phase": "removed",
+      "confirmMode": "confirm",
+      "requiresExplicitConfirm": false,
+      "outcome": "Removed from Twitch.",
+      "outcomeCode": "removed",
+      "createdAt": "2026-10-04T12:01:00Z",
+      "updatedAt": "2026-10-04T12:01:01Z"
+    },
+    "hiddenOperation": {
+      "operationId": "2b3c4d5e-6f70-4182-93a4-b5c6d7e8f901",
+      "sessionId": "session-fixture",
+      "messageId": "session-fixture:youtube:default:yt-fixture",
+      "platform": "youtube",
+      "authorName": "coders_x",
+      "excerpt": "buy my coins at scam dot example",
+      "source": "orcle-voice",
+      "reason": "spam",
+      "phase": "hidden-locally",
+      "confirmMode": "countdown",
+      "requiresExplicitConfirm": true,
+      "confirmBy": "2026-10-04T12:02:20Z",
+      "outcome": "Hidden in Videorc. Viewers on YouTube still see it. YouTube removals are paused for today to save Videorc's daily YouTube limit.",
+      "outcomeCode": "quota-paused",
+      "createdAt": "2026-10-04T12:02:00Z",
+      "updatedAt": "2026-10-04T12:02:09Z"
+    },
+    "removedMessage": {
+      "id": "session-fixture:twitch:default:message-fixture",
+      "providerMessageId": "message-fixture",
+      "platform": "twitch",
+      "targetId": "twitch-target-fixture",
+      "sessionId": "session-fixture",
+      "authorId": "1002",
+      "authorName": "coders_x",
+      "authorBadges": [],
+      "authorRoles": [],
+      "publishedAt": "2026-10-04T11:59:50Z",
+      "receivedAt": "2026-10-04T11:59:50.200Z",
+      "messageText": "Removed by you",
+      "fragments": [],
+      "eventType": "deleted",
+      "isDeleted": true,
+      "rawProviderType": "videorc.removed"
+    }
+  },
   "clip": {
     "markedSaved": {
       "sessionId": "session-fixture",

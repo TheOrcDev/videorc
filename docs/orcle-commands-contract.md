@@ -91,7 +91,24 @@ every change. **Never add it to `LAN_EVENTS`.**
 
 Each destination's live chat status gains `moderate`:
 `"ready" | "missing-scope" | "unsupported" | "paused"`. It sits next to the
-existing `write` state.
+existing `write` state (optional on the wire; absent when no account is
+connected).
+
+### Local tombstones (S4 writes them, S6 renders them)
+
+Both terminal outcomes rewrite the original chat row in place through the
+normal inbound tombstone path: same app id, `isDeleted: true`,
+`eventType: "deleted"`, empty `fragments`. A row tells them apart by
+`rawProviderType`:
+
+| `rawProviderType` | `messageText` | Meaning |
+| --- | --- | --- |
+| `videorc.removed` | `Removed by you` | The platform deleted it; viewers no longer see it. |
+| `videorc.hidden` | `Hidden in Videorc` | The platform could not delete it; viewers still see it. |
+
+A provider's own deletion keeps its provider type (Twitch
+`channel.chat.message_delete`, YouTube/Kick `message-delete`). The matching
+`ModerationOperation` carries the plain `outcome` sentence and `outcomeCode`.
 
 ## B. Orcle command state and settings (desktop, S3, read by S6)
 

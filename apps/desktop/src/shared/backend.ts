@@ -3803,6 +3803,76 @@ export interface CommentsSendOperation {
   updatedAt: string
 }
 
+// --- Chat moderation (plan 140 S4) ---
+// Wire mirror of crates/videorc-backend/src/live_chat_moderation.rs. Every
+// removal is a durable, audited operation; the backend owns the timers. The
+// event `liveChat.moderationOperation` carries a ModerationOperation on every
+// change. Manual removal is free; `orcle-voice` needs Premium.
+
+export type ModerationSource = 'manual' | 'orcle-voice'
+export type RemoveConfirmMode = 'confirm' | 'countdown'
+export type ModerationPhase =
+  | 'pending-confirm'
+  | 'cancelled'
+  | 'expired'
+  | 'executing'
+  | 'removed'
+  | 'hidden-locally'
+  | 'failed'
+  | 'delivery-unknown'
+export type ModerationOutcomeCode =
+  | 'removed'
+  | 'missing-scope'
+  | 'unsupported'
+  | 'quota-paused'
+  | 'too-old'
+  | 'provider-error'
+  | 'not-found'
+
+/** One audited removal, as `liveChat.moderation.*` return it and the event carries it. */
+export interface ModerationOperation {
+  operationId: string
+  sessionId: string
+  messageId: string
+  platform: StreamPlatform
+  targetId?: string
+  authorName: string
+  /** At most 140 characters of the message, for the card and the audit row. */
+  excerpt: string
+  source: ModerationSource
+  /** Audit only ("toxic", "spam"), at most 40 characters. */
+  reason?: string
+  phase: ModerationPhase
+  confirmMode: RemoveConfirmMode
+  /** True whenever the operation runs only on an explicit confirm (always on YouTube). */
+  requiresExplicitConfirm: boolean
+  /** Confirm mode: when the open card expires (20 s), RFC 3339. */
+  confirmBy?: string
+  /** Countdown mode: when the removal runs unless cancelled (5 s), RFC 3339. */
+  executeAt?: string
+  /** A plain sentence for the chip, the card and the operation list. */
+  outcome?: string
+  outcomeCode?: ModerationOutcomeCode
+  createdAt: string
+  updatedAt: string
+}
+
+/** `liveChat.moderation.request` params. `confirmMode` defaults to `confirm`. */
+export interface ModerationRequestParams {
+  /** UUID v4 minted by the caller: the idempotency key. */
+  operationId: string
+  /** The app message id (`LiveChatMessage.id`). */
+  messageId: string
+  source: ModerationSource
+  reason?: string
+  confirmMode?: RemoveConfirmMode
+}
+
+/** `liveChat.moderation.confirm` and `liveChat.moderation.cancel` params. */
+export interface ModerationOperationParams {
+  operationId: string
+}
+
 export interface CommentsSendCommand {
   requestId: string
   operationId: string
@@ -4434,6 +4504,8 @@ export interface ChatCapability {
   state: ChatCapabilityState
   read: CommentsReadState
   write: CommentsWriteState
+  /** "Remove messages" readiness (plan 140); absent without an account. */
+  moderate?: CommentsModerateState
   /** True only when chat can actually be read right now. */
   chatReadAvailable: boolean
   requiredScope?: string
@@ -4462,6 +4534,13 @@ export type CommentsReadState =
   | 'unavailable'
 
 export type CommentsWriteState = 'ready' | 'missing-scope' | 'read-only' | 'failed' | 'unavailable'
+
+/**
+ * Whether Videorc can remove a viewer's message on a destination (plan 140):
+ * `missing-scope` means reconnect (or authorize X Live), `paused` means the
+ * YouTube quota breaker is set.
+ */
+export type CommentsModerateState = 'ready' | 'missing-scope' | 'unsupported' | 'paused'
 
 /** What kind of chat row a message is — drives styling for monetized/system events. */
 export type LiveChatEventType =
@@ -4548,6 +4627,8 @@ export interface LiveChatProviderState {
   accountLabel?: string
   read: CommentsReadState
   write: CommentsWriteState
+  /** "Remove messages" readiness (plan 140), next to `write`; absent without an account. */
+  moderate?: CommentsModerateState
   state: LiveChatProviderConnectionState
   message: string
   lastConnectedAt?: string

@@ -915,7 +915,10 @@ describe('backend RPC contract', () => {
         'sessions.delete.pending',
         'repair.repair_file',
         'scene.editor.draft.set',
-        'scene.editor.draft.clear'
+        'scene.editor.draft.clear',
+        'liveChat.moderation.request',
+        'liveChat.moderation.confirm',
+        'liveChat.moderation.cancel'
       ])
     )
   })
@@ -2223,6 +2226,85 @@ describe('backend RPC contract', () => {
         budget: { units: -1, limit: 2500, step: 'normal' }
       })
     ).toThrow()
+  })
+
+  it('types and exactly validates the chat moderation RPCs and event (plan 140)', () => {
+    const operation = {
+      operationId: '0f1e2d3c-4b5a-4968-8777-66554433aabb',
+      sessionId: 'session-1',
+      messageId: 'session-1:twitch:default:m-1',
+      platform: 'twitch',
+      authorName: 'coders_x',
+      excerpt: 'this stream is trash',
+      source: 'orcle-voice',
+      reason: 'toxic',
+      phase: 'pending-confirm',
+      confirmMode: 'confirm',
+      requiresExplicitConfirm: true,
+      confirmBy: '2026-10-04T12:00:20Z',
+      createdAt: '2026-10-04T12:00:00Z',
+      updatedAt: '2026-10-04T12:00:00Z'
+    }
+    expectTypeOf<BackendEventMap['liveChat.moderationOperation']>().toEqualTypeOf<
+      BackendRpcResult<'liveChat.moderation.request'>
+    >()
+    expect(validateBackendEventPayload('liveChat.moderationOperation', operation)).toEqual(
+      operation
+    )
+    expect(validateBackendRpcResult('liveChat.moderation.request', operation)).toEqual(operation)
+    const request = {
+      operationId: operation.operationId,
+      messageId: operation.messageId,
+      source: 'orcle-voice',
+      reason: 'toxic',
+      confirmMode: 'countdown'
+    }
+    expect(validateBackendRpcParams('liveChat.moderation.request', request)).toEqual(request)
+    // The manual row action: no reason, no mode (the backend defaults it).
+    const manual = {
+      operationId: operation.operationId,
+      messageId: operation.messageId,
+      source: 'manual'
+    }
+    expect(validateBackendRpcParams('liveChat.moderation.request', manual)).toEqual(manual)
+    for (const method of ['liveChat.moderation.confirm', 'liveChat.moderation.cancel'] as const) {
+      expect(validateBackendRpcParams(method, { operationId: operation.operationId })).toEqual({
+        operationId: operation.operationId
+      })
+      expect(() => validateBackendRpcParams(method, { operationId: '' })).toThrow(method)
+      expect(() =>
+        validateBackendRpcParams(method, { operationId: operation.operationId, force: true })
+      ).toThrow(method)
+    }
+    expect(
+      validateBackendRpcParams('liveChat.moderationOperations.list', { sessionId: 'session-1' })
+    ).toEqual({ sessionId: 'session-1' })
+    expect(
+      validateBackendRpcResult('liveChat.moderationOperations.list', [
+        { ...operation, phase: 'removed', outcome: 'Removed from Twitch.', outcomeCode: 'removed' }
+      ])
+    ).toHaveLength(1)
+    // Closed enums and closed objects: a phase, source, code or key this build
+    // does not know is refused instead of rendered.
+    for (const bad of [
+      { ...operation, phase: 'deleting' },
+      { ...operation, source: 'viewer' },
+      { ...operation, outcomeCode: 'banned' },
+      { ...operation, confirmMode: 'auto' },
+      { ...operation, confirmBy: null },
+      { ...operation, attempts: 2 },
+      { ...operation, requiresExplicitConfirm: 'yes' }
+    ]) {
+      expect(() => validateBackendEventPayload('liveChat.moderationOperation', bad)).toThrow(
+        'liveChat.moderationOperation'
+      )
+    }
+    expect(() =>
+      validateBackendRpcParams('liveChat.moderation.request', { ...request, source: 'cloud' })
+    ).toThrow('liveChat.moderation.request')
+    expect(() =>
+      validateBackendRpcParams('liveChat.moderation.request', { ...request, sessionId: 'x' })
+    ).toThrow('liveChat.moderation.request')
   })
 
   it('bounds unregistered method and event payloads instead of passing arbitrary values', () => {
