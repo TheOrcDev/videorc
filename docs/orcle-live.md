@@ -20,8 +20,10 @@ The Orcle tab names three powers:
   promises, nudges you in dead air, tells you when viewers say your audio
   broke, and can put the comment you're talking about on screen.
 
-Orcle never posts, replies or moderates by itself. A reply goes out only when
-you send it.
+Orcle never acts on its own. It removes a comment only when you tell it to.
+It never posts or replies by itself: a reply goes out only when you send it.
+Voice commands (highlight, clear and remove a comment by asking) are covered
+in [orcle-commands.md](orcle-commands.md).
 
 ## The one switch
 

@@ -163,7 +163,11 @@ web has `VIDEORC_AI_COHOST_DISABLED` off. Offline proof: `pnpm smoke:cohost-fake
 - [ ] Press `H` on a question: the source comment appears on the viewer-facing output for ~10 s
       via the existing comment highlight; `A` and `⌫` remove questions and they never return.
 - [ ] Post a clearly toxic message from a viewer account. Confirm it shows under Flags with a
-      reason and that nothing is auto-deleted or auto-replied.
+      reason and that Orcle never removes or replies to it on its own. Then pick the flag and use
+      **Remove from chat** (⇧⌫): the row reads "Removed" (or "Hidden in Videorc" with the reason
+      on hover) and the message is gone for viewers. Voice removal ("this one is toxic, remove it
+      from our chat") must show a card and wait for your answer; see
+      [orcle-commands.md](orcle-commands.md).
 - [ ] Sign out mid-stream: chip reads `paused · signed out`; sign back in and confirm listening
       resumes without losing open questions. Exhaust the daily quota (or set the limit to 1 on
       web): chip reads `quota` and resumes after `Retry-After`.
