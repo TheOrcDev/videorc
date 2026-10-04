@@ -1,9 +1,19 @@
 import { describe, expect, it } from 'vitest'
 
-import type { CohostState } from './backend'
+import type { CohostState, PlatformAccount } from './backend'
 import { orcleLiveSettingsPatch } from './cohost-state'
+import { COHOST_ACTS_ON_ASK_COPY } from './cohost-view'
 import type { EntitlementUiGate } from './entitlement-ui'
 import {
+  ORCLE_REMOVAL_FALLBACK,
+  ORCLE_REMOVAL_LIMITS,
+  ORCLE_REMOVE_MESSAGES_NO_ACCOUNT,
+  ORCLE_VOICE_COMMANDS,
+  ORCLE_VOICE_COMMANDS_DESCRIPTION,
+  ORCLE_VOICE_COMMANDS_OFF,
+  ORCLE_VOICE_PREMIUM,
+  orcleVoicePhrasesLabel,
+  removeMessagesRows,
   CLOUD_AI_KEEPS,
   CLOUD_AI_USES,
   ORCLE_CONSENT_OFF_REASON,
@@ -242,5 +252,99 @@ describe('orcleLiveView', () => {
     expect(view.switchDisabled).toBe(true)
     expect(view.checked).toBe(false)
     expect(view.status.kind).toBe('off')
+  })
+})
+
+describe('Voice commands (plan 140, S6 part A)', () => {
+  it("says what you can say in the web guide's words", () => {
+    expect(ORCLE_VOICE_COMMANDS.map((command) => command.title)).toEqual([
+      'Highlight',
+      'Clear',
+      'Remove',
+      'Answer'
+    ])
+    const phrases = ORCLE_VOICE_COMMANDS.flatMap((command) => command.phrases)
+    for (const phrase of [
+      'Orcle, highlight the comment from coders X',
+      'Orcle, put this one up',
+      'Orcle, take it down',
+      'Orcle, remove it from the screen',
+      'This one is toxic. Remove it from our chat.',
+      'Orcle, delete the comment from coders X',
+      'Yes',
+      'Never mind'
+    ]) {
+      expect(phrases).toContain(phrase)
+    }
+    expect(orcleVoicePhrasesLabel(['Yes', 'Do it', 'No'], 2)).toBe('“Yes”, “Do it”')
+  })
+
+  it('keeps the promises plain: never on its own, 20 seconds, 10 a minute, free removal', () => {
+    expect(COHOST_ACTS_ON_ASK_COPY).toBe(
+      'Orcle never acts on its own. It removes a comment only when you tell it to.'
+    )
+    expect(ORCLE_REMOVAL_LIMITS).toContain('20 seconds')
+    expect(ORCLE_REMOVAL_LIMITS).toContain('At most 10 removals a minute.')
+    expect(ORCLE_REMOVAL_FALLBACK).toBe(
+      'If the platform cannot remove it, Orcle hides it in Videorc and tells you viewers may still see it.'
+    )
+    expect(ORCLE_VOICE_PREMIUM).toContain('Premium')
+    expect(ORCLE_VOICE_PREMIUM).toContain('free for everyone')
+    for (const line of [
+      ORCLE_VOICE_COMMANDS_DESCRIPTION,
+      ORCLE_VOICE_COMMANDS_OFF,
+      ORCLE_REMOVAL_LIMITS,
+      ORCLE_REMOVAL_FALLBACK,
+      ORCLE_VOICE_PREMIUM,
+      ORCLE_REMOVE_MESSAGES_NO_ACCOUNT,
+      ...ORCLE_VOICE_COMMANDS.flatMap((command) => [command.result, ...command.phrases])
+    ]) {
+      expect(line).not.toContain('—')
+      expect(line).not.toMatch(/co-?host/i)
+    }
+  })
+
+  const account = (
+    platform: PlatformAccount['platform'],
+    scopes: string[],
+    status: PlatformAccount['status'] = 'connected'
+  ): Pick<PlatformAccount, 'platform' | 'scopes' | 'status' | 'accountLabel'> => ({
+    platform,
+    scopes,
+    status,
+    accountLabel: `${platform}-channel`
+  })
+
+  it('shows Remove messages per connected platform with its one fix', () => {
+    const rows = removeMessagesRows(
+      [
+        account('x', []),
+        account('kick', ['chat:write']),
+        account('twitch', ['moderator:manage:chat_messages']),
+        account('youtube', ['https://www.googleapis.com/auth/youtube.force-ssl']),
+        account('tiktok', [])
+      ],
+      { xLiveAuthorized: false }
+    )
+    expect(rows.map((row) => [row.platform, row.ready, row.message, row.action?.label])).toEqual([
+      ['youtube', true, 'Ready', undefined],
+      ['twitch', true, 'Ready', undefined],
+      ['kick', false, 'Reconnect Kick to let Orcle remove messages.', 'Reconnect'],
+      ['x', false, 'Authorize X Live to let Orcle remove messages.', 'Authorize X Live']
+    ])
+    expect(rows[0].accountLabel).toBe('youtube-channel')
+  })
+
+  it('asks for a reconnect when the account lapsed, and is ready once X Live is authorized', () => {
+    expect(
+      removeMessagesRows([
+        account('twitch', ['moderator:manage:chat_messages'], 'needs-reconnect')
+      ])[0]
+    ).toMatchObject({ ready: false, action: { kind: 'reconnect' } })
+    expect(removeMessagesRows([account('x', [])], { xLiveAuthorized: true })[0]).toMatchObject({
+      ready: true,
+      message: 'Ready'
+    })
+    expect(removeMessagesRows([])).toEqual([])
   })
 })
