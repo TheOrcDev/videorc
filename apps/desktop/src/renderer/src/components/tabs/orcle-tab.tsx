@@ -14,7 +14,7 @@ import {
 import { OrcleEmblem } from '@/components/orcle-emblem'
 import { OrcleReportCard } from '@/components/orcle-report-card'
 import { OrcleVoiceCommands } from '@/components/orcle-voice-commands'
-import { ConfigGrid, PageStack } from '@/components/page'
+import { ConfigGrid, CONFIG_GRID_PAIR, PageStack } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -75,13 +75,6 @@ function reviewTargetOf(request: CleanCutTabRequest | null): CleanCutReviewTarge
     jobId: request.jobId ?? null
   }
 }
-
-/**
- * A tab with two sections: side by side at `lg`, stacked below it with a
- * hairline between them, exactly like Settings' (plan 064). At `lg` the pair
- * fills the visible height so the column hairline runs the full height.
- */
-const SECTION_PAIR = 'flex-1 content-start lg:content-stretch lg:[&>*]:border-b-0'
 
 /** The tab a deep link lands on, for a page rendered without the shell's tab. */
 function initialTab(
@@ -185,7 +178,7 @@ export function OrcleTab({
           data-slot="orcle-scroll"
         >
           <TabsContent className="flex flex-col" value="live">
-            <ConfigGrid className={SECTION_PAIR}>
+            <ConfigGrid className={CONFIG_GRID_PAIR}>
               <OrcleLiveSection />
               <div className="flex flex-col">
                 <OrcleLivePowers onSelectTab={selectTab} />
@@ -195,15 +188,16 @@ export function OrcleTab({
           </TabsContent>
           <TabsContent className="flex flex-1 flex-col" value="chat">
             <OrcleTabLock />
-            <ConfigGrid className={SECTION_PAIR}>
+            <ConfigGrid className={CONFIG_GRID_PAIR}>
               <OrcleRepliesSection />
               <OrcleModerationSection />
             </ConfigGrid>
           </TabsContent>
-          <TabsContent className="flex flex-col" value="voice">
-            <PageStack>
-              <OrcleVoiceCommands />
-            </PageStack>
+          <TabsContent className="flex flex-1 flex-col" value="voice">
+            <OrcleVoiceCommands
+              lead={<OrcleUnlockAlert slot="orcle-tab-unlock" />}
+              onOpenLive={() => selectTab('live')}
+            />
           </TabsContent>
           <TabsContent className="flex flex-col" value="reports">
             <PageStack>

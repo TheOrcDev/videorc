@@ -509,11 +509,33 @@ describe('Orcle tab: Voice commands (plan 140, S6 part A)', () => {
     expect(voice.querySelector('[data-slot="orcle-voice-commands-off"]')).toBeNull()
   })
 
-  it('says to turn on Orcle Live first while it is off', async () => {
+  it('says to turn on Orcle Live first while it is off, with a way to Live', async () => {
     await render({ tab: 'voice' })
-    expect(section().querySelector('[data-slot="orcle-voice-commands-off"]')?.textContent).toBe(
-      'Turn on Orcle Live to use voice commands.'
+    const off = section().querySelector('[data-slot="orcle-voice-commands-off"]') as HTMLElement
+    expect(off.textContent).toContain('Turn on Orcle Live to use voice commands.')
+    await act(async () => off.querySelector('button')!.click())
+    expect(calls.onTabChange).toHaveBeenLastCalledWith('live')
+  })
+
+  it('leads with one reason when Orcle is locked, and disables the settings (plan 150)', async () => {
+    await render({ tab: 'voice', gate: basic })
+    expect(section().querySelector('[data-slot="orcle-tab-unlock"]')?.textContent).toContain(
+      'Orcle requires Videorc Premium.'
     )
+    expect(section().querySelector('[data-slot="orcle-voice-commands-off"]')).toBeNull()
+    expect((document.getElementById('orcle-wake-word') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('puts each phrase over what it does, in two columns (plan 150)', async () => {
+    await render({ cohost: settings({ enabled: true }), tab: 'voice' })
+    const titles = [...section().querySelectorAll('[data-slot="panel-section"] h3')].map(
+      (heading) => heading.textContent
+    )
+    expect(titles).toEqual(['Commands', 'Remove messages'])
+    const highlight = section().querySelector('[data-command="highlight"]') as HTMLElement
+    expect(highlight.children).toHaveLength(2)
+    expect(highlight.lastElementChild?.textContent).toBe('Puts it on stream.')
+    expect(section().querySelector('[data-slot="orcle-voice-commands-premium"]')).toBeTruthy()
   })
 
   it('lists Remove messages per account, with the one fix for each', async () => {
