@@ -13,7 +13,8 @@ const mocked = vi.hoisted(() => ({
   chat: { cohostState: null } as Record<string, unknown>,
   recording: { recording: { state: 'idle' } } as Record<string, unknown>,
   shell: {} as Record<string, unknown>,
-  account: {} as Record<string, unknown>
+  account: {} as Record<string, unknown>,
+  reportAsks: [] as Array<string | null>
 }))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
@@ -22,6 +23,12 @@ vi.mock('@/hooks/use-studio', () => ({
   useStudioShell: () => mocked.shell
 }))
 vi.mock('@/hooks/use-account', () => ({ useVideorcAccount: () => mocked.account }))
+vi.mock('@/hooks/use-orcle-report', () => ({
+  useOrcleReport: (sessionId: string | null) => {
+    mocked.reportAsks.push(sessionId)
+    return { payload: null, loading: false, error: null, reload: () => undefined }
+  }
+}))
 
 let root: Root
 let container: HTMLDivElement
@@ -59,6 +66,7 @@ function settings(overrides: Partial<CohostSettings> = {}): CohostSettings {
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   for (const spy of Object.values(calls)) spy.mockClear()
+  mocked.reportAsks = []
   Object.assign(window, { videorc: { openOAuthUrl: calls.openOAuthUrl } })
   container = document.createElement('div')
   document.body.append(container)
@@ -79,9 +87,11 @@ async function render({
   consented = true,
   consentRequested = false,
   live = false,
-  state = null as CohostState | null
+  state = null as CohostState | null,
+  reportSessionId = undefined as string | null | undefined
 } = {}): Promise<void> {
   mocked.core = {
+    sessions: [],
     account: signedIn ? { status: 'signed-in' } : { status: 'signed-out' },
     aiConsent: consented,
     cohostGate: gate,
@@ -101,7 +111,13 @@ async function render({
   }
   mocked.shell = { openCommentsWindow: calls.openCommentsWindow }
   mocked.account = { signIn: calls.signIn }
-  await act(async () => root.render(createElement(OrcleTab)))
+  await act(async () =>
+    root.render(
+      reportSessionId === undefined
+        ? createElement(OrcleTab)
+        : createElement(OrcleTab, { reportSessionId })
+    )
+  )
 }
 
 function liveSwitch(): HTMLButtonElement {
@@ -223,6 +239,34 @@ describe('Orcle tab (plan 119 S2)', () => {
     expect(statusLine().getAttribute('data-status')).toBe('attention')
     expect(statusLine().textContent).toContain('Needs attention')
     expect(statusLine().textContent).toContain("Cloud AI is off, so Orcle can't read chat")
+  })
+})
+
+describe('Stream report (plan 119 S3)', () => {
+  function sectionTitles(): string[] {
+    return [...document.querySelectorAll('[data-slot="orcle-tab"] h3')].map(
+      (heading) => heading.textContent ?? ''
+    )
+  }
+
+  it('sits under Orcle Live, before Customize, and follows the last stream', async () => {
+    await render()
+    expect(sectionTitles()).toEqual(['Orcle Live', 'Last stream'])
+    const tab = document.querySelector('[data-slot="orcle-tab"]') as HTMLElement
+    const report = tab.querySelector('[data-slot="orcle-report"]') as HTMLElement
+    const customize = tab.querySelector('[data-slot="orcle-customize"]') as HTMLElement
+    expect(
+      report.compareDocumentPosition(customize) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(mocked.reportAsks.at(-1)).toBeNull()
+    expect(document.body.textContent).toContain(
+      'The report appears here after your first stream with Orcle.'
+    )
+  })
+
+  it("opens on the session Library's Orcle report asked for", async () => {
+    await render({ reportSessionId: 'stream-7' })
+    expect(mocked.reportAsks.at(-1)).toBe('stream-7')
   })
 })
 

@@ -47,6 +47,12 @@ export function sortLibrarySessions(
   return sort === 'oldest' ? sorted : sorted.reverse()
 }
 
+/** A session that went out live has an Orcle report to open (plan 119 S3):
+ * stored modes are `stream` and `record+stream`, older rows `streaming`. */
+export function hasOrcleReport(session: Pick<SessionSummary, 'mode'>): boolean {
+  return session.mode.includes('stream')
+}
+
 /** "tee" is the internal ffmpeg fan-out container for record+stream sessions —
  * show the user what the file actually is instead (F-019). */
 export function sessionFormatLabel(session: SessionSummary): string | null {

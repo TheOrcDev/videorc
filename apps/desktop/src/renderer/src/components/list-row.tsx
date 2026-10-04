@@ -40,7 +40,8 @@ export function ListRow({
   /** 28 px instead of 32 px. */
   compact?: boolean
   children?: ReactNode
-} & ComponentProps<'div'>): ReactElement {
+  // `title` is the row's title, never the div's tooltip attribute.
+} & Omit<ComponentProps<'div'>, 'title'>): ReactElement {
   return (
     <div
       data-slot="list-row"

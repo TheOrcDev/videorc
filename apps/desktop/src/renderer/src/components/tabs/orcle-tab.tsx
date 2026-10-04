@@ -2,6 +2,7 @@ import { ChatIcon, ChevronDownIcon, LockIcon } from '@/components/icons'
 import { useState, type ReactElement } from 'react'
 
 import { CohostSettingsSection } from '@/components/cohost-settings-section'
+import { OrcleReportCard } from '@/components/orcle-report-card'
 import { PageHeader } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
@@ -43,14 +44,23 @@ import { sessionIsLive } from '../../../../shared/capture-state'
 /**
  * The Orcle tab (plan 119 S2): Videorc's AI tab, right under Studio, where
  * Publish was. Phase 1 holds Orcle Live (one switch, consent, settings under
- * Customize); the stream report (S3) and Clean cut (phase 2) join it here.
- * The toolbar names the page; nothing sits in its corner.
+ * Customize) and the last stream's report (S3); Clean cut (phase 2) joins it
+ * here. The toolbar names the page; nothing sits in its corner.
+ *
+ * `reportSessionId` is the Library's "Orcle report" ask: the report opens on
+ * that session. Without it the report follows the last stream.
  */
-export function OrcleTab(): ReactElement {
+export function OrcleTab({
+  reportSessionId = null
+}: {
+  reportSessionId?: string | null
+}): ReactElement {
+  const [reportSession, setReportSession] = useState<string | null>(reportSessionId)
   return (
     <div className="flex flex-col" data-slot="orcle-tab">
       <PageHeader description={ORCLE_TAB_DESCRIPTION} title="Orcle" />
       <OrcleLiveSection />
+      <OrcleReportCard sessionId={reportSession} onSessionChange={setReportSession} />
       <OrcleCustomize />
       <OrcleConsentDialog />
     </div>

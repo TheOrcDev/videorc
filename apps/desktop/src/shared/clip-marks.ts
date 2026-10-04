@@ -16,15 +16,24 @@ export interface ClipMarkedToast {
   description?: string
 }
 
-/** The toast for a `clip.marked` event: where the mark landed, or why the
- * moment could not be kept. One copy for every window that shows it. */
-export function clipMarkedToast(event: ClipMarkedEvent): ClipMarkedToast {
+/** Where a saved mark shows up: the stream's report in the Orcle tab (plan 119 S3). */
+export const CLIP_MARK_IN_REPORT = "It's in your stream report in Orcle."
+
+/**
+ * The toast for a `clip.marked` event: where the mark landed, or why the
+ * moment could not be kept. One copy for every window that shows it.
+ * `streaming: false` is a recording that never went live: it has no stream
+ * report, so the toast does not point at one.
+ */
+export function clipMarkedToast(
+  event: ClipMarkedEvent,
+  { streaming = true }: { streaming?: boolean } = {}
+): ClipMarkedToast {
   if (event.saved) {
     return {
       kind: 'success',
       title: `Clip marked at ${formatClipMarkClock(event.atSeconds)}`,
-      description:
-        event.source === 'voice' ? 'Find it in Publish → Clips after the session.' : undefined
+      description: streaming ? CLIP_MARK_IN_REPORT : undefined
     }
   }
   return {

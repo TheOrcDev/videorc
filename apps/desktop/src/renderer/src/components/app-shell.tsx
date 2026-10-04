@@ -165,7 +165,19 @@ export function AppShell(): ReactElement {
     toggleCaptionsWindow
   } = useStudioShell()
   const { recording } = useStudioRecordingState()
-  const [active, setActive] = useState<WorkspaceTab>('studio')
+  const [active, setActiveTab] = useState<WorkspaceTab>('studio')
+  // Library's "Orcle report" opens the Orcle tab on one session's report (plan
+  // 119 S3). Any other way to a page drops that ask, so the next visit to
+  // Orcle shows the last stream again.
+  const [orcleReportSessionId, setOrcleReportSessionId] = useState<string | null>(null)
+  const setActive = useCallback((tab: WorkspaceTab) => {
+    setOrcleReportSessionId(null)
+    setActiveTab(tab)
+  }, [])
+  const openOrcleReport = useCallback((sessionId: string) => {
+    setOrcleReportSessionId(sessionId)
+    setActiveTab('ai')
+  }, [])
   const [commandOpen, setCommandOpen] = useState(false)
   const [onboardingOpen, setOnboardingOpen] = useState(false)
   const whatsNew = useWhatsNew(runtimeInfo?.version, runtimeInfo?.platform)
@@ -188,13 +200,16 @@ export function AppShell(): ReactElement {
   }, [])
 
   // Studio control pages are ordinary tabs grouped under "Studio" in the sidebar.
-  const openStudioPanel = useCallback((panel: StudioPanel) => {
-    setActive(panel)
-  }, [])
+  const openStudioPanel = useCallback(
+    (panel: StudioPanel) => {
+      setActive(panel)
+    },
+    [setActive]
+  )
 
   const closeStudioPanel = useCallback(() => {
     setActive('studio')
-  }, [])
+  }, [setActive])
 
   // Plan 064: Settings reopens on the tab used last; a link that names a tab
   // (update chip, FFmpeg banner, ⌘K, toasts) selects it before opening.
@@ -210,7 +225,7 @@ export function AppShell(): ReactElement {
       }
       setActive('settings')
     },
-    [selectSettingsTab]
+    [selectSettingsTab, setActive]
   )
 
   const completeOnboarding = useCallback(() => {
@@ -222,12 +237,6 @@ export function AppShell(): ReactElement {
   // dismissal flag — no flag clearing, closing just re-dismisses.
   const openPermissionsSetup = useCallback(() => {
     setOnboardingOpen(true)
-  }, [])
-
-  // Library's "Open in Publish (AI)" opens the Orcle tab until plan 119 S3
-  // replaces that entry with "Orcle report".
-  const openOrcleTab = useCallback(() => {
-    setActive('ai')
   }, [])
 
   useEffect(() => {
@@ -300,7 +309,7 @@ export function AppShell(): ReactElement {
       }
     })
     return off
-  }, [])
+  }, [setActive])
 
   useEffect(() => {
     const onWorkspaceNavigate = (event: Event): void => {
@@ -314,7 +323,7 @@ export function AppShell(): ReactElement {
     }
     window.addEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
     return () => window.removeEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
-  }, [openSettings])
+  }, [openSettings, setActive])
 
   const live = isActiveRecordingState(recordingState)
   const statusTone: StatusDotTone = live
@@ -378,8 +387,8 @@ export function AppShell(): ReactElement {
                   {active === 'live' ? <StreamingTab /> : null}
                   {active === 'captions' ? <CaptionsTab /> : null}
                   {active === 'recording' ? <RecordingTab /> : null}
-                  {active === 'library' ? <LibraryTab onOpenInAi={openOrcleTab} /> : null}
-                  {active === 'ai' ? <OrcleTab /> : null}
+                  {active === 'library' ? <LibraryTab onOpenOrcleReport={openOrcleReport} /> : null}
+                  {active === 'ai' ? <OrcleTab reportSessionId={orcleReportSessionId} /> : null}
                   {active === 'diagnostics' ? <DiagnosticsTab /> : null}
                   {active === 'settings' ? (
                     <SettingsTab

@@ -7,12 +7,12 @@ import {
   FolderIcon,
   LockIcon,
   MoreIcon,
+  OrcleIcon,
   PlayIcon,
   RepairIcon,
   ResetIcon,
   SearchIcon,
   SortIcon,
-  SparkleIcon,
   SpinnerIcon,
   SuccessIcon,
   UploadIcon,
@@ -68,6 +68,7 @@ import { revealInFileManagerLabel } from '@/lib/platform'
 import {
   LIBRARY_FILTERS,
   filterLibrarySessions,
+  hasOrcleReport,
   isLiveSession,
   libraryStorageLabel,
   liveSessionLabel,
@@ -96,9 +97,10 @@ import { openVideorcWebLink, VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
 // with filter/sort/search on top and an honest storage footer below. All list
 // logic is pure (lib/library-view); this component is the shell.
 export function LibraryTab({
-  onOpenInAi
+  onOpenOrcleReport
 }: {
-  onOpenInAi: (sessionId: string) => void
+  /** "Orcle report": the Orcle tab, opened on this session's report. */
+  onOpenOrcleReport: (sessionId: string) => void
 }): ReactElement {
   const {
     sessions,
@@ -249,7 +251,7 @@ export function LibraryTab({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <PageHeader
-        description="Every recording and stream becomes a local session. Files stay on disk; AI work happens in Publish."
+        description="Every recording and stream becomes a local session. Files stay on disk."
         title="Library"
       />
 
@@ -375,7 +377,7 @@ export function LibraryTab({
                     else rowElementsRef.current.delete(session.id)
                   }}
                   onDelete={() => setDeleting([session])}
-                  onOpenInAi={() => onOpenInAi(session.id)}
+                  onOpenOrcleReport={() => onOpenOrcleReport(session.id)}
                   onRevealSession={focusLibrarySession}
                   onRename={() => {
                     setRenaming(session)
@@ -497,7 +499,7 @@ function LibraryRow({
   selectionDisabled,
   registerRow,
   onToggleSelected,
-  onOpenInAi,
+  onOpenOrcleReport,
   onRevealSession,
   onRename,
   onDelete
@@ -508,7 +510,7 @@ function LibraryRow({
   selectionDisabled: boolean
   registerRow: (element: HTMLDivElement | null) => void
   onToggleSelected: () => void
-  onOpenInAi: () => void
+  onOpenOrcleReport: () => void
   onRevealSession: (sessionId: string) => void
   onRename: () => void
   onDelete: () => void
@@ -594,7 +596,7 @@ function LibraryRow({
         filePath={filePath}
         session={session}
         onDelete={onDelete}
-        onOpenInAi={onOpenInAi}
+        onOpenOrcleReport={onOpenOrcleReport}
         onRevealSession={onRevealSession}
         onRename={onRename}
       />
@@ -669,14 +671,14 @@ type RepairPhase = 'idle' | 'checking' | 'assessed' | 'repairing' | 'done'
 function RowActions({
   filePath,
   session,
-  onOpenInAi,
+  onOpenOrcleReport,
   onRevealSession,
   onRename,
   onDelete
 }: {
   filePath: string | null
   session: SessionSummary
-  onOpenInAi: () => void
+  onOpenOrcleReport: () => void
   onRevealSession: (sessionId: string) => void
   onRename: () => void
   onDelete: () => void
@@ -876,15 +878,6 @@ function RowActions({
         view={cleanupView}
         onAction={(action) => void runNoiseCleanupAction(action)}
       />
-      <Button
-        aria-label="Open in Publish"
-        size="icon-sm"
-        title="Open in Publish (AI)"
-        variant="ghost"
-        onClick={onOpenInAi}
-      >
-        <SparkleIcon weight="fill" />
-      </Button>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
@@ -906,10 +899,13 @@ function RowActions({
               <PlayIcon />
               Play
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={onOpenInAi}>
-              <SparkleIcon />
-              Open in Publish
-            </DropdownMenuItem>
+            {hasOrcleReport(session) ? (
+              // The report is saved when the stream ends (plan 119 S3).
+              <DropdownMenuItem disabled={live} onClick={onOpenOrcleReport}>
+                <OrcleIcon />
+                Orcle report
+              </DropdownMenuItem>
+            ) : null}
             <DropdownMenuItem
               disabled={!filePath}
               onClick={() => filePath && void window.videorc?.revealSession?.(session.id)}

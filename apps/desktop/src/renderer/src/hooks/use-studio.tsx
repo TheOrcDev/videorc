@@ -6639,7 +6639,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // Clip that (plan 068 D6): one toast per mark, whether it came from a
       // spoken phrase, a shortcut, a deck key, or the Stream Manager.
       nextClient.on('clip.marked', (payload) => {
-        const copy = clipMarkedToast(payload as ClipMarkedEvent)
+        // A recording that never went live has no stream report to point at.
+        const copy = clipMarkedToast(payload as ClipMarkedEvent, {
+          streaming: sessionIsLive(recordingRef.current)
+        })
         ;(copy.kind === 'success' ? toast.success : toast.warning)(copy.title, {
           id: 'clip-marked',
           description: copy.description
