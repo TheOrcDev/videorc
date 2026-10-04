@@ -124,9 +124,10 @@ pub const KICK_MODERATION_SCOPE: &str = "moderation:chat_message:manage";
 
 /// Scopes a user can opt into per platform (plan 055, S6). They stay opt-in
 /// because adding a scope to the base set makes every existing connection
-/// reconnect once. The desktop asks for all of a platform's optional scopes
-/// on every connect and reconnect (`shared/platform-scopes.ts`, whose test
-/// pins this table), and `retained_optional_scopes` keeps the ones an account
+/// reconnect once. The desktop asks for all of Twitch's on every connect, and
+/// for Kick's only from its "Remove messages" row, because Kick can refuse a
+/// scope its app settings don't enable (`shared/platform-scopes.ts`, whose
+/// test pins this table). `retained_optional_scopes` keeps the ones an account
 /// already holds, so no path drops a grant.
 pub fn optional_scopes_for(platform: StreamPlatform) -> &'static [&'static str] {
     match platform {

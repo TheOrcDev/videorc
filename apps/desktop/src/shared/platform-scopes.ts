@@ -29,17 +29,22 @@ export const KICK_MODERATION_SCOPE = 'moderation:chat_message:manage'
 export const YOUTUBE_FORCE_SSL_SCOPE = 'https://www.googleapis.com/auth/youtube.force-ssl'
 
 /**
- * Every optional Twitch scope. Every connect and reconnect asks for all of
- * them: the backend requests the base set plus only the optional scopes it is
- * passed (keeping the ones the account already holds), so a path that passed
- * a subset would never grant the rest.
+ * Every optional Twitch scope. Every Twitch connect and reconnect asks for all
+ * of them: the backend requests the base set plus only the optional scopes it
+ * is passed (keeping the ones the account already holds), so a path that
+ * passed a subset would never grant the rest.
  */
 export const TWITCH_OPTIONAL_SCOPES = [...TWITCH_AUDIENCE_SCOPES, TWITCH_MODERATION_SCOPE] as const
-/** Every optional Kick scope (plan 140: optional, with a Reconnect row). */
+/** Every optional Kick scope (plan 140: optional, asked for only from its Reconnect row). */
 export const KICK_OPTIONAL_SCOPES = [KICK_MODERATION_SCOPE] as const
 
-/** The optional scopes a connect or reconnect of `platform` requests: all of them. */
-export function connectOptionalScopes(platform: StreamPlatform): readonly string[] {
+/**
+ * Every optional scope `platform` offers, exactly `optional_scopes_for` in
+ * `oauth.rs`: what a permission row's Reconnect asks for ("Reconnect Twitch
+ * to let Orcle remove messages", the Stream Manager's twin, Show who
+ * followed). Never a hand-picked subset.
+ */
+export function permissionReconnectScopes(platform: StreamPlatform): readonly string[] {
   switch (platform) {
     case 'twitch':
       return TWITCH_OPTIONAL_SCOPES
@@ -51,15 +56,40 @@ export function connectOptionalScopes(platform: StreamPlatform): readonly string
 }
 
 /**
- * What every connect or reconnect of `platform` passes to `onConnect`
- * (Connect, Reconnect, and every permission row): the full optional union,
- * never a hand-picked subset. `undefined` for platforms with none.
+ * The optional scopes an ordinary Connect or Reconnect of `platform` asks for.
+ * Twitch asks for all of them, so Activity names followers and Orcle can
+ * remove messages from the first stream. Kick asks for none: Kick can refuse a
+ * scope its app settings don't enable, and that would fail every Kick connect,
+ * so its moderation scope is asked for only from the "Remove messages" row.
+ * The backend keeps the optional scopes an account already holds on every
+ * reconnect (`retained_optional_scopes` in `main.rs`), so this never drops a
+ * grant.
+ */
+export function connectOptionalScopes(platform: StreamPlatform): readonly string[] {
+  return platform === 'twitch' ? TWITCH_OPTIONAL_SCOPES : []
+}
+
+function optionalScopesOptions(
+  optionalScopes: readonly string[]
+): PlatformConnectOptions | undefined {
+  return optionalScopes.length ? { optionalScopes } : undefined
+}
+
+/**
+ * What an ordinary Connect or Reconnect of `platform` passes to `onConnect`.
+ * `undefined` for platforms that ask for nothing extra.
  */
 export function platformConnectOptions(
   platform: StreamPlatform
 ): PlatformConnectOptions | undefined {
-  const optionalScopes = connectOptionalScopes(platform)
-  return optionalScopes.length ? { optionalScopes } : undefined
+  return optionalScopesOptions(connectOptionalScopes(platform))
+}
+
+/** What a permission row's Reconnect passes to `onConnect`: every optional scope. */
+export function permissionReconnectOptions(
+  platform: StreamPlatform
+): PlatformConnectOptions | undefined {
+  return optionalScopesOptions(permissionReconnectScopes(platform))
 }
 
 export function hasTwitchAudienceScopes(scopes: readonly string[]): {

@@ -146,7 +146,7 @@ import {
 } from '../shared/comments-snapshot-delta'
 import { normalizeLiveDashboardState, type LiveDashboardState } from '../shared/live-dashboard'
 import { sessionChatTotalsSchema } from '../shared/session-chat-totals'
-import { connectOptionalScopes, isScopeReconnectPlatform } from '../shared/platform-scopes'
+import { isScopeReconnectPlatform, permissionReconnectScopes } from '../shared/platform-scopes'
 import {
   migrateStreamManagerFrame,
   STREAM_MANAGER_DEFAULT_SIZE,
@@ -14282,7 +14282,7 @@ app.whenReady().then(async () => {
       {
         platform,
         ...(redirectUri ? { redirectUri } : {}),
-        optionalScopes: [...connectOptionalScopes(platform)]
+        optionalScopes: [...permissionReconnectScopes(platform)]
       }
     )
     await openOAuthUrl(authUrl)

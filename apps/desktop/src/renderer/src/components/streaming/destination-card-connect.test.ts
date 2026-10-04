@@ -129,10 +129,12 @@ describe('DestinationCard connect paths (plan 140, S5)', () => {
     expect(onConnect).toHaveBeenCalledWith('twitch', { optionalScopes: TWITCH_OPTIONAL_SCOPES })
   })
 
-  it('Connect Kick asks for the moderation permission', async () => {
+  it('Connect Kick asks for nothing extra', async () => {
+    // Kick's moderation permission is asked for only from the Remove messages
+    // row: Kick can refuse a scope its app settings don't enable.
     const onConnect = await render({ target: target('kick') })
     await click('Connect Kick')
-    expect(onConnect).toHaveBeenCalledWith('kick', { optionalScopes: KICK_OPTIONAL_SCOPES })
+    expect(onConnect).toHaveBeenCalledWith('kick', undefined)
   })
 
   it('Connect X asks for nothing extra', async () => {

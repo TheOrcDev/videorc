@@ -12,6 +12,8 @@ import {
   YOUTUBE_FORCE_SSL_SCOPE,
   connectOptionalScopes,
   isScopeReconnectPlatform,
+  permissionReconnectOptions,
+  permissionReconnectScopes,
   platformConnectOptions,
   removeMessagesReadiness,
   removeMessagesReconnectCopy,
@@ -88,26 +90,40 @@ function account(
 }
 
 describe('optional scope union (plan 140, S5)', () => {
-  it('asks for every optional scope on every Twitch and Kick connect', () => {
+  it('asks for every optional scope on every Twitch connect', () => {
     expect(TWITCH_OPTIONAL_SCOPES).toEqual([
       'moderator:read:followers',
       'channel:read:subscriptions',
       'moderator:manage:chat_messages'
     ])
     expect(KICK_OPTIONAL_SCOPES).toEqual(['moderation:chat_message:manage'])
-    // No connect path can drop the audience or the moderation grant.
+    // No Twitch connect path can drop the audience or the moderation grant.
     for (const scope of [...TWITCH_AUDIENCE_SCOPES, TWITCH_MODERATION_SCOPE]) {
       expect(connectOptionalScopes('twitch')).toContain(scope)
       expect(platformConnectOptions('twitch')?.optionalScopes).toContain(scope)
+      expect(permissionReconnectOptions('twitch')?.optionalScopes).toContain(scope)
     }
     expect(platformConnectOptions('twitch')).toEqual({ optionalScopes: TWITCH_OPTIONAL_SCOPES })
-    expect(platformConnectOptions('kick')).toEqual({ optionalScopes: [KICK_MODERATION_SCOPE] })
+    expect(permissionReconnectOptions('twitch')).toEqual({
+      optionalScopes: TWITCH_OPTIONAL_SCOPES
+    })
+  })
+
+  it('asks for Kick moderation only from its permission row', () => {
+    // Kick can refuse a scope its app settings don't enable; asking on every
+    // connect would fail every Kick connect until the app enables it.
+    expect(connectOptionalScopes('kick')).toEqual([])
+    expect(platformConnectOptions('kick')).toBeUndefined()
+    expect(permissionReconnectScopes('kick')).toEqual([KICK_MODERATION_SCOPE])
+    expect(permissionReconnectOptions('kick')).toEqual({ optionalScopes: [KICK_MODERATION_SCOPE] })
   })
 
   it('passes nothing extra where a platform has no optional scope', () => {
     for (const platform of ['youtube', 'x', 'tiktok', 'instagram', 'custom'] as const) {
       expect(connectOptionalScopes(platform)).toEqual([])
       expect(platformConnectOptions(platform)).toBeUndefined()
+      expect(permissionReconnectScopes(platform)).toEqual([])
+      expect(permissionReconnectOptions(platform)).toBeUndefined()
     }
   })
 
@@ -117,7 +133,7 @@ describe('optional scope union (plan 140, S5)', () => {
     const known = new Set(Object.values(RUST_VARIANTS))
     for (const variant of table.keys()) expect(known).toContain(variant)
     for (const platform of ALL_PLATFORMS) {
-      expect(connectOptionalScopes(platform), platform).toEqual(
+      expect(permissionReconnectScopes(platform), platform).toEqual(
         table.get(RUST_VARIANTS[platform]) ?? []
       )
     }

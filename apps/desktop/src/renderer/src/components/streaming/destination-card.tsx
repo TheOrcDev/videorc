@@ -64,6 +64,7 @@ import { cn } from '@/lib/utils'
 import { VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
 import {
   isScopeReconnectPlatform,
+  permissionReconnectOptions,
   platformConnectOptions,
   removeMessagesReadiness,
   removeMessagesReconnectCopy,
@@ -760,7 +761,7 @@ export function accountStatus(
 /**
  * The signed-in account's one permission row (plan 140, S5): what a reconnect
  * would add, or null when nothing is missing. One row and one button, since
- * every reconnect asks for all of a platform's optional permissions. Removing
+ * its reconnect asks for all of a platform's optional permissions. Removing
  * messages leads; Twitch's follow alerts ride along when they are missing too.
  */
 export function missingPermissionsRow(
@@ -831,11 +832,14 @@ function OAuthAccountPanel({
   const [youtubeConsentOpen, setYoutubeConsentOpen] = useState(false)
   const [youtubeConsentAccepted, setYoutubeConsentAccepted] = useState(false)
   const platformName = metadataPlatformLabel(platform)
-  // Every connect and reconnect from this card (Connect, Reconnect and the
-  // permission row) asks for all of the platform's optional permissions
-  // (plan 071 S2, plan 140 S5): Activity names followers from the first
-  // stream and Orcle can remove messages. A subset would never grant the rest.
+  // Connect and Reconnect ask for the platform's ordinary optional
+  // permissions (plan 071 S2, plan 140 S5): all of Twitch's, so Activity names
+  // followers and Orcle can remove messages from the first stream. The
+  // permission row asks for every optional permission, which is the only
+  // place Kick's moderation permission is requested.
   const connect = (): void => onConnect(platform, platformConnectOptions(platform))
+  const reconnectForPermissions = (): void =>
+    onConnect(platform, permissionReconnectOptions(platform))
 
   if (!account) {
     const connectDisabled = disabled || credentials?.ready === false
@@ -945,7 +949,8 @@ function OAuthAccountPanel({
 
   const status = accountStatus(account, validation)
   const shared = Boolean(sharedAccountWith)
-  // A lost account already shows Reconnect, and that one asks for everything.
+  // A lost account shows Reconnect first; the backend keeps the permissions it
+  // already held, and this row returns afterwards if one is still missing.
   const permissions = status === 'reconnect' ? null : missingPermissionsRow(platform, account)
   const youtubeChannelOptions =
     platform === 'youtube' &&
@@ -1026,7 +1031,7 @@ function OAuthAccountPanel({
             disabled={disabled}
             size="sm"
             variant="outline"
-            onClick={connect}
+            onClick={reconnectForPermissions}
           >
             {permissions.action}
           </Button>
