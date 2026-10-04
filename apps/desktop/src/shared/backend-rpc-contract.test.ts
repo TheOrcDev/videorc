@@ -742,6 +742,30 @@ describe('backend RPC contract', () => {
       })
     ).toThrow('healthEvents must be a known field')
 
+    // Plan 119 S13: a Clean cut output names its source and mode; the
+    // processingKind literal stays closed (decision 12).
+    const cleanCutOutput = {
+      ...item,
+      id: 'session-1-clean-cut',
+      derivedFromSessionId: 'session-1',
+      sourceTitle: 'Session 1',
+      cleanCutOfSessionId: 'session-1',
+      cleanCutMode: 'clean'
+    }
+    expect(validateBackendRpcResult('sessions.list', { items: [cleanCutOutput] })).toEqual({
+      items: [cleanCutOutput]
+    })
+    expect(() =>
+      validateBackendRpcResult('sessions.list', {
+        items: [{ ...cleanCutOutput, cleanCutMode: 'tight' }]
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('sessions.list', {
+        items: [{ ...cleanCutOutput, processingKind: 'clean-cut' }]
+      })
+    ).toThrow()
+
     const params = { sessionId: 'session-1', cursor: 'created\nid', limit: 120 }
     for (const method of [
       'sessions.healthEvents.list',

@@ -738,6 +738,8 @@ mod tests {
             derived_from_session_id: None,
             source_title: None,
             processing_kind: None,
+            clean_cut_of_session_id: None,
+            clean_cut_mode: None,
             finalization_state: None,
             finalization_error: None,
         };

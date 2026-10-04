@@ -34,6 +34,7 @@ import type {
   CleanCutJob,
   CleanCutJobDetail,
   CleanCutStartParams,
+  CleanCutTranscript,
   CleanCutUpdateEdlParams,
   CompositorFrameReady,
   CompositorStatus,
@@ -261,6 +262,8 @@ export interface BackendRpcMethodMap {
   'cleanCut.list': BackendRpcDefinition<undefined, CleanCutJob[]>
   'cleanCut.cancel': BackendRpcDefinition<{ jobId: string }, CleanCutJob>
   'cleanCut.updateEdl': BackendRpcDefinition<CleanCutUpdateEdlParams, CleanCutJobDetail>
+  'cleanCut.render': BackendRpcDefinition<{ jobId: string }, CleanCutJob>
+  'cleanCut.transcript': BackendRpcDefinition<{ jobId: string }, CleanCutTranscript>
   'repair.assess_file': BackendRpcDefinition<{ sessionId: string }, FileAssessment>
   'repair.repair_file': BackendRpcDefinition<
     { sessionId: string; expectAudio?: boolean; intendedFps?: number },
@@ -1637,6 +1640,10 @@ const sessionSummarySchema = boundedSemanticValue(
       derivedFromSessionId: optionalSchema(boundedString),
       sourceTitle: optionalSchema(stringSchema({ maxLength: 16_384 })),
       processingKind: optionalSchema(literalSchema('noise-cleanup')),
+      // Plan 119 S13: a Clean cut output row names its source and mode;
+      // `processingKind` never carries a Clean cut value (decision 12).
+      cleanCutOfSessionId: optionalSchema(boundedString),
+      cleanCutMode: optionalSchema(enumSchema(['clean', 'condensed'])),
       finalizationState: optionalSchema(recordingFinalizationStateSchema),
       finalizationProgressPercent: optionalSchema(numberSchema({ min: 0, max: 100 })),
       finalizationError: optionalSchema(stringSchema({ maxLength: 16_384 }))
@@ -1872,8 +1879,47 @@ const cleanCutEdlSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+const cleanCutCondensedKeepSchema = objectSchema(
+  {
+    startMs: nonNegativeInteger,
+    endMs: nonNegativeInteger,
+    title: stringSchema({ maxLength: 2_000 })
+  },
+  { allowUnknown: false }
+)
 const cleanCutJobDetailSchema = objectSchema(
-  { job: cleanCutJobSchema, edl: optionalSchema(cleanCutEdlSchema) },
+  {
+    job: cleanCutJobSchema,
+    edl: optionalSchema(cleanCutEdlSchema),
+    condensedKeeps: optionalSchema(arraySchema(cleanCutCondensedKeepSchema, { maxLength: 10_000 }))
+  },
+  { allowUnknown: false }
+)
+const cleanCutJobParamsSchema = objectSchema({ jobId: boundedString }, { allowUnknown: false })
+const cleanCutTranscriptSchema = objectSchema(
+  {
+    jobId: boundedString,
+    language: nullableSchema(stringSchema({ maxLength: 64 })),
+    words: arraySchema(
+      objectSchema(
+        {
+          text: stringSchema({ maxLength: 2_000 }),
+          startMs: nonNegativeInteger,
+          endMs: nonNegativeInteger,
+          filler: optionalSchema(literalSchema(true))
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: 500_000 }
+    ),
+    segments: arraySchema(
+      objectSchema(
+        { id: boundedString, startMs: nonNegativeInteger, endMs: nonNegativeInteger },
+        { allowUnknown: false }
+      ),
+      { maxLength: 25_000 }
+    )
+  },
   { allowUnknown: false }
 )
 const cleanCutGetResultSchema = objectSchema(
@@ -3007,6 +3053,14 @@ const runtimeContracts = {
   'cleanCut.updateEdl': {
     params: cleanCutUpdateEdlParamsSchema,
     result: cleanCutJobDetailSchema
+  },
+  'cleanCut.render': {
+    params: cleanCutJobParamsSchema,
+    result: cleanCutJobSchema
+  },
+  'cleanCut.transcript': {
+    params: cleanCutJobParamsSchema,
+    result: cleanCutTranscriptSchema
   },
   'repair.assess_file': {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),

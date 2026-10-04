@@ -5420,6 +5420,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cleanCut.start"
         | "cleanCut.cancel"
         | "cleanCut.updateEdl"
+        | "cleanCut.render"
         | "performance.check.run"
         | "performance.check.cancel"
         | "encoder.preference.set" => Some(DEFAULT_MUTATION_POLICY),
@@ -5504,6 +5505,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "noiseCleanup.list"
         | "cleanCut.get"
         | "cleanCut.list"
+        | "cleanCut.transcript"
         | "clip.marks.list"
         | "preview.live.status"
         | "session.sources.get"
@@ -11835,6 +11837,32 @@ async fn handle_text_message_with_role(
             match serde_json::from_value::<protocol::CleanCutUpdateEdlParams>(command.params) {
                 Ok(params) => match clean_cut::update_edl(state, params).await {
                     Ok(detail) => ServerResponse::ok(command.id, detail),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cleanCut.render" => {
+            match serde_json::from_value::<protocol::CleanCutRenderParams>(command.params) {
+                Ok(params) => match clean_cut::render(state.clone(), params).await {
+                    Ok(job) => ServerResponse::ok(command.id, job),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cleanCut.transcript" => {
+            match serde_json::from_value::<protocol::CleanCutTranscriptParams>(command.params) {
+                Ok(params) => match clean_cut::transcript(state, params).await {
+                    Ok(transcript) => ServerResponse::ok(command.id, transcript),
                     Err(refusal) => {
                         ServerResponse::error(command.id, refusal.code, refusal.message)
                     }

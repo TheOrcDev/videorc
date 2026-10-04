@@ -73,12 +73,13 @@ pub const REFUSAL_UNAVAILABLE: &str = "unavailable";
 pub const REFUSAL_ALREADY_RUNNING: &str = "already-running";
 pub const REFUSAL_START_FAILED: &str = "start-failed";
 
-// `cleanCut.updateEdl` refusal codes.
+// `cleanCut.updateEdl`, `cleanCut.render` and `cleanCut.transcript` refusal codes.
 pub const REFUSAL_NOT_FOUND: &str = "not-found";
 pub const REFUSAL_NOT_READY: &str = "not-ready";
 pub const REFUSAL_EDL_REVISION_CONFLICT: &str = "edl-revision-conflict";
 pub const REFUSAL_INVALID_PARAMS: &str = "invalid-params";
 pub const REFUSAL_UPDATE_FAILED: &str = "update-failed";
+pub const REFUSAL_RENDER_FAILED: &str = "render-failed";
 
 // Job `error_code` values the desktop produces itself. Server codes from the
 // contract (`clean-cut-monthly-quota-exhausted`, `clean-cut-disabled`, ...)
@@ -96,6 +97,12 @@ pub const ERROR_PROCESSING: &str = "processing-failed";
 pub const ERROR_ANALYSIS: &str = "analysis-failed";
 pub const ERROR_ANALYSIS_TIMEOUT: &str = "analysis-timeout";
 pub const ERROR_TRANSCRIPT_TOO_LONG: &str = "transcript-too-long";
+// Render (S13).
+pub const ERROR_FFMPEG_UNSUPPORTED: &str = "ffmpeg-unsupported";
+pub const ERROR_INSUFFICIENT_SPACE: &str = "insufficient-space";
+pub const ERROR_RENDER_FAILED: &str = "render-failed";
+pub const ERROR_RENDER_INVALID: &str = "render-invalid";
+pub const ERROR_RENDER_TOO_MANY_CUTS: &str = "render-too-many-cuts";
 
 /// A typed `cleanCut.*` refusal: the code is closed on the desktop side, the
 /// message is plain copy for the renderer.

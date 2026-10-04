@@ -606,7 +606,7 @@ pub fn extract_audio_blocking(
     }
 }
 
-fn read_bounded_tail<R: Read>(reader: Option<R>) -> Vec<u8> {
+pub(super) fn read_bounded_tail<R: Read>(reader: Option<R>) -> Vec<u8> {
     let mut tail = Vec::new();
     let Some(mut reader) = reader else {
         return tail;

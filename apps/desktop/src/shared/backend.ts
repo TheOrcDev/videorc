@@ -247,9 +247,18 @@ export interface CleanCutEdl {
   stats: CleanCutEdlStats
 }
 
+/** One kept range of a Condensed selection, in recording time (S13/S19). */
+export interface CleanCutCondensedKeep {
+  startMs: number
+  endMs: number
+  title: string
+}
+
 export interface CleanCutJobDetail {
   job: CleanCutJob
   edl?: CleanCutEdl
+  /** Condensed jobs only, once the analysis answered; omitted when empty. */
+  condensedKeeps?: CleanCutCondensedKeep[]
 }
 
 /** `cleanCut.get`: the newest job per mode for one source session. */
@@ -286,6 +295,34 @@ export interface CleanCutUpdateEdlParams {
   removals?: CleanCutRemovalToggle[]
   addManual?: CleanCutManualRange[]
   removeManual?: string[]
+}
+
+/** `cleanCut.render` and `cleanCut.transcript` params (S13). */
+export interface CleanCutJobParams {
+  jobId: string
+}
+
+/** One word of `cleanCut.transcript`; `filler` is present only when true. */
+export interface CleanCutTranscriptWord {
+  text: string
+  startMs: number
+  endMs: number
+  filler?: true
+}
+
+/** One sentence of `cleanCut.transcript`: the analysis job's segment ids. */
+export interface CleanCutTranscriptSegment {
+  id: string
+  startMs: number
+  endMs: number
+}
+
+/** `cleanCut.transcript`: the stitched words and sentence segments of a job. */
+export interface CleanCutTranscript {
+  jobId: string
+  language: string | null
+  words: CleanCutTranscriptWord[]
+  segments: CleanCutTranscriptSegment[]
 }
 
 export type VideorcAccountStatus = 'signed-out' | 'signed-in'
@@ -3456,6 +3493,10 @@ export interface SessionListItem {
   derivedFromSessionId?: string
   sourceTitle?: string
   processingKind?: 'noise-cleanup'
+  /** Present only on a derived row Clean cut rendered (plan 119 S13): the
+   * source session and the mode. `processingKind` stays absent for these rows. */
+  cleanCutOfSessionId?: string
+  cleanCutMode?: CleanCutMode
   /** Background MP4 finalization (instant-record P2); absent for legacy rows. */
   finalizationState?: RecordingFinalizationState
   /** Live export progress from the backend registry (only while finalizing). */

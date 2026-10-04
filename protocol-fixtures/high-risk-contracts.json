@@ -1073,6 +1073,121 @@
       "revision": 0,
       "removals": [{ "id": "r3", "enabled": true }],
       "addManual": [{ "startMs": 600000, "endMs": 601000 }]
+    },
+    "renderParams": { "jobId": "clean-cut-fixture-1" },
+    "transcriptParams": { "jobId": "clean-cut-fixture-1" },
+    "renderingJob": {
+      "id": "clean-cut-fixture-1",
+      "sourceSessionId": "session-fixture",
+      "mode": "clean",
+      "state": "rendering",
+      "step": "render",
+      "progress": 0.42,
+      "edlRevision": 1,
+      "edlSummary": {
+        "durationMs": 1834200,
+        "keptMs": 1499965,
+        "removalCount": 3,
+        "byKind": [
+          { "kind": "head", "count": 1, "ms": 1702 },
+          { "kind": "retake", "count": 1, "ms": 332532 }
+        ]
+      },
+      "transcriptPath": "Artifacts/session-fixture/clean-cut/transcript.words.json",
+      "createdAt": "2026-10-04T10:00:00Z",
+      "updatedAt": "2026-10-04T10:12:00Z"
+    },
+    "completedJob": {
+      "id": "clean-cut-fixture-1",
+      "sourceSessionId": "session-fixture",
+      "mode": "clean",
+      "state": "completed",
+      "progress": 1.0,
+      "edlRevision": 1,
+      "edlSummary": {
+        "durationMs": 1834200,
+        "keptMs": 1499965,
+        "removalCount": 3,
+        "byKind": [
+          { "kind": "head", "count": 1, "ms": 1702 },
+          { "kind": "retake", "count": 1, "ms": 332532 }
+        ]
+      },
+      "transcriptPath": "Artifacts/session-fixture/clean-cut/transcript.words.json",
+      "outputSessionId": "session-fixture-clean-cut",
+      "createdAt": "2026-10-04T10:00:00Z",
+      "updatedAt": "2026-10-04T10:15:00Z"
+    },
+    "transcript": {
+      "jobId": "clean-cut-fixture-1",
+      "language": "en",
+      "words": [
+        { "text": "So", "startMs": 1702, "endMs": 1900 },
+        { "text": "um", "startMs": 1950, "endMs": 2300, "filler": true },
+        { "text": "today.", "startMs": 2350, "endMs": 2800 }
+      ],
+      "segments": [{ "id": "s1", "startMs": 1702, "endMs": 2800 }]
+    },
+    "transcriptWithoutLanguage": {
+      "jobId": "clean-cut-fixture-2",
+      "language": null,
+      "words": [],
+      "segments": []
+    },
+    "condensedGetResult": {
+      "sessionId": "session-fixture",
+      "jobs": [
+        {
+          "job": {
+            "id": "clean-cut-fixture-3",
+            "sourceSessionId": "session-fixture",
+            "mode": "condensed",
+            "state": "completed",
+            "progress": 1.0,
+            "edlRevision": 0,
+            "edlSummary": {
+              "durationMs": 1834200,
+              "keptMs": 900900,
+              "removalCount": 1,
+              "byKind": [{ "kind": "condensed", "count": 1, "ms": 933300 }]
+            },
+            "transcriptPath": "Artifacts/session-fixture/clean-cut/transcript.words.json",
+            "outputSessionId": "session-fixture-condensed",
+            "createdAt": "2026-10-04T12:00:00Z",
+            "updatedAt": "2026-10-04T12:20:00Z"
+          },
+          "edl": {
+            "version": 1,
+            "sourceIdentity": {
+              "path": "Recordings/talk.mp4",
+              "sizeBytes": 734003200,
+              "modifiedUnixMs": 1759572000000
+            },
+            "frameRate": { "num": 30000, "den": 1001 },
+            "durationMs": 1834200,
+            "removals": [
+              {
+                "id": "r1",
+                "startMs": 900900,
+                "endMs": 1834200,
+                "startFrame": 27000,
+                "endFrame": 54970,
+                "kind": "condensed",
+                "reason": "Outside the condensed selection",
+                "enabled": true
+              }
+            ],
+            "stats": {
+              "byKind": [{ "kind": "condensed", "count": 1, "ms": 933300 }],
+              "keptMs": 900900
+            }
+          },
+          "condensedKeeps": [
+            { "startMs": 0, "endMs": 540540, "title": "Intro" },
+            { "startMs": 540540, "endMs": 900900, "title": "Deploying to Vercel" }
+          ]
+        }
+      ]
     }
   }
 }

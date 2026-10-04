@@ -70,7 +70,12 @@ function probeBundledFfmpeg(executable) {
     maxBuffer: 16 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'pipe']
   })
-  return assessLinuxFfmpegCapabilities({ encodersOutput, versionOutput })
+  const filtersOutput = execFileSync(executable, ['-hide_banner', '-filters'], {
+    encoding: 'utf8',
+    maxBuffer: 16 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe']
+  })
+  return assessLinuxFfmpegCapabilities({ encodersOutput, filtersOutput, versionOutput })
 }
 
 function currentCommit() {

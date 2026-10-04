@@ -1536,8 +1536,10 @@ fn saturating_u64_product(left: impl Into<u64>, right: impl Into<u64>) -> u64 {
     left.into().saturating_mul(right.into())
 }
 
+/// Free bytes on the volume holding `path`. Shared with Clean cut's render
+/// (plan 119 S13), which checks space the same way before it writes.
 #[cfg(unix)]
-fn available_space(path: &Path) -> Option<u64> {
+pub(crate) fn available_space(path: &Path) -> Option<u64> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
@@ -1551,7 +1553,7 @@ fn available_space(path: &Path) -> Option<u64> {
 }
 
 #[cfg(target_os = "windows")]
-fn available_space(path: &Path) -> Option<u64> {
+pub(crate) fn available_space(path: &Path) -> Option<u64> {
     use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
     use windows::core::PCWSTR;
 
@@ -1562,7 +1564,7 @@ fn available_space(path: &Path) -> Option<u64> {
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]
-fn available_space(_path: &Path) -> Option<u64> {
+pub(crate) fn available_space(_path: &Path) -> Option<u64> {
     None
 }
 

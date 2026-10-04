@@ -113,9 +113,11 @@ pub(crate) struct PersistedNoiseCleanupJob {
     pub source_full_sha256: String,
 }
 
-/// The session facts Clean cut eligibility reads (plan 119 decision 11).
+/// The session facts Clean cut eligibility reads (plan 119 decision 11), and
+/// the title S13 names the derived session after.
 #[derive(Debug, Clone)]
 pub(crate) struct CleanCutSource {
+    pub title: String,
     pub status: String,
     pub mode: String,
     pub mp4_path: Option<String>,
@@ -124,14 +126,19 @@ pub(crate) struct CleanCutSource {
     pub processing_kind: Option<String>,
 }
 
-/// A `clean_cut_jobs` row: the renderer snapshot plus the three JSON columns
-/// the worker owns and the renderer never sees whole.
+/// A `clean_cut_jobs` row: the renderer snapshot plus the JSON columns the
+/// worker owns and the renderer never sees whole.
 #[derive(Debug, Clone)]
 pub(crate) struct PersistedCleanCutJob {
     pub job: CleanCutJob,
     pub source_identity_json: Option<String>,
     pub analysis_json: Option<String>,
     pub edl_json: Option<String>,
+    /// Plan 119 S13: the render's staging and final paths, recorded before
+    /// FFmpeg writes a byte so startup can sweep a stray partial file. Clean
+    /// cut deliberately stays out of the shared `session_file_operations`
+    /// journal (see `complete_clean_cut_derivative`).
+    pub render_json: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2937,7 +2944,8 @@ impl Database {
     pub(crate) fn clean_cut_source(&self, session_id: &str) -> Result<Option<CleanCutSource>> {
         let conn = self.lock()?;
         conn.query_row(
-            "SELECT status, mode, mp4_path, duration_ms, derived_from_session_id, processing_kind
+            "SELECT status, mode, mp4_path, duration_ms, derived_from_session_id, processing_kind,
+                    title
              FROM sessions WHERE id = ?1 AND library_hidden = 0",
             params![session_id],
             |row| {
@@ -2948,6 +2956,7 @@ impl Database {
                     duration_ms: row.get(3)?,
                     derived_from_session_id: row.get(4)?,
                     processing_kind: row.get(5)?,
+                    title: row.get(6)?,
                 })
             },
         )
@@ -3084,7 +3093,7 @@ impl Database {
              SET state = ?2, step = ?3, progress = ?4, source_identity_json = ?5,
                  transcript_path = ?6, analysis_json = ?7, edl_json = ?8,
                  output_session_id = ?9, error_code = ?10, error_message = ?11,
-                 updated_at = ?12
+                 updated_at = ?12, render_json = ?13
              WHERE id = ?1",
             params![
                 job.id,
@@ -3099,6 +3108,7 @@ impl Database {
                 job.error_code,
                 job.error_message,
                 job.updated_at,
+                persisted.render_json,
             ],
         )?;
         if updated != 1 {
@@ -3135,7 +3145,9 @@ impl Database {
 
     /// Startup: every job a dead process owned goes back to `queued` with its
     /// chunk files, transcript, analysis and cut list intact, so the worker
-    /// resumes at the first missing step.
+    /// resumes at the first missing step. `ready` jobs come back too: since
+    /// S13 a built cut list renders by itself, so a `ready` row at startup is
+    /// a render that was waiting for the maintenance slot.
     pub(crate) fn reconcile_interrupted_clean_cut_jobs(&self) -> Result<Vec<CleanCutJob>> {
         let now = Utc::now().to_rfc3339();
         self.lock()?.execute(
@@ -3147,10 +3159,178 @@ impl Database {
         let conn = self.lock()?;
         query_clean_cut_jobs(
             &conn,
-            "WHERE state = 'queued' ORDER BY created_at ASC, id ASC",
+            "WHERE state IN ('queued', 'ready') ORDER BY created_at ASC, id ASC",
             [],
         )
         .map(|jobs| jobs.into_iter().map(|job| job.job).collect())
+    }
+
+    /// Every job that recorded a render in progress (plan 119 S13): startup
+    /// sweeps their staging files, the requeued worker renders again.
+    pub(crate) fn clean_cut_jobs_with_render_record(&self) -> Result<Vec<PersistedCleanCutJob>> {
+        let conn = self.lock()?;
+        query_clean_cut_jobs(
+            &conn,
+            "WHERE render_json IS NOT NULL ORDER BY created_at ASC, id ASC",
+            [],
+        )
+    }
+
+    /// The source changed under a built cut list (S15 rebind): drop the list
+    /// and bump the revision, so a `cleanCut.updateEdl` against the old list
+    /// is refused, then let the worker rebuild from transcription.
+    pub(crate) fn reset_clean_cut_edl(&self, job_id: &str) -> Result<Option<PersistedCleanCutJob>> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        transaction.execute(
+            "UPDATE clean_cut_jobs
+             SET edl_json = NULL, edl_revision = edl_revision + 1, updated_at = ?2
+             WHERE id = ?1",
+            params![job_id, now],
+        )?;
+        let job = query_one_clean_cut_job(&transaction, "WHERE id = ?1", params![job_id])?;
+        transaction.commit()?;
+        Ok(job)
+    }
+
+    /// The derived session an earlier render of the same source and mode
+    /// published, when its row still exists: a later job renders into it
+    /// instead of creating "(Clean cut) 2" (decision 11: re-rendering
+    /// replaces the same derived file and row). `(output_session_id, mp4_path)`.
+    pub(crate) fn clean_cut_adoptable_output(
+        &self,
+        source_session_id: &str,
+        mode: CleanCutMode,
+    ) -> Result<Option<(String, Option<String>)>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT sessions.id, sessions.mp4_path
+             FROM clean_cut_jobs
+             JOIN sessions ON sessions.id = clean_cut_jobs.output_session_id
+             WHERE clean_cut_jobs.source_session_id = ?1 AND clean_cut_jobs.mode = ?2
+             ORDER BY clean_cut_jobs.updated_at DESC, clean_cut_jobs.id DESC
+             LIMIT 1",
+            params![source_session_id, mode.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Plan 119 S15: whether the post-recording quality gate for this file is
+    /// still ahead of a clean cut. A fresh `pending` row (no reason) is the
+    /// gate's idle delay or its wait for the maintenance slot; `running` is
+    /// the gate at work, possibly repairing the file in place. A deferred
+    /// gate (`pending` with a reason) resumes only at the next launch, so it
+    /// never holds a clean cut back; the identity check catches its repair.
+    pub(crate) fn quality_gate_blocking_for_path(&self, path: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM repair_jobs
+                 WHERE file_path = ?1
+                   AND (status = 'running' OR (status = 'pending' AND reason IS NULL))
+                 LIMIT 1",
+                params![path],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Plan 119 S13: publish a Clean cut render as a derived session row, in
+    /// one transaction with the job's completion. The first render inserts
+    /// the row, copying the source's sources, layout and output settings as
+    /// Noise Cleanup does, with `processing_kind` NULL (decision 12). A
+    /// re-render, or a later job for the same source and mode, updates the
+    /// row named by `output_session_id` in place. The file is already at
+    /// `output_path` when this runs: a crash before the commit leaves a file
+    /// the requeued render overwrites, never a torn row. Clean cut stays out
+    /// of the shared `session_file_operations` journal on purpose: that
+    /// journal's startup reconcile ignores `kind`, deletes the `sessions` row
+    /// of any entry without a bound identity, and assumes a no-replace
+    /// publish, so an older backend meeting a re-render entry would delete
+    /// the existing derived session. Returns `false` when the source is gone.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn complete_clean_cut_derivative(
+        &self,
+        job_id: &str,
+        source_session_id: &str,
+        output_session_id: &str,
+        title: &str,
+        source_title: &str,
+        output_path: &str,
+        duration_ms: Option<i64>,
+        file_size_bytes: i64,
+    ) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let exists = transaction
+            .query_row(
+                "SELECT 1 FROM sessions WHERE id = ?1",
+                params![output_session_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        let changed = if exists {
+            transaction.execute(
+                "UPDATE sessions
+                 SET title = ?2, ended_at = ?3, status = 'completed', output_path = NULL,
+                     mp4_path = ?4, container = NULL, duration_ms = ?5, file_size_bytes = ?6,
+                     derived_from_session_id = ?7, source_title = ?8, processing_kind = NULL
+                 WHERE id = ?1",
+                params![
+                    output_session_id,
+                    title,
+                    now,
+                    output_path,
+                    duration_ms,
+                    file_size_bytes,
+                    source_session_id,
+                    source_title,
+                ],
+            )?
+        } else {
+            transaction.execute(
+                "INSERT INTO sessions
+                    (id, title, started_at, ended_at, status, mode, output_path, mp4_path,
+                     stream_preset, container, duration_ms, sources_json, layout_json, output_json,
+                     diagnostics_json, file_size_bytes, derived_from_session_id, source_title,
+                     processing_kind)
+                 SELECT ?2, ?3, ?5, ?5, 'completed', mode, NULL, ?6, stream_preset, NULL,
+                        COALESCE(?7, duration_ms), sources_json, layout_json, output_json,
+                        NULL, ?8, ?1, ?4, NULL
+                 FROM sessions WHERE id = ?1",
+                params![
+                    source_session_id,
+                    output_session_id,
+                    title,
+                    source_title,
+                    now,
+                    output_path,
+                    duration_ms,
+                    file_size_bytes,
+                ],
+            )?
+        };
+        if changed != 1 {
+            return Ok(false);
+        }
+        let completed = transaction.execute(
+            "UPDATE clean_cut_jobs
+             SET state = 'completed', step = NULL, progress = 1.0, output_session_id = ?2,
+                 render_json = NULL, error_code = NULL, error_message = NULL, updated_at = ?3
+             WHERE id = ?1 AND source_session_id = ?4 AND state IN ('rendering', 'validating')",
+            params![job_id, output_session_id, now, source_session_id],
+        )?;
+        if completed != 1 {
+            bail!("Clean cut job {job_id} was no longer rendering at derivative commit.");
+        }
+        transaction.commit()?;
+        Ok(true)
     }
 
     /// Commit the managed derivative row and its completed job state in one
@@ -3914,7 +4094,15 @@ impl Database {
             "SELECT id, title, started_at, ended_at, status, mode, output_path, mp4_path,
                     stream_preset, container, duration_ms, sources_json, layout_json,
                     diagnostics_json, file_size_bytes, derived_from_session_id, source_title,
-                    processing_kind, finalization_state, finalization_error
+                    processing_kind, finalization_state, finalization_error,
+                    (SELECT source_session_id FROM clean_cut_jobs
+                      WHERE clean_cut_jobs.output_session_id = sessions.id
+                      ORDER BY clean_cut_jobs.updated_at DESC, clean_cut_jobs.id DESC
+                      LIMIT 1),
+                    (SELECT mode FROM clean_cut_jobs
+                      WHERE clean_cut_jobs.output_session_id = sessions.id
+                      ORDER BY clean_cut_jobs.updated_at DESC, clean_cut_jobs.id DESC
+                      LIMIT 1)
              FROM sessions
              WHERE library_hidden = 0
              ORDER BY started_at DESC
@@ -3946,6 +4134,8 @@ impl Database {
                 row.get::<_, Option<String>>(17)?,
                 row.get::<_, Option<String>>(18)?,
                 row.get::<_, Option<String>>(19)?,
+                row.get::<_, Option<String>>(20)?,
+                row.get::<_, Option<String>>(21)?,
             ))
         })?;
 
@@ -3972,6 +4162,8 @@ impl Database {
                 processing_kind,
                 finalization_state,
                 finalization_error,
+                clean_cut_of_session_id,
+                clean_cut_mode,
             ) = row?;
 
             // Size truth (Library rewrite L1): stat the VISIBLE file live while
@@ -4003,6 +4195,8 @@ impl Database {
                 derived_from_session_id,
                 source_title,
                 processing_kind: normalized_processing_kind(processing_kind),
+                clean_cut_of_session_id,
+                clean_cut_mode,
                 finalization_state: crate::recording_finalization::finalization_state_from_column(
                     finalization_state.as_deref(),
                 ),
@@ -4181,6 +4375,21 @@ impl Database {
                           gate_status IN ('ready', 'repaired')
                           AND (job_status = 'running' OR COALESCE(reason, '') <> '')
                       )
+                ),
+                clean_cut_outputs AS (
+                    SELECT output_session_id, source_session_id, mode
+                    FROM (
+                        SELECT clean_cut_jobs.output_session_id,
+                               clean_cut_jobs.source_session_id, clean_cut_jobs.mode,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY clean_cut_jobs.output_session_id
+                                   ORDER BY clean_cut_jobs.updated_at DESC,
+                                            clean_cut_jobs.id DESC
+                               ) AS rank
+                        FROM clean_cut_jobs
+                        JOIN page_sessions
+                          ON page_sessions.id = clean_cut_jobs.output_session_id
+                    ) WHERE rank = 1
                 )
              SELECT page_sessions.id, page_sessions.title, page_sessions.started_at,
                     page_sessions.ended_at, page_sessions.status, page_sessions.mode,
@@ -4193,7 +4402,8 @@ impl Database {
                     COALESCE(health_counts.count, 0), COALESCE(log_counts.count, 0),
                     COALESCE(artifact_summaries.count, 0), artifact_summaries.ready_kinds,
                     COALESCE(comment_counts.count, 0),
-                    page_sessions.finalization_state, page_sessions.finalization_error
+                    page_sessions.finalization_state, page_sessions.finalization_error,
+                    clean_cut_outputs.source_session_id, clean_cut_outputs.mode
              FROM page_sessions
              LEFT JOIN health_counts ON health_counts.session_id = page_sessions.id
              LEFT JOIN log_counts ON log_counts.session_id = page_sessions.id
@@ -4202,6 +4412,8 @@ impl Database {
              LEFT JOIN quality_candidates
                     ON quality_candidates.session_id = page_sessions.id
                    AND quality_candidates.rank = 1
+             LEFT JOIN clean_cut_outputs
+                    ON clean_cut_outputs.output_session_id = page_sessions.id
              ORDER BY page_sessions.started_at DESC, page_sessions.id DESC",
         )?;
 
@@ -4251,6 +4463,8 @@ impl Database {
                     derived_from_session_id: row.get(13)?,
                     source_title: row.get(14)?,
                     processing_kind: normalized_processing_kind(row.get(15)?),
+                    clean_cut_of_session_id: row.get(24)?,
+                    clean_cut_mode: row.get(25)?,
                     finalization_state:
                         crate::recording_finalization::finalization_state_from_column(
                             row.get::<_, Option<String>>(22)?.as_deref(),
@@ -6808,6 +7022,10 @@ impl Database {
              CREATE INDEX IF NOT EXISTS idx_clean_cut_source_mode_created
                 ON clean_cut_jobs(source_session_id, mode, created_at DESC, id DESC);",
         )?;
+        // Plan 119 S13: the render's staging and final paths. A column on
+        // Clean cut's own table, never a new `session_file_operations` kind:
+        // older readers name their columns and never see it.
+        ensure_column(&conn, "clean_cut_jobs", "render_json", "render_json TEXT")?;
         ensure_column(
             &conn,
             "health_events",
@@ -7613,6 +7831,7 @@ fn clean_cut_job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Persisted
         source_identity_json: row.get(6)?,
         analysis_json: row.get(8)?,
         edl_json,
+        render_json: row.get(16)?,
     })
 }
 
@@ -7624,7 +7843,7 @@ fn query_clean_cut_jobs<P: rusqlite::Params>(
     let sql = format!(
         "SELECT id, source_session_id, mode, state, step, progress, source_identity_json,
                 transcript_path, analysis_json, edl_json, edl_revision, output_session_id,
-                error_code, error_message, created_at, updated_at
+                error_code, error_message, created_at, updated_at, render_json
          FROM clean_cut_jobs {filter}"
     );
     let mut statement = conn.prepare(&sql)?;
@@ -8128,6 +8347,538 @@ mod tests {
                 item.id
             );
         }
+    }
+
+    #[test]
+    fn clean_cut_derivative_inserts_then_updates_in_place_and_lists_the_join_fields() {
+        // Plan 119 S13 and decision 12: the derived row carries
+        // `derived_from_session_id` and NO `processing_kind`; the Library
+        // learns it is a Clean cut from the join on
+        // `clean_cut_jobs.output_session_id`. A later render of the same
+        // source and mode replaces the same file and row.
+        use super::*;
+        use crate::protocol::{CleanCutJobState, CleanCutMode};
+        let database = test_database();
+        let dir =
+            std::env::temp_dir().join(format!("videorc-clean-cut-storage-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source_mp4 = dir.join("Talk.mp4");
+        std::fs::write(&source_mp4, b"source").unwrap();
+        let mut source = sample_session("source");
+        source.title = "Talk".to_string();
+        database
+            .create_completed_session(
+                &source,
+                "2026-10-04T10:00:00Z",
+                Some(source_mp4.to_str().unwrap()),
+                Some(60_000),
+                Some(6),
+            )
+            .unwrap();
+
+        let CleanCutJobCreation::Created(mut job) = database
+            .create_clean_cut_job("source", CleanCutMode::Clean)
+            .unwrap()
+        else {
+            panic!("expected a new job");
+        };
+        let output_mp4 = dir.join("Talk (Clean cut).mp4");
+        std::fs::write(&output_mp4, b"cut").unwrap();
+        assert!(
+            database
+                .complete_clean_cut_derivative(
+                    &job.job.id,
+                    "source",
+                    "out-1",
+                    "Talk (Clean cut)",
+                    "Talk",
+                    output_mp4.to_str().unwrap(),
+                    Some(31_000),
+                    3,
+                )
+                .is_err(),
+            "a job that is not rendering cannot publish"
+        );
+        job.job.state = CleanCutJobState::Rendering;
+        job.render_json = Some(r#"{"version":1}"#.to_string());
+        database.save_clean_cut_job(&job).unwrap();
+        assert!(
+            database
+                .complete_clean_cut_derivative(
+                    &job.job.id,
+                    "source",
+                    "out-1",
+                    "Talk (Clean cut)",
+                    "Talk",
+                    output_mp4.to_str().unwrap(),
+                    Some(31_000),
+                    3,
+                )
+                .unwrap()
+        );
+        let completed = database.clean_cut_job(&job.job.id).unwrap().unwrap();
+        assert_eq!(completed.job.state, CleanCutJobState::Completed);
+        assert_eq!(completed.job.output_session_id.as_deref(), Some("out-1"));
+        assert_eq!(completed.job.progress, 1.0);
+        assert!(completed.job.step.is_none());
+        assert!(
+            completed.render_json.is_none(),
+            "the render record retires with the commit"
+        );
+
+        let summaries = database.list_sessions(10).unwrap();
+        let output = summaries
+            .iter()
+            .find(|session| session.id == "out-1")
+            .expect("the derived row lists");
+        assert_eq!(output.title, "Talk (Clean cut)");
+        assert_eq!(output.derived_from_session_id.as_deref(), Some("source"));
+        assert_eq!(output.source_title.as_deref(), Some("Talk"));
+        assert_eq!(
+            output.processing_kind, None,
+            "decision 12: never a new processing kind"
+        );
+        assert_eq!(output.clean_cut_of_session_id.as_deref(), Some("source"));
+        assert_eq!(output.clean_cut_mode.as_deref(), Some("clean"));
+        assert_eq!(output.mp4_path.as_deref(), output_mp4.to_str());
+        assert!(output.output_path.is_none() && output.container.is_none());
+        assert_eq!(output.duration_ms, Some(31_000));
+        assert_eq!(output.mode, "record", "copied from the source");
+        let source_row = summaries
+            .iter()
+            .find(|session| session.id == "source")
+            .unwrap();
+        assert_eq!(source_row.clean_cut_of_session_id, None);
+        assert_eq!(source_row.clean_cut_mode, None);
+        let output_json = serde_json::to_value(output).unwrap();
+        assert!(output_json.get("processingKind").is_none());
+        assert_eq!(
+            output_json["cleanCutOfSessionId"],
+            serde_json::json!("source")
+        );
+        assert_eq!(output_json["cleanCutMode"], serde_json::json!("clean"));
+        let source_json = serde_json::to_value(source_row).unwrap();
+        assert!(
+            source_json.get("cleanCutOfSessionId").is_none()
+                && source_json.get("cleanCutMode").is_none(),
+            "absent, never null"
+        );
+        let page = database.list_session_items_page(None, 10).unwrap();
+        let item = page.items.iter().find(|item| item.id == "out-1").unwrap();
+        assert_eq!(item.clean_cut_of_session_id.as_deref(), Some("source"));
+        assert_eq!(item.clean_cut_mode.as_deref(), Some("clean"));
+        assert_eq!(item.processing_kind, None);
+        assert!(
+            page.items
+                .iter()
+                .find(|item| item.id == "source")
+                .unwrap()
+                .clean_cut_of_session_id
+                .is_none()
+        );
+
+        // A later job for the same source and mode adopts the row and file.
+        assert_eq!(
+            database
+                .clean_cut_adoptable_output("source", CleanCutMode::Clean)
+                .unwrap(),
+            Some(("out-1".to_string(), Some(output_mp4.display().to_string())))
+        );
+        assert_eq!(
+            database
+                .clean_cut_adoptable_output("source", CleanCutMode::Condensed)
+                .unwrap(),
+            None
+        );
+        let CleanCutJobCreation::Created(mut second) = database
+            .create_clean_cut_job("source", CleanCutMode::Clean)
+            .unwrap()
+        else {
+            panic!("a completed job is history; a new start makes a new row");
+        };
+        second.job.state = CleanCutJobState::Validating;
+        database.save_clean_cut_job(&second).unwrap();
+        std::fs::write(&output_mp4, b"cut again").unwrap();
+        assert!(
+            database
+                .complete_clean_cut_derivative(
+                    &second.job.id,
+                    "source",
+                    "out-1",
+                    "Talk (Clean cut)",
+                    "Talk",
+                    output_mp4.to_str().unwrap(),
+                    Some(30_000),
+                    9,
+                )
+                .unwrap()
+        );
+        let summaries = database.list_sessions(10).unwrap();
+        assert_eq!(
+            summaries.len(),
+            2,
+            "updated in place: no second derived row"
+        );
+        let output = summaries
+            .iter()
+            .find(|session| session.id == "out-1")
+            .unwrap();
+        assert_eq!(output.duration_ms, Some(30_000));
+        assert_eq!(output.file_size_bytes, Some(9));
+        assert_eq!(
+            output.clean_cut_of_session_id.as_deref(),
+            Some("source"),
+            "two jobs name the row; it lists once"
+        );
+        assert_eq!(
+            database
+                .list_session_items_page(None, 10)
+                .unwrap()
+                .items
+                .len(),
+            2
+        );
+
+        // The source vanished: nothing is inserted and the job stays as it was.
+        let CleanCutJobCreation::Created(mut orphan) = database
+            .create_clean_cut_job("source", CleanCutMode::Condensed)
+            .unwrap()
+        else {
+            panic!("expected a new job");
+        };
+        orphan.job.state = CleanCutJobState::Rendering;
+        database.save_clean_cut_job(&orphan).unwrap();
+        assert!(
+            !database
+                .complete_clean_cut_derivative(
+                    &orphan.job.id,
+                    "missing-source",
+                    "out-2",
+                    "x",
+                    "x",
+                    "/rec/x.mp4",
+                    None,
+                    1,
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            database
+                .clean_cut_job(&orphan.job.id)
+                .unwrap()
+                .unwrap()
+                .job
+                .state,
+            CleanCutJobState::Rendering
+        );
+
+        // A Noise Cleanup derivative keeps its kind and gains no Clean cut fields.
+        {
+            let conn = database.lock().unwrap();
+            conn.execute(
+                "INSERT INTO sessions
+                    (id, title, started_at, status, mode, processing_kind,
+                     derived_from_session_id, sources_json, layout_json, output_json)
+                 VALUES ('cleaned', 'Talk - Noise Cleaned', '2026-10-04T11:00:00Z', 'completed',
+                         'record', 'noise-cleanup', 'source', '{}', ?1, '{}')",
+                params![
+                    serde_json::to_string(&crate::protocol::default_layout_settings()).unwrap()
+                ],
+            )
+            .unwrap();
+        }
+        let cleaned = database
+            .list_sessions(10)
+            .unwrap()
+            .into_iter()
+            .find(|session| session.id == "cleaned")
+            .unwrap();
+        assert_eq!(cleaned.processing_kind.as_deref(), Some("noise-cleanup"));
+        assert_eq!(cleaned.clean_cut_of_session_id, None);
+        assert_eq!(cleaned.clean_cut_mode, None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn clean_cut_stays_out_of_the_shared_journal_whose_reconcile_would_delete_a_derived_row() {
+        // Decision 12 asked for proof before using the shared file-operation
+        // journal with a new kind. The proof: `reconcile_session_file_operations`
+        // never reads `kind`, and an entry without a bound identity deletes the
+        // `sessions` row it names. A Clean cut re-render publishes over an
+        // existing derived session, so an older backend meeting such an entry
+        // after a crash would delete that session. Clean cut therefore keeps
+        // its render paths on `clean_cut_jobs.render_json` instead.
+        use super::*;
+        let database = test_database();
+        let dir =
+            std::env::temp_dir().join(format!("videorc-clean-cut-journal-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let staging = dir.join(".Talk (Clean cut).job.videorc-partial.mp4");
+        let output = dir.join("Talk (Clean cut).mp4");
+        assert!(
+            database
+                .begin_session_file_operation("clean-cut", "out-1", &staging, &output)
+                .is_err(),
+            "this backend refuses the kind outright"
+        );
+
+        database
+            .create_completed_session(
+                &sample_session("source"),
+                "2026-10-04T10:00:00Z",
+                None,
+                Some(60_000),
+                None,
+            )
+            .unwrap();
+        std::fs::write(&output, b"published earlier").unwrap();
+        {
+            let conn = database.lock().unwrap();
+            conn.execute(
+                "INSERT INTO sessions
+                    (id, title, started_at, status, mode, derived_from_session_id, mp4_path,
+                     sources_json, layout_json, output_json)
+                 VALUES ('out-1', 'Talk (Clean cut)', '2026-10-04T10:00:00Z', 'completed',
+                         'record', 'source', ?1, '{}', ?2, '{}')",
+                params![
+                    output.to_str().unwrap(),
+                    serde_json::to_string(&crate::protocol::default_layout_settings()).unwrap()
+                ],
+            )
+            .unwrap();
+            // What a crash mid re-render would have left, had Clean cut used
+            // the journal: the entry, no bound identity, the old file in place.
+            conn.execute(
+                "INSERT INTO session_file_operations
+                    (id, kind, session_id, staging_path, final_path, created_at)
+                 VALUES ('op-1', 'clean-cut', 'out-1', ?1, ?2, '2026-10-04T10:05:00Z')",
+                params![staging.to_str().unwrap(), output.to_str().unwrap()],
+            )
+            .unwrap();
+        }
+        let summary = database.reconcile_session_file_operations().unwrap();
+        assert_eq!(summary.discarded, 1, "{summary:?}");
+        assert!(
+            database
+                .list_sessions(10)
+                .unwrap()
+                .iter()
+                .all(|session| session.id != "out-1"),
+            "the derived session is gone: the shared journal is not safe for a replace-in-place publish"
+        );
+        assert!(
+            output.exists(),
+            "the file is orphaned, the row that owned it is not"
+        );
+
+        // Clean cut's own commit leaves the journal untouched.
+        let CleanCutJobCreation::Created(mut job) = database
+            .create_clean_cut_job("source", crate::protocol::CleanCutMode::Clean)
+            .unwrap()
+        else {
+            panic!("expected a new job");
+        };
+        job.job.state = crate::protocol::CleanCutJobState::Validating;
+        database.save_clean_cut_job(&job).unwrap();
+        assert!(
+            database
+                .complete_clean_cut_derivative(
+                    &job.job.id,
+                    "source",
+                    "out-2",
+                    "Talk (Clean cut)",
+                    "Talk",
+                    output.to_str().unwrap(),
+                    Some(30_000),
+                    17,
+                )
+                .unwrap()
+        );
+        assert!(
+            database
+                .pending_session_file_operations()
+                .unwrap()
+                .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn clean_cut_render_column_is_added_to_an_older_table_and_invisible_to_older_readers() {
+        // The S12 backend created `clean_cut_jobs` without `render_json`; the
+        // migration adds it, and a reader that names its columns (as every
+        // Videorc backend does) never sees it: downgrade-safe by construction.
+        use super::*;
+        let database = test_database();
+        {
+            let conn = database.lock().unwrap();
+            conn.execute("ALTER TABLE clean_cut_jobs DROP COLUMN render_json", [])
+                .unwrap();
+        }
+        database.migrate().unwrap();
+        {
+            let conn = database.lock().unwrap();
+            let mut statement = conn.prepare("PRAGMA table_info(clean_cut_jobs)").unwrap();
+            let columns: Vec<String> = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap();
+            assert!(columns.iter().any(|column| column == "render_json"));
+        }
+        database
+            .create_completed_session(
+                &sample_session("source"),
+                "2026-10-04T10:00:00Z",
+                None,
+                Some(60_000),
+                None,
+            )
+            .unwrap();
+        let CleanCutJobCreation::Created(mut job) = database
+            .create_clean_cut_job("source", crate::protocol::CleanCutMode::Clean)
+            .unwrap()
+        else {
+            panic!("expected a new job");
+        };
+        assert!(job.render_json.is_none());
+        job.render_json =
+            Some(r#"{"version":1,"stagingPath":"a","finalPath":"b","revision":0}"#.to_string());
+        database.save_clean_cut_job(&job).unwrap();
+        let with_record = database.clean_cut_jobs_with_render_record().unwrap();
+        assert_eq!(with_record.len(), 1);
+        assert_eq!(with_record[0].render_json, job.render_json);
+        // The S12 reader, column for column.
+        let conn = database.lock().unwrap();
+        let (state, revision): (String, i64) = conn
+            .query_row(
+                "SELECT id, source_session_id, mode, state, step, progress, source_identity_json,
+                        transcript_path, analysis_json, edl_json, edl_revision, output_session_id,
+                        error_code, error_message, created_at, updated_at
+                 FROM clean_cut_jobs WHERE id = ?1",
+                params![job.job.id],
+                |row| Ok((row.get(3)?, row.get(10)?)),
+            )
+            .unwrap();
+        assert_eq!((state.as_str(), revision), ("queued", 0));
+    }
+
+    #[test]
+    fn quality_gate_blocking_follows_fresh_pending_and_running_rows_only() {
+        // Plan 119 S15: a clean cut waits while the post-recording quality
+        // gate for its source is queued or running, never for a gate that was
+        // deferred by a capture (those resume only at the next launch).
+        use super::*;
+        let database = test_database();
+        let path = "/rec/talk.mp4";
+        assert!(!database.quality_gate_blocking_for_path(path).unwrap());
+        let mut job = RepairJob::pending(
+            "gate".into(),
+            path.into(),
+            &crate::repair::QualityExpectations::default(),
+            "t0".into(),
+        );
+        database.upsert_repair_job(&job).unwrap();
+        assert!(
+            database.quality_gate_blocking_for_path(path).unwrap(),
+            "queued for its idle delay"
+        );
+        assert!(
+            !database
+                .quality_gate_blocking_for_path("/rec/other.mp4")
+                .unwrap()
+        );
+        job.mark_running("t1".into());
+        database.upsert_repair_job(&job).unwrap();
+        assert!(
+            database.quality_gate_blocking_for_path(path).unwrap(),
+            "at work"
+        );
+        job.defer(
+            "quality check deferred because capture started".into(),
+            "t2".into(),
+        );
+        database.upsert_repair_job(&job).unwrap();
+        assert!(
+            !database.quality_gate_blocking_for_path(path).unwrap(),
+            "a deferred gate must not hold a clean cut for 30 minutes"
+        );
+        job.fail("done".into(), "t3".into());
+        database.upsert_repair_job(&job).unwrap();
+        assert!(!database.quality_gate_blocking_for_path(path).unwrap());
+    }
+
+    #[test]
+    fn startup_requeues_ready_clean_cut_jobs_and_a_reset_bumps_the_revision() {
+        use super::*;
+        use crate::protocol::{CleanCutJobState, CleanCutMode};
+        let database = test_database();
+        database
+            .create_completed_session(
+                &sample_session("source"),
+                "2026-10-04T10:00:00Z",
+                None,
+                Some(60_000),
+                None,
+            )
+            .unwrap();
+        let CleanCutJobCreation::Created(mut ready) = database
+            .create_clean_cut_job("source", CleanCutMode::Clean)
+            .unwrap()
+        else {
+            panic!("expected a new job");
+        };
+        ready.job.state = CleanCutJobState::Ready;
+        ready.edl_json = Some(r#"{"version":1}"#.to_string());
+        database.save_clean_cut_job(&ready).unwrap();
+        let CleanCutJobCreation::Created(mut rendering) = database
+            .create_clean_cut_job("source", CleanCutMode::Condensed)
+            .unwrap()
+        else {
+            panic!("expected a new job");
+        };
+        rendering.job.state = CleanCutJobState::Rendering;
+        database.save_clean_cut_job(&rendering).unwrap();
+
+        let resumed = database.reconcile_interrupted_clean_cut_jobs().unwrap();
+        let mut ids: Vec<&str> = resumed.iter().map(|job| job.id.as_str()).collect();
+        ids.sort_unstable();
+        let mut expected = vec![ready.job.id.as_str(), rendering.job.id.as_str()];
+        expected.sort_unstable();
+        assert_eq!(
+            ids, expected,
+            "ready jobs render by themselves after a restart"
+        );
+        assert_eq!(
+            database
+                .clean_cut_job(&ready.job.id)
+                .unwrap()
+                .unwrap()
+                .job
+                .state,
+            CleanCutJobState::Ready,
+            "a ready job keeps its state while it waits"
+        );
+        assert_eq!(
+            database
+                .clean_cut_job(&rendering.job.id)
+                .unwrap()
+                .unwrap()
+                .job
+                .state,
+            CleanCutJobState::Queued
+        );
+
+        let reset = database
+            .reset_clean_cut_edl(&ready.job.id)
+            .unwrap()
+            .unwrap();
+        assert!(reset.edl_json.is_none() && reset.job.edl_summary.is_none());
+        assert_eq!(
+            reset.job.edl_revision, 1,
+            "a stale updateEdl against the old list is refused"
+        );
+        assert!(database.reset_clean_cut_edl("nope").unwrap().is_none());
     }
 
     #[test]

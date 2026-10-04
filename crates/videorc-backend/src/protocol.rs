@@ -3896,6 +3896,14 @@ pub struct SessionSummary {
     pub source_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub processing_kind: Option<String>,
+    /// Plan 119 S13: present only on a derived row Clean cut rendered, from a
+    /// join on `clean_cut_jobs.output_session_id`. `processing_kind` stays
+    /// absent for these rows (decision 12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_cut_of_session_id: Option<String>,
+    /// `clean` or `condensed`, next to `clean_cut_of_session_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_cut_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finalization_state: Option<RecordingFinalizationState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3943,6 +3951,14 @@ pub struct SessionListItem {
     pub source_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub processing_kind: Option<String>,
+    /// Plan 119 S13: the source session of a Clean cut output row, from a
+    /// join on `clean_cut_jobs.output_session_id`. Never set together with a
+    /// `processing_kind` (decision 12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_cut_of_session_id: Option<String>,
+    /// `clean` or `condensed`, next to `clean_cut_of_session_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_cut_mode: Option<String>,
     /// Background MP4 finalization (instant-record P2). Absent for rows that
     /// finished inline (legacy) or never recorded a file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4354,12 +4370,74 @@ pub struct CleanCutJob {
     pub updated_at: String,
 }
 
+/// One kept range of a Condensed selection, mapped from the analysis `keeps`
+/// (segment ids) to recording time. S13 adds it to `cleanCut.get` entries.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutCondensedKeep {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub title: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CleanCutJobDetail {
     pub job: CleanCutJob,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edl: Option<CleanCutEdl>,
+    /// Condensed jobs only, and only once the analysis answered; omitted for
+    /// clean jobs and when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub condensed_keeps: Vec<CleanCutCondensedKeep>,
+}
+
+/// `cleanCut.render`: render the current cut list revision again.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutRenderParams {
+    pub job_id: String,
+}
+
+/// `cleanCut.transcript`: the stitched words and sentence segments of a job.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CleanCutTranscriptParams {
+    pub job_id: String,
+}
+
+/// One word of `cleanCut.transcript`. `filler` is written only when true.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutTranscriptWord {
+    pub text: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub filler: bool,
+}
+
+/// One sentence of `cleanCut.transcript`: the analysis job's segment ids.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutTranscriptSegment {
+    pub id: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+/// `cleanCut.transcript` result. `language` is `null` when the provider
+/// reported none: the S13/S14 interface spells it `string | null`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanCutTranscript {
+    pub job_id: String,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub words: Vec<CleanCutTranscriptWord>,
+    #[serde(default)]
+    pub segments: Vec<CleanCutTranscriptSegment>,
 }
 
 /// `cleanCut.get`: the latest job per mode for one source session.
@@ -6585,6 +6663,90 @@ mod tests {
         assert_eq!(update.add_manual[0].end_ms, 601_000);
         assert_eq!(update.removals[0].id, "r3");
         assert_eq!(serde_json::to_value(update).unwrap(), update_wire);
+    }
+
+    #[test]
+    fn shared_high_risk_contract_fixture_matches_clean_cut_render_dtos() {
+        // Plan 119 S13: `cleanCut.render`, `cleanCut.transcript` and the
+        // Condensed keeps on `cleanCut.get`.
+        let render_wire = shared_high_risk_contract_fixture_value("/cleanCut/renderParams");
+        let render: CleanCutRenderParams = serde_json::from_value(render_wire.clone()).unwrap();
+        assert_eq!(render.job_id, "clean-cut-fixture-1");
+        assert_eq!(serde_json::to_value(render).unwrap(), render_wire);
+        let transcript_params: CleanCutTranscriptParams = serde_json::from_value(
+            shared_high_risk_contract_fixture_value("/cleanCut/transcriptParams"),
+        )
+        .unwrap();
+        assert_eq!(transcript_params.job_id, "clean-cut-fixture-1");
+
+        for pointer in ["/cleanCut/renderingJob", "/cleanCut/completedJob"] {
+            let wire = shared_high_risk_contract_fixture_value(pointer);
+            let job: CleanCutJob = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(job).unwrap(), wire, "{pointer}");
+        }
+        let rendering: CleanCutJob = serde_json::from_value(
+            shared_high_risk_contract_fixture_value("/cleanCut/renderingJob"),
+        )
+        .unwrap();
+        assert_eq!(rendering.state, CleanCutJobState::Rendering);
+        assert!(rendering.state.is_active());
+        assert_eq!(rendering.step.as_deref(), Some("render"));
+        assert_eq!(rendering.output_session_id, None);
+        let completed: CleanCutJob = serde_json::from_value(
+            shared_high_risk_contract_fixture_value("/cleanCut/completedJob"),
+        )
+        .unwrap();
+        assert_eq!(completed.state, CleanCutJobState::Completed);
+        assert!(!completed.state.is_active());
+        assert_eq!(
+            completed.output_session_id.as_deref(),
+            Some("session-fixture-clean-cut")
+        );
+
+        let transcript_wire = shared_high_risk_contract_fixture_value("/cleanCut/transcript");
+        let transcript: CleanCutTranscript =
+            serde_json::from_value(transcript_wire.clone()).unwrap();
+        assert_eq!(transcript.language.as_deref(), Some("en"));
+        assert!(!transcript.words[0].filler && transcript.words[1].filler);
+        assert_eq!(transcript.segments[0].id, "s1");
+        assert_eq!(
+            serde_json::to_value(transcript).unwrap(),
+            transcript_wire,
+            "filler is written only when true"
+        );
+        let without_wire =
+            shared_high_risk_contract_fixture_value("/cleanCut/transcriptWithoutLanguage");
+        let without: CleanCutTranscript = serde_json::from_value(without_wire.clone()).unwrap();
+        assert_eq!(without.language, None);
+        assert!(without.words.is_empty() && without.segments.is_empty());
+        assert_eq!(
+            serde_json::to_value(without).unwrap(),
+            without_wire,
+            "language is null, never absent"
+        );
+
+        let condensed_wire =
+            shared_high_risk_contract_fixture_value("/cleanCut/condensedGetResult");
+        let condensed: CleanCutGetResult = serde_json::from_value(condensed_wire.clone()).unwrap();
+        assert_eq!(condensed.jobs[0].job.mode, CleanCutMode::Condensed);
+        assert_eq!(condensed.jobs[0].condensed_keeps.len(), 2);
+        assert_eq!(
+            condensed.jobs[0].condensed_keeps[1].title,
+            "Deploying to Vercel"
+        );
+        assert_eq!(serde_json::to_value(condensed).unwrap(), condensed_wire);
+        let clean: CleanCutGetResult = serde_json::from_value(
+            shared_high_risk_contract_fixture_value("/cleanCut/getResult"),
+        )
+        .unwrap();
+        assert!(clean.jobs[0].condensed_keeps.is_empty());
+        assert!(
+            serde_json::to_value(&clean.jobs[0])
+                .unwrap()
+                .get("condensedKeeps")
+                .is_none(),
+            "omitted when empty"
+        );
     }
 
     #[test]
