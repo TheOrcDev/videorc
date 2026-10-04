@@ -30,7 +30,7 @@ These are leads, not established causes. Existing failures do not authorize a pr
 
 - [ ] The actual owning boundary and missing/mismatched PCM or meter values are attributed.
 - [ ] A meaningful failing-before regression passes after the smallest reviewed repair.
-- [ ] Affected Windows tests pass25 repetitions and three complete Windows Rust suites.
+- [x] Affected Windows tests pass25 repetitions and three complete Windows Rust suites; original cause remains unassigned.
 - [ ] Applicable final recording/audio and artifact gates complete, with all failed evidence retained.
 
 ## Observation slice — merged, attribution pending
@@ -44,3 +44,9 @@ The optional collector defaults absent and exists only in test builds. Snapshot 
 The actual Windows source job 111339072452/run 37169394914 remains pending its 25 affected-filter repetitions and three full Rust passes. No app/E2E ran for the individual observation slice. The root-owned unchanged final `smoke:local-gates` batch on main 4403adfd passes 2,994 Rust tests and strict Clippy, then stops at the first OAuth app readiness timeout (Plan 127). Its full 60-minute preview and 15-minute recording gates have not started. Final acceptance and Plan 126 done criteria remain incomplete.
 
 An earlier source job, 111330354018/run 37166493873, now completes successfully. Its actual raw log shows all 25 audio repetitions passing 68 tests each, all 25 preview-bounds repetitions, and three full Windows backend suites passing 2,813 tests plus one integration test each (13 existing ignored per backend pass). All later format, lint and audit steps also succeed. The private complete log is `/tmp/videorc-fix124-ci-windows-source-green.log`. This establishes an earlier successful stability cohort; it does not attribute or invalidate the two retained failures, and it does not substitute for the new observation slice's Windows run or Plan 127's new Node ownership coverage.
+
+## Observation-slice Windows acceptance verified
+
+Actual Windows [job111339072452](https://github.com/TheOrcDev/videorc/actions/runs/37169394914/job/111339072452) completes successfully for the observation slice under PowerShell7. Root independently verifies every required step/audit and the private raw log `/tmp/videorc-fix126-ci-windows-source-green.log`: all25 preview passes; all26 affected filter series repeated25times; every `session_audio` iteration68PASS/0FAIL/0ignored; all three full backend runs2,814PASS plus one integration test/13existing ignored each. Windows desktop2,850PASS/2skips and Node1,814PASS/10skips are platform-specific counts. This satisfies this slice's Windows repetition requirement; it does not substitute for the newer OAuth25 or future caption-clock slice.
+
+The workflow captures successful test output, and this successful raw log contains zero `mix-observation` records. No successful Windows PCM/lateness classifications are claimed from hidden stderr. The collector still adds the disclosed test-build overhead, and the two original failed cohorts remain retained and unattributed. A green observed cohort does not establish a production repair or identify the original scheduling/data-loss cause. Final runtime recording/artifact acceptance remains separate.
