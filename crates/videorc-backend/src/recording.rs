@@ -31336,7 +31336,10 @@ mod tests {
                 preview_started_sender.send(()).unwrap();
                 let _ = preview_release.await;
             }));
-            preview_started.await.unwrap();
+            let preview_started = matches!(
+                timeout(TEST_LIVE_AUDIO_EVENT_TIMEOUT, preview_started).await,
+                Ok(Ok(()))
+            );
             let (release_sender, release) = oneshot::channel();
             let (ready_sender, ready) = oneshot::channel();
             let log_state = state.clone();
@@ -31355,22 +31358,29 @@ mod tests {
             release_sender.send(()).unwrap();
             if committed {
                 let (mut child, admission, monitor) = process.commit();
-                assert!(matches!(
+                let preview_retained = matches!(
                     preview_dropped.try_recv(),
                     Err(oneshot::error::TryRecvError::Empty)
-                ));
-                preview_release_sender.send(()).unwrap();
-                assert!(
-                    timeout(Duration::from_secs(1), preview_dropped)
-                        .await
-                        .unwrap()
-                        .is_err()
                 );
-                assert!(monitor.is_some());
-                assert!(drain_ffmpeg_stderr_monitor(monitor, Duration::from_secs(1)).await);
+                let preview_released = preview_release_sender.send(()).is_ok();
+                let preview_completed = matches!(
+                    timeout(Duration::from_secs(1), preview_dropped).await,
+                    Ok(Err(_))
+                );
+                let stderr_owned = monitor.is_some();
+                let stderr_drained =
+                    drain_ffmpeg_stderr_monitor(monitor, Duration::from_secs(1)).await;
                 drop(stdin);
                 wait_for_test_stdin_sink(&mut child).await;
                 drop(admission);
+                // Report a failed reader contract only after the owned child
+                // has completed the bounded EOF/kill-and-reap cleanup.
+                assert!(preview_started);
+                assert!(preview_retained);
+                assert!(preview_released);
+                assert!(preview_completed);
+                assert!(stderr_owned);
+                assert!(stderr_drained);
                 assert_ne!(
                     state
                         .database
@@ -31385,14 +31395,15 @@ mod tests {
                     "original startup timeout rtmp://private.example/live/secret-key",
                 );
                 process.terminate_and_reap_before_fifo_writer_join().await;
-                assert!(
-                    timeout(Duration::from_secs(1), preview_dropped)
-                        .await
-                        .unwrap()
-                        .is_err()
+                let preview_completed = matches!(
+                    timeout(Duration::from_secs(1), preview_dropped).await,
+                    Ok(Err(_))
                 );
-                assert!(preview_release_sender.send(()).is_err());
+                let preview_release_refused = preview_release_sender.send(()).is_err();
                 drop(stdin);
+                assert!(preview_started);
+                assert!(preview_completed);
+                assert!(preview_release_refused);
                 assert_eq!(
                     state
                         .database
