@@ -25,34 +25,59 @@ export function connectRemote(host, port, token, { timeoutMs = 90000 } = {}) {
 export function remoteRequest(ws, method, params, { timeoutMs = 90000 } = {}) {
   const id = `rc-${Math.random().toString(36).slice(2)}`
   return new Promise((resolveRequest, rejectRequest) => {
-    const timer = setTimeout(() => rejectRequest(new Error(`${method} timed out`)), timeoutMs)
+    let cleanedUp = false
+    const timer = setTimeout(() => {
+      cleanup()
+      rejectRequest(new Error(`${method} timed out`))
+    }, timeoutMs)
     const onMessage = (raw) => {
       const message = JSON.parse(String(raw))
       if (message.id !== id) return
-      clearTimeout(timer)
-      ws.off('message', onMessage)
+      cleanup()
       resolveRequest(message)
     }
-    ws.on('message', onMessage)
-    ws.send(JSON.stringify({ id, method, ...(params ? { params } : {}) }))
+    const cleanup = () => {
+      if (cleanedUp) return
+      cleanedUp = true
+      clearTimeout(timer)
+      ws.off('message', onMessage)
+    }
+    try {
+      ws.on('message', onMessage)
+      ws.send(JSON.stringify({ id, method, ...(params ? { params } : {}) }))
+    } catch (error) {
+      cleanup()
+      rejectRequest(error)
+    }
   })
 }
 
 export function waitForRemoteEvent(ws, event, predicate = () => true, { timeoutMs = 90000 } = {}) {
   return new Promise((resolveEvent, rejectEvent) => {
-    const timer = setTimeout(
-      () => rejectEvent(new Error(`timed out waiting for ${event}`)),
-      timeoutMs
-    )
+    const timer = setTimeout(() => {
+      cleanup()
+      rejectEvent(new Error(`timed out waiting for ${event}`))
+    }, timeoutMs)
+    let cleanedUp = false
     const onMessage = (raw) => {
       const message = JSON.parse(String(raw))
       if (message.event === event && predicate(message.payload)) {
-        clearTimeout(timer)
-        ws.off('message', onMessage)
+        cleanup()
         resolveEvent(message.payload)
       }
     }
-    ws.on('message', onMessage)
+    const cleanup = () => {
+      if (cleanedUp) return
+      cleanedUp = true
+      clearTimeout(timer)
+      ws.off('message', onMessage)
+    }
+    try {
+      ws.on('message', onMessage)
+    } catch (error) {
+      cleanup()
+      rejectEvent(error)
+    }
   })
 }
 

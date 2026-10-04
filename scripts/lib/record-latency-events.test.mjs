@@ -208,7 +208,7 @@ test('actual start timeout preserves its recording deadline and disposes failed 
   assert.equal(observed.remoteListeners, 0)
 })
 
-test('shared send-throw deadline stays distinct from disposed local ACK and recorder waits', async (t) => {
+test('shared send-throw failure disposes request, local ACK and recorder waits', async (t) => {
   const originalError = new Error('fixture send failed')
   const observed = await withFixture(t, async (fixture) => {
     const send = fixture.remote.send
@@ -227,10 +227,10 @@ test('shared send-throw deadline stays distinct from disposed local ACK and reco
 
   assert.equal(observed.outcome.reason, originalError)
   assert.equal(observed.recorderWaiters, 0)
-  // remoteRequest is intentionally unchanged: its own send-throw timer and
-  // reply listener remain. These are not a local ACK cleanup success claim.
-  assert.equal(observed.remainingSharedRequestDeadlines, 1)
-  assert.equal(observed.remainingSharedRequestListeners, 1)
+  // Shared request cleanup must preserve the original Error while removing
+  // its own deadline/listener alongside the local ACK and recorder owners.
+  assert.equal(observed.remainingSharedRequestDeadlines, 0)
+  assert.equal(observed.remainingSharedRequestListeners, 0)
 })
 
 test('actual successful stop disposes the optional stopping-event loser', async (t) => {
