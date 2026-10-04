@@ -20,7 +20,6 @@ import {
   ORCLE_LIVE_POWERS,
   ORCLE_LIVE_STATUS_LABELS,
   ORCLE_SIGNED_OUT_REASON,
-  ORCLE_TAB_DESCRIPTION,
   orcleLiveUnlock,
   orcleLiveView,
   type OrcleLiveViewInput
@@ -62,18 +61,17 @@ function input(overrides: Partial<OrcleLiveViewInput> = {}): OrcleLiveViewInput 
 }
 
 describe('Orcle tab copy (plan 119 S2)', () => {
-  it('introduces the page and names the three powers', () => {
-    expect(ORCLE_TAB_DESCRIPTION).toBe('Live with you. Edits after.')
-    expect(ORCLE_LIVE_POWERS.map((power) => power.title)).toEqual([
-      'Never miss a question',
-      'Chat stays safe',
-      'The room, handled'
+  it('names what Orcle does, each with the tab that holds its settings (plan 150)', () => {
+    expect(ORCLE_LIVE_POWERS.map((power) => [power.title, power.tab])).toEqual([
+      ['Never miss a question', 'chat'],
+      ['Chat stays safe', 'chat'],
+      ['The room, handled', 'chat'],
+      ['Talk to Orcle', 'voice']
     ])
   })
 
   it('keeps every line plain: no em dash, sentence case, a full stop', () => {
     const lines = [
-      ORCLE_TAB_DESCRIPTION,
       ...ORCLE_LIVE_POWERS.map((power) => power.description),
       ...CLOUD_AI_USES,
       CLOUD_AI_KEEPS,

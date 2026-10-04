@@ -72,22 +72,85 @@ export function cohostShowOnStreamMode(
 }
 
 /**
- * Orcle's settings, under Customize in the Orcle tab (plan 119; Settings →
- * Orcle before). Persisted per profile through `cohost.settings.get/set` (the
- * engine reads the same row when it builds a tick), NOT through local
- * settings — so what the streamer types here is what the model is given.
+ * Saving Orcle's settings (plan 119; Settings → Orcle before). Persisted per
+ * profile through `cohost.settings.get/set` (the engine reads the same row
+ * when it builds a tick), NOT through local settings — so what the streamer
+ * types here is what the model is given.
  *
  * Orcle Live's switch owns `enabled` and the Premium gate's call to action,
  * so neither repeats here: a locked account sees these controls disabled.
  */
-export function CohostSettingsSection(): ReactElement | null {
+function useCohostSettingsSave(): {
+  cohostSettings: CohostSettings | null
+  locked: boolean
+  save: (patch: CohostSettingsPatch) => void
+  error: string | null
+  clearError: () => void
+} {
   const { cohostSettings, cohostGate, patchCohostSettings } = useStudioCore()
-  const [notesDraft, setNotesDraft] = useState('')
-  const [notesError, setNotesError] = useState<string | null>(null)
-  const savedNotesRef = useRef<string | null>(null)
-  const [ruleDraft, setRuleDraft] = useState('')
-  const sensitivity = useCohostSensitivity()
+  const [error, setError] = useState<string | null>(null)
+  const save = (patch: CohostSettingsPatch): void => {
+    setError(null)
+    void patchCohostSettings(patch).catch((failure: unknown) =>
+      setError(failure instanceof Error ? failure.message : 'Could not save Orcle settings.')
+    )
+  }
+  return {
+    cohostSettings: cohostSettings ?? null,
+    locked: !cohostGate.allowed,
+    save,
+    error,
+    clearError: () => setError(null)
+  }
+}
 
+/** A save that failed, under the section it belongs to. */
+function SaveError({ error }: { error: string | null }): ReactElement | null {
+  return error ? (
+    <p className="text-xs text-destructive" data-slot="cohost-save-error">
+      {error}
+    </p>
+  ) : null
+}
+
+/**
+ * "Orcle hears you while you're live" (plan 068), on the Orcle tab's Live tab
+ * (plan 150): listening is part of what turning Orcle on means, so it sits
+ * under Orcle Live's switch rather than with the reply settings.
+ */
+export function CohostListenField(): ReactElement | null {
+  const { cohostSettings, locked, save, error } = useCohostSettingsSave()
+  if (!cohostSettings) return null
+  return (
+    <FieldGroup variant="grouped" data-slot="cohost-listen-field">
+      <Field>
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <FieldLabel htmlFor="cohost-listen">Orcle hears you while you&apos;re live</FieldLabel>
+            <p className="text-xs text-muted-foreground">{COHOST_LISTEN_CONSENT_SENTENCE}</p>
+            <CohostListenAllowance />
+          </div>
+          <Switch
+            checked={cohostSettings.listen === true}
+            disabled={locked}
+            id="cohost-listen"
+            onCheckedChange={(listen) => save({ listen })}
+          />
+        </div>
+      </Field>
+      <SaveError error={error} />
+    </FieldGroup>
+  )
+}
+
+/**
+ * Replies (plan 150, Chat tab): how Orcle drafts the replies you approve, and
+ * the facts it answers from.
+ */
+export function OrcleRepliesSection(): ReactElement | null {
+  const { cohostSettings, locked, save, error } = useCohostSettingsSave()
+  const [notesDraft, setNotesDraft] = useState('')
+  const savedNotesRef = useRef<string | null>(null)
   // Follow the backend value until the streamer starts typing; after that the
   // draft is the truth until it is saved.
   useEffect(() => {
@@ -96,53 +159,18 @@ export function CohostSettingsSection(): ReactElement | null {
     savedNotesRef.current = notes
     setNotesDraft(notes)
   }, [cohostSettings?.notes])
-
   if (!cohostSettings) {
     return null
   }
-
-  const locked = !cohostGate.allowed
-  const showOnStream = cohostShowOnStreamMode(cohostSettings)
   const notesOverLimit = notesDraft.length > COHOST_NOTES_MAX_CHARS
   const notesDirty = notesDraft !== (cohostSettings.notes ?? '')
-
-  const save = (patch: Parameters<typeof patchCohostSettings>[0]): void => {
-    setNotesError(null)
-    void patchCohostSettings(patch).catch((error: unknown) =>
-      setNotesError(error instanceof Error ? error.message : 'Could not save Orcle settings.')
-    )
-  }
-
-  const rules = cohostSettings.rules ?? []
-  const rulesFull = rules.length >= COHOST_RULES_MAX
-  const addRule = (): void => {
-    const rule = ruleDraft.trim()
-    if (!rule || rulesFull) return
-    setRuleDraft('')
-    save({ rules: [...rules, rule] })
-  }
-
+  const notesError = error
   return (
-    <PanelSection>
+    <PanelSection
+      description="How Orcle drafts the replies you approve, and the facts it answers from."
+      title="Replies"
+    >
       <FieldGroup variant="grouped">
-        <Field>
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex min-w-0 flex-col gap-0.5">
-              <FieldLabel htmlFor="cohost-listen">
-                Orcle hears you while you&apos;re live
-              </FieldLabel>
-              <p className="text-xs text-muted-foreground">{COHOST_LISTEN_CONSENT_SENTENCE}</p>
-              <CohostListenAllowance />
-            </div>
-            <Switch
-              checked={cohostSettings.listen === true}
-              disabled={locked}
-              id="cohost-listen"
-              onCheckedChange={(listen) => save({ listen })}
-            />
-          </div>
-        </Field>
-
         <Field>
           <FieldLabel htmlFor="cohost-tone">Reply tone</FieldLabel>
           <FieldDescription>How the drafted replies read before you edit them.</FieldDescription>
@@ -164,7 +192,6 @@ export function CohostSettingsSection(): ReactElement | null {
             ))}
           </ToggleGroup>
         </Field>
-
         <Field>
           <FieldLabel htmlFor="cohost-notes">Orcle notes</FieldLabel>
           <FieldDescription>
@@ -205,7 +232,37 @@ export function CohostSettingsSection(): ReactElement | null {
             {notesError ? <span className="text-xs text-destructive">{notesError}</span> : null}
           </div>
         </Field>
+      </FieldGroup>
+    </PanelSection>
+  )
+}
 
+/**
+ * Moderation (plan 150, Chat tab): what Orcle flags for you and what it may
+ * put on stream. Orcle never acts on its own.
+ */
+export function OrcleModerationSection(): ReactElement | null {
+  const { cohostSettings, locked, save, error } = useCohostSettingsSave()
+  const [ruleDraft, setRuleDraft] = useState('')
+  const sensitivity = useCohostSensitivity()
+  if (!cohostSettings) {
+    return null
+  }
+  const showOnStream = cohostShowOnStreamMode(cohostSettings)
+  const rules = cohostSettings.rules ?? []
+  const rulesFull = rules.length >= COHOST_RULES_MAX
+  const addRule = (): void => {
+    const rule = ruleDraft.trim()
+    if (!rule || rulesFull) return
+    setRuleDraft('')
+    save({ rules: [...rules, rule] })
+  }
+  return (
+    <PanelSection
+      description="What Orcle flags for you, and what it may put on stream. Orcle never acts on its own."
+      title="Moderation"
+    >
+      <FieldGroup variant="grouped">
         <Field>
           <FieldLabel htmlFor="cohost-rule-new">Chat rules</FieldLabel>
           <FieldDescription>
@@ -281,7 +338,6 @@ export function CohostSettingsSection(): ReactElement | null {
             {rules.length}/{COHOST_RULES_MAX}
           </span>
         </Field>
-
         <Field>
           <FieldLabel htmlFor="cohost-sensitivity">Flag sensitivity</FieldLabel>
           <FieldDescription>
@@ -306,7 +362,6 @@ export function CohostSettingsSection(): ReactElement | null {
             ))}
           </ToggleGroup>
         </Field>
-
         <Field>
           <FieldLabel htmlFor="cohost-show-on-stream">Show on stream automatically</FieldLabel>
           <FieldDescription>
@@ -347,6 +402,7 @@ export function CohostSettingsSection(): ReactElement | null {
           </FieldDescription>
         </Field>
       </FieldGroup>
+      <SaveError error={error} />
     </PanelSection>
   )
 }

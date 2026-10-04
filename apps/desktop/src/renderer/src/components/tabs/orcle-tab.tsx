@@ -1,4 +1,4 @@
-import { ChatIcon, LockIcon } from '@/components/icons'
+import { ChatIcon, ChevronRightIcon, LockIcon } from '@/components/icons'
 import { lazy, Suspense, useState, type ReactElement } from 'react'
 
 import {
@@ -6,11 +6,15 @@ import {
   type CleanCutFocus,
   type CleanCutReviewTarget
 } from '@/components/clean-cut/clean-cut-card'
-import { CohostSettingsSection } from '@/components/cohost-settings-section'
+import {
+  CohostListenField,
+  OrcleModerationSection,
+  OrcleRepliesSection
+} from '@/components/cohost-settings-section'
 import { OrcleEmblem } from '@/components/orcle-emblem'
 import { OrcleReportCard } from '@/components/orcle-report-card'
 import { OrcleVoiceCommands } from '@/components/orcle-voice-commands'
-import { PageStack } from '@/components/page'
+import { ConfigGrid, PageStack } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -23,7 +27,14 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
-import { Field, FieldContent, FieldGroup, FieldLabel } from '@/components/ui/field'
+import {
+  Field,
+  FieldContent,
+  FieldDescription,
+  FieldGroup,
+  FieldLabel,
+  FieldTitle
+} from '@/components/ui/field'
 import { Kbd } from '@/components/ui/kbd'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -64,6 +75,13 @@ function reviewTargetOf(request: CleanCutTabRequest | null): CleanCutReviewTarge
     jobId: request.jobId ?? null
   }
 }
+
+/**
+ * A tab with two sections: side by side at `lg`, stacked below it with a
+ * hairline between them, exactly like Settings' (plan 064). At `lg` the pair
+ * fills the visible height so the column hairline runs the full height.
+ */
+const SECTION_PAIR = 'flex-1 content-start lg:content-stretch lg:[&>*]:border-b-0'
 
 /** The tab a deep link lands on, for a page rendered without the shell's tab. */
 function initialTab(
@@ -167,15 +185,20 @@ export function OrcleTab({
           data-slot="orcle-scroll"
         >
           <TabsContent className="flex flex-col" value="live">
-            <PageStack>
+            <ConfigGrid className={SECTION_PAIR}>
               <OrcleLiveSection />
-              <CloudAiSection />
-            </PageStack>
+              <div className="flex flex-col">
+                <OrcleLivePowers onSelectTab={selectTab} />
+                <CloudAiSection />
+              </div>
+            </ConfigGrid>
           </TabsContent>
-          <TabsContent className="flex flex-col" value="chat">
-            <PageStack>
-              <CohostSettingsSection />
-            </PageStack>
+          <TabsContent className="flex flex-1 flex-col" value="chat">
+            <OrcleTabLock />
+            <ConfigGrid className={SECTION_PAIR}>
+              <OrcleRepliesSection />
+              <OrcleModerationSection />
+            </ConfigGrid>
           </TabsContent>
           <TabsContent className="flex flex-col" value="voice">
             <PageStack>
@@ -227,15 +250,15 @@ function CleanCutReviewFallback(): ReactElement {
   )
 }
 
-function OrcleLiveSection(): ReactElement {
-  const { account, aiConsent, cohostGate, cohostSettings, runtimeInfo, setOrcleLive } =
-    useStudioCore()
+/**
+ * Orcle Live's state as the provider holds it, shared by the Live tab and the
+ * locked alert every other settings tab leads with (plan 150, D7).
+ */
+function useOrcleLive(): ReturnType<typeof orcleLiveView> {
+  const { account, aiConsent, cohostGate, cohostSettings } = useStudioCore()
   const { cohostState } = useStudioChat()
   const { recording } = useStudioRecordingState()
-  const { openCommentsWindow } = useStudioShell()
-  const { signIn } = useVideorcAccount()
-  const [pending, setPending] = useState(false)
-  const view = orcleLiveView({
+  return orcleLiveView({
     settings: cohostSettings,
     signedIn: account?.status === 'signed-in',
     gate: cohostGate,
@@ -243,7 +266,64 @@ function OrcleLiveSection(): ReactElement {
     live: sessionIsLive(recording),
     state: cohostState
   })
-  const unlockAction = view.unlock?.action ?? null
+}
+
+/**
+ * Why Orcle is locked, with its one action (sign in or Premium). Locked means
+ * disabled with one reason (plan 150, D7): the tab's controls render disabled
+ * under it, and nothing live-looking sits beside it.
+ */
+function OrcleUnlockAlert({ slot = 'orcle-live-unlock' }: { slot?: string }): ReactElement | null {
+  const { signIn } = useVideorcAccount()
+  const view = useOrcleLive()
+  if (!view.unlock) return null
+  const unlockAction = view.unlock.action ?? null
+  return (
+    <Alert data-slot={slot}>
+      <LockIcon />
+      <AlertTitle className="font-normal text-muted-foreground">{view.unlock.reason}</AlertTitle>
+      {unlockAction ? (
+        <AlertAction>
+          <Button
+            size="xs"
+            type="button"
+            variant="outline"
+            onClick={() =>
+              unlockAction.kind === 'sign-in' ? signIn() : openVideorcWebLink(unlockAction.url)
+            }
+          >
+            {unlockAction.kind === 'sign-in' ? 'Sign in' : 'View Premium'}
+          </Button>
+        </AlertAction>
+      ) : null}
+    </Alert>
+  )
+}
+
+/**
+ * The Chat tab's lead (plan 150): when Orcle is locked, one alert above both
+ * columns says why; the fields under it are disabled.
+ */
+function OrcleTabLock(): ReactElement | null {
+  const view = useOrcleLive()
+  if (!view.unlock) return null
+  return (
+    <div className="border-b border-border p-gutter" data-slot="orcle-tab-lock">
+      <OrcleUnlockAlert slot="orcle-tab-unlock" />
+    </div>
+  )
+}
+
+/**
+ * The Live tab's left column (plan 150): Orcle's emblem beside the one switch
+ * and its status, then why it is locked, the Stream Manager while live, and
+ * whether Orcle hears you, which is part of what turning it on means.
+ */
+function OrcleLiveSection(): ReactElement {
+  const { runtimeInfo, setOrcleLive } = useStudioCore()
+  const { openCommentsWindow } = useStudioShell()
+  const [pending, setPending] = useState(false)
+  const view = useOrcleLive()
   const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
   const shiftKey = displayKeyGlyph('⇧', runtimeInfo?.platform)
 
@@ -266,41 +346,23 @@ function OrcleLiveSection(): ReactElement {
       description="Orcle reads your chat and hears you while you stream. It never posts on its own."
       title="Orcle Live"
     >
-      <Field orientation="horizontal">
-        <FieldContent>
-          <FieldLabel htmlFor="orcle-live-switch">Orcle joins my streams</FieldLabel>
-          <OrcleLiveStatusLine status={view.status} />
-        </FieldContent>
-        <Switch
-          checked={view.checked}
-          disabled={view.switchDisabled || pending}
-          id="orcle-live-switch"
-          onCheckedChange={turn}
-        />
-      </Field>
+      <div className="flex items-center gap-3" data-slot="orcle-live-status-block">
+        <OrcleEmblem size="lg" />
+        <Field className="min-w-0 flex-1" orientation="horizontal">
+          <FieldContent>
+            <FieldLabel htmlFor="orcle-live-switch">Orcle joins my streams</FieldLabel>
+            <OrcleLiveStatusLine status={view.status} />
+          </FieldContent>
+          <Switch
+            checked={view.checked}
+            disabled={view.switchDisabled || pending}
+            id="orcle-live-switch"
+            onCheckedChange={turn}
+          />
+        </Field>
+      </div>
 
-      {view.unlock ? (
-        <Alert data-slot="orcle-live-unlock">
-          <LockIcon />
-          <AlertTitle className="font-normal text-muted-foreground">
-            {view.unlock.reason}
-          </AlertTitle>
-          {unlockAction ? (
-            <AlertAction>
-              <Button
-                size="xs"
-                type="button"
-                variant="outline"
-                onClick={() =>
-                  unlockAction.kind === 'sign-in' ? signIn() : openVideorcWebLink(unlockAction.url)
-                }
-              >
-                {unlockAction.kind === 'sign-in' ? 'Sign in' : 'View Premium'}
-              </Button>
-            </AlertAction>
-          ) : null}
-        </Alert>
-      ) : null}
+      <OrcleUnlockAlert />
 
       {view.streamManager && runtimeInfo?.commentsWindowEnabled !== false ? (
         <Button
@@ -318,14 +380,51 @@ function OrcleLiveSection(): ReactElement {
         </Button>
       ) : null}
 
-      <ul aria-label="What Orcle Live does" className="grid gap-x-6 gap-y-3 lg:grid-cols-3">
-        {ORCLE_LIVE_POWERS.map((power) => (
-          <li key={power.title} className="flex flex-col gap-0.5">
-            <span className="text-sm font-medium text-foreground">{power.title}</span>
-            <span className="text-xs text-muted-foreground">{power.description}</span>
-          </li>
-        ))}
-      </ul>
+      <CohostListenField />
+    </PanelSection>
+  )
+}
+
+/**
+ * "What Orcle does" (plan 150, D5): the powers as rows, each with a way to the
+ * tab that holds its settings. Navigation, not a pitch.
+ */
+function OrcleLivePowers({
+  onSelectTab
+}: {
+  onSelectTab: (tab: OrcleTabId) => void
+}): ReactElement {
+  return (
+    <PanelSection title="What Orcle does">
+      <FieldGroup aria-label="What Orcle Live does" role="list" variant="grouped">
+        {ORCLE_LIVE_POWERS.map((power) => {
+          const label = ORCLE_TABS.find((entry) => entry.id === power.tab)?.label ?? power.tab
+          return (
+            <Field
+              key={power.title}
+              data-power-tab={power.tab}
+              orientation="horizontal"
+              role="listitem"
+            >
+              <FieldContent>
+                <FieldTitle>{power.title}</FieldTitle>
+                <FieldDescription className="text-xs">{power.description}</FieldDescription>
+              </FieldContent>
+              <Button
+                aria-label={`Open ${label} settings for ${power.title}`}
+                className="shrink-0"
+                size="xs"
+                type="button"
+                variant="ghost"
+                onClick={() => onSelectTab(power.tab)}
+              >
+                {label}
+                <ChevronRightIcon data-icon="inline-end" />
+              </Button>
+            </Field>
+          )
+        })}
+      </FieldGroup>
     </PanelSection>
   )
 }
@@ -369,12 +468,15 @@ function OrcleLiveStatusLine({ status }: { status: OrcleLiveStatus }): ReactElem
 function CloudAiSection(): ReactElement {
   const { aiConsent, setAiConsent } = useStudioCore()
   return (
-    <PanelSection>
+    <PanelSection
+      description="What Orcle and Clean cut send to Videorc's cloud, and what is kept."
+      title="Cloud AI"
+    >
       <FieldGroup variant="grouped">
         <Field>
           <div className="flex items-center justify-between gap-3">
             <div className="flex min-w-0 flex-col gap-1">
-              <FieldLabel htmlFor="orcle-cloud-ai">Cloud AI</FieldLabel>
+              <FieldLabel htmlFor="orcle-cloud-ai">Allow cloud AI</FieldLabel>
               <ul className="flex list-disc flex-col gap-0.5 pl-4 text-xs text-muted-foreground">
                 {CLOUD_AI_USES.map((use) => (
                   <li key={use}>{use}</li>

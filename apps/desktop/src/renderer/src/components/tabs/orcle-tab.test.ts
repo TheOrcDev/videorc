@@ -352,6 +352,46 @@ describe('Orcle tab (plan 119 S2)', () => {
   })
 })
 
+describe('Live and Chat tabs (plan 150 S3, S4)', () => {
+  it('leads Live with the emblem beside the switch, and listening under it', async () => {
+    await render()
+    const block = document.querySelector('[data-slot="orcle-live-status-block"]') as HTMLElement
+    expect(block.querySelector('[data-slot="orcle-emblem"]')?.getAttribute('src')).toContain(
+      'orcle-emblem-112'
+    )
+    expect(block.querySelector('#orcle-live-switch')).toBeTruthy()
+    expect(document.getElementById('cohost-listen')).toBeTruthy()
+    // The three-column pitch is gone; Live lists what Orcle does as rows.
+    expect(document.querySelector('ul[aria-label="What Orcle Live does"]')).toBeNull()
+    expect(document.querySelectorAll('[data-power-tab]')).toHaveLength(ORCLE_LIVE_POWERS.length)
+  })
+
+  it('opens the tab that holds a power when its row is pressed', async () => {
+    await render({ tab: 'live' })
+    const voice = document.querySelector('[data-power-tab="voice"] button') as HTMLButtonElement
+    await act(async () => voice.click())
+    expect(calls.onTabChange).toHaveBeenLastCalledWith('voice')
+    const chat = document.querySelector('[data-power-tab="chat"] button') as HTMLButtonElement
+    await act(async () => chat.click())
+    expect(calls.onTabChange).toHaveBeenLastCalledWith('chat')
+  })
+
+  it('splits Chat into Replies and Moderation, and leads with one reason when locked', async () => {
+    await render({ tab: 'chat' })
+    const titles = [...document.querySelectorAll('[data-slot="panel-section"] h3')].map(
+      (heading) => heading.textContent
+    )
+    expect(titles).toEqual(['Replies', 'Moderation'])
+    expect(document.querySelector('[data-slot="orcle-tab-unlock"]')).toBeNull()
+
+    await render({ tab: 'chat', gate: basic })
+    expect(document.querySelector('[data-slot="orcle-tab-unlock"]')?.textContent).toContain(
+      'Orcle requires Videorc Premium.'
+    )
+    expect((document.getElementById('cohost-notes') as HTMLTextAreaElement).disabled).toBe(true)
+  })
+})
+
 describe('Reports (plan 119 S3, plan 150)', () => {
   it('is its own tab and follows the last stream', async () => {
     await render({ tab: 'reports' })
