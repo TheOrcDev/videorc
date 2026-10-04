@@ -119,6 +119,13 @@ static TAP_CLOCK_EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::Onc
 /// has entered the current caption bus. Updated on the producer fast path.
 static TAP_LAST_FRAME_MICROS: AtomicU64 = AtomicU64::new(0);
 static TAP: std::sync::Mutex<Option<mpsc::Sender<AudioFrame>>> = std::sync::Mutex::new(None);
+// Only the explicit debug producer uses this sample clock and serialization.
+// TAP protects its reset and every cursor advance/send; the captured sender
+// identifies the installed tap without retaining another owner registry.
+#[cfg(debug_assertions)]
+static CAPTION_CONTRACT_AUDIO_CURSOR: AtomicU64 = AtomicU64::new(0);
+#[cfg(debug_assertions)]
+static CAPTION_CONTRACT_AUDIO_SERIAL: Mutex<()> = Mutex::const_new(());
 /// Serializes caption control transitions across every backend WebSocket.
 /// Without this guard a start racing sign-out could clone the bearer between
 /// teardown and credential removal, then install a fresh provider task.
@@ -154,14 +161,30 @@ fn offer_caption_frame_to_tap(
         return;
     };
     if let Some(sender) = guard.as_ref() {
-        match sender.try_send(frame.clone()) {
-            Ok(()) => {
-                frames_seen.fetch_add(1, Ordering::Relaxed);
-                last_frame_micros.store(caption_bus_clock_micros(), Ordering::Release);
-            }
-            Err(_) => {
-                frames_dropped.fetch_add(1, Ordering::Relaxed);
-            }
+        offer_caption_frame_to_sender(
+            frame,
+            sender,
+            frames_seen,
+            frames_dropped,
+            last_frame_micros,
+        );
+    }
+}
+
+fn offer_caption_frame_to_sender(
+    frame: &AudioFrame,
+    sender: &mpsc::Sender<AudioFrame>,
+    frames_seen: &AtomicU64,
+    frames_dropped: &AtomicU64,
+    last_frame_micros: &AtomicU64,
+) {
+    match sender.try_send(frame.clone()) {
+        Ok(()) => {
+            frames_seen.fetch_add(1, Ordering::Relaxed);
+            last_frame_micros.store(caption_bus_clock_micros(), Ordering::Release);
+        }
+        Err(_) => {
+            frames_dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -216,8 +239,32 @@ pub async fn inject_caption_contract_test_audio(duration_ms: u64) -> Result<u64>
 // the actual debug producer and installed tap without changing global env.
 #[cfg(debug_assertions)]
 async fn produce_caption_contract_test_audio(duration_ms: u64) -> Result<u64> {
-    if !TAP_ACTIVE.load(Ordering::Relaxed) {
-        bail!("Start the caption contract session before injecting audio.");
+    // Capture the exact sender before awaiting serialization. A queued
+    // request belongs to this tap, not whichever tap exists when it resumes.
+    let sender = {
+        let guard = TAP
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Caption contract audio tap lock is unavailable."))?;
+        guard
+            .as_ref()
+            .filter(|_| TAP_ACTIVE.load(Ordering::Relaxed))
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!("Start the caption contract session before injecting audio.")
+            })?
+    };
+    let _producer_guard = CAPTION_CONTRACT_AUDIO_SERIAL.lock().await;
+    {
+        let guard = TAP
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Caption contract audio tap lock is unavailable."))?;
+        if !TAP_ACTIVE.load(Ordering::Relaxed)
+            || !guard
+                .as_ref()
+                .is_some_and(|current| current.same_channel(&sender))
+        {
+            bail!("Caption contract audio tap was retired during injection.");
+        }
     }
     let duration_ms = duration_ms.clamp(20, 5_000);
     let frames = duration_ms.div_ceil(20);
@@ -238,13 +285,39 @@ async fn produce_caption_contract_test_audio(duration_ms: u64) -> Result<u64> {
         let buffer_end =
             producer_started_at + std::time::Duration::from_millis((frame_index + 1) * 20);
         tokio::time::sleep_until(tokio::time::Instant::from_std(buffer_end)).await;
-        offer_caption_frame(&AudioFrame {
-            timestamp_micros: frame_index * 20_000,
+        let mut frame = AudioFrame {
+            timestamp_micros: 0,
             captured_at: std::time::Instant::now(),
             sample_rate: 48_000,
             channels: 2,
             samples,
-        });
+        };
+        {
+            let guard = TAP
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Caption contract audio tap lock is unavailable."))?;
+            let current = guard
+                .as_ref()
+                .filter(|current| {
+                    TAP_ACTIVE.load(Ordering::Relaxed) && current.same_channel(&sender)
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Caption contract audio tap was retired during injection.")
+                })?;
+            let cursor = CAPTION_CONTRACT_AUDIO_CURSOR.load(Ordering::Relaxed);
+            let next = cursor
+                .checked_add(20_000)
+                .ok_or_else(|| anyhow::anyhow!("Caption contract sample clock is exhausted."))?;
+            frame.timestamp_micros = cursor;
+            CAPTION_CONTRACT_AUDIO_CURSOR.store(next, Ordering::Relaxed);
+            offer_caption_frame_to_sender(
+                &frame,
+                current,
+                &TAP_FRAMES_SEEN,
+                &TAP_FRAMES_DROPPED,
+                &TAP_LAST_FRAME_MICROS,
+            );
+        }
         tokio::task::yield_now().await;
     }
     Ok(TAP_FRAMES_SEEN
@@ -259,7 +332,12 @@ fn install_tap() -> mpsc::Receiver<AudioFrame> {
     CAPTION_AUDIO_MILLIS_DROPPED.store(0, Ordering::Relaxed);
     TAP_LAST_FRAME_MICROS.store(0, Ordering::Release);
     TAP_CLOCK_EPOCH.get_or_init(std::time::Instant::now);
-    *TAP.lock().expect("caption tap lock") = Some(sender);
+    {
+        let mut guard = TAP.lock().expect("caption tap lock");
+        #[cfg(debug_assertions)]
+        CAPTION_CONTRACT_AUDIO_CURSOR.store(0, Ordering::Relaxed);
+        *guard = Some(sender);
+    }
     TAP_ACTIVE.store(true, Ordering::Relaxed);
     receiver
 }
@@ -5408,15 +5486,15 @@ async fn run_realtime_caption_session(
                     };
                     audio_heartbeat.record_frame(std::time::Instant::now());
                     if caption_anchor_should_reset(last_frame_timestamp, frame.timestamp_micros) {
-                        // Re-anchor presentation while retaining bounded
-                        // original item ownership for late clip routing.
-                        retire_realtime_caption_items(&mut items, capture_epoch, timeline.current_seconds());
-                        ms_at_anchor = ms_sent;
-                        timeline.reset_capture();
-                        sequence.reset();
-                        let mut coordinator = session.state.captions.lock().await;
-                        coordinator.capture_epoch += 1;
-                        capture_epoch = coordinator.capture_epoch;
+                        (ms_at_anchor, capture_epoch) = reanchor_realtime_caption_capture(
+                            session,
+                            &mut items,
+                            sequence,
+                            timeline,
+                            capture_epoch,
+                            ms_sent,
+                        )
+                        .await;
                     }
                     last_frame_timestamp = Some(frame.timestamp_micros);
                     let mono = downmix_resample_to_16k_mono(
@@ -5950,6 +6028,28 @@ async fn report_usage(session: &CaptionSession, unreported_ms: &mut f64) {
             tracing::warn!("Caption usage report failed: {error}");
         }
     });
+}
+
+// The realtime audio loop owns the decreasing-clock condition. Keep its
+// capture reset together so actual input-clock tests exercise the same item,
+// sequence and coordinator retirement as the provider task.
+async fn reanchor_realtime_caption_capture(
+    session: &CaptionSession,
+    items: &mut std::collections::HashMap<String, RealtimeCaptionItem>,
+    sequence: &CaptionSequence,
+    timeline: &mut CaptionTimeline,
+    capture_epoch: u64,
+    ms_sent: f64,
+) -> (f64, u64) {
+    // Re-anchor presentation while retaining bounded original item ownership
+    // for late clip routing.
+    retire_realtime_caption_items(items, capture_epoch, timeline.current_seconds());
+    let ms_at_anchor = ms_sent;
+    timeline.reset_capture();
+    sequence.reset();
+    let mut coordinator = session.state.captions.lock().await;
+    coordinator.capture_epoch += 1;
+    (ms_at_anchor, coordinator.capture_epoch)
 }
 
 /// Route one gateway realtime event into caption updates + chunk records.
@@ -7186,6 +7286,476 @@ mod tests {
                 .duration_since(speech_grant.max(listen_grant))
                 .as_micros(),
             capture_times[0].1.as_micros(),
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn caption_contract_fixture_concurrent_batches_keep_ordered_samples_and_acks() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let outcome: Result<_> = async {
+            let mut receiver = {
+                let _control = CAPTION_CONTROL.lock().await;
+                install_tap()
+            };
+            let serial_guard = CAPTION_CONTRACT_AUDIO_SERIAL.lock().await;
+            let mut first = Box::pin(produce_caption_contract_test_audio(200));
+            let mut second = Box::pin(produce_caption_contract_test_audio(200));
+            // Poll the actual producer bodies to their first await: each has
+            // captured this installed sender before waiting on serialization.
+            let pending = poll_fn(|context| {
+                Poll::Ready((
+                    first.as_mut().poll(context).is_pending(),
+                    second.as_mut().poll(context).is_pending(),
+                ))
+            })
+            .await;
+            if pending != (true, true) {
+                bail!("Actual concurrent producers did not wait at their owned serialization boundary.");
+            }
+            let released_at = std::time::Instant::now();
+            drop(serial_guard);
+            let (first_ack, second_ack) = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                async { tokio::join!(first.as_mut(), second.as_mut()) },
+            )
+            .await?;
+            let acks = (first_ack?, second_ack?);
+            let mut frames = Vec::new();
+            for _ in 0..20 {
+                frames.push(
+                    tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+                        .await?
+                        .ok_or_else(|| anyhow::anyhow!("Owned concurrent fixture receiver ended early."))?,
+                );
+            }
+            Ok((pending, acks, released_at, frames))
+        }
+        .await;
+        // The owned futures have completed or been dropped on error. No
+        // detached producer can keep a guard or send after this exact removal.
+        remove_tap();
+        assert!(!TAP_ACTIVE.load(Ordering::Acquire));
+        let (pending, acks, released_at, frames) = outcome
+            .expect("actual concurrent fixture producers must complete within their deadlines");
+        assert_eq!(pending, (true, true));
+        assert_eq!(
+            acks,
+            (10, 10),
+            "Each serialized ACK owns only its ten frames."
+        );
+        assert_eq!(TAP_FRAMES_DROPPED.load(Ordering::Relaxed), 0);
+        let now = std::time::Instant::now();
+        for (index, frame) in frames.iter().enumerate() {
+            assert_eq!(frame.timestamp_micros, index as u64 * 20_000);
+            assert_eq!(frame.duration(), std::time::Duration::from_millis(20));
+            assert!(
+                frame.captured_at
+                    >= released_at + std::time::Duration::from_millis((index as u64 + 1) * 20)
+            );
+            assert!(frame.captured_at <= now);
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn caption_contract_fixture_reinstalled_tap_refuses_active_and_queued_old_writers() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let outcome: Result<_> = async {
+            let mut receiver = {
+                let _control = CAPTION_CONTROL.lock().await;
+                install_tap()
+            };
+            let mut active = Box::pin(produce_caption_contract_test_audio(200));
+            let first_frame = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                tokio::select! {
+                    frame = receiver.recv() => frame.ok_or_else(|| {
+                        anyhow::anyhow!("Owned active fixture receiver ended before readiness.")
+                    }),
+                    result = active.as_mut() => {
+                        result?;
+                        bail!("Actual active producer ended before its first-frame readiness.");
+                    }
+                }
+            })
+            .await??;
+            let mut queued = Box::pin(produce_caption_contract_test_audio(200));
+            let queued_pending =
+                poll_fn(|context| Poll::Ready(queued.as_mut().poll(context).is_pending())).await;
+            if !queued_pending {
+                bail!("Actual queued producer did not wait behind the active owner's guard.");
+            }
+            let mut replacement = {
+                let _control = CAPTION_CONTROL.lock().await;
+                remove_tap();
+                install_tap()
+            };
+            let (active_result, queued_result) =
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    tokio::join!(active.as_mut(), queued.as_mut())
+                })
+                .await?;
+            let retired = |result: Result<u64>| {
+                result.is_err_and(|error| {
+                    error.to_string() == "Caption contract audio tap was retired during injection."
+                })
+            };
+            let refused = (retired(active_result), retired(queued_result));
+            let replacement_empty = matches!(
+                replacement.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            );
+            let fresh_ack = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                produce_caption_contract_test_audio(20),
+            )
+            .await??;
+            let fresh_frame =
+                tokio::time::timeout(std::time::Duration::from_secs(1), replacement.recv())
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Replacement fixture tap did not receive its own frame.")
+                    })?;
+            Ok((
+                first_frame,
+                queued_pending,
+                refused,
+                replacement_empty,
+                fresh_ack,
+                fresh_frame,
+            ))
+        }
+        .await;
+        remove_tap();
+        assert!(!TAP_ACTIVE.load(Ordering::Acquire));
+        let (first_frame, queued_pending, refused, replacement_empty, fresh_ack, fresh_frame) =
+            outcome.expect(
+                "active, queued and replacement producers must finish with bounded owned cleanup",
+            );
+        assert_eq!(first_frame.timestamp_micros, 0);
+        assert!(queued_pending);
+        assert_eq!(refused, (true, true));
+        assert!(
+            replacement_empty,
+            "No retired producer may send into the new tap."
+        );
+        assert_eq!(fresh_ack, 1);
+        assert_eq!(
+            fresh_frame.timestamp_micros, 0,
+            "The replacement owns a fresh sample clock."
+        );
+        assert_eq!(TAP_FRAMES_SEEN.load(Ordering::Relaxed), 1);
+        assert_eq!(TAP_FRAMES_DROPPED.load(Ordering::Relaxed), 0);
+    }
+
+    #[cfg(debug_assertions)]
+    struct RepeatedCaptionFixtureOutcome {
+        timestamps: Vec<Vec<u64>>,
+        same_capture_epoch: bool,
+        held_cue_presented: bool,
+        held_final_emitted: bool,
+        held_orcle_final: bool,
+        before_control: bool,
+        after_control: bool,
+        backwards_clock_retired: bool,
+    }
+
+    #[cfg(debug_assertions)]
+    async fn repeated_caption_fixture_outcome() -> RepeatedCaptionFixtureOutcome {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        let mut session = test_caption_session(&state, true);
+        let outcome: Result<_> = async {
+            start_caption_contract_listen_grant(&state).await?;
+            session.receiver = {
+                let _control = CAPTION_CONTROL.lock().await;
+                install_tap()
+            };
+            let sequence = CaptionSequence::default();
+            let mut timeline = CaptionTimeline::new(0.0);
+            let mut items = std::collections::HashMap::new();
+            let mut last_frame_timestamp = None;
+            let mut ms_sent = 0.0;
+            let mut ms_at_anchor = 0.0;
+            let initial_epoch = state.captions.lock().await.capture_epoch;
+            let mut capture_epoch = initial_epoch;
+            let mut timestamps = Vec::new();
+            let mut admission = AdmittedOrcleAudio::default();
+            let mut events = state.events.subscribe();
+            for batch in 0..2 {
+                // Same actual paced producer and same installed tap as the
+                // debug RPC. No env mutation, clock substitution or sleep.
+                let accepted = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    produce_caption_contract_test_audio(200),
+                )
+                .await??;
+                let mut batch_timestamps = Vec::new();
+                for _ in 0..accepted {
+                    let frame = tokio::time::timeout(
+                        std::time::Duration::from_secs(1),
+                        session.receiver.recv(),
+                    )
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Owned caption tap closed before its batch drained.")
+                    })?;
+                    // Exercise the production decreasing-clock predicate and
+                    // actual reset owner on the producer's real input frames.
+                    if caption_anchor_should_reset(last_frame_timestamp, frame.timestamp_micros) {
+                        (ms_at_anchor, capture_epoch) = reanchor_realtime_caption_capture(
+                            &session,
+                            &mut items,
+                            &sequence,
+                            &mut timeline,
+                            capture_epoch,
+                            ms_sent,
+                        )
+                        .await;
+                    }
+                    last_frame_timestamp = Some(frame.timestamp_micros);
+                    batch_timestamps.push(frame.timestamp_micros);
+                    admission = session.admitted_orcle_audio_for_frame(&frame).await;
+                    let mono = downmix_resample_to_16k_mono(
+                        &frame.samples,
+                        frame.channels,
+                        frame.sample_rate,
+                    );
+                    let seconds = mono.len() as f64 / f64::from(CAPTION_SAMPLE_RATE);
+                    ms_sent += seconds * 1000.0;
+                    timeline.advance_seconds(seconds);
+                }
+                timestamps.push(batch_timestamps);
+                let current = RealtimeCaptionTimeline {
+                    capture_base_seconds: timeline.capture_base_seconds,
+                    ms_at_anchor,
+                    socket_audio_base_ms: 0.0,
+                    ms_sent,
+                    capture_epoch,
+                    admission,
+                };
+                if batch == 0 {
+                    for (item_id, transcript, complete) in [
+                        ("before-control", "fixture before batch", true),
+                        ("held", "fixture retained utterance", false),
+                    ] {
+                        handle_realtime_event(
+                            &session,
+                            GatewayRealtimeCaptionTransport::parse(&serde_json::json!({
+                                "type": "speech-started",
+                                "itemId": item_id,
+                                "raw": { "audio_start_ms": ms_sent - 20.0, "item_id": item_id }
+                            })),
+                            &mut items,
+                            &sequence,
+                            current,
+                        )
+                        .await;
+                        if complete {
+                            handle_realtime_event(
+                                &session,
+                                GatewayRealtimeCaptionTransport::parse(&serde_json::json!({
+                                    "type": "input-transcription-completed",
+                                    "itemId": item_id,
+                                    "transcript": transcript
+                                })),
+                                &mut items,
+                                &sequence,
+                                current,
+                            )
+                            .await;
+                        }
+                    }
+                } else {
+                    handle_realtime_event(
+                        &session,
+                        GatewayRealtimeCaptionTransport::parse(&serde_json::json!({
+                            "type": "input-transcription-completed",
+                            "itemId": "held",
+                            "transcript": "fixture retained utterance"
+                        })),
+                        &mut items,
+                        &sequence,
+                        current,
+                    )
+                    .await;
+                    handle_realtime_event(
+                        &session,
+                        GatewayRealtimeCaptionTransport::parse(&serde_json::json!({
+                            "type": "speech-started",
+                            "itemId": "after-control",
+                            "raw": { "audio_start_ms": ms_sent - 20.0, "item_id": "after-control" }
+                        })),
+                        &mut items,
+                        &sequence,
+                        current,
+                    )
+                    .await;
+                    handle_realtime_event(
+                        &session,
+                        GatewayRealtimeCaptionTransport::parse(&serde_json::json!({
+                            "type": "input-transcription-completed",
+                            "itemId": "after-control",
+                            "transcript": "fixture after batch"
+                        })),
+                        &mut items,
+                        &sequence,
+                        current,
+                    )
+                    .await;
+                }
+            }
+            let emitted = drain_events(&mut events);
+            let exact_ui = |text: &str| {
+                emitted.iter().any(|event| {
+                    event.event == "captions.update"
+                        && event.payload["kind"] == "final"
+                        && event.payload["text"] == text
+                        && event.payload["sessionClientId"] == session.session_client_id
+                })
+            };
+            let speech = crate::cohost::recent_speech_since(&state, None)
+                .ok_or_else(|| anyhow::anyhow!("Owned Orcle speech snapshot was unavailable."))?;
+            let exact_orcle = |text: &str| speech.finals.iter().any(|item| item.text == text);
+            let held_cue_presented = state.captions.lock().await.chunks.iter().any(|cue| {
+                cue.text == "fixture retained utterance"
+                    && cue.capture_epoch == initial_epoch
+                    && cue.presented
+            });
+            let mut result = RepeatedCaptionFixtureOutcome {
+                timestamps,
+                same_capture_epoch: initial_epoch == capture_epoch,
+                held_cue_presented,
+                held_final_emitted: exact_ui("fixture retained utterance"),
+                held_orcle_final: exact_orcle("fixture retained utterance"),
+                before_control: exact_ui("fixture before batch")
+                    && exact_orcle("fixture before batch"),
+                after_control: exact_ui("fixture after batch")
+                    && exact_orcle("fixture after batch"),
+                backwards_clock_retired: false,
+            };
+            // Genuine source-clock regression still retires presentation and
+            // Orcle. This control uses the same predicate/reset/callback owner,
+            // independent of the debug producer's intended continuity.
+            let current = RealtimeCaptionTimeline {
+                capture_base_seconds: timeline.capture_base_seconds,
+                ms_at_anchor,
+                socket_audio_base_ms: 0.0,
+                ms_sent,
+                capture_epoch,
+                admission,
+            };
+            handle_realtime_event(
+                &session,
+                RealtimeCaptionEvent::SpeechStarted {
+                    item_id: "genuine-retired".into(),
+                    audio_start_ms: Some(ms_sent - 20.0),
+                },
+                &mut items,
+                &sequence,
+                current,
+            )
+            .await;
+            let backwards_timestamp = last_frame_timestamp
+                .ok_or_else(|| anyhow::anyhow!("Owned fixture batch contained no audio frames."))?
+                .saturating_sub(1);
+            if caption_anchor_should_reset(last_frame_timestamp, backwards_timestamp) {
+                (ms_at_anchor, capture_epoch) = reanchor_realtime_caption_capture(
+                    &session,
+                    &mut items,
+                    &sequence,
+                    &mut timeline,
+                    capture_epoch,
+                    ms_sent,
+                )
+                .await;
+            }
+            handle_realtime_event(
+                &session,
+                RealtimeCaptionEvent::Completed {
+                    item_id: "genuine-retired".into(),
+                    transcript: "genuine retired utterance".into(),
+                },
+                &mut items,
+                &sequence,
+                RealtimeCaptionTimeline {
+                    ms_at_anchor,
+                    capture_epoch,
+                    ..current
+                },
+            )
+            .await;
+            let emitted = drain_events(&mut events);
+            let speech = crate::cohost::recent_speech_since(&state, None)
+                .ok_or_else(|| anyhow::anyhow!("Owned Orcle speech snapshot was unavailable."))?;
+            result.backwards_clock_retired = capture_epoch > current.capture_epoch
+                && !emitted.iter().any(|event| event.event == "captions.update")
+                && !speech
+                    .finals
+                    .iter()
+                    .any(|item| item.text == "genuine retired utterance")
+                && state.captions.lock().await.chunks.iter().any(|cue| {
+                    cue.text == "genuine retired utterance"
+                        && !cue.presented
+                        && cue.capture_epoch == current.capture_epoch
+                });
+            Ok(result)
+        }
+        .await;
+        // Retire the exact global tap and cohost scheduler before reporting
+        // any failure. There is no detached producer or provider task here.
+        remove_tap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(6),
+            crate::cohost::stop_cohost(&state),
+        )
+        .await
+        .expect("owned cohost cleanup must complete");
+        assert!(!TAP_ACTIVE.load(Ordering::Acquire));
+        outcome.expect("actual fixture batches and callbacks must finish within their deadlines")
+    }
+
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn caption_contract_fixture_repeated_batches_keep_one_sample_clock() {
+        let result = repeated_caption_fixture_outcome().await;
+        assert!(result.before_control && result.after_control && result.backwards_clock_retired);
+        assert_eq!(
+            result.timestamps.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![10, 10]
+        );
+        assert!(
+            result.timestamps[1][0] > *result.timestamps[0].last().unwrap(),
+            "The same installed debug tap must not restart its timestamp clock at each RPC."
+        );
+        assert!(result.same_capture_epoch);
+    }
+
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn caption_contract_fixture_repeated_batch_preserves_exact_final_event() {
+        let result = repeated_caption_fixture_outcome().await;
+        assert!(result.before_control && result.after_control && result.backwards_clock_retired);
+        assert!(
+            result.held_cue_presented && result.held_final_emitted,
+            "A final held across another batch on this same tap must remain presented and emit its exact final event."
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn caption_contract_fixture_repeated_batch_preserves_exact_orcle_final() {
+        let result = repeated_caption_fixture_outcome().await;
+        assert!(result.before_control && result.after_control && result.backwards_clock_retired);
+        assert!(
+            result.held_orcle_final,
+            "The consenting same-session Orcle owner must receive the exact final held across another fixture batch."
         );
     }
 
