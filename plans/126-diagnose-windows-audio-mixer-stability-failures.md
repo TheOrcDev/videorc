@@ -30,7 +30,7 @@ These are leads, not established causes. Existing failures do not authorize a pr
 
 - [ ] The actual owning boundary and missing/mismatched PCM or meter values are attributed.
 - [ ] A meaningful failing-before regression passes after the smallest reviewed repair.
-- [x] Affected Windows tests pass25 repetitions and three complete Windows Rust suites; original cause remains unassigned.
+- [x] One current-source Windows cohort completes 25 affected-filter repetitions and three complete Rust suites; the failed PR 602/603 cohorts remain retained and unattributed below.
 - [ ] Applicable final recording/audio and artifact gates complete, with all failed evidence retained.
 
 ## Observation slice — merged, attribution pending
@@ -58,3 +58,31 @@ Windows source [job111388490245](https://github.com/TheOrcDev/videorc/actions/ru
 The whole `session_audio.rs` file remains 371,632 bytes with SHA-256 `94f0e0bc087d5d9a8ba70c06c8fd017ae4fcbd4346826a2296951d074f11f5d0` across source126,137,138. Earlier source126 and137 logs each contain 28 successful executions of this exact case, with successful diagnostics hidden. Those passes do not invalidate this failure. Full Rust and later static/audit gates in the failed job are unexecuted.
 
 [Plan139](139-retain-bounded-source-clock-recovery-evidence.md) calls for opt-in, bounded test-only delivery/write timing and finished-window zero ranges before selecting a repair. Private root review is `/tmp/videorc-fix138-windows-source-job-111388490245-20261004/root-actual-windows138-review.json`. The existing original failures and distinct physical Windows recording-tail/freeze incident remain open; no production repair or acceptance relaxation is inferred.
+
+## Resumed unchanged-audio source failure
+
+[PR 602 Windows source job 111483647242 / run 37218433772](https://github.com/TheOrcDev/videorc/actions/runs/37218433772/job/111483647242) fails `session_audio` repetition **22/25**, with 75 pass / three fail. Whole `session_audio.rs` is unchanged across queue-fix `c88f3ad4`, startup-fix `651bc216` and test-only reader-cleanup `c73bedd6`: 400,369 bytes, SHA-256 `1c1027194e80fe573499bf3419fd8f4ac177ac62b49cd5d8ac3aad741a7ab263`. This excludes an audio-source edit in those slices; it does not identify the failures' cause.
+
+The exact failed assertions are:
+
+- `stopping_writes_real_microphone_audio_up_to_the_stop_instant`: 50 ms playout writes 28,320 frames versus stop sample 30,969 (2,649 fewer frames). No new bounded delivery/write diagnostic is retained for this assertion.
+- `silent_system_producer_is_never_retired_for_stalling`: sampled PCM is 0.0 versus expected 0.341324 after the initial system silence. This assertion does not establish an actual retired source; the earlier attached/loss assertions passed.
+- `a_bursty_fifo_reader_never_drops_small_microphone_callbacks`: counters are captured 45,545 / generated 31,255 / discarded 15,895 / dropped 17,792, versus required zero drops. The current trace lacks the temporal producer/reader/ingestion dispositions needed to assign them.
+
+All 26 ownership filters complete their first 21 iterations successfully; only audio-capture-adapter and live-source-switch also complete iteration 22. The published startup reader owner case passes 21 times, all 84 focused Node cases pass 21 times each, and preview concurrency passes 25 times. Remaining iterations, three full Rust suites and every later source/static/audit stage are unexecuted. No successful older source run supplies these absent current outcomes. Private raw log is `pr602-windows-source.log`, 45,658,447 bytes, SHA-256 `fea8a133e562a07991d6dcbb94d45cfddf29ac027b1657a59d127464f3fbb992` under the durable evidence root. The earlier passing PR 600 cohort remains separate.
+
+Retain the ranked producer lateness, mixer catch-up and observer-boundary hypotheses above. Before choosing a correction, add bounded actual producer delivery/accepted-or-rejected placement, FIFO/write progress and stop-target/deadline dispositions at these three owning tests, with explicit owner admission and cleanup evidence. Preserve every exact PCM sample, zero-drop assertion, original playout/stall/stop budget and timed workload. Neither scheduling nor production loss is attributed by these aggregate counters. The later test-only reader-cleanup PR outcome and automatic main control are reviewed separately below.
+
+## Latest reader-cleanup source also fails audio stability
+
+[PR 603 source job 111486562576 / run 37219424806](https://github.com/TheOrcDev/videorc/actions/runs/37219424806/job/111486562576) fails `session_audio` repetition **16/25**, with 77 pass / one fail. The exact unchanged `an_output_stall_never_retires_a_healthy_microphone` assertion finds 46,080 expected microphone frames versus 48,000 in its **before-stall [24,000,72,000)** window. This is not a failure of its post-stall recovery assertion and does not establish retirement. All 26 ownership filters and all 84 focused Node cases finish 15 iterations; the adapter/live-source filters also finish iteration 16. The published startup owner case passes 15 times; preview concurrency passes 25. Three full Rust suites and later gates are unexecuted. Raw log is 33,254,623 bytes, SHA-256 `308f231acc8e2f1e6c7b1a29a2570c95a3f81f5e281f7abfba951562b881ce8e`, `pr603-windows-source.log` in the private durable root. This failed PR cohort does not supply the complete required Windows 25/3 proof; the later identical-source main control is recorded separately below.
+
+The actual `microphone-after-stall` diagnostic inspects **[266,400,314,400)**, a different window, and finds all 48,000 expected frames per channel with zero quiet/altered/missing frames, zero inspected-window loss deltas and zero stale-written frames. It does not classify the failed before-stall window. Whole-producer delivery has 665 packets / 319,200 frames, 81,800 µs maximum send lateness and 1,920 frames later than the 50,000 µs playout allowance. Aggregate microphone overlap also totals 1,920 frames at the stall boundary. These equal counts are a lead, not an event-by-event attribution; individual delivery/chunk timelines are absent and `windowTrace` is null. The original four-byte/sample assertions and all budgets remain unchanged.
+
+Before any correction, retain exact before-stall window PCM classifications and bounded actual delivery/ingest/write events for [24,000,72,000), alongside the existing separate after-stall window. Distinguish sender lateness, eligible-PCM overlap/drop behavior and reader/observer admission through the actual writer/timeline. Keep all earlier passing and failing cohorts. Current audio stability and production-versus-fixture attribution remain OPEN; no tolerance, test parallelism or timing policy is changed to obtain green.
+
+## Merged-main source control completes
+
+The automatic push run on main `08b600cb`, [job 111486687705 / run 37219456973](https://github.com/TheOrcDev/videorc/actions/runs/37219456973/job/111486687705), completes successfully. The entire committed tree is identical to reviewed reader-cleanup source `c73bedd6`. Independently parsed raw output proves every one of the 26 filters completes 25 nonzero passing iterations, including the actual published reader owner case, plus three complete Windows Rust runs of 2,900 backend and one integration PASS / 13 ignored each. Preview concurrency passes 25 times; all 84 focused Node cases pass 25 times each. Desktop passes 3,096 / two skips, full Node 1,910 / ten skips, and every source/audit step succeeds. Raw log is 55,252,165 bytes, SHA-256 `cc971b0281ad8578c56afdf873b548742ffd7991149d8297ac49751abdc0fe88`, `main08-windows-source.log` in the durable evidence root.
+
+This supplies the current reader change's required Windows 25/3 evidence. It is one successful automatic cohort, not an attributed audio repair or an erasure of either failed PR run. The original audio failures, missing before-window trace and production-versus-fixture diagnosis remain OPEN. No manual workflow retry, assertion change or scheduling-policy change is used.

@@ -2,7 +2,7 @@
 
 ## Status
 
-P1. Attributed during final acceptance on main `b3771763`. Source repair merged in PR 600 (`c88f3ad4`, main `2310b6fd`); the real-command regression is RED before the fix and GREEN after it. Focused app and full source verification pass; aggregate verification remains in progress; no aggregate acceptance claimed.
+P1. Attributed during final acceptance on main `b3771763`. Source repair merged in PR 600 (`c88f3ad4`, main `2310b6fd`); the real-command regression is RED before the fix and GREEN after it. Focused app, full source verification and the unchanged complete profile matrix pass; studio/device and local-bundle acceptance remain incomplete. No aggregate acceptance is claimed.
 
 ## Reproduction and attribution
 
@@ -27,3 +27,11 @@ The production-command/live-bus regression fails before the fix: video stalls at
 
 
 These QA follow-ups use Plan146/147 because open Orcle PR599 already reserves Plan140. The local private evidence filenames retain their original `fix140` names. Shadscan baseline/floor/pre-commit:37/37/37. The source fix is merged through the normal protected PR workflow; no release is published.
+
+## Current full-matrix and Windows source proof
+
+After the separately attributed legacy startup correction in Plan 148, the complete unchanged profile matrix passes **18/18**. This includes ordinary/portrait 60 fps, hard-content cost and both transient-pressure paths. Legacy 4K60 contains 359 distinct frames / 5.983 seconds / 10 ms tail at the original duration and quality gates. This downstream matrix pass does not attribute the original intermittent shared-stop failure in Plan 147.
+
+[Queue-fix Windows source job 111476285940 / run 37215921582](https://github.com/TheOrcDev/videorc/actions/runs/37215921582/job/111476285940) completes successfully. Independent full raw-log review verifies all 26 Rust filter series and the preview concurrency case each 25 times, all 84 actual focused Node cases each 25 times, and three complete Rust runs each 2,900 backend pass / 13 ignored plus one integration pass. Full Windows desktop is 3,096 pass / two existing skips; full Node is 1,910 pass / ten existing skips; all source gates and advisory audits pass. Raw log: 55,329,863 bytes, SHA-256 `f5ddfb8706372d8564f87306d9bb2992a5584951f5ee76da82ce8755952fef18`, `pr600-windows-source.log` in the private durable root. This older source does not substitute for the later reader-cleanup test's Windows proof. Windows incident artifact failures remain separate in Plan 112.
+
+The corrected studio/device run passes its synthetic/native-preview prefix and all 1,935 Node cases, then stops before real-screen artifact qualification because the host lock screen covers its motion stimulus. Later device stages and the complete local bundle remain pending. Task-owned wake assertions do not unlock the host; no capture permission, threshold or profile is changed.
