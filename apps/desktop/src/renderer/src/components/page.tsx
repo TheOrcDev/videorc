@@ -72,6 +72,14 @@ export function ConfigGrid({
   )
 }
 
+/**
+ * A config grid of exactly two sections that fills the visible height at
+ * `lg`, so the column hairline runs the full height however short the tab
+ * is (Settings' tabs, plan 064; the Orcle tab's, plan 150). Stacked, the rows
+ * keep their content height.
+ */
+export const CONFIG_GRID_PAIR = 'flex-1 content-start lg:content-stretch lg:[&>*]:border-b-0'
+
 /** Gallery archetype: picture cards that fill by available width. */
 export function Gallery({
   children,

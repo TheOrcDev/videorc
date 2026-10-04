@@ -14,6 +14,7 @@ import {
 } from '@/components/icons'
 import { createContext, useContext } from 'react'
 
+import type { OrcleTabId } from '@/lib/orcle-tabs'
 import type { SettingsTabId } from '@/lib/settings-tabs'
 
 // Studio control pages, grouped under "Studio" in the sidebar: one click away, but
@@ -139,6 +140,8 @@ type WorkspaceNavValue = {
   closeStudioPanel: () => void
   /** Opens Settings on `tab`, or on the tab used last when none is named. */
   openSettings: (tab?: SettingsTabId) => void
+  /** Opens Orcle on `tab`, or on the tab used last when none is named (plan 150). */
+  openOrcle: (tab?: OrcleTabId) => void
 }
 
 export const WorkspaceNavContext = createContext<WorkspaceNavValue | null>(null)

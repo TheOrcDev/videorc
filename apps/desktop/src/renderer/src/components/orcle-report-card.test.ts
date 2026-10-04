@@ -203,7 +203,9 @@ describe('Orcle report card (plan 119 S3)', () => {
     await render()
     // Follows the newest stream that ended (a recording is not a stream).
     expect(mocked.asked.at(-1)).toBe('stream-1')
-    expect(text()).toContain('Last stream')
+    // Plan 150: one title; the picker names which stream.
+    expect(text()).toContain('Stream report')
+    expect(text()).not.toContain('Last stream')
     expect(text()).toContain(ORCLE_REPORT_DESCRIPTION)
     expect(card().getAttribute('data-state')).toBe('report')
 
@@ -321,9 +323,7 @@ describe('Orcle report card (plan 119 S3)', () => {
       }
     })
     expect(mocked.asked.at(-1)).toBe('stream-0')
-    // An older stream is a report, not the last stream.
     expect(text()).toContain('Stream report')
-    expect(text()).not.toContain('Last stream')
     await act(async () => (document.querySelector('[aria-label="Stream"]') as HTMLElement).click())
     const newest = [...document.querySelectorAll('[role="option"]')][0] as HTMLElement
     await act(async () => newest.click())
@@ -366,5 +366,44 @@ describe('OrcleReportCard: the Commands row (plan 140, S6)', () => {
   it('leaves the row out when no command was counted', async () => {
     await render()
     expect(document.querySelector('[data-slot="orcle-report-commands"]')).toBeNull()
+  })
+})
+
+describe('Reports tab layout (plan 150 S6)', () => {
+  it('repeats no auto session name the picker already says', async () => {
+    await render({
+      report: {
+        payload: payload({ report: { ...REPORT, streamTitle: 'Session 2026-10-02 14:55' } }),
+        loading: false,
+        error: null
+      },
+      sessions: [session({ title: 'Session 2026-10-02 14:55' })]
+    })
+    const stream = document.querySelector('[data-slot="orcle-report-stream"]')
+    expect(stream?.textContent).not.toContain('Session 2026-10-02 14:55')
+    expect(stream?.textContent).toContain('84 chat messages')
+  })
+
+  it('keeps a real stream title', async () => {
+    await render()
+    expect(document.querySelector('[data-slot="orcle-report-stream"]')?.textContent).toContain(
+      'Rust night'
+    )
+  })
+
+  it('names the empty tab before any stream with Orcle', async () => {
+    await render({ report: { payload: null, loading: false, error: null }, sessions: [] })
+    const empty = document.querySelector('[data-slot="orcle-report-empty"]')
+    expect(empty?.textContent).toContain('No stream reports yet')
+    expect(empty?.textContent).toContain(
+      'The report appears here after your first stream with Orcle.'
+    )
+  })
+
+  it('sets what needs you beside what happened', async () => {
+    await render()
+    const lists = document.querySelector('[data-slot="orcle-report-lists"]') as HTMLElement
+    expect(lists.children.length).toBeGreaterThan(0)
+    expect(lists.children.length).toBeLessThanOrEqual(2)
   })
 })

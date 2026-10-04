@@ -28,8 +28,10 @@ import type { ClipMomentSource } from '@/lib/backend'
 import {
   capReportList,
   formatReportCount,
+  isAutoSessionTitle,
   newestStreamedSessionId,
   ORCLE_REPORT_DESCRIPTION,
+  ORCLE_REPORT_EMPTY_TITLE,
   ORCLE_REPORT_LIST_CAP,
   orcleReportView,
   reportSessionChoice,
@@ -50,10 +52,10 @@ const ASKERS_YIELD =
 const LABEL_STAYS = '[&_[data-slot=list-row-title]]:shrink-0'
 
 /**
- * "Last stream" (plan 119 S3): what Orcle caught in the stream that ended
- * last, or in any recent stream the switcher picks. `sessionId` null follows
- * the newest stream, so the next one that ends replaces it on its own; the
- * Library's "Orcle report" passes one session.
+ * The Orcle tab's Reports tab (plan 119 S3, plan 150 S6): what Orcle caught in
+ * the stream that ended last, or in any recent stream the picker names.
+ * `sessionId` null follows the newest stream, so the next one that ends
+ * replaces it on its own; the Library's "Orcle report" passes one session.
  */
 export function OrcleReportCard({
   sessionId,
@@ -76,7 +78,6 @@ export function OrcleReportCard({
     shown ? { id: shown.sessionId, title: shown.title, date: shown.date ?? '' } : null
   )
   const selectedId = ask ?? shown?.sessionId ?? null
-  const latest = sessionId === null || sessionId === newestId
 
   return (
     <PanelSection
@@ -90,7 +91,7 @@ export function OrcleReportCard({
         ) : null
       }
       description={ORCLE_REPORT_DESCRIPTION}
-      title={latest ? 'Last stream' : 'Stream report'}
+      title="Stream report"
     >
       <div
         aria-busy={loading || undefined}
@@ -111,11 +112,14 @@ export function OrcleReportCard({
         ) : null}
         {shown ? (
           <ReportBody key={shown.sessionId} view={shown} />
-        ) : error ? null : (
-          <p className="text-xs text-muted-foreground">
-            {loading ? 'Loading the report…' : view.kind === 'empty' ? view.message : null}
-          </p>
-        )}
+        ) : error ? null : loading ? (
+          <p className="text-xs text-muted-foreground">Loading the report…</p>
+        ) : view.kind === 'empty' ? (
+          <div className="flex flex-col gap-1 py-6" data-slot="orcle-report-empty">
+            <p className="text-sm font-medium text-foreground">{ORCLE_REPORT_EMPTY_TITLE}</p>
+            <p className="text-xs text-muted-foreground">{view.message}</p>
+          </div>
+        ) : null}
       </div>
     </PanelSection>
   )
@@ -167,82 +171,106 @@ function ReportBody({ view }: { view: ShownReport }): ReactElement {
         <ReportStats stats={view.stats} />
       )}
       <ReportCommands commands={view.commands} />
-      <ReportList
-        id="missed"
-        items={view.missed}
-        label="Missed questions"
-        render={(question) => (
-          <ListRow
-            key={question.id}
-            alias={question.high ? <Badge variant="outline">High</Badge> : undefined}
-            className={ASKERS_YIELD}
-            context={
-              question.askers ? (
-                <span title={question.askersTitle}>{question.askers}</span>
-              ) : undefined
-            }
-            interactive={false}
-            meta={question.at ? <span className="tabular-nums">{question.at}</span> : undefined}
-            statusIcons={
-              question.platforms.length > 0
-                ? question.platforms.map((platform) => (
-                    <ChatPlatformIcon key={platform} platform={platform} />
-                  ))
-                : undefined
-            }
-            title={<span title={question.text}>{question.text}</span>}
-          />
+      {/* Plan 150: what needs you (questions, promises) beside what happened
+          (moments, alerts), two columns at lg when both sides have rows. */}
+      <div
+        className={cn(
+          'grid min-w-0 gap-4',
+          (view.missed.length > 0 || view.promises.length > 0) &&
+            (view.moments.length > 0 || view.alerts.length > 0) &&
+            'lg:grid-cols-2'
         )}
-      />
-      <ReportList
-        id="promises"
-        items={view.promises}
-        label="Open promises"
-        render={(promise) => (
-          <ListRow
-            key={promise.key}
-            className="select-text"
-            interactive={false}
-            meta={promise.at ? <span className="tabular-nums">{promise.at}</span> : undefined}
-            title={<span title={promise.text}>{promise.text}</span>}
-          />
-        )}
-      />
-      <ReportList
-        id="moments"
-        items={view.moments}
-        label="Moments"
-        render={(moment) => (
-          <ListRow
-            key={moment.key}
-            className={cn('select-text', LABEL_STAYS)}
-            context={
-              moment.excerpt ? <span title={moment.excerpt}>{moment.excerpt}</span> : undefined
-            }
-            data-moment={moment.kind}
-            icon={<MomentIcon kind={moment.kind} />}
-            interactive={false}
-            meta={<span className="tabular-nums">{moment.range}</span>}
-            title={moment.label}
-          />
-        )}
-      />
-      <ReportList
-        id="alerts"
-        items={view.alerts}
-        label="Alerts"
-        render={(alert) => (
-          <ListRow
-            key={alert.key}
-            className={LABEL_STAYS}
-            context={alert.viewers}
-            icon={<AlertIcon className="text-muted-foreground" />}
-            interactive={false}
-            meta={alert.at ? <span className="tabular-nums">{alert.at}</span> : undefined}
-            title={alert.label}
-          />
-        )}
-      />
+        data-slot="orcle-report-lists"
+      >
+        {view.missed.length > 0 || view.promises.length > 0 ? (
+          <div className="flex min-w-0 flex-col gap-4">
+            <ReportList
+              id="missed"
+              items={view.missed}
+              label="Missed questions"
+              render={(question) => (
+                <ListRow
+                  key={question.id}
+                  alias={question.high ? <Badge variant="outline">High</Badge> : undefined}
+                  className={ASKERS_YIELD}
+                  context={
+                    question.askers ? (
+                      <span title={question.askersTitle}>{question.askers}</span>
+                    ) : undefined
+                  }
+                  interactive={false}
+                  meta={
+                    question.at ? <span className="tabular-nums">{question.at}</span> : undefined
+                  }
+                  statusIcons={
+                    question.platforms.length > 0
+                      ? question.platforms.map((platform) => (
+                          <ChatPlatformIcon key={platform} platform={platform} />
+                        ))
+                      : undefined
+                  }
+                  title={<span title={question.text}>{question.text}</span>}
+                />
+              )}
+            />
+            <ReportList
+              id="promises"
+              items={view.promises}
+              label="Open promises"
+              render={(promise) => (
+                <ListRow
+                  key={promise.key}
+                  className="select-text"
+                  interactive={false}
+                  meta={promise.at ? <span className="tabular-nums">{promise.at}</span> : undefined}
+                  title={<span title={promise.text}>{promise.text}</span>}
+                />
+              )}
+            />
+          </div>
+        ) : null}
+        {view.moments.length > 0 || view.alerts.length > 0 ? (
+          <div className="flex min-w-0 flex-col gap-4">
+            <ReportList
+              id="moments"
+              items={view.moments}
+              label="Moments"
+              render={(moment) => (
+                <ListRow
+                  key={moment.key}
+                  className={cn('select-text', LABEL_STAYS)}
+                  context={
+                    moment.excerpt ? (
+                      <span title={moment.excerpt}>{moment.excerpt}</span>
+                    ) : undefined
+                  }
+                  data-moment={moment.kind}
+                  icon={<MomentIcon kind={moment.kind} />}
+                  interactive={false}
+                  meta={<span className="tabular-nums">{moment.range}</span>}
+                  title={moment.label}
+                />
+              )}
+            />
+            <ReportList
+              id="alerts"
+              items={view.alerts}
+              label="Alerts"
+              render={(alert) => (
+                <ListRow
+                  key={alert.key}
+                  className={LABEL_STAYS}
+                  context={alert.viewers}
+                  icon={<AlertIcon className="text-muted-foreground" />}
+                  interactive={false}
+                  meta={alert.at ? <span className="tabular-nums">{alert.at}</span> : undefined}
+                  title={alert.label}
+                />
+              )}
+            />
+          </div>
+        ) : null}
+      </div>
     </>
   )
 }
@@ -252,9 +280,11 @@ function StreamLine({ view }: { view: ShownReport }): ReactElement {
   const facts = [view.duration, view.chat.label].filter((fact): fact is string => Boolean(fact))
   return (
     <div className="flex min-w-0 flex-col gap-0.5" data-slot="orcle-report-stream">
-      <p className="truncate text-sm font-medium text-foreground select-text" title={view.title}>
-        {view.title}
-      </p>
+      {isAutoSessionTitle(view.title) ? null : (
+        <p className="truncate text-sm font-medium text-foreground select-text" title={view.title}>
+          {view.title}
+        </p>
+      )}
       <p className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground">
         {facts.map((fact, index) => (
           <span key={fact} className="contents">

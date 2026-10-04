@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, createElement } from 'react'
+import { act, createElement, Fragment } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -7,7 +7,9 @@ import type { CohostListening, CohostSettings } from '@/lib/backend'
 
 import {
   COHOST_SHOW_ON_STREAM_PATCHES,
-  CohostSettingsSection,
+  CohostListenField,
+  OrcleModerationSection,
+  OrcleRepliesSection,
   cohostShowOnStreamMode
 } from './cohost-settings-section'
 
@@ -60,7 +62,18 @@ async function render(
 ): Promise<void> {
   mocked.core = { cohostSettings: current, cohostGate: gate, patchCohostSettings }
   mocked.chat = { cohostState: listening ? { listening } : null }
-  await act(async () => root.render(createElement(CohostSettingsSection)))
+  // Plan 150: the listen field sits on Live, Replies and Moderation on Chat.
+  await act(async () =>
+    root.render(
+      createElement(
+        Fragment,
+        null,
+        createElement(CohostListenField),
+        createElement(OrcleRepliesSection),
+        createElement(OrcleModerationSection)
+      )
+    )
+  )
 }
 
 function option(label: string): HTMLButtonElement {
@@ -147,15 +160,29 @@ describe('Show on stream automatically', () => {
   })
 })
 
-// Plan 119 S2: the section lives under the Orcle tab's Customize, where Orcle
-// Live's switch owns `enabled` and the Premium call to action.
+// Plan 119 S2, plan 150: the settings live in the Orcle tab's Chat tab, where
+// Orcle Live's switch owns `enabled` and the Premium call to action.
 describe('under the Orcle tab', () => {
-  it('has no Enable switch and no title of its own', async () => {
+  it('splits into Replies and Moderation, with no Enable switch', async () => {
     await render(settings())
     expect(document.getElementById('cohost-enabled')).toBeNull()
     expect(document.body.textContent).not.toContain('Enable Orcle')
     expect(document.body.textContent).not.toContain('Orcle (alpha)')
-    expect(document.querySelector('[data-slot="panel-section"] header')).toBeNull()
+    const titles = [...document.querySelectorAll('[data-slot="panel-section"] h3')].map(
+      (heading) => heading.textContent
+    )
+    expect(titles).toEqual(['Replies', 'Moderation'])
+    const [replies, moderation] = [
+      ...document.querySelectorAll<HTMLElement>('[data-slot="panel-section"]')
+    ]
+    expect(replies.querySelector('#cohost-tone')).toBeTruthy()
+    expect(replies.querySelector('#cohost-notes')).toBeTruthy()
+    expect(moderation.querySelector('#cohost-rule-new')).toBeTruthy()
+    expect(moderation.querySelector('#cohost-sensitivity')).toBeTruthy()
+    expect(moderation.querySelector('#cohost-show-on-stream')).toBeTruthy()
+    // Listening sits outside both: it belongs with Orcle Live's switch.
+    expect(replies.querySelector('#cohost-listen')).toBeNull()
+    expect(moderation.querySelector('#cohost-listen')).toBeNull()
   })
 
   it('leaves the Premium call to action to Orcle Live: a Basic account sees it disabled', async () => {

@@ -33,6 +33,12 @@ import {
 } from '@/lib/clean-cut-events'
 import { displayKeyGlyph } from '@/lib/platform'
 import {
+  isOrcleTabId,
+  readLastOrcleTab,
+  writeLastOrcleTab,
+  type OrcleTabId
+} from '@/lib/orcle-tabs'
+import {
   isSettingsTabId,
   readLastSettingsTab,
   writeLastSettingsTab,
@@ -183,23 +189,47 @@ export function AppShell(): ReactElement {
   const [cleanCutRequest, setCleanCutRequest] = useState<CleanCutTabRequest | null>(null)
   const [libraryFocusSessionId, setLibraryFocusSessionId] = useState<string | null>(null)
   const cleanCutNonceRef = useRef(0)
+  // Plan 150: Orcle reopens on its tab used last, like Settings; the
+  // Library's report and clean-cut asks select the tab that answers them.
+  const [orcleTab, setOrcleTab] = useState<OrcleTabId>(readLastOrcleTab)
+  const selectOrcleTab = useCallback((tab: OrcleTabId) => {
+    setOrcleTab(tab)
+    writeLastOrcleTab(tab)
+  }, [])
   const setActive = useCallback((tab: WorkspaceTab) => {
     setOrcleReportSessionId(null)
     setCleanCutRequest(null)
     setLibraryFocusSessionId(null)
     setActiveTab(tab)
   }, [])
-  const openOrcleReport = useCallback((sessionId: string) => {
-    setCleanCutRequest(null)
-    setOrcleReportSessionId(sessionId)
-    setActiveTab('ai')
-  }, [])
-  const openCleanCut = useCallback((request: CleanCutOpenRequest) => {
-    cleanCutNonceRef.current += 1
-    setOrcleReportSessionId(null)
-    setCleanCutRequest({ ...request, nonce: cleanCutNonceRef.current })
-    setActiveTab('ai')
-  }, [])
+  const openOrcleReport = useCallback(
+    (sessionId: string) => {
+      setCleanCutRequest(null)
+      setOrcleReportSessionId(sessionId)
+      selectOrcleTab('reports')
+      setActiveTab('ai')
+    },
+    [selectOrcleTab]
+  )
+  const openCleanCut = useCallback(
+    (request: CleanCutOpenRequest) => {
+      cleanCutNonceRef.current += 1
+      setOrcleReportSessionId(null)
+      setCleanCutRequest({ ...request, nonce: cleanCutNonceRef.current })
+      selectOrcleTab('clean-cut')
+      setActiveTab('ai')
+    },
+    [selectOrcleTab]
+  )
+  const openOrcle = useCallback(
+    (tab?: OrcleTabId) => {
+      if (tab) {
+        selectOrcleTab(tab)
+      }
+      setActive('ai')
+    },
+    [selectOrcleTab, setActive]
+  )
   const openLibrarySession = useCallback((sessionId: string) => {
     setOrcleReportSessionId(null)
     setCleanCutRequest(null)
@@ -341,17 +371,21 @@ export function AppShell(): ReactElement {
 
   useEffect(() => {
     const onWorkspaceNavigate = (event: Event): void => {
-      const detail = (event as CustomEvent<{ tab?: unknown; settingsTab?: unknown }>).detail
+      const detail = (
+        event as CustomEvent<{ tab?: unknown; settingsTab?: unknown; orcleTab?: unknown }>
+      ).detail
       const tab = detail?.tab
       if (tab === 'settings') {
         openSettings(isSettingsTabId(detail?.settingsTab) ? detail.settingsTab : undefined)
+      } else if (tab === 'ai') {
+        openOrcle(isOrcleTabId(detail?.orcleTab) ? detail.orcleTab : undefined)
       } else if (isWorkspaceTab(tab)) {
         setActive(tab)
       }
     }
     window.addEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
     return () => window.removeEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
-  }, [openSettings, setActive])
+  }, [openOrcle, openSettings, setActive])
 
   useEffect(() => {
     const onOpenCleanCut = (event: Event): void => {
@@ -382,7 +416,8 @@ export function AppShell(): ReactElement {
         activeStudioPanel: isStudioPanel(active) ? active : null,
         openStudioPanel,
         closeStudioPanel,
-        openSettings
+        openSettings,
+        openOrcle
       }}
     >
       {/* The window family's shell (plan 050, D4): the sidebar sits on the
@@ -411,10 +446,10 @@ export function AppShell(): ReactElement {
           <Pane>
             <Toolbar title={workspaceTabLabel(active)} />
             {/* Library manages its own scroll (pinned header and toolbar,
-                  only the table scrolls), and so does Settings (its tab strip
-                  stays pinned, only the tab under it scrolls); every other tab
-                  scrolls as one. */}
-            <PaneBody scroll={active !== 'library' && active !== 'settings'}>
+                  only the table scrolls), and so do Settings and Orcle (their
+                  tab strips stay pinned, only the tab under it scrolls); every
+                  other tab scrolls as one. */}
+            <PaneBody scroll={active !== 'library' && active !== 'settings' && active !== 'ai'}>
               <StudioMicVisualProvider enabled={active === 'studio' || active === 'sources'}>
                 <Suspense fallback={<WorkspaceTabFallback />}>
                   {active === 'studio' ? <StudioTab /> : null}
@@ -435,7 +470,9 @@ export function AppShell(): ReactElement {
                     <OrcleTab
                       cleanCutRequest={cleanCutRequest}
                       reportSessionId={orcleReportSessionId}
+                      tab={orcleTab}
                       onOpenLibrarySession={openLibrarySession}
+                      onTabChange={selectOrcleTab}
                     />
                   ) : null}
                   {active === 'diagnostics' ? <DiagnosticsTab /> : null}

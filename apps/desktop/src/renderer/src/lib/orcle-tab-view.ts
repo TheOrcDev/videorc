@@ -3,31 +3,45 @@ import { removeMessagesReadiness } from '../../../shared/platform-scopes'
 import { COHOST_ERROR_TOAST_MESSAGES, cohostErrorDetail } from './cohost-state'
 import { cohostErrorDetailText, cohostListeningView } from './cohost-view'
 import type { EntitlementUiGate } from './entitlement-ui'
+import type { OrcleTabId } from './orcle-tabs'
 
 // The Orcle tab (plan 119 S2): Videorc's AI tab, under Studio. Everything here
 // is a pure derivation of what the studio provider already holds, so the tab,
 // its tests and the Comments window cannot disagree about what Orcle Live is
 // doing.
 
-/** The page's intro line (plan 119 decision 1): Orcle Live, then Clean cut. */
-export const ORCLE_TAB_DESCRIPTION = 'Live with you. Edits after.'
-
-/** What Orcle Live does, in three powers (plan 119 decision 4). */
-export const ORCLE_LIVE_POWERS: readonly { title: string; description: string }[] = [
+/**
+ * What Orcle Live does (plan 119 decision 4), as the Live tab's "What Orcle
+ * does" rows (plan 150): each names the Orcle tab that holds its settings, so
+ * the row is a way there rather than a pitch.
+ */
+export const ORCLE_LIVE_POWERS: readonly {
+  title: string
+  description: string
+  tab: OrcleTabId
+}[] = [
   {
     title: 'Never miss a question',
     description:
-      'Questions from every platform, grouped, each with a drafted reply you approve. Answer out loud and Orcle clears it.'
+      'Questions from every platform, grouped, each with a drafted reply you approve. Answer out loud and Orcle clears it.',
+    tab: 'chat'
   },
   {
     title: 'Chat stays safe',
     description:
-      'Spam, scams and abuse are flagged against your own rules. Orcle never acts on its own.'
+      'Spam, scams and abuse are flagged against your own rules. Orcle never acts on its own.',
+    tab: 'chat'
   },
   {
     title: 'The room, handled',
     description:
-      "Orcle greets first-timers, reminds you of your promises, nudges you in dead air, tells you when viewers say your audio broke, and can put the comment you're talking about on screen."
+      "Orcle greets first-timers, reminds you of your promises, nudges you in dead air, tells you when viewers say your audio broke, and can put the comment you're talking about on screen.",
+    tab: 'chat'
+  },
+  {
+    title: 'Talk to Orcle',
+    description: 'Ask Orcle to put a comment on stream, take it down, or remove it from chat.',
+    tab: 'voice'
   }
 ]
 

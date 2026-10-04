@@ -96,7 +96,8 @@ async function render(): Promise<void> {
     activeStudioPanel: null,
     openStudioPanel: vi.fn(),
     closeStudioPanel: vi.fn(),
-    openSettings: vi.fn()
+    openSettings: vi.fn(),
+    openOrcle: vi.fn()
   }
   await act(async () =>
     root.render(

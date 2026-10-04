@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CohostSettings, CohostState } from '@/lib/backend'
 import type { CleanCutTabRequest } from '@/lib/clean-cut-events'
 import { CLOUD_AI_KEEPS, CLOUD_AI_USES, ORCLE_LIVE_POWERS } from '@/lib/orcle-tab-view'
+import type { OrcleTabId } from '@/lib/orcle-tabs'
 
 import { OrcleTab } from './orcle-tab'
 
@@ -72,7 +73,8 @@ const calls = {
   patchCohostSettings: vi.fn(async () => undefined),
   openCommentsWindow: vi.fn(async () => undefined),
   signIn: vi.fn(),
-  openOAuthUrl: vi.fn(async (_url: string) => undefined)
+  openOAuthUrl: vi.fn(async (_url: string) => undefined),
+  onTabChange: vi.fn((_tab: OrcleTabId) => undefined)
 }
 
 const premium = { allowed: true }
@@ -125,6 +127,7 @@ async function render({
   state = null as CohostState | null,
   reportSessionId = undefined as string | null | undefined,
   cleanCutRequest = undefined as CleanCutTabRequest | undefined,
+  tab = undefined as OrcleTabId | undefined,
   core = {} as Record<string, unknown>
 } = {}): Promise<void> {
   mocked.core = {
@@ -154,7 +157,8 @@ async function render({
     root.render(
       createElement(OrcleTab, {
         ...(reportSessionId === undefined ? {} : { reportSessionId }),
-        ...(cleanCutRequest === undefined ? {} : { cleanCutRequest })
+        ...(cleanCutRequest === undefined ? {} : { cleanCutRequest }),
+        ...(tab === undefined ? {} : { tab, onTabChange: calls.onTabChange })
       })
     )
   )
@@ -182,11 +186,70 @@ function statusLine(): HTMLElement {
   return document.querySelector('[data-slot="orcle-live-status"]') as HTMLElement
 }
 
+function stripTabs(): HTMLElement[] {
+  return [...document.querySelectorAll<HTMLElement>('[data-videorc-orcle-tab]')]
+}
+
+function selectedTab(): string | null {
+  return (
+    document
+      .querySelector('[data-videorc-orcle-tab][data-state="active"]')
+      ?.getAttribute('data-videorc-orcle-tab') ?? null
+  )
+}
+
+/** Radix activates a tab on mousedown with the primary button. */
+async function pressTab(id: OrcleTabId): Promise<void> {
+  const trigger = document.querySelector(`[data-videorc-orcle-tab="${id}"]`) as HTMLElement
+  expect(trigger).toBeTruthy()
+  await act(async () => {
+    trigger.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))
+  })
+}
+
+describe('Orcle tab strip (plan 150)', () => {
+  it('lists five tabs like Settings and opens on Live', async () => {
+    await render()
+    expect(stripTabs().map((tab) => tab.textContent)).toEqual([
+      'Live',
+      'Chat',
+      'Voice',
+      'Reports',
+      'Clean cut'
+    ])
+    expect(selectedTab()).toBe('live')
+    expect(document.querySelector('[data-slot="page-header"]')).toBeNull()
+    expect(document.querySelector('[data-slot="orcle-customize"]')).toBeNull()
+  })
+
+  it('shows the tab the shell names and asks the shell to change it', async () => {
+    await render({ tab: 'voice' })
+    expect(selectedTab()).toBe('voice')
+    expect(document.querySelector('[data-slot="orcle-voice-commands"]')).toBeTruthy()
+    expect(document.getElementById('orcle-live-switch')).toBeNull()
+    await pressTab('reports')
+    expect(calls.onTabChange).toHaveBeenLastCalledWith('reports')
+  })
+
+  it('switches its own tab when rendered without the shell', async () => {
+    await render()
+    await pressTab('chat')
+    expect(selectedTab()).toBe('chat')
+    expect(document.getElementById('cohost-tone')).toBeTruthy()
+  })
+
+  it("lands on Reports for the Library's report ask, and Clean cut for a cut ask", async () => {
+    await render({ reportSessionId: 'stream-7' })
+    expect(selectedTab()).toBe('reports')
+    await render({ cleanCutRequest: { sessionId: 'rec-1', nonce: 1 } })
+    expect(selectedTab()).toBe('clean-cut')
+  })
+})
+
 describe('Orcle tab (plan 119 S2)', () => {
   it('introduces Orcle Live with its switch, its status and its three powers', async () => {
     await render()
     const text = document.body.textContent ?? ''
-    expect(text).toContain('Live with you. Edits after.')
     expect(text).toContain('Orcle Live')
     expect(text).toContain('Alpha')
     expect(text).toContain('Orcle joins my streams')
@@ -196,11 +259,6 @@ describe('Orcle tab (plan 119 S2)', () => {
     }
     expect(liveSwitch().getAttribute('data-state')).toBe('unchecked')
     expect(statusLine().getAttribute('data-status')).toBe('off')
-    // Plan 149: Orcle's emblem leads the tab's intro line, at 32 px.
-    const header = document.querySelector('[data-slot="page-header"]')
-    const emblem = header?.querySelector('[data-slot="orcle-emblem"]')
-    expect(emblem?.getAttribute('src')).toContain('orcle-emblem-64')
-    expect(emblem?.nextElementSibling?.textContent).toContain('Live with you. Edits after.')
     // The Stream Manager waits for a stream.
     expect(text).not.toContain('Open Stream Manager')
   })
@@ -294,22 +352,74 @@ describe('Orcle tab (plan 119 S2)', () => {
   })
 })
 
-describe('Stream report (plan 119 S3)', () => {
-  function sectionTitles(): string[] {
-    return [...document.querySelectorAll('[data-slot="orcle-tab"] h3')].map(
-      (heading) => heading.textContent ?? ''
-    )
-  }
-
-  it('sits under Orcle Live, before Customize, and follows the last stream', async () => {
+describe('Live and Chat tabs (plan 150 S3, S4)', () => {
+  it('leads Live with the emblem beside the switch, and listening under it', async () => {
     await render()
-    expect(sectionTitles()).toEqual(['Orcle Live', 'Last stream', 'Clean cut'])
-    const tab = document.querySelector('[data-slot="orcle-tab"]') as HTMLElement
-    const report = tab.querySelector('[data-slot="orcle-report"]') as HTMLElement
-    const customize = tab.querySelector('[data-slot="orcle-customize"]') as HTMLElement
-    expect(
-      report.compareDocumentPosition(customize) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy()
+    const block = document.querySelector('[data-slot="orcle-live-status-block"]') as HTMLElement
+    expect(block.querySelector('[data-slot="orcle-emblem"]')?.getAttribute('src')).toContain(
+      'orcle-emblem-112'
+    )
+    expect(block.querySelector('#orcle-live-switch')).toBeTruthy()
+    expect(document.getElementById('cohost-listen')).toBeTruthy()
+    // The three-column pitch is gone; Live lists what Orcle does as rows.
+    expect(document.querySelector('ul[aria-label="What Orcle Live does"]')).toBeNull()
+    expect(document.querySelectorAll('[data-power-tab]')).toHaveLength(ORCLE_LIVE_POWERS.length)
+  })
+
+  it('opens the tab that holds a power when its row is pressed', async () => {
+    await render({ tab: 'live' })
+    const voice = document.querySelector('[data-power-tab="voice"] button') as HTMLButtonElement
+    await act(async () => voice.click())
+    expect(calls.onTabChange).toHaveBeenLastCalledWith('voice')
+    const chat = document.querySelector('[data-power-tab="chat"] button') as HTMLButtonElement
+    await act(async () => chat.click())
+    expect(calls.onTabChange).toHaveBeenLastCalledWith('chat')
+  })
+
+  it('splits Chat into Replies and Moderation, and leads with one reason when locked', async () => {
+    await render({ tab: 'chat' })
+    const titles = [...document.querySelectorAll('[data-slot="panel-section"] h3')].map(
+      (heading) => heading.textContent
+    )
+    expect(titles).toEqual(['Replies', 'Moderation'])
+    expect(document.querySelector('[data-slot="orcle-tab-unlock"]')).toBeNull()
+
+    await render({ tab: 'chat', gate: basic })
+    expect(document.querySelector('[data-slot="orcle-tab-unlock"]')?.textContent).toContain(
+      'Orcle requires Videorc Premium.'
+    )
+    expect((document.getElementById('cohost-notes') as HTMLTextAreaElement).disabled).toBe(true)
+  })
+})
+
+describe('Locked means disabled, with one reason, on every tab (plan 150, D7)', () => {
+  it('gives a signed-out streamer the same sign-in reason on Live, Chat and Voice', async () => {
+    await render({ signedIn: false })
+    expect(document.querySelector('[data-slot="orcle-live-unlock"]')?.textContent).toContain(
+      'Sign in to use Orcle Live'
+    )
+    expect((document.getElementById('cohost-listen') as HTMLButtonElement).disabled).toBe(true)
+
+    await render({ signedIn: false, tab: 'chat' })
+    expect(document.querySelector('[data-slot="orcle-tab-unlock"]')?.textContent).toContain(
+      'Sign in to use Orcle Live'
+    )
+    expect((document.getElementById('cohost-notes') as HTMLTextAreaElement).disabled).toBe(true)
+
+    await render({ signedIn: false, tab: 'voice' })
+    expect(document.querySelector('[data-slot="orcle-tab-unlock"]')?.textContent).toContain(
+      'Sign in to use Orcle Live'
+    )
+    expect(document.querySelector('[data-slot="orcle-voice-commands-off"]')).toBeNull()
+    expect((document.getElementById('orcle-wake-word') as HTMLButtonElement).disabled).toBe(true)
+  })
+})
+
+describe('Reports (plan 119 S3, plan 150)', () => {
+  it('is its own tab and follows the last stream', async () => {
+    await render({ tab: 'reports' })
+    expect(document.querySelector('[data-slot="orcle-report"]')).toBeTruthy()
+    expect(document.getElementById('orcle-live-switch')).toBeNull()
     expect(mocked.reportAsks.at(-1)).toBeNull()
     expect(document.body.textContent).toContain(
       'The report appears here after your first stream with Orcle.'
@@ -322,24 +432,9 @@ describe('Stream report (plan 119 S3)', () => {
   })
 })
 
-describe('Customize (plan 119 S2)', () => {
-  async function openCustomize(): Promise<void> {
-    const trigger = [...document.querySelectorAll('button')].find((candidate) =>
-      candidate.textContent?.includes('Customize')
-    )
-    expect(trigger).toBeTruthy()
-    await act(async () => trigger!.click())
-  }
-
-  it('starts collapsed', async () => {
-    await render()
-    expect(document.getElementById('orcle-cloud-ai')).toBeNull()
-    expect(document.getElementById('cohost-listen')).toBeNull()
-  })
-
-  it('is the single home of cloud-AI consent: it revokes and grants', async () => {
+describe('Cloud AI and the settings tabs (plan 119 S2, plan 150)', () => {
+  it('keeps cloud-AI consent on Live, its single home: it revokes and grants', async () => {
     await render({ cohost: settings({ enabled: true, listen: true }) })
-    await openCustomize()
     const cloudAi = document.getElementById('orcle-cloud-ai') as HTMLButtonElement
     expect(cloudAi.getAttribute('data-state')).toBe('checked')
     for (const use of CLOUD_AI_USES) expect(document.body.textContent).toContain(use)
@@ -356,25 +451,18 @@ describe('Customize (plan 119 S2)', () => {
   })
 
   it("holds Orcle's settings without a second Enable switch", async () => {
-    await render({ cohost: settings({ enabled: true }) })
-    await openCustomize()
-    expect(document.getElementById('cohost-listen')).toBeTruthy()
+    await render({ cohost: settings({ enabled: true }), tab: 'chat' })
+    expect(document.getElementById('cohost-tone')).toBeTruthy()
     expect(document.getElementById('cohost-enabled')).toBeNull()
     expect(document.body.textContent).not.toContain('Enable Orcle')
   })
 })
 
 describe('Clean cut in the Orcle tab (plan 119 S14)', () => {
-  it('sits after the stream report, before Customize', async () => {
-    await render()
-    const tab = document.querySelector('[data-slot="orcle-tab"]') as HTMLElement
-    const report = tab.querySelector('[data-slot="orcle-report"]') as HTMLElement
-    const cleanCut = tab.querySelector('[data-slot="clean-cut"]') as HTMLElement
-    const customize = tab.querySelector('[data-slot="orcle-customize"]') as HTMLElement
-    expect(report.compareDocumentPosition(cleanCut) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(
-      cleanCut.compareDocumentPosition(customize) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy()
+  it('is its own tab', async () => {
+    await render({ tab: 'clean-cut' })
+    expect(document.querySelector('[data-slot="clean-cut"]')).toBeTruthy()
+    expect(document.querySelector('[data-slot="orcle-report"]')).toBeNull()
   })
 
   it("opens a cut's review on the ready toast's ask, and goes back to the tab", async () => {
@@ -393,9 +481,11 @@ describe('Clean cut in the Orcle tab (plan 119 S14)', () => {
       mode: 'condensed',
       jobId: 'job-1'
     })
-    expect(document.querySelector('[data-slot="orcle-tab"]')).toBeNull()
+    // The review opens inside Clean cut: the strip stays.
+    expect(selectedTab()).toBe('clean-cut')
+    expect(document.querySelector('[data-slot="clean-cut"]')).toBeNull()
     await act(async () => button('Close review').click())
-    expect(document.querySelector('[data-slot="orcle-tab"]')).toBeTruthy()
+    expect(document.querySelector('[data-slot="clean-cut"]')).toBeTruthy()
   })
 })
 
@@ -424,10 +514,10 @@ describe('Orcle tab: Voice commands (plan 140, S6 part A)', () => {
     return element!
   }
 
-  it('sits inside Orcle Live: what you can say, and the promise', async () => {
-    await render({ cohost: settings({ enabled: true }) })
+  it('is the Voice tab: what you can say, and the promise', async () => {
+    await render({ cohost: settings({ enabled: true }), tab: 'voice' })
     const voice = section()
-    expect(voice.closest('[data-slot="panel-section"]')?.textContent).toContain('Orcle Live')
+    expect(document.getElementById('orcle-live-switch')).toBeNull()
     const text = voice.textContent ?? ''
     expect(text).toContain('Voice commands')
     expect(text).toContain('What you can say')
@@ -442,17 +532,40 @@ describe('Orcle tab: Voice commands (plan 140, S6 part A)', () => {
     expect(voice.querySelector('[data-slot="orcle-voice-commands-off"]')).toBeNull()
   })
 
-  it('says to turn on Orcle Live first while it is off', async () => {
-    await render()
-    expect(section().querySelector('[data-slot="orcle-voice-commands-off"]')?.textContent).toBe(
-      'Turn on Orcle Live to use voice commands.'
+  it('says to turn on Orcle Live first while it is off, with a way to Live', async () => {
+    await render({ tab: 'voice' })
+    const off = section().querySelector('[data-slot="orcle-voice-commands-off"]') as HTMLElement
+    expect(off.textContent).toContain('Turn on Orcle Live to use voice commands.')
+    await act(async () => off.querySelector('button')!.click())
+    expect(calls.onTabChange).toHaveBeenLastCalledWith('live')
+  })
+
+  it('leads with one reason when Orcle is locked, and disables the settings (plan 150)', async () => {
+    await render({ tab: 'voice', gate: basic })
+    expect(section().querySelector('[data-slot="orcle-tab-unlock"]')?.textContent).toContain(
+      'Orcle requires Videorc Premium.'
     )
+    expect(section().querySelector('[data-slot="orcle-voice-commands-off"]')).toBeNull()
+    expect((document.getElementById('orcle-wake-word') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('puts each phrase over what it does, in two columns (plan 150)', async () => {
+    await render({ cohost: settings({ enabled: true }), tab: 'voice' })
+    const titles = [...section().querySelectorAll('[data-slot="panel-section"] h3')].map(
+      (heading) => heading.textContent
+    )
+    expect(titles).toEqual(['Commands', 'Remove messages'])
+    const highlight = section().querySelector('[data-command="highlight"]') as HTMLElement
+    expect(highlight.children).toHaveLength(2)
+    expect(highlight.lastElementChild?.textContent).toBe('Puts it on stream.')
+    expect(section().querySelector('[data-slot="orcle-voice-commands-premium"]')).toBeTruthy()
   })
 
   it('lists Remove messages per account, with the one fix for each', async () => {
     connectPlatformAccount.mockClear()
     authorizeXLive.mockClear()
     await render({
+      tab: 'voice',
       core: {
         platformAccounts: accounts,
         xNativeCapability: { nativeAvailable: false },
@@ -484,7 +597,8 @@ describe('Orcle tab: Voice commands (plan 140, S6 part A)', () => {
   it('saves the wake word and the confirmation mode (part B)', async () => {
     calls.patchCohostSettings.mockClear()
     await render({
-      cohost: settings({ enabled: true, wakeWordRequired: false, removeConfirm: 'confirm' })
+      cohost: settings({ enabled: true, wakeWordRequired: false, removeConfirm: 'confirm' }),
+      tab: 'voice'
     })
     const voice = section()
     expect(voice.textContent).toContain('Commands need “Orcle” first')
@@ -502,13 +616,14 @@ describe('Orcle tab: Voice commands (plan 140, S6 part A)', () => {
   })
 
   it('names the countdown in the numbers line when it is on', async () => {
-    await render({ cohost: settings({ enabled: true, removeConfirm: 'countdown' }) })
+    await render({ cohost: settings({ enabled: true, removeConfirm: 'countdown' }), tab: 'voice' })
     const notes = section().querySelector('[data-slot="orcle-voice-commands-notes"]')
     expect(notes?.textContent).toContain('runs after 5 seconds unless you cancel')
   })
 
   it('says when Videorc paused voice commands or removing', async () => {
     await render({
+      tab: 'voice',
       state: {
         sessionId: null,
         status: 'off',
@@ -529,12 +644,12 @@ describe('Orcle tab: Voice commands (plan 140, S6 part A)', () => {
       'Voice commands are paused by Videorc.',
       'Removing messages is paused by Videorc.'
     ])
-    await render()
+    await render({ tab: 'voice' })
     expect(section().querySelector('[data-slot="orcle-voice-commands-paused"]')).toBeNull()
   })
 
   it('says where to connect when no platform is connected', async () => {
-    await render({ core: { platformAccounts: [] } })
+    await render({ core: { platformAccounts: [] }, tab: 'voice' })
     expect(section().querySelector('[data-slot="remove-messages-empty"]')?.textContent).toBe(
       'Connect YouTube, Twitch, Kick or X under Livestream to remove their chat messages.'
     )
