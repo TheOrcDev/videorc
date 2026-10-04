@@ -330,7 +330,7 @@ describe('ActivityPane on stream', () => {
     expect(markup).not.toContain('data-highlight-phase="live"')
   })
 
-  it('flips Show on stream to Remove from stream while the row is live', () => {
+  it('flips Show on stream to Take off stream while the row is live', () => {
     const onShowOnStream = (): void => undefined
     const show = (phase: 'idle' | 'applying' | 'live' | 'failed') =>
       activityRowActions(rows[0]!, { phase }, { onShowOnStream }).find(
@@ -338,7 +338,7 @@ describe('ActivityPane on stream', () => {
       )
     expect(show('idle')?.label).toBe('Show on stream')
     expect(show('failed')?.label).toBe('Show on stream')
-    expect(show('live')?.label).toBe('Remove from stream')
+    expect(show('live')?.label).toBe('Take off stream')
     expect(show('applying')?.disabled).toBe(true)
     expect(show('live')?.disabled).toBe(false)
     // No chat message behind it, or no live window: nothing to show.

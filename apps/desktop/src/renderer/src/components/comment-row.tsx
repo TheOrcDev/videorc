@@ -453,7 +453,9 @@ function CommentContent({
 
 /**
  * The row's ⋯ menu: show on (or take off) stream, reply, copy, and, for a row
- * that can be removed, "Remove from chat" (destructive, so it sorts last).
+ * that can be removed, "Remove from chat" (destructive: it sorts last, below
+ * a separator, in the destructive tone). The stream toggle says "Take off
+ * stream", never "Remove": only the irreversible item may say remove.
  * Empty without Reply or Remove from chat: a row outside a live session has
  * no menu.
  */
@@ -478,7 +480,7 @@ export function commentRowMenu({
       ? [
           {
             id: 'show',
-            label: highlightPhase === 'live' ? 'Remove from stream' : 'Show on stream',
+            label: highlightPhase === 'live' ? 'Take off stream' : 'Show on stream',
             icon: PreviewIcon,
             onSelect: () => onHighlight?.(message)
           }
@@ -593,7 +595,7 @@ export function CommentRow({
         <Button
           aria-label={
             highlight.phase === 'live'
-              ? `Remove ${message.authorName}'s message from the stream`
+              ? `Take ${message.authorName}'s message off the stream`
               : suggested
                 ? `Show ${message.authorName}'s message on the stream (Orcle suggestion)`
                 : `Show ${message.authorName}'s message on the stream`
@@ -605,9 +607,7 @@ export function CommentRow({
             cohostSpotlight && highlight.phase !== 'live' && 'bg-accent',
             message.amountText && 'bg-warning/10 ring-1 ring-warning/30'
           )}
-          title={
-            highlight.phase === 'live' ? 'Remove from stream' : 'Show this message on the stream'
-          }
+          title={highlight.phase === 'live' ? 'Take off stream' : 'Show this message on the stream'}
           type="button"
           variant={highlight.phase === 'live' ? 'secondary' : 'ghost'}
           onClick={() => onHighlight?.(message)}

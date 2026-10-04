@@ -235,6 +235,20 @@ describe('CommentRow: Remove from chat (plan 140, S6)', () => {
     })
     expect(items.map((item) => item.id)).toEqual(['show', 'reply', 'copy', 'remove-from-chat'])
     expect(items.at(-1)).toMatchObject({ label: 'Remove from chat', destructive: true })
+    expect(items.filter((item) => item.destructive)).toHaveLength(1)
+    // The stream toggle never says "Remove" next to the irreversible item.
+    const live = commentRowMenu({
+      message: message(),
+      highlightable: true,
+      highlightPhase: 'live',
+      onHighlight: () => undefined,
+      onReply: reply,
+      onRemoveFromChat: remove
+    })
+    expect(live[0]).toMatchObject({ id: 'show', label: 'Take off stream' })
+    expect(live.filter((item) => item.label.startsWith('Remove'))).toEqual([
+      expect.objectContaining({ id: 'remove-from-chat', destructive: true })
+    ])
     const paid = message({ eventType: 'paid', amountText: '$5' })
     expect(menuIds(paid, offered(paid))).toContain('remove-from-chat')
   })
