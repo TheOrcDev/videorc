@@ -1,6 +1,7 @@
 import type {
   AiCapabilities,
   CleanCutEdlSummary,
+  CleanCutGetResult,
   CleanCutJob,
   CleanCutJobDetail,
   CleanCutMode,
@@ -15,64 +16,28 @@ import { formatClipMarkClock } from '../../../shared/clip-marks'
 // of the job snapshots, the Library rows and the capability block, so the
 // card, the review, the ready toast and their tests cannot disagree.
 
-// --- Shapes from the S13 interface ----------------------------------------------
-// TODO(S13 merge): the backend half (S13) adds these to the shared protocol in
-// parallel. Once feat/119-orcle-tab carries it, switch to the shared types:
-// - CleanCutTranscript*        → shared/backend.ts, `cleanCut.transcript` in the
-//   RPC contract; use-clean-cut.ts moves from request<T>() to requestTyped().
-// - `cleanCut.render`          → the RPC contract; same move in use-clean-cut.ts.
-// - CleanCutCondensedKeep      → `CleanCutJobDetail.condensedKeeps`.
-// - CleanCutSessionFields      → `SessionListItem.cleanCutOfSessionId` / `cleanCutMode`.
-// - cleanCutCapabilities()     → reads `AiCapabilities.cleanCut` and
-//   `features.cleanCutEnabled` loosely; keep the reader (older servers omit
-//   the block) but type it once the shared type has the fields.
+// --- Shapes ---------------------------------------------------------------------
+// The wire shapes live in the shared protocol (plan 119 S13); these names stay as
+// aliases so the card, the review and their tests read one vocabulary.
+export type {
+  CleanCutCondensedKeep,
+  CleanCutTranscript,
+  CleanCutTranscriptSegment,
+  CleanCutTranscriptWord
+} from './backend'
 
-/** One word of `transcript.words.json`; times are recording time. */
-export interface CleanCutTranscriptWord {
-  text: string
-  startMs: number
-  endMs: number
-  filler?: true
-}
+/** `cleanCut.get` entries carry `condensedKeeps` for condensed jobs. */
+export type CleanCutJobDetailWithKeeps = CleanCutJobDetail
+export type CleanCutGetResultWithKeeps = CleanCutGetResult
 
-/** A sentence from the cut-list builder (`edl.rs`). */
-export interface CleanCutTranscriptSegment {
-  id: string
-  startMs: number
-  endMs: number
-}
+/** The Library row fields a clean-cut derivative carries (`SessionSummary`). */
+export type CleanCutSessionFields = Pick<SessionSummary, 'cleanCutOfSessionId' | 'cleanCutMode'>
 
-/** `cleanCut.transcript {jobId}`. */
-export interface CleanCutTranscript {
-  jobId: string
-  language: string | null
-  words: CleanCutTranscriptWord[]
-  segments: CleanCutTranscriptSegment[]
-}
+export type CleanCutSession = SessionSummary
 
-/** A kept part of a condensed cut, with its title (`cleanCut.get`). */
-export interface CleanCutCondensedKeep {
-  startMs: number
-  endMs: number
-  title: string
-}
-
-export type CleanCutJobDetailWithKeeps = CleanCutJobDetail & {
-  condensedKeeps?: CleanCutCondensedKeep[]
-}
-
-export interface CleanCutGetResultWithKeeps {
-  sessionId: string
-  jobs: CleanCutJobDetailWithKeeps[]
-}
-
-/** The Library row fields a clean-cut derivative carries. */
-export interface CleanCutSessionFields {
-  cleanCutOfSessionId?: string
-  cleanCutMode?: CleanCutMode
-}
-
-export type CleanCutSession = SessionSummary & CleanCutSessionFields
+// `cleanCutCapabilities()` below reads the capability block loosely on purpose:
+// older servers omit it, and `ai.capabilities.get` is validated only as a
+// bounded payload, so a partial block must never throw.
 
 /** The `cleanCut` block of `ai.capabilities.get` (contract part B). */
 export interface CleanCutCapabilities {

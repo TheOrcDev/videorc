@@ -3290,6 +3290,19 @@ export interface AiCapabilities {
       model: string
     }
   }
+  /** Clean cut (plan 119, docs/clean-cut-contract.md part B). Older servers
+   * omit it, which means Clean cut is not available. `reasonCode` is open. */
+  cleanCut?: {
+    supported: boolean
+    available: boolean
+    reasonCode: string | null
+    maxChunkSeconds?: number
+    maxChunkBytes?: number
+    monthlySecondsLimit: number | null
+    remainingSeconds: number | null
+    modes?: string[]
+    workflowKind?: string
+  }
   entitlement: {
     checkedAt: string
     cloudAi: boolean
@@ -3299,6 +3312,8 @@ export interface AiCapabilities {
     tier: string
   }
   features: {
+    /** Clean cut kill switch off and its provider configured; older servers omit it. */
+    cleanCutEnabled?: boolean
     cloudAiEnabled: boolean
     gatewayConfigured: boolean
     modelTestingEnabled: boolean

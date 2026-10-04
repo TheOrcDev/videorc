@@ -130,17 +130,14 @@ export function useCleanCut(): CleanCutClient {
       remember(await requireClient().requestTyped('cleanCut.cancel', { jobId })),
     [remember, requireClient]
   )
-  // TODO(S13 merge): requestTyped('cleanCut.render') once the contract has it.
   const render = useCallback(
     async (jobId: string) =>
-      remember(await requireClient().request<CleanCutJob>('cleanCut.render', { jobId })),
+      remember(await requireClient().requestTyped('cleanCut.render', { jobId })),
     [remember, requireClient]
   )
   const get = useCallback(
-    async (sessionId: string) =>
-      (await requireClient().requestTyped('cleanCut.get', {
-        sessionId
-      })) as CleanCutGetResultWithKeeps,
+    async (sessionId: string): Promise<CleanCutGetResultWithKeeps> =>
+      requireClient().requestTyped('cleanCut.get', { sessionId }),
     [requireClient]
   )
   const updateEdl = useCallback(
@@ -151,10 +148,9 @@ export function useCleanCut(): CleanCutClient {
     },
     [remember, requireClient]
   )
-  // TODO(S13 merge): requestTyped('cleanCut.transcript') once the contract has it.
   const transcript = useCallback(
-    async (jobId: string) =>
-      requireClient().request<CleanCutTranscript>('cleanCut.transcript', { jobId }),
+    async (jobId: string): Promise<CleanCutTranscript> =>
+      requireClient().requestTyped('cleanCut.transcript', { jobId }),
     [requireClient]
   )
   const subscribe = useCallback((listener: (job: CleanCutJob) => void) => {
