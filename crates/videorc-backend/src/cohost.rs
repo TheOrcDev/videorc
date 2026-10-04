@@ -2088,6 +2088,15 @@ impl CommandContext {
     }
 }
 
+/// What a consent change left for after the engine lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConsentUpdate {
+    /// The replacement scheduler generation.
+    generation: u64,
+    /// The voice removal the closed card was waiting on: cancel it.
+    abandoned_removal: Option<String>,
+}
+
 /// A removal to ask chat moderation for, after the engine lock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CommandRemovalRequest {
@@ -2444,8 +2453,10 @@ impl CohostSession {
     }
 
     /// Sign-out: everything this session learned from speech goes (see
-    /// `purge_speech_for_sign_out`). Chat state stays.
-    fn forget_speech(&mut self) {
+    /// `purge_speech_for_sign_out`). Chat state stays. Returns the voice
+    /// removal its closed card was waiting on, for the caller to cancel.
+    #[must_use]
+    fn forget_speech(&mut self) -> Option<String> {
         self.transcript_pending.clear();
         self.in_flight_transcript.clear();
         self.summary.clear();
@@ -2467,8 +2478,8 @@ impl CohostSession {
             self.discard_in_flight = true;
         }
         // Plan 140 S3: a card a voice command opened closes with what was
-        // heard (`clear_transcript` cancels its removal).
-        self.abandon_command(COMMAND_SIGNED_OUT, &chrono::Utc::now().to_rfc3339());
+        // heard; the caller cancels its removal.
+        self.abandon_command(COMMAND_SIGNED_OUT, &chrono::Utc::now().to_rfc3339())
     }
 
     fn snapshot(&self) -> CohostState {
@@ -3743,28 +3754,31 @@ impl CohostSession {
         cancel
     }
 
-    /// A session boundary (a consent change, sign-out) closes the open card;
-    /// `clear_transcript` cancels its removal. Nothing here is counted.
-    fn abandon_command(&mut self, message: &str, now_iso: &str) -> bool {
-        let Some(record) = self.command.as_mut() else {
-            return false;
-        };
+    /// A session boundary (a consent change, sign-out) closes the open card.
+    /// Like `supersede_command`, it returns the pending removal: the caller
+    /// cancels it after the engine lock (`cancel_abandoned_removal`), never
+    /// trusting the slot mirror, which a concurrent command step may rewrite
+    /// before `clear_transcript` reads it. Nothing here is counted.
+    fn abandon_command(&mut self, message: &str, now_iso: &str) -> Option<String> {
+        let record = self.command.as_mut()?;
         if matches!(
             record.pending,
             CommandPending::None | CommandPending::Removing
         ) {
-            return false;
+            return None;
         }
+        let mut cancel = None;
         if record.pending == CommandPending::Removal
             && let Some(operation_id) = record.wire.operation_id.clone()
         {
             self.command_operations
-                .entry(operation_id)
+                .entry(operation_id.clone())
                 .or_default()
                 .superseded = true;
+            cancel = Some(operation_id);
         }
         record.finish(CohostCommandStatus::Cancelled, message, now_iso);
-        true
+        cancel
     }
 
     /// A new voice command, under the engine lock. Newest wins: it replaces
@@ -5614,8 +5628,10 @@ impl CohostEngine {
     }
 
     /// Consent changes retire cloud work, not the chat session or its history.
-    /// Return the replacement scheduler generation only when consent changed.
-    fn update_consent(&mut self, consent: bool) -> Option<u64> {
+    /// Return the replacement scheduler generation only when consent changed,
+    /// with the voice removal its closed card was waiting on: the caller
+    /// cancels it after the engine lock (`cancel_abandoned_removal`).
+    fn update_consent(&mut self, consent: bool) -> Option<ConsentUpdate> {
         if self.session.as_ref()?.consent == consent {
             return None;
         }
@@ -5666,10 +5682,14 @@ impl CohostEngine {
         session.detail = None;
         session.next_attempt_at = None;
         // Plan 140 S3: listening restarts under the new consent; a card a
-        // voice command opened closes with it (`clear_transcript` cancels
-        // its removal).
-        session.abandon_command(COMMAND_STOPPED_LISTENING, &chrono::Utc::now().to_rfc3339());
-        Some(self.generation)
+        // voice command opened closes with it, and the caller cancels its
+        // removal.
+        let abandoned_removal =
+            session.abandon_command(COMMAND_STOPPED_LISTENING, &chrono::Utc::now().to_rfc3339());
+        Some(ConsentUpdate {
+            generation: self.generation,
+            abandoned_removal,
+        })
     }
 
     /// Begin a session at `now`. Returns the new generation the scheduler must
@@ -7064,12 +7084,12 @@ pub(crate) async fn purge_speech_for_sign_out(state: &AppState) {
         *voice = VoiceActivity::default();
     }
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
-    let snapshot = {
+    let (snapshot, abandoned_removal) = {
         let mut engine = state.cohost.lock().await;
         let Some(session) = engine.session.as_mut() else {
             return;
         };
-        session.forget_speech();
+        let abandoned_removal = session.forget_speech();
         if session
             .listening
             .as_ref()
@@ -7082,9 +7102,23 @@ pub(crate) async fn purge_speech_for_sign_out(state: &AppState) {
         }
         // Plan 140 S3: the closed card waits for nothing any more.
         mirror_command_slot(state, &engine);
-        engine.snapshot()
+        (engine.snapshot(), abandoned_removal)
     };
+    // Nothing asked under this account runs under the next.
+    cancel_abandoned_removal(state, abandoned_removal).await;
     emit_state(state, &snapshot, &lifecycle_delivery);
+}
+
+/// Cancel the voice removal a session boundary closed (`abandon_command`).
+/// Called after the engine lock; a removal already answered or run is
+/// "not pending" and left alone.
+async fn cancel_abandoned_removal(state: &AppState, operation_id: Option<String>) {
+    let Some(operation_id) = operation_id else {
+        return;
+    };
+    if let Err(refusal) = crate::live_chat_moderation::cancel(state, &operation_id).await {
+        tracing::debug!("An abandoned Orcle removal was no longer pending: {refusal}");
+    }
 }
 
 /// Sign-in completed: a running Orcle session with listening on hears the
@@ -7290,7 +7324,11 @@ where
         return Err(CohostError::Disabled);
     }
     if engine.is_running_for(&session_id) {
-        let Some(generation) = engine.update_consent(consent) else {
+        let Some(ConsentUpdate {
+            generation,
+            abandoned_removal,
+        }) = engine.update_consent(consent)
+        else {
             return Ok(engine.snapshot());
         };
         let listen = engine.settings.listen;
@@ -7298,6 +7336,8 @@ where
         engine.scheduler = Some(spawn_scheduler(state.clone(), generation));
         engine.spotlight_scheduler = Some(spawn_spotlight_scheduler(state.clone(), generation));
         drop(engine);
+        // The removal asked under the old consent never runs under the new.
+        cancel_abandoned_removal(state, abandoned_removal).await;
         // Invalidate delayed listen publications and capture-resume admissions
         // before reflecting the new consent. Explicit captions keep their task.
         crate::captions::retire_orcle_speech(state).await;
@@ -16558,7 +16598,11 @@ mod tests {
         let card = state_command(&state).await;
         let operation_id = card.operation_id.clone().unwrap();
         // Consent changed: listening restarts, and so does everything heard.
-        assert!(state.cohost.lock().await.update_consent(false).is_some());
+        let update = state.cohost.lock().await.update_consent(false).unwrap();
+        assert_eq!(
+            update.abandoned_removal.as_deref(),
+            Some(operation_id.as_str())
+        );
         clear_transcript(&state);
         wait_for_operation_phase(&state, &operation_id, ModerationPhase::Cancelled).await;
         let closed = wait_for_command(&state, "the card to close", |command| {
@@ -16583,6 +16627,83 @@ mod tests {
         let slot = state.cohost_commands.lock().unwrap();
         assert_eq!(slot.pending_operation, None);
         assert!(slot.session.is_none() && !slot.context.awaiting_answer);
+    }
+
+    #[tokio::test]
+    async fn withdrawing_consent_cancels_a_pending_voice_removal() {
+        let rows = vec![command_row(
+            1,
+            "coders_x",
+            StreamPlatform::Twitch,
+            "spam link",
+        )];
+        let (state, scope) = command_state(&rows, fake_deletes()).await;
+        run_new_command(&state, &scope, resolved_removal(&rows[0].id), true).await;
+        let operation_id = state_command(&state).await.operation_id.unwrap();
+        let mut params = start_params(COMMAND_SESSION);
+        params.consent_to_process_chat = false;
+        start_cohost_if_entitled(&state, params, true)
+            .await
+            .expect("the consent change applies");
+        wait_for_operation_phase(&state, &operation_id, ModerationPhase::Cancelled).await;
+        assert!(
+            !state
+                .live_chat
+                .lock()
+                .await
+                .message(&rows[0].id)
+                .unwrap()
+                .is_deleted
+        );
+    }
+
+    /// The slot mirror is not the only record: a command step that rewrites
+    /// it between the consent change and `clear_transcript` (here, a mirror
+    /// after the card closed) must not leave the removal pending.
+    #[tokio::test]
+    async fn an_abandoned_removal_is_cancelled_even_when_the_mirror_moved_on() {
+        let rows = vec![command_row(
+            1,
+            "coders_x",
+            StreamPlatform::Twitch,
+            "spam link",
+        )];
+        let (state, scope) = command_state(&rows, fake_deletes()).await;
+        run_new_command(&state, &scope, resolved_removal(&rows[0].id), true).await;
+        let operation_id = state_command(&state).await.operation_id.unwrap();
+        let abandoned = {
+            let mut engine = state.cohost.lock().await;
+            let update = engine.update_consent(false).unwrap();
+            // The race: a concurrent command step mirrors the closed card.
+            mirror_command_slot(&state, &engine);
+            update.abandoned_removal
+        };
+        assert_eq!(
+            state.cohost_commands.lock().unwrap().pending_operation,
+            None
+        );
+        clear_transcript(&state);
+        cancel_abandoned_removal(&state, abandoned).await;
+        let stored = state
+            .database
+            .get_chat_moderation_operation(&operation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.phase, ModerationPhase::Cancelled);
+        // Sign-out returns its removal the same way.
+        let rows = vec![command_row(2, "ada", StreamPlatform::Twitch, "scam link")];
+        let (state, scope) = command_state(&rows, fake_deletes()).await;
+        run_new_command(&state, &scope, resolved_removal(&rows[0].id), true).await;
+        let operation_id = state_command(&state).await.operation_id.unwrap();
+        let abandoned = state
+            .cohost
+            .lock()
+            .await
+            .session
+            .as_mut()
+            .unwrap()
+            .forget_speech();
+        assert_eq!(abandoned.as_deref(), Some(operation_id.as_str()));
     }
 
     #[tokio::test]
