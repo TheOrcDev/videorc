@@ -1002,6 +1002,10 @@ async fn run_execution(
 
     let client = reqwest::Client::new();
     let mut resolved: Option<ProviderDeleteOutcome> = None;
+    // A timed-out attempt may have removed the message after all: unless a
+    // later attempt gets a definite answer, the result is unknown, never a
+    // plain failure.
+    let mut timed_out = false;
     while operation.attempts < MAX_ATTEMPTS {
         operation.attempts += 1;
         let fresh =
@@ -1040,9 +1044,21 @@ async fn run_execution(
                         PROVIDER_TIMEOUT.as_millis()
                     ),
                 );
+                timed_out = true;
                 resolved = None;
             }
         }
+    }
+    let definite = matches!(
+        resolved,
+        Some(
+            ProviderDeleteOutcome::Deleted
+                | ProviderDeleteOutcome::NotFound
+                | ProviderDeleteOutcome::CannotDelete { .. }
+        )
+    );
+    if timed_out && !definite {
+        resolved = None;
     }
 
     match resolved {
@@ -2591,6 +2607,52 @@ mod tests {
         assert_eq!(operation.phase, ModerationPhase::DeliveryUnknown);
         assert_eq!(operation.attempts, 2);
         assert!(!buffered_message(&state, &target.id).await.is_deleted);
+    }
+
+    #[tokio::test]
+    async fn a_timeout_then_a_server_error_is_delivery_unknown() {
+        let (state, _events) = test_state();
+        let target = message(StreamPlatform::Twitch, 1);
+        // The first attempt may have removed it after all; the 503 on the
+        // retry says nothing about that.
+        let (base, script) = twitch_server(&[HANG, 503]).await;
+        seed(
+            &state,
+            StreamPlatform::Twitch,
+            Some(twitch_sender(&base)),
+            &[target.clone()],
+        )
+        .await;
+        let operation = request(&state, request_for(&target, ModerationSource::Manual))
+            .await
+            .unwrap();
+        assert_eq!(operation.phase, ModerationPhase::DeliveryUnknown);
+        assert_eq!(
+            operation.outcome_code,
+            Some(ModerationOutcomeCode::ProviderError)
+        );
+        assert_eq!(operation.attempts, 2);
+        assert_eq!(script.hits.load(Ordering::SeqCst), 2);
+        assert!(!buffered_message(&state, &target.id).await.is_deleted);
+
+        // A definite answer on the retry still decides.
+        let second = message(StreamPlatform::Twitch, 2);
+        let (base, _script) = twitch_server(&[HANG, 404]).await;
+        seed(
+            &state,
+            StreamPlatform::Twitch,
+            Some(twitch_sender(&base)),
+            &[second.clone()],
+        )
+        .await;
+        let operation = request(&state, request_for(&second, ModerationSource::Manual))
+            .await
+            .unwrap();
+        assert_eq!(operation.phase, ModerationPhase::Removed);
+        assert_eq!(
+            operation.outcome_code,
+            Some(ModerationOutcomeCode::NotFound)
+        );
     }
 
     #[tokio::test]
