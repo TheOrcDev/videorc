@@ -2038,7 +2038,7 @@ mod tests {
         let media_foundation = build_render_args(
             Path::new("in.mp4"),
             Path::new("out.mp4"),
-            &GraphArgument::Inline(graph.text),
+            &GraphArgument::Inline(graph.text.clone()),
             &graph,
             &RenderEncoder::MediaFoundation,
             &probe,
