@@ -9,10 +9,10 @@ macOS app. See [the QA ledger](qa-2026-10-03.md) for those original findings.
 All 15 original fixes are implemented; 33 merged source commits include
 reviewed follow-ups and diagnostics. [The fix ledger](qa-fixes-2026-10-03.md) tracks current verification.
 The fresh complete 36-stage recording/device suite passes on source7f345759, including real
-camera/screen and analyzed finished artifacts. The OAuth and Orcle caption harness repairs are merged;
-complete consent and Spotlight now pass; startup audio notice132, unresolved Windows diagnostics,
-remaining feature checks and long soaks keep final acceptance open. The
-original checkout and unrelated existing plans are preserved.
+camera/screen and analyzed finished artifacts. Complete consent and Spotlight pass.
+Seven of eight latest feature gates pass; Plan133 records the scene camera-hide UI timeout.
+That diagnosis, startup audio notice132, Windows runtime, remaining capability checks
+and long soaks keep final acceptance open. The original checkout and unrelated plans are preserved.
 
 | Plan | Fix | Priority | Depends on | Status |
 | --- | --- | --- | --- | --- |
@@ -24,10 +24,10 @@ original checkout and unrelated existing plans are preserved.
 | [106](106-diagnose-source-loss-audio-in-stream-artifacts.md) | Diagnose source-loss audio in stream artifact | P1 | — | IMPLEMENTED; PR 560; all source-switch modes and three fresh stream legs PASS; broader recording/A/V gates pending; Shadscan 37 |
 | [107](107-diagnose-floating-preview-input-latency.md) | Diagnose floating native-preview input latency | P1 | — | CAMERA FIX merged PR564; three post-fix native stress PASS unchanged100ms; current complete36-stage recording/device PASS; original samples retained |
 | [110](110-reject-obstructed-glass-probe-evidence.md) | Reject system-dialog-obstructed glass evidence | P1 | — | IMPLEMENTED `d91a7cb7` / PR 551; 60 Node tests and Swift compile; clean visual E2E pending |
-| [109](109-diagnose-live-layout-intent-buttons.md) | Diagnose live layout buttons blocking latest intent | P1 | — | IMPLEMENTED `d28b71ba` / PR 553; 371 focused tests; final device/E2E pending |
+| [109](109-diagnose-live-layout-intent-buttons.md) | Diagnose live layout buttons blocking latest intent | P1 | — | IMPLEMENTED PR553; three physical preview stress runs and current36-stage recording/device PASS; full local bundle pending |
 | [108](108-repair-obs-import-smoke-and-owned-teardown.md) | Repair OBS import smoke and owned teardown | P1 | — | IMPLEMENTED `205a6f5e` / PR 550; 47 Node + 43 OBS desktop tests; real IPC/E2E pending |
 | [101](101-restore-camera-off-in-saved-scenes.md) | Preserve saved Camera Off | P1 | — | IMPLEMENTED `43716ab3` / PR 552; 263 focused tests; final E2E pending |
-| [103](103-persist-source-visibility-in-scene-snapshots.md) | Preserve saved source visibility | P1 | — | IMPLEMENTED `aa86df0e` / PR 554; 477 root focused tests; final camera/artifact E2E pending |
+| [103](103-persist-source-visibility-in-scene-snapshots.md) | Preserve saved source visibility | P1 | — | IMPLEMENTED PR554; latest full scene UI hide-camera wait FAIL; Plan133 diagnosis open, final hidden/visible artifacts unexecuted |
 | [097](097-scope-voice-clip-marks-to-recordings.md) | Scope clip matcher/dedupe to recording | P1 | — | IMPLEMENTED, final app gates pending; PR 558; 203 root Rust + 7 Node cases; Shadscan 37 |
 | [099](099-count-new-chat-during-buffer-rollover.md) | Count unread chat beyond buffer rollover | P1 | — | IMPLEMENTED `d5729943` / PR 555; 272 root focused tests; final Comments-window/E2E pending |
 | [114](114-sync-source-visibility-protocol-fixture.md) | Synchronize source visibility protocol fixture | P1 | 103 | IMPLEMENTED `fef7bc40` / PR 556; focused and predecessor full logic gates pass; final app acceptance pending |
@@ -47,10 +47,11 @@ original checkout and unrelated existing plans are preserved.
 | [112](112-diagnose-windows-incident-artifact-failures.md) | Diagnose Windows CI artifact freezes and stop tails | P1 | — | Latest hash-verified controlled cohort 48/48 PASS, independent tone 25/48 PASS with 23 failures; cause unassigned, physical Windows host unavailable |
 | [127](127-fix-legacy-oauth-smoke-startup-ownership.md) | Share OAuth smoke build/startup ownership | P1 | Final local verification | FIX merged PR574/mainc51f9e5f; actual callers RED8/4 controls, final GREEN44; unchanged OAuth assertions/90-second limit; actual Windows25/3/all audits PASS including12newOAuthcases×25; final app gate pending |
 | [128](128-diagnose-orcle-consent-smoke-caption-audio-startup.md) | Repair Orcle consent caption-audio startup | P1 | Final feature verification | FIX merged PR576/main60de246a; debug RPC switch and independent-caption start order; focused22PASS and actual maintained five-second audio gate PASS; next discrepancy129 |
-| [129](129-diagnose-orcle-consent-caption-final-event.md) | Repair repeated caption fixture capture resets | P1 | Final feature verification | DEBUG FIX merged PR577/main180b509c; root7/192 unique Rust/22 Node, strictClippy/fmt, Shadscan37; original full-smoke timing unproven; complete cohost/fresh36studio PASS; all7Rustfixturecases25times and fullWindows3 PASS on byte-identical current Rusttree; latest130/131Node coverage pending |
-| [130](130-diagnose-orcle-consent-caption-socket-retirement.md) | Diagnose held-consent caption socket retirement | P1 | Final feature verification | ATTRIBUTED FIXTURE PROGRESS: positive audio ACKs but no transcript progress trigger10s fallback before20s tick; FIX merged PR578/main1e8cb13f; GREEN25/root9/actualbackend preserves284context/twofinals; complete consent PASS; Spotlight follow-up131 and Windows25/3 pending |
+| [129](129-diagnose-orcle-consent-caption-final-event.md) | Repair repeated caption fixture capture resets | P1 | Final feature verification | DEBUG FIX merged PR577/main180b509c; root7/192 unique Rust/22 Node, strictClippy/fmt, Shadscan37; original full-smoke timing unproven; complete cohost/fresh36studio PASS; all7Rustfixturecases25times and fullWindows3 PASS on byte-identical current Rusttree; latest131pump Node coverage pending |
+| [130](130-diagnose-orcle-consent-caption-socket-retirement.md) | Diagnose held-consent caption socket retirement | P1 | Final feature verification | FIX merged PR578/main1e8cb13f; focused25/root9/actualbackend preserves284context/twofinals; complete cohost/fresh36-stage device PASS; actualWindows all9fake-provider cases×25/three full suites/audits PASS; latest131pump separate |
 | [131](131-diagnose-spotlight-short-caption-final.md) | Diagnose missing short Spotlight breaker final | P1 | Final feature verification | FIX merged946f6fee/PR581/main7f345759: confirmed stream uses native PCM clock, idle tap unchanged; same-body RED2fail/5controls→GREEN7, focused32PASS, actual stream/idle all3finals PASS after exact cleanup; complete unchanged cohost53321 PASS; fresh36-stage studio/device PASS; remaining gates/latest Windows25/3 pending |
 | [132](132-diagnose-cohost-stream-startup-audio-stall.md) | Diagnose stream-startup audio loss notice | P2 | Final feature verification | INVESTIGATED: zero-only pre-injection fixture loss triggers existing Plan076 notice; complete cohost PASS; no supported new correction, encoded artifact absent and stall cause unassigned |
+| [133](133-diagnose-scene-camera-visibility-toggle.md) | Diagnose camera visibility UI timeout | P1 | Final scene verification | OBSERVED main9fd: Off/On/restart/live initial recording PASS; inspector toggle does not yield visibilityfalse within120s; cameraavailable/no pending intent; cause unassigned |
 
 Execute privacy, remote gesture, and microphone-demand fixes first, repair
 acceptance gates, then close scene
