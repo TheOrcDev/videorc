@@ -49,10 +49,10 @@ const REMOVE_CONFIRM_MODES: readonly RemoveConfirmMode[] = ['confirm', 'countdow
  * Videorc's kill switches.
  */
 export function OrcleVoiceCommands({
-  lead,
+  lead = null,
   onOpenLive
 }: {
-  /** The tab's locked alert, when Orcle is locked. */
+  /** The tab's locked alert, given only while Orcle is locked (plan 150, D7). */
   lead?: ReactNode
   /** Opens the Live tab, from the "turn on Orcle Live" alert. */
   onOpenLive?: () => void
@@ -72,7 +72,7 @@ export function OrcleVoiceCommands({
   const [pending, setPending] = useState<string | null>(null)
   const { cohostState } = useStudioChat()
   const paused = commandAvailabilityLines(cohostState?.commandAvailability)
-  const locked = cohostGate?.allowed === false || !cohostSettings
+  const locked = lead !== null || cohostGate?.allowed === false || !cohostSettings
   const off = !locked && cohostSettings?.enabled !== true
   const removeConfirm = cohostSettings?.removeConfirm ?? 'confirm'
   const save = (patch: CohostSettingsPatch): void => {
@@ -99,15 +99,13 @@ export function OrcleVoiceCommands({
       .finally(() => setPending(null))
   }
 
-  // The lead is the tab's locked alert: shown only while Orcle is locked.
-  const showLock = locked && Boolean(lead)
-  const hasLead = showLock || off || paused.length > 0
+  const hasLead = lead !== null || off || paused.length > 0
 
   return (
     <div className="flex flex-1 flex-col" data-slot="orcle-voice-commands">
       {hasLead ? (
         <div className="flex flex-col gap-2 border-b border-border p-gutter">
-          {showLock ? lead : null}
+          {lead}
           {off ? (
             <Alert data-slot="orcle-voice-commands-off">
               <InfoIcon />

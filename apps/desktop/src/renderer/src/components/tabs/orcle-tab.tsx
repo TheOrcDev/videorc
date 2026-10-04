@@ -187,17 +187,10 @@ export function OrcleTab({
             </ConfigGrid>
           </TabsContent>
           <TabsContent className="flex flex-1 flex-col" value="chat">
-            <OrcleTabLock />
-            <ConfigGrid className={CONFIG_GRID_PAIR}>
-              <OrcleRepliesSection />
-              <OrcleModerationSection />
-            </ConfigGrid>
+            <OrcleChatTab />
           </TabsContent>
           <TabsContent className="flex flex-1 flex-col" value="voice">
-            <OrcleVoiceCommands
-              lead={<OrcleUnlockAlert slot="orcle-tab-unlock" />}
-              onOpenLive={() => selectTab('live')}
-            />
+            <OrcleVoiceTab onOpenLive={() => selectTab('live')} />
           </TabsContent>
           <TabsContent className="flex flex-col" value="reports">
             <PageStack>
@@ -295,16 +288,35 @@ function OrcleUnlockAlert({ slot = 'orcle-live-unlock' }: { slot?: string }): Re
 }
 
 /**
- * The Chat tab's lead (plan 150): when Orcle is locked, one alert above both
- * columns says why; the fields under it are disabled.
+ * The Chat tab (plan 150): Replies beside Moderation. When Orcle is locked,
+ * one alert above both columns says why and every field under it is
+ * disabled (D7), the same reason Live shows.
  */
-function OrcleTabLock(): ReactElement | null {
-  const view = useOrcleLive()
-  if (!view.unlock) return null
+function OrcleChatTab(): ReactElement {
+  const locked = useOrcleLive().unlock !== null
   return (
-    <div className="border-b border-border p-gutter" data-slot="orcle-tab-lock">
-      <OrcleUnlockAlert slot="orcle-tab-unlock" />
-    </div>
+    <>
+      {locked ? (
+        <div className="border-b border-border p-gutter" data-slot="orcle-tab-lock">
+          <OrcleUnlockAlert slot="orcle-tab-unlock" />
+        </div>
+      ) : null}
+      <ConfigGrid className={CONFIG_GRID_PAIR}>
+        <OrcleRepliesSection locked={locked} />
+        <OrcleModerationSection locked={locked} />
+      </ConfigGrid>
+    </>
+  )
+}
+
+/** The Voice tab (plan 150): led by the same locked reason as Live and Chat. */
+function OrcleVoiceTab({ onOpenLive }: { onOpenLive: () => void }): ReactElement {
+  const locked = useOrcleLive().unlock !== null
+  return (
+    <OrcleVoiceCommands
+      lead={locked ? <OrcleUnlockAlert slot="orcle-tab-unlock" /> : null}
+      onOpenLive={onOpenLive}
+    />
   )
 }
 
@@ -374,7 +386,7 @@ function OrcleLiveSection(): ReactElement {
         </Button>
       ) : null}
 
-      <CohostListenField />
+      <CohostListenField locked={view.unlock !== null} />
     </PanelSection>
   )
 }

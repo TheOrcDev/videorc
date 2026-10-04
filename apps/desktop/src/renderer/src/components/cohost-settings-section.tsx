@@ -80,7 +80,7 @@ export function cohostShowOnStreamMode(
  * Orcle Live's switch owns `enabled` and the Premium gate's call to action,
  * so neither repeats here: a locked account sees these controls disabled.
  */
-function useCohostSettingsSave(): {
+function useCohostSettingsSave(lockedByTab = false): {
   cohostSettings: CohostSettings | null
   locked: boolean
   save: (patch: CohostSettingsPatch) => void
@@ -97,7 +97,7 @@ function useCohostSettingsSave(): {
   }
   return {
     cohostSettings: cohostSettings ?? null,
-    locked: !cohostGate.allowed,
+    locked: !cohostGate.allowed || lockedByTab,
     save,
     error,
     clearError: () => setError(null)
@@ -118,8 +118,13 @@ function SaveError({ error }: { error: string | null }): ReactElement | null {
  * (plan 150): listening is part of what turning Orcle on means, so it sits
  * under Orcle Live's switch rather than with the reply settings.
  */
-export function CohostListenField(): ReactElement | null {
-  const { cohostSettings, locked, save, error } = useCohostSettingsSave()
+export function CohostListenField({
+  locked: lockedByTab = false
+}: {
+  /** Orcle Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
+  locked?: boolean
+} = {}): ReactElement | null {
+  const { cohostSettings, locked, save, error } = useCohostSettingsSave(lockedByTab)
   if (!cohostSettings) return null
   return (
     <FieldGroup variant="grouped" data-slot="cohost-listen-field">
@@ -147,8 +152,13 @@ export function CohostListenField(): ReactElement | null {
  * Replies (plan 150, Chat tab): how Orcle drafts the replies you approve, and
  * the facts it answers from.
  */
-export function OrcleRepliesSection(): ReactElement | null {
-  const { cohostSettings, locked, save, error } = useCohostSettingsSave()
+export function OrcleRepliesSection({
+  locked: lockedByTab = false
+}: {
+  /** Orcle Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
+  locked?: boolean
+} = {}): ReactElement | null {
+  const { cohostSettings, locked, save, error } = useCohostSettingsSave(lockedByTab)
   const [notesDraft, setNotesDraft] = useState('')
   const savedNotesRef = useRef<string | null>(null)
   // Follow the backend value until the streamer starts typing; after that the
@@ -241,8 +251,13 @@ export function OrcleRepliesSection(): ReactElement | null {
  * Moderation (plan 150, Chat tab): what Orcle flags for you and what it may
  * put on stream. Orcle never acts on its own.
  */
-export function OrcleModerationSection(): ReactElement | null {
-  const { cohostSettings, locked, save, error } = useCohostSettingsSave()
+export function OrcleModerationSection({
+  locked: lockedByTab = false
+}: {
+  /** Orcle Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
+  locked?: boolean
+} = {}): ReactElement | null {
+  const { cohostSettings, locked, save, error } = useCohostSettingsSave(lockedByTab)
   const [ruleDraft, setRuleDraft] = useState('')
   const sensitivity = useCohostSensitivity()
   if (!cohostSettings) {

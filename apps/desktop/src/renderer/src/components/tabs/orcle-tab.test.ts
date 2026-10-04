@@ -392,6 +392,29 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
   })
 })
 
+describe('Locked means disabled, with one reason, on every tab (plan 150, D7)', () => {
+  it('gives a signed-out streamer the same sign-in reason on Live, Chat and Voice', async () => {
+    await render({ signedIn: false })
+    expect(document.querySelector('[data-slot="orcle-live-unlock"]')?.textContent).toContain(
+      'Sign in to use Orcle Live'
+    )
+    expect((document.getElementById('cohost-listen') as HTMLButtonElement).disabled).toBe(true)
+
+    await render({ signedIn: false, tab: 'chat' })
+    expect(document.querySelector('[data-slot="orcle-tab-unlock"]')?.textContent).toContain(
+      'Sign in to use Orcle Live'
+    )
+    expect((document.getElementById('cohost-notes') as HTMLTextAreaElement).disabled).toBe(true)
+
+    await render({ signedIn: false, tab: 'voice' })
+    expect(document.querySelector('[data-slot="orcle-tab-unlock"]')?.textContent).toContain(
+      'Sign in to use Orcle Live'
+    )
+    expect(document.querySelector('[data-slot="orcle-voice-commands-off"]')).toBeNull()
+    expect((document.getElementById('orcle-wake-word') as HTMLButtonElement).disabled).toBe(true)
+  })
+})
+
 describe('Reports (plan 119 S3, plan 150)', () => {
   it('is its own tab and follows the last stream', async () => {
     await render({ tab: 'reports' })
