@@ -5356,6 +5356,10 @@ pub struct AiCapabilitiesFeatures {
     #[serde(default)]
     pub clean_cut_enabled: bool,
     pub cloud_ai_enabled: bool,
+    /// The Orcle command route is on and its model configured (plan 140 S8,
+    /// contract part E). Older servers omit it: the parser stays off.
+    #[serde(default)]
+    pub cohost_command_enabled: bool,
     pub gateway_configured: bool,
     pub model_testing_enabled: bool,
     pub multipart_audio_jobs_enabled: bool,

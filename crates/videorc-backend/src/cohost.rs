@@ -51,10 +51,11 @@ use crate::state::AppState;
 use crate::storage::Database;
 use crate::streaming::{StreamPlatform, stream_platform_label};
 use crate::videorc_api::{
-    COHOST_SPOTLIGHT_MAX_BODY_BYTES, CohostApiError, CohostApiErrorKind, CohostSpotlightCandidate,
-    CohostSpotlightRequest, CohostSpotlightResponse, CohostTickMessage, CohostTickOpenPromise,
-    CohostTickOpenQuestion, CohostTickPromise, CohostTickQuestion, CohostTickRequest,
-    CohostTickResponse, VideorcApiClient,
+    COHOST_COMMAND_MAX_CANDIDATES, COHOST_SPOTLIGHT_MAX_BODY_BYTES, CohostApiError,
+    CohostApiErrorKind, CohostCommandCandidate, CohostCommandRequest, CohostCommandResponse,
+    CohostSpotlightCandidate, CohostSpotlightRequest, CohostSpotlightResponse, CohostTickMessage,
+    CohostTickOpenPromise, CohostTickOpenQuestion, CohostTickPromise, CohostTickQuestion,
+    CohostTickRequest, CohostTickResponse, VideorcApiClient,
 };
 
 pub const COHOST_STATE_EVENT: &str = "cohost.state";
@@ -1555,6 +1556,40 @@ struct SpotlightLane {
     current: Option<SpotlightRecord>,
 }
 
+/// Plan 140 S8: the cloud command parser's client side. Engine-wide, so a
+/// quota pause outlives a session restart.
+#[derive(Debug, Default)]
+struct CommandParserLane {
+    /// `features.cohostCommandEnabled` from the last capability read. Off
+    /// until the web says otherwise: nothing is sent while it is off.
+    enabled: bool,
+    seq: u64,
+    in_flight: bool,
+    last_call_at: Option<Instant>,
+    /// A 429 (`Retry-After`) or an unavailable route pauses the parser.
+    off_until: Option<Instant>,
+}
+
+/// One parse on its way: the request, and the command card that was
+/// current when it left (a newer command since makes the answer stale).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedCommandParse {
+    pub(crate) request: CohostCommandRequest,
+    command_id: Option<String>,
+}
+
+/// What a wake-word utterance the grammar missed turned into.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UnknownCommandResolution {
+    /// The parser read it: run it like a spoken command.
+    Resolved(CommandKind, Vec<String>),
+    /// "Orcle didn't catch that".
+    Unheard,
+    /// A newer command, or a session change, landed while the parser was
+    /// thinking: say nothing.
+    Superseded,
+}
+
 #[derive(Debug, Clone)]
 struct SpotlightRecord {
     message_id: String,
@@ -1807,6 +1842,23 @@ const COMMAND_CANDIDATES_CAP: usize = 3;
 const COMMAND_EXCERPT_MAX_UNITS: usize = 140;
 /// What Orcle heard, as the strip shows it.
 const COMMAND_HEARD_MAX_UNITS: usize = 300;
+
+/// Plan 140 S8, desktop-owned thresholds (contract part E): the cloud parser
+/// acts only when its intent is at least this sure...
+pub(crate) const COMMAND_PARSE_INTENT_THRESHOLD: f64 = 0.7;
+/// ...and, for a highlight or a removal, on comments at least this likely.
+pub(crate) const COMMAND_PARSE_TARGET_THRESHOLD: f64 = 0.75;
+/// At most one parse per this long, and never two at once.
+const COMMAND_PARSE_MIN_GAP: Duration = Duration::from_secs(3);
+/// An in-flight mark older than this is stale (its task died): the client
+/// gives up at 2.5 s.
+const COMMAND_PARSE_IN_FLIGHT_MAX: Duration = Duration::from_secs(10);
+/// A 429 without a readable `Retry-After` pauses the parser this long.
+const COMMAND_PARSE_QUOTA_PAUSE: Duration = Duration::from_secs(5 * 60);
+/// The route is off, or this account cannot use it: ask again later.
+const COMMAND_PARSE_UNAVAILABLE_PAUSE: Duration = Duration::from_secs(5 * 60);
+/// No pause, whatever the server says, outlasts a day.
+const COMMAND_PARSE_MAX_PAUSE: Duration = Duration::from_secs(24 * 60 * 60);
 
 const COMMAND_VOICE_PAUSED: &str = "Voice commands are paused by Videorc.";
 const COMMAND_SIGNED_OUT: &str = "Cancelled because you signed out.";
@@ -3554,6 +3606,40 @@ impl CohostSession {
             .or_else(|| self.newest_command_messages(1).pop())
     }
 
+    /// Plan 140 S8: the comments a parsed command may point at, newest
+    /// first (the same eligibility as a spoken command).
+    fn command_parse_candidates(&self) -> Vec<CohostCommandCandidate> {
+        self.newest_command_messages(COHOST_COMMAND_MAX_CANDIDATES)
+            .into_iter()
+            .filter_map(|id| self.command_parse_candidate(&id))
+            .collect()
+    }
+
+    fn command_parse_candidate(&self, message_id: &str) -> Option<CohostCommandCandidate> {
+        let known = self.command_target_eligible(message_id)?;
+        Some(CohostCommandCandidate {
+            id: message_id.to_string(),
+            author: known.author_name.clone(),
+            text: known.text.clone(),
+            at: known.at.clone(),
+        })
+    }
+
+    /// "This one" for the parser: the live spotlight, else the comment on
+    /// stream. The request always carries it as a candidate.
+    fn command_parse_focus(&self, on_stream: Option<&str>, now: Instant) -> Option<String> {
+        self.spotlight
+            .current
+            .as_ref()
+            .filter(|current| {
+                now < current.expires_at && current.score >= SPOTLIGHT_ABOUT_THRESHOLD
+            })
+            .map(|current| current.message_id.as_str())
+            .filter(|id| self.command_target_eligible(id).is_some())
+            .or_else(|| on_stream.filter(|id| self.command_target_eligible(id).is_some()))
+            .map(str::to_string)
+    }
+
     /// "Remove this one": the comment on stream, the newest flag of the last
     /// two minutes that is not deleted, and the spotlight. One of them goes
     /// to the confirm card; several (deduped) to the chooser. With none, a
@@ -5257,6 +5343,8 @@ pub struct CohostEngine {
     /// The voice-command kill switches as last read (plan 140 S3); `None`
     /// while both are on. Every state carries it, Orcle running or not.
     command_availability: Option<CohostCommandAvailability>,
+    /// The cloud command parser (plan 140 S8).
+    command_parser: CommandParserLane,
 }
 
 impl CohostEngine {
@@ -5269,7 +5357,115 @@ impl CohostEngine {
             spotlight_scheduler: None,
             auto_highlight_generation: 0,
             command_availability: None,
+            command_parser: CommandParserLane::default(),
         }
+    }
+
+    // --- Cloud command parser (plan 140 S8) ----------------------------------
+
+    /// `features.cohostCommandEnabled` from the last capability read.
+    pub(crate) fn set_command_parser_enabled(&mut self, enabled: bool) {
+        self.command_parser.enabled = enabled;
+    }
+
+    /// Whether a parse may go out for `scope` now: the capability, Premium,
+    /// the voice kill switch, Orcle on with this session and its consent to
+    /// process chat, nothing in flight, and the gap and any pause over.
+    fn command_parser_ready(
+        &self,
+        scope: &CommandSession,
+        premium: bool,
+        voice_enabled: bool,
+        now: Instant,
+    ) -> bool {
+        let lane = &self.command_parser;
+        let in_flight = lane.in_flight
+            && lane
+                .last_call_at
+                .is_some_and(|at| now.saturating_duration_since(at) < COMMAND_PARSE_IN_FLIGHT_MAX);
+        lane.enabled
+            && premium
+            && voice_enabled
+            && self.settings.enabled
+            && !in_flight
+            && lane.off_until.is_none_or(|until| now >= until)
+            && lane
+                .last_call_at
+                .is_none_or(|at| now.saturating_duration_since(at) >= COMMAND_PARSE_MIN_GAP)
+            && self.session.as_ref().is_some_and(|session| {
+                session.session_id == scope.session_id
+                    && session.generation == scope.generation
+                    && session.consent
+            })
+    }
+
+    /// The parse to send for `heard`, marked in flight; `None` when the
+    /// parser may not run or nothing is left to send.
+    fn prepare_command_parse(
+        &mut self,
+        scope: &CommandSession,
+        heard: &str,
+        on_stream: Option<&str>,
+        premium: bool,
+        voice_enabled: bool,
+        now: Instant,
+    ) -> Option<PreparedCommandParse> {
+        if !self.command_parser_ready(scope, premium, voice_enabled, now) {
+            return None;
+        }
+        let session = self.session.as_ref()?;
+        let seq = self.command_parser.seq.saturating_add(1);
+        let focus = session.command_parse_focus(on_stream, now);
+        let mut candidates = session.command_parse_candidates();
+        // An older focus rides along; shaping keeps it within the cap.
+        if let Some(focus) = focus.as_deref()
+            && !candidates.iter().any(|candidate| candidate.id == focus)
+            && let Some(candidate) = session.command_parse_candidate(focus)
+        {
+            candidates.push(candidate);
+        }
+        let request = CohostCommandRequest::shaped(
+            DESKTOP_CLIENT_VERSION,
+            &session.session_id,
+            seq,
+            heard,
+            focus.as_deref(),
+            candidates,
+        )?;
+        let command_id = session
+            .command
+            .as_ref()
+            .map(|record| record.wire.id.clone());
+        self.command_parser.seq = seq;
+        self.command_parser.in_flight = true;
+        self.command_parser.last_call_at = Some(now);
+        Some(PreparedCommandParse {
+            request,
+            command_id,
+        })
+    }
+
+    /// Settle the lane after a parse; true when the answer still belongs to
+    /// `scope` and no newer command was heard while it was out.
+    fn finish_command_parse(
+        &mut self,
+        scope: &CommandSession,
+        prepared: &PreparedCommandParse,
+        result: &Result<CohostCommandResponse, CohostApiError>,
+        now: Instant,
+    ) -> bool {
+        self.command_parser.in_flight = false;
+        if let Err(error) = result
+            && let Some(pause) = command_parse_pause(error)
+        {
+            self.command_parser.off_until = now.checked_add(pause);
+        }
+        self.session.as_ref().is_some_and(|session| {
+            session.session_id == scope.session_id
+                && session.generation == scope.generation
+                && session.command.as_ref().map(|record| &record.wire.id)
+                    == prepared.command_id.as_ref()
+        })
     }
 
     pub fn settings(&self) -> &CohostSettings {
@@ -6119,20 +6315,28 @@ async fn run_detected_command(
             if !command.wake_word {
                 return;
             }
-            if let Some((kind, message_ids)) =
-                resolve_unknown_command(state, scope, &command.heard).await
-            {
-                return execute_resolved_command(
-                    state,
-                    scope,
-                    kind,
-                    message_ids,
-                    command.heard,
-                    None,
-                )
-                .await;
-            }
-            return note_unheard_command(state, scope, &command.heard, premium).await;
+            let resolution = resolve_unknown_command(state, scope, &command.heard, premium).await;
+            return match resolution {
+                UnknownCommandResolution::Resolved(kind, message_ids) => {
+                    execute_resolved_command(
+                        state,
+                        scope,
+                        kind,
+                        message_ids,
+                        command.heard,
+                        command.reason,
+                    )
+                    .await
+                }
+                UnknownCommandResolution::Unheard => {
+                    note_unheard_command(state, scope, &command.heard, premium).await
+                }
+                UnknownCommandResolution::Superseded => {
+                    tracing::info!(
+                        "Orcle dropped a parsed command: a newer command or session came first."
+                    );
+                }
+            };
         }
         CommandKind::Highlight => CommandIntent::Highlight,
         CommandKind::Clear => CommandIntent::Clear,
@@ -6155,18 +6359,199 @@ async fn run_detected_command(
     .await;
 }
 
-/// Plan 140 S8 seam: every wake-word utterance the local grammar could not
-/// read is offered here first. `None` (always, until S8) shows "Orcle
-/// didn't catch that". S8 calls the cloud parser here (2 s timeout, the
-/// thresholds stay on the desktop) and returns the verb (`Highlight`,
-/// `Clear` or `Remove`) with the message ids it picked; the engine then runs
-/// it through `execute_resolved_command`, chooser and confirm card included.
+/// Plan 140 S8: every wake-word utterance the local grammar could not read
+/// is offered to the cloud command parser first, when the web enabled it
+/// (`features.cohostCommandEnabled`), on Premium, with the voice kill switch
+/// on, an Orcle session for `scope` and its consent to process chat. One
+/// call at most, never retried, on this command's own task with no lock
+/// held across it. Any failure, timeout or doubt is "didn't catch that".
 async fn resolve_unknown_command(
-    _state: &AppState,
-    _scope: &CommandSession,
-    _heard: &str,
+    state: &AppState,
+    scope: &CommandSession,
+    heard: &str,
+    premium: bool,
+) -> UnknownCommandResolution {
+    resolve_unknown_command_with(
+        state,
+        scope,
+        heard,
+        premium,
+        crate::account::stored_session_token,
+        |token: String, request: CohostCommandRequest| async move {
+            match VideorcApiClient::new() {
+                Ok(client) => client.post_cohost_command(&token, &request).await,
+                Err(error) => Err(CohostApiError::network(error.to_string())),
+            }
+        },
+    )
+    .await
+}
+
+/// `resolve_unknown_command` with the token read and the call injected.
+/// Nothing, not even the stored token, is read while the parser may not run.
+async fn resolve_unknown_command_with<T, C, F>(
+    state: &AppState,
+    scope: &CommandSession,
+    heard: &str,
+    premium: bool,
+    token: T,
+    call: C,
+) -> UnknownCommandResolution
+where
+    T: FnOnce() -> Option<String>,
+    C: FnOnce(String, CohostCommandRequest) -> F,
+    F: std::future::Future<Output = Result<CohostCommandResponse, CohostApiError>>,
+{
+    let voice_enabled = crate::service_flags::orcle_voice_commands_enabled(state);
+    let ready = {
+        let engine = state.cohost.lock().await;
+        engine.command_parser_ready(scope, premium, voice_enabled, Instant::now())
+    };
+    if !ready {
+        return UnknownCommandResolution::Unheard;
+    }
+    let Some(token) = token() else {
+        return UnknownCommandResolution::Unheard;
+    };
+    let on_stream = live_card_message_id(state).await;
+    let prepared = {
+        let mut engine = state.cohost.lock().await;
+        engine.prepare_command_parse(
+            scope,
+            heard,
+            on_stream.as_deref(),
+            premium,
+            voice_enabled,
+            Instant::now(),
+        )
+    };
+    let Some(prepared) = prepared else {
+        return UnknownCommandResolution::Unheard;
+    };
+    let result = call(token, prepared.request.clone()).await;
+    let current = {
+        let mut engine = state.cohost.lock().await;
+        engine.finish_command_parse(scope, &prepared, &result, Instant::now())
+    };
+    let response = match result {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::info!(
+                code = %error.detail.code,
+                status = ?error.detail.status,
+                "Orcle's command parser failed: {}",
+                error.message()
+            );
+            return if current {
+                UnknownCommandResolution::Unheard
+            } else {
+                UnknownCommandResolution::Superseded
+            };
+        }
+    };
+    if !current {
+        return UnknownCommandResolution::Superseded;
+    }
+    match interpret_command_parse(&prepared.request, &response) {
+        Some((kind, message_ids)) => {
+            tracing::info!(
+                kind = %kind.label(),
+                targets = message_ids.len(),
+                "Orcle's command parser read '{heard}'."
+            );
+            UnknownCommandResolution::Resolved(kind, message_ids)
+        }
+        None => {
+            tracing::info!(
+                choice = %response.intent.choice,
+                "Orcle's command parser was not sure enough about '{heard}'."
+            );
+            UnknownCommandResolution::Unheard
+        }
+    }
+}
+
+/// Plan 140 S8, the desktop's thresholds over one parser answer (pure). The
+/// intent acts at `COMMAND_PARSE_INTENT_THRESHOLD` and never as `none`; a
+/// clear needs no comment. A highlight or a removal takes the comments the
+/// request sent at `COMMAND_PARSE_TARGET_THRESHOLD` or more, likeliest first
+/// (ties in answer order), at most a chooser's worth: one acts, several
+/// open the chooser, none is "didn't catch that". An answer for another
+/// `seq` is ignored.
+pub(crate) fn interpret_command_parse(
+    request: &CohostCommandRequest,
+    response: &CohostCommandResponse,
 ) -> Option<(CommandKind, Vec<String>)> {
-    None
+    if response.seq != request.seq {
+        return None;
+    }
+    let choice = response.intent.choice.trim();
+    let kind = match choice {
+        "highlight" => CommandKind::Highlight,
+        "remove" => CommandKind::Remove,
+        "clear" => CommandKind::Clear,
+        _ => return None,
+    };
+    let confidence = response.intent.probabilities.of(choice);
+    if !(confidence.is_finite() && confidence >= COMMAND_PARSE_INTENT_THRESHOLD) {
+        return None;
+    }
+    if kind == CommandKind::Clear {
+        return Some((kind, Vec::new()));
+    }
+    let mut targets: Vec<(&str, f64)> = Vec::new();
+    for target in &response.targets {
+        let id = target.message_id.as_str();
+        let likely =
+            target.probability.is_finite() && target.probability >= COMMAND_PARSE_TARGET_THRESHOLD;
+        let sent = request
+            .candidates
+            .iter()
+            .any(|candidate| candidate.id == id);
+        if likely && sent && !targets.iter().any(|(seen, _)| *seen == id) {
+            targets.push((id, target.probability));
+        }
+    }
+    if targets.is_empty() {
+        return None;
+    }
+    targets.sort_by(|a, b| b.1.total_cmp(&a.1));
+    targets.truncate(COMMAND_CANDIDATES_CAP);
+    Some((
+        kind,
+        targets.into_iter().map(|(id, _)| id.to_string()).collect(),
+    ))
+}
+
+/// How long one failed parse pauses the parser: a 429 until `Retry-After`,
+/// an unavailable route or account for a while; a slow or broken answer not
+/// at all (the 3 s gap still applies).
+fn command_parse_pause(error: &CohostApiError) -> Option<Duration> {
+    let pause = match &error.kind {
+        CohostApiErrorKind::QuotaExhausted { retry_after } => {
+            (*retry_after).unwrap_or(COMMAND_PARSE_QUOTA_PAUSE)
+        }
+        CohostApiErrorKind::ServerUnconfigured
+        | CohostApiErrorKind::PremiumRequired
+        | CohostApiErrorKind::Unauthorized
+        | CohostApiErrorKind::ConsentRequired
+        | CohostApiErrorKind::PromptVersionUnsupported => COMMAND_PARSE_UNAVAILABLE_PAUSE,
+        CohostApiErrorKind::InvalidRequest
+        | CohostApiErrorKind::GatewayError
+        | CohostApiErrorKind::Network
+        | CohostApiErrorKind::MalformedResponse => return None,
+    };
+    Some(pause.min(COMMAND_PARSE_MAX_PAUSE))
+}
+
+/// The capability read (`GET /api/ai/capabilities`, at launch, sign-in and
+/// every entitlement refresh) turns the cloud command parser on or off.
+pub(crate) async fn set_command_parser_capability(state: &AppState, enabled: bool) {
+    state
+        .cohost
+        .lock()
+        .await
+        .set_command_parser_enabled(enabled);
 }
 
 /// Run a command whose target is already known as message ids (plan 140
@@ -16207,6 +16592,474 @@ mod tests {
             .unwrap_err()
             .code,
             "not-pending"
+        );
+    }
+
+    // --- Cloud command parser (plan 140 S8) ----------------------------------
+
+    fn parse_request(seq: u64, ids: &[&str]) -> CohostCommandRequest {
+        CohostCommandRequest::shaped(
+            "videorc-desktop/test",
+            COMMAND_SESSION,
+            seq,
+            "orcle show what they just asked",
+            None,
+            ids.iter()
+                .map(|id| CohostCommandCandidate {
+                    id: id.to_string(),
+                    author: "viewer".to_string(),
+                    text: "a comment".to_string(),
+                    at: "2026-10-04T12:00:00Z".to_string(),
+                })
+                .collect(),
+        )
+        .expect("a request")
+    }
+
+    fn parse_answer(
+        seq: u64,
+        choice: &str,
+        confidence: f64,
+        targets: &[(&str, f64)],
+    ) -> CohostCommandResponse {
+        let mut probabilities =
+            serde_json::json!({ "highlight": 0.0, "remove": 0.0, "clear": 0.0, "none": 0.0 });
+        probabilities[choice] = serde_json::json!(confidence);
+        serde_json::from_value(serde_json::json!({
+            "seq": seq,
+            "intent": { "choice": choice, "probabilities": probabilities },
+            "targets": targets
+                .iter()
+                .map(|(id, probability)| serde_json::json!({ "messageId": id, "probability": probability }))
+                .collect::<Vec<_>>(),
+            "usage": { "inputTokens": 310, "model": "jev", "outputTokens": 6 }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_cloud_parser_acts_only_at_the_desktop_thresholds() {
+        let request = parse_request(7, &["m1", "m2", "m3", "m4", "m5"]);
+        let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        // One likely comment acts.
+        assert_eq!(
+            interpret_command_parse(
+                &request,
+                &parse_answer(7, "highlight", 0.9, &[("m1", 0.88), ("m2", 0.2)])
+            ),
+            Some((CommandKind::Highlight, ids(&["m1"])))
+        );
+        // Several open the chooser: likeliest first, at most three.
+        assert_eq!(
+            interpret_command_parse(
+                &request,
+                &parse_answer(
+                    7,
+                    "remove",
+                    COMMAND_PARSE_INTENT_THRESHOLD,
+                    &[("m1", 0.8), ("m2", 0.95), ("m3", 0.75), ("m4", 0.9)]
+                )
+            ),
+            Some((CommandKind::Remove, ids(&["m2", "m4", "m1"])))
+        );
+        assert_eq!(
+            interpret_command_parse(
+                &request,
+                &parse_answer(7, "remove", 0.8, &[("m3", 0.8), ("m5", 0.8)])
+            ),
+            Some((CommandKind::Remove, ids(&["m3", "m5"]))),
+            "ties keep the answer's order"
+        );
+        // A clear needs no comment.
+        assert_eq!(
+            interpret_command_parse(&request, &parse_answer(7, "clear", 0.8, &[])),
+            Some((CommandKind::Clear, Vec::new()))
+        );
+        // A repeated target counts once.
+        assert_eq!(
+            interpret_command_parse(
+                &request,
+                &parse_answer(7, "highlight", 0.9, &[("m1", 0.9), ("m1", 0.8)])
+            ),
+            Some((CommandKind::Highlight, ids(&["m1"])))
+        );
+        // Doubt is "didn't catch that".
+        for (answer, why) in [
+            (
+                parse_answer(7, "highlight", 0.69, &[("m1", 0.99)]),
+                "an unsure intent",
+            ),
+            (parse_answer(7, "none", 0.99, &[("m1", 0.99)]), "none"),
+            (
+                parse_answer(7, "highlight", 0.9, &[("m1", 0.74)]),
+                "no comment at the target threshold",
+            ),
+            (
+                parse_answer(7, "remove", 0.9, &[]),
+                "a removal without a comment",
+            ),
+            (
+                parse_answer(7, "highlight", 0.9, &[("elsewhere", 0.99)]),
+                "a comment Orcle never sent",
+            ),
+            (
+                parse_answer(8, "highlight", 0.9, &[("m1", 0.9)]),
+                "another seq",
+            ),
+            (
+                parse_answer(7, "dance", 0.99, &[("m1", 0.9)]),
+                "a choice this build does not know",
+            ),
+            (CohostCommandResponse::default(), "an empty answer"),
+        ] {
+            assert_eq!(interpret_command_parse(&request, &answer), None, "{why}");
+        }
+        assert_eq!(COMMAND_PARSE_INTENT_THRESHOLD, 0.7);
+        assert_eq!(COMMAND_PARSE_TARGET_THRESHOLD, 0.75);
+    }
+
+    #[test]
+    fn a_429_pauses_the_cloud_parser_until_retry_after_and_a_slow_answer_does_not() {
+        use crate::videorc_api::classify_cohost_failure;
+        let failure = |status: u16, code: &str, retry_after: Option<&str>| {
+            classify_cohost_failure(status, code, "no".to_string(), retry_after)
+        };
+        assert_eq!(
+            command_parse_pause(&failure(429, "quota-exhausted", Some("120"))),
+            Some(Duration::from_secs(120))
+        );
+        assert_eq!(
+            command_parse_pause(&failure(429, "quota-exhausted", None)),
+            Some(COMMAND_PARSE_QUOTA_PAUSE)
+        );
+        assert_eq!(
+            command_parse_pause(&failure(429, "quota-exhausted", Some("99999999"))),
+            Some(COMMAND_PARSE_MAX_PAUSE)
+        );
+        for (status, code) in [
+            (503, "command-disabled"),
+            (503, "judge-unconfigured"),
+            (503, "ai-gateway-not-configured"),
+            (403, "premium-required"),
+            (403, "ai-user-disabled"),
+        ] {
+            assert_eq!(
+                command_parse_pause(&failure(status, code, None)),
+                Some(COMMAND_PARSE_UNAVAILABLE_PAUSE),
+                "{code}"
+            );
+        }
+        for error in [
+            failure(504, "judge-timeout", None),
+            failure(502, "ai-gateway-error", None),
+            CohostApiError::timeout("slow"),
+            CohostApiError::network("down"),
+            CohostApiError::malformed_response(200, "odd"),
+        ] {
+            assert_eq!(command_parse_pause(&error), None, "{}", error.detail.code);
+        }
+    }
+
+    #[test]
+    fn the_cloud_parser_is_off_by_default_and_one_call_at_a_time_when_on() {
+        let rows = vec![
+            command_row(1, "coders_x", StreamPlatform::Twitch, "rust is great"),
+            command_row(2, "ada", StreamPlatform::Twitch, "which editor?"),
+        ];
+        let now = Instant::now();
+        let mut engine = CohostEngine::new(enabled_settings());
+        let generation = engine.start_session(COMMAND_SESSION.to_string(), true, None, now);
+        engine.note_messages(&rows);
+        let scope = CommandSession {
+            session_id: COMMAND_SESSION.to_string(),
+            generation,
+        };
+        let heard = "  orcle show what ada asked ";
+        // Off until the capability read says otherwise.
+        assert!(!engine.command_parser_ready(&scope, true, true, now));
+        assert_eq!(
+            engine.prepare_command_parse(&scope, heard, None, true, true, now),
+            None
+        );
+        engine.set_command_parser_enabled(true);
+        assert!(
+            !engine.command_parser_ready(&scope, false, true, now),
+            "Basic"
+        );
+        assert!(
+            !engine.command_parser_ready(&scope, true, false, now),
+            "the voice kill switch"
+        );
+        let stale = CommandSession {
+            session_id: COMMAND_SESSION.to_string(),
+            generation: generation + 1,
+        };
+        assert!(!engine.command_parser_ready(&stale, true, true, now));
+
+        let prepared = engine
+            .prepare_command_parse(&scope, heard, None, true, true, now)
+            .expect("a parse");
+        let request = &prepared.request;
+        assert_eq!(request.seq, 1);
+        assert_eq!(request.utterance, "orcle show what ada asked");
+        assert!(request.consent_to_process_chat);
+        assert_eq!(request.session_client_id, COMMAND_SESSION);
+        assert_eq!(
+            request
+                .candidates
+                .iter()
+                .map(|candidate| candidate.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![rows[1].id.as_str(), rows[0].id.as_str()],
+            "newest first"
+        );
+        assert_eq!(request.candidates[0].author, "ada");
+        assert_eq!(request.candidates[0].text, "which editor?");
+        assert_eq!(request.focus_message_id, None);
+        assert_eq!(request.validate(), Ok(()));
+
+        // One in flight at a time, then the gap.
+        assert!(!engine.command_parser_ready(&scope, true, true, now + Duration::from_secs(5)));
+        let slow: Result<CohostCommandResponse, CohostApiError> =
+            Err(CohostApiError::timeout("slow"));
+        assert!(engine.finish_command_parse(
+            &scope,
+            &prepared,
+            &slow,
+            now + Duration::from_millis(2_500)
+        ));
+        assert!(!engine.command_parser_ready(&scope, true, true, now + Duration::from_secs(2)));
+        assert!(engine.command_parser_ready(&scope, true, true, now + COMMAND_PARSE_MIN_GAP));
+
+        // The comment on stream is "this one" without a spotlight.
+        let later = now + COMMAND_PARSE_MIN_GAP;
+        let prepared = engine
+            .prepare_command_parse(
+                &scope,
+                "orcle that one",
+                Some(rows[0].id.as_str()),
+                true,
+                true,
+                later,
+            )
+            .expect("a second parse");
+        assert_eq!(prepared.request.seq, 2);
+        assert_eq!(
+            prepared.request.focus_message_id.as_deref(),
+            Some(rows[0].id.as_str())
+        );
+        // A 429 waits for Retry-After.
+        let quota: Result<CohostCommandResponse, CohostApiError> =
+            Err(crate::videorc_api::classify_cohost_failure(
+                429,
+                "quota-exhausted",
+                "Daily limit".to_string(),
+                Some("120"),
+            ));
+        engine.finish_command_parse(&scope, &prepared, &quota, later);
+        assert!(!engine.command_parser_ready(&scope, true, true, later + Duration::from_secs(60)));
+        assert!(engine.command_parser_ready(&scope, true, true, later + Duration::from_secs(120)));
+
+        // Turned off again (or no consent): nothing.
+        engine.set_command_parser_enabled(false);
+        assert!(!engine.command_parser_ready(&scope, true, true, later + Duration::from_secs(600)));
+        engine.set_command_parser_enabled(true);
+        engine.session.as_mut().unwrap().consent = false;
+        assert!(!engine.command_parser_ready(&scope, true, true, later + Duration::from_secs(600)));
+    }
+
+    #[tokio::test]
+    async fn the_cloud_parser_resolves_a_paraphrase_and_falls_back_on_any_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let rows = vec![
+            command_row(
+                1,
+                "coders_x",
+                StreamPlatform::Twitch,
+                "how do lifetimes work?",
+            ),
+            command_row(2, "ada", StreamPlatform::Twitch, "hello"),
+        ];
+        let (state, scope) = command_state(&rows, None).await;
+        let heard = "orcle show what coders x just asked";
+        let tokens = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let token = {
+            let tokens = tokens.clone();
+            move || -> Option<String> {
+                tokens.fetch_add(1, Ordering::SeqCst);
+                Some("bearer".to_string())
+            }
+        };
+        let failing = |error: CohostApiError| {
+            let calls = calls.clone();
+            move |_token: String, _request: CohostCommandRequest| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async move { Err::<CohostCommandResponse, CohostApiError>(error) }
+            }
+        };
+
+        // Capability off (the default): no token read, nothing sent.
+        assert_eq!(
+            resolve_unknown_command_with(
+                &state,
+                &scope,
+                heard,
+                true,
+                token.clone(),
+                failing(CohostApiError::network("never"))
+            )
+            .await,
+            UnknownCommandResolution::Unheard
+        );
+        assert_eq!(tokens.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        // On: the paraphrase resolves to coders_x's comment.
+        set_command_parser_capability(&state, true).await;
+        let sent = Arc::new(std::sync::Mutex::new(None::<CohostCommandRequest>));
+        let resolution =
+            resolve_unknown_command_with(&state, &scope, heard, true, token.clone(), {
+                let sent = sent.clone();
+                move |bearer: String, request: CohostCommandRequest| {
+                    assert_eq!(bearer, "bearer");
+                    let target = request
+                        .candidates
+                        .iter()
+                        .find(|candidate| candidate.author == "coders_x")
+                        .map(|candidate| candidate.id.clone())
+                        .unwrap();
+                    let response =
+                        parse_answer(request.seq, "highlight", 0.91, &[(target.as_str(), 0.88)]);
+                    *sent.lock().unwrap() = Some(request);
+                    async move { Ok::<CohostCommandResponse, CohostApiError>(response) }
+                }
+            })
+            .await;
+        assert_eq!(
+            resolution,
+            UnknownCommandResolution::Resolved(CommandKind::Highlight, vec![rows[0].id.clone()])
+        );
+        let request = sent.lock().unwrap().clone().expect("one request");
+        assert_eq!(request.utterance, heard);
+        assert_eq!(request.candidates.len(), 2);
+        assert!(!state.cohost.lock().await.command_parser.in_flight);
+
+        // A timeout and an error envelope are "didn't catch that", never a retry.
+        for error in [
+            CohostApiError::timeout("Orcle did not answer within 2 s."),
+            crate::videorc_api::classify_cohost_failure(
+                504,
+                "judge-timeout",
+                "slow".to_string(),
+                None,
+            ),
+        ] {
+            state.cohost.lock().await.command_parser.last_call_at = None;
+            let before = calls.load(Ordering::SeqCst);
+            assert_eq!(
+                resolve_unknown_command_with(
+                    &state,
+                    &scope,
+                    heard,
+                    true,
+                    token.clone(),
+                    failing(error)
+                )
+                .await,
+                UnknownCommandResolution::Unheard
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), before + 1, "exactly one call");
+        }
+
+        // A 429 pauses the parser: the next utterance is not sent.
+        state.cohost.lock().await.command_parser.last_call_at = None;
+        let quota = crate::videorc_api::classify_cohost_failure(
+            429,
+            "quota-exhausted",
+            "Daily limit".to_string(),
+            Some("600"),
+        );
+        assert_eq!(
+            resolve_unknown_command_with(
+                &state,
+                &scope,
+                heard,
+                true,
+                token.clone(),
+                failing(quota)
+            )
+            .await,
+            UnknownCommandResolution::Unheard
+        );
+        state.cohost.lock().await.command_parser.last_call_at = None;
+        let before = calls.load(Ordering::SeqCst);
+        assert_eq!(
+            resolve_unknown_command_with(
+                &state,
+                &scope,
+                heard,
+                true,
+                token.clone(),
+                failing(CohostApiError::network("never"))
+            )
+            .await,
+            UnknownCommandResolution::Unheard
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), before, "paused");
+    }
+
+    #[tokio::test]
+    async fn a_parsed_command_never_replaces_a_command_heard_while_it_was_out() {
+        let rows = vec![
+            command_row(
+                1,
+                "coders_x",
+                StreamPlatform::Twitch,
+                "this stream is trash",
+            ),
+            command_row(2, "ada", StreamPlatform::Twitch, "hello"),
+        ];
+        let (state, scope) = command_state(&rows, None).await;
+        set_command_parser_capability(&state, true).await;
+        let inner_state = state.clone();
+        let inner_scope = scope.clone();
+        let resolution = resolve_unknown_command_with(
+            &state,
+            &scope,
+            "orcle get rid of that nonsense",
+            true,
+            || Some("bearer".to_string()),
+            move |_token: String, request: CohostCommandRequest| {
+                let response = parse_answer(
+                    request.seq,
+                    "remove",
+                    0.95,
+                    &[(request.candidates[0].id.as_str(), 0.95)],
+                );
+                async move {
+                    // The streamer moved on while the parser thought.
+                    run_detected_command(
+                        &inner_state,
+                        &inner_scope,
+                        detected(
+                            CommandKind::Highlight,
+                            CommandTarget::Last,
+                            "highlight the last comment",
+                            None,
+                        ),
+                        true,
+                    )
+                    .await;
+                    Ok::<CohostCommandResponse, CohostApiError>(response)
+                }
+            },
+        )
+        .await;
+        assert_eq!(resolution, UnknownCommandResolution::Superseded);
+        assert_eq!(
+            state_command(&state).await.kind,
+            CohostCommandKind::Highlight
         );
     }
 }
