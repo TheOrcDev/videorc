@@ -657,7 +657,7 @@ pub async fn confirm(
     state: &AppState,
     operation_id: &str,
 ) -> Result<ModerationOperation, ModerationRefusal> {
-    let operation = begin_execution(state, operation_id).await?;
+    let operation = begin_execution(state, operation_id, ExecutionCaller::Answer).await?;
     Ok(run_execution(state, operation).await)
 }
 
@@ -779,10 +779,22 @@ fn finish_locked(
     crate::cohost::note_moderation_operation(state, operation);
 }
 
-/// Move a pending operation to `executing` under the lock, aborting its timer.
+/// Who moves a pending operation to `executing`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionCaller {
+    /// A confirm answer: the operation's timer is aborted.
+    Answer,
+    /// The countdown timer itself. Its handle is only forgotten: aborting a
+    /// task's own handle cancels it at its next await, which would strand
+    /// the operation in `executing` mid provider call.
+    CountdownTimer,
+}
+
+/// Move a pending operation to `executing` under the lock, retiring its timer.
 async fn begin_execution(
     state: &AppState,
     operation_id: &str,
+    caller: ExecutionCaller,
 ) -> Result<ModerationOperation, ModerationRefusal> {
     let mut runtime = state.live_chat_moderation.lock().await;
     let mut operation = load(state, operation_id)?;
@@ -792,7 +804,9 @@ async fn begin_execution(
             "This removal is no longer waiting for an answer.",
         ));
     }
-    if let Some(handle) = runtime.timers.remove(&operation.operation_id) {
+    if let Some(handle) = runtime.timers.remove(&operation.operation_id)
+        && caller == ExecutionCaller::Answer
+    {
         handle.abort();
     }
     operation.phase = ModerationPhase::Executing;
@@ -842,6 +856,9 @@ fn spawn_timer(
                 if operation.phase != ModerationPhase::PendingConfirm {
                     return;
                 }
+                // Forget this timer's own handle without aborting it (see
+                // `ExecutionCaller::CountdownTimer`).
+                runtime.timers.remove(&operation_id);
                 operation.phase = ModerationPhase::Expired;
                 operation.outcome = Some(format!(
                     "No answer in {} seconds. Nothing was removed.",
@@ -850,7 +867,9 @@ fn spawn_timer(
                 finish_locked(&state, &mut runtime, &mut operation);
             }
             TimerAction::Run => {
-                let Ok(operation) = begin_execution(&state, &operation_id).await else {
+                let Ok(operation) =
+                    begin_execution(&state, &operation_id, ExecutionCaller::CountdownTimer).await
+                else {
                     return;
                 };
                 run_execution(&state, operation).await;
