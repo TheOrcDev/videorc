@@ -731,9 +731,16 @@ fn detect(words: &[Word], newest: u64, ctx: &DetectContext) -> Option<Detection>
             end: words.len() - 1,
         });
     }
-    if ctx.awaiting_answer
-        && let Some((kind, heard)) = detect_answer(newest_words)
-    {
+    if !ctx.awaiting_answer {
+        return scan_commands(words, newest, ctx, false);
+    }
+    // A new command beats an answer (plan 140 review): "Yes Orcle, delete
+    // the comment from bob" is a new removal, never a yes to the open card,
+    // wherever in the final the command sits.
+    if let Some(detection) = scan_commands(words, newest, ctx, true) {
+        return Some(detection);
+    }
+    if let Some((kind, heard)) = detect_answer(newest_words) {
         return Some(Detection {
             command: DetectedCommand {
                 kind,
@@ -747,7 +754,26 @@ fn detect(words: &[Word], newest: u64, ctx: &DetectContext) -> Option<Detection>
             end: words.len() - 1,
         });
     }
-    // Latest start wins: scan wake words and structured verbs from the end.
+    scan_commands(words, newest, ctx, false)
+}
+
+/// Wake-word commands and structured phrases ending in the newest final.
+/// Latest start wins: scan wake words and structured verbs from the end.
+/// With `actions_only`, only a highlight, clear or removal counts: answers
+/// and unknowns are skipped, so an earlier command in the final still wins.
+fn scan_commands(
+    words: &[Word],
+    newest: u64,
+    ctx: &DetectContext,
+    actions_only: bool,
+) -> Option<Detection> {
+    let accept = |detection: &Detection| {
+        !actions_only
+            || matches!(
+                detection.command.kind,
+                CommandKind::Highlight | CommandKind::Clear | CommandKind::Remove
+            )
+    };
     let mut unknown: Option<Detection> = None;
     let mut index = words.len();
     while index > 0 {
@@ -755,9 +781,12 @@ fn detect(words: &[Word], newest: u64, ctx: &DetectContext) -> Option<Detection>
         let text = words[index].text.as_str();
         if is_any_wake_word(text) {
             match parse_wake(words, index, newest, ctx) {
-                WakeOutcome::Command(detection) => return Some(detection),
+                WakeOutcome::Command(detection) if accept(&detection) => {
+                    return Some(detection);
+                }
+                WakeOutcome::Command(_) => {}
                 WakeOutcome::Unknown(detection) => {
-                    if unknown.is_none() {
+                    if unknown.is_none() && !actions_only {
                         unknown = Some(detection);
                     }
                 }
@@ -775,10 +804,13 @@ fn detect(words: &[Word], newest: u64, ctx: &DetectContext) -> Option<Detection>
         if let Some(wake) = nearest_wake_before(words, index)
             && let WakeOutcome::Command(detection) = parse_wake(words, wake, newest, ctx)
             && detection.end >= index
+            && accept(&detection)
         {
             return Some(detection);
         }
-        if let Some(detection) = parse_structured(words, index, newest) {
+        if let Some(detection) = parse_structured(words, index, newest)
+            && accept(&detection)
+        {
             return Some(detection);
         }
     }
@@ -1815,6 +1847,46 @@ mod tests {
                 found.as_ref().map(shape),
                 expected,
                 "text: {text:?}, context: {ctx:?}, found: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_command_beats_an_answer_while_a_card_is_open() {
+        let bob = name("bob");
+        let cases: [(&str, Option<(CommandKind, CommandTarget)>); 6] = [
+            (
+                "Yes Orcle, delete the comment from bob",
+                Some((CommandKind::Remove, bob.clone())),
+            ),
+            (
+                "Yeah, Orcle, remove bob's comment",
+                Some((CommandKind::Remove, bob.clone())),
+            ),
+            (
+                "Orcle, remove bob's comment. Orcle, yes.",
+                Some((CommandKind::Remove, bob.clone())),
+            ),
+            (
+                "Yes. Orcle, highlight the comment from bob.",
+                Some((CommandKind::Highlight, bob.clone())),
+            ),
+            // A structured removal also wins over the answer around it.
+            (
+                "Yes, remove it from our chat",
+                Some((CommandKind::Remove, CommandTarget::Deixis)),
+            ),
+            // A pure answer is still an answer.
+            (
+                "Orcle, remove it",
+                Some((CommandKind::Confirm, CommandTarget::None)),
+            ),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(
+                detect_one(text, &ANSWERING).map(|command| (command.kind, command.target)),
+                expected,
+                "text: {text:?}"
             );
         }
     }
