@@ -12,7 +12,7 @@
 - **Depends on**: [126](126-diagnose-windows-audio-mixer-stability-failures.md)
 - **Category**: tests
 - **Planned at**: `26b296add983f9badd3724f2d7e1dcdb46c141f5`, 2026-10-04
-- **State**: Diagnosis required; source implementation has not started.
+- **State**: Test-only diagnostic merged in PR 593 (`f0fa05bc`); original source-clock failure remains unassigned.
 
 ## Why this matters
 
@@ -101,3 +101,14 @@ Stop and report if source hashes drift, the original failure fields cannot be ve
 ## Maintenance notes
 
 Keep observation separate from acceptance. Timestamp ordering, counter boundaries, omissions and instrumentation overhead must remain visible. This plan does not resolve the distinct physical Windows recording-tail/freeze incident, the macOS system-audio gap, or the original source-ownership failure.
+
+## Continuation evidence — 2026-10-04
+
+PR 593 implements the bounded test-only diagnostic. Its Windows run `37191256736`, source job `111403746795`, fails on repetition 13 at a different existing FIFO case, `a_bursty_fifo_reader_never_drops_small_microphone_callbacks` (77 pass / 1 fail; captured 12,000, generated 20,640, discarded 11,296, dropped 0). The original source-clock case passes in this cohort, so its successful captured stdout does not provide a reproduced failure trace. Preserve both failure cohorts.
+
+Current main `b3771763` completes Windows source job `111443059302`, run `37204593882`: all 26 Rust ownership filters run 25 times, and three full backend runs each pass 2,899 cases / 13 existing ignored cases plus one integration test. The affected Node caller cases each run 25 times; the full Node suite passes 1,910 / 10 existing skips. Complete raw logs are retained outside Git: failed diagnostic cohort SHA-256 `f67fa2a22686258fc6c40786b24f95eac51f25705794942a30a38fb9c0882915`, 74,368,276 bytes; current source SHA-256 `edc7f3ce00bc82d6521b5d84f25a556f5a0ff275406933eb20cd1afee9c38f83`, 93,884,150 bytes. The successful current run does not attribute or erase the earlier failures.
+
+A fresh local 49-case mixer run passes and retains complete bounded source-clock delivery/write evidence with zero omissions, missing frames, changed samples, or zeros in the original window. Its post-send and post-publication timestamps remain observations, not a global causal ordering. Final local acceptance separately fails the expanded recording matrix (Plans 140/141); recording-studio acceptance remains incomplete.
+
+
+The original pass-22 failure log is re-downloaded intact to `windows-original-clock-failure.log` in the durable private evidence directory: exactly 45,631,730 bytes and SHA-256 `cc5308abf73f6374796a7eb89b89841189535e4d4c14812e2b82d439a02bd24f`, matching the frozen original record. No earlier failure depends solely on the vanished temporary checkout.

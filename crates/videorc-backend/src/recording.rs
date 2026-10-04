@@ -18226,13 +18226,17 @@ fn append_audio_encoding_with_video_clock(
         .any(|input| input.track.source == AudioTrackSource::Microphone);
     if preserve_bridge_shortest || microphone_is_padded {
         args.push("-shortest".to_string());
-        if input_layout.microphone_is_linux_pulse && !streaming {
-            // Live Pulse PCM and raw video can stall FFmpeg's pre-encode sync
-            // queue after the first audio packets. Its default 10-second
-            // buffering window outlasts our 8-second output-progress deadline.
-            // These are dense live A/V streams, not sparse subtitle inputs:
-            // bound the queue to 250 ms so its overflow heartbeat can advance
-            // the lagging stream, retaining PCM audio, apad and video-owned EOF.
+        if !streaming
+            && (input_layout.microphone_is_linux_pulse
+                || (microphone_is_padded && !preserve_bridge_shortest))
+        {
+            // Live PCM can stall FFmpeg's pre-encode sync queue after the first
+            // audio packets: both Pulse/raw bridge inputs and legacy capture
+            // with padded microphone audio reproduce it. The default 10-second
+            // window can retain an entire short recording. Bound these dense
+            // live A/V queues to 250 ms so the overflow heartbeat advances the
+            // lagging stream, retaining PCM, apad and video-owned EOF. Encoded
+            // bridges and AAC outputs keep their existing synchronization.
             args.extend(["-shortest_buf_duration".to_string(), "0.25".to_string()]);
         }
     }
@@ -28552,6 +28556,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn legacy_pcm_sync_bound_preserves_aac_and_bridge_policies() {
+        let layout = microphone_input_layout(false);
+        for streaming in [false, true] {
+            for bridge in [false, true] {
+                let mut args = Vec::new();
+                append_audio_encoding_with_video_clock(
+                    &mut args,
+                    &layout,
+                    &AudioSettings::default(),
+                    streaming,
+                    bridge,
+                );
+                assert_eq!(
+                    arg_value(&args, "-shortest_buf_duration"),
+                    (!streaming && !bridge).then_some("0.25"),
+                    "streaming={streaming}, bridge={bridge}: {args:?}"
+                );
+                assert_eq!(
+                    arg_value(&args, "-c:a"),
+                    Some(if streaming { "aac" } else { "pcm_s16le" })
+                );
+                assert!(arg_value(&args, "-af").unwrap().ends_with(",apad"));
+                assert!(args.iter().any(|arg| arg == "-shortest"));
+            }
+        }
+    }
+
     #[tokio::test]
     async fn camera_only_resolves_windows_camera_as_primary_video_input() {
         let mut params = base_params(true, false);
@@ -34156,6 +34188,117 @@ mod tests {
 
         cleanup_prepared_mp4_export_staging(&staging).unwrap();
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// The legacy 4K60 command must advance while its live PCM bus remains
+    /// open, including its second preview output. A short file after Stop is
+    /// not evidence that the six-second recording clock ever advanced.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore = "spawns bundled ffmpeg/ffprobe and the live PCM bus; run on recording-studio hosts"]
+    async fn real_ffmpeg_legacy_pcm_recording_advances_before_stop() {
+        let directory =
+            std::env::temp_dir().join(format!("videorc-real-legacy-pcm-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let fifo = directory.join("audio.f32le");
+        crate::audio::create_native_audio_fifo(&fifo).unwrap();
+        let output = directory.join("recording.mkv");
+        let mut params = base_params(true, false);
+        params.output.video.width = 3840;
+        params.output.video.height = 2160;
+        params.output.video.fps = 60;
+        params.output.video.bitrate_kbps = 50_000;
+        let capture = CaptureInputs {
+            video: VideoInput::TestPattern,
+            camera_index: None,
+            microphone: Some(MicrophoneInput::SessionPcm {
+                fifo_path: fifo.clone(),
+            }),
+        };
+        let args = ffmpeg_args(&capture, &params, Some(&output), &[], None).unwrap();
+        let mut child = Command::new("ffmpeg")
+            .args(args)
+            .kill_on_drop(true)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("ffmpeg should be on PATH for this ignored test");
+        let audio = crate::session_audio::attach_prepared(
+            None,
+            fifo,
+            None,
+            AudioProcessingSettings::default(),
+            crate::audio::NATIVE_AUDIO_SOURCE_STALL_TIMEOUT,
+        );
+        let mut stdout = child.stdout.take().unwrap();
+        let preview =
+            tokio::spawn(async move { tokio::io::copy(&mut stdout, &mut tokio::io::sink()).await });
+        let mut stderr = BufReader::new(child.stderr.take().unwrap()).lines();
+        let (sender, mut progress) = mpsc::unbounded_channel();
+        let evidence = tokio::spawn(async move {
+            let mut lines = Vec::new();
+            while let Ok(Some(line)) = stderr.next_line().await {
+                if let Some(seconds) = parse_ffmpeg_progress_media_seconds(&line) {
+                    let _ = sender.send(seconds);
+                }
+                lines.push(line);
+            }
+            lines
+        });
+        let advanced = timeout(Duration::from_secs(8), async {
+            while let Some(seconds) = progress.recv().await {
+                if seconds >= 3.0 {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false);
+        audio.request_stop();
+        let mut stdin = child.stdin.take().unwrap();
+        let _ = stdin.write_all(b"q\n").await;
+        drop(stdin);
+        let clean_exit = match timeout(Duration::from_secs(3), child.wait()).await {
+            Ok(result) => result.unwrap().success(),
+            Err(_) => {
+                let _ = child.start_kill();
+                child.wait().await.unwrap();
+                false
+            }
+        };
+        audio.request_stop();
+        drop(audio);
+        let lines = evidence.await.unwrap();
+        preview.await.unwrap().unwrap();
+        let probe = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-count_frames",
+                "-show_entries",
+                "stream=nb_read_frames",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+            ])
+            .arg(&output)
+            .output()
+            .await
+            .unwrap();
+        let frames = String::from_utf8_lossy(&probe.stdout)
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(0);
+        std::fs::remove_dir_all(directory).unwrap();
+        assert!(advanced, "live PCM recording stalled: {lines:?}");
+        assert!(clean_exit, "legacy FFmpeg did not stop cleanly: {lines:?}");
+        assert!(
+            probe.status.success() && frames >= 180,
+            "only {frames} video frames survived"
+        );
     }
 
     /// Runs the production microphone filter/duration policy through real
