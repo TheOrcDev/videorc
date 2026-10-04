@@ -11107,6 +11107,7 @@ fn should_finalize_recording_session(
 /// TERM is TerminateProcess → "exit code: 1", and the raw FIFO write then fails
 /// with os error 232). Reporting that as an encoder failure sent a tester and
 /// support hunting for an FFmpeg crash that never happened.
+/// These inputs establish the forced stop, not why FFmpeg failed to finish.
 fn classify_failed_ffmpeg_exit(
     stop_intent_preceded_exit: bool,
     stop_escalated: bool,
@@ -11118,7 +11119,7 @@ fn classify_failed_ffmpeg_exit(
             RecordingPipelineStage::Muxer,
             "recording-stop-forced",
             format!(
-                "Videorc had to force FFmpeg to stop because it was still writing captured frames long after Stop. This PC could not encode at the selected output size in real time. The file was kept as recovery media and may be cut short. Lower the output resolution in Output settings. (FFmpeg exit: {exit_status})"
+                "FFmpeg did not finish after Stop, so Videorc forced it to stop. The file was kept as recovery media and may be cut short. (FFmpeg exit: {exit_status})"
             ),
         );
     }
@@ -37916,7 +37917,61 @@ mod low_end_windows_recording_tests {
         assert!(!message.contains("Encoder bridge stopped"));
         assert!(!message.contains("os error 232"));
         assert!(message.contains("exit code: 1"));
-        assert!(message.contains("Output settings"));
+        assert_forced_stop_message_reports_only_confirmed_outcome(&message, "exit code: 1");
+    }
+
+    fn assert_forced_stop_message_reports_only_confirmed_outcome(message: &str, exit_status: &str) {
+        assert!(message.contains("FFmpeg"));
+        assert!(message.contains("force"));
+        assert!(message.contains("Stop"));
+        assert!(message.contains("The file was kept as recovery media and may be cut short."));
+        assert!(message.contains(&format!("(FFmpeg exit: {exit_status})")));
+        for unsupported_claim in [
+            "still writing captured frames",
+            "could not encode",
+            "selected output size",
+            "real time",
+            "This PC",
+            "Lower the output resolution",
+            "Output settings",
+        ] {
+            assert!(
+                !message.contains(unsupported_claim),
+                "forced-stop inputs do not establish {unsupported_claim:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn forced_stop_without_bridge_error_preserves_windows_exit() {
+        let (stage, code, message) = classify_failed_ffmpeg_exit(true, true, None, "exit code: 1");
+        assert_eq!(stage, RecordingPipelineStage::Muxer);
+        assert_eq!(code, "recording-stop-forced");
+        assert_forced_stop_message_reports_only_confirmed_outcome(&message, "exit code: 1");
+    }
+
+    #[test]
+    fn forced_stop_with_bridge_error_preserves_sigkill_exit() {
+        let (stage, code, message) = classify_failed_ffmpeg_exit(
+            true,
+            true,
+            Some("Broken pipe (os error 32)"),
+            "signal: 9 (SIGKILL)",
+        );
+        assert_eq!(stage, RecordingPipelineStage::Muxer);
+        assert_eq!(code, "recording-stop-forced");
+        assert!(!message.contains("Broken pipe"));
+        assert!(!message.contains("os error 32"));
+        assert_forced_stop_message_reports_only_confirmed_outcome(&message, "signal: 9 (SIGKILL)");
+    }
+
+    #[test]
+    fn forced_stop_without_bridge_error_preserves_sigkill_exit() {
+        let (stage, code, message) =
+            classify_failed_ffmpeg_exit(true, true, None, "signal: 9 (SIGKILL)");
+        assert_eq!(stage, RecordingPipelineStage::Muxer);
+        assert_eq!(code, "recording-stop-forced");
+        assert_forced_stop_message_reports_only_confirmed_outcome(&message, "signal: 9 (SIGKILL)");
     }
 
     #[test]
