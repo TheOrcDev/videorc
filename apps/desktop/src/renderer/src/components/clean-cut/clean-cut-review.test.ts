@@ -479,3 +479,103 @@ describe('Clean cut review (plan 119 S14)', () => {
     expect(current.transcript).not.toHaveBeenCalled()
   })
 })
+
+describe('Condensed review (plan 119 S19)', () => {
+  const keeps = [
+    { startMs: 0, endMs: 2 * MIN, title: 'Intro' },
+    { startMs: 10 * MIN, endMs: 14 * MIN, title: 'Deploying to Vercel' }
+  ]
+  const words = [
+    ...speak('Welcome back everyone.', 1_000),
+    ...speak('This part is left out.', 5 * MIN),
+    ...speak('Now we deploy.', 10 * MIN + 500)
+  ]
+  const removals = [
+    removal('c1', 'condensed', 2 * MIN, 10 * MIN),
+    removal('c2', 'condensed', 14 * MIN, 20 * MIN)
+  ]
+  const condensedJob = job({ id: 'job-c', mode: 'condensed' })
+
+  beforeEach(() => {
+    mocked.report = { payload: null, loading: false, error: null, reload: () => undefined }
+  })
+
+  function condensedClient(): CleanCutClient {
+    return client({
+      jobs: [condensedJob],
+      get: vi.fn(async () => ({
+        sessionId: 'rec-1',
+        jobs: [
+          {
+            job: condensedJob,
+            edl: {
+              ...edl(removals),
+              durationMs: 20 * MIN,
+              stats: { byKind: [], keptMs: 6 * MIN }
+            },
+            condensedKeeps: keeps
+          }
+        ]
+      })),
+      transcript: vi.fn(async () => ({ jobId: 'job-c', language: 'en', words, segments: [] }))
+    })
+  }
+
+  function paragraphs(): string[] {
+    return [...document.querySelectorAll('[data-slot="clean-cut-paragraph"]')].map(
+      (paragraph) => paragraph.textContent?.trim() ?? ''
+    )
+  }
+
+  function blockTexts(): string[] {
+    return [...document.querySelectorAll('[data-slot="clean-cut-block"]')].map(
+      (block) => block.textContent ?? ''
+    )
+  }
+
+  function blocks(): Array<[string | null, string | null]> {
+    return [...document.querySelectorAll('[data-slot="clean-cut-block"]')].map((block) => [
+      block.getAttribute('data-block'),
+      block.getAttribute('data-removed')
+    ])
+  }
+
+  it('shows the kept parts with their titles and the parts left out as single rows', async () => {
+    await render(condensedClient(), { sessionId: 'rec-1', mode: 'condensed', jobId: 'job-c' })
+    expect(blocks()).toEqual([
+      ['kept', null],
+      ['left-out', 'true'],
+      ['kept', null],
+      ['left-out', 'true']
+    ])
+    const text = review().textContent ?? ''
+    expect(text).toContain('Intro')
+    expect(text).toContain('Deploying to Vercel')
+    expect(paragraphs()).toEqual(['Welcome back everyone.', 'Now we deploy.'])
+    // A left-out part is one row with its first words, not ten thousand struck ones.
+    expect(blockTexts()[1]).toContain('This part is left out.')
+    expect(document.querySelector('[data-slot="clean-cut-stats"]')?.textContent).toContain(
+      '20:00 → 6:00'
+    )
+  })
+
+  it('brings a part back and drops a kept one, saved as one updateEdl', async () => {
+    await render(condensedClient(), { sessionId: 'rec-1', mode: 'condensed', jobId: 'job-c' })
+    await act(async () => button('Bring back').click())
+    expect(blocks()[1]).toEqual(['left-out', null])
+    expect(paragraphs()).toContain('This part is left out.')
+    const drop = [...document.querySelectorAll('button')].filter(
+      (candidate) => candidate.textContent === 'Drop'
+    )[0] as HTMLButtonElement
+    await act(async () => drop.click())
+    expect(blocks()[0]).toEqual(['kept', 'true'])
+    await act(async () => button('Save changes').click())
+    await settle()
+    expect(current.updateEdl).toHaveBeenCalledExactlyOnceWith({
+      jobId: 'job-c',
+      revision: 3,
+      removals: [{ id: 'c1', enabled: false }],
+      addManual: [{ startMs: 0, endMs: 2 * MIN }]
+    })
+  })
+})

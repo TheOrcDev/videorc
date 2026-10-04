@@ -125,10 +125,17 @@ export const CLEAN_CUT_CONSENT_OFF_REASON =
 export const CLEAN_CUT_NO_RECORDINGS =
   'Record something, and its clean cut shows up here when you stop.'
 
+export const CONDENSED_TOO_SHORT = 'Condensed is for recordings of 25 minutes or more.'
+
 // --- Rules ----------------------------------------------------------------------
 
 /** Decision 11: shorter recordings are not cut. */
 export const CLEAN_CUT_MIN_SOURCE_MS = 10_000
+/** S19: Condensed is offered from 25 minutes. */
+export const CONDENSED_MIN_SOURCE_MS = 25 * 60_000
+/** S19: the target lengths, in minutes. */
+export const CONDENSED_TARGET_MINUTES = [10, 15, 20, 30] as const
+export const CONDENSED_DEFAULT_TARGET_MINUTES = 15
 /** Recordings the picker offers, newest first. */
 export const CLEAN_CUT_PICKER_LIMIT = 20
 
@@ -179,6 +186,15 @@ export function isCleanCutEligible(session: EligibilityRow): boolean {
   return cleanCutEligibility(session).eligible
 }
 
+/** Condensed needs an eligible recording of at least 25 minutes. */
+export function condensedEligibility(session: EligibilityRow): CleanCutEligibility {
+  const eligibility = cleanCutEligibility(session)
+  if (!eligibility.eligible) return eligibility
+  return (session.durationMs ?? 0) >= CONDENSED_MIN_SOURCE_MS
+    ? { eligible: true }
+    : { eligible: false, reason: CONDENSED_TOO_SHORT }
+}
+
 /** The recordings the card offers: eligible ones, newest first. */
 export function recentCleanCutRecordings<
   T extends EligibilityRow & Pick<SessionSummary, 'startedAt'>
@@ -187,6 +203,11 @@ export function recentCleanCutRecordings<
     .filter(isCleanCutEligible)
     .sort((left, right) => right.startedAt.localeCompare(left.startedAt))
     .slice(0, limit)
+}
+
+/** Seconds for `cleanCut.start`; the contract allows 120..3600. */
+export function condensedTargetSeconds(minutes: number): number {
+  return Math.min(3_600, Math.max(120, Math.round(minutes * 60)))
 }
 
 // --- Jobs -----------------------------------------------------------------------

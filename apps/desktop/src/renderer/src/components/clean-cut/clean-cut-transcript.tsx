@@ -12,6 +12,7 @@ import {
 
 import { ChatIcon, ClipIcon, MicrophoneIcon, PinIcon, WaveformIcon } from '@/components/icons'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import type { ClipMomentSource, CleanCutRemoval } from '@/lib/backend'
 import {
@@ -22,7 +23,8 @@ import {
   type CleanCutPin,
   type CleanCutTone,
   type CleanCutTranscriptItem,
-  type CleanCutTranscriptToken
+  type CleanCutTranscriptToken,
+  type CondensedBlock
 } from '@/lib/clean-cut-review'
 import { formatCutClock } from '@/lib/clean-cut-view'
 import { cn } from '@/lib/utils'
@@ -72,6 +74,7 @@ export interface CleanCutTranscriptProps {
   scrollRequest: CleanCutScrollRequest | null
   onToggleRemoval: (id: string) => void
   onSeek: (ms: number) => void
+  onToggleBlock: (block: CondensedBlock) => void
   className?: string
 }
 
@@ -90,6 +93,7 @@ export function CleanCutTranscript({
   scrollRequest,
   onToggleRemoval,
   onSeek,
+  onToggleBlock,
   className
 }: CleanCutTranscriptProps): ReactElement {
   const rootRef = useRef<HTMLDivElement>(null)
@@ -102,7 +106,7 @@ export function CleanCutTranscript({
   const virtualizer = useVirtualizer({
     count: items.length,
     getScrollElement: () => viewport,
-    estimateSize: () => 96,
+    estimateSize: (index) => (items[index]?.type === 'block' ? 40 : 96),
     overscan: 6,
     getItemKey: (index) => items[index]?.key ?? index
   })
@@ -152,13 +156,19 @@ export function CleanCutTranscript({
               data-index={row.index}
               style={{ transform: `translateY(${row.start}px)` }}
             >
-              <ParagraphRow
-                activeWord={paragraphHasWord(item, activeWord) ? activeWord : -1}
-                paragraph={item}
-                removals={removals}
-                selectedId={selectedId && item.removalIds.includes(selectedId) ? selectedId : null}
-                stateKey={paragraphStateKey(item, removals)}
-              />
+              {item.type === 'block' ? (
+                <BlockRow block={item.block} onToggle={onToggleBlock} />
+              ) : (
+                <ParagraphRow
+                  activeWord={paragraphHasWord(item, activeWord) ? activeWord : -1}
+                  paragraph={item}
+                  removals={removals}
+                  selectedId={
+                    selectedId && item.removalIds.includes(selectedId) ? selectedId : null
+                  }
+                  stateKey={paragraphStateKey(item, removals)}
+                />
+              )}
             </div>
           )
         })}
@@ -407,5 +417,63 @@ function PinMarker({ pin }: { pin: CleanCutPin }): ReactElement {
       {pin.label}
       <span className="font-normal text-subtle tabular-nums">{formatCutClock(pin.startMs)}</span>
     </Badge>
+  )
+}
+
+const BLOCK_ACTIONS = {
+  kept: { on: 'Drop', off: 'Keep' },
+  'left-out': { on: 'Leave out', off: 'Bring back' }
+} as const
+
+/** A Condensed part: its title, when and how long, and one toggle. */
+function BlockRow({
+  block,
+  onToggle
+}: {
+  block: CondensedBlock
+  onToggle: (block: CondensedBlock) => void
+}): ReactElement {
+  const title =
+    block.kind === 'left-out' ? (block.removed ? 'Left out' : 'Brought back') : block.title
+  const action = block.removed ? BLOCK_ACTIONS[block.kind].off : BLOCK_ACTIONS[block.kind].on
+  return (
+    <div
+      className={cn(
+        'flex min-w-0 items-center gap-2 border-y border-border bg-foreground/[0.03] px-gutter py-1.5',
+        block.removed && 'text-muted-foreground'
+      )}
+      data-block={block.kind}
+      data-removed={block.removed || undefined}
+      data-slot="clean-cut-block"
+    >
+      <span
+        className={cn(
+          'max-w-[45%] shrink-0 truncate text-[13px] font-semibold',
+          block.removed ? 'text-muted-foreground' : 'text-foreground'
+        )}
+        title={title}
+      >
+        {title}
+      </span>
+      <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
+        {formatCutClock(block.startMs)}–{formatCutClock(block.endMs)} ·{' '}
+        {formatCutClock(block.endMs - block.startMs)}
+      </span>
+      {block.removed && block.excerpt ? (
+        <span className="min-w-0 truncate text-xs text-subtle" title={block.excerpt}>
+          {block.excerpt}
+        </span>
+      ) : null}
+      {block.kind === 'kept' && block.removed ? <Badge variant="outline">Dropped</Badge> : null}
+      <Button
+        className="ml-auto"
+        size="xs"
+        type="button"
+        variant="outline"
+        onClick={() => onToggle(block)}
+      >
+        {action}
+      </Button>
+    </div>
   )
 }

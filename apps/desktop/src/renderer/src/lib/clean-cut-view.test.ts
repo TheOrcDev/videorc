@@ -7,6 +7,8 @@ import {
   CLEAN_CUT_DESCRIPTION,
   CLEAN_CUT_NO_RECORDINGS,
   CLEAN_CUT_SIGNED_OUT_REASON,
+  CONDENSED_TARGET_MINUTES,
+  CONDENSED_TOO_SHORT,
   cleanCutAutoStatus,
   cleanCutCapabilities,
   cleanCutDurationsLabel,
@@ -19,6 +21,8 @@ import {
   cleanCutStatusView,
   cleanCutUnavailableReason,
   cleanCutUnlock,
+  condensedEligibility,
+  condensedTargetSeconds,
   formatCutClock,
   isCleanCutJobActive,
   latestCleanCutJob,
@@ -105,6 +109,7 @@ describe('Clean cut copy (plan 119 S14)', () => {
       CLEAN_CUT_SIGNED_OUT_REASON,
       CLEAN_CUT_CONSENT_OFF_REASON,
       CLEAN_CUT_NO_RECORDINGS,
+      CONDENSED_TOO_SHORT,
       cleanCutFailureCopy('clean-cut-monthly-quota-exhausted', undefined),
       cleanCutUnavailableReason('quota-exhausted')
     ]) {
@@ -161,6 +166,17 @@ describe('eligibility (decision 11)', () => {
     expect(reason({ mp4Path: '/videos/rust-cli.mkv' })).toContain('MP4 file is missing')
   })
 
+  it('offers Condensed from 25 minutes', () => {
+    expect(condensedEligibility(session({ durationMs: 25 * MIN })).eligible).toBe(true)
+    expect(condensedEligibility(session({ durationMs: 25 * MIN - 1 }))).toEqual({
+      eligible: false,
+      reason: CONDENSED_TOO_SHORT
+    })
+    expect(condensedEligibility(session({ mode: 'imported', durationMs: 60 * MIN })).eligible).toBe(
+      false
+    )
+  })
+
   it('lists eligible recordings newest first, within the limit', () => {
     const rows = [
       session({ id: 'old', startedAt: '2026-10-01T10:00:00Z' }),
@@ -170,6 +186,13 @@ describe('eligibility (decision 11)', () => {
     ]
     expect(recentCleanCutRecordings(rows).map((row) => row.id)).toEqual(['new', 'old'])
     expect(recentCleanCutRecordings(rows, 1).map((row) => row.id)).toEqual(['new'])
+  })
+
+  it('sends the Condensed target in seconds, inside the contract range', () => {
+    expect(CONDENSED_TARGET_MINUTES).toEqual([10, 15, 20, 30])
+    expect(condensedTargetSeconds(15)).toBe(900)
+    expect(condensedTargetSeconds(1)).toBe(120)
+    expect(condensedTargetSeconds(90)).toBe(3_600)
   })
 })
 

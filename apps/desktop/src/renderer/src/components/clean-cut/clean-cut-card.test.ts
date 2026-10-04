@@ -9,6 +9,7 @@ import { CLEAN_CUT_AUTO_STORAGE_KEY } from '@/lib/clean-cut-auto'
 import {
   CLEAN_CUT_DESCRIPTION,
   CLEAN_CUT_NO_RECORDINGS,
+  CONDENSED_TOO_SHORT,
   type CleanCutCapabilities
 } from '@/lib/clean-cut-view'
 import { DEFAULT_BASIC_ENTITLEMENTS } from '@/lib/entitlements'
@@ -169,6 +170,16 @@ function statusRow(): HTMLElement {
 
 function autoSwitch(): HTMLButtonElement {
   return document.getElementById('clean-cut-auto-switch') as HTMLButtonElement
+}
+
+async function chooseTab(label: string): Promise<void> {
+  const tab = [...document.querySelectorAll('[role="tab"]')].find(
+    (candidate) => candidate.textContent === label
+  ) as HTMLElement
+  expect(tab, label).toBeTruthy()
+  await act(async () => {
+    tab.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))
+  })
 }
 
 beforeEach(() => {
@@ -359,6 +370,37 @@ describe('Clean cut card (plan 119 S14)', () => {
       mode: 'clean',
       consentToUploadAudio: true
     })
+  })
+
+  it('makes a Condensed cut at the chosen length (S19)', async () => {
+    await render({ focus: { sessionId: 'rec-2', nonce: 1 } })
+    expect(document.querySelector('[aria-label="Recording"]')?.textContent).toContain(
+      'Friday stream'
+    )
+    await chooseTab('Condensed')
+    const lengths = [...document.querySelectorAll('[data-slot="clean-cut-target"] button')].map(
+      (item) => item.textContent
+    )
+    expect(lengths).toEqual(['10 min', '15 min', '20 min', '30 min'])
+    expect(
+      document.querySelector('[data-slot="clean-cut-target"] [data-state="on"]')?.textContent
+    ).toBe('15 min')
+    await act(async () => button('20 min').click())
+    await act(async () => button('Make a condensed cut').click())
+    expect(current.start).toHaveBeenCalledWith({
+      sessionId: 'rec-2',
+      mode: 'condensed',
+      consentToUploadAudio: true,
+      targetDurationSeconds: 1_200
+    })
+  })
+
+  it('keeps Condensed for recordings of 25 minutes or more', async () => {
+    await render({ focus: { sessionId: 'rec-short', nonce: 1 } })
+    await chooseTab('Condensed')
+    expect(statusRow().getAttribute('data-status')).toBe('unavailable')
+    expect(statusRow().textContent).toContain(CONDENSED_TOO_SHORT)
+    expect(document.querySelector('[data-slot="clean-cut-target"]')).toBeNull()
   })
 
   it('says where cuts appear when there is no recording yet', async () => {

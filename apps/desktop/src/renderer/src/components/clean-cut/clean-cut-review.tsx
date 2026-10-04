@@ -52,6 +52,7 @@ import {
   cleanCutPins,
   cleanCutStats,
   cleanCutTranscriptItems,
+  condensedBlocks,
   cutSkipRanges,
   draftChangeCount,
   effectiveRemovals,
@@ -61,19 +62,23 @@ import {
   rebaseDraft,
   removalRowIndex,
   stepRemoval,
+  toggleCondensedBlock,
   toggleKindGroup,
   toggleRemoval,
   updateEdlPayload,
   type CleanCutDraft,
   type CleanCutKindChip,
   type CleanCutKindGroupId,
-  type CleanCutPin
+  type CleanCutPin,
+  type CondensedBlock
 } from '@/lib/clean-cut-review'
 import {
   cleanCutJobEditable,
   cleanCutModeLabel,
   cleanCutStatusView,
   formatCutClock,
+  latestCleanCutJob,
+  type CleanCutCondensedKeep,
   type CleanCutJobDetailWithKeeps,
   type CleanCutTranscript as CleanCutTranscriptData
 } from '@/lib/clean-cut-view'
@@ -91,6 +96,7 @@ const UNTITLED = 'Untitled recording'
 interface ReviewData {
   job: CleanCutJob
   edl: CleanCutEdl
+  keeps: CleanCutCondensedKeep[] | null
   /** Null when the transcript could not be read: the cuts still show as markers. */
   transcript: CleanCutTranscriptData | null
 }
@@ -128,7 +134,7 @@ const EMPTY_WORDS: CleanCutTranscriptData['words'] = []
 const EMPTY_SEGMENTS: CleanCutTranscriptData['segments'] = []
 
 /**
- * Clean cut review (plan 119 S14). The source recording plays on top
+ * Clean cut review (plan 119 S14, S19). The source recording plays on top
  * with the cut list as a virtual preview (removed spans are skipped), the
  * transcript below shows every cut, and edits stay a local draft until "Save
  * changes" sends one `cleanCut.updateEdl` and renders the cut again.
@@ -148,8 +154,8 @@ export function CleanCutReview({
 }): ReactElement {
   const { sessions, runtimeInfo } = useStudioCore()
   const { recording } = useStudioRecordingState()
-  const mode = target.mode
-  const jobId = target.jobId
+  const [mode, setMode] = useState<CleanCutMode>(target.mode)
+  const [jobId, setJobId] = useState<string | null>(target.jobId)
   const [load, setLoad] = useState<ReviewLoad>({ kind: 'loading' })
   const [reloads, setReloads] = useState(0)
   const loadRef = useRef(load)
@@ -193,6 +199,7 @@ export function CleanCutReview({
           data: {
             job: detail.job,
             edl: detail.edl,
+            keeps: detail.condensedKeeps ?? null,
             transcript
           }
         })
@@ -247,12 +254,36 @@ export function CleanCutReview({
   )
   const report = useOrcleReport(target.sessionId)
   const pins = useMemo(() => cleanCutPins(report.payload?.moments), [report.payload])
+  const condensedMode = data?.job.mode === 'condensed'
   const durationMs = data?.edl.durationMs ?? 0
-  const paragraphs = useMemo(
-    () => (saved ? buildCleanCutParagraphs({ words, segments, removals: saved, pins }) : []),
-    [pins, saved, segments, words]
+  const keeps = data?.keeps ?? null
+  // Part boundaries come from the saved list, so the layout never re-runs on a toggle.
+  const savedBlocks = useMemo(
+    () =>
+      condensedMode && saved
+        ? condensedBlocks({ durationMs, keeps, effective: saved, words })
+        : null,
+    [condensedMode, durationMs, keeps, saved, words]
   )
-  const items = useMemo(() => cleanCutTranscriptItems(paragraphs), [paragraphs])
+  const paragraphs = useMemo(
+    () =>
+      saved
+        ? buildCleanCutParagraphs({
+            words,
+            segments,
+            removals: saved,
+            pins,
+            breaksMs: savedBlocks?.map((block) => block.startMs) ?? [],
+            skipKinds: condensedMode ? ['condensed'] : []
+          })
+        : [],
+    [condensedMode, pins, saved, savedBlocks, segments, words]
+  )
+  const blocks = useMemo(
+    () => (condensedMode ? condensedBlocks({ durationMs, keeps, effective, words }) : null),
+    [condensedMode, durationMs, effective, keeps, words]
+  )
+  const items = useMemo(() => cleanCutTranscriptItems(paragraphs, blocks), [blocks, paragraphs])
   const rows = useMemo(() => removalRowIndex(items), [items])
   const order = useMemo(() => navigableRemovals(effective, rows), [effective, rows])
   const chips = useMemo(() => cleanCutKindChips(effective), [effective])
@@ -279,6 +310,11 @@ export function CleanCutReview({
   const job = data?.job ?? (load.kind === 'waiting' ? load.job : null)
   const status = cleanCutStatusView(job, { captureActive, streaming: sessionIsLive(recording) })
   const editable = data ? cleanCutJobEditable(data.job) : false
+  const otherModeJob = latestCleanCutJob(
+    client.jobs,
+    target.sessionId,
+    mode === 'clean' ? 'condensed' : 'clean'
+  )
   const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
 
   const select = useCallback(
@@ -308,6 +344,15 @@ export function CleanCutReview({
     setDraft((current) => toggleKindGroup(current, saved, groupId))
     setNotice(null)
   }
+
+  const toggleBlock = useCallback(
+    (block: CondensedBlock): void => {
+      if (!saved) return
+      setDraft((current) => toggleCondensedBlock(current, saved, block))
+      setNotice(null)
+    },
+    [saved]
+  )
 
   const seek = useCallback((ms: number): void => playerRef.current?.seekTo(ms), [])
 
@@ -453,10 +498,34 @@ export function CleanCutReview({
             </span>
             <span className="text-xs text-muted-foreground">
               {formatCutClock(stats.savedMs)} shorter
-              {` · ${stats.cuts} cuts`}
+              {condensedMode && blocks
+                ? ` · ${blocks.filter((block) => !block.removed).length} parts`
+                : ` · ${stats.cuts} cuts`}
             </span>
           </p>
         ) : null}
+        <Tabs
+          value={mode}
+          onValueChange={(value) => {
+            setMode(value as CleanCutMode)
+            setJobId(null)
+          }}
+        >
+          <TabsList aria-label="Kind of cut">
+            <TabsTrigger
+              disabled={mode !== 'clean' && (changes > 0 || !otherModeJob)}
+              value="clean"
+            >
+              Clean
+            </TabsTrigger>
+            <TabsTrigger
+              disabled={mode !== 'condensed' && (changes > 0 || !otherModeJob)}
+              value="condensed"
+            >
+              Condensed
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
       </header>
 
       {load.kind === 'ready' && data ? (
@@ -535,6 +604,7 @@ export function CleanCutReview({
                 scrollRequest={scrollRequest}
                 selectedId={selectedId}
                 onSeek={seek}
+                onToggleBlock={toggleBlock}
                 onToggleRemoval={toggle}
               />
             )}

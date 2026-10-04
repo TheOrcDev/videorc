@@ -5,11 +5,15 @@ import type {
   CleanCutRemovalKind,
   CleanCutUpdateEdlParams
 } from './backend'
-import type { CleanCutTranscriptSegment, CleanCutTranscriptWord } from './clean-cut-view'
+import type {
+  CleanCutCondensedKeep,
+  CleanCutTranscriptSegment,
+  CleanCutTranscriptWord
+} from './clean-cut-view'
 import { momentKind, momentLabel } from './orcle-report-view'
 import { keptDurationMs, type SkipRange } from './skip-ranges'
 
-// Clean cut review (plan 119 S14): what the player skips, what the
+// Clean cut review (plan 119 S14, S19): what the player skips, what the
 // transcript strikes through, the per-kind chips, and the one `updateEdl`
 // payload "Save changes" sends. Edits stay a local draft over the saved cut
 // list until they are saved, so a toggle is instant and the virtual preview
@@ -685,14 +689,216 @@ export function activeWordIndex(
   return positionMs < words[found].endMs + 250 ? found : -1
 }
 
-/** One row of the virtual transcript list. */
-export type CleanCutTranscriptItem = CleanCutParagraph
+// --- Condensed (S19) ----------------------------------------------------------------
 
-/** The rows the transcript shows: its paragraphs. */
+/** A part of a Condensed cut: a kept part (with its title) or a part left out. */
+export interface CondensedBlock {
+  key: string
+  kind: 'kept' | 'left-out'
+  startMs: number
+  endMs: number
+  title: string
+  /** The first words, to recognise a part without opening it. */
+  excerpt: string
+  /** Cut right now: a part still left out, or a kept part that was dropped. */
+  removed: boolean
+  /** The `condensed` removals that leave this part out. */
+  condensedIds: string[]
+  /** Manual removals (saved ids or draft keys) that drop this part. */
+  manualIds: string[]
+}
+
+const MIN_LEFT_OUT_MS = 500
+const EXCERPT_WORDS = 12
+
+function overlapMs(
+  a: { startMs: number; endMs: number },
+  b: { startMs: number; endMs: number }
+): number {
+  return Math.max(0, Math.min(a.endMs, b.endMs) - Math.max(a.startMs, b.startMs))
+}
+
+/** The first word that starts at or after `ms`. */
+function firstWordFrom(words: readonly CleanCutTranscriptWord[], ms: number): number {
+  let low = 0
+  let high = words.length
+  while (low < high) {
+    const middle = (low + high) >> 1
+    if (words[middle].startMs < ms) low = middle + 1
+    else high = middle
+  }
+  return low
+}
+
+function excerptFor(
+  words: readonly CleanCutTranscriptWord[],
+  startMs: number,
+  endMs: number
+): string {
+  const inside: string[] = []
+  let more = false
+  for (let index = firstWordFrom(words, startMs); index < words.length; index += 1) {
+    const word = words[index]
+    if (word.startMs >= endMs) break
+    if (inside.length === EXCERPT_WORDS) {
+      more = true
+      break
+    }
+    inside.push(word.text.trim())
+  }
+  const text = inside.filter(Boolean).join(' ')
+  return more ? `${text}…` : text
+}
+
+/**
+ * The Condensed cut as parts, in time order, tiling the recording: the kept
+ * parts from `condensedKeeps` (their titles come from the selection) and the
+ * parts between them, left out by `condensed` removals. Without keeps (an
+ * older backend) the parts come from the `condensed` removals alone.
+ */
+export function condensedBlocks({
+  durationMs,
+  keeps,
+  effective,
+  words
+}: {
+  durationMs: number
+  keeps: readonly CleanCutCondensedKeep[] | null | undefined
+  effective: readonly CleanCutRemoval[]
+  words: readonly CleanCutTranscriptWord[]
+}): CondensedBlock[] {
+  const condensed = effective.filter((removal) => removal.kind === 'condensed')
+  const manual = effective.filter((removal) => removal.kind === 'manual' && removal.enabled)
+  const kept: Array<{ startMs: number; endMs: number; title: string }> =
+    keeps && keeps.length > 0
+      ? keeps
+          .map((keep) => ({
+            startMs: Math.max(0, keep.startMs),
+            endMs: Math.min(durationMs, keep.endMs),
+            title: keep.title.trim()
+          }))
+          .filter((keep) => keep.endMs > keep.startMs)
+          .sort((left, right) => left.startMs - right.startMs)
+      : complement(condensed, durationMs).map((range, index) => ({
+          ...range,
+          title: `Part ${index + 1}`
+        }))
+
+  const ranges: Array<{
+    kind: CondensedBlock['kind']
+    startMs: number
+    endMs: number
+    title: string
+  }> = []
+  let cursor = 0
+  for (const keep of kept) {
+    if (keep.startMs - cursor >= MIN_LEFT_OUT_MS) {
+      ranges.push({ kind: 'left-out', startMs: cursor, endMs: keep.startMs, title: 'Left out' })
+    }
+    ranges.push({
+      kind: 'kept',
+      startMs: Math.max(cursor, keep.startMs),
+      endMs: keep.endMs,
+      title: keep.title || 'Untitled part'
+    })
+    cursor = Math.max(cursor, keep.endMs)
+  }
+  if (durationMs - cursor >= MIN_LEFT_OUT_MS) {
+    ranges.push({ kind: 'left-out', startMs: cursor, endMs: durationMs, title: 'Left out' })
+  }
+
+  return ranges.map((range) => {
+    const span = Math.max(1, range.endMs - range.startMs)
+    const condensedIds = condensed
+      .filter((removal) => {
+        const overlap = overlapMs(removal, range)
+        return overlap > 0 && overlap * 2 >= Math.min(span, removal.endMs - removal.startMs)
+      })
+      .map((removal) => removal.id)
+    const covering = manual.filter((removal) => overlapMs(removal, range) > 0)
+    const manualCovered = covering.reduce((sum, removal) => sum + overlapMs(removal, range), 0)
+    const dropped = manualCovered >= span * 0.9
+    const leftOut = condensed.some(
+      (removal) => removal.enabled && condensedIds.includes(removal.id)
+    )
+    return {
+      key: `${range.kind}-${range.startMs}`,
+      kind: range.kind,
+      startMs: range.startMs,
+      endMs: range.endMs,
+      title: range.title,
+      excerpt: excerptFor(words, range.startMs, range.endMs),
+      removed: leftOut || dropped,
+      condensedIds,
+      manualIds: dropped ? covering.map((removal) => removal.id) : []
+    }
+  })
+}
+
+function complement(
+  removals: readonly CleanCutRemoval[],
+  durationMs: number
+): Array<{ startMs: number; endMs: number }> {
+  const out: Array<{ startMs: number; endMs: number }> = []
+  let cursor = 0
+  for (const removal of [...removals].sort(byTime)) {
+    if (removal.startMs > cursor) out.push({ startMs: cursor, endMs: removal.startMs })
+    cursor = Math.max(cursor, removal.endMs)
+  }
+  if (cursor < durationMs) out.push({ startMs: cursor, endMs: durationMs })
+  return out.filter((range) => range.endMs - range.startMs >= MIN_LEFT_OUT_MS)
+}
+
+/**
+ * Keep or drop one Condensed part. Bringing a part back switches its
+ * `condensed` removals off and deletes any manual cut over it; dropping a
+ * kept part cuts its whole range as a manual removal.
+ */
+export function toggleCondensedBlock(
+  draft: CleanCutDraft,
+  saved: readonly CleanCutRemoval[],
+  block: CondensedBlock
+): CleanCutDraft {
+  if (block.removed) {
+    let next = setRemovalsEnabled(draft, saved, block.condensedIds, false)
+    if (block.manualIds.length > 0) next = removeManualRemovals(next, block.manualIds)
+    return next
+  }
+  if (block.condensedIds.length > 0) {
+    return setRemovalsEnabled(draft, saved, block.condensedIds, true)
+  }
+  return addDraftManual(draft, block)
+}
+
+/** One row of the virtual transcript list. */
+export type CleanCutTranscriptItem =
+  | CleanCutParagraph
+  | { type: 'block'; key: string; block: CondensedBlock }
+
+/**
+ * The rows the transcript shows. Clean: paragraphs. Condensed: each part's
+ * header, then its paragraphs unless the part is cut, so a left-out hour is
+ * one row, not ten thousand struck words.
+ */
 export function cleanCutTranscriptItems(
-  paragraphs: readonly CleanCutParagraph[]
+  paragraphs: readonly CleanCutParagraph[],
+  blocks: readonly CondensedBlock[] | null
 ): CleanCutTranscriptItem[] {
-  return [...paragraphs]
+  if (!blocks) return [...paragraphs]
+  const items: CleanCutTranscriptItem[] = []
+  let paragraph = 0
+  blocks.forEach((block, index) => {
+    items.push({ type: 'block', key: `block-${block.key}`, block })
+    const last = index === blocks.length - 1
+    while (
+      paragraph < paragraphs.length &&
+      (last || paragraphs[paragraph].startMs < block.endMs - BOUNDARY_TOLERANCE_MS)
+    ) {
+      if (!block.removed) items.push(paragraphs[paragraph])
+      paragraph += 1
+    }
+  })
+  return items
 }
 
 /** Removal id → the row that shows it. */

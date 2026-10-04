@@ -11,6 +11,7 @@ import {
   cleanCutPins,
   cleanCutStats,
   cleanCutTranscriptItems,
+  condensedBlocks,
   cutSkipRanges,
   draftChangeCount,
   effectiveRemovals,
@@ -23,6 +24,7 @@ import {
   removalTone,
   setRemovalsEnabled,
   stepRemoval,
+  toggleCondensedBlock,
   toggleKindGroup,
   toggleRemoval,
   updateEdlPayload,
@@ -375,7 +377,7 @@ describe('keyboard navigation', () => {
     removals: SAVED,
     pins: []
   })
-  const items = cleanCutTranscriptItems(paragraphs)
+  const items = cleanCutTranscriptItems(paragraphs, null)
   const rows = removalRowIndex(items)
   const order = navigableRemovals(effectiveRemovals(SAVED, EMPTY_CLEAN_CUT_DRAFT), rows)
 
@@ -398,5 +400,114 @@ describe('keyboard navigation', () => {
   it('lands a moment before the cut', () => {
     expect(prerollMs({ startMs: 3_700 })).toBe(2_200)
     expect(prerollMs({ startMs: 500 })).toBe(0)
+  })
+})
+
+describe('Condensed parts (S19)', () => {
+  const MIN = 60_000
+  const keeps = [
+    { startMs: 0, endMs: 2 * MIN, title: 'Intro' },
+    { startMs: 10 * MIN, endMs: 14 * MIN, title: 'Deploying to Vercel' }
+  ]
+  const words = [
+    ...speak('Welcome back everyone.', 1_000),
+    ...speak('This part is left out of the cut.', 5 * MIN),
+    ...speak('Now we deploy.', 10 * MIN + 500)
+  ]
+  const saved = [
+    removal('c1', 'condensed', 2 * MIN, 10 * MIN),
+    removal('c2', 'condensed', 14 * MIN, 20 * MIN),
+    removal('f1', 'filler', 10 * MIN + 100, 10 * MIN + 400)
+  ]
+
+  it('tiles the recording into kept and left-out parts', () => {
+    const blocks = condensedBlocks({ durationMs: 20 * MIN, keeps, effective: saved, words })
+    expect(
+      blocks.map((block) => [block.kind, block.title, block.startMs, block.endMs, block.removed])
+    ).toEqual([
+      ['kept', 'Intro', 0, 2 * MIN, false],
+      ['left-out', 'Left out', 2 * MIN, 10 * MIN, true],
+      ['kept', 'Deploying to Vercel', 10 * MIN, 14 * MIN, false],
+      ['left-out', 'Left out', 14 * MIN, 20 * MIN, true]
+    ])
+    expect(blocks[1].condensedIds).toEqual(['c1'])
+    expect(blocks[1].excerpt).toBe('This part is left out of the cut.')
+  })
+
+  it('falls back to the condensed removals when the keeps are missing', () => {
+    const blocks = condensedBlocks({
+      durationMs: 20 * MIN,
+      keeps: undefined,
+      effective: saved,
+      words
+    })
+    expect(blocks.map((block) => [block.kind, block.title])).toEqual([
+      ['kept', 'Part 1'],
+      ['left-out', 'Left out'],
+      ['kept', 'Part 2'],
+      ['left-out', 'Left out']
+    ])
+  })
+
+  it('brings a part back, leaves it out again, and drops or keeps a kept part', () => {
+    const blocks = condensedBlocks({ durationMs: 20 * MIN, keeps, effective: saved, words })
+    const back = toggleCondensedBlock(EMPTY_CLEAN_CUT_DRAFT, saved, blocks[1])
+    expect([...back.toggles]).toEqual([['c1', false]])
+    const backBlocks = condensedBlocks({
+      durationMs: 20 * MIN,
+      keeps,
+      effective: effectiveRemovals(saved, back),
+      words
+    })
+    expect(backBlocks[1].removed).toBe(false)
+    expect(draftChangeCount(toggleCondensedBlock(back, saved, backBlocks[1]))).toBe(0)
+
+    const dropped = toggleCondensedBlock(EMPTY_CLEAN_CUT_DRAFT, saved, blocks[0])
+    expect(dropped.addManual).toEqual([{ key: 'draft:1', startMs: 0, endMs: 2 * MIN }])
+    const droppedBlocks = condensedBlocks({
+      durationMs: 20 * MIN,
+      keeps,
+      effective: effectiveRemovals(saved, dropped),
+      words
+    })
+    expect(droppedBlocks[0]).toMatchObject({ removed: true, manualIds: ['draft:1'] })
+    expect(draftChangeCount(toggleCondensedBlock(dropped, saved, droppedBlocks[0]))).toBe(0)
+
+    // A drop saved earlier is deleted on the server.
+    const savedDrop = [...saved, removal('m1', 'manual', 0, 2 * MIN)]
+    const savedBlocks = condensedBlocks({
+      durationMs: 20 * MIN,
+      keeps,
+      effective: savedDrop,
+      words
+    })
+    const kept = toggleCondensedBlock(EMPTY_CLEAN_CUT_DRAFT, savedDrop, savedBlocks[0])
+    expect([...kept.removeManual]).toEqual(['m1'])
+    expect(updateEdlPayload('job', 1, kept)).toEqual({
+      jobId: 'job',
+      revision: 1,
+      removeManual: ['m1']
+    })
+  })
+
+  it('shows a left-out part as one row and a kept part with its words', () => {
+    const blocks = condensedBlocks({ durationMs: 20 * MIN, keeps, effective: saved, words })
+    const paragraphs = buildCleanCutParagraphs({
+      words,
+      segments: [],
+      removals: saved,
+      pins: [],
+      breaksMs: blocks.map((block) => block.startMs),
+      skipKinds: ['condensed']
+    })
+    const items = cleanCutTranscriptItems(paragraphs, blocks)
+    expect(items.map((item) => (item.type === 'block' ? `[${item.block.title}]` : 'p'))).toEqual([
+      '[Intro]',
+      'p',
+      '[Left out]',
+      '[Deploying to Vercel]',
+      'p',
+      '[Left out]'
+    ])
   })
 })

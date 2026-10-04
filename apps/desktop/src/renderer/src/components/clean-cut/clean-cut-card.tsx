@@ -29,6 +29,8 @@ import {
   SelectValue
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useVideorcAccount } from '@/hooks/use-account'
 import type { CleanCutClient } from '@/hooks/use-clean-cut'
 import { setCleanCutAuto, useCleanCutAuto } from '@/hooks/use-clean-cut-auto'
@@ -39,10 +41,14 @@ import {
   CLEAN_CUT_DESCRIPTION,
   CLEAN_CUT_NO_RECORDINGS,
   CLEAN_CUT_TITLE,
+  CONDENSED_DEFAULT_TARGET_MINUTES,
+  CONDENSED_TARGET_MINUTES,
   cleanCutAutoStatus,
   cleanCutMinutesLeftLabel,
   cleanCutStatusView,
   cleanCutUnlock,
+  condensedEligibility,
+  condensedTargetSeconds,
   formatCutClock,
   latestCleanCutJob,
   recentCleanCutRecordings,
@@ -79,7 +85,7 @@ function errorMessage(error: unknown): string | undefined {
 }
 
 /**
- * The Clean cut section of the Orcle tab (plan 119 S14): the "every
+ * The Clean cut section of the Orcle tab (plan 119 S14, S19): the "every
  * recording" switch, the chosen recording's cut with what to do next, and
  * the monthly allowance. Starting needs the same sign-in, Premium and Cloud
  * AI consent as Orcle Live; consent is asked here, in a dialog that names
@@ -122,6 +128,8 @@ export function CleanCutCard({
       ? [...recordings, selected]
       : recordings
 
+  const [mode, setMode] = useState<CleanCutMode>('clean')
+  const [targetMinutes, setTargetMinutes] = useState<number>(CONDENSED_DEFAULT_TARGET_MINUTES)
   const [ask, setAsk] = useState<CleanCutConsentAsk | null>(null)
   const [pending, setPending] = useState(false)
 
@@ -133,8 +141,10 @@ export function CleanCutCard({
   const autoStatus = cleanCutAutoStatus({ on: auto, unlock, consented: aiConsent, captureActive })
   const minutesLeft = signedIn ? cleanCutMinutesLeftLabel(client.capabilities) : null
 
-  const job = selected ? latestCleanCutJob(client.jobs, selected.id, 'clean') : null
+  const job = selected ? latestCleanCutJob(client.jobs, selected.id, mode) : null
   const status = cleanCutStatusView(job, { captureActive, streaming: sessionIsLive(recording) })
+  const condensed = selected ? condensedEligibility(selected) : null
+  const condensedBlocked = mode === 'condensed' && condensed !== null && !condensed.eligible
   // Until the jobs are listed, a recording that already has its cut would
   // look uncut: starting it again would spend minutes on a second one.
   const cannotStart =
@@ -142,23 +152,40 @@ export function CleanCutCard({
     !client.jobsLoaded ||
     accountLocked ||
     client.capabilities?.available === false ||
-    pending
+    pending ||
+    condensedBlocked
   // Cutting again is local work: it needs the connection, not the cloud.
   const cannotRetry = status.retry === 'render' ? !client.connected || pending : cannotStart
 
-  const startCut = (request: { sessionId: string }): void => {
+  const startCut = (request: {
+    sessionId: string
+    mode: CleanCutMode
+    targetMinutes: number
+  }): void => {
     setPending(true)
     void client
-      .start({ sessionId: request.sessionId, mode: 'clean', consentToUploadAudio: true })
+      .start({
+        sessionId: request.sessionId,
+        mode: request.mode,
+        consentToUploadAudio: true,
+        ...(request.mode === 'condensed'
+          ? { targetDurationSeconds: condensedTargetSeconds(request.targetMinutes) }
+          : {})
+      })
       .catch((error: unknown) =>
-        toast.error("Couldn't start the clean cut", { description: errorMessage(error) })
+        toast.error(
+          request.mode === 'condensed'
+            ? "Couldn't start the condensed cut"
+            : "Couldn't start the clean cut",
+          { description: errorMessage(error) }
+        )
       )
       .finally(() => setPending(false))
   }
 
   const make = (): void => {
     if (!selected) return
-    const request = { sessionId: selected.id }
+    const request = { sessionId: selected.id, mode, targetMinutes }
     if (!aiConsent) {
       setAsk({ kind: 'start', ...request })
       return
@@ -213,7 +240,7 @@ export function CleanCutCard({
     onReview({ sessionId: target.sourceSessionId, mode: target.mode, jobId: target.id })
 
   const unlockAction = unlock?.action ?? null
-  const makeLabel = 'Make a clean cut'
+  const makeLabel = mode === 'condensed' ? 'Make a condensed cut' : 'Make a clean cut'
 
   return (
     <>
@@ -279,12 +306,67 @@ export function CleanCutCard({
                     setPicked(sessionId === recordings[0]?.id ? null : sessionId)
                   }
                 />
+                <Tabs value={mode} onValueChange={(value) => setMode(value as CleanCutMode)}>
+                  <TabsList aria-label="Kind of cut">
+                    <TabsTrigger value="clean">Clean</TabsTrigger>
+                    <TabsTrigger value="condensed">Condensed</TabsTrigger>
+                  </TabsList>
+                </Tabs>
+                {mode === 'condensed' && !condensedBlocked && !status.busy ? (
+                  <div className="flex items-center gap-2" data-slot="clean-cut-target">
+                    <span className="text-xs text-muted-foreground">Length</span>
+                    <ToggleGroup
+                      aria-label="Condensed length"
+                      size="sm"
+                      spacing={1}
+                      type="single"
+                      value={String(targetMinutes)}
+                      onValueChange={(value) => {
+                        if (value) setTargetMinutes(Number(value))
+                      }}
+                    >
+                      {CONDENSED_TARGET_MINUTES.map((minutes) => (
+                        <ToggleGroupItem
+                          key={minutes}
+                          className="h-6 px-2 text-xs tabular-nums"
+                          value={String(minutes)}
+                        >
+                          {minutes} min
+                        </ToggleGroupItem>
+                      ))}
+                    </ToggleGroup>
+                    {job && status.kind !== 'none' && status.kind !== 'cancelled' ? (
+                      <Button
+                        disabled={cannotStart}
+                        size="xs"
+                        type="button"
+                        variant="outline"
+                        onClick={make}
+                      >
+                        Make again
+                      </Button>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
 
-              {status.kind === 'failed' && job ? (
+              {condensedBlocked && condensed && !condensed.eligible ? (
+                <GroupedList>
+                  <ListRow
+                    data-slot="clean-cut-status"
+                    data-status="unavailable"
+                    icon={<ClipIcon aria-hidden className="text-muted-foreground" />}
+                    interactive={false}
+                    title="Not for this recording"
+                    context={<span title={condensed.reason}>{condensed.reason}</span>}
+                  />
+                </GroupedList>
+              ) : status.kind === 'failed' && job ? (
                 <Alert data-slot="clean-cut-status" data-status="failed" variant="destructive">
                   <AlertIcon />
-                  <AlertTitle>The clean cut failed</AlertTitle>
+                  <AlertTitle>
+                    {mode === 'condensed' ? 'The condensed cut failed' : 'The clean cut failed'}
+                  </AlertTitle>
                   <AlertDescription className="text-xs">{status.detail}</AlertDescription>
                   <AlertAction className="flex items-center gap-1.5">
                     {status.canReview ? (
