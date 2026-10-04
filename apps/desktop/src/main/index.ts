@@ -146,7 +146,7 @@ import {
 } from '../shared/comments-snapshot-delta'
 import { normalizeLiveDashboardState, type LiveDashboardState } from '../shared/live-dashboard'
 import { sessionChatTotalsSchema } from '../shared/session-chat-totals'
-import { TWITCH_AUDIENCE_SCOPES } from '../shared/platform-scopes'
+import { connectOptionalScopes, isScopeReconnectPlatform } from '../shared/platform-scopes'
 import {
   migrateStreamManagerFrame,
   STREAM_MANAGER_DEFAULT_SIZE,
@@ -488,6 +488,7 @@ import type {
   PreviewSupervisorState,
   SceneSource,
   SceneTransform,
+  ScopeReconnectPlatform,
   StreamScreen,
   SystemPermissionPane,
   RuntimeInfo,
@@ -14269,10 +14270,25 @@ app.whenReady().then(async () => {
       return commentsCommandBroker.resolve(resolution)
     }
   )
-  // Show who followed (plan 071, S2): main starts the Twitch reconnect with
-  // the follow and sub permissions over its admin socket and opens the
-  // browser. The callback completes it like any connect, and none of this
-  // rides in the main window's eager bundle.
+  // A Stream Manager reconnect (plan 071, S2; plan 140, S5): main starts it
+  // over its admin socket and opens the browser. The callback completes it
+  // like any connect, and none of this rides in the main window's eager
+  // bundle. Main picks the scopes, always the platform's whole optional set,
+  // so a reconnect from here never drops the follow, sub or moderation grant.
+  const startScopeReconnect = async (platform: ScopeReconnectPlatform): Promise<boolean> => {
+    const redirectUri = oauthCallbackRedirectUri(platform)
+    const { authUrl } = await requestBackendAdmin<{ authUrl: string }>(
+      'platformAccounts.oauth.startProvider',
+      {
+        platform,
+        ...(redirectUri ? { redirectUri } : {}),
+        optionalScopes: [...connectOptionalScopes(platform)]
+      }
+    )
+    await openOAuthUrl(authUrl)
+    return true
+  }
+  // Show who followed (plan 071, S2): a Twitch reconnect.
   secureIpcHandle(
     'comments-window:follow-names',
     async (event, value: unknown): Promise<boolean> => {
@@ -14283,17 +14299,24 @@ app.whenReady().then(async () => {
       if ((value as { platform?: unknown }).platform !== 'twitch') {
         throw new Error('Only Twitch needs a reconnect to show who followed.')
       }
-      const redirectUri = oauthCallbackRedirectUri('twitch')
-      const { authUrl } = await requestBackendAdmin<{ authUrl: string }>(
-        'platformAccounts.oauth.startProvider',
-        {
-          platform: 'twitch',
-          ...(redirectUri ? { redirectUri } : {}),
-          optionalScopes: [...TWITCH_AUDIENCE_SCOPES]
-        }
-      )
-      await openOAuthUrl(authUrl)
-      return true
+      return startScopeReconnect('twitch')
+    }
+  )
+  // "Reconnect Twitch to let Orcle remove messages" (plan 140, S5). The
+  // runtime contract already admits only {requestId, platform: twitch | kick};
+  // the checks below keep the handler safe on its own.
+  secureIpcHandle(
+    'comments-window:reconnect-scopes',
+    async (event, value: unknown): Promise<boolean> => {
+      if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+        throw new Error('Only the Chat window can ask to reconnect an account.')
+      }
+      commentsCommandRequestId(value)
+      const platform = (value as { platform?: unknown }).platform
+      if (!isScopeReconnectPlatform(platform)) {
+        throw new Error('Only Twitch and Kick reconnect from the Stream Manager.')
+      }
+      return startScopeReconnect(platform)
     }
   )
   secureIpcHandle('captions-window:open', () => openCaptionsWindow())

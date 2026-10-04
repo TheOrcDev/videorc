@@ -26,6 +26,8 @@ export const AUXILIARY_API_KEYS = {
     'markClipFromCommentsWindow',
     // Show who followed (plan 071, S2): main starts the Twitch reconnect.
     'showFollowNamesFromCommentsWindow',
+    // Reconnect Twitch or Kick so Orcle can remove messages (plan 140, S5).
+    'reconnectScopesFromCommentsWindow',
     'getCommentsWindowState',
     'setCommentsWindowAlwaysOnTop',
     'setCommentsWindowHighlightAnchor',

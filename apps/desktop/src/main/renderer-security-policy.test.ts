@@ -333,6 +333,19 @@ describe('renderer security policy', () => {
     expect(AUXILIARY_API_KEYS.comments).toContain('setCommentsWindowHighlightAnchor')
   })
 
+  it('lets only the Chat window start a scope reconnect, checked by sender (plan 140)', () => {
+    // Same policy as Show who followed: main and the Chat window by role, and
+    // the handler itself refuses any sender but the Chat window.
+    expect(roleCanInvokeChannel('comments', 'comments-window:reconnect-scopes')).toBe(true)
+    expect(roleCanInvokeChannel('notes', 'comments-window:reconnect-scopes')).toBe(false)
+    expect(roleCanInvokeChannel('captions', 'comments-window:reconnect-scopes')).toBe(false)
+    expect(AUXILIARY_API_KEYS.comments).toContain('reconnectScopesFromCommentsWindow')
+    expect(AUXILIARY_API_KEYS.notes).not.toContain('reconnectScopesFromCommentsWindow')
+    expect(AUXILIARY_API_KEYS.captions).not.toContain('reconnectScopesFromCommentsWindow')
+    const handler = source('./index.ts').split("'comments-window:reconnect-scopes',")[1] ?? ''
+    expect(handler.slice(0, 600)).toContain('event.sender.id !== commentsWindow.webContents.id')
+  })
+
   it('exposes an invoke to an auxiliary preload only when the channel policy admits that role', () => {
     const channelByApiMethod = new Map<string, string>(
       Object.entries(electronInvokeApiMethods).map(([channel, method]) => [method, channel])

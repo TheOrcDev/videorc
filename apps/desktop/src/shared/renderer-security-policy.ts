@@ -120,6 +120,7 @@ export const IPC_INVOKE_ROLES = {
   'comments-window:clip-mark': MAIN_AND_COMMENTS,
   'comments-window:clip-mark-result-push': MAIN_ONLY,
   'comments-window:follow-names': MAIN_AND_COMMENTS,
+  'comments-window:reconnect-scopes': MAIN_AND_COMMENTS,
   'captions-window:open': MAIN_ONLY,
   'captions-window:close': MAIN_ONLY,
   'captions-window:toggle': MAIN_ONLY,

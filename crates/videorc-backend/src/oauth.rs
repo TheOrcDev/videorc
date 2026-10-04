@@ -114,13 +114,28 @@ pub struct OAuthStartProviderParams {
 pub const TWITCH_FOLLOWERS_SCOPE: &str = "moderator:read:followers";
 /// Twitch subscriber total and points for the Stream Manager.
 pub const TWITCH_SUBSCRIPTIONS_SCOPE: &str = "channel:read:subscriptions";
+/// What follow alerts and the sub count need. Not every optional Twitch scope:
+/// the moderation scope has nothing to do with Activity.
+pub const TWITCH_AUDIENCE_SCOPES: &[&str] = &[TWITCH_FOLLOWERS_SCOPE, TWITCH_SUBSCRIPTIONS_SCOPE];
+/// Twitch `DELETE /helix/moderation/chat`: remove one chat message (plan 140).
+pub const TWITCH_MODERATION_SCOPE: &str = "moderator:manage:chat_messages";
+/// Kick `DELETE /public/v1/chat/{message_id}`: remove one chat message (plan 140).
+pub const KICK_MODERATION_SCOPE: &str = "moderation:chat_message:manage";
 
 /// Scopes a user can opt into per platform (plan 055, S6). They stay opt-in
 /// because adding a scope to the base set makes every existing connection
-/// reconnect once.
+/// reconnect once. The desktop asks for all of a platform's optional scopes
+/// on every connect and reconnect (`shared/platform-scopes.ts`, whose test
+/// pins this table), and `retained_optional_scopes` keeps the ones an account
+/// already holds, so no path drops a grant.
 pub fn optional_scopes_for(platform: StreamPlatform) -> &'static [&'static str] {
     match platform {
-        StreamPlatform::Twitch => &[TWITCH_FOLLOWERS_SCOPE, TWITCH_SUBSCRIPTIONS_SCOPE],
+        StreamPlatform::Twitch => &[
+            TWITCH_FOLLOWERS_SCOPE,
+            TWITCH_SUBSCRIPTIONS_SCOPE,
+            TWITCH_MODERATION_SCOPE,
+        ],
+        StreamPlatform::Kick => &[KICK_MODERATION_SCOPE],
         _ => &[],
     }
 }
@@ -2354,9 +2369,35 @@ where
     .await
 }
 
+/// The scopes a refreshed token holds. RFC 6749 §5.1 lets a provider omit
+/// `scope` when it equals the scope requested, and a refresh requests the
+/// original grant, so an omitted or empty answer means the account keeps what
+/// it already held. Falling back to the base set instead would silently drop
+/// every optional grant, the moderation scopes included (plan 140, S5). The
+/// base set is the last resort, for an account with no stored scopes at all.
+fn refreshed_token_scopes(
+    returned: Option<Vec<String>>,
+    granted: &[String],
+    base: &[String],
+) -> Vec<String> {
+    returned
+        .filter(|scopes| !scopes.is_empty())
+        .unwrap_or_else(|| {
+            let granted = normalized_scopes(granted);
+            if granted.is_empty() {
+                base.to_vec()
+            } else {
+                granted
+            }
+        })
+}
+
+/// Refresh one platform token. `granted_scopes` is what the account holds now:
+/// the answer when the provider omits `scope` (see `refreshed_token_scopes`).
 pub async fn refresh_provider_token(
     platform: StreamPlatform,
     refresh_token: &str,
+    granted_scopes: &[String],
     client: &reqwest::Client,
 ) -> Result<RefreshedOAuthToken> {
     if refresh_token.trim().is_empty() {
@@ -2404,10 +2445,7 @@ pub async fn refresh_provider_token(
     if token.access_token.trim().is_empty() {
         anyhow::bail!("OAuth refresh response did not include an access token.");
     }
-    let scopes = token
-        .scopes()
-        .filter(|scopes| !scopes.is_empty())
-        .unwrap_or_else(|| config.scopes.clone());
+    let scopes = refreshed_token_scopes(token.scopes(), granted_scopes, &config.scopes);
     let expires_at = token
         .expires_in
         .and_then(|seconds| Utc::now().checked_add_signed(Duration::seconds(seconds)))
@@ -5960,6 +5998,124 @@ mod tests {
             optional_provider_scopes(StreamPlatform::Youtube, &[])
                 .unwrap()
                 .is_empty()
+        );
+
+        // Plan 140, S5: the union every connect asks for is accepted whole,
+        // in order and deduplicated, on Twitch and on Kick.
+        let union = optional_provider_scopes(
+            StreamPlatform::Twitch,
+            &[
+                TWITCH_FOLLOWERS_SCOPE.to_string(),
+                TWITCH_SUBSCRIPTIONS_SCOPE.to_string(),
+                TWITCH_MODERATION_SCOPE.to_string(),
+                TWITCH_MODERATION_SCOPE.to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            union,
+            vec![
+                TWITCH_FOLLOWERS_SCOPE.to_string(),
+                TWITCH_SUBSCRIPTIONS_SCOPE.to_string(),
+                TWITCH_MODERATION_SCOPE.to_string(),
+            ]
+        );
+        assert_eq!(
+            optional_provider_scopes(StreamPlatform::Kick, &[KICK_MODERATION_SCOPE.to_string()])
+                .unwrap(),
+            vec![KICK_MODERATION_SCOPE.to_string()]
+        );
+        // Each platform's moderation scope belongs to that platform only, and
+        // the ban scopes stay out of v1.
+        assert!(
+            optional_provider_scopes(StreamPlatform::Kick, &[TWITCH_MODERATION_SCOPE.to_string()])
+                .is_err()
+        );
+        assert!(
+            optional_provider_scopes(StreamPlatform::Twitch, &[KICK_MODERATION_SCOPE.to_string()])
+                .is_err()
+        );
+        assert!(
+            optional_provider_scopes(StreamPlatform::Kick, &["moderation:ban".to_string()])
+                .is_err()
+        );
+        for platform in [StreamPlatform::Youtube, StreamPlatform::X] {
+            assert!(
+                optional_provider_scopes(platform, &[TWITCH_MODERATION_SCOPE.to_string()]).is_err()
+            );
+            assert!(
+                optional_provider_scopes(platform, &[KICK_MODERATION_SCOPE.to_string()]).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn optional_scope_tables_offer_message_removal_on_twitch_and_kick() {
+        assert_eq!(
+            optional_scopes_for(StreamPlatform::Twitch),
+            &[
+                "moderator:read:followers",
+                "channel:read:subscriptions",
+                "moderator:manage:chat_messages",
+            ]
+        );
+        assert_eq!(
+            optional_scopes_for(StreamPlatform::Kick),
+            &["moderation:chat_message:manage"]
+        );
+        // YouTube's base youtube.force-ssl already covers deletes; X removes
+        // with the Authorize X Live credentials, not an OAuth 2 scope.
+        for platform in [
+            StreamPlatform::Youtube,
+            StreamPlatform::X,
+            StreamPlatform::Tiktok,
+            StreamPlatform::Instagram,
+            StreamPlatform::Custom,
+        ] {
+            assert!(optional_scopes_for(platform).is_empty());
+        }
+        // Optional means optional: never in the base set, so no existing
+        // connection is forced to reconnect.
+        let twitch_base = [
+            "channel:manage:broadcast",
+            "channel:read:stream_key",
+            "user:read:chat",
+            "user:write:chat",
+        ];
+        assert!(!twitch_base.contains(&TWITCH_MODERATION_SCOPE));
+        assert!(!KICK_OAUTH_SCOPES.contains(&KICK_MODERATION_SCOPE));
+    }
+
+    #[test]
+    fn a_refresh_without_a_scope_answer_keeps_the_granted_scopes() {
+        let base = vec!["user:read:chat".to_string()];
+        let granted = vec![
+            "user:read:chat".to_string(),
+            TWITCH_MODERATION_SCOPE.to_string(),
+            TWITCH_FOLLOWERS_SCOPE.to_string(),
+        ];
+        // Omitted or empty: the account keeps what it held, normalized
+        // (sorted, so "moderator:manage:…" sorts before "moderator:read:…").
+        for returned in [None, Some(Vec::new())] {
+            assert_eq!(
+                refreshed_token_scopes(returned, &granted, &base),
+                vec![
+                    TWITCH_MODERATION_SCOPE.to_string(),
+                    TWITCH_FOLLOWERS_SCOPE.to_string(),
+                    "user:read:chat".to_string(),
+                ]
+            );
+        }
+        // The provider's own answer always wins.
+        assert_eq!(
+            refreshed_token_scopes(Some(vec!["user:read:chat".to_string()]), &granted, &base),
+            vec!["user:read:chat".to_string()]
+        );
+        // Nothing stored and nothing returned: the base set, as before.
+        assert_eq!(refreshed_token_scopes(None, &[], &base), base);
+        assert_eq!(
+            refreshed_token_scopes(None, &["  ".to_string()], &base),
+            base
         );
     }
 }

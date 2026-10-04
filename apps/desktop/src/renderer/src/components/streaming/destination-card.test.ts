@@ -10,7 +10,12 @@ import type {
   XNativeLiveCapability
 } from '@/lib/backend'
 
-import { accountStatus, DestinationCard, idleDestinationBadge } from './destination-card'
+import {
+  accountStatus,
+  DestinationCard,
+  idleDestinationBadge,
+  missingPermissionsRow
+} from './destination-card'
 
 // Plan 080 S5/S6: the owner's screenshot showed raw OAuth scopes, three
 // statuses saying the same thing, and a full-width Disconnect. These tests pin
@@ -69,11 +74,18 @@ const TWITCH_SCOPES = [
   'user:read:chat',
   'user:write:chat'
 ]
-const TWITCH_ALL_SCOPES = [
-  ...TWITCH_SCOPES,
-  'moderator:read:followers',
-  'channel:read:subscriptions'
+const TWITCH_AUDIENCE = ['moderator:read:followers', 'channel:read:subscriptions']
+const TWITCH_MODERATION = 'moderator:manage:chat_messages'
+const TWITCH_ALL_SCOPES = [...TWITCH_SCOPES, ...TWITCH_AUDIENCE, TWITCH_MODERATION]
+const KICK_SCOPES = [
+  'user:read',
+  'channel:read',
+  'channel:write',
+  'chat:write',
+  'streamkey:read',
+  'events:subscribe'
 ]
+const KICK_MODERATION = 'moderation:chat_message:manage'
 const YOUTUBE_SCOPE = 'https://www.googleapis.com/auth/youtube.force-ssl'
 
 function render(props: {
@@ -248,7 +260,7 @@ describe('DestinationCard signed-in account', () => {
   it('keeps the Twitch follower permission prompt, in fewer words', () => {
     const markup = render({
       target: target('twitch'),
-      account: account('twitch', { scopes: TWITCH_SCOPES }),
+      account: account('twitch', { scopes: [...TWITCH_SCOPES, TWITCH_MODERATION] }),
       validation: validation('twitch', 'valid')
     })
     expect(markup).toContain('Follow alerts and sub count need one more Twitch permission.')
@@ -289,6 +301,112 @@ describe('DestinationCard signed-in account', () => {
     expect(markup).toContain('Use a stream key instead')
     expect(markup).toContain('X Producer docs')
     expect(markup).not.toContain('Manual RTMP')
+  })
+})
+
+describe('DestinationCard Remove messages permission (plan 140, S5)', () => {
+  const permissions = (markup: string): string => {
+    const start = markup.indexOf('data-slot="destination-permissions"')
+    return start === -1 ? '' : visibleText(markup.slice(start, markup.indexOf('</div>', start)))
+  }
+
+  it('asks a Twitch account without the moderation scope to reconnect, naming Orcle', () => {
+    const markup = render({
+      target: target('twitch'),
+      account: account('twitch', { scopes: [...TWITCH_SCOPES, ...TWITCH_AUDIENCE] }),
+      validation: validation('twitch', 'valid')
+    })
+    const row = permissions(markup)
+    expect(row).toContain('Reconnect Twitch to let Orcle remove messages.')
+    expect(row).not.toContain('Follow alerts')
+    expect(markup).toMatch(/data-slot="destination-permissions"[\s\S]*?>Reconnect<\/button>/)
+    // One row, one button, never the raw scope.
+    expect(markup.match(/data-slot="destination-permissions"/g)).toHaveLength(1)
+    expect(markup).not.toContain(TWITCH_MODERATION)
+  })
+
+  it('folds the follow permission into the same row when both are missing', () => {
+    const markup = render({
+      target: target('twitch'),
+      account: account('twitch', { scopes: TWITCH_SCOPES })
+    })
+    expect(permissions(markup)).toContain(
+      'Reconnect Twitch to let Orcle remove messages. Follow alerts and the sub count need it too.'
+    )
+    expect(markup.match(/data-slot="destination-permissions"/g)).toHaveLength(1)
+  })
+
+  it('asks a Kick account without its moderation scope to reconnect', () => {
+    const markup = render({
+      target: target('kick'),
+      account: account('kick', { scopes: KICK_SCOPES })
+    })
+    expect(permissions(markup)).toContain('Reconnect Kick to let Orcle remove messages.')
+    expect(markup).not.toContain(KICK_MODERATION)
+    expect(
+      render({
+        target: target('kick'),
+        account: account('kick', { scopes: [...KICK_SCOPES, KICK_MODERATION] })
+      })
+    ).not.toContain('destination-permissions')
+  })
+
+  it('stays quiet once the account holds every permission', () => {
+    const markup = render({
+      target: target('twitch'),
+      account: account('twitch', { scopes: TWITCH_ALL_SCOPES }),
+      validation: validation('twitch', 'valid')
+    })
+    expect(markup).not.toContain('destination-permissions')
+    expect(markup).not.toContain('remove messages')
+  })
+
+  it('never shows the row on YouTube or X: neither needs a reconnect for it', () => {
+    expect(
+      render({
+        target: target('youtube'),
+        account: account('youtube', { scopes: [YOUTUBE_SCOPE] })
+      })
+    ).not.toContain('destination-permissions')
+    expect(
+      render({ target: target('x', { label: 'X / Twitter' }), account: account('x') })
+    ).not.toContain('destination-permissions')
+  })
+
+  it('leaves a lost account to its own Reconnect, which asks for everything', () => {
+    const markup = render({
+      target: target('twitch'),
+      account: account('twitch', { scopes: TWITCH_SCOPES, status: 'needs-reconnect' })
+    })
+    expect(markup).toContain('Needs reconnect')
+    expect(markup).not.toContain('destination-permissions')
+    expect(markup).not.toContain('remove messages')
+  })
+
+  it('missingPermissionsRow picks one sentence and one action', () => {
+    const twitch = (scopes: string[]): ReturnType<typeof missingPermissionsRow> =>
+      missingPermissionsRow('twitch', { status: 'connected', scopes })
+    expect(twitch(TWITCH_SCOPES)).toEqual({
+      message:
+        'Reconnect Twitch to let Orcle remove messages. Follow alerts and the sub count need it too.',
+      action: 'Reconnect'
+    })
+    expect(twitch([...TWITCH_SCOPES, ...TWITCH_AUDIENCE])).toEqual({
+      message: 'Reconnect Twitch to let Orcle remove messages.',
+      action: 'Reconnect'
+    })
+    expect(twitch([...TWITCH_SCOPES, TWITCH_MODERATION])).toEqual({
+      message: 'Follow alerts and sub count need one more Twitch permission.',
+      action: 'Reconnect Twitch'
+    })
+    expect(twitch(TWITCH_ALL_SCOPES)).toBeNull()
+    expect(missingPermissionsRow('kick', { status: 'connected', scopes: KICK_SCOPES })).toEqual({
+      message: 'Reconnect Kick to let Orcle remove messages.',
+      action: 'Reconnect'
+    })
+    for (const platform of ['youtube', 'x', 'tiktok', 'instagram', 'custom'] as const) {
+      expect(missingPermissionsRow(platform, { status: 'connected', scopes: [] })).toBeNull()
+    }
   })
 })
 

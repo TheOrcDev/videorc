@@ -2,12 +2,14 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
-import { StreamManager } from '@/components/stream-manager/stream-manager'
+import { StreamManager, type StreamManagerProps } from '@/components/stream-manager/stream-manager'
 import type {
   CohostQuestion,
   CommentHighlightState,
   LiveChatMessage,
-  LiveChatSnapshot
+  LiveChatProviderState,
+  LiveChatSnapshot,
+  StreamPlatform
 } from '@/lib/backend'
 import { EMPTY_COHOST_STATE } from '@/lib/cohost-view'
 import { emptyLiveDashboardState } from '../../../../shared/live-dashboard'
@@ -129,6 +131,67 @@ describe('StreamManager highlight slot (plan 095, S2)', () => {
     expect(markup).not.toContain('data-slot="pane-on-stream"')
     expect(markup).not.toContain('data-highlight-phase="live"')
     expect(markup).not.toMatch(/data-variant="success"[^>]*>On stream</)
+  })
+})
+
+describe('StreamManager Remove messages reconnect (plan 140, S5)', () => {
+  // The backend's per-destination `moderate` state (S4) drives the rows.
+  const provider = (platform: StreamPlatform, moderate: string): LiveChatProviderState =>
+    ({
+      id: `${platform}-destination`,
+      platform,
+      read: 'ready',
+      write: 'ready',
+      state: 'connected',
+      message: '',
+      moderate
+    }) as LiveChatProviderState
+  const missing = [
+    provider('twitch', 'missing-scope'),
+    provider('youtube', 'missing-scope'),
+    provider('kick', 'ready')
+  ]
+  const renderWith = (patch: Partial<StreamManagerProps>): string =>
+    renderToStaticMarkup(
+      createElement(StreamManager, {
+        snapshot: { ...snapshot, providers: missing },
+        dashboard: null,
+        cohostGate: { allowed: true },
+        cohostConsented: true,
+        cohostEnabled: true,
+        cohostState: { ...EMPTY_COHOST_STATE, sessionId: 's1', status: 'listening' },
+        onReconnectScopes: () => undefined,
+        ...patch
+      })
+    )
+
+  it('puts one quiet row in the Orcle pane for each platform missing the permission', () => {
+    const markup = renderWith({})
+    const orcle = markup.slice(markup.indexOf('data-slot="orcle-pane"'))
+    expect(orcle).toContain('data-slot="remove-messages-reconnect"')
+    expect(orcle).toContain('Reconnect Twitch to let Orcle remove messages.')
+    expect(markup.match(/to let Orcle remove messages/g)).toHaveLength(1)
+    expect(markup).not.toContain('Reconnect YouTube')
+    expect(markup).not.toContain('Reconnect Kick')
+  })
+
+  it('stays away in history, without a handler, and when nothing is missing', () => {
+    expect(
+      renderWith({
+        viewMode: {
+          kind: 'history',
+          sessionId: 's1',
+          title: 'Earlier stream',
+          startedAt: '2026-10-02T10:00:00Z'
+        }
+      })
+    ).not.toContain('remove-messages-reconnect')
+    expect(renderWith({ onReconnectScopes: undefined })).not.toContain('remove-messages-reconnect')
+    expect(
+      renderWith({
+        snapshot: { ...snapshot, providers: [provider('twitch', 'ready')] }
+      })
+    ).not.toContain('remove-messages-reconnect')
   })
 })
 

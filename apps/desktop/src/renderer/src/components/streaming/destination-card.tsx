@@ -62,7 +62,13 @@ import { streamKeyPlatformMismatch, streamKeyTailHint } from '@/lib/stream-key-f
 import { metadataPlatformLabel } from '@/lib/stream-metadata-summary'
 import { cn } from '@/lib/utils'
 import { VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
-import { TWITCH_AUDIENCE_SCOPES } from '../../../../shared/platform-scopes'
+import {
+  isScopeReconnectPlatform,
+  platformConnectOptions,
+  removeMessagesReadiness,
+  removeMessagesReconnectCopy,
+  TWITCH_AUDIENCE_SCOPES
+} from '../../../../shared/platform-scopes'
 
 // One destination (plan 080 S5/S6). The owner's brief: "make it good and
 // readable for someone connecting through OAuth or through RTMP". The row
@@ -751,6 +757,40 @@ export function accountStatus(
   return validation?.state === 'valid' || validation?.state === 'refreshed' ? 'ok' : 'unchecked'
 }
 
+/**
+ * The signed-in account's one permission row (plan 140, S5): what a reconnect
+ * would add, or null when nothing is missing. One row and one button, since
+ * every reconnect asks for all of a platform's optional permissions. Removing
+ * messages leads; Twitch's follow alerts ride along when they are missing too.
+ */
+export function missingPermissionsRow(
+  platform: StreamPlatform,
+  account: Pick<PlatformAccount, 'scopes' | 'status'>
+): { message: string; action: string } | null {
+  const audienceMissing =
+    platform === 'twitch' &&
+    !TWITCH_AUDIENCE_SCOPES.every((scope) => account.scopes.includes(scope))
+  if (
+    isScopeReconnectPlatform(platform) &&
+    removeMessagesReadiness(platform, account) === 'missing-scope'
+  ) {
+    const removeMessages = removeMessagesReconnectCopy(platform)
+    return {
+      message: audienceMissing
+        ? `${removeMessages} Follow alerts and the sub count need it too.`
+        : removeMessages,
+      action: 'Reconnect'
+    }
+  }
+  if (audienceMissing) {
+    return {
+      message: 'Follow alerts and sub count need one more Twitch permission.',
+      action: 'Reconnect Twitch'
+    }
+  }
+  return null
+}
+
 function OAuthAccountPanel({
   account,
   credentials,
@@ -791,13 +831,11 @@ function OAuthAccountPanel({
   const [youtubeConsentOpen, setYoutubeConsentOpen] = useState(false)
   const [youtubeConsentAccepted, setYoutubeConsentAccepted] = useState(false)
   const platformName = metadataPlatformLabel(platform)
-  // A first Twitch connection asks for the follow and sub permissions too
-  // (plan 071, S2), so Activity names followers from the first stream.
-  const connect = (): void =>
-    onConnect(
-      platform,
-      platform === 'twitch' ? { optionalScopes: TWITCH_AUDIENCE_SCOPES } : undefined
-    )
+  // Every connect and reconnect from this card (Connect, Reconnect and the
+  // permission row) asks for all of the platform's optional permissions
+  // (plan 071 S2, plan 140 S5): Activity names followers from the first
+  // stream and Orcle can remove messages. A subset would never grant the rest.
+  const connect = (): void => onConnect(platform, platformConnectOptions(platform))
 
   if (!account) {
     const connectDisabled = disabled || credentials?.ready === false
@@ -907,6 +945,8 @@ function OAuthAccountPanel({
 
   const status = accountStatus(account, validation)
   const shared = Boolean(sharedAccountWith)
+  // A lost account already shows Reconnect, and that one asks for everything.
+  const permissions = status === 'reconnect' ? null : missingPermissionsRow(platform, account)
   const youtubeChannelOptions =
     platform === 'youtube' &&
     !youtubeChannels.some((channel) => channel.channelId === account.accountId)
@@ -975,19 +1015,20 @@ function OAuthAccountPanel({
         </p>
       ) : null}
 
-      {platform === 'twitch' &&
-      !TWITCH_AUDIENCE_SCOPES.every((scope) => account.scopes.includes(scope)) ? (
-        <div className="flex items-center justify-between gap-3">
-          <span className="text-xs text-muted-foreground">
-            Follow alerts and sub count need one more Twitch permission.
-          </span>
+      {permissions ? (
+        <div
+          className="flex items-center justify-between gap-3"
+          data-slot="destination-permissions"
+        >
+          <span className="text-xs text-muted-foreground">{permissions.message}</span>
           <Button
+            className="shrink-0"
             disabled={disabled}
             size="sm"
             variant="outline"
-            onClick={() => onConnect('twitch', { optionalScopes: TWITCH_AUDIENCE_SCOPES })}
+            onClick={connect}
           >
-            Reconnect Twitch
+            {permissions.action}
           </Button>
         </div>
       ) : null}

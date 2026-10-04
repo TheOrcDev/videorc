@@ -45,6 +45,7 @@ import type {
   CommentsViewMode,
   LiveChatMessage,
   LiveChatSnapshot,
+  ScopeReconnectPlatform,
   ViewerSample
 } from '@/lib/backend'
 import type { ChatSendFailure } from '@/lib/chat-send'
@@ -84,8 +85,10 @@ import {
 } from '@/lib/stream-manager-layout'
 import { sendablePlatforms } from '@/lib/chat-send'
 import { cn } from '@/lib/utils'
+import { RemoveMessagesReconnectRows } from '@/components/stream-manager/remove-messages-reconnect'
 
 import type { LiveDashboardState } from '../../../../shared/live-dashboard'
+import { removeMessagesReconnectPlatforms } from '../../../../shared/platform-scopes'
 
 /**
  * ⌘J on macOS, Ctrl+J elsewhere; the key handler below accepts both. Electron's
@@ -212,6 +215,9 @@ export interface StreamManagerProps {
   /** Show who followed (plan 071, S2): reconnect Twitch with its follow
    * permission, relayed to the main window. */
   onShowFollowNames?: () => void
+  /** Reconnect Twitch or Kick so Orcle can remove messages (plan 140, S5);
+   * Electron main starts it. Rows show only while live. */
+  onReconnectScopes?: (platform: ScopeReconnectPlatform) => void
   sendPending?: boolean
   sendOperation?: CommentsSendOperation | null
   sendFailures?: ChatSendFailure[]
@@ -271,6 +277,7 @@ export function StreamManager({
   onMarkClip,
   onOpenPreview,
   onShowFollowNames,
+  onReconnectScopes,
   sendPending = false,
   sendOperation = null,
   sendFailures = [],
@@ -581,6 +588,14 @@ export function StreamManager({
           onUpgrade={onCohostUpgrade}
         />
       </div>
+      {/* Plan 140, S5: a quiet row per platform whose account must be
+          reconnected before Orcle can remove messages there. Live only. */}
+      {live && onReconnectScopes ? (
+        <RemoveMessagesReconnectRows
+          platforms={removeMessagesReconnectPlatforms(snapshot.providers)}
+          onReconnect={onReconnectScopes}
+        />
+      ) : null}
       {/* The one-time listening card (plan 068 D3), on air or off, above the
           scroll so it never scrolls away. Same gate as the pane itself:
           Premium, cloud-AI consent, and Orcle on. */}

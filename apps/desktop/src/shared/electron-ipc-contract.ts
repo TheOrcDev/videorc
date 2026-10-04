@@ -40,6 +40,7 @@ import { sessionChatTotalsSchema } from './session-chat-totals'
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { COMMENT_HIGHLIGHT_ANCHORS, DOCK_SLOTS, LAYOUT_PRESET_VALUES } from './backend'
 import { CHAT_AVATAR_MAX_BYTES, chatAvatarBytesWithinCap } from './chat-avatar-bytes'
+import { SCOPE_RECONNECT_PLATFORMS } from './platform-scopes'
 import {
   arraySchema,
   booleanSchema,
@@ -140,6 +141,7 @@ export const electronInvokeApiMethods = {
   'comments-window:clip-mark': 'markClipFromCommentsWindow',
   'comments-window:clip-mark-result-push': 'pushClipMarkResult',
   'comments-window:follow-names': 'showFollowNamesFromCommentsWindow',
+  'comments-window:reconnect-scopes': 'reconnectScopesFromCommentsWindow',
   'comments-window:viewers-push': 'pushViewerSample',
   'comments-window:viewers-get': 'getViewerSample',
   'comments-window:dashboard-push': 'pushDashboard',
@@ -1062,6 +1064,17 @@ const specificRuntimeInvokeContracts = {
   'oauth:open-url': invokeContract(tupleSchema([boundedUrl])),
   'comments-window:set-highlight-anchor': invokeContract(
     tupleSchema([enumSchema(COMMENT_HIGHLIGHT_ANCHORS)])
+  ),
+  // Plan 140, S5: the window names a platform and nothing else. Main picks
+  // the scopes, so a forged command can never widen what is requested.
+  'comments-window:reconnect-scopes': invokeContract(
+    tupleSchema([
+      objectSchema(
+        { requestId: boundedIdentifier, platform: enumSchema(SCOPE_RECONNECT_PLATFORMS) },
+        { allowUnknown: false }
+      )
+    ]),
+    booleanSchema
   ),
   'notes-window:get-document': invokeContract(noArgs, notesDocumentSchema),
   'notes-window:save-document': invokeContract(
