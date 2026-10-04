@@ -1,4 +1,4 @@
-import { ChatIcon, ChevronDownIcon, LockIcon } from '@/components/icons'
+import { ChatIcon, LockIcon } from '@/components/icons'
 import { lazy, Suspense, useState, type ReactElement } from 'react'
 
 import {
@@ -10,12 +10,11 @@ import { CohostSettingsSection } from '@/components/cohost-settings-section'
 import { OrcleEmblem } from '@/components/orcle-emblem'
 import { OrcleReportCard } from '@/components/orcle-report-card'
 import { OrcleVoiceCommands } from '@/components/orcle-voice-commands'
-import { PageHeader } from '@/components/page'
+import { PageStack } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import {
   Dialog,
   DialogContent,
@@ -27,6 +26,7 @@ import {
 import { Field, FieldContent, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Kbd } from '@/components/ui/kbd'
 import { Switch } from '@/components/ui/switch'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useVideorcAccount } from '@/hooks/use-account'
 import { useCleanCut } from '@/hooks/use-clean-cut'
 import {
@@ -39,7 +39,6 @@ import {
   CLOUD_AI_KEEPS,
   CLOUD_AI_USES,
   ORCLE_LIVE_POWERS,
-  ORCLE_TAB_DESCRIPTION,
   orcleLiveView,
   type OrcleLiveStatus
 } from '@/lib/orcle-tab-view'
@@ -48,7 +47,7 @@ import { toast } from '@/lib/toast'
 import { cn } from '@/lib/utils'
 import { openVideorcWebLink } from '@/lib/videorc-web-links'
 import type { CleanCutTabRequest } from '@/lib/clean-cut-events'
-import type { OrcleTabId } from '@/lib/orcle-tabs'
+import { ORCLE_TABS, isOrcleTabId, type OrcleTabId } from '@/lib/orcle-tabs'
 import { sessionIsLive } from '../../../../shared/capture-state'
 
 // The review is the heaviest part of Clean cut (player, transcript editor):
@@ -66,20 +65,36 @@ function reviewTargetOf(request: CleanCutTabRequest | null): CleanCutReviewTarge
   }
 }
 
+/** The tab a deep link lands on, for a page rendered without the shell's tab. */
+function initialTab(
+  reportSessionId: string | null,
+  cleanCutRequest: CleanCutTabRequest | null
+): OrcleTabId {
+  if (cleanCutRequest) return 'clean-cut'
+  if (reportSessionId) return 'reports'
+  return 'live'
+}
+
 /**
- * The Orcle tab (plan 119 S2, S14): Videorc's AI tab, right under Studio.
- * Orcle Live (one switch, consent, settings under Customize), the last
- * stream's report (S3) and Clean cut (S14), whose review takes the whole tab
- * while it is open. The toolbar names the page; nothing sits in its corner.
+ * The Orcle tab (plan 150): Videorc's AI tab, right under Studio, built like
+ * Settings. Five tabs in a segmented strip under the toolbar, each answering
+ * one question: Live (is Orcle on), Chat (how it replies and moderates),
+ * Voice (what you can say), Reports (what happened on your streams) and
+ * Clean cut (edit your recordings). The strip never scrolls away: the shell
+ * turns the pane body's scroll off, and only the region under the strip
+ * scrolls. The selected tab lives in app-shell, so links open a named tab and
+ * Orcle reopens on the one used last.
  *
- * `reportSessionId` is the Library's "Orcle report" ask: the report opens on
+ * `reportSessionId` is the Library's "Orcle report" ask: Reports opens on
  * that session. Without it the report follows the last stream.
  * `cleanCutRequest` is the Library's "Clean cut" (select that recording) or
- * the ready toast's Review (open that cut's review).
+ * the ready toast's Review (open that cut's review, inside Clean cut).
  */
 export function OrcleTab({
   reportSessionId = null,
   cleanCutRequest = null,
+  tab,
+  onTabChange,
   onOpenLibrarySession
 }: {
   reportSessionId?: string | null
@@ -88,7 +103,25 @@ export function OrcleTab({
   onTabChange?: (tab: OrcleTabId) => void
   onOpenLibrarySession?: (sessionId: string) => void
 }): ReactElement {
+  // The shell owns the tab; a page rendered on its own (tests) keeps its own.
+  const [ownTab, setOwnTab] = useState<OrcleTabId>(() =>
+    initialTab(reportSessionId, cleanCutRequest)
+  )
+  const current = tab ?? ownTab
+  const selectTab = (next: OrcleTabId): void => {
+    if (onTabChange) onTabChange(next)
+    else setOwnTab(next)
+  }
   const [reportSession, setReportSession] = useState<string | null>(reportSessionId)
+  // A new report ask while the page is open opens it, like a fresh visit.
+  const [appliedReport, setAppliedReport] = useState<string | null>(reportSessionId)
+  if (reportSessionId !== appliedReport) {
+    setAppliedReport(reportSessionId)
+    if (reportSessionId) {
+      setReportSession(reportSessionId)
+      setOwnTab('reports')
+    }
+  }
   const cleanCut = useCleanCut()
   const [review, setReview] = useState<CleanCutReviewTarget | null>(() =>
     reviewTargetOf(cleanCutRequest)
@@ -99,6 +132,7 @@ export function OrcleTab({
   if (cleanCutRequest && cleanCutRequest.nonce !== appliedRequest) {
     setAppliedRequest(cleanCutRequest.nonce)
     setReview(reviewTargetOf(cleanCutRequest))
+    setOwnTab('clean-cut')
   }
   const focus: CleanCutFocus | null =
     cleanCutRequest && !cleanCutRequest.review
@@ -108,33 +142,74 @@ export function OrcleTab({
 
   return (
     <>
-      {review ? (
-        <Suspense fallback={<CleanCutReviewFallback />}>
-          <CleanCutReview
-            client={cleanCut}
-            target={review}
-            onClose={() => setReview(null)}
-            onOpenLibrarySession={openLibrarySession}
-          />
-        </Suspense>
-      ) : (
-        <div className="flex flex-col" data-slot="orcle-tab">
-          <PageHeader
-            description={ORCLE_TAB_DESCRIPTION}
-            media={<OrcleEmblem size="md" />}
-            title="Orcle"
-          />
-          <OrcleLiveSection />
-          <OrcleReportCard sessionId={reportSession} onSessionChange={setReportSession} />
-          <CleanCutCard
-            client={cleanCut}
-            focus={focus}
-            onOpenLibrarySession={openLibrarySession}
-            onReview={setReview}
-          />
-          <OrcleCustomize />
+      <Tabs
+        className="min-h-0 flex-1 gap-0"
+        data-slot="orcle-tab"
+        value={current}
+        onValueChange={(value) => {
+          if (isOrcleTabId(value)) selectTab(value)
+        }}
+      >
+        {/* Settings' strip, verbatim; the toolbar carries only the title. */}
+        <div className="shrink-0 border-b border-border px-gutter py-2">
+          <TabsList aria-label="Orcle sections">
+            {ORCLE_TABS.map(({ id, label }) => (
+              <TabsTrigger key={id} data-videorc-orcle-tab={id} value={id}>
+                {label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
         </div>
-      )}
+        {/* Keyed by tab, so every tab change starts the new tab at the top. */}
+        <div
+          key={current}
+          className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain"
+          data-slot="orcle-scroll"
+        >
+          <TabsContent className="flex flex-col" value="live">
+            <PageStack>
+              <OrcleLiveSection />
+              <CloudAiSection />
+            </PageStack>
+          </TabsContent>
+          <TabsContent className="flex flex-col" value="chat">
+            <PageStack>
+              <CohostSettingsSection />
+            </PageStack>
+          </TabsContent>
+          <TabsContent className="flex flex-col" value="voice">
+            <PageStack>
+              <OrcleVoiceCommands />
+            </PageStack>
+          </TabsContent>
+          <TabsContent className="flex flex-col" value="reports">
+            <PageStack>
+              <OrcleReportCard sessionId={reportSession} onSessionChange={setReportSession} />
+            </PageStack>
+          </TabsContent>
+          <TabsContent className="flex flex-col" value="clean-cut">
+            {review ? (
+              <Suspense fallback={<CleanCutReviewFallback />}>
+                <CleanCutReview
+                  client={cleanCut}
+                  target={review}
+                  onClose={() => setReview(null)}
+                  onOpenLibrarySession={openLibrarySession}
+                />
+              </Suspense>
+            ) : (
+              <PageStack>
+                <CleanCutCard
+                  client={cleanCut}
+                  focus={focus}
+                  onOpenLibrarySession={openLibrarySession}
+                  onReview={setReview}
+                />
+              </PageStack>
+            )}
+          </TabsContent>
+        </div>
+      </Tabs>
       <OrcleConsentDialog />
     </>
   )
@@ -251,8 +326,6 @@ function OrcleLiveSection(): ReactElement {
           </li>
         ))}
       </ul>
-
-      <OrcleVoiceCommands />
     </PanelSection>
   )
 }
@@ -285,31 +358,6 @@ function OrcleLiveStatusLine({ status }: { status: OrcleLiveStatus }): ReactElem
         </>
       ) : null}
     </p>
-  )
-}
-
-/** Every Orcle setting, collapsed until asked for (plan 119 decision 4). */
-function OrcleCustomize(): ReactElement {
-  const [open, setOpen] = useState(false)
-  return (
-    <Collapsible
-      className="border-b border-border"
-      data-slot="orcle-customize"
-      open={open}
-      onOpenChange={setOpen}
-    >
-      <CollapsibleTrigger className="group flex w-full items-center gap-2 px-gutter py-3 text-left text-[13px] font-semibold text-foreground hover:bg-accent">
-        <ChevronDownIcon className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
-        <span className="flex-1">Customize</span>
-        <span className="truncate text-xs font-normal text-muted-foreground">
-          Cloud AI, listening, replies and rules
-        </span>
-      </CollapsibleTrigger>
-      <CollapsibleContent>
-        <CloudAiSection />
-        <CohostSettingsSection />
-      </CollapsibleContent>
-    </Collapsible>
   )
 }
 
