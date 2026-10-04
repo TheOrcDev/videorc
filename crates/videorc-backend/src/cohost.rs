@@ -25,6 +25,7 @@ use tokio::task::JoinHandle;
 
 use crate::captions::{CaptionUpdateKind, CaptionsUpdate, ListenStop};
 use crate::cohost_ack::{AuthorLedger, DeadAirLane, GreetedHow, dead_air_due, dead_air_text};
+use crate::cohost_command::{CommandSession, DetectContext, DetectedCommand};
 use crate::comment_highlight::{CommentHighlightPhase, CommentHighlightState};
 use crate::live_chat::{LiveChatEventType, LiveChatMessage};
 use crate::protocol::{
@@ -4325,19 +4326,103 @@ pub(crate) fn note_transcript_final(
         return;
     }
     note_caption_final(state, update);
+    let heard = detect_voice_command(state, update, &final_);
     if let Ok(mut speech) = state.cohost_recent_speech.lock() {
         speech.push(final_);
+    }
+    if let Some((session, command)) = heard {
+        dispatch_detected_command(state.clone(), session, command);
+    }
+}
+
+/// Plan 140 S2: the pure command detector reads the final while an Orcle
+/// session is armed (`arm_command_detector`). Std mutex, no await: the
+/// caption task observes and returns, like the buffers above.
+fn detect_voice_command(
+    state: &AppState,
+    update: &CaptionsUpdate,
+    final_: &RecentSpeechFinal,
+) -> Option<(CommandSession, DetectedCommand)> {
+    let mut commands = state.cohost_commands.lock().ok()?;
+    let session = commands.session.clone()?;
+    // S3: wire `require_wake_word` to the `wakeWordRequired` setting, and the
+    // awaiting flags to the open removal card and chooser.
+    let context = DetectContext {
+        require_wake_word: false,
+        awaiting_answer: false,
+        awaiting_choice: false,
+    };
+    let command = commands.detector.observe_final(
+        &update.session_client_id,
+        update.seq,
+        &final_.text,
+        final_.at,
+        &context,
+    )?;
+    Some((session, command))
+}
+
+/// Plan 140 S2: a detected command leaves the caption path at once and runs
+/// on its own task, never inline in `note_transcript_final` and never on the
+/// tick pass, which can wait 12 s. S3 replaces the body with the command
+/// engine: check the session generation under the engine lock, resolve the
+/// target, then highlight, clear, or hand a removal to chat moderation. Until
+/// then the command is only logged.
+pub(crate) fn dispatch_detected_command(
+    state: AppState,
+    session: CommandSession,
+    command: DetectedCommand,
+) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        tracing::warn!(
+            "Heard an Orcle command ({}) but no runtime is available to run it.",
+            command.kind.label()
+        );
+        return;
+    };
+    handle.spawn(async move {
+        // S3: resolve and act here.
+        let _state = state;
+        tracing::info!(
+            session_id = %session.session_id,
+            generation = session.generation,
+            kind = %command.kind.label(),
+            target = %command.target.describe(),
+            question = command.question,
+            reason = command.reason.as_deref().unwrap_or("none"),
+            wake_word = command.wake_word,
+            "Orcle heard a command: '{}'.",
+            command.heard
+        );
+    });
+}
+
+/// Plan 140 S2: voice commands are heard for this engine session only. Armed
+/// when a session starts, or hears again after sign-in; `clear_transcript`
+/// disarms it on every stop and at sign-out.
+fn arm_command_detector(state: &AppState, session_id: &str, generation: u64) {
+    if let Ok(mut commands) = state.cohost_commands.lock() {
+        commands.detector.clear();
+        commands.session = Some(CommandSession {
+            session_id: session_id.to_string(),
+            generation,
+        });
     }
 }
 
 /// A session boundary forgets what was said: the next session's spotlight
-/// never sees the previous stream's words.
+/// never sees the previous stream's words, and no half-said voice command
+/// completes across it.
 fn clear_transcript(state: &AppState) {
     if let Ok(mut window) = state.cohost_transcript.lock() {
         window.clear();
     }
     if let Ok(mut speech) = state.cohost_recent_speech.lock() {
         speech.clear();
+    }
+    if let Ok(mut commands) = state.cohost_commands.lock() {
+        commands.detector.clear();
+        commands.session = None;
     }
 }
 
@@ -4438,14 +4523,18 @@ pub(crate) async fn resume_listen_after_sign_in(state: &AppState) {
             .map(|session| {
                 (
                     session.session_id.clone(),
+                    session.generation,
                     session.consent,
                     engine.settings.listen,
                 )
             })
     };
-    let Some((session_id, consent, listen)) = running else {
+    let Some((session_id, generation, consent, listen)) = running else {
         return;
     };
+    // Sign-out disarmed voice commands with the transcript; they resume with
+    // listening (plan 140 S2).
+    arm_command_detector(state, &session_id, generation);
     if consent {
         crate::captions::grant_orcle_speech(state).await;
     }
@@ -4632,6 +4721,7 @@ where
         crate::captions::retire_orcle_speech(state).await;
         crate::captions::stop_listen(state).await;
         clear_transcript(state);
+        arm_command_detector(state, &session_id, generation);
         if consent {
             crate::captions::grant_orcle_speech(state).await;
         }
@@ -4661,6 +4751,7 @@ where
     crate::captions::retire_orcle_speech(state).await;
     crate::captions::stop_listen(state).await;
     clear_transcript(state);
+    arm_command_detector(state, &session_id, generation);
     if consent {
         crate::captions::grant_orcle_speech(state).await;
     }

@@ -21,6 +21,7 @@ mod clean_cut;
 mod clip_marks;
 mod cohost;
 mod cohost_ack;
+mod cohost_command;
 mod color;
 mod comment_highlight;
 mod compositor;

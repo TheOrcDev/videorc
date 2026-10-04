@@ -234,7 +234,7 @@ const STOP_WORDS: &[&str] = &[
     "yt",
 ];
 
-fn is_stop_word(word: &str) -> bool {
+pub(crate) fn is_stop_word(word: &str) -> bool {
     STOP_WORDS.binary_search(&word).is_ok()
 }
 
@@ -407,7 +407,7 @@ pub(crate) fn name_match_forms(display_name: &str) -> NameForms {
 /// What a name form is compared against: every word that is not a stop word,
 /// and each pair of neighbours glued together (speech splits "DarkKnight"),
 /// unless both are stop words ("the stream" is never "TheStream").
-fn match_candidates(words: &[String]) -> Vec<String> {
+pub(crate) fn match_candidates(words: &[String]) -> Vec<String> {
     let mut candidates: Vec<String> = words
         .iter()
         .filter(|word| !is_stop_word(word))
@@ -453,8 +453,8 @@ fn greeting_cue_near(words: &[String], at: usize) -> bool {
 
 /// Whether `words` (the name tokens of what was said or typed) name a viewer
 /// with `forms`; `candidates` is `match_candidates(words)`, computed once per
-/// text.
-fn name_forms_match(words: &[String], candidates: &[String], forms: &NameForms) -> bool {
+/// text. Plan 140 S3 resolves spoken command names with the same matchers.
+pub(crate) fn name_forms_match(words: &[String], candidates: &[String], forms: &NameForms) -> bool {
     forms_match(candidates, &forms.plain)
         || forms.cued.iter().any(|form| {
             words
