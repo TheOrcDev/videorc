@@ -12357,9 +12357,20 @@ async fn refresh_account_entitlements(state: &AppState) {
     // Phase 3: compare+hydrate+persist atomically with sign-in/sign-out. A
     // newer refresh generation also wins for the same token/account.
     let transition = state.account_auth_transition.lock().await;
+    // Plan 140 S8: the same read turns Orcle's cloud command parser on or
+    // off (applied below, outside this lock). Signed out reads as off; a
+    // failed read keeps the last answer.
+    let mut command_parser = None;
     let changed = match current_account_entitlement_refresh_identity(state) {
         Ok(current) => {
             commit_account_entitlement_refresh_if_current(&prepared.identity, &current, || {
+                command_parser = match &prepared.outcome {
+                    PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some(false),
+                    PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
+                        Some(capabilities.features.cohost_command_enabled)
+                    }
+                    PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
+                };
                 apply_prepared_account_entitlement_refresh(prepared.outcome)
             })
             .unwrap_or(false)
@@ -12376,6 +12387,9 @@ async fn refresh_account_entitlements(state: &AppState) {
         publish_entitlements_updated(state);
     }
     drop(transition);
+    if let Some(enabled) = command_parser {
+        cohost::set_command_parser_capability(state, enabled).await;
+    }
 }
 
 /// Every `entitlements.updated` goes out through here (plan 140 S1): publish

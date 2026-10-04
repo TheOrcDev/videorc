@@ -3327,6 +3327,8 @@ export interface AiCapabilities {
     /** Clean cut kill switch off and its provider configured; older servers omit it. */
     cleanCutEnabled?: boolean
     cloudAiEnabled: boolean
+    /** The Orcle command parser route is on (plan 140 S8); older servers omit it. */
+    cohostCommandEnabled?: boolean
     gatewayConfigured: boolean
     modelTestingEnabled: boolean
     multipartAudioJobsEnabled: boolean
