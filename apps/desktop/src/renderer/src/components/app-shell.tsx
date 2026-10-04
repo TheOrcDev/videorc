@@ -25,6 +25,12 @@ import {
 import { StudioMicVisualProvider } from '@/hooks/use-studio-mic-visual'
 import { useWhatsNew } from '@/hooks/use-whats-new'
 import { ONBOARDING_DISMISSED_VALUE, STORAGE_KEYS } from '@/lib/capture'
+import {
+  OPEN_CLEAN_CUT_EVENT,
+  readCleanCutOpenRequest,
+  type CleanCutOpenRequest,
+  type CleanCutTabRequest
+} from '@/lib/clean-cut-events'
 import { displayKeyGlyph } from '@/lib/platform'
 import {
   isSettingsTabId,
@@ -170,13 +176,35 @@ export function AppShell(): ReactElement {
   // 119 S3). Any other way to a page drops that ask, so the next visit to
   // Orcle shows the last stream again.
   const [orcleReportSessionId, setOrcleReportSessionId] = useState<string | null>(null)
+  // Clean cut (plan 119 S14): Library's "Clean cut" selects a recording in
+  // the Orcle tab, and the ready toast opens a cut's review there. The card's
+  // "Open in Library" focuses the cut copy's row. Like the report ask, any
+  // other way to a page drops them.
+  const [cleanCutRequest, setCleanCutRequest] = useState<CleanCutTabRequest | null>(null)
+  const [libraryFocusSessionId, setLibraryFocusSessionId] = useState<string | null>(null)
+  const cleanCutNonceRef = useRef(0)
   const setActive = useCallback((tab: WorkspaceTab) => {
     setOrcleReportSessionId(null)
+    setCleanCutRequest(null)
+    setLibraryFocusSessionId(null)
     setActiveTab(tab)
   }, [])
   const openOrcleReport = useCallback((sessionId: string) => {
+    setCleanCutRequest(null)
     setOrcleReportSessionId(sessionId)
     setActiveTab('ai')
+  }, [])
+  const openCleanCut = useCallback((request: CleanCutOpenRequest) => {
+    cleanCutNonceRef.current += 1
+    setOrcleReportSessionId(null)
+    setCleanCutRequest({ ...request, nonce: cleanCutNonceRef.current })
+    setActiveTab('ai')
+  }, [])
+  const openLibrarySession = useCallback((sessionId: string) => {
+    setOrcleReportSessionId(null)
+    setCleanCutRequest(null)
+    setLibraryFocusSessionId(sessionId)
+    setActiveTab('library')
   }, [])
   const [commandOpen, setCommandOpen] = useState(false)
   const [onboardingOpen, setOnboardingOpen] = useState(false)
@@ -325,6 +353,15 @@ export function AppShell(): ReactElement {
     return () => window.removeEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
   }, [openSettings, setActive])
 
+  useEffect(() => {
+    const onOpenCleanCut = (event: Event): void => {
+      const request = readCleanCutOpenRequest((event as CustomEvent<unknown>).detail)
+      if (request) openCleanCut(request)
+    }
+    window.addEventListener(OPEN_CLEAN_CUT_EVENT, onOpenCleanCut)
+    return () => window.removeEventListener(OPEN_CLEAN_CUT_EVENT, onOpenCleanCut)
+  }, [openCleanCut])
+
   const live = isActiveRecordingState(recordingState)
   const statusTone: StatusDotTone = live
     ? 'error'
@@ -387,8 +424,20 @@ export function AppShell(): ReactElement {
                   {active === 'live' ? <StreamingTab /> : null}
                   {active === 'captions' ? <CaptionsTab /> : null}
                   {active === 'recording' ? <RecordingTab /> : null}
-                  {active === 'library' ? <LibraryTab onOpenOrcleReport={openOrcleReport} /> : null}
-                  {active === 'ai' ? <OrcleTab reportSessionId={orcleReportSessionId} /> : null}
+                  {active === 'library' ? (
+                    <LibraryTab
+                      focusSessionId={libraryFocusSessionId}
+                      onOpenCleanCut={(sessionId) => openCleanCut({ sessionId })}
+                      onOpenOrcleReport={openOrcleReport}
+                    />
+                  ) : null}
+                  {active === 'ai' ? (
+                    <OrcleTab
+                      cleanCutRequest={cleanCutRequest}
+                      reportSessionId={orcleReportSessionId}
+                      onOpenLibrarySession={openLibrarySession}
+                    />
+                  ) : null}
                   {active === 'diagnostics' ? <DiagnosticsTab /> : null}
                   {active === 'settings' ? (
                     <SettingsTab

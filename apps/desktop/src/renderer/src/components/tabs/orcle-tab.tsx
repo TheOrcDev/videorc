@@ -1,6 +1,7 @@
 import { ChatIcon, ChevronDownIcon, LockIcon } from '@/components/icons'
 import { useState, type ReactElement } from 'react'
 
+import { CleanCutCard, type CleanCutFocus } from '@/components/clean-cut/clean-cut-card'
 import { CohostSettingsSection } from '@/components/cohost-settings-section'
 import { OrcleReportCard } from '@/components/orcle-report-card'
 import { PageHeader } from '@/components/page'
@@ -21,6 +22,7 @@ import { Field, FieldContent, FieldGroup, FieldLabel } from '@/components/ui/fie
 import { Kbd } from '@/components/ui/kbd'
 import { Switch } from '@/components/ui/switch'
 import { useVideorcAccount } from '@/hooks/use-account'
+import { useCleanCut } from '@/hooks/use-clean-cut'
 import {
   useStudioChat,
   useStudioCore,
@@ -39,31 +41,47 @@ import { displayKeyGlyph } from '@/lib/platform'
 import { toast } from '@/lib/toast'
 import { cn } from '@/lib/utils'
 import { openVideorcWebLink } from '@/lib/videorc-web-links'
+import type { CleanCutTabRequest } from '@/lib/clean-cut-events'
 import { sessionIsLive } from '../../../../shared/capture-state'
 
 /**
- * The Orcle tab (plan 119 S2): Videorc's AI tab, right under Studio. Phase 1
- * holds Orcle Live (one switch, consent, settings under Customize) and the
- * last stream's report (S3); Clean cut (phase 2) joins it here. The toolbar
- * names the page; nothing sits in its corner.
+ * The Orcle tab (plan 119 S2, S14): Videorc's AI tab, right under Studio.
+ * Orcle Live (one switch, consent, settings under Customize), the last
+ * stream's report (S3) and Clean cut (S14). The toolbar names the page;
+ * nothing sits in its corner.
  *
  * `reportSessionId` is the Library's "Orcle report" ask: the report opens on
  * that session. Without it the report follows the last stream.
+ * `cleanCutRequest` is the Library's "Clean cut": the card selects that
+ * recording.
  */
 export function OrcleTab({
-  reportSessionId = null
+  reportSessionId = null,
+  cleanCutRequest = null,
+  onOpenLibrarySession
 }: {
   reportSessionId?: string | null
+  cleanCutRequest?: CleanCutTabRequest | null
+  onOpenLibrarySession?: (sessionId: string) => void
 }): ReactElement {
   const [reportSession, setReportSession] = useState<string | null>(reportSessionId)
+  const cleanCut = useCleanCut()
+  const focus: CleanCutFocus | null = cleanCutRequest
+    ? { sessionId: cleanCutRequest.sessionId, nonce: cleanCutRequest.nonce }
+    : null
+  const openLibrarySession = onOpenLibrarySession ?? (() => undefined)
+
   return (
-    <div className="flex flex-col" data-slot="orcle-tab">
-      <PageHeader description={ORCLE_TAB_DESCRIPTION} title="Orcle" />
-      <OrcleLiveSection />
-      <OrcleReportCard sessionId={reportSession} onSessionChange={setReportSession} />
-      <OrcleCustomize />
+    <>
+      <div className="flex flex-col" data-slot="orcle-tab">
+        <PageHeader description={ORCLE_TAB_DESCRIPTION} title="Orcle" />
+        <OrcleLiveSection />
+        <OrcleReportCard sessionId={reportSession} onSessionChange={setReportSession} />
+        <CleanCutCard client={cleanCut} focus={focus} onOpenLibrarySession={openLibrarySession} />
+        <OrcleCustomize />
+      </div>
       <OrcleConsentDialog />
-    </div>
+    </>
   )
 }
 
