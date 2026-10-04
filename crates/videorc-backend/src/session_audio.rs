@@ -2466,6 +2466,270 @@ struct MixDeliveryObservation {
     late_100ms_frames: u64,
 }
 
+// Opt-in source-clock evidence. Caps include boundary rows and both roles;
+// no PCM or arbitrary strings are retained. Additional fixed bookkeeping is
+// two rolling excluded delivery candidates and one excluded writer candidate,
+// plus the existing observation first/last/window snapshots; the output caps
+// are not a claim about total internal storage. Vector insertion is observation-lock
+// order only: role-local packet ordinals and writer ordinals are the owners.
+#[cfg(test)]
+const MIX_TRACE_RECORD_CAP: usize = 256;
+#[cfg(test)]
+const MIX_TRACE_ZERO_CAP: usize = 64;
+#[cfg(test)]
+const MIX_TRACE_JSON_LIMIT: usize = 2 * 1024 * 1024;
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum MixTracePosition {
+    Predecessor,
+    Intersecting,
+    Successor,
+}
+
+#[cfg(test)]
+impl MixTracePosition {
+    fn value(self) -> &'static str {
+        match self {
+            Self::Predecessor => "predecessor",
+            Self::Intersecting => "intersecting",
+            Self::Successor => "successor",
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct MixDeliveryRecord {
+    role: usize,
+    ordinal: u64,
+    intended_end_frame: u64,
+    frames: u64,
+    device_timestamp_us: u64,
+    post_send_us: Option<u64>,
+    send_lateness_us: Option<u64>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct MixWriteRecord {
+    ordinal: u64,
+    preceding_after: Option<MixCounterSnapshot>,
+    before: MixCounterSnapshot,
+    after: MixCounterSnapshot,
+    publication_checkpoint_us: Option<u64>,
+    stale_from_frame: Option<u64>,
+}
+
+#[cfg(test)]
+struct MixWindowTrace {
+    window: (u64, u64),
+    deliveries: Vec<(MixTracePosition, MixDeliveryRecord)>,
+    writes: Vec<(MixTracePosition, MixWriteRecord)>,
+    delivery_predecessor: [Option<MixDeliveryRecord>; 2],
+    delivery_started: [bool; 2],
+    delivery_predecessor_observed: [Option<bool>; 2],
+    delivery_successor: [bool; 2],
+    write_predecessor: Option<MixWriteRecord>,
+    write_started: bool,
+    write_predecessor_observed: Option<bool>,
+    write_successor: bool,
+    eligible_deliveries: u64,
+    omitted_deliveries: u64,
+    excluded_deliveries: u64,
+    eligible_writes: u64,
+    omitted_writes: u64,
+    excluded_writes: u64,
+}
+
+#[cfg(test)]
+impl MixWindowTrace {
+    fn new(from: u64, to: u64) -> Self {
+        assert!(from < to);
+        Self {
+            window: (from, to),
+            deliveries: Vec::with_capacity(MIX_TRACE_RECORD_CAP),
+            writes: Vec::with_capacity(MIX_TRACE_RECORD_CAP),
+            delivery_predecessor: [None; 2],
+            delivery_started: [false; 2],
+            delivery_predecessor_observed: [None; 2],
+            delivery_successor: [false; 2],
+            write_predecessor: None,
+            write_started: false,
+            write_predecessor_observed: None,
+            write_successor: false,
+            eligible_deliveries: 0,
+            omitted_deliveries: 0,
+            excluded_deliveries: 0,
+            eligible_writes: 0,
+            omitted_writes: 0,
+            excluded_writes: 0,
+        }
+    }
+
+    fn retain_delivery(&mut self, position: MixTracePosition, record: MixDeliveryRecord) {
+        self.eligible_deliveries += 1;
+        if self.deliveries.len() < MIX_TRACE_RECORD_CAP {
+            self.deliveries.push((position, record));
+        } else {
+            self.omitted_deliveries += 1;
+        }
+    }
+
+    fn delivered(&mut self, record: MixDeliveryRecord) {
+        let role = record.role;
+        let start = record.intended_end_frame.saturating_sub(record.frames);
+        let (from, to) = self.window;
+        if record.intended_end_frame <= from {
+            self.excluded_deliveries += 1;
+            if !self.delivery_started[role] {
+                self.delivery_predecessor[role] = Some(record);
+            }
+            return;
+        }
+        if !self.delivery_started[role] {
+            self.delivery_started[role] = true;
+            self.delivery_predecessor_observed[role] =
+                Some(self.delivery_predecessor[role].is_some());
+            if let Some(preceding) = self.delivery_predecessor[role].take() {
+                self.excluded_deliveries -= 1;
+                self.retain_delivery(MixTracePosition::Predecessor, preceding);
+            }
+        }
+        if start < to {
+            self.retain_delivery(MixTracePosition::Intersecting, record);
+        } else if !self.delivery_successor[role] {
+            self.delivery_successor[role] = true;
+            self.retain_delivery(MixTracePosition::Successor, record);
+        } else {
+            self.excluded_deliveries += 1;
+        }
+    }
+
+    fn retain_write(&mut self, position: MixTracePosition, record: MixWriteRecord) {
+        self.eligible_writes += 1;
+        if self.writes.len() < MIX_TRACE_RECORD_CAP {
+            self.writes.push((position, record));
+        } else {
+            self.omitted_writes += 1;
+        }
+    }
+
+    fn completed(&mut self, record: MixWriteRecord) {
+        let (from, to) = self.window;
+        if record.after.cursor <= from {
+            self.excluded_writes += 1;
+            if !self.write_started {
+                self.write_predecessor = Some(record);
+            }
+            return;
+        }
+        if !self.write_started {
+            self.write_started = true;
+            self.write_predecessor_observed = Some(self.write_predecessor.is_some());
+            if let Some(preceding) = self.write_predecessor.take() {
+                self.excluded_writes -= 1;
+                self.retain_write(MixTracePosition::Predecessor, preceding);
+            }
+        }
+        if record.before.cursor < to {
+            self.retain_write(MixTracePosition::Intersecting, record);
+        } else if !self.write_successor {
+            self.write_successor = true;
+            self.retain_write(MixTracePosition::Successor, record);
+        } else {
+            self.excluded_writes += 1;
+        }
+    }
+
+    // Called only after bus.finish(), borrowing the original finished PCM.
+    // Missing samples are never filled with zeros. Runs close at the available
+    // window end, including a run extending to the requested end.
+    fn zero_ranges(&self, samples: &[f32]) -> serde_json::Value {
+        let (from, to) = self.window;
+        let available = samples.len() as u64 / 2;
+        let end = to.min(available);
+        let mut ranges = Vec::with_capacity(MIX_TRACE_ZERO_CAP);
+        let mut omitted = 0_u64;
+        let mut eligible = 0_u64;
+        for channel in 0..2 {
+            let mut start = None;
+            for frame in from.min(available)..end {
+                if samples[frame as usize * 2 + channel] == 0.0 {
+                    start.get_or_insert(frame);
+                } else if let Some(start) = start.take() {
+                    eligible += 1;
+                    if ranges.len() < MIX_TRACE_ZERO_CAP {
+                        ranges.push((channel, start, frame));
+                    } else {
+                        omitted += 1;
+                    }
+                }
+            }
+            if let Some(start) = start {
+                eligible += 1;
+                if ranges.len() < MIX_TRACE_ZERO_CAP {
+                    ranges.push((channel, start, end));
+                } else {
+                    omitted += 1;
+                }
+            }
+        }
+        let covered = end.saturating_sub(from.min(available));
+        serde_json::json!({
+            "ranges": ranges.iter().map(|(channel, from, to)| serde_json::json!({
+                "channel": if *channel == 0 { "left" } else { "right" }, "from": from, "to": to
+            })).collect::<Vec<_>>(),
+            "eligibleRanges": eligible, "omittedRanges": omitted,
+            "availableFrames": available, "inspectedFramesPerChannel": covered,
+            "missingFramesPerChannel": (to - from).saturating_sub(covered),
+            "complete": omitted == 0 && covered == to - from,
+            "trailingUnpairedSample": samples.len() % 2 != 0
+        })
+    }
+
+    fn value(&self, samples: &[f32]) -> serde_json::Value {
+        serde_json::json!({
+            "window": self.window,
+            "deliveryBoundary": "post-send-observation-not-ingestion-ack",
+            "writeBoundary": "post-publication-checkpoint-not-fifo-return",
+            "timestampDomain": "monotonic-microseconds-since-bus-epoch",
+            "unrepresentableOrBeforeEpochTimestamp": "null",
+            "globalCausalOrderKnown": false,
+            "deliveryRecordCapCombinedRoles": MIX_TRACE_RECORD_CAP,
+            "writeRecordCap": MIX_TRACE_RECORD_CAP,
+            "zeroRangeCapCombinedChannels": MIX_TRACE_ZERO_CAP,
+            "jsonByteLimit": MIX_TRACE_JSON_LIMIT,
+            "eligibleDeliveries": self.eligible_deliveries, "omittedDeliveries": self.omitted_deliveries,
+            "excludedDeliveries": self.excluded_deliveries,
+            "eligibleWrites": self.eligible_writes, "omittedWrites": self.omitted_writes,
+            "excludedWrites": self.excluded_writes,
+            "completeDeliveryRetention": self.omitted_deliveries == 0,
+            "completeWriteRetention": self.omitted_writes == 0,
+            "deliveryRolesReachedWindow": self.delivery_started,
+            "deliveryPredecessorObserved": self.delivery_predecessor_observed,
+            "deliverySuccessorObserved": self.delivery_successor,
+            "writeReachedWindow": self.write_started,
+            "writePredecessorObserved": self.write_predecessor_observed, "writeSuccessorObserved": self.write_successor,
+            "deliveries": self.deliveries.iter().map(|(position, record)| serde_json::json!({
+                "position": position.value(),
+                "role": if record.role == 0 { "microphone" } else { "system" },
+                "ordinal": record.ordinal, "intendedEndFrame": record.intended_end_frame,
+                "frames": record.frames, "deviceTimestampUs": record.device_timestamp_us,
+                "postSendObservationUs": record.post_send_us, "sendLatenessUs": record.send_lateness_us
+            })).collect::<Vec<_>>(),
+            "writes": self.writes.iter().map(|(position, record)| serde_json::json!({
+                "position": position.value(), "ordinal": record.ordinal,
+                "precedingCompletedAfter": record.preceding_after.map(MixCounterSnapshot::value),
+                "currentBefore": record.before.value(), "currentAfter": record.after.value(),
+                "publicationCheckpointUs": record.publication_checkpoint_us,
+                "staleFromFrame": record.stale_from_frame
+            })).collect::<Vec<_>>(),
+            "zeroRanges": self.zero_ranges(samples)
+        })
+    }
+}
+
 #[cfg(test)]
 struct MixTestObservation {
     epoch: Instant,
@@ -2483,6 +2747,7 @@ struct MixTestObservation {
     boundaries: VecDeque<serde_json::Value>,
     omitted_boundaries: u64,
     delivery: [MixDeliveryObservation; 2],
+    trace: Option<MixWindowTrace>,
 }
 
 #[cfg(test)]
@@ -2504,10 +2769,18 @@ impl MixTestObservation {
             boundaries: VecDeque::new(),
             omitted_boundaries: 0,
             delivery: Default::default(),
+            trace: None,
         }
     }
 
-    fn delivered(&mut self, role: SourceRole, end: Instant, frames: u64, sent: Instant) {
+    fn delivered(
+        &mut self,
+        role: SourceRole,
+        end: Instant,
+        frames: u64,
+        device_timestamp_us: u64,
+        sent: Instant,
+    ) {
         let delivery = &mut self.delivery[match role {
             SourceRole::Microphone => 0,
             SourceRole::System => 1,
@@ -2526,6 +2799,22 @@ impl MixTestObservation {
         if lateness >= Duration::from_millis(100) {
             delivery.late_100ms_frames += frames;
         }
+        if let Some(trace) = &mut self.trace {
+            trace.delivered(MixDeliveryRecord {
+                role: match role {
+                    SourceRole::Microphone => 0,
+                    SourceRole::System => 1,
+                },
+                ordinal: delivery.packets,
+                intended_end_frame: end_frame,
+                frames,
+                device_timestamp_us,
+                post_send_us: sent
+                    .checked_duration_since(self.epoch)
+                    .and_then(|duration| duration.as_micros().try_into().ok()),
+                send_lateness_us: lateness.as_micros().try_into().ok(),
+            });
+        }
     }
 
     fn completed(
@@ -2533,6 +2822,7 @@ impl MixTestObservation {
         before: MixCounterSnapshot,
         after: MixCounterSnapshot,
         stale_from: Option<usize>,
+        published: Instant,
     ) {
         self.first.get_or_insert(before);
         let preceding = self.last.unwrap_or(before);
@@ -2550,6 +2840,18 @@ impl MixTestObservation {
                         end.saturating_sub(start.max(before.cursor + stale as u64));
                 }
             }
+        }
+        if let Some(trace) = &mut self.trace {
+            trace.completed(MixWriteRecord {
+                ordinal: self.completed_chunks + 1,
+                preceding_after: self.last,
+                before,
+                after,
+                publication_checkpoint_us: published
+                    .checked_duration_since(self.epoch)
+                    .and_then(|duration| duration.as_micros().try_into().ok()),
+                stale_from_frame: stale_from.map(|from| before.cursor.saturating_add(from as u64)),
+            });
         }
         self.last = Some(after);
         self.completed_chunks += 1;
@@ -2590,10 +2892,10 @@ impl MixTestObservation {
             "counterBoundaryFrameRange": self.window_before.zip(self.window_after).map(|(before, after)| (before.cursor, after.cursor)),
             "counterDeltasCoverCompletedChunksNotIndividualSamples": true,
             "initialIngestMayPrecedeFirstSnapshot": true,
-            "individualChunkTimelineRetained": false, "completedChunks": self.completed_chunks,
+            "individualChunkTimelineRetained": self.trace.is_some(), "completedChunks": self.completed_chunks,
             "boundaries": self.boundaries, "omittedBoundaries": self.omitted_boundaries,
             "deliveryLatenessScope": "entire-observed-producer",
-            "individualDeliveryTimelineRetained": false, "playoutUs": self.playout.as_micros(),
+            "individualDeliveryTimelineRetained": self.trace.is_some(), "playoutUs": self.playout.as_micros(),
             "delivery": self.delivery.iter().enumerate().map(|(role, delivery)| serde_json::json!({
                 "role": if role == 0 { "microphone" } else { "system" },
                 "packets": delivery.packets, "frames": delivery.frames,
@@ -4872,6 +5174,7 @@ fn run_bus_owned(
                     mix_before,
                     MixCounterSnapshot::capture(&timeline, system.as_ref(), diagnostics),
                     stale_from,
+                    Instant::now(),
                 );
             }
         }
@@ -6962,6 +7265,404 @@ mod mix_tests {
     use super::*;
     use sha2::{Digest, Sha256};
 
+    fn trace_snapshot(cursor: u64, overlap: u64) -> MixCounterSnapshot {
+        MixCounterSnapshot {
+            cursor,
+            microphone: AudioBusCounters::default(),
+            microphone_losses: BusLosses {
+                discarded_overlap: overlap,
+                ..BusLosses::default()
+            },
+            system: None,
+            diagnostics: BusDiagnostics::default(),
+        }
+    }
+
+    fn trace_delivery(role: usize, ordinal: u64, end: u64, frames: u64) -> MixDeliveryRecord {
+        MixDeliveryRecord {
+            role,
+            ordinal,
+            intended_end_frame: end,
+            frames,
+            device_timestamp_us: end * 1_000 / 48 + 5_000_000,
+            post_send_us: Some(end * 1_000 / 48 + 5),
+            send_lateness_us: Some(5),
+        }
+    }
+
+    fn trace_write(ordinal: u64, from: u64, to: u64) -> MixWriteRecord {
+        MixWriteRecord {
+            ordinal,
+            preceding_after: None,
+            before: trace_snapshot(from, 0),
+            after: trace_snapshot(to, 0),
+            publication_checkpoint_us: Some(to * 1_000 / 48),
+            stale_from_frame: None,
+        }
+    }
+
+    #[test]
+    fn mix_trace_distinguishes_delivery_associations_with_equal_summary_maxima() {
+        let epoch = Instant::now();
+        let mut observations = [
+            MixTestObservation::new(epoch, Duration::from_millis(50)),
+            MixTestObservation::new(epoch, Duration::from_millis(50)),
+        ];
+        for (index, observation) in observations.iter_mut().enumerate() {
+            observation.trace = Some(MixWindowTrace::new(0, 960));
+            for packet in 0..2 {
+                let end = epoch + Duration::from_millis((packet + 1) * 10);
+                let lag = if packet == index as u64 { 60 } else { 5 };
+                observation.delivered(
+                    SourceRole::Microphone,
+                    end,
+                    480,
+                    5_000_000 + packet * 10_000,
+                    end + Duration::from_millis(lag),
+                );
+            }
+        }
+        assert_eq!(
+            observations[0].delivery[0].max_send_lateness_us,
+            observations[1].delivery[0].max_send_lateness_us
+        );
+        let a = observations[0].trace.as_ref().unwrap().value(&[]);
+        let b = observations[1].trace.as_ref().unwrap().value(&[]);
+        assert_eq!(a["deliveries"][0]["sendLatenessUs"], 60_000);
+        assert_eq!(b["deliveries"][1]["sendLatenessUs"], 60_000);
+        assert_eq!(a["deliveries"][0]["intendedEndFrame"], 480);
+        assert_eq!(a["deliveries"][0]["deviceTimestampUs"], 5_000_000);
+        assert_ne!(
+            a["deliveries"], b["deliveries"],
+            "maxima cannot identify the late packet"
+        );
+        assert_eq!(a["globalCausalOrderKnown"], false);
+    }
+
+    #[test]
+    fn mix_trace_preserves_ingest_losses_between_completed_writes() {
+        let epoch = Instant::now();
+        let mut observation = MixTestObservation::new(epoch, Duration::from_millis(50));
+        observation.trace = Some(MixWindowTrace::new(480, 960));
+        observation.completed(trace_snapshot(0, 0), trace_snapshot(480, 0), None, epoch);
+        observation.completed(
+            trace_snapshot(480, 480),
+            trace_snapshot(960, 480),
+            None,
+            epoch,
+        );
+        observation.completed(
+            trace_snapshot(960, 480),
+            trace_snapshot(1_440, 480),
+            Some(1),
+            epoch,
+        );
+        let trace = observation.trace.as_ref().unwrap().value(&[]);
+        let intersecting = &trace["writes"][1];
+        assert_eq!(intersecting["position"], "intersecting");
+        assert_eq!(
+            intersecting["precedingCompletedAfter"]["microphoneLosses"]["overlap"],
+            0
+        );
+        assert_eq!(
+            intersecting["currentBefore"]["microphoneLosses"]["overlap"],
+            480
+        );
+        assert_eq!(
+            intersecting["currentAfter"]["microphoneLosses"]["overlap"],
+            480
+        );
+        assert_eq!(trace["writes"][0]["position"], "predecessor");
+        assert_eq!(trace["writes"][2]["position"], "successor");
+        assert_eq!(trace["writes"][2]["staleFromFrame"], 961);
+        assert_eq!(trace["writePredecessorObserved"], true);
+    }
+
+    #[test]
+    fn mix_trace_selects_capture_window_and_counts_excluded_boundary_rows() {
+        let mut trace = MixWindowTrace::new(480, 960);
+        for role in 0..2 {
+            for (ordinal, end) in [240, 480, 720, 960, 1_200, 1_440].into_iter().enumerate() {
+                trace.delivered(trace_delivery(role, ordinal as u64 + 1, end, 240));
+            }
+        }
+        for (ordinal, from) in [0, 240, 480, 720, 960, 1_200].into_iter().enumerate() {
+            trace.completed(trace_write(ordinal as u64 + 1, from, from + 240));
+        }
+        let value = trace.value(&[]);
+        assert_eq!(value["eligibleDeliveries"], 8);
+        assert_eq!(value["excludedDeliveries"], 4);
+        assert_eq!(value["eligibleWrites"], 4);
+        assert_eq!(value["excludedWrites"], 2);
+        let rows = value["deliveries"].as_array().unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["position"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "predecessor",
+                "intersecting",
+                "intersecting",
+                "successor",
+                "predecessor",
+                "intersecting",
+                "intersecting",
+                "successor"
+            ]
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row["deviceTimestampUs"].as_u64().unwrap() > 5_000_000)
+        );
+        assert_eq!(rows[0]["intendedEndFrame"], 480);
+        assert_eq!(
+            value["deliveryPredecessorObserved"],
+            serde_json::json!([true, true])
+        );
+        assert_eq!(
+            value["deliverySuccessorObserved"],
+            serde_json::json!([true, true])
+        );
+        assert!(value["writes"][0]["precedingCompletedAfter"].is_null());
+    }
+
+    #[test]
+    fn mix_trace_caps_include_both_roles_and_every_eligible_omission() {
+        let mut trace = MixWindowTrace::new(0, 10_000);
+        for ordinal in 1..=256 {
+            trace.delivered(trace_delivery(ordinal as usize % 2, ordinal, ordinal, 1));
+            trace.completed(trace_write(ordinal, ordinal - 1, ordinal));
+        }
+        assert_eq!(trace.deliveries.len(), MIX_TRACE_RECORD_CAP);
+        assert_eq!(trace.writes.len(), MIX_TRACE_RECORD_CAP);
+        assert_eq!(trace.omitted_deliveries, 0);
+        assert_eq!(trace.omitted_writes, 0);
+        trace.delivered(trace_delivery(0, 257, 257, 1));
+        trace.completed(trace_write(257, 256, 257));
+        let value = trace.value(&[]);
+        assert_eq!(value["eligibleDeliveries"], 257);
+        assert_eq!(value["omittedDeliveries"], 1);
+        assert_eq!(value["eligibleWrites"], 257);
+        assert_eq!(value["omittedWrites"], 1);
+        assert_eq!(value["completeDeliveryRetention"], false);
+        assert_eq!(value["completeWriteRetention"], false);
+        assert_eq!(
+            value["deliveryPredecessorObserved"],
+            serde_json::json!([false, false])
+        );
+        assert_eq!(value["writes"][255]["ordinal"], 256);
+    }
+
+    #[test]
+    fn mix_trace_rolling_candidates_remain_fixed_when_another_role_fills_the_cap() {
+        let mut trace = MixWindowTrace::new(100, 10_000);
+        for ordinal in 1..=256 {
+            trace.delivered(trace_delivery(0, ordinal, 200 + ordinal, 1));
+        }
+        for ordinal in 1..=99 {
+            trace.delivered(trace_delivery(1, ordinal, ordinal, 1));
+        }
+        assert_eq!(trace.deliveries.len(), MIX_TRACE_RECORD_CAP);
+        assert!(trace.delivery_predecessor[0].is_none());
+        let pending = trace.delivery_predecessor[1].unwrap();
+        assert_eq!(
+            pending.ordinal, 99,
+            "only the latest excluded candidate survives"
+        );
+        assert_eq!(pending.intended_end_frame, 99);
+        assert_eq!(trace.excluded_deliveries, 99);
+        assert_eq!(
+            trace.omitted_deliveries, 0,
+            "excluded candidates are not eligible omissions"
+        );
+        trace.delivered(trace_delivery(1, 100, 101, 1));
+        assert!(trace.delivery_predecessor.iter().all(Option::is_none));
+        assert_eq!(trace.deliveries.len(), MIX_TRACE_RECORD_CAP);
+        assert_eq!(
+            trace.eligible_deliveries, 258,
+            "promoted boundary plus intersecting row"
+        );
+        assert_eq!(trace.omitted_deliveries, 2);
+        assert_eq!(trace.excluded_deliveries, 98);
+        assert_eq!(trace.delivery_predecessor_observed[1], Some(true));
+        for ordinal in 1..=100 {
+            trace.completed(trace_write(ordinal, ordinal - 1, ordinal));
+        }
+        assert!(trace.writes.is_empty());
+        assert_eq!(trace.write_predecessor.unwrap().ordinal, 100);
+        trace.completed(trace_write(101, 100, 101));
+        assert!(trace.write_predecessor.is_none());
+        assert_eq!(trace.writes.len(), 2);
+        assert_eq!(trace.writes[0].1.ordinal, 100);
+        assert_eq!(trace.writes[1].1.ordinal, 101);
+        assert_eq!(trace.excluded_writes, 99);
+    }
+
+    #[test]
+    fn mix_trace_zero_ranges_distinguish_channels_and_close_at_window_end() {
+        let trace = MixWindowTrace::new(1, 10);
+        let mut samples = vec![0.2; 20];
+        for frame in [1, 2, 9] {
+            samples[frame * 2] = 0.0;
+        }
+        for frame in [0, 4, 5, 6] {
+            samples[frame * 2 + 1] = 0.0;
+        }
+        let value = trace.zero_ranges(&samples);
+        assert_eq!(
+            value["ranges"],
+            serde_json::json!([
+                {"channel":"left", "from":1, "to":3},
+                {"channel":"left", "from":9, "to":10},
+                {"channel":"right", "from":4, "to":7}
+            ])
+        );
+        assert_eq!(value["complete"], true);
+        assert_eq!(value["missingFramesPerChannel"], 0);
+    }
+
+    #[test]
+    fn mix_trace_zero_range_cap_is_shared_and_reports_overflow() {
+        let trace = MixWindowTrace::new(0, 64);
+        let mut samples = vec![0.2; 128];
+        for frame in (0..64).step_by(2) {
+            samples[frame * 2] = 0.0;
+            samples[frame * 2 + 1] = 0.0;
+        }
+        let exact = trace.zero_ranges(&samples);
+        assert_eq!(exact["ranges"].as_array().unwrap().len(), 64);
+        assert_eq!(exact["omittedRanges"], 0);
+        let trace = MixWindowTrace::new(0, 66);
+        samples.extend_from_slice(&[0.0, 0.0, 0.2, 0.2]);
+        let overflow = trace.zero_ranges(&samples);
+        assert_eq!(overflow["ranges"].as_array().unwrap().len(), 64);
+        assert_eq!(overflow["eligibleRanges"], 66);
+        assert_eq!(overflow["omittedRanges"], 2);
+        assert_eq!(overflow["complete"], false);
+    }
+
+    #[test]
+    fn mix_trace_missing_pcm_and_unobserved_boundaries_stay_unknown() {
+        let mut trace = MixWindowTrace::new(2, 6);
+        let absent = trace.zero_ranges(&[]);
+        assert_eq!(absent["missingFramesPerChannel"], 4);
+        assert_eq!(absent["eligibleRanges"], 0);
+        assert_eq!(absent["complete"], false);
+        let partial = trace.zero_ranges(&[0.2, 0.2, 0.2, 0.2, 0.0, 0.0, 0.0]);
+        assert_eq!(
+            partial["ranges"],
+            serde_json::json!([
+                {"channel":"left", "from":2, "to":3}, {"channel":"right", "from":2, "to":3}
+            ])
+        );
+        assert_eq!(partial["missingFramesPerChannel"], 3);
+        assert_eq!(partial["trailingUnpairedSample"], true);
+        assert!(trace.value(&[])["writePredecessorObserved"].is_null());
+        trace.completed(trace_write(1, 2, 3));
+        assert_eq!(trace.value(&[])["writePredecessorObserved"], false);
+        assert!(trace.value(&[])["writes"][0]["precedingCompletedAfter"].is_null());
+        assert_eq!(trace.value(&[])["writeSuccessorObserved"], false);
+    }
+
+    #[test]
+    fn mix_trace_default_retains_no_individual_records() {
+        let epoch = Instant::now();
+        let mut observation = MixTestObservation::new(epoch, Duration::from_millis(50));
+        observation.delivered(
+            SourceRole::Microphone,
+            epoch + Duration::from_millis(10),
+            480,
+            5_000_000,
+            epoch + Duration::from_millis(20),
+        );
+        observation.completed(trace_snapshot(0, 0), trace_snapshot(480, 0), None, epoch);
+        assert!(observation.trace.is_none());
+        assert_eq!(
+            observation.value()["individualDeliveryTimelineRetained"],
+            false
+        );
+        assert_eq!(
+            observation.value()["individualChunkTimelineRetained"],
+            false
+        );
+        assert_eq!(observation.delivery[0].packets, 1);
+        assert_eq!(observation.completed_chunks, 1);
+    }
+
+    #[test]
+    fn mix_trace_serializes_exact_large_integers_with_a_bounded_payload() {
+        let mut trace = MixWindowTrace::new(0, u64::MAX);
+        let losses = BusLosses {
+            dropped_ahead_of_cap: u64::MAX,
+            dropped_output_behind: u64::MAX,
+            dropped_malformed: u64::MAX,
+            producer_queue_full: u64::MAX,
+            discarded_stale: u64::MAX,
+            discarded_before_epoch: u64::MAX,
+            discarded_overlap: u64::MAX,
+            discarded_duplicate: u64::MAX,
+            discarded_behind_cap: u64::MAX,
+            stale_written: u64::MAX,
+        };
+        let counters = AudioBusCounters {
+            captured_frames: u64::MAX,
+            generated_frames: u64::MAX,
+            discarded_frames: u64::MAX,
+            dropped_frames: u64::MAX,
+        };
+        let snapshot = MixCounterSnapshot {
+            cursor: u64::MAX,
+            microphone: counters,
+            microphone_losses: losses,
+            system: Some((counters, losses)),
+            diagnostics: BusDiagnostics {
+                max_write_stall: Duration::from_micros(u64::MAX),
+                max_lateness: Duration::from_micros(u64::MAX),
+            },
+        };
+        for ordinal in 1..=256 {
+            let mut delivery = trace_delivery(ordinal as usize % 2, ordinal, ordinal, 1);
+            delivery.device_timestamp_us = u64::MAX;
+            delivery.post_send_us = Some(u64::MAX);
+            delivery.send_lateness_us = Some(u64::MAX);
+            trace.delivered(delivery);
+            trace.completed(MixWriteRecord {
+                ordinal,
+                preceding_after: Some(snapshot),
+                before: MixCounterSnapshot {
+                    cursor: ordinal - 1,
+                    ..snapshot
+                },
+                after: MixCounterSnapshot {
+                    cursor: ordinal,
+                    ..snapshot
+                },
+                publication_checkpoint_us: Some(u64::MAX),
+                stale_from_frame: Some(u64::MAX),
+            });
+        }
+        let encoded = serde_json::to_vec(&trace.value(&[])).unwrap();
+        assert!(
+            encoded.len() <= MIX_TRACE_JSON_LIMIT,
+            "{} bytes",
+            encoded.len()
+        );
+        let decoded: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(
+            decoded["deliveries"][0]["deviceTimestampUs"].as_u64(),
+            Some(u64::MAX)
+        );
+        assert_eq!(
+            decoded["writes"][0]["precedingCompletedAfter"]["system"]["losses"]["overlap"].as_u64(),
+            Some(u64::MAX)
+        );
+        assert_eq!(
+            decoded["writes"][0]["publicationCheckpointUs"].as_u64(),
+            Some(u64::MAX)
+        );
+        assert_eq!(decoded["jsonByteLimit"], MIX_TRACE_JSON_LIMIT);
+    }
+
     #[test]
     fn level_windows_keep_the_loudest_sample_and_the_rms_until_taken() {
         let mut window = LevelWindow::default();
@@ -7142,19 +7843,26 @@ mod mix_tests {
                         None => break,
                     }
                 }
-                let delivery = observation
-                    .as_ref()
-                    .map(|_| (packet.captured_at, packet.frame_count() as u64));
+                let delivery = observation.as_ref().map(|_| {
+                    (
+                        packet.captured_at,
+                        packet.frame_count() as u64,
+                        packet.timestamp_micros,
+                    )
+                });
                 if sender.send(packet).is_err() {
                     return;
                 }
-                if let Some((end, frames)) = delivery {
+                if let Some((end, frames, device_timestamp_us)) = delivery {
                     let sent = Instant::now();
                     let observation = observation.as_ref().unwrap();
-                    observation
-                        .lock()
-                        .unwrap()
-                        .delivered(role, end, frames, sent);
+                    observation.lock().unwrap().delivered(
+                        role,
+                        end,
+                        frames,
+                        device_timestamp_us,
+                        sent,
+                    );
                 }
             }
             while !worker_stop.load(Ordering::Acquire) {
@@ -7635,10 +8343,21 @@ mod mix_tests {
         options: SessionAudioOptions,
         reader_stall: Option<(usize, Duration)>,
     ) -> (Bus, Arc<std::sync::Mutex<MixTestObservation>>) {
-        let observation = Arc::new(std::sync::Mutex::new(MixTestObservation::new(
-            epoch,
-            options.playout_delay,
-        )));
+        start_observed_bus_with_trace(epoch, microphone, settings, options, reader_stall, None)
+            .await
+    }
+
+    async fn start_observed_bus_with_trace(
+        epoch: Instant,
+        microphone: Option<Vec<AudioFrame>>,
+        settings: AudioProcessingSettings,
+        options: SessionAudioOptions,
+        reader_stall: Option<(usize, Duration)>,
+        trace_window: Option<(u64, u64)>,
+    ) -> (Bus, Arc<std::sync::Mutex<MixTestObservation>>) {
+        let mut observation = MixTestObservation::new(epoch, options.playout_delay);
+        observation.trace = trace_window.map(|(from, to)| MixWindowTrace::new(from, to));
+        let observation = Arc::new(std::sync::Mutex::new(observation));
         let bus = start_bus_observed(
             epoch,
             microphone,
@@ -7834,7 +8553,8 @@ mod mix_tests {
         eprintln!(
             "mix-observation: {}",
             serde_json::json!({
-                "case": case, "observation": evidence.value(), "inspectedWindow": histogram
+                "case": case, "observation": evidence.value(), "inspectedWindow": histogram,
+                "windowTrace": evidence.trace.as_ref().map(|trace| trace.value(samples))
             })
         );
     }
@@ -7948,12 +8668,13 @@ mod mix_tests {
         for packet in microphone.iter_mut().skip(200) {
             packet.timestamp_micros += 5_000_000;
         }
-        let (bus, evidence) = start_observed_bus(
+        let (bus, evidence) = start_observed_bus_with_trace(
             epoch,
             Some(microphone),
             AudioProcessingSettings::default(),
             SessionAudioOptions::default(),
             None,
+            Some((288_000, 384_000)),
         )
         .await;
         set_mix_window(&evidence, 288_000, 384_000);
