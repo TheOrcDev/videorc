@@ -2348,8 +2348,13 @@ async fn refresh_platform_access_token(
         .context("No OAuth refresh token is stored for this account.")?;
     let refresh_token =
         secrets::get_secret(refresh_ref).context("Could not read OAuth refresh token.")?;
-    let token =
-        oauth::refresh_provider_token(credential.account.platform, &refresh_token, client).await?;
+    let token = oauth::refresh_provider_token(
+        credential.account.platform,
+        &refresh_token,
+        &credential.account.scopes,
+        client,
+    )
+    .await?;
 
     persist_refreshed_platform_access_token(state, credential, access_ref, refresh_ref, token)
 }

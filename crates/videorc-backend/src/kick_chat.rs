@@ -1230,10 +1230,10 @@ pub async fn send_kick_chat_message(
 
 // --- Removing ------------------------------------------------------------------
 
-/// The optional scope that lets Videorc delete chat messages (plan 140). S5
-/// adds it to the connect flow with a Reconnect row; until then removals hide
-/// locally with `missing-scope`.
-pub const KICK_CHAT_MODERATE_SCOPE: &str = "moderation:chat_message:manage";
+/// The optional scope that lets Videorc delete chat messages (plan 140). Only
+/// the "Remove messages" Reconnect row asks for it; until an account grants
+/// it, removals hide locally with `missing-scope`.
+pub const KICK_CHAT_MODERATE_SCOPE: &str = crate::oauth::KICK_MODERATION_SCOPE;
 
 /// The hide reason the moderation engine shows after "Viewers on Kick still
 /// see it."

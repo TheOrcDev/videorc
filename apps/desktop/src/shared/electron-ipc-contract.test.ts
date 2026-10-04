@@ -34,13 +34,14 @@ import {
 describe('Electron IPC contract', () => {
   it('maps every renderer-facing invoke channel to a real async API method', () => {
     expectTypeOf<ElectronInvokeMappingInvariant>().toEqualTypeOf<true>()
-    // 111: plan 119 added the in-app player's media:grant-session (plan 095
-    // the highlight card's avatars:read; plan 071 the Stream Manager Show who
-    // followed channel; plan 068 the mark-clip relay pair; plan 062 the
-    // shortcut recorder arm; plan 055 the dashboard push and get; plan 050
-    // retired glass:wallpaper:get).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(111)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(111)
+    // 112: plan 140 added the Stream Manager's reconnect-scopes channel (plan
+    // 119 the in-app player's media:grant-session; plan 095 the highlight
+    // card's avatars:read; plan 071 the Stream Manager Show who followed
+    // channel; plan 068 the mark-clip relay pair; plan 062 the shortcut
+    // recorder arm; plan 055 the dashboard push and get; plan 050 retired
+    // glass:wallpaper:get).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(112)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(112)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -270,6 +271,37 @@ describe('Electron IPC contract', () => {
     for (const stale of [undefined, null, 'top', 'TOP-LEFT', 3, {}]) {
       expect(normalizeCommentHighlightAnchor(stale)).toBe(DEFAULT_COMMENT_HIGHLIGHT_ANCHOR)
     }
+  })
+
+  it('lets the Stream Manager name a platform to reconnect, never the scopes (plan 140)', () => {
+    for (const platform of ['twitch', 'kick']) {
+      const command = { requestId: 'reconnect-1', platform }
+      expect(validateElectronInvokeArgs('comments-window:reconnect-scopes', [command])).toEqual([
+        command
+      ])
+    }
+    // YouTube never needs it and X authorizes elsewhere; free-form values,
+    // a missing request id, and a smuggled scope list never reach main.
+    for (const forged of [
+      { requestId: 'r', platform: 'youtube' },
+      { requestId: 'r', platform: 'x' },
+      { requestId: 'r', platform: 'Twitch' },
+      { requestId: 'r', platform: '' },
+      { requestId: '', platform: 'twitch' },
+      { platform: 'twitch' },
+      { requestId: 'r', platform: 'twitch', optionalScopes: ['moderator:manage:banned_users'] },
+      'twitch',
+      null
+    ]) {
+      expect(() =>
+        validateElectronInvokeArgs('comments-window:reconnect-scopes', [forged])
+      ).toThrow()
+    }
+    expect(() => validateElectronInvokeArgs('comments-window:reconnect-scopes', [])).toThrow()
+    expect(validateElectronInvokeResult('comments-window:reconnect-scopes', true)).toBe(true)
+    expect(() =>
+      validateElectronInvokeResult('comments-window:reconnect-scopes', 'opened')
+    ).toThrow()
   })
 
   it('semantically validates native host, scene, and compositor IPC', () => {

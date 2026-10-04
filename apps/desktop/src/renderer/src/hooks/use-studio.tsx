@@ -10917,6 +10917,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       try {
         setLastError(null)
         const redirectUri = await window.videorc.getOAuthCallbackRedirectUri(platform)
+        // A pass-through: callers send `platformConnectOptions(platform)` or,
+        // from a permission row, `permissionReconnectOptions(platform)`
+        // (shared/platform-scopes, kept out of this eager bundle), and the
+        // backend keeps any optional scope the account already holds.
+        // Plan 140, S5.
         const optionalScopes = options?.optionalScopes?.length
           ? { optionalScopes: [...options.optionalScopes] }
           : {}

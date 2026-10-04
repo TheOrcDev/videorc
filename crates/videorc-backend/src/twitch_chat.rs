@@ -163,10 +163,10 @@ pub async fn send_twitch_chat_message(
     })
 }
 
-/// The optional scope that lets Videorc delete chat messages (plan 140). S5
-/// adds it to the connect flow; until an account reconnects with it, removals
+/// The optional scope that lets Videorc delete chat messages (plan 140). Every
+/// Twitch connect asks for it; until an account reconnects with it, removals
 /// hide locally with `missing-scope`.
-pub const TWITCH_CHAT_MODERATE_SCOPE: &str = "moderator:manage:chat_messages";
+pub const TWITCH_CHAT_MODERATE_SCOPE: &str = crate::oauth::TWITCH_MODERATION_SCOPE;
 
 /// Helix deletes only messages younger than this (checked before any call).
 pub const TWITCH_DELETE_MAX_AGE: chrono::Duration = chrono::Duration::hours(6);

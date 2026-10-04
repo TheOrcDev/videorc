@@ -3260,6 +3260,18 @@ export interface FollowNamesCommand {
   platform: 'twitch'
 }
 
+/** The platforms the Stream Manager can reconnect for a missing permission
+ * (plan 140, S5). The list lives in `shared/platform-scopes.ts`. */
+export type ScopeReconnectPlatform = Extract<StreamPlatform, 'twitch' | 'kick'>
+
+/** Stream Manager → main: reconnect Twitch or Kick asking for every optional
+ * permission, so Orcle can remove messages (plan 140, S5). Main picks the
+ * scopes; the window only names the platform. */
+export interface ScopeReconnectCommand {
+  requestId: string
+  platform: ScopeReconnectPlatform
+}
+
 export interface AiCapabilities {
   /** Optional during rolling web deployments. Missing must fail closed when captions are enabled. */
   captions?: {
@@ -4263,6 +4275,10 @@ export interface VideorcApi {
    * socket and opens the browser, so the main window's eager bundle carries
    * none of it. Resolves once the browser opened. */
   showFollowNamesFromCommentsWindow: (command: FollowNamesCommand) => Promise<boolean>
+  /** "Reconnect Twitch to let Orcle remove messages" from the Stream Manager
+   * (plan 140, S5): like Show who followed, main starts the reconnect with
+   * every optional permission and opens the browser. Resolves once it opened. */
+  reconnectScopesFromCommentsWindow: (command: ScopeReconnectCommand) => Promise<boolean>
   /** Co-host relay: the main renderer pushes state, the window seeds + follows
    * it, and window actions come back through the same correlated broker. */
   pushCohostWindowState: (state: CohostWindowState) => Promise<void>
