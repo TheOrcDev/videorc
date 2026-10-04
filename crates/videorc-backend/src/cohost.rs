@@ -1639,6 +1639,10 @@ struct AutoHighlightLedger {
     last_card_end: Option<Instant>,
     /// Message ids that were on stream this session, automatically or by hand.
     shown: HashSet<String>,
+    /// Message ids the report already counted as on stream. Apart from
+    /// `shown`, which an engine command fills when it is issued: counting off
+    /// `shown` missed every automatic, voice and command card.
+    counted_on_stream: HashSet<String>,
     /// Author key of the previous automatic card.
     last_author: Option<String>,
     /// Types of the recent automatic cards, oldest first (bounded).
@@ -4665,7 +4669,8 @@ impl CohostSession {
                     engine_set,
                     expires_at: observed_expiry,
                 });
-                if self.auto.shown.insert(message_id.to_string()) {
+                self.auto.shown.insert(message_id.to_string());
+                if self.auto.counted_on_stream.insert(message_id.to_string()) {
                     // Plan 119: the report counts each comment on stream once
                     // and marks the open question it carries as shown.
                     let question_id = self
@@ -13879,6 +13884,31 @@ mod tests {
             live_message_id: Some(message_id.to_string()),
             remaining,
         }
+    }
+
+    #[test]
+    fn report_counts_an_engine_set_card_once_it_reaches_the_stream() {
+        // Plan 140 S9: issuing a card (command, voice or pick) marks it
+        // `shown` for the pick rules at once, which used to stop the report
+        // from ever counting it when it went live.
+        let start = Instant::now();
+        let (mut engine, _generation) = running_engine(start);
+        let rows = messages("session-1", 0..2);
+        engine.note_messages(&rows);
+        {
+            let session = engine.session.as_mut().unwrap();
+            let mut generation = 0;
+            session.apply_command_highlight(&rows[1].id, None, &mut generation, start + secs(1));
+            // Issued, not on stream yet: nothing to count.
+            session.observe_overlay(&OverlayObservation::default(), start + secs(2));
+            session.observe_overlay(&overlay(&rows[1].id, secs(10)), start + secs(3));
+            // The same card observed again is not a second showing.
+            session.observe_overlay(&overlay(&rows[1].id, secs(9)), start + secs(4));
+        }
+        let report = engine
+            .stop_session()
+            .expect("a running session leaves a report");
+        assert_eq!(report.shown_on_stream, 1);
     }
 
     #[test]
