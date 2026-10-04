@@ -20,6 +20,14 @@
   - Still owed by the owner:
     - the rights confirmation;
     - a by-eye check of the glyph and the placements in the running app.
+  - **Owner override, 2026-10-04, after S1–S6 were built:** "I want real
+    image inside the app not that icon." `OrcleIcon` now draws the real
+    emblem image (the 64 px export inside an `<svg>`, so `svg`-based slot
+    styles still apply) everywhere Orcle appears: the sidebar, the session
+    row, the Stream Manager, popovers and menus. The vector eye from S3 is
+    deleted. This overrides D1 (no raster under 24 px) and D2 (no red in the
+    icon); D5's emblem placements stay. The owner also said "no checking
+    now", so no by-eye pass of the image icon was made.
   - **Built differently from the slices below, on purpose:**
     - S2 has no `srcSet`. Each size ships its 2× file only, and the browser
       scales it down on 1× displays. A 1× file would add bytes for no

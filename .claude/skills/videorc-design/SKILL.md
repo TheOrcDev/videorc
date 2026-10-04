@@ -362,19 +362,17 @@ moved onto the utility.
   Before adding a slot, check whether one already means the same thing: the
   set is licence-counted (100 glyphs). `docs/icon-set.md` holds the licence
   terms, the build pipeline (`pnpm icons:build`), and the semantic audit.
-- **The Orcle mark** (plan 149) is the cybernetic orc eye, in two tiers.
-  The master and its export commands live in `assets/brand/orcle/`.
-  - The emblem (`OrcleEmblem`) is the full-colour artwork, at 32 px
-    (`md`) or 56 px (`lg`) tall, never under 24 px, where it turns to mush.
-    It appears in two places only: the Orcle tab's intro line and the
-    Orcle Live consent dialog. It is never tinted and never filtered, and
-    one file serves both themes.
-  - The glyph (`OrcleIcon`) is the same eye drawn for 16 px slots:
-    monochrome `currentColor`, honouring `weight` like its Phosphor
-    neighbours. It is used everywhere else Orcle appears: the sidebar,
-    session rows, the Stream Manager, popovers and menus.
-  - The LED-red iris lives in the emblem only. A red glyph would read as
-    record or live.
+- **The Orcle mark** (plan 149) is the cybernetic orc eye, always the
+  real artwork, never a redrawn glyph (owner call, 2026-10-04). The master
+  and its export commands live in `assets/brand/orcle/`.
+  - `OrcleIcon` is the emblem at icon size: an `<svg>` wrapping the image,
+    so `svg`-based slot styles size it like its neighbours. It is the one
+    full-colour icon in the registry. `weight` and `currentColor` never
+    change it, so a selected row keeps the same image.
+  - `OrcleEmblem` is the emblem larger, at 32 px (`md`) or 56 px (`lg`)
+    tall: the Orcle tab's intro line and the Orcle Live consent dialog.
+  - It is never tinted or filtered, and one file serves both themes. Its
+    red iris is the brand, not a status: no other icon may borrow it.
   - The Videorc app icon stays the orc-head orb. Orcle's eye is not the
     app's logo.
 

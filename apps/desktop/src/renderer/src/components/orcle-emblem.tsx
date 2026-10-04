@@ -5,13 +5,9 @@ import emblem112Url from '@/assets/orcle/orcle-emblem-112.webp'
 import { cn } from '@/lib/utils'
 
 /**
- * Orcle's emblem (plan 149): the cybernetic orc eye in full colour, the only
- * place Orcle's LED-red iris appears.
- *
- * The mark has two tiers. The emblem turns to a grey smudge below 24 px, so
- * there is no size under that here; 16 px slots use the vector `OrcleIcon`
- * glyph instead. The emblem appears in two places only, the Orcle tab header
- * and the Orcle Live consent dialog. Everywhere else the glyph carries Orcle.
+ * Orcle's emblem (plan 149): the cybernetic orc eye in full colour, shown
+ * large in two places, the Orcle tab header and the Orcle Live consent
+ * dialog. Icon slots show the same image through `OrcleIcon`.
  *
  * Each size ships its 2× file and lets the browser scale it down on 1×
  * displays. One file serves both themes: its black keyline holds on

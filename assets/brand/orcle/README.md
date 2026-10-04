@@ -4,12 +4,11 @@ Orcle's official mark (plan 149). `orcle-eye-emblem-master.png` is the
 original artwork, byte-identical: 1254 × 1254 RGBA on a transparent
 background. It is outside every bundle; the app ships trimmed WebP exports.
 
-The mark has two tiers:
+The app always shows this real artwork, never a redrawn glyph:
 
-- **The emblem**, this artwork, in full colour at 24 px tall and up
-  (`OrcleEmblem` in the desktop renderer). The LED-red iris lives here only.
-- **The glyph**, a monochrome vector eye drawn from it for 16 px slots
-  (`OrcleIcon` in `apps/desktop/src/renderer/src/components/icons.tsx`).
+- **`OrcleIcon`** (`apps/desktop/src/renderer/src/components/icons.tsx`)
+  is the 64 px export at icon size (16 px slots), wrapped in an `<svg>`.
+- **`OrcleEmblem`** shows it larger, at 32 and 56 px tall.
 
 ## Exports
 
@@ -27,10 +26,10 @@ for height in 64 112; do
 done
 ```
 
-| File                    | Size      | Shown at                 |
-| ----------------------- | --------- | ------------------------ |
-| `orcle-emblem-64.webp`  | 92 × 64   | 32 px tall (`size="md"`) |
-| `orcle-emblem-112.webp` | 160 × 112 | 56 px tall (`size="lg"`) |
+| File                    | Size      | Shown at                            |
+| ----------------------- | --------- | ----------------------------------- |
+| `orcle-emblem-64.webp`  | 92 × 64   | icons, and 32 px tall (`size="md"`) |
+| `orcle-emblem-112.webp` | 160 × 112 | 56 px tall (`size="lg"`)            |
 
 Each file is the 2× asset for its display height. CI never runs these
 commands: the outputs are committed, and `orcle-emblem.test.ts` pins their

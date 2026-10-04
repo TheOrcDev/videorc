@@ -91,33 +91,22 @@ describe('semantic icon registry', () => {
     )
   })
 
-  // Plan 149: Orcle's glyph is the Orcle eye. It follows its Phosphor
-  // neighbours' weights, so the sidebar's regular-to-fill swap still reads,
-  // and it never carries the emblem's red: currentColor only.
-  it('draws the Orcle eye as an outline, a duotone or a solid eye in currentColor', () => {
+  // Plan 149: Orcle's icon is the real emblem image, kept inside an <svg> so
+  // icon slots that size and lay out through `svg` selectors still apply.
+  it('draws Orcle as the real emblem image inside an svg, whatever the weight', () => {
     const markup = (weight?: AppIconProps['weight']): string =>
       renderToStaticMarkup(createElement(OrcleIcon, { size: 16, weight, className: 'orcle' }))
-    const outline = markup()
-    expect(outline).toContain('viewBox="0 0 256 256"')
-    expect(outline).toContain('width="16"')
-    expect(outline).toContain('fill="currentColor"')
-    expect(outline).toContain('class="orcle"')
-    expect(outline).toContain('stroke-width="16"')
-    expect(outline).not.toContain('opacity')
-    expect(markup('regular')).toBe(outline)
-    expect(markup('light')).toBe(outline)
-    expect(markup('thin')).toBe(outline)
-    expect(markup('fill')).not.toBe(outline)
-    expect(markup('fill')).toContain('fill-rule="evenodd"')
-    expect(markup('fill')).not.toContain('stroke')
-    expect(markup('bold')).toBe(markup('fill'))
-    expect(markup('duotone')).toContain('opacity="0.2"')
-    // The duotone is the outline over a 20% eye.
-    expect(markup('duotone')).toContain(outline.match(/<path d="[^"]+" fill="none"[^>]*>/)?.[0])
+    const html = markup()
+    expect(html).toMatch(/^<svg /)
+    expect(html).toContain('viewBox="0 0 256 256"')
+    expect(html).toContain('width="16"')
+    expect(html).toContain('class="orcle"')
+    expect(html).toMatch(/<image href="[^"]*orcle-emblem-64[^"]*"/)
+    expect(html).toContain('preserveAspectRatio="xMidYMid meet"')
+    expect(html).not.toContain('<path')
     for (const weight of ['thin', 'light', 'regular', 'duotone', 'fill', 'bold'] as const) {
-      const colours = markup(weight).match(/(?:fill|stroke)="([^"]+)"/g) ?? []
-      expect(colours.every((colour) => /="(currentColor|none)"$/.test(colour))).toBe(true)
-      expect(markup(weight)).not.toMatch(/#[0-9a-f]{3,8}\b|rgb|hsl|oklch/i)
+      expect(markup(weight)).toBe(html)
     }
+    expect(renderToStaticMarkup(createElement(OrcleIcon))).toContain('width="1em"')
   })
 })

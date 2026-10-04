@@ -19,6 +19,8 @@ import type { ComponentType, SVGProps } from 'react'
 
 import type * as PhosphorIcons from '@phosphor-icons/react'
 
+import orcleEmblemUrl from '../assets/orcle/orcle-emblem-64.webp'
+
 /**
  * The props every registry icon accepts.
  *
@@ -137,7 +139,7 @@ type _RegistryIconProps = _AssertIconProps<
  * Navigation — one slot per sidebar destination. These are the icons the
  * 2026-08-25 semantic audit reviews first: several are placeholders inherited
  * from the pre-audit set (see the audit table in the Nucleo plan). The Orcle
- * tab's slot is `OrcleIcon`, the Orcle eye, drawn below.
+ * tab's slot is `OrcleIcon`, the Orcle eye emblem, below.
  */
 export {
   VideoCamera as StudioIcon,
@@ -247,7 +249,7 @@ export {
 } from '@phosphor-icons/react'
 /**
  * AI, tooling and appearance. Orcle (code name `cohost`) has its own mark,
- * the eye: `OrcleIcon` below at icon size, `OrcleEmblem` in full colour.
+ * the real eye emblem: `OrcleIcon` below at icon size, `OrcleEmblem` larger.
  */
 export {
   Brain as BrainIcon,
@@ -299,68 +301,31 @@ export const KickIcon: AppIcon = ({ size, weight: _weight, children, ...props })
   </svg>
 )
 
-// The Orcle eye (plan 149), drawn from the emblem in
-// `assets/brand/orcle/`: a wide almond with the emblem's horn spiking up
-// from its top-left corner.
-const ORCLE_EYE = 'M14 134L42 104Q30 76 18 44Q44 60 72 72Q112 58 154 64L242 136Q150 238 14 134Z'
-
-// The outline's features, stroked: the scowling brow that runs on from the
-// horn's base, the iris below it, and one plate seam for the cyber half.
-const ORCLE_EYE_FEATURES = 'M42 104L166 122M108 114A32 32 0 1 0 151 120M180 88L196 160'
-
-const ORCLE_PUPIL = 'M114 140a12 12 0 1 0 24 0a12 12 0 1 0-24 0Z'
-
-// The solid eye: the outline's outer edge, with the iris knocked out under
-// the brow (its flat top is the scowl), a brow slit back to the horn and a
-// solid pupil. The seam is dropped: at 16 px it would float as a slot.
-const ORCLE_EYE_SOLID =
-  'M9 140L6 136L7 131L33 102L11 47L10 41L14 37L17 36L22 37L48 52L72 63L95 58L120 54L146 55L155 56L159 58L249 132L250 137L248 141L229 159L210 174L190 185L168 191L146 194L123 193L100 189L76 180L60 173L43 164L18 147Z' +
-  'M56 102L159 117A40 40 0 1 1 94 116L55 110Z' +
-  'M112 140a14 14 0 1 0 28 0a14 14 0 1 0-28 0Z'
-
 /**
- * Orcle's glyph (plan 149): the Orcle eye, simplified to read at 16 px. A
- * wide almond with the horn spike, a brow that scowls across the iris, a
- * pupil, and one plate seam. Hand-drawn like `KickIcon` on Phosphor's 256
- * grid in currentColor, so it sizes and tints like the set. One glyph
- * everywhere Orcle appears at icon size: the sidebar, the Stream Manager,
- * the Studio session row, popovers and menus.
+ * Orcle's mark (plan 149): the real Orcle eye emblem, the full-colour artwork
+ * in `assets/brand/orcle/`, at icon size. The owner's call: Orcle appears as
+ * its actual image everywhere, the sidebar, the Stream Manager, the Studio
+ * session row, popovers and menus, never as a redrawn glyph.
  *
- * It is the small tier of Orcle's mark. The full-colour emblem
- * (`OrcleEmblem`) turns to mush below 24 px, so it never shrinks to this
- * slot; and the glyph never carries the emblem's red iris, because red means
- * record, live and destructive here.
+ * It stays an `<svg>` so every slot that sizes and lays out icons through
+ * `svg` selectors (`[&_svg]:size-4`, the Alert's `has-[>svg]` grid) treats it
+ * like its neighbours. The raster sits inside as an `<image>`, centred and
+ * fitted to the square: the eye is wider than tall, so it fills the width.
+ * The 64 px export is the 2x+ source for every icon size up to 32 px.
  *
- * Unlike `KickIcon` it honours `weight` the way its Phosphor neighbours do,
- * so the sidebar's regular-to-fill swap still reads: an outline at Phosphor's
- * 16-unit stroke (thin, light, regular), the outline over a 20% eye
- * (duotone), and a solid eye with the iris knocked out (fill, bold).
+ * It is the one full-colour icon in the registry. `weight` is accepted and
+ * ignored, and `currentColor` never tints it: the red iris is the brand.
  */
-export const OrcleIcon: AppIcon = ({ size, weight, children, ...props }) => (
+export const OrcleIcon: AppIcon = ({ size, weight: _weight, children, ...props }) => (
   <svg
     xmlns="http://www.w3.org/2000/svg"
     viewBox="0 0 256 256"
     width={size ?? '1em'}
     height={size ?? '1em'}
-    fill="currentColor"
+    data-slot="orcle-icon"
     {...props}
   >
     {children}
-    {weight === 'fill' || weight === 'bold' ? (
-      <path fillRule="evenodd" d={ORCLE_EYE_SOLID} />
-    ) : (
-      <>
-        {weight === 'duotone' ? <path d={ORCLE_EYE} opacity="0.2" /> : null}
-        <path
-          d={`${ORCLE_EYE}${ORCLE_EYE_FEATURES}`}
-          fill="none"
-          stroke="currentColor"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          strokeWidth="16"
-        />
-        <path d={ORCLE_PUPIL} />
-      </>
-    )}
+    <image href={orcleEmblemUrl} width="256" height="256" preserveAspectRatio="xMidYMid meet" />
   </svg>
 )
