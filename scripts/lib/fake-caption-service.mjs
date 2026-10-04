@@ -40,6 +40,7 @@ export async function startFakeCaptionService({
     emptyAudioAppends: 0,
     assistantResponseOnNextAudio: false,
     assistantResponses: 0,
+    realtimePartialProgress: false,
     chunkRequests: 0,
     chunkFailureCode: null,
     chunkAudio: [],
@@ -161,6 +162,8 @@ export async function startFakeCaptionService({
     state.realtimeConnections += 1
     audioTimeline.set(ws, { sentMs: 0, lastStartMs: 0 })
     let transcriptSent = false
+    let progressStarted = false
+    const progressItemId = `${itemId}-progress`
     ws.on('message', (data) => {
       let message
       try {
@@ -193,6 +196,31 @@ export async function startFakeCaptionService({
           })
         )
         return
+      }
+      // Scripted speech fixtures keep their provider productive while PCM
+      // continues between exact finals. Partials never finalize extra words.
+      if (
+        state.realtimePartialProgress &&
+        typeof message.audio === 'string' &&
+        Buffer.from(message.audio, 'base64').length > 0
+      ) {
+        if (!progressStarted) {
+          progressStarted = true
+          ws.send(
+            JSON.stringify({
+              type: 'speech-started',
+              itemId: progressItemId,
+              raw: { audio_start_ms: timeline.lastStartMs, item_id: progressItemId }
+            })
+          )
+        }
+        ws.send(
+          JSON.stringify({
+            type: 'custom',
+            rawType: 'conversation.item.input_audio_transcription.updated',
+            raw: { item_id: progressItemId, transcript: 'Fixture speech is still in progress.' }
+          })
+        )
       }
       if (transcriptSent || !autoTranscript) return
       transcriptSent = true

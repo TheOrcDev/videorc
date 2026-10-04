@@ -1773,6 +1773,10 @@ function startAutoHighlightExecutor(ws, sessionId) {
 
 // Captions stall after 8 s without audio; the debug seam keeps the bus fed.
 function startCaptionAudioPump(ws) {
+  // Both scripted-speech scenarios need provider progress between exact finals:
+  // the healthy energy-positive bus otherwise trips the transcript watchdog.
+  const previousPartialProgress = captionFake.state.realtimePartialProgress
+  captionFake.state.realtimePartialProgress = true
   let stopped = false
   const tick = () => {
     if (stopped) return
@@ -1782,7 +1786,9 @@ function startCaptionAudioPump(ws) {
   const timer = setInterval(tick, CAPTION_AUDIO_PUMP_MS)
   return {
     stop() {
+      if (stopped) return
       stopped = true
+      captionFake.state.realtimePartialProgress = previousPartialProgress
       clearInterval(timer)
     }
   }

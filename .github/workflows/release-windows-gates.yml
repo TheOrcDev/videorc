@@ -87,6 +87,13 @@ jobs:
             if ($status -ne 0 -or $result -notmatch '# pass [1-9][0-9]*') {
               throw "OAuth smoke startup ownership failed or executed zero tests: pass $pass"
             }
+            Write-Host "Caption fake-provider progress pass $pass/25"
+            $result = node --test --test-reporter=tap scripts/lib/fake-caption-service.test.mjs 2>&1 | Out-String
+            $status = $LASTEXITCODE
+            Write-Host $result
+            if ($status -ne 0 -or $result -notmatch '# pass [1-9][0-9]*') {
+              throw "Caption fake-provider progress failed or executed zero tests: pass $pass"
+            }
           }
 
       - name: Test (3 stability passes)
