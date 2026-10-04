@@ -28,13 +28,29 @@ const cmd = async (command, params = {}) => {
 }
 await cmd('resize-window', { width: 1280, height: 860 })
 await new Promise(r => setTimeout(r, 2500))
-for (const tab of ['studio', 'sources', 'layout', 'streaming', 'recording', 'library', 'settings']) {
+// Pages by tab id. The Orcle tab (id `ai`, ⌘9; plan 119) doubles as a probe:
+// it must render the Orcle Live switch, or the run fails at the end.
+const pages = [
+  { tab: 'studio' },
+  { tab: 'ai', name: 'orcle', mustShow: '#orcle-live-switch' },
+  { tab: 'sources' },
+  { tab: 'layout' },
+  { tab: 'streaming' },
+  { tab: 'recording' },
+  { tab: 'library' },
+  { tab: 'settings' }
+]
+const failures = []
+for (const { tab, name = tab, mustShow } of pages) {
   try {
-    await cmd('open-tab', { tab })
+    await cmd('open-tab', mustShow ? { tab, waitFor: mustShow } : { tab })
     await new Promise(r => setTimeout(r, 900))
-    const shot = await cmd('capture-page', { name: tab })
+    const shot = await cmd('capture-page', { name })
     console.log(shot.file)
-  } catch (e) { console.log(`SKIP ${tab}: ${e.message}`) }
+  } catch (e) {
+    console.log(`SKIP ${name}: ${e.message}`)
+    if (mustShow) failures.push(`${name}: ${e.message}`)
+  }
 }
 // Settings has tabs (plan 064): shoot each one. Radix tab triggers switch on
 // mousedown, not click.
@@ -51,4 +67,8 @@ for (const id of settingsTabs) {
   } catch (e) { console.log(`SKIP settings-${id}: ${e.message}`) }
 }
 await stopProcess(launched.process)
+if (failures.length > 0) {
+  console.error(`Required pages did not render:\n${failures.join('\n')}`)
+  process.exit(1)
+}
 process.exit(0)

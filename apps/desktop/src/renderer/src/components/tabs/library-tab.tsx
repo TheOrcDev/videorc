@@ -1,18 +1,19 @@
 import {
   CameraIcon,
   ChatIcon,
+  ClipIcon,
   CopyIcon,
   DeleteIcon,
   EditIcon,
   FolderIcon,
   LockIcon,
   MoreIcon,
+  OrcleIcon,
   PlayIcon,
   RepairIcon,
   ResetIcon,
   SearchIcon,
   SortIcon,
-  SparkleIcon,
   SpinnerIcon,
   SuccessIcon,
   UploadIcon,
@@ -64,10 +65,12 @@ import {
   isFinalizingSession
 } from '@/lib/session-finalization'
 import { dayLabel, durationMsLabel, formatBytes, isActiveRecordingState } from '@/lib/format'
+import { cleanCutModeLabel, isCleanCutEligible, type CleanCutSession } from '@/lib/clean-cut-view'
 import { revealInFileManagerLabel } from '@/lib/platform'
 import {
   LIBRARY_FILTERS,
   filterLibrarySessions,
+  hasOrcleReport,
   isLiveSession,
   libraryStorageLabel,
   liveSessionLabel,
@@ -96,9 +99,16 @@ import { openVideorcWebLink, VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
 // with filter/sort/search on top and an honest storage footer below. All list
 // logic is pure (lib/library-view); this component is the shell.
 export function LibraryTab({
-  onOpenInAi
+  onOpenOrcleReport,
+  onOpenCleanCut,
+  focusSessionId = null
 }: {
-  onOpenInAi: (sessionId: string) => void
+  /** "Orcle report": the Orcle tab, opened on this session's report. */
+  onOpenOrcleReport: (sessionId: string) => void
+  /** "Clean cut": the Orcle tab's Clean cut, on this recording (plan 119 S14). */
+  onOpenCleanCut: (sessionId: string) => void
+  /** Clean cut's "Open in Library": the row to show and focus. */
+  focusSessionId?: string | null
 }): ReactElement {
   const {
     sessions,
@@ -134,6 +144,11 @@ export function LibraryTab({
     setQuery('')
     setRecentlyCreatedSessionId(sessionId)
   }, [])
+  const [appliedFocus, setAppliedFocus] = useState<string | null>(null)
+  if (focusSessionId && focusSessionId !== appliedFocus) {
+    setAppliedFocus(focusSessionId)
+    focusLibrarySession(focusSessionId)
+  }
 
   const runImport = async (): Promise<void> => {
     setImporting(true)
@@ -249,7 +264,7 @@ export function LibraryTab({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <PageHeader
-        description="Every recording and stream becomes a local session. Files stay on disk; AI work happens in Publish."
+        description="Every recording and stream becomes a local session. Files stay on disk."
         title="Library"
       />
 
@@ -375,7 +390,8 @@ export function LibraryTab({
                     else rowElementsRef.current.delete(session.id)
                   }}
                   onDelete={() => setDeleting([session])}
-                  onOpenInAi={() => onOpenInAi(session.id)}
+                  onOpenCleanCut={() => onOpenCleanCut(session.id)}
+                  onOpenOrcleReport={() => onOpenOrcleReport(session.id)}
                   onRevealSession={focusLibrarySession}
                   onRename={() => {
                     setRenaming(session)
@@ -497,7 +513,8 @@ function LibraryRow({
   selectionDisabled,
   registerRow,
   onToggleSelected,
-  onOpenInAi,
+  onOpenCleanCut,
+  onOpenOrcleReport,
   onRevealSession,
   onRename,
   onDelete
@@ -508,7 +525,8 @@ function LibraryRow({
   selectionDisabled: boolean
   registerRow: (element: HTMLDivElement | null) => void
   onToggleSelected: () => void
-  onOpenInAi: () => void
+  onOpenCleanCut: () => void
+  onOpenOrcleReport: () => void
   onRevealSession: (sessionId: string) => void
   onRename: () => void
   onDelete: () => void
@@ -523,6 +541,10 @@ function LibraryRow({
   // still runs; the row says so instead of claiming an MKV.
   const finalizing = isFinalizingSession(session)
   const exportFailed = finalizationFailed(session)
+  // A Clean cut copy (plan 119 S14): `cleanCutOfSessionId` names its source.
+  const cleanCutMode = (session as CleanCutSession).cleanCutOfSessionId
+    ? ((session as CleanCutSession).cleanCutMode ?? 'clean')
+    : null
   return (
     <div
       ref={registerRow}
@@ -552,12 +574,17 @@ function LibraryRow({
             {session.processingKind === 'noise-cleanup' && session.sourceTitle
               ? ` · cleaned from ${session.sourceTitle}`
               : ''}
+            {cleanCutMode && session.sourceTitle ? ` · cut from ${session.sourceTitle}` : ''}
           </p>
         </div>
       </div>
       <div className="min-w-0">
         {session.processingKind === 'noise-cleanup' ? (
           <Badge variant="outline">Noise cleaned</Badge>
+        ) : cleanCutMode ? (
+          <Badge data-clean-cut={cleanCutMode} variant="outline">
+            {cleanCutModeLabel(cleanCutMode)}
+          </Badge>
         ) : session.sceneLabel ? (
           <Badge className="max-w-full" variant="outline">
             <span className="truncate">{session.sceneLabel}</span>
@@ -594,7 +621,8 @@ function LibraryRow({
         filePath={filePath}
         session={session}
         onDelete={onDelete}
-        onOpenInAi={onOpenInAi}
+        onOpenCleanCut={onOpenCleanCut}
+        onOpenOrcleReport={onOpenOrcleReport}
         onRevealSession={onRevealSession}
         onRename={onRename}
       />
@@ -669,14 +697,16 @@ type RepairPhase = 'idle' | 'checking' | 'assessed' | 'repairing' | 'done'
 function RowActions({
   filePath,
   session,
-  onOpenInAi,
+  onOpenCleanCut,
+  onOpenOrcleReport,
   onRevealSession,
   onRename,
   onDelete
 }: {
   filePath: string | null
   session: SessionSummary
-  onOpenInAi: () => void
+  onOpenCleanCut: () => void
+  onOpenOrcleReport: () => void
   onRevealSession: (sessionId: string) => void
   onRename: () => void
   onDelete: () => void
@@ -876,15 +906,6 @@ function RowActions({
         view={cleanupView}
         onAction={(action) => void runNoiseCleanupAction(action)}
       />
-      <Button
-        aria-label="Open in Publish"
-        size="icon-sm"
-        title="Open in Publish (AI)"
-        variant="ghost"
-        onClick={onOpenInAi}
-      >
-        <SparkleIcon weight="fill" />
-      </Button>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
@@ -906,10 +927,20 @@ function RowActions({
               <PlayIcon />
               Play
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={onOpenInAi}>
-              <SparkleIcon />
-              Open in Publish
-            </DropdownMenuItem>
+            {hasOrcleReport(session) ? (
+              // The report is saved when the stream ends (plan 119 S3).
+              <DropdownMenuItem disabled={live} onClick={onOpenOrcleReport}>
+                <OrcleIcon />
+                Orcle report
+              </DropdownMenuItem>
+            ) : null}
+            {isCleanCutEligible(session) ? (
+              // The Orcle tab's Clean cut, on this recording (plan 119 S14).
+              <DropdownMenuItem onClick={onOpenCleanCut}>
+                <ClipIcon />
+                Clean cut
+              </DropdownMenuItem>
+            ) : null}
             <DropdownMenuItem
               disabled={!filePath}
               onClick={() => filePath && void window.videorc?.revealSession?.(session.id)}

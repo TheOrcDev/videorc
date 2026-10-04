@@ -45,16 +45,25 @@ function renderAction(
 }
 
 describe('Library Noise Cleanup direct action', () => {
-  it('keeps the locked direct-action order: Play, Cleanup, Publish', () => {
+  it('keeps the locked direct-action order: Play, Cleanup, then the menu', () => {
     const source = readFileSync(new URL('./library-tab.tsx', import.meta.url), 'utf8')
     const rowActions = source.slice(source.indexOf('function RowActions'))
     const play = rowActions.indexOf('aria-label="Play recording"')
     const cleanup = rowActions.indexOf('<NoiseCleanupDirectAction')
-    const publish = rowActions.indexOf('aria-label="Open in Publish"')
+    const menu = rowActions.indexOf('aria-label="Session actions"')
 
     expect(play).toBeGreaterThan(-1)
     expect(cleanup).toBeGreaterThan(play)
-    expect(publish).toBeGreaterThan(cleanup)
+    expect(menu).toBeGreaterThan(cleanup)
+    // The menu's "Orcle report" and "Clean cut" open the Orcle tab (plan 119).
+    const menuPlay = rowActions.indexOf('Play\n', menu)
+    const orcleReport = rowActions.indexOf('Orcle report', menu)
+    const cleanCut = rowActions.indexOf('Clean cut\n', menu)
+    const reveal = rowActions.indexOf('{revealInFileManagerLabel()}', menu)
+    expect(menuPlay).toBeGreaterThan(menu)
+    expect(orcleReport).toBeGreaterThan(menuPlay)
+    expect(cleanCut).toBeGreaterThan(orcleReport)
+    expect(reveal).toBeGreaterThan(cleanCut)
   })
 
   it('uses a native accessible button for one-click cleanup', () => {

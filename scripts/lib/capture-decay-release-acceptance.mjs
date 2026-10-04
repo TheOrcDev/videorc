@@ -130,6 +130,7 @@ export const CAPTURE_DECAY_D3_SCRIPT_DEPENDENCY_PATHS = Object.freeze([
   'scripts/lib/av-sync-stimulus.mjs',
   'scripts/lib/beta-release-manifest.mjs',
   'scripts/lib/changelog.mjs',
+  'scripts/lib/clean-cut-ffmpeg-filters.mjs',
   'scripts/lib/ffmpeg-sibling-paths.mjs',
   'scripts/lib/final-recording-path.mjs',
   'scripts/lib/frame-cadence.mjs',

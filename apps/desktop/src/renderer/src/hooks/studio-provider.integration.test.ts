@@ -40,7 +40,6 @@ import { sourceVisibilityFromScene } from '@/lib/scene-presets'
 import { isMediaAccessSnapshotReady, systemAccessRows } from '@/lib/system-access'
 import type {
   AccountCallbackEnvelope,
-  AiArtifact,
   AudioMeterResult,
   AudioTrack,
   BackendConnection,
@@ -442,7 +441,6 @@ class StudioBackend {
   sessionListNextCursor: string | undefined
   sessionHealthEvents: HealthEvent[] = []
   sessionLogs: SessionLogEntry[] = []
-  sessionAiArtifacts: AiArtifact[] = []
   cohostSettings: CohostSettings = {
     enabled: true,
     tone: 'friendly',
@@ -1305,8 +1303,6 @@ class StudioBackend {
         return { events: this.sessionHealthEvents }
       case 'sessions.logs.list':
         return { entries: this.sessionLogs }
-      case 'sessions.aiArtifacts.list':
-        return { artifacts: this.sessionAiArtifacts }
       case 'sessions.delete': {
         const deletedSessionIds = new Set(params.sessionIds as string[])
         this.noiseCleanupJobs = this.noiseCleanupJobs.map((job) =>
@@ -6334,7 +6330,7 @@ describe('real StudioProvider lifecycle', () => {
           command.method !== 'sessions.list' &&
           command.method !== 'sessions.storage'
       )
-    ).toHaveLength(3)
+    ).toHaveLength(2)
   })
 
   it('ignores a stale load-more response after the first Library page refreshes', async () => {
@@ -6565,7 +6561,6 @@ describe('real StudioProvider lifecycle', () => {
 
     const releaseHealth = backend.deferResponse('sessions.healthEvents.list', { events: [] })
     const releaseLogs = backend.deferResponse('sessions.logs.list', { entries: [] })
-    const releaseArtifacts = backend.deferResponse('sessions.aiArtifacts.list', { artifacts: [] })
     let detailLoad!: Promise<void>
     await act(async () => {
       detailLoad = latest()!.core.loadSessionDetails('session-1')
@@ -6574,13 +6569,9 @@ describe('real StudioProvider lifecycle', () => {
     await vi.waitFor(() =>
       expect(
         backend.sentCommands.filter((command) =>
-          [
-            'sessions.healthEvents.list',
-            'sessions.logs.list',
-            'sessions.aiArtifacts.list'
-          ].includes(command.method)
+          ['sessions.healthEvents.list', 'sessions.logs.list'].includes(command.method)
         )
-      ).toHaveLength(3)
+      ).toHaveLength(2)
     )
 
     const healthEvent: HealthEvent = {
@@ -6621,7 +6612,6 @@ describe('real StudioProvider lifecycle', () => {
     await act(async () => {
       releaseHealth()
       releaseLogs()
-      releaseArtifacts()
       await detailLoad
     })
 
@@ -6629,147 +6619,9 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()?.core.sessionDetails['session-1']?.sessionLogs).toEqual([logEntry])
     expect(
       backend.sentCommands.filter((command) =>
-        ['sessions.healthEvents.list', 'sessions.logs.list', 'sessions.aiArtifacts.list'].includes(
-          command.method
-        )
+        ['sessions.healthEvents.list', 'sessions.logs.list'].includes(command.method)
       )
-    ).toHaveLength(3)
-  })
-
-  it('runs one trailing detail refresh when AI artifacts change during a load', async () => {
-    const backend = new StudioBackend()
-    backend.sessionSummaries = [sessionSummary()]
-    TestWebSocket.backend = backend
-    vi.stubGlobal('WebSocket', TestWebSocket)
-
-    const api = createVideorcApi({
-      acknowledge: async () => true,
-      pending: async () => [],
-      acknowledgeProvider: async () => true,
-      pendingProvider: async () => []
-    })
-    const testDom = installProviderTestEnvironment(api)
-    restoreEnvironment = testDom.restore
-    const observations: StudioObservation[] = []
-    const latest = (): StudioObservation | undefined => observations.at(-1)
-
-    await act(async () => {
-      root = createRoot(testDom.container)
-      root.render(
-        createElement(
-          BackgroundAssetsProvider,
-          null,
-          createElement(
-            StudioProvider,
-            null,
-            createElement(Probe, {
-              observe: (value) => {
-                observations.push(value)
-              }
-            })
-          )
-        )
-      )
-    })
-    await waitForObservation(
-      () => latest()?.core.wsStatus === 'connected' && latest()?.core.sessions.length === 1
-    )
-    await act(async () => latest()!.core.loadSessionDetails('session-1'))
-
-    const releaseHealth = backend.deferResponse('sessions.healthEvents.list', { events: [] })
-    const releaseLogs = backend.deferResponse('sessions.logs.list', { entries: [] })
-    const releaseArtifacts = backend.deferResponse('sessions.aiArtifacts.list', { artifacts: [] })
-    let detailReload!: Promise<void>
-    await act(async () => {
-      detailReload = latest()!.core.loadSessionDetails('session-1')
-      await Promise.resolve()
-    })
-    await vi.waitFor(() =>
-      expect(
-        backend.sentCommands.filter((command) =>
-          [
-            'sessions.healthEvents.list',
-            'sessions.logs.list',
-            'sessions.aiArtifacts.list'
-          ].includes(command.method)
-        )
-      ).toHaveLength(6)
-    )
-
-    const artifact: AiArtifact = {
-      id: 'artifact-live',
-      sessionId: 'session-1',
-      kind: 'summary',
-      status: 'ready',
-      content: { text: 'Fresh summary' },
-      filePath: null,
-      createdAt: '2026-07-12T00:00:02.000Z'
-    }
-    backend.sessionAiArtifacts = [artifact]
-    backend.sessionSummaries = [sessionSummary({ aiArtifactCount: 1 })]
-    await act(async () => {
-      for (const socket of backend.sockets) {
-        socket.onmessage?.({
-          data: JSON.stringify({
-            event: 'ai.artifacts.changed',
-            payload: { sessionId: 'session-1' }
-          })
-        })
-      }
-      await Promise.resolve()
-    })
-
-    const releaseTrailingHealth = backend.deferResponse('sessions.healthEvents.list', {
-      events: []
-    })
-    const releaseTrailingLogs = backend.deferResponse('sessions.logs.list', { entries: [] })
-    const releaseTrailingArtifacts = backend.deferResponse('sessions.aiArtifacts.list', {
-      artifacts: [artifact]
-    })
-    await act(async () => {
-      releaseHealth()
-      releaseLogs()
-      releaseArtifacts()
-      await Promise.resolve()
-    })
-    await vi.waitFor(() =>
-      expect(
-        backend.sentCommands.filter((command) =>
-          [
-            'sessions.healthEvents.list',
-            'sessions.logs.list',
-            'sessions.aiArtifacts.list'
-          ].includes(command.method)
-        )
-      ).toHaveLength(9)
-    )
-
-    await act(async () => {
-      for (const socket of backend.sockets) {
-        socket.onmessage?.({
-          data: JSON.stringify({
-            event: 'ai.artifacts.changed',
-            payload: { sessionId: 'session-1' }
-          })
-        })
-      }
-      await Promise.resolve()
-    })
-    await act(async () => {
-      releaseTrailingHealth()
-      releaseTrailingLogs()
-      releaseTrailingArtifacts()
-      await detailReload
-    })
-
-    expect(latest()?.core.sessionDetails['session-1']?.aiArtifacts).toEqual([artifact])
-    expect(
-      backend.sentCommands.filter((command) =>
-        ['sessions.healthEvents.list', 'sessions.logs.list', 'sessions.aiArtifacts.list'].includes(
-          command.method
-        )
-      )
-    ).toHaveLength(9)
+    ).toHaveLength(2)
   })
 
   it('keeps replacement detail buffers when an invalidated request settles late', async () => {
@@ -6818,11 +6670,7 @@ describe('real StudioProvider lifecycle', () => {
       backend.sentCommands.filter(
         (command) =>
           matchesSessionOne(command) &&
-          [
-            'sessions.healthEvents.list',
-            'sessions.logs.list',
-            'sessions.aiArtifacts.list'
-          ].includes(command.method)
+          ['sessions.healthEvents.list', 'sessions.logs.list'].includes(command.method)
       ).length
 
     const releaseOldHealth = backend.deferResponse(
@@ -6835,17 +6683,12 @@ describe('real StudioProvider lifecycle', () => {
       { entries: [] },
       matchesSessionOne
     )
-    const releaseOldArtifacts = backend.deferResponse(
-      'sessions.aiArtifacts.list',
-      { artifacts: [] },
-      matchesSessionOne
-    )
     let invalidatedLoad!: Promise<void>
     await act(async () => {
       invalidatedLoad = latest()!.core.loadSessionDetails('session-1')
       await Promise.resolve()
     })
-    await vi.waitFor(() => expect(detailCommandCount()).toBe(6))
+    await vi.waitFor(() => expect(detailCommandCount()).toBe(4))
 
     // Fill the bounded detail LRU through the public provider API. Committing
     // session 9 evicts session 1 and invalidates its still-pending request.
@@ -6864,17 +6707,12 @@ describe('real StudioProvider lifecycle', () => {
       { entries: [] },
       matchesSessionOne
     )
-    const releaseNewArtifacts = backend.deferResponse(
-      'sessions.aiArtifacts.list',
-      { artifacts: [] },
-      matchesSessionOne
-    )
     let replacementLoad!: Promise<void>
     await act(async () => {
       replacementLoad = latest()!.core.loadSessionDetails('session-1')
       await Promise.resolve()
     })
-    await vi.waitFor(() => expect(detailCommandCount()).toBe(9))
+    await vi.waitFor(() => expect(detailCommandCount()).toBe(6))
 
     const healthEvent: HealthEvent = {
       id: 'health-replacement',
@@ -6895,15 +6733,6 @@ describe('real StudioProvider lifecycle', () => {
       permissionPane: null,
       createdAt: '2026-07-12T00:00:03.000Z'
     }
-    const artifact: AiArtifact = {
-      id: 'artifact-replacement',
-      sessionId: 'session-1',
-      kind: 'summary',
-      status: 'ready',
-      content: { text: 'Replacement summary' },
-      filePath: null,
-      createdAt: '2026-07-12T00:00:03.000Z'
-    }
     await act(async () => {
       backend.sockets[0]?.onmessage?.({
         data: JSON.stringify({ event: 'health.event', payload: healthEvent })
@@ -6911,57 +6740,28 @@ describe('real StudioProvider lifecycle', () => {
       backend.sockets[0]?.onmessage?.({
         data: JSON.stringify({ event: 'session.log', payload: logEntry })
       })
-      backend.sockets[0]?.onmessage?.({
-        data: JSON.stringify({
-          event: 'ai.artifacts.changed',
-          payload: { sessionId: 'session-1' }
-        })
-      })
       await Promise.resolve()
     })
 
     await act(async () => {
       releaseOldHealth()
       releaseOldLogs()
-      releaseOldArtifacts()
       await invalidatedLoad
     })
 
-    const releaseTrailingHealth = backend.deferResponse(
-      'sessions.healthEvents.list',
-      { events: [healthEvent] },
-      matchesSessionOne
-    )
-    const releaseTrailingLogs = backend.deferResponse(
-      'sessions.logs.list',
-      { entries: [logEntry] },
-      matchesSessionOne
-    )
-    const releaseTrailingArtifacts = backend.deferResponse(
-      'sessions.aiArtifacts.list',
-      { artifacts: [artifact] },
-      matchesSessionOne
-    )
+    // The stale request settled first. The replacement's pages are empty, so
+    // the events can only come from the buffer the stale one had to leave.
     await act(async () => {
       releaseNewHealth()
       releaseNewLogs()
-      releaseNewArtifacts()
-      await Promise.resolve()
-    })
-    await vi.waitFor(() => expect(detailCommandCount()).toBe(12))
-
-    await act(async () => {
-      releaseTrailingHealth()
-      releaseTrailingLogs()
-      releaseTrailingArtifacts()
       await replacementLoad
     })
 
     expect(latest()?.core.sessionDetails['session-1']).toEqual({
       healthEvents: [healthEvent],
-      sessionLogs: [logEntry],
-      aiArtifacts: [artifact]
+      sessionLogs: [logEntry]
     })
+    expect(detailCommandCount()).toBe(6)
   })
 
   it('reads a Linux media-access snapshot as not-applicable and renders no permission chips', async () => {
@@ -8096,6 +7896,477 @@ describe('real StudioProvider lifecycle', () => {
     // The engine — not the renderer — decides what a missing consent means.
     await waitForObservation(() => latest()?.chat.cohostState?.reason === 'consent-required')
     expect(latest()?.chat.cohostState?.status).toBe('paused')
+  }, 15_000)
+
+  // Plan 119 S2: Orcle Live is one switch. On asks for cloud-AI consent first
+  // (the Orcle tab's dialog), then writes chat AND listening in ONE save; off
+  // writes `enabled` alone. Cloud AI is its own choice and never rewrites them.
+  async function mountOrcleLiveProvider(consent: '0' | '1'): Promise<{
+    backend: StudioBackend
+    latest: () => StudioObservation | undefined
+    settingsWrites: () => unknown[]
+    emitApi: (name: string, value: unknown) => void
+    pushCohostEnableResult: ReturnType<typeof vi.fn>
+  }> {
+    const backend = new StudioBackend()
+    backend.entitlements = premiumEntitlements
+    backend.cohostSettings = { ...backend.cohostSettings, enabled: false, listen: false }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    let emitApi: ((name: string, value: unknown) => void) | undefined
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      registerEmitter: (emit) => {
+        emitApi = emit
+      }
+    })
+    const pushCohostEnableResult = vi.fn(async () => true)
+    Object.assign(api, { pushCohostEnableResult })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem('videorc.aiConsent', consent)
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    await waitForObservation(() => latest()?.core.cohostSettings !== null)
+    return {
+      backend,
+      latest,
+      settingsWrites: () =>
+        backend.sentCommands
+          .filter((command) => command.method === 'cohost.settings.set')
+          .map((command) => command.params),
+      emitApi: (name, value) => emitApi?.(name, value),
+      pushCohostEnableResult
+    }
+  }
+
+  it('turns Orcle Live on only through the consent dialog, then in one save with listening', async () => {
+    const { latest, settingsWrites } = await mountOrcleLiveProvider('0')
+
+    await act(async () => latest()!.core.setOrcleLive(true))
+    await waitForObservation(() => latest()?.core.orcleConsentRequested === true)
+    // Asking writes nothing: no consent and no settings until the answer.
+    expect(settingsWrites()).toEqual([])
+    expect(localStorage.getItem('videorc.aiConsent')).toBe('0')
+
+    await act(async () => latest()!.core.answerOrcleConsent(true))
+    await waitForObservation(() => latest()?.core.cohostSettings?.enabled === true)
+    expect(latest()!.core.orcleConsentRequested).toBe(false)
+    expect(latest()!.core.aiConsent).toBe(true)
+    expect(localStorage.getItem('videorc.aiConsent')).toBe('1')
+    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
+    expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: true })
+
+    // Off is `enabled` alone: listening and consent stay as they were.
+    await act(async () => latest()!.core.setOrcleLive(false))
+    await waitForObservation(() => latest()?.core.cohostSettings?.enabled === false)
+    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }, { enabled: false }])
+    expect(latest()!.core.cohostSettings?.listen).toBe(true)
+    expect(localStorage.getItem('videorc.aiConsent')).toBe('1')
+    expect(toastSpies.error).not.toHaveBeenCalled()
+  }, 15_000)
+
+  it('changes nothing when the Orcle Live consent dialog is declined', async () => {
+    const { latest, settingsWrites } = await mountOrcleLiveProvider('0')
+
+    await act(async () => latest()!.core.setOrcleLive(true))
+    await waitForObservation(() => latest()?.core.orcleConsentRequested === true)
+    await act(async () => latest()!.core.answerOrcleConsent(false))
+    await waitForObservation(() => latest()?.core.orcleConsentRequested === false)
+
+    expect(latest()!.core.aiConsent).toBe(false)
+    expect(localStorage.getItem('videorc.aiConsent')).toBe('0')
+    expect(settingsWrites()).toEqual([])
+    expect(latest()!.core.cohostSettings?.enabled).toBe(false)
+  }, 15_000)
+
+  it('turns Orcle Live on without a dialog once cloud AI is allowed', async () => {
+    const { latest, settingsWrites } = await mountOrcleLiveProvider('1')
+
+    await act(async () => latest()!.core.setOrcleLive(true))
+    await waitForObservation(() => latest()?.core.cohostSettings?.enabled === true)
+    expect(latest()!.core.orcleConsentRequested).toBe(false)
+    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
+  }, 15_000)
+
+  it('revokes cloud AI without rewriting Orcle settings, and asks again on the next on', async () => {
+    const { latest, settingsWrites } = await mountOrcleLiveProvider('1')
+    await act(async () => latest()!.core.setOrcleLive(true))
+    await waitForObservation(() => latest()?.core.cohostSettings?.enabled === true)
+
+    await act(async () => latest()!.core.setAiConsent(false))
+    await waitForObservation(() => latest()?.core.aiConsent === false)
+    expect(localStorage.getItem('videorc.aiConsent')).toBe('0')
+    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
+    expect(latest()!.core.cohostSettings?.enabled).toBe(true)
+
+    await act(async () => latest()!.core.setOrcleLive(true))
+    await waitForObservation(() => latest()?.core.orcleConsentRequested === true)
+    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
+  }, 15_000)
+
+  it('applies the same Orcle Live save to every Comments-window way on', async () => {
+    const { latest, settingsWrites, emitApi, pushCohostEnableResult } =
+      await mountOrcleLiveProvider('0')
+
+    // The consent CTA: grant consent and turn on in the same click.
+    await act(async () => {
+      emitApi('onCohostEnableRequest', {
+        requestId: 'enable-1',
+        enabled: true,
+        grantConsent: true,
+        listen: true
+      })
+    })
+    await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 1)
+    expect(localStorage.getItem('videorc.aiConsent')).toBe('1')
+    expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
+    expect(pushCohostEnableResult).toHaveBeenLastCalledWith({
+      requestId: 'enable-1',
+      ok: true,
+      value: expect.objectContaining({ consented: true, enabled: true, listen: true })
+    })
+
+    // The status popover's switch, off: `enabled` alone.
+    await act(async () => {
+      emitApi('onCohostEnableRequest', { requestId: 'enable-2', enabled: false })
+    })
+    await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 2)
+    expect(settingsWrites().at(-1)).toEqual({ enabled: false })
+
+    // An `enabled`-only on (the nudge's old shape) still turns listening on.
+    await act(async () => {
+      emitApi('onCohostEnableRequest', { requestId: 'enable-3', enabled: true })
+    })
+    await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 3)
+    expect(settingsWrites().at(-1)).toEqual({ enabled: true, listen: true })
+    expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: true })
+    expect(latest()!.core.orcleConsentRequested).toBe(false)
+  }, 15_000)
+
+  // Stop never starts a cloud job on its own: a streamed, recorded session
+  // Orcle heard finalizes with its transcript, and only the cloud-AI
+  // readiness reads go out.
+  it('starts no cloud job when a streamed recording Orcle heard finalizes', async () => {
+    // Cloud AI reads ready, so only a missing trigger keeps a job from going out.
+    class CloudReadyBackend extends StudioBackend {
+      override response(command: BackendCommand): unknown {
+        if (command.method === 'ai.capabilities.get') {
+          return {
+            entitlement: { cloudAi: true },
+            features: { cloudAiEnabled: true },
+            models: { defaultTextModel: 'test-model' },
+            readiness: {
+              access: { cloudAiEntitled: true, globallyDisabled: false },
+              gateway: { configured: true, configError: null },
+              transcription: { configured: true, configError: null },
+              worker: { configured: true, configError: null }
+            },
+            workflow: { inputModes: [{ enabled: true, kind: 'transcript' }] }
+          }
+        }
+        if (command.method === 'ai.quota.get') {
+          return {
+            access: { allowed: true, code: null, message: null, status: null },
+            today: { limit: 20, remaining: 20 },
+            monthly: { limit: 500, remaining: 500 }
+          }
+        }
+        return super.response(command)
+      }
+    }
+    const backend = new CloudReadyBackend()
+    backend.entitlements = premiumEntitlements
+    backend.accountSnapshot = signedInAccount
+    backend.cohostSettings = { ...backend.cohostSettings, enabled: true, listen: true }
+    backend.sessionSummaries = [
+      sessionSummary({
+        id: 'pack-1',
+        title: 'Streamed and recorded',
+        mode: 'record+stream',
+        mp4Path: '/recordings/pack-1.mp4'
+      })
+    ]
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem('videorc.aiConsent', '1')
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    await waitForObservation(() => latest()?.core.account?.status === 'signed-in')
+    await waitForObservation(() => latest()?.core.aiCapabilities !== null)
+    await waitForObservation(
+      () => latest()?.core.sessions.some((row) => row.id === 'pack-1') === true
+    )
+    await waitForObservation(() => latest()?.core.cohostSettings?.listen === true)
+
+    const emit = async (event: string, payload: unknown): Promise<void> => {
+      await act(async () => {
+        for (const socket of backend.sockets) {
+          socket.onmessage?.({ data: JSON.stringify({ event, payload }) })
+        }
+        await Promise.resolve()
+      })
+    }
+    // Everything a post-recording job could key on: Orcle heard the stream,
+    // the transcript landed, and the MP4 finalized.
+    await emit('liveChat.snapshot', {
+      sessionId: 'pack-1',
+      providers: [],
+      messages: [],
+      unreadCount: 0,
+      updatedAt: now
+    })
+    await waitForObservation(() => latest()?.chat.cohostState?.listening?.state === 'on')
+    await emit('health.event', {
+      id: 'srt-pack-1',
+      sessionId: 'pack-1',
+      level: 'info',
+      code: 'captions-srt-written',
+      message: 'The transcript was saved next to the recording.',
+      createdAt: now
+    } satisfies HealthEvent)
+    await emit('recording.finalization', {
+      sessionId: 'pack-1',
+      state: 'finalized',
+      mp4Path: '/recordings/pack-1.mp4',
+      updatedAt: now
+    })
+    // Room for any lazy import a job would go through.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    })
+
+    const readinessReads = new Set(['ai.capabilities.get', 'ai.quota.get'])
+    expect(
+      backend.sentCommands
+        .map((command) => command.method)
+        .filter((method) => method.startsWith('ai.') && !readinessReads.has(method))
+    ).toEqual([])
+  }, 15_000)
+
+  // Plan 119 S15: with "Make a clean cut of every recording" on, a recording
+  // that finalizes starts one clean cut; a second finalized event for it starts
+  // nothing, and a completed cut is announced once per cut-list revision.
+  it('starts one clean cut when a recording finalizes with the switch on', async () => {
+    class CleanCutBackend extends StudioBackend {
+      override response(command: BackendCommand): unknown {
+        if (command.method === 'ai.capabilities.get') {
+          return {
+            entitlement: { cloudAi: true },
+            features: { cloudAiEnabled: true, cleanCutEnabled: true },
+            models: { defaultTextModel: 'test-model' },
+            readiness: {
+              access: { cloudAiEntitled: true, globallyDisabled: false },
+              gateway: { configured: true, configError: null },
+              transcription: { configured: true, configError: null },
+              worker: { configured: true, configError: null }
+            },
+            workflow: { inputModes: [{ enabled: true, kind: 'transcript' }] },
+            cleanCut: { supported: true, available: true, reasonCode: null }
+          }
+        }
+        if (command.method === 'ai.quota.get') {
+          return {
+            access: { allowed: true, code: null, message: null, status: null },
+            today: { limit: 20, remaining: 20 },
+            monthly: { limit: 500, remaining: 500 }
+          }
+        }
+        if (command.method === 'cleanCut.start') {
+          return {
+            id: 'clean-job-1',
+            sourceSessionId: 'clean-cut-1',
+            mode: 'clean',
+            state: 'queued',
+            progress: 0,
+            edlRevision: 0,
+            createdAt: now,
+            updatedAt: now
+          }
+        }
+        return super.response(command)
+      }
+    }
+    const backend = new CleanCutBackend()
+    backend.entitlements = premiumEntitlements
+    backend.accountSnapshot = signedInAccount
+    backend.sessionSummaries = [
+      sessionSummary({
+        id: 'clean-cut-1',
+        title: 'Tutorial',
+        mode: 'record',
+        durationMs: 600_000,
+        mp4Path: '/recordings/clean-cut-1.mp4'
+      }),
+      sessionSummary({
+        id: 'clean-cut-stream-only',
+        title: 'Stream only',
+        mode: 'stream',
+        durationMs: 600_000
+      })
+    ]
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem('videorc.aiConsent', '1')
+    localStorage.setItem('videorc.cleanCutAuto', '1')
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    await waitForObservation(() => latest()?.core.account?.status === 'signed-in')
+    await waitForObservation(() => latest()?.core.aiCapabilities !== null)
+    await waitForObservation(
+      () => latest()?.core.sessions.some((row) => row.id === 'clean-cut-1') === true
+    )
+
+    const emit = async (event: string, payload: unknown): Promise<void> => {
+      await act(async () => {
+        for (const socket of backend.sockets) {
+          socket.onmessage?.({ data: JSON.stringify({ event, payload }) })
+        }
+        await Promise.resolve()
+      })
+    }
+    const settle = async (): Promise<void> => {
+      // Room for the lazy import the auto-run goes through.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      })
+    }
+    const starts = (): unknown[] =>
+      backend.sentCommands
+        .filter((command) => command.method === 'cleanCut.start')
+        .map((command) => command.params)
+
+    for (const sessionId of ['clean-cut-1', 'clean-cut-1', 'clean-cut-stream-only']) {
+      await emit('recording.finalization', {
+        sessionId,
+        state: 'finalized',
+        mp4Path: `/recordings/${sessionId}.mp4`,
+        updatedAt: now
+      })
+      await settle()
+    }
+    expect(starts()).toEqual([
+      { sessionId: 'clean-cut-1', mode: 'clean', consentToUploadAudio: true }
+    ])
+    expect(JSON.parse(localStorage.getItem('videorc.cleanCutAttempted') ?? '[]')).toEqual([
+      'clean-cut-1'
+    ])
+
+    const completed = {
+      id: 'clean-job-1',
+      sourceSessionId: 'clean-cut-1',
+      mode: 'clean',
+      state: 'completed',
+      progress: 1,
+      edlRevision: 0,
+      edlSummary: { durationMs: 600_000, keptMs: 450_000, removalCount: 12, byKind: [] },
+      outputSessionId: 'clean-cut-1-out',
+      createdAt: now,
+      updatedAt: now
+    }
+    const listsBefore = backend.sentCommands.filter(
+      (command) => command.method === 'sessions.list'
+    ).length
+    await emit('cleanCut.status', completed)
+    await settle()
+    await emit('cleanCut.status', completed)
+    await settle()
+    const ready = toastSpies.success.mock.calls.filter(
+      ([title]) => typeof title === 'string' && title.startsWith('Your clean cut is ready')
+    )
+    expect(ready).toHaveLength(1)
+    expect(ready[0][0]).toBe('Your clean cut is ready (10:00 → 7:30)')
+    expect(ready[0][1]).toMatchObject({ action: { label: 'Review' } })
+    // The cut copy joins the Library without a click.
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'sessions.list').length
+    ).toBeGreaterThan(listsBefore)
+  }, 15_000)
+
+  it('starts no clean cut with the switch off', async () => {
+    const backend = new StudioBackend()
+    backend.entitlements = premiumEntitlements
+    backend.accountSnapshot = signedInAccount
+    backend.sessionSummaries = [
+      sessionSummary({
+        id: 'clean-cut-off',
+        mode: 'record',
+        durationMs: 600_000,
+        mp4Path: '/recordings/clean-cut-off.mp4'
+      })
+    ]
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem('videorc.aiConsent', '1')
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    await waitForObservation(
+      () => latest()?.core.sessions.some((row) => row.id === 'clean-cut-off') === true
+    )
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'recording.finalization',
+            payload: {
+              sessionId: 'clean-cut-off',
+              state: 'finalized',
+              mp4Path: '/recordings/clean-cut-off.mp4',
+              updatedAt: now
+            }
+          })
+        })
+      }
+    })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    })
+    expect(backend.sentCommands.some((command) => command.method.startsWith('cleanCut.'))).toBe(
+      false
+    )
   }, 15_000)
 
   it('does not reuse a stale permission snapshot when the click-time status read fails', async () => {

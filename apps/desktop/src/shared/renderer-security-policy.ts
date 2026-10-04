@@ -35,6 +35,9 @@ export const IPC_INVOKE_ROLES = {
   'resource:reveal-background': MAIN_ONLY,
   'resource:trash-session-deletion': MAIN_ONLY,
   'resource:open-session': MAIN_ONLY,
+  // In-app playback grants (plan 119, S11). Only the Studio renderer may mint
+  // one; the Comments window shares the scheme in its CSP but holds no id.
+  'media:grant-session': MAIN_ONLY,
   'system:pick-file': MAIN_ONLY,
   'system:pick-directory': MAIN_ONLY,
   'system:check-directory': MAIN_ONLY,

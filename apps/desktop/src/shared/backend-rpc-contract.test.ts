@@ -742,6 +742,30 @@ describe('backend RPC contract', () => {
       })
     ).toThrow('healthEvents must be a known field')
 
+    // Plan 119 S13: a Clean cut output names its source and mode; the
+    // processingKind literal stays closed (decision 12).
+    const cleanCutOutput = {
+      ...item,
+      id: 'session-1-clean-cut',
+      derivedFromSessionId: 'session-1',
+      sourceTitle: 'Session 1',
+      cleanCutOfSessionId: 'session-1',
+      cleanCutMode: 'clean'
+    }
+    expect(validateBackendRpcResult('sessions.list', { items: [cleanCutOutput] })).toEqual({
+      items: [cleanCutOutput]
+    })
+    expect(() =>
+      validateBackendRpcResult('sessions.list', {
+        items: [{ ...cleanCutOutput, cleanCutMode: 'tight' }]
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('sessions.list', {
+        items: [{ ...cleanCutOutput, processingKind: 'clean-cut' }]
+      })
+    ).toThrow()
+
     const params = { sessionId: 'session-1', cursor: 'created\nid', limit: 120 }
     for (const method of [
       'sessions.healthEvents.list',
@@ -1742,6 +1766,144 @@ describe('backend RPC contract', () => {
     expect(() =>
       validateBackendRpcResult('clip.marks.list', [{ ...marks[1], phrase: null }])
     ).toThrow('clip.marks.list')
+  })
+
+  it('validates the Orcle report RPCs and the saved event (plan 119 S1)', () => {
+    const report = {
+      version: 1,
+      sessionId: 'session-1',
+      startedAt: '2026-10-04T10:00:00Z',
+      endedAt: '2026-10-04T11:00:00Z',
+      segments: 1,
+      streamTitle: 'Rust night',
+      messagesSeen: 84,
+      shownOnStream: 2,
+      questions: {
+        total: 5,
+        markedAnswered: 1,
+        dismissed: 1,
+        replied: 1,
+        answeredOnAir: 1,
+        restored: 0,
+        shownOnStream: 1,
+        items: [
+          {
+            id: 'q_1',
+            text: 'What keyboard is that?',
+            askers: ['Viewer'],
+            platforms: ['twitch'],
+            priority: 'high',
+            firstSeenAt: '2026-10-04T10:00:00Z',
+            outcome: 'replied'
+          },
+          {
+            id: 'q_2',
+            text: 'Which editor?',
+            priority: 'normal',
+            firstSeenAt: '2026-10-04T10:20:00Z',
+            outcome: 'open'
+          }
+        ]
+      },
+      flags: {
+        raised: 1,
+        dismissed: 1,
+        byKind: [{ kind: 'spam', count: 1 }],
+        bySeverity: [{ severity: 'low', count: 1 }]
+      },
+      promises: {
+        heard: 2,
+        kept: 1,
+        dismissed: 0,
+        reminded: 1,
+        open: [{ text: 'Giveaway at 100 viewers', firstSeenAt: '2026-10-04T10:05:00Z' }]
+      },
+      greetings: {
+        firstTimers: 3,
+        firstTimersGreeted: 2,
+        byVoice: 1,
+        byChat: 1,
+        onStream: 0,
+        manual: 1
+      },
+      alerts: [
+        { kind: 'audio', peakViewers: 2, active: true, firstSeenAt: '2026-10-04T10:40:00Z' }
+      ],
+      recap: { offered: 1, drafted: 0, dismissed: 1 }
+    }
+    const payload = {
+      sessionId: 'session-1',
+      report,
+      moments: [
+        {
+          startMs: 275_400,
+          endMs: 312_000,
+          reason: "You said 'clip that'",
+          excerpt: 'and it actually works first try clip that',
+          source: 'voice'
+        }
+      ],
+      chat: { messages: 84, byPlatform: [{ platform: 'twitch', messages: 84 }] }
+    }
+    expect(validateBackendRpcParams('cohost.report.get', { sessionId: 'session-1' })).toEqual({
+      sessionId: 'session-1'
+    })
+    expect(validateBackendRpcResult('cohost.report.get', payload)).toEqual(payload)
+    expect(validateBackendRpcResult('cohost.report.latest', payload)).toEqual(payload)
+    expect(validateBackendRpcResult('cohost.report.latest', null)).toBeNull()
+    const noReport = {
+      sessionId: 'session-1',
+      report: null,
+      moments: [],
+      chat: { messages: 0, byPlatform: [] }
+    }
+    expect(validateBackendRpcResult('cohost.report.get', noReport)).toEqual(noReport)
+    expect(validateBackendEventPayload('cohost.report.saved', { sessionId: 'session-1' })).toEqual({
+      sessionId: 'session-1'
+    })
+
+    // The serde-null trap: optional fields are absent, never null.
+    for (const broken of [
+      { ...report, streamTitle: null },
+      { ...report, alerts: null },
+      { ...report, questions: { ...report.questions, items: null } },
+      { ...report, promises: { ...report.promises, open: null } }
+    ]) {
+      expect(() =>
+        validateBackendRpcResult('cohost.report.get', { ...payload, report: broken })
+      ).toThrow('cohost.report.get')
+    }
+    // Closed shapes, a pinned version and a closed outcome vocabulary.
+    expect(() =>
+      validateBackendRpcResult('cohost.report.get', {
+        ...payload,
+        report: { ...report, version: 2 }
+      })
+    ).toThrow('cohost.report.get')
+    expect(() =>
+      validateBackendRpcResult('cohost.report.get', { ...payload, report: { ...report, extra: 1 } })
+    ).toThrow('cohost.report.get')
+    expect(() =>
+      validateBackendRpcResult('cohost.report.get', {
+        ...payload,
+        report: {
+          ...report,
+          questions: {
+            ...report.questions,
+            items: [{ ...report.questions.items[0], outcome: 'teleported' }]
+          }
+        }
+      })
+    ).toThrow('cohost.report.get')
+    expect(() =>
+      validateBackendRpcResult('cohost.report.get', {
+        ...payload,
+        moments: [{ ...payload.moments[0], source: null }]
+      })
+    ).toThrow('cohost.report.get')
+    expect(() =>
+      validateBackendEventPayload('cohost.report.saved', { sessionId: 'session-1', extra: true })
+    ).toThrow('cohost.report.saved')
   })
 
   it('validates the Live Co-host RPCs and state event against the wire contract', () => {

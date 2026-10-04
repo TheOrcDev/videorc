@@ -141,6 +141,190 @@ export interface NoiseCleanupJob {
   updatedAt: string
 }
 
+// --- Clean cut (plan 119 S12a/S12b) -----------------------------------------
+// Mirrors the Rust `CleanCut*` types in `protocol.rs`. The closed schemas in
+// `backend-rpc-contract.ts` validate every one of these shapes.
+
+export type CleanCutMode = 'clean' | 'condensed'
+
+/** `queued → transcribing → analyzing → ready` here; `ready → rendering →
+ * validating → completed` once rendering (S13) lands. `failed` and `cancelled`
+ * are final; starting again on the same recording resumes the transcript. */
+export type CleanCutJobState =
+  | 'queued'
+  | 'transcribing'
+  | 'analyzing'
+  | 'ready'
+  | 'rendering'
+  | 'validating'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+
+export type CleanCutRemovalKind =
+  | 'head'
+  | 'tail'
+  | 'silence'
+  | 'gap'
+  | 'filler'
+  | 'retake'
+  | 'false_start'
+  | 'condensed'
+  | 'manual'
+
+export interface CleanCutKindStat {
+  kind: CleanCutRemovalKind
+  count: number
+  ms: number
+}
+
+/** The part of the cut list that rides on every job snapshot. */
+export interface CleanCutEdlSummary {
+  durationMs: number
+  keptMs: number
+  removalCount: number
+  byKind: CleanCutKindStat[]
+}
+
+/** Durable backend-owned Clean cut state; also the `cleanCut.status` event. */
+export interface CleanCutJob {
+  id: string
+  sourceSessionId: string
+  mode: CleanCutMode
+  state: CleanCutJobState
+  /** Free-form: `extract-audio`, `probe`, `upload`, `stitch`, `analyze`, `cut-list`. */
+  step?: string
+  /** 0..1 across the whole job. */
+  progress: number
+  edlRevision: number
+  edlSummary?: CleanCutEdlSummary
+  /** `<Artifacts>/<sessionId>/clean-cut/transcript.words.json` once stitched. */
+  transcriptPath?: string
+  outputSessionId?: string
+  errorCode?: string
+  errorMessage?: string
+  createdAt: string
+  updatedAt: string
+}
+
+/** The source frame grid as `num/den` frames per second. */
+export interface CleanCutFrameRate {
+  num: number
+  den: number
+}
+
+export interface CleanCutSourceIdentity {
+  path: string
+  sizeBytes: number
+  modifiedUnixMs?: number
+}
+
+export interface CleanCutRemoval {
+  id: string
+  startMs: number
+  endMs: number
+  /** Exact frame indices on the source grid; `endFrame` is exclusive. */
+  startFrame: number
+  endFrame: number
+  kind: CleanCutRemovalKind
+  reason: string
+  confidence?: number
+  enabled: boolean
+}
+
+export interface CleanCutEdlStats {
+  byKind: CleanCutKindStat[]
+  keptMs: number
+}
+
+/** The cut list, version 1. */
+export interface CleanCutEdl {
+  version: 1
+  sourceIdentity: CleanCutSourceIdentity
+  frameRate: CleanCutFrameRate
+  durationMs: number
+  removals: CleanCutRemoval[]
+  stats: CleanCutEdlStats
+}
+
+/** One kept range of a Condensed selection, in recording time (S13/S19). */
+export interface CleanCutCondensedKeep {
+  startMs: number
+  endMs: number
+  title: string
+}
+
+export interface CleanCutJobDetail {
+  job: CleanCutJob
+  edl?: CleanCutEdl
+  /** Condensed jobs only, once the analysis answered; omitted when empty. */
+  condensedKeeps?: CleanCutCondensedKeep[]
+}
+
+/** `cleanCut.get`: the newest job per mode for one source session. */
+export interface CleanCutGetResult {
+  sessionId: string
+  jobs: CleanCutJobDetail[]
+}
+
+export interface CleanCutStartParams {
+  sessionId: string
+  mode: CleanCutMode
+  /** The Cloud AI consent the renderer holds; `false` is refused. */
+  consentToUploadAudio: boolean
+  /** Condensed only: 120..3600 seconds, default 900. */
+  targetDurationSeconds?: number
+}
+
+export interface CleanCutRemovalToggle {
+  id: string
+  enabled: boolean
+}
+
+export interface CleanCutManualRange {
+  startMs: number
+  endMs: number
+}
+
+/** `cleanCut.updateEdl`: optimistic on `revision`; toggles flip `enabled`,
+ * `addManual` adds frame-snapped manual removals, `removeManual` deletes
+ * manual removals by id. */
+export interface CleanCutUpdateEdlParams {
+  jobId: string
+  revision: number
+  removals?: CleanCutRemovalToggle[]
+  addManual?: CleanCutManualRange[]
+  removeManual?: string[]
+}
+
+/** `cleanCut.render` and `cleanCut.transcript` params (S13). */
+export interface CleanCutJobParams {
+  jobId: string
+}
+
+/** One word of `cleanCut.transcript`; `filler` is present only when true. */
+export interface CleanCutTranscriptWord {
+  text: string
+  startMs: number
+  endMs: number
+  filler?: true
+}
+
+/** One sentence of `cleanCut.transcript`: the analysis job's segment ids. */
+export interface CleanCutTranscriptSegment {
+  id: string
+  startMs: number
+  endMs: number
+}
+
+/** `cleanCut.transcript`: the stitched words and sentence segments of a job. */
+export interface CleanCutTranscript {
+  jobId: string
+  language: string | null
+  words: CleanCutTranscriptWord[]
+  segments: CleanCutTranscriptSegment[]
+}
+
 export type VideorcAccountStatus = 'signed-out' | 'signed-in'
 
 // The desktop's Videorc PRODUCT account (mirrors the Rust VideorcAccountSnapshot).
@@ -3026,19 +3210,7 @@ export interface SessionLogEntry {
   createdAt: string
 }
 
-export interface RunAiWorkflowParams {
-  sessionId: string
-  consentToUploadAudio: boolean
-  ffmpegPath?: string
-}
-
-export interface AiWorkflowResult {
-  sessionId: string
-  audioPath: string
-  artifacts: AiArtifact[]
-}
-
-/** Where a clip suggestion came from (plan 068 D6). */
+/** Where a moment came from (plan 068 D6). */
 export type ClipMomentSource = 'voice' | 'manual' | 'chat'
 
 /** A clip-worthy time range: a mark the streamer placed, or a chat spike,
@@ -3088,24 +3260,6 @@ export interface FollowNamesCommand {
   platform: 'twitch'
 }
 
-export interface ClipSuggestResult {
-  sessionId: string
-  moments: ClipMoment[]
-  chatMessageCount: number
-}
-
-export interface ClipExportResult {
-  sessionId: string
-  path: string
-}
-
-export interface ExportPublishPackResult {
-  sessionId: string
-  markdownPath: string
-  /** Every file the export wrote (markdown + per-field paste-ready files). */
-  files?: string[]
-}
-
 export interface AiCapabilities {
   /** Optional during rolling web deployments. Missing must fail closed when captions are enabled. */
   captions?: {
@@ -3136,6 +3290,19 @@ export interface AiCapabilities {
       model: string
     }
   }
+  /** Clean cut (plan 119, docs/clean-cut-contract.md part B). Older servers
+   * omit it, which means Clean cut is not available. `reasonCode` is open. */
+  cleanCut?: {
+    supported: boolean
+    available: boolean
+    reasonCode: string | null
+    maxChunkSeconds?: number
+    maxChunkBytes?: number
+    monthlySecondsLimit: number | null
+    remainingSeconds: number | null
+    modes?: string[]
+    workflowKind?: string
+  }
   entitlement: {
     checkedAt: string
     cloudAi: boolean
@@ -3145,6 +3312,8 @@ export interface AiCapabilities {
     tier: string
   }
   features: {
+    /** Clean cut kill switch off and its provider configured; older servers omit it. */
+    cleanCutEnabled?: boolean
     cloudAiEnabled: boolean
     gatewayConfigured: boolean
     modelTestingEnabled: boolean
@@ -3339,6 +3508,10 @@ export interface SessionListItem {
   derivedFromSessionId?: string
   sourceTitle?: string
   processingKind?: 'noise-cleanup'
+  /** Present only on a derived row Clean cut rendered (plan 119 S13): the
+   * source session and the mode. `processingKind` stays absent for these rows. */
+  cleanCutOfSessionId?: string
+  cleanCutMode?: CleanCutMode
   /** Background MP4 finalization (instant-record P2); absent for legacy rows. */
   finalizationState?: RecordingFinalizationState
   /** Live export progress from the backend registry (only while finalizing). */
@@ -3397,10 +3570,7 @@ export interface SessionAiArtifactsPage {
 export interface SessionDetails {
   healthEvents: HealthEvent[]
   sessionLogs: SessionLogEntry[]
-  aiArtifacts: AiArtifact[]
 }
-
-export type SessionWithDetails = SessionListItem & SessionDetails
 
 export interface SessionStorageTotals {
   count: number
@@ -3950,6 +4120,19 @@ export interface ShortcutRecorderArmResult {
   armed: boolean
 }
 
+/** Why main refused to mint a session media grant (plan 119, S11). */
+export type SessionMediaGrantRefusal =
+  /** No such session, no managed file, or the file is gone (or reached through a symlink). */
+  | 'not-found'
+  /** The session's managed file is not an `.mp4`. */
+  | 'not-mp4'
+  /** The MP4 exists but has no index yet: the recording is still being finalized. */
+  | 'not-ready'
+
+export type SessionMediaGrantResult =
+  | { url: string; expiresAt: number }
+  | { error: SessionMediaGrantRefusal }
+
 export interface VideorcApi {
   setGlobalShortcuts?: (shortcuts: GlobalShortcutsConfig) => Promise<GlobalShortcutsResult>
   onGlobalShortcut?: (callback: (action: GlobalShortcutAction) => void) => () => void
@@ -4148,6 +4331,14 @@ export interface VideorcApi {
   getDashboard?: () => Promise<LiveDashboardState | null>
   onDashboard?: (callback: (state: LiveDashboardState | null) => void) => () => void
   openSession: (sessionId: string) => Promise<string>
+  /**
+   * In-app playback (plan 119, S11): mints a short-lived grant for one
+   * finalized recording MP4, served Range-aware at
+   * `videorc-asset://session-media/<grantId>`. Main-window only. Calling again
+   * for the same session renews the grant and keeps its URL while the file is
+   * unchanged; the grant also dies with the window.
+   */
+  grantSessionMedia: (sessionId: string) => Promise<SessionMediaGrantResult>
   trashSessionDeletion: (operationId: string) => Promise<{ deleted: boolean; failedCount: number }>
   onOAuthCallbackUrl: (callback: (envelope: OAuthCallbackEnvelope) => void) => () => void
   /**
@@ -4828,6 +5019,166 @@ export interface CohostState {
    */
   sayHi?: CohostSayHi[]
   deadAirNudge?: CohostDeadAirNudge
+}
+
+/**
+ * Plan 119 S1: what became of a question Orcle caught. The latest outcome
+ * wins; a restore puts it back to `open`; `shown` means still open, but its
+ * comment was on stream.
+ */
+export type CohostReportQuestionOutcome =
+  | 'open'
+  | 'answered-on-air'
+  | 'replied'
+  | 'marked-answered'
+  | 'dismissed'
+  | 'shown'
+
+/** One question in the report's log. Optional lists are omitted while empty, never null. */
+export interface CohostReportQuestion {
+  id: string
+  text: string
+  /** At most five names. */
+  askers?: string[]
+  platforms?: StreamPlatform[]
+  priority: CohostPriority
+  firstSeenAt: string
+  outcome: CohostReportQuestionOutcome
+}
+
+export interface CohostReportQuestions {
+  /** Distinct question ids Orcle surfaced. */
+  total: number
+  markedAnswered: number
+  dismissed: number
+  replied: number
+  answeredOnAir: number
+  restored: number
+  shownOnStream: number
+  /** First seen first, at most 200. Omitted while empty. */
+  items?: CohostReportQuestion[]
+}
+
+export interface CohostReportFlagKindCount {
+  kind: CohostFlagKind
+  count: number
+}
+
+export interface CohostReportFlagSeverityCount {
+  severity: CohostFlagSeverity
+  count: number
+}
+
+export interface CohostReportFlags {
+  /** Each flagged message counted once. */
+  raised: number
+  dismissed: number
+  byKind?: CohostReportFlagKindCount[]
+  bySeverity?: CohostReportFlagSeverityCount[]
+}
+
+export interface CohostReportOpenPromise {
+  text: string
+  firstSeenAt: string
+}
+
+export interface CohostReportPromises {
+  /** New promises heard this session. */
+  heard: number
+  /** Marked done, or the transcript showed they were kept. */
+  kept: number
+  dismissed: number
+  reminded: number
+  /** Still open at the end, oldest first, at most 20. Omitted while empty. */
+  open?: CohostReportOpenPromise[]
+}
+
+/** Greeting totals over every chatter of the session. */
+export interface CohostReportGreetings {
+  /** Viewers whose first message in the channel landed this session. */
+  firstTimers: number
+  firstTimersGreeted: number
+  byVoice: number
+  byChat: number
+  /** Their comment went on stream. */
+  onStream: number
+  /** The streamer pressed Greeted. */
+  manual: number
+}
+
+/** One alert kind viewers raised: the most distinct viewers who said it at
+ * once, and whether two of them ever agreed within 60 s. */
+export interface CohostReportAlert {
+  kind: CohostAlertKind
+  peakViewers: number
+  active: boolean
+  firstSeenAt: string
+}
+
+/** Recaps are never posted by Orcle, so posting leaves no count. */
+export interface CohostReportRecap {
+  offered: number
+  drafted: number
+  dismissed: number
+}
+
+/**
+ * What Orcle caught in one stream (plan 119 decision 6): counts by outcome,
+ * the questions and what became of them, the promises still open. Saved on
+ * this computer when the session ends and deleted with the recording.
+ * `cohost.report.get` returns it; `cohost.report.saved` announces it. Every
+ * optional field is omitted while empty, never null.
+ */
+export interface CohostSessionReport {
+  version: 1
+  sessionId: string
+  startedAt: string
+  endedAt: string
+  /** Orcle sessions folded into this report: off and on mid-stream adds one. */
+  segments: number
+  streamTitle?: string
+  messagesSeen: number
+  /** Distinct comments that went on stream, automatically or by hand. */
+  shownOnStream: number
+  questions: CohostReportQuestions
+  flags: CohostReportFlags
+  promises: CohostReportPromises
+  greetings: CohostReportGreetings
+  alerts?: CohostReportAlert[]
+  recap: CohostReportRecap
+}
+
+export interface CohostReportChatPlatformCount {
+  platform: StreamPlatform
+  messages: number
+}
+
+/** Every chat row the session kept, by platform (busiest first). */
+export interface CohostReportChat {
+  messages: number
+  byPlatform: CohostReportChatPlatformCount[]
+}
+
+/**
+ * `cohost.report.get` / `cohost.report.latest`: the saved report (null when
+ * Orcle left none), the session's moments (clip marks and chat peaks, computed
+ * on read and never stored) and its chat totals.
+ */
+export interface CohostReportPayload {
+  sessionId: string
+  report: CohostSessionReport | null
+  moments: ClipMoment[]
+  chat: CohostReportChat
+}
+
+/** `cohost.report.get`. */
+export interface CohostReportGetParams {
+  sessionId: string
+}
+
+/** `cohost.report.saved`: a report for this session was written. */
+export interface CohostReportSavedEvent {
+  sessionId: string
 }
 
 /**

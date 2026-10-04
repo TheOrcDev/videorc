@@ -22,8 +22,19 @@ import type {
   CohostSettingsPatch,
   CohostStartParams,
   CohostState,
+  CohostReportGetParams,
+  CohostReportPayload,
+  CohostReportSavedEvent,
+  CohostSessionReport,
   ClipMark,
   ClipMarkedEvent,
+  ClipMoment,
+  CleanCutGetResult,
+  CleanCutJob,
+  CleanCutJobDetail,
+  CleanCutStartParams,
+  CleanCutTranscript,
+  CleanCutUpdateEdlParams,
   CompositorFrameReady,
   CompositorStatus,
   SceneEditorDraftAck,
@@ -245,6 +256,13 @@ export interface BackendRpcMethodMap {
   'noiseCleanup.start': BackendRpcDefinition<{ sessionId: string }, NoiseCleanupJob>
   'noiseCleanup.cancel': BackendRpcDefinition<{ jobId: string }, NoiseCleanupJob>
   'noiseCleanup.list': BackendRpcDefinition<undefined, NoiseCleanupJob[]>
+  'cleanCut.start': BackendRpcDefinition<CleanCutStartParams, CleanCutJob>
+  'cleanCut.get': BackendRpcDefinition<{ sessionId: string }, CleanCutGetResult>
+  'cleanCut.list': BackendRpcDefinition<undefined, CleanCutJob[]>
+  'cleanCut.cancel': BackendRpcDefinition<{ jobId: string }, CleanCutJob>
+  'cleanCut.updateEdl': BackendRpcDefinition<CleanCutUpdateEdlParams, CleanCutJobDetail>
+  'cleanCut.render': BackendRpcDefinition<{ jobId: string }, CleanCutJob>
+  'cleanCut.transcript': BackendRpcDefinition<{ jobId: string }, CleanCutTranscript>
   'repair.assess_file': BackendRpcDefinition<{ sessionId: string }, FileAssessment>
   'repair.repair_file': BackendRpcDefinition<
     { sessionId: string; expectAudio?: boolean; intendedFps?: number },
@@ -265,6 +283,8 @@ export interface BackendRpcMethodMap {
   'cohost.author.greeted': BackendRpcDefinition<CohostAuthorParams, CohostState>
   'cohost.settings.get': BackendRpcDefinition<undefined, CohostSettings>
   'cohost.settings.set': BackendRpcDefinition<CohostSettingsPatch, CohostSettings>
+  'cohost.report.get': BackendRpcDefinition<CohostReportGetParams, CohostReportPayload>
+  'cohost.report.latest': BackendRpcDefinition<undefined, CohostReportPayload | null>
   'liveChat.emotes.get': BackendRpcDefinition<undefined, ChatEmotesSettings>
   'liveChat.emotes.set': BackendRpcDefinition<ChatEmotesSettingsPatch, ChatEmotesSettings>
   'clip.mark': BackendRpcDefinition<undefined, ClipMarkedEvent>
@@ -284,6 +304,7 @@ export interface BackendEventMap {
   'devices.changed': DeviceList
   'entitlements.updated': EntitlementsSnapshot
   'noiseCleanup.status': NoiseCleanupJob
+  'cleanCut.status': CleanCutJob
   'recording.finalization': RecordingFinalizationEvent
   'platformAccounts.oauth.callback': OAuthCallbackResult
   'recording.status': RecordingStatus
@@ -297,6 +318,7 @@ export interface BackendEventMap {
   'capture.recovery.status': CaptureRecoveryStatus
   'diagnostics.stats': DiagnosticStats
   'cohost.state': CohostState
+  'cohost.report.saved': CohostReportSavedEvent
   'clip.marked': ClipMarkedEvent
   'performance.check.progress': PerformanceCheckProgress
   'performance.check.completed': PerformanceCheckState
@@ -1617,6 +1639,10 @@ const sessionSummarySchema = boundedSemanticValue(
       derivedFromSessionId: optionalSchema(boundedString),
       sourceTitle: optionalSchema(stringSchema({ maxLength: 16_384 })),
       processingKind: optionalSchema(literalSchema('noise-cleanup')),
+      // Plan 119 S13: a Clean cut output row names its source and mode;
+      // `processingKind` never carries a Clean cut value (decision 12).
+      cleanCutOfSessionId: optionalSchema(boundedString),
+      cleanCutMode: optionalSchema(enumSchema(['clean', 'condensed'])),
       finalizationState: optionalSchema(recordingFinalizationStateSchema),
       finalizationProgressPercent: optionalSchema(numberSchema({ min: 0, max: 100 })),
       finalizationError: optionalSchema(stringSchema({ maxLength: 16_384 }))
@@ -1738,6 +1764,203 @@ const noiseCleanupJobSchema = runtimeSchema<NoiseCleanupJob>(
     }
     return job
   }
+)
+
+// --- Clean cut (plan 119 S12a/S12b); mirrors `CleanCut*` in protocol.rs -----
+const cleanCutModeSchema = enumSchema(['clean', 'condensed'])
+const cleanCutJobStateSchema = enumSchema([
+  'queued',
+  'transcribing',
+  'analyzing',
+  'ready',
+  'rendering',
+  'validating',
+  'completed',
+  'failed',
+  'cancelled'
+])
+const cleanCutRemovalKindSchema = enumSchema([
+  'head',
+  'tail',
+  'silence',
+  'gap',
+  'filler',
+  'retake',
+  'false_start',
+  'condensed',
+  'manual'
+])
+const cleanCutKindStatSchema = objectSchema(
+  {
+    kind: cleanCutRemovalKindSchema,
+    count: nonNegativeInteger,
+    ms: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
+const cleanCutKindStatsSchema = arraySchema(cleanCutKindStatSchema, { maxLength: 16 })
+const cleanCutEdlSummarySchema = objectSchema(
+  {
+    durationMs: nonNegativeInteger,
+    keptMs: nonNegativeInteger,
+    removalCount: nonNegativeInteger,
+    byKind: cleanCutKindStatsSchema
+  },
+  { allowUnknown: false }
+)
+const cleanCutJobFieldsSchema = objectSchema(
+  {
+    id: boundedString,
+    sourceSessionId: boundedString,
+    mode: cleanCutModeSchema,
+    state: cleanCutJobStateSchema,
+    step: optionalText,
+    progress: numberSchema({ min: 0, max: 1 }),
+    edlRevision: nonNegativeInteger,
+    edlSummary: optionalSchema(cleanCutEdlSummarySchema),
+    transcriptPath: optionalSchema(boundedPath),
+    outputSessionId: optionalSchema(boundedString),
+    errorCode: optionalText,
+    errorMessage: optionalText,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  },
+  { allowUnknown: false }
+)
+const cleanCutJobSchema = runtimeSchema<CleanCutJob>('a Clean cut job', (value, path) => {
+  const job = cleanCutJobFieldsSchema.parse(value, path) as CleanCutJob
+  if (job.state === 'failed' && (!job.errorCode || !job.errorMessage)) {
+    throw new Error(`${path} must include a stable failure code and message.`)
+  }
+  if (job.state === 'ready' && !job.edlSummary) {
+    throw new Error(`${path} must carry the cut list summary once ready.`)
+  }
+  return job
+})
+const cleanCutRemovalSchema = objectSchema(
+  {
+    id: boundedString,
+    startMs: nonNegativeInteger,
+    endMs: nonNegativeInteger,
+    startFrame: nonNegativeInteger,
+    endFrame: nonNegativeInteger,
+    kind: cleanCutRemovalKindSchema,
+    reason: stringSchema({ maxLength: 2_000 }),
+    confidence: optionalSchema(numberSchema({ min: 0, max: 1 })),
+    enabled: booleanSchema
+  },
+  { allowUnknown: false }
+)
+const cleanCutEdlSchema = objectSchema(
+  {
+    version: literalSchema(1),
+    sourceIdentity: objectSchema(
+      {
+        path: boundedPath,
+        sizeBytes: nonNegativeInteger,
+        modifiedUnixMs: optionalSchema(numberSchema({ integer: true }))
+      },
+      { allowUnknown: false }
+    ),
+    frameRate: objectSchema(
+      {
+        num: numberSchema({ integer: true, min: 1 }),
+        den: numberSchema({ integer: true, min: 1 })
+      },
+      { allowUnknown: false }
+    ),
+    durationMs: nonNegativeInteger,
+    removals: arraySchema(cleanCutRemovalSchema, { maxLength: 100_000 }),
+    stats: objectSchema(
+      { byKind: cleanCutKindStatsSchema, keptMs: nonNegativeInteger },
+      { allowUnknown: false }
+    )
+  },
+  { allowUnknown: false }
+)
+const cleanCutCondensedKeepSchema = objectSchema(
+  {
+    startMs: nonNegativeInteger,
+    endMs: nonNegativeInteger,
+    title: stringSchema({ maxLength: 2_000 })
+  },
+  { allowUnknown: false }
+)
+const cleanCutJobDetailSchema = objectSchema(
+  {
+    job: cleanCutJobSchema,
+    edl: optionalSchema(cleanCutEdlSchema),
+    condensedKeeps: optionalSchema(arraySchema(cleanCutCondensedKeepSchema, { maxLength: 10_000 }))
+  },
+  { allowUnknown: false }
+)
+const cleanCutJobParamsSchema = objectSchema({ jobId: boundedString }, { allowUnknown: false })
+const cleanCutTranscriptSchema = objectSchema(
+  {
+    jobId: boundedString,
+    language: nullableSchema(stringSchema({ maxLength: 64 })),
+    words: arraySchema(
+      objectSchema(
+        {
+          text: stringSchema({ maxLength: 2_000 }),
+          startMs: nonNegativeInteger,
+          endMs: nonNegativeInteger,
+          filler: optionalSchema(literalSchema(true))
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: 500_000 }
+    ),
+    segments: arraySchema(
+      objectSchema(
+        { id: boundedString, startMs: nonNegativeInteger, endMs: nonNegativeInteger },
+        { allowUnknown: false }
+      ),
+      { maxLength: 25_000 }
+    )
+  },
+  { allowUnknown: false }
+)
+const cleanCutGetResultSchema = objectSchema(
+  {
+    sessionId: boundedString,
+    jobs: arraySchema(cleanCutJobDetailSchema, { maxLength: 8 })
+  },
+  { allowUnknown: false }
+)
+const cleanCutStartParamsSchema = objectSchema(
+  {
+    sessionId: boundedString,
+    mode: cleanCutModeSchema,
+    consentToUploadAudio: booleanSchema,
+    targetDurationSeconds: optionalSchema(numberSchema({ integer: true, min: 120, max: 3_600 }))
+  },
+  { allowUnknown: false }
+)
+const cleanCutUpdateEdlParamsSchema = objectSchema(
+  {
+    jobId: boundedString,
+    revision: nonNegativeInteger,
+    removals: optionalSchema(
+      arraySchema(
+        objectSchema({ id: boundedString, enabled: booleanSchema }, { allowUnknown: false }),
+        {
+          maxLength: 100_000
+        }
+      )
+    ),
+    addManual: optionalSchema(
+      arraySchema(
+        objectSchema(
+          { startMs: nonNegativeInteger, endMs: nonNegativeInteger },
+          { allowUnknown: false }
+        ),
+        { maxLength: 10_000 }
+      )
+    ),
+    removeManual: optionalSchema(arraySchema(boundedString, { maxLength: 10_000 }))
+  },
+  { allowUnknown: false }
 )
 
 const fileAssessmentSchema = boundedSemanticValue(
@@ -2226,6 +2449,172 @@ const cohostAuthorParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<CohostAuthorParams>
 
+// Plan 119 S1: the Orcle report. The blocks always ride; every optional list
+// is omitted by the backend while empty (never null). `version` is pinned:
+// the backend reads any other stored version as unavailable, so a report on
+// the wire is always this shape.
+const cohostReportQuestionOutcomeSchema = enumSchema([
+  'open',
+  'answered-on-air',
+  'replied',
+  'marked-answered',
+  'dismissed',
+  'shown'
+])
+const cohostReportQuestionSchema = objectSchema(
+  {
+    id: boundedString,
+    text: stringSchema({ maxLength: 2000 }),
+    askers: optionalSchema(arraySchema(stringSchema({ maxLength: 512 }), { maxLength: 5 })),
+    platforms: optionalSchema(arraySchema(streamPlatformSchema, { maxLength: 7 })),
+    priority: enumSchema(['high', 'normal', 'low']),
+    firstSeenAt: timestamp,
+    outcome: cohostReportQuestionOutcomeSchema
+  },
+  { allowUnknown: false }
+)
+const cohostReportQuestionsSchema = objectSchema(
+  {
+    total: nonNegativeInteger,
+    markedAnswered: nonNegativeInteger,
+    dismissed: nonNegativeInteger,
+    replied: nonNegativeInteger,
+    answeredOnAir: nonNegativeInteger,
+    restored: nonNegativeInteger,
+    shownOnStream: nonNegativeInteger,
+    items: optionalSchema(arraySchema(cohostReportQuestionSchema, { maxLength: 200 }))
+  },
+  { allowUnknown: false }
+)
+const cohostReportFlagsSchema = objectSchema(
+  {
+    raised: nonNegativeInteger,
+    dismissed: nonNegativeInteger,
+    byKind: optionalSchema(
+      arraySchema(
+        objectSchema(
+          { kind: cohostFlagKindSchema, count: nonNegativeInteger },
+          { allowUnknown: false }
+        ),
+        { maxLength: 16 }
+      )
+    ),
+    bySeverity: optionalSchema(
+      arraySchema(
+        objectSchema(
+          { severity: enumSchema(['high', 'medium', 'low']), count: nonNegativeInteger },
+          { allowUnknown: false }
+        ),
+        { maxLength: 4 }
+      )
+    )
+  },
+  { allowUnknown: false }
+)
+const cohostReportPromisesSchema = objectSchema(
+  {
+    heard: nonNegativeInteger,
+    kept: nonNegativeInteger,
+    dismissed: nonNegativeInteger,
+    reminded: nonNegativeInteger,
+    open: optionalSchema(
+      arraySchema(
+        objectSchema(
+          { text: stringSchema({ maxLength: 160 }), firstSeenAt: timestamp },
+          { allowUnknown: false }
+        ),
+        { maxLength: 20 }
+      )
+    )
+  },
+  { allowUnknown: false }
+)
+const cohostReportGreetingsSchema = objectSchema(
+  {
+    firstTimers: nonNegativeInteger,
+    firstTimersGreeted: nonNegativeInteger,
+    byVoice: nonNegativeInteger,
+    byChat: nonNegativeInteger,
+    onStream: nonNegativeInteger,
+    manual: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
+const cohostReportAlertSchema = objectSchema(
+  {
+    kind: enumSchema(['audio', 'video', 'stream-health', 'game', 'other']),
+    peakViewers: nonNegativeInteger,
+    active: booleanSchema,
+    firstSeenAt: timestamp
+  },
+  { allowUnknown: false }
+)
+const cohostReportRecapSchema = objectSchema(
+  { offered: nonNegativeInteger, drafted: nonNegativeInteger, dismissed: nonNegativeInteger },
+  { allowUnknown: false }
+)
+const cohostSessionReportSchema = objectSchema(
+  {
+    version: literalSchema(1),
+    sessionId: boundedString,
+    startedAt: timestamp,
+    endedAt: timestamp,
+    segments: nonNegativeInteger,
+    streamTitle: optionalSchema(stringSchema({ maxLength: 1000 })),
+    messagesSeen: nonNegativeInteger,
+    shownOnStream: nonNegativeInteger,
+    questions: cohostReportQuestionsSchema,
+    flags: cohostReportFlagsSchema,
+    promises: cohostReportPromisesSchema,
+    greetings: cohostReportGreetingsSchema,
+    alerts: optionalSchema(arraySchema(cohostReportAlertSchema, { maxLength: 8 })),
+    recap: cohostReportRecapSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostSessionReport>
+// A moment of the session: a clip mark or a chat peak, snapped to the
+// captions. `source` is omitted by an older backend (never null).
+const clipMomentSchema = objectSchema(
+  {
+    startMs: nonNegativeInteger,
+    endMs: nonNegativeInteger,
+    reason: stringSchema({ minLength: 1, maxLength: 500 }),
+    excerpt: stringSchema({ maxLength: 2000 }),
+    source: optionalSchema(enumSchema(['voice', 'manual', 'chat']))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ClipMoment>
+const cohostReportChatSchema = objectSchema(
+  {
+    messages: nonNegativeInteger,
+    byPlatform: arraySchema(
+      objectSchema(
+        { platform: streamPlatformSchema, messages: nonNegativeInteger },
+        { allowUnknown: false }
+      ),
+      { maxLength: 7 }
+    )
+  },
+  { allowUnknown: false }
+)
+const cohostReportPayloadSchema = objectSchema(
+  {
+    sessionId: boundedString,
+    report: nullableSchema(cohostSessionReportSchema),
+    moments: arraySchema(clipMomentSchema, { maxLength: 10_000 }),
+    chat: cohostReportChatSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostReportPayload>
+const cohostReportGetParamsSchema = objectSchema(
+  { sessionId: boundedString },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostReportGetParams>
+const cohostReportSavedEventSchema = objectSchema(
+  { sessionId: boundedString },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostReportSavedEvent>
+
 const scheduledMutationSchema = objectSchema(
   {
     confirmationFingerprint: optionalSchema(boundedString),
@@ -2644,6 +3033,34 @@ const runtimeContracts = {
     params: undefinedSchema,
     result: arraySchema(noiseCleanupJobSchema, { maxLength: 1000 })
   },
+  'cleanCut.start': {
+    params: cleanCutStartParamsSchema,
+    result: cleanCutJobSchema
+  },
+  'cleanCut.get': {
+    params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
+    result: cleanCutGetResultSchema
+  },
+  'cleanCut.list': {
+    params: undefinedSchema,
+    result: arraySchema(cleanCutJobSchema, { maxLength: 1000 })
+  },
+  'cleanCut.cancel': {
+    params: objectSchema({ jobId: boundedString }, { allowUnknown: false }),
+    result: cleanCutJobSchema
+  },
+  'cleanCut.updateEdl': {
+    params: cleanCutUpdateEdlParamsSchema,
+    result: cleanCutJobDetailSchema
+  },
+  'cleanCut.render': {
+    params: cleanCutJobParamsSchema,
+    result: cleanCutJobSchema
+  },
+  'cleanCut.transcript': {
+    params: cleanCutJobParamsSchema,
+    result: cleanCutTranscriptSchema
+  },
   'repair.assess_file': {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
     result: fileAssessmentSchema
@@ -2686,6 +3103,11 @@ const runtimeContracts = {
   'clip.marks.list': {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
     result: arraySchema(clipMarkSchema, { maxLength: 10_000 })
+  },
+  'cohost.report.get': { params: cohostReportGetParamsSchema, result: cohostReportPayloadSchema },
+  'cohost.report.latest': {
+    params: undefinedSchema,
+    result: nullableSchema(cohostReportPayloadSchema)
   }
 } satisfies Record<BackendRpcMethod, RuntimeBackendRpcContract>
 
@@ -2718,6 +3140,7 @@ const runtimeEventSchemas = {
   'devices.changed': deviceListSchema,
   'entitlements.updated': entitlementsSchema,
   'noiseCleanup.status': noiseCleanupJobSchema,
+  'cleanCut.status': cleanCutJobSchema,
   'recording.finalization': recordingFinalizationEventSchema,
   'platformAccounts.oauth.callback': oauthCallbackResultSchema,
   'recording.status': recordingStatusSchema,
@@ -2731,6 +3154,7 @@ const runtimeEventSchemas = {
   'capture.recovery.status': captureRecoveryStatusSchema,
   'diagnostics.stats': diagnosticStatsSchema,
   'cohost.state': cohostStateSchema,
+  'cohost.report.saved': cohostReportSavedEventSchema,
   'clip.marked': clipMarkedEventSchema,
   'performance.check.progress': performanceCheckProgressSchema,
   'performance.check.completed': performanceCheckStateSchema,

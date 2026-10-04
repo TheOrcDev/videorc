@@ -2,11 +2,11 @@ import {
   AlertIcon,
   type AppIcon,
   ChevronRightIcon,
-  CohostIcon,
   FrameIcon,
   ImageIcon,
   InfoIcon,
   LivestreamIcon,
+  OrcleIcon,
   RecordIcon,
   StopIcon
 } from '@/components/icons'
@@ -333,7 +333,7 @@ function CohostSessionRow(): ReactElement {
 
   return (
     <SessionRow
-      icon={CohostIcon}
+      icon={OrcleIcon}
       label="Orcle"
       title={view.tooltipLines.join('\n') || undefined}
       value={

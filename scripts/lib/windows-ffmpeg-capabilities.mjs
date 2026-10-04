@@ -10,21 +10,27 @@
 // Pure parsing lives here (covered by test:scripts); running the .exe is the
 // caller's job and only possible on a Windows host.
 
+import { CLEAN_CUT_FFMPEG_FILTERS } from './clean-cut-ffmpeg-filters.mjs'
+
 /** Protocols every shipped Windows ffmpeg must expose. rtmps implies a TLS
  * backend was linked (schannel on BtbN win64 builds); tls is listed
  * separately so a partial TLS wiring still fails loudly. */
 export const REQUIRED_WINDOWS_FFMPEG_PROTOCOLS = ['rtmp', 'rtmps', 'tls']
 
 /** Encoders the Windows recording/stream path selects: MediaFoundation H.264,
- * AAC for MP4 audio, and PCM for Noise Cleanup's MKV output policy. */
+ * AAC for MP4 audio, and PCM for Noise Cleanup's MKV output policy. Clean cut
+ * renders with `h264_mf` too and falls back to `libopenh264`, which is
+ * reported with the optional set below rather than required. */
 export const REQUIRED_WINDOWS_FFMPEG_ENCODERS = ['h264_mf', 'aac', 'pcm_s16le']
-export const REQUIRED_WINDOWS_FFMPEG_FILTERS = ['afftdn']
+/** `afftdn` for Noise Cleanup plus the trim/concat set Clean cut renders with
+ * (plan 119 S13). */
+export const REQUIRED_WINDOWS_FFMPEG_FILTERS = ['afftdn', ...CLEAN_CUT_FFMPEG_FILTERS]
 
 /** Encoders the app uses when present and lives without when absent: Intel
  * Quick Sync for the Windows raw path (plan 090 C). Reported, never required,
  * so a future pin without it degrades to software instead of failing the
  * package gate. */
-export const OPTIONAL_WINDOWS_FFMPEG_ENCODERS = ['h264_qsv']
+export const OPTIONAL_WINDOWS_FFMPEG_ENCODERS = ['h264_qsv', 'libopenh264']
 
 function hasWord(output, word) {
   return new RegExp(`(^|[^A-Za-z0-9_])${word}([^A-Za-z0-9_]|$)`, 'm').test(output)

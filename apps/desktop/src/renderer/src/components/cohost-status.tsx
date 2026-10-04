@@ -1,4 +1,4 @@
-import { CohostIcon, MicrophoneIcon } from '@/components/icons'
+import { MicrophoneIcon, OrcleIcon } from '@/components/icons'
 import { useState, type ReactElement } from 'react'
 
 import { Badge } from '@/components/ui/badge'
@@ -97,7 +97,7 @@ export function CohostStatus({
       <PopoverContent align="end" className="w-72">
         <PopoverHeader>
           <PopoverTitle className="flex items-center gap-2 text-sm">
-            <CohostIcon aria-hidden className="size-4 shrink-0" weight="duotone" />
+            <OrcleIcon aria-hidden className="size-4 shrink-0" weight="duotone" />
             Orcle
           </PopoverTitle>
           <PopoverDescription>
@@ -140,9 +140,11 @@ export function CohostStatus({
             ) : null}
           </div>
         ) : (
+          // Orcle Live's one switch (plan 119): on means Orcle reads chat and
+          // hears you, the same as the Orcle tab's switch.
           <div className="flex items-center gap-3">
             <Label className="min-w-0 flex-1 text-xs font-normal" htmlFor="cohost-status-enable">
-              Read live chat during this stream
+              Orcle joins my streams
             </Label>
             <Switch
               checked={enabled}

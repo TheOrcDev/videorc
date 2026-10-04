@@ -28,7 +28,22 @@ const ENCODERS_WITH_MF = [
   ' A....D aac                  AAC (Advanced Audio Coding)',
   ' A....D pcm_s16le            PCM signed 16-bit little-endian'
 ].join('\n')
-const FILTERS_WITH_NOISE_CLEANUP = 'Filters:\n TS afftdn A->A Denoise audio samples using FFT.'
+const CLEAN_CUT_FILTER_LINES = [
+  ' ... trim             V->V       Pick one continuous section from the input, drop the rest.',
+  ' ... atrim            A->A       Pick one continuous section from the input, drop the rest.',
+  ' ... concat           N->N       Concatenate audio and video streams.',
+  ' T.. afade            A->A       Fade in/out input audio.',
+  ' ... split            V->N       Pass on the input to N video outputs.',
+  ' ... asplit           A->N       Pass on the audio input to N audio outputs.',
+  ' ... setpts           V->V       Set PTS for the output video frame.',
+  ' ... asetpts          A->A       Set PTS for the output audio frame.',
+  ' ... format           V->V       Convert the input video to one of the specified pixel formats.'
+]
+const FILTERS_WITH_NOISE_CLEANUP = [
+  'Filters:',
+  ' TS afftdn A->A Denoise audio samples using FFT.',
+  ...CLEAN_CUT_FILTER_LINES
+].join('\n')
 
 test('a fully capable ffmpeg passes', () => {
   const result = assessWindowsFfmpegCapabilities({
@@ -40,22 +55,51 @@ test('a fully capable ffmpeg passes', () => {
   assert.deepEqual(result.missing, [])
 })
 
-test('Quick Sync is reported but never required', () => {
+test('Quick Sync and the OpenH264 fallback are reported but never required', () => {
   const without = assessWindowsFfmpegCapabilities({
     protocolsOutput: PROTOCOLS_WITH_TLS,
     encodersOutput: ENCODERS_WITH_MF,
     filtersOutput: FILTERS_WITH_NOISE_CLEANUP
   })
   assert.equal(without.ok, true)
-  assert.deepEqual(without.optionalMissing, ['encoder:h264_qsv'])
+  assert.deepEqual(without.optionalMissing, ['encoder:h264_qsv', 'encoder:libopenh264'])
 
-  const withQsv = assessWindowsFfmpegCapabilities({
+  const withBoth = assessWindowsFfmpegCapabilities({
     protocolsOutput: PROTOCOLS_WITH_TLS,
-    encodersOutput: `${ENCODERS_WITH_MF}\n V..... h264_qsv             H.264 (Intel Quick Sync Video acceleration) (codec h264)`,
+    encodersOutput: [
+      ENCODERS_WITH_MF,
+      ' V..... h264_qsv             H.264 (Intel Quick Sync Video acceleration) (codec h264)',
+      ' V..... libopenh264          OpenH264 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (codec h264)'
+    ].join('\n'),
     filtersOutput: FILTERS_WITH_NOISE_CLEANUP
   })
-  assert.equal(withQsv.ok, true)
-  assert.deepEqual(withQsv.optionalMissing, [])
+  assert.equal(withBoth.ok, true)
+  assert.deepEqual(withBoth.optionalMissing, [])
+})
+
+test('the Windows bundle requires every filter the Clean cut render uses (plan 119 S13)', () => {
+  for (const name of [
+    'trim',
+    'atrim',
+    'concat',
+    'afade',
+    'split',
+    'asplit',
+    'setpts',
+    'asetpts',
+    'format'
+  ]) {
+    assert.ok(REQUIRED_WINDOWS_FFMPEG_FILTERS.includes(name), name)
+  }
+  const withoutAfade = assessWindowsFfmpegCapabilities({
+    protocolsOutput: PROTOCOLS_WITH_TLS,
+    encodersOutput: ENCODERS_WITH_MF,
+    filtersOutput: FILTERS_WITH_NOISE_CLEANUP.split('\n')
+      .filter((line) => !/ afade /.test(line))
+      .join('\n')
+  })
+  assert.equal(withoutAfade.ok, false)
+  assert.deepEqual(withoutAfade.missing, ['filter:afade'])
 })
 
 test('an ffmpeg without a TLS stack fails on rtmps and tls (the 0.9.23 class)', () => {
@@ -113,7 +157,11 @@ test('the Windows bundle requires the model-free noise cleanup filter', () => {
   const result = assessWindowsFfmpegCapabilities({
     protocolsOutput: PROTOCOLS_WITH_TLS,
     encodersOutput: ENCODERS_WITH_MF,
-    filtersOutput: 'Filters:\n T. loudnorm A->A EBU R128 loudness normalization'
+    filtersOutput: [
+      'Filters:',
+      ' T. loudnorm A->A EBU R128 loudness normalization',
+      ...CLEAN_CUT_FILTER_LINES
+    ].join('\n')
   })
   assert.deepEqual(result.missing, ['filter:afftdn'])
 })

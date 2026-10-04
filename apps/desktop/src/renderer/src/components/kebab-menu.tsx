@@ -23,9 +23,10 @@ export interface KebabMenuItem {
 
 /**
  * ⋯ overflow menu for low-frequency per-item actions (videorc-design): a ghost
- * icon trigger + Radix dropdown. Shared E0 primitive — Assets tiles and the
- * Publish session rail use the same anatomy. Pass `separatorBefore` implicitly
- * by ordering: destructive items are separated automatically.
+ * icon trigger + Radix dropdown. Shared E0 primitive: Assets tiles, scene
+ * presets, scheduled streams and comment rows use the same anatomy. Pass
+ * `separatorBefore` implicitly by ordering: destructive items are separated
+ * automatically.
  */
 export function KebabMenu({
   items,

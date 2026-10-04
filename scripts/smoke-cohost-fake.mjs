@@ -625,6 +625,65 @@ try {
   )
   await request(backend, timeoutMs, 'liveChat.stop', {})
 
+  // --- Plan 119 S1: the stream left a report ---------------------------------
+  // The fake chat session has a sessions row (`ensure_fake_live_chat_session`),
+  // so the stop saved a report; a session without a row is skipped instead.
+  phase('report: cohost.report.get after the stop')
+  const reportPayload = await request(backend, timeoutMs, 'cohost.report.get', { sessionId })
+  const report = reportPayload?.report
+  expect(
+    reportPayload?.sessionId === sessionId &&
+      report?.version === 1 &&
+      report.sessionId === sessionId,
+    `cohost.report.get should return the saved report: ${JSON.stringify(reportPayload)}`
+  )
+  expect(
+    report.messagesSeen >= totalMessages && report.segments === 1,
+    `The report should count every noted message (the scripted ones at least): ${JSON.stringify({ messagesSeen: report.messagesSeen, segments: report.segments })}`
+  )
+  expect(
+    report.questions.total >= 2 &&
+      report.questions.dismissed === 1 &&
+      report.questions.replied === 1 &&
+      report.questions.markedAnswered === 0 &&
+      report.questions.answeredOnAir === 0,
+    `Question outcomes should count the dismiss and the reply once each: ${JSON.stringify(report.questions)}`
+  )
+  const loggedDup = (report.questions.items ?? []).find((item) => item.id === dup9.id)
+  const loggedVictim = (report.questions.items ?? []).find((item) => item.id === victim.id)
+  expect(
+    loggedDup?.outcome === 'replied' &&
+      loggedDup.askers.length === 5 &&
+      ['twitch', 'youtube', 'x'].every((platform) => loggedDup.platforms.includes(platform)) &&
+      loggedVictim?.outcome === 'dismissed',
+    `The question log should carry the latest outcome, five askers and every platform: ${JSON.stringify(report.questions.items)}`
+  )
+  expect(
+    report.flags.raised === 1 &&
+      report.flags.dismissed === 1 &&
+      (report.flags.byKind ?? []).some((entry) => entry.kind === 'spam' && entry.count === 1),
+    `The flag should count once as spam and once dismissed: ${JSON.stringify(report.flags)}`
+  )
+  expect(
+    report.greetings.firstTimers >= 5 &&
+      report.greetings.manual === 1 &&
+      report.greetings.byChat >= 1,
+    `Greetings should count the Greeted button and the reply: ${JSON.stringify(report.greetings)}`
+  )
+  expect(
+    Array.isArray(reportPayload.moments) &&
+      reportPayload.chat.messages >= totalMessages &&
+      ['twitch', 'youtube', 'x'].every((platform) =>
+        reportPayload.chat.byPlatform.some((entry) => entry.platform === platform)
+      ),
+    `The payload should carry moments and chat totals by platform: ${JSON.stringify({ moments: reportPayload.moments, chat: reportPayload.chat })}`
+  )
+  const latest = await request(backend, timeoutMs, 'cohost.report.latest', {})
+  expect(
+    latest?.sessionId === sessionId && latest.report?.version === 1,
+    `cohost.report.latest should find the session that just ended: ${JSON.stringify(latest?.sessionId)}`
+  )
+
   console.log(
     `Live Co-host fake smoke PASS - ${fake.state.requests.length} ticks over ${totalMessages} messages: ` +
       `off-shaped presence defaults, pending-bucket emit with nextTickAt, tickInFlight toggle, ` +
@@ -1574,6 +1633,56 @@ async function runSpotlightScenario({ ready, startedAt }) {
 
     phase('stop')
     await stopSpotlightResources()
+
+    // --- Plan 119 S1: the stream session left a report ------------------------
+    phase('report: the stream session left a report')
+    const streamReport = await request(backend, timeoutMs, 'cohost.report.get', {
+      sessionId: streamSessionId
+    })
+    const saved = streamReport?.report
+    expect(
+      saved?.version === 1 && saved.sessionId === streamSessionId,
+      `cohost.report.get should return the stream session's report: ${JSON.stringify(streamReport)}`
+    )
+    expect(
+      saved.questions.answeredOnAir === 1 &&
+        saved.questions.restored === 1 &&
+        saved.questions.total >= SPOTLIGHT_LANE.count - 1,
+      `The report should count the voice resolve and the restore once each: ${JSON.stringify(saved.questions)}`
+    )
+    const loggedAnswer = (saved.questions.items ?? []).find((item) => item.id === answerQuestion.id)
+    expect(
+      loggedAnswer && ['open', 'shown'].includes(loggedAnswer.outcome),
+      `A restored question reads open (or shown once its comment went on stream): ${JSON.stringify(loggedAnswer)}`
+    )
+    expect(
+      saved.flags.raised === 1 && (saved.flags.byKind ?? []).length === 1,
+      `The one flagged message should count once: ${JSON.stringify(saved.flags)}`
+    )
+    expect(
+      saved.greetings.firstTimers === 3 &&
+        saved.greetings.onStream === 2 &&
+        saved.greetings.byVoice === 1,
+      `Greetings should match the cards and the voice greeting: ${JSON.stringify(saved.greetings)}`
+    )
+    expect(
+      saved.shownOnStream >= 2 && saved.questions.shownOnStream >= 1,
+      `Cards on stream should be counted: ${JSON.stringify({ shownOnStream: saved.shownOnStream, questions: saved.questions.shownOnStream })}`
+    )
+    expect(
+      events.list.some(
+        (entry) =>
+          entry.event === 'cohost.report.saved' && entry.payload?.sessionId === streamSessionId
+      ),
+      'cohost.report.saved must announce the saved report.'
+    )
+    expect(
+      Array.isArray(streamReport.moments) &&
+        streamReport.chat.messages >= SPOTLIGHT_LANE.count &&
+        streamReport.chat.byPlatform[0]?.platform === SPOTLIGHT_LANE.platform,
+      `The payload should carry moments and Kick chat totals: ${JSON.stringify({ moments: streamReport.moments, chat: streamReport.chat })}`
+    )
+
     console.log(
       `Spotlight fake smoke PASS - spotlight ${spotlightLatencyMs} ms after the final, ` +
         `${sessionCalls.length} valid spotlight request(s) without the flagged message, ` +

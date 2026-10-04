@@ -269,6 +269,27 @@ describe('renderer security policy', () => {
     expect(roleCanInvokeChannel('captions', 'captions-window:push-snapshot')).toBe(false)
   })
 
+  it('lets only the Studio renderer mint in-app playback grants (plan 119, S11)', () => {
+    // The Comments window shares the videorc-asset: scheme in its CSP, so the
+    // grant id must be the only key: no auxiliary window may ask for one, and
+    // the preload never hands the method to them.
+    expect(roleCanInvokeChannel('main', 'media:grant-session')).toBe(true)
+    for (const role of ['notes', 'comments', 'captions'] as const) {
+      expect(roleCanInvokeChannel(role, 'media:grant-session')).toBe(false)
+      expect(AUXILIARY_API_KEYS[role]).not.toContain('grantSessionMedia')
+    }
+    const registry = new RendererSecurityRegistry()
+    registry.register(21, 'comments')
+    registry.trustDocument(21, 'http://localhost:5173/comments.html')
+    expect(
+      registry.invokeAllowed('media:grant-session', {
+        senderId: 21,
+        frameUrl: 'http://localhost:5173/comments.html',
+        isMainFrame: true
+      })
+    ).toBe(false)
+  })
+
   it('lets only the Comments window join main in caching chat avatars', () => {
     // The detached Comments window draws the same chat rows as Studio; the
     // host allowlist and the on-disk cache stay main-owned (avatar-cache.ts).

@@ -212,6 +212,25 @@ describe('Noise Cleanup Library view', () => {
     })
   })
 
+  it('treats a Clean cut copy as a derivative: its source, never a second cleanup', () => {
+    expect(
+      derive({
+        session: session({
+          id: 'cut-session',
+          mp4Path: '/recordings/cut-session.mp4',
+          derivedFromSessionId: 'session-1',
+          sourceTitle: 'Weekly update'
+        })
+      })
+    ).toMatchObject({
+      directAction: null,
+      directLabel: null,
+      menuAction: 'show-source',
+      menuLabel: 'Show source recording',
+      derivative: true
+    })
+  })
+
   it('never offers cleanup again when a derivative source was deleted', () => {
     expect(
       derive({
