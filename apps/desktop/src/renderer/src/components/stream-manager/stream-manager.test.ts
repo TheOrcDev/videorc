@@ -9,6 +9,7 @@ import type {
   LiveChatMessage,
   LiveChatProviderState,
   LiveChatSnapshot,
+  ModerationOperation,
   StreamPlatform
 } from '@/lib/backend'
 import { EMPTY_COHOST_STATE } from '@/lib/cohost-view'
@@ -192,6 +193,70 @@ describe('StreamManager Remove messages reconnect (plan 140, S5)', () => {
         snapshot: { ...snapshot, providers: [provider('twitch', 'ready')] }
       })
     ).not.toContain('remove-messages-reconnect')
+  })
+})
+
+describe('StreamManager removal cards (plan 140, S6)', () => {
+  const pending: ModerationOperation = {
+    operationId: '6f1c2e9a-3b7d-4c51-9e2f-0a1b2c3d4e5f',
+    sessionId: 's1',
+    messageId: chat.id,
+    platform: 'twitch',
+    authorName: 'Ada',
+    excerpt: 'What keyboard is that?',
+    source: 'orcle-voice',
+    reason: 'spam',
+    phase: 'pending-confirm',
+    confirmMode: 'confirm',
+    requiresExplicitConfirm: true,
+    confirmBy: '2099-01-01T00:00:00Z',
+    createdAt: '2026-10-04T12:00:00Z',
+    updatedAt: '2026-10-04T12:00:00Z'
+  }
+  const renderWith = (patch: Partial<StreamManagerProps>): string =>
+    renderToStaticMarkup(
+      createElement(StreamManager, {
+        snapshot,
+        dashboard: null,
+        cohostGate: { allowed: true },
+        cohostConsented: true,
+        cohostEnabled: true,
+        cohostState: { ...EMPTY_COHOST_STATE, sessionId: 's1', status: 'listening' },
+        onReconnectScopes: () => undefined,
+        moderationOperations: [pending],
+        onAnswerRemoval: () => undefined,
+        onRemoveFromChat: () => undefined,
+        ...patch
+      })
+    )
+
+  it('puts the open card at the top of the Orcle pane, above everything that scrolls', () => {
+    const markup = renderWith({})
+    const orcle = markup.slice(markup.indexOf('data-slot="orcle-pane"'))
+    const cards = orcle.indexOf('data-slot="removal-cards"')
+    expect(cards).toBeGreaterThan(orcle.indexOf('data-slot="orcle-pane-header"'))
+    expect(cards).toBeLessThan(orcle.indexOf('data-slot="cohost-pane"'))
+    expect(orcle).toContain('Remove from chat?')
+    expect(orcle).toContain('spam')
+    // Only the Orcle pane carries cards.
+    expect(markup.match(/data-slot="removal-card"/g)).toHaveLength(1)
+  })
+
+  it('never shows a card in history, without a handler, or for a manual removal', () => {
+    expect(
+      renderWith({
+        viewMode: {
+          kind: 'history',
+          sessionId: 's1',
+          title: 'Earlier stream',
+          startedAt: '2026-10-02T10:00:00Z'
+        }
+      })
+    ).not.toContain('data-slot="removal-card"')
+    expect(renderWith({ onAnswerRemoval: undefined })).not.toContain('data-slot="removal-card"')
+    expect(
+      renderWith({ moderationOperations: [{ ...pending, source: 'manual', phase: 'executing' }] })
+    ).not.toContain('data-slot="removal-card"')
   })
 })
 

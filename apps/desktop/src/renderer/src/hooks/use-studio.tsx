@@ -258,6 +258,7 @@ import type {
   LiveLayoutApplyStatus,
   LiveChatMessage,
   LiveChatProviderState,
+  ModerationOperation,
   CaptionsStatus,
   CaptionsUpdate,
   CaptionsWindowState,
@@ -2249,6 +2250,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   const latestLiveChatSendOperationRef = useRef<CommentsSendOperation | undefined>(undefined)
   const liveChatSendOperationRevisionRef = useRef(0)
+  // Chat removals (plan 140, S6): the lazy relay while a backend is connected.
+  // It follows the live chat session.
+  const chatModerationRef = useRef<
+    import('@/lib/chat-moderation-relay').ChatModerationRelay | null
+  >(null)
+  useEffect(() => {
+    chatModerationRef.current?.session(liveChatSnapshot.sessionId)
+  }, [liveChatSnapshot.sessionId])
   const replaceLiveChatSendOperation = useCallback(
     (
       operation: CommentsSendOperation | undefined,
@@ -5803,6 +5812,32 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         for (const [event, payload] of dashboardBacklog.splice(0)) started.feed(event, payload)
       })
       .catch(() => undefined)
+    // Chat removals (plan 140, S6): a lazy chunk keeps the live session's
+    // removal ledger, relays the Stream Manager's Remove from chat and card
+    // answers, and mirrors an open Orcle card as a toast while the Stream
+    // Manager is closed. Events that arrive first wait for it.
+    let moderation: typeof chatModerationRef.current = null
+    const moderationBacklog: ModerationOperation[] = []
+    void import('@/lib/chat-moderation-relay')
+      .then(({ startChatModerationRelay }) => {
+        if (!generationIsCurrent()) return
+        moderation = startChatModerationRelay({
+          client: nextClient,
+          sessionId: () => liveChatSnapshotRef.current.sessionId,
+          publish: (moderationOperations) => {
+            const snapshot = liveChatSnapshotRef.current
+            if (!snapshot.sessionId) return
+            void publishLiveCommentsSnapshot({
+              mode: { kind: 'live' },
+              snapshot,
+              moderationOperations
+            })
+          }
+        })
+        chatModerationRef.current = moderation
+        for (const operation of moderationBacklog.splice(0)) moderation.feed(operation)
+      })
+      .catch(() => undefined)
     const bufferLiveChatBootstrapEvent = (event: LiveChatBootstrapEvent): void => {
       if (liveChatBootstrapComplete) {
         return
@@ -6620,6 +6655,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           applyLiveChatSendOperation(operation)
         }
       }),
+      nextClient.on('liveChat.moderationOperation', (operation) => {
+        if (moderation) moderation.feed(operation)
+        else if (moderationBacklog.length < 64) moderationBacklog.push(operation)
+      }),
       nextClient.on('cohost.state', (payload) => {
         commitCohostState(payload as CohostState)
       }),
@@ -7152,6 +7191,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       liveChatMessageBatcher.dispose()
       dashboard?.dispose()
       dashboardBacklog.length = 0
+      moderation?.dispose()
+      if (chatModerationRef.current === moderation) chatModerationRef.current = null
+      moderationBacklog.length = 0
       if (liveChatRecoveryRetryTimer !== null) {
         window.clearTimeout(liveChatRecoveryRetryTimer)
         liveChatRecoveryRetryTimer = null

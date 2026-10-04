@@ -28,6 +28,8 @@ export const AUXILIARY_API_KEYS = {
     'showFollowNamesFromCommentsWindow',
     // Reconnect Twitch or Kick so Orcle can remove messages (plan 140, S5).
     'reconnectScopesFromCommentsWindow',
+    // Remove from chat and Orcle's removal cards (plan 140, S6): relayed.
+    'moderateFromCommentsWindow',
     'getCommentsWindowState',
     'setCommentsWindowAlwaysOnTop',
     'setCommentsWindowHighlightAnchor',

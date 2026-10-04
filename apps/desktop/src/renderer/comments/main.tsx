@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import ReactDOM from 'react-dom/client'
 import { toast } from '@/lib/toast'
 
@@ -16,6 +16,7 @@ import type {
   CommentsSendOperation,
   CommentsViewSnapshot,
   LiveChatMessage,
+  ModerationOperation,
   ViewerSample
 } from '@/lib/backend'
 import {
@@ -39,6 +40,8 @@ import {
   commentsSendTransportFailureCanReplace
 } from '../../shared/comments-send-operation'
 import { emptyLiveChatSnapshot } from '@/lib/live-chat-view'
+import { removalOutcomeToast, type RemovalAnswer } from '@/lib/chat-removal-view'
+import { mergeModerationOperations } from '../../shared/chat-moderation'
 import {
   reconcileBrokerCommentsSnapshot,
   applyCommentsSnapshotDelta
@@ -224,6 +227,85 @@ function CommentsWindowApp(): ReactElement {
   const { snapshot } = view
   const live = view.mode.kind === 'live' && Boolean(snapshot.sessionId)
 
+  // Chat removals (plan 140, S6). Studio relays the live session's operations
+  // in the snapshot; replies to this window's own requests fold in on top, so
+  // a row never waits for the next snapshot to say what happened.
+  const [localRemovals, setLocalRemovals] = useState<ModerationOperation[]>([])
+  const [removalRequestIds, setRemovalRequestIds] = useState<ReadonlySet<string>>(() => new Set())
+  const [removalAnsweringIds, setRemovalAnsweringIds] = useState<ReadonlySet<string>>(
+    () => new Set()
+  )
+  const relayedRemovals = view.mode.kind === 'live' ? view.moderationOperations : undefined
+  const moderationOperations = useMemo(
+    () =>
+      live
+        ? mergeModerationOperations(
+            relayedRemovals ?? [],
+            localRemovals.filter((operation) => operation.sessionId === snapshot.sessionId)
+          )
+        : [],
+    [live, localRemovals, relayedRemovals, snapshot.sessionId]
+  )
+  const noteRemoval = (operation: ModerationOperation): void =>
+    setLocalRemovals((current) => mergeModerationOperations(current, [operation]).slice(-100))
+  const flagId = (setter: typeof setRemovalRequestIds, id: string, on: boolean): void =>
+    setter((current) => {
+      if (current.has(id) === on) return current
+      const next = new Set(current)
+      if (on) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  // "Remove from chat" is the express consent: it runs at once, as manual.
+  const removeFromChat = (message: LiveChatMessage): void => {
+    const sessionId = snapshot.sessionId
+    const moderate = window.videorc?.moderateFromCommentsWindow
+    if (!sessionId || !moderate) return
+    flagId(setRemovalRequestIds, message.id, true)
+    void moderate({
+      requestId: crypto.randomUUID(),
+      sessionId,
+      action: 'remove',
+      operationId: crypto.randomUUID(),
+      messageId: message.id
+    })
+      .then((operation) => {
+        noteRemoval(operation)
+        const outcome = removalOutcomeToast(operation, { includeSuccess: false })
+        if (outcome) {
+          ;(outcome.kind === 'error' ? toast.error : toast.warning)(outcome.text, {
+            id: `chat-removal:${operation.operationId}`
+          })
+        }
+      })
+      .catch((error) =>
+        toast.error(error instanceof Error ? error.message : 'Could not remove the message.', {
+          id: `chat-removal:${message.id}`
+        })
+      )
+      .finally(() => flagId(setRemovalRequestIds, message.id, false))
+  }
+  // An Orcle removal card's Remove or Cancel (Enter or Esc).
+  const answerRemoval = (operation: ModerationOperation, answer: RemovalAnswer): void => {
+    const sessionId = snapshot.sessionId
+    const moderate = window.videorc?.moderateFromCommentsWindow
+    if (!sessionId || !moderate || removalAnsweringIds.has(operation.operationId)) return
+    flagId(setRemovalAnsweringIds, operation.operationId, true)
+    void moderate({
+      requestId: crypto.randomUUID(),
+      sessionId,
+      action: answer,
+      operationId: operation.operationId
+    })
+      .then(noteRemoval)
+      .catch((error) =>
+        toast.error(error instanceof Error ? error.message : 'Could not answer the removal.', {
+          id: `chat-removal:${operation.operationId}`
+        })
+      )
+      .finally(() => flagId(setRemovalAnsweringIds, operation.operationId, false))
+  }
+
   const requestHighlight = (message: LiveChatMessage): void => {
     if (!snapshot.sessionId) return
     const intent = ++highlightIntentRef.current
@@ -363,6 +445,11 @@ function CommentsWindowApp(): ReactElement {
         cohostNudgeDismissedForever={cohostNudgeDismissed}
         cohostStarting={cohostStarting}
         cohostState={cohost.state}
+        moderationOperations={moderationOperations}
+        removalAnsweringIds={removalAnsweringIds}
+        removalRequestIds={removalRequestIds}
+        onAnswerRemoval={live ? answerRemoval : undefined}
+        onRemoveFromChat={live ? removeFromChat : undefined}
         onCohostAnswered={(question) => void sendCohostAction('answered')(question.id)}
         onCohostRestoreQuestion={(question) => void sendCohostAction('restore')(question.id)}
         onCohostPromiseDone={(promise) => void sendCohostAction('promise-done')(promise.id)}

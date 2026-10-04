@@ -346,6 +346,26 @@ describe('renderer security policy', () => {
     expect(handler.slice(0, 600)).toContain('event.sender.id !== commentsWindow.webContents.id')
   })
 
+  it('lets only the Chat window ask for a chat removal, checked by sender (plan 140, S6)', () => {
+    expect(roleCanInvokeChannel('comments', 'comments-window:moderation')).toBe(true)
+    expect(roleCanInvokeChannel('notes', 'comments-window:moderation')).toBe(false)
+    expect(roleCanInvokeChannel('captions', 'comments-window:moderation')).toBe(false)
+    // Only Studio answers the relay.
+    expect(roleCanInvokeChannel('comments', 'comments-window:moderation-result-push')).toBe(false)
+    expect(roleCanInvokeChannel('main', 'comments-window:moderation-result-push')).toBe(true)
+    expect(AUXILIARY_API_KEYS.comments).toContain('moderateFromCommentsWindow')
+    expect(AUXILIARY_API_KEYS.comments).not.toContain('pushModerationResult')
+    expect(AUXILIARY_API_KEYS.comments).not.toContain('onModerationRequest')
+    expect(AUXILIARY_API_KEYS.notes).not.toContain('moderateFromCommentsWindow')
+    expect(AUXILIARY_API_KEYS.captions).not.toContain('moderateFromCommentsWindow')
+    const mainSource = source('./index.ts')
+    const handler = mainSource.split("'comments-window:moderation',")[1] ?? ''
+    expect(handler.slice(0, 700)).toContain('event.sender.id !== commentsWindow.webContents.id')
+    expect(handler.slice(0, 700)).toContain('assertLiveCommentsCommandSession(command.sessionId)')
+    const result = mainSource.split("'comments-window:moderation-result-push',")[1] ?? ''
+    expect(result.slice(0, 400)).toContain('event.sender.id !== mainWindow.webContents.id')
+  })
+
   it('exposes an invoke to an auxiliary preload only when the channel policy admits that role', () => {
     const channelByApiMethod = new Map<string, string>(
       Object.entries(electronInvokeApiMethods).map(([channel, method]) => [method, channel])

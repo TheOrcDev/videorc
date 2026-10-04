@@ -45,6 +45,7 @@ import type {
   CommentsViewMode,
   LiveChatMessage,
   LiveChatSnapshot,
+  ModerationOperation,
   ScopeReconnectPlatform,
   ViewerSample
 } from '@/lib/backend'
@@ -86,9 +87,16 @@ import {
 import { sendablePlatforms } from '@/lib/chat-send'
 import { cn } from '@/lib/utils'
 import { RemoveMessagesReconnectRows } from '@/components/stream-manager/remove-messages-reconnect'
+import { RemovalCards } from '@/components/stream-manager/removal-cards'
+import {
+  removalPaneView,
+  removeFromChatAvailable,
+  type RemovalAnswer
+} from '@/lib/chat-removal-view'
 
 import type { LiveDashboardState } from '../../../../shared/live-dashboard'
 import { removeMessagesReconnectPlatforms } from '../../../../shared/platform-scopes'
+import { latestModerationOperationByMessage } from '../../../../shared/chat-moderation'
 
 /**
  * ⌘J on macOS, Ctrl+J elsewhere; the key handler below accepts both. Electron's
@@ -97,6 +105,8 @@ import { removeMessagesReconnectPlatforms } from '../../../../shared/platform-sc
  * window shares with the main window and grows the main window's eager bytes.
  */
 const ORCLE_SHORTCUT = /Macintosh/.test(globalThis.navigator?.userAgent ?? '') ? '⌘J' : 'Ctrl+J'
+
+const NO_MODERATION_OPERATIONS: readonly ModerationOperation[] = []
 
 /** True while the element is laid out and on screen (a hidden pane is not). */
 function usePaneVisible(ref: RefObject<HTMLElement | null>): boolean {
@@ -218,6 +228,17 @@ export interface StreamManagerProps {
   /** Reconnect Twitch or Kick so Orcle can remove messages (plan 140, S5);
    * Electron main starts it. Rows show only while live. */
   onReconnectScopes?: (platform: ScopeReconnectPlatform) => void
+  /** The live session's chat removals (plan 140, S6), relayed by Studio:
+   * row chips, and Orcle's removal cards in the Orcle pane. */
+  moderationOperations?: readonly ModerationOperation[]
+  /** "Remove from chat" asked for, before any operation answered. */
+  removalRequestIds?: ReadonlySet<string>
+  /** Cards whose answer is on its way. */
+  removalAnsweringIds?: ReadonlySet<string>
+  /** ⋯ Remove from chat on a row, or on a flagged message: a manual removal. */
+  onRemoveFromChat?: (message: LiveChatMessage) => void
+  /** Remove or Cancel on an Orcle removal card. */
+  onAnswerRemoval?: (operation: ModerationOperation, answer: RemovalAnswer) => void
   sendPending?: boolean
   sendOperation?: CommentsSendOperation | null
   sendFailures?: ChatSendFailure[]
@@ -278,6 +299,11 @@ export function StreamManager({
   onOpenPreview,
   onShowFollowNames,
   onReconnectScopes,
+  moderationOperations = NO_MODERATION_OPERATIONS,
+  removalRequestIds,
+  removalAnsweringIds,
+  onRemoveFromChat,
+  onAnswerRemoval,
   sendPending = false,
   sendOperation = null,
   sendFailures = [],
@@ -316,14 +342,24 @@ export function StreamManager({
   const live = !inHistory && Boolean(snapshot.sessionId)
   const mode = inHistory ? 'History' : live ? 'Live' : messages.length > 0 ? 'History' : 'Idle'
 
-  // One clock: seconds while on air (the session clock), slow otherwise.
+  // One clock: seconds while on air (the session clock) or while a removal
+  // card counts down, slow otherwise.
   const [nowMs, setNowMs] = useState(() => Date.now())
   const onAir =
     !inHistory && dashboard?.session.state !== undefined && dashboard.session.state !== 'off-air'
+  // Chat removals (plan 140, S6): each row's newest removal, and Orcle's
+  // cards and their result lines. History never has any.
+  const removalOperations = live ? moderationOperations : NO_MODERATION_OPERATIONS
+  const removals = useMemo(
+    () => latestModerationOperationByMessage(removalOperations),
+    [removalOperations]
+  )
+  const removalPane = removalPaneView(removalOperations, nowMs, removalAnsweringIds)
+  const removalActive = removalPane.active
   useEffect(() => {
-    const timer = setInterval(() => setNowMs(Date.now()), onAir ? 1_000 : 15_000)
+    const timer = setInterval(() => setNowMs(Date.now()), onAir || removalActive ? 1_000 : 15_000)
     return () => clearInterval(timer)
-  }, [onAir])
+  }, [onAir, removalActive])
 
   // --- Orcle (unchanged behaviour, moved into its own pane: D5) ---
   const cohostSensitivity = useCohostSensitivity()
@@ -526,6 +562,33 @@ export function StreamManager({
     setCohostExpand((value) => value + 1)
   }, [])
 
+  // A new Orcle removal card brings the Orcle pane forward when it sits behind
+  // a tab, without taking focus from the composer. Once the cards and their
+  // result lines are gone, the pane the streamer was on comes back, unless
+  // they moved on themselves.
+  const removalCardIds = removalPane.cards.map((card) => card.operationId).join(' ')
+  const seenRemovalCardsRef = useRef<Set<string>>(new Set())
+  const revealedFromRef = useRef<{
+    narrow: StreamManagerPane
+    right: StreamManagerRightPane
+  } | null>(null)
+  useEffect(() => {
+    const ids = removalCardIds ? removalCardIds.split(' ') : []
+    const fresh = ids.filter((id) => !seenRemovalCardsRef.current.has(id))
+    for (const id of fresh) seenRemovalCardsRef.current.add(id)
+    if (fresh.length === 0 || orcleVisible || !cohostPresent) return
+    revealedFromRef.current ??= { narrow: narrowPane, right: rightPane }
+    setNarrowPane('orcle')
+    setRightPane('orcle')
+  }, [cohostPresent, narrowPane, orcleVisible, removalCardIds, rightPane])
+  useEffect(() => {
+    const from = revealedFromRef.current
+    if (removalActive || !from) return
+    revealedFromRef.current = null
+    setNarrowPane((current) => (current === 'orcle' ? from.narrow : current))
+    setRightPane((current) => (current === 'orcle' ? from.right : current))
+  }, [removalActive])
+
   // ⌘J focuses Orcle wherever it sits; ⌘F searches chat. The pane is shown
   // first, so its own focus handling lands on a visible element.
   useEffect(() => {
@@ -544,6 +607,32 @@ export function StreamManager({
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [cohostVisible, showOrcle])
+
+  // Flagged messages Remove from chat can act on: still in chat, removable,
+  // and with no removal in flight.
+  const flaggedIds = (shownCohostState?.flags ?? []).map((flag) => flag.messageId).join(' ')
+  const removableFlaggedIds = useMemo(() => {
+    const removable = new Set<string>()
+    if (!live || !onRemoveFromChat || !flaggedIds) return removable
+    const flagged = new Set(flaggedIds.split(' '))
+    for (const message of messages) {
+      if (
+        flagged.has(message.id) &&
+        removeFromChatAvailable(
+          message,
+          removals.get(message.id),
+          removalRequestIds?.has(message.id) ?? false
+        )
+      ) {
+        removable.add(message.id)
+      }
+    }
+    return removable
+  }, [flaggedIds, live, messages, onRemoveFromChat, removalRequestIds, removals])
+  const removeFlagged = (flag: CohostFlag): void => {
+    const message = messages.find((candidate) => candidate.id === flag.messageId)
+    if (message) onRemoveFromChat?.(message)
+  }
 
   const sendTargets = sendablePlatforms(snapshot.providers)
   // Pre-fill only: the composer is the one place a send starts (plan 068 D8).
@@ -588,6 +677,21 @@ export function StreamManager({
           onUpgrade={onCohostUpgrade}
         />
       </div>
+      {/* Plan 140, S6: what Orcle is about to remove because you asked, and
+          how to stop it, above the scroll so it never scrolls away. Part B's
+          command strip ("Heard: …") goes directly above these cards: what
+          Orcle heard, then what it is about to do. */}
+      {onAnswerRemoval ? (
+        <RemovalCards
+          view={removalPane}
+          onAnswer={(operationId, answer) => {
+            const operation = removalOperations.find(
+              (candidate) => candidate.operationId === operationId
+            )
+            if (operation) onAnswerRemoval(operation, answer)
+          }}
+        />
+      ) : null}
       {/* Plan 140, S5: a quiet row per platform whose account must be
           reconnected before Orcle can remove messages there. Live only. */}
       {live && onReconnectScopes ? (
@@ -623,6 +727,8 @@ export function StreamManager({
               onCohostRestoreQuestion ? (question) => onCohostRestoreQuestion(question) : undefined
             }
             onDismissFlag={(flag) => onCohostDismissFlag?.(flag)}
+            onRemoveFlagged={onRemoveFromChat ? removeFlagged : undefined}
+            removableMessageIds={removableFlaggedIds}
             onDismissQuestion={(question) => onCohostDismissQuestion?.(question)}
             onEnableConsent={onCohostEnableConsent}
             onJumpToMessage={(messageId) => {
@@ -800,6 +906,9 @@ export function StreamManager({
               onCohostEnable?.(true)
             }}
             onHighlight={live ? onHighlight : undefined}
+            removalRequestIds={removalRequestIds}
+            removals={removals}
+            onRemoveFromChat={live ? onRemoveFromChat : undefined}
             onSend={onSend}
           />
         </div>
