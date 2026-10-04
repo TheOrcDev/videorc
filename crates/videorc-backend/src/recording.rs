@@ -624,6 +624,7 @@ struct UncommittedCaptureProcess {
     rejected_start_cleanup: Option<PostSpawnRejectedStartCleanup>,
     rejected_start_terminal: Option<PublishedSessionStartTerminal>,
     stderr_monitor: Option<tokio::task::JoinHandle<()>>,
+    preview_stdout_monitor: Option<tokio::task::JoinHandle<()>>,
     #[cfg(test)]
     cleanup_completed: Option<oneshot::Sender<()>>,
 }
@@ -636,6 +637,7 @@ impl UncommittedCaptureProcess {
             rejected_start_cleanup: None,
             rejected_start_terminal: None,
             stderr_monitor: None,
+            preview_stdout_monitor: None,
             #[cfg(test)]
             cleanup_completed: None,
         }
@@ -691,6 +693,7 @@ impl UncommittedCaptureProcess {
         // where deleting a named-pipe registration before reap can let a new
         // session collide with the retiring process.
         drain_ffmpeg_stderr_monitor(self.stderr_monitor.take(), FFMPEG_STDERR_DRAIN_TIMEOUT).await;
+        abort_ffmpeg_preview_monitor(self.preview_stdout_monitor.take()).await;
         if let Some(terminal) = self.rejected_start_terminal.as_ref() {
             terminal.persist_failed_diagnostics().await;
         }
@@ -723,6 +726,9 @@ impl UncommittedCaptureProcess {
             .child
             .take()
             .expect("uncommitted capture process must own its child");
+        // The committed process owns stdout EOF from here; retain the existing
+        // running reader rather than aborting it when this startup guard drops.
+        drop(self.preview_stdout_monitor.take());
         (child, session_start_admission, self.stderr_monitor.take())
     }
 }
@@ -741,6 +747,10 @@ impl Drop for UncommittedCaptureProcess {
         let cleanup = self.rejected_start_cleanup.take();
         let terminal = self.rejected_start_terminal.take();
         let stderr_monitor = self.stderr_monitor.take();
+        let preview_stdout_monitor = self.preview_stdout_monitor.take();
+        if let Some(monitor) = preview_stdout_monitor.as_ref() {
+            monitor.abort();
+        }
         #[cfg(test)]
         let cleanup_completed = self.cleanup_completed.take();
         if child.is_none()
@@ -748,6 +758,7 @@ impl Drop for UncommittedCaptureProcess {
             && cleanup.is_none()
             && terminal.is_none()
             && stderr_monitor.is_none()
+            && preview_stdout_monitor.is_none()
         {
             return;
         }
@@ -757,6 +768,7 @@ impl Drop for UncommittedCaptureProcess {
                     let _ = child.wait().await;
                 }
                 drain_ffmpeg_stderr_monitor(stderr_monitor, FFMPEG_STDERR_DRAIN_TIMEOUT).await;
+                abort_ffmpeg_preview_monitor(preview_stdout_monitor).await;
                 if let Some(terminal) = terminal.as_ref() {
                     terminal.persist_failed_diagnostics().await;
                 }
@@ -4727,18 +4739,27 @@ async fn start_session_with_timeline(
         .with_rejected_start_terminal(published_session_start.take_terminal());
     session_row_guard.disarm();
     let ffmpeg_output_startup_started_at = Instant::now();
-    let (ffmpeg_output_startup_sender, mut ffmpeg_output_startup_receiver) = if use_encoder_bridge {
-        let (sender, receiver) = oneshot::channel();
-        (Some(sender), Some(receiver))
-    } else {
-        (None, None)
-    };
+    // Legacy FFmpeg has no bridge first-frame proof. Process spawn alone must
+    // not admit Recording: initialization time would consume the user's take.
+    // Every path observes positive output; only proven VideoToolbox bridges
+    // may defer this ACK using their existing encoded-frame watchdog.
+    let (ffmpeg_output_startup_sender, ffmpeg_output_startup_receiver) = oneshot::channel();
+    let mut ffmpeg_output_startup_receiver = Some(ffmpeg_output_startup_receiver);
     let ffmpeg_progress = FfmpegProgressBeacon::default();
     let mut ffmpeg_stderr_events = spawn_ffmpeg_stderr_reader(
         stderr,
-        ffmpeg_output_startup_sender,
+        Some(ffmpeg_output_startup_sender),
         ffmpeg_progress.clone(),
     );
+    // Legacy capture also writes preview JPEGs to stdout. Drain before waiting
+    // for media progress so that a full preview pipe cannot block that proof.
+    // The startup owner aborts this task on rejection/cancellation; commit
+    // transfers its lifetime to the running FFmpeg process's stdout EOF.
+    if let Some(stdout) = stdout {
+        uncommitted_capture_process.preview_stdout_monitor = Some(tokio::spawn(
+            publish_preview_stdout(state.clone(), None, stdout),
+        ));
+    }
     let stream_tee_has_recording_leg =
         output_path.is_some() && !(use_encoder_bridge && encoder_bridge_stream_profile.is_some());
     let (stream_runtime, slave_positions, stream_url_positions) = build_stream_runtime(
@@ -5549,10 +5570,6 @@ async fn start_session_with_timeline(
             crate::captions::resume_listen_for_capture(&listen_state).await;
         });
     }
-    if let Some(stdout) = stdout {
-        tokio::spawn(publish_preview_stdout(state.clone(), None, stdout));
-    }
-
     let initial_stream_targets_snapshot = stream_targets_snapshot_value(&stream_targets_snapshot);
     if !initial_stream_targets_snapshot.targets.is_empty() {
         state.emit_event("stream.targets", initial_stream_targets_snapshot);
@@ -8671,6 +8688,13 @@ async fn drain_ffmpeg_stderr_monitor(
             let _ = timeout(FFMPEG_STDERR_ABORT_JOIN_TIMEOUT, monitor).await;
             false
         }
+    }
+}
+
+async fn abort_ffmpeg_preview_monitor(monitor: Option<tokio::task::JoinHandle<()>>) {
+    if let Some(monitor) = monitor {
+        monitor.abort();
+        let _ = timeout(FFMPEG_STDERR_ABORT_JOIN_TIMEOUT, monitor).await;
     }
 }
 
@@ -31302,6 +31326,17 @@ mod tests {
             let mut process =
                 UncommittedCaptureProcess::new(child, CaptureStartupResources::default())
                     .with_rejected_start_terminal(terminal.take_terminal());
+            let (preview_started_sender, preview_started) = oneshot::channel();
+            let (preview_release_sender, preview_release) = oneshot::channel();
+            let (preview_dropped_sender, mut preview_dropped) = oneshot::channel::<()>();
+            process.preview_stdout_monitor = Some(tokio::spawn(async move {
+                // Closing this channel proves the actual task future was
+                // dropped, rather than only its detached JoinHandle.
+                let _drop_evidence = preview_dropped_sender;
+                preview_started_sender.send(()).unwrap();
+                let _ = preview_release.await;
+            }));
+            preview_started.await.unwrap();
             let (release_sender, release) = oneshot::channel();
             let (ready_sender, ready) = oneshot::channel();
             let log_state = state.clone();
@@ -31320,6 +31355,17 @@ mod tests {
             release_sender.send(()).unwrap();
             if committed {
                 let (mut child, admission, monitor) = process.commit();
+                assert!(matches!(
+                    preview_dropped.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ));
+                preview_release_sender.send(()).unwrap();
+                assert!(
+                    timeout(Duration::from_secs(1), preview_dropped)
+                        .await
+                        .unwrap()
+                        .is_err()
+                );
                 assert!(monitor.is_some());
                 assert!(drain_ffmpeg_stderr_monitor(monitor, Duration::from_secs(1)).await);
                 drop(stdin);
@@ -31339,6 +31385,13 @@ mod tests {
                     "original startup timeout rtmp://private.example/live/secret-key",
                 );
                 process.terminate_and_reap_before_fifo_writer_join().await;
+                assert!(
+                    timeout(Duration::from_secs(1), preview_dropped)
+                        .await
+                        .unwrap()
+                        .is_err()
+                );
+                assert!(preview_release_sender.send(()).is_err());
                 drop(stdin);
                 assert_eq!(
                     state
@@ -31490,6 +31543,7 @@ mod tests {
             rejected_start_cleanup: None,
             rejected_start_terminal: terminal.take_terminal(),
             stderr_monitor: Some(monitor),
+            preview_stdout_monitor: None,
             cleanup_completed: Some(completed_sender),
         };
         row_guard.disarm();

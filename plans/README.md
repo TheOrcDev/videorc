@@ -83,6 +83,7 @@ checkout and unrelated plans are preserved.
 | [139](139-retain-bounded-source-clock-recovery-evidence.md) | Retain bounded source-clock recovery evidence | P1 | 126 | Diagnostic merged PR593; current Windows 26 filters ×25 / full3 and local 49 mixer PASS; earlier recovery/FIFO failures remain unassigned, complete raw evidence retained |
 | [146](146-bound-legacy-pcm-recording-sync.md) | Bound legacy PCM recording synchronization | P1 | Final profile matrix | Current main matrix 16/18; repeated 4K60 recordings truncate before export; FIX merged PR600/main2310b6fd; real-command RED→GREEN, full Rust/desktop/Node and source-app 4K60 PASS; complete matrix/studio pending |
 | [147](147-diagnose-shared-record-stream-stop.md) | Diagnose shared record/stream stop failure | P1 | Final profile matrix | Original shared pressure requires TERM/KILL and no finished artifact; three current isolated shared+ordinary trials6/6PASS; original cause OPEN |
+| [148](148-diagnose-legacy-recording-startup-admission.md) | Diagnose legacy recording startup admission | P1 | 146 | Explicit pre-exec RED→GREEN; unchanged4K60 gate6.583s/395distinctframes/13ms tail; legacy positive-output and reader-ownership repair verified; full bundle/studio/device/Windows pending |
 
 Execute privacy, remote gesture, and microphone-demand fixes first, repair
 acceptance gates, then close scene
