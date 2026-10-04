@@ -4417,6 +4417,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_chat_totals_fake_provider_rpc() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let destinations = [
+            ("twitch", "smoke-twitch-events"),
+            ("youtube", "smoke-youtube-events"),
+            ("kick", "smoke-kick-events"),
+        ];
+        let start = crate::handle_text_message(
+            &state,
+            &serde_json::json!({
+                "id": "activity-start", "method": "liveChat.start", "params": {
+                    "sessionId": "activity-rpc",
+                    "platforms": ["twitch", "youtube", "kick"],
+                    "destinations": destinations.map(|(platform, target)| serde_json::json!({
+                        "platform": platform, "targetId": target, "read": "ready", "write": "ready"
+                    })),
+                    "fakes": destinations.map(|(platform, target)| serde_json::json!({
+                        "platform": platform, "targetId": target, "count": 1,
+                        "intervalMs": 60, "events": true
+                    }))
+                }
+            })
+            .to_string(),
+        )
+        .await;
+        let completed = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut ended = HashSet::new();
+            let mut messages = Vec::new();
+            while ended.len() != destinations.len() {
+                let event = events.recv().await?;
+                if event.event == "liveChat.providerStatus"
+                    && event.payload["state"] == "ended"
+                    && let Some(target) = event.payload["targetId"].as_str()
+                    && destinations.iter().any(|(_, expected)| *expected == target)
+                {
+                    ended.insert(target.to_string());
+                } else if event.event == "liveChat.message" {
+                    messages.push(event.payload);
+                }
+            }
+            Ok::<_, broadcast::error::RecvError>(messages)
+        })
+        .await;
+        let response = crate::handle_text_message(
+            &state,
+            r#"{"id":"activity-totals","method":"sessions.comments.totals","params":{"sessionId":"activity-rpc"}}"#,
+        )
+        .await;
+
+        // Retain exact fixture task ownership even on readiness failure. No
+        // abort/drop handle or assertion can leave its connector running.
+        let tasks = std::mem::take(&mut state.live_chat.lock().await.tasks);
+        if !matches!(&completed, Ok(Ok(_))) {
+            for task in &tasks {
+                task.abort();
+            }
+        }
+        let mut all_joined = true;
+        for mut task in tasks {
+            match tokio::time::timeout(Duration::from_secs(1), &mut task).await {
+                Ok(result) => all_joined &= result.is_ok(),
+                Err(_) => {
+                    task.abort();
+                    all_joined &= tokio::time::timeout(Duration::from_secs(1), &mut task)
+                        .await
+                        .is_ok();
+                }
+            }
+        }
+        let stopped = tokio::time::timeout(Duration::from_secs(1), stop_live_chat(&state)).await;
+        assert!(
+            all_joined,
+            "exact fake provider tasks must finish bounded cleanup"
+        );
+        assert!(stopped.is_ok(), "fixture session cleanup must complete");
+        assert!(start.ok);
+        let messages = completed
+            .expect("all three exact fake provider end events must arrive")
+            .expect("fixture events must not lag");
+        assert_eq!(messages.len(), 13);
+        assert_eq!(
+            messages
+                .iter()
+                .filter_map(|message| message["id"].as_str())
+                .collect::<HashSet<_>>()
+                .len(),
+            13
+        );
+        assert!(response.ok);
+        let wire = serde_json::to_string(&response).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        let value = &parsed["payload"];
+        let reduced = serde_json::json!({
+            "status": value["status"], "messageCount": value["messageCount"],
+            "chatters": value["chatters"], "supporters": value["supporters"],
+            "follows": value["follows"], "raids": value["raids"],
+            "bits": value["bits"], "tips": value["tips"]
+        });
+        assert_eq!(
+            reduced,
+            serde_json::json!({
+                "status": "available", "messageCount": 13, "chatters": 7,
+                "supporters": 7, "follows": 2, "raids": 1, "bits": 1500,
+                "tips": [{ "currency": "USD", "amountMicros": 5_000_000 },
+                         { "currency": "EUR", "amountMicros": 2_000_000 }]
+            })
+        );
+        // This bounded synthetic-only projection connects the real serialized
+        // reply to the Node smoke's acceptance regression; no session or text.
+        eprintln!("fake-activity-rpc-reduced: {reduced}");
+    }
+
+    #[tokio::test]
     async fn session_chat_totals_match_normalized_fake_activity_rules() {
         let state = test_state();
         state

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 
 import { smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
+import { assertFakeActivityTotals } from './lib/comments-totals-probe.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 // Unified-comments smoke with the fake connector: drives the LiveChatCoordinator end to
@@ -515,22 +516,7 @@ try {
     const eventTotals = await request(ws, timeoutMs, 'sessions.comments.totals', {
       sessionId: eventsSessionId
     })
-    if (
-      eventTotals?.status !== 'available' ||
-      eventTotals.messageCount !== 13 ||
-      eventTotals.supporters !== 7 ||
-      eventTotals.bits !== 1500 ||
-      eventTotals.follows !== 2 ||
-      eventTotals.raids !== 1 ||
-      eventTotals.chatters !== 7 ||
-      JSON.stringify(eventTotals.tips) !==
-        JSON.stringify([
-          { currency: 'USD', amountMicros: 5_000_000 },
-          { currency: 'EUR', amountMicros: 2_000_000 }
-        ])
-    ) {
-      throw new Error('Confirmed fake activity accounting disagreed with the normalized fixture.')
-    }
+    assertFakeActivityTotals(eventTotals)
     // Reuse the same persisted session with an independent X destination. Its
     // canonical IDs cannot collide with the activity fixtures, and >5,000 rows
     // retire every paid row from the live buffer without erasing accounting.
