@@ -367,6 +367,15 @@ pub struct CommandDetectorState {
     pub detector: CommandDetector,
     /// `None` while no Orcle session hears the streamer: nothing is detected.
     pub session: Option<CommandSession>,
+    /// What the engine waits for, and the wake-word setting (plan 140 S3).
+    /// The engine mirrors it here after every change, so the caption task
+    /// reads it without the engine lock.
+    pub context: DetectContext,
+    /// The voice removal waiting for an answer, mirrored with `context`
+    /// (plan 140 S3). Every session boundary that disarms the detector
+    /// (`cohost::clear_transcript`) cancels it: no removal outlives the
+    /// session, consent or sign-in it was asked under.
+    pub pending_operation: Option<String>,
 }
 
 pub type CommandDetectorSlot = Arc<StdMutex<CommandDetectorState>>;
@@ -674,6 +683,12 @@ fn reason_for(word: &str) -> Option<&'static str> {
         "bullying" | "bully" => "bullying",
         _ => return None,
     })
+}
+
+/// Plan 140 S3: the engine strips command words from a spoken name before
+/// it matches authors, with the same vocabulary the grammar uses.
+pub(crate) fn is_command_word(text: &str) -> bool {
+    is_grammar_word(text)
 }
 
 /// Anything the grammar knows is never part of a name.

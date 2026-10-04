@@ -4842,6 +4842,18 @@ export interface CohostSettings {
    * live captions off (plan 068; default off).
    */
   listen: boolean
+  /**
+   * Plan 140: "Commands need 'Orcle' first". On, the structured phrases
+   * ("remove it from our chat") stop working without the wake word
+   * (default off).
+   */
+  wakeWordRequired: boolean
+  /**
+   * Plan 140: how a voice removal is confirmed. `confirm` (the default) waits
+   * for a yes; `countdown` runs after 5 s unless cancelled, except on YouTube,
+   * which always waits for a yes.
+   */
+  removeConfirm: RemoveConfirmMode
 }
 
 /** `cohost.settings.set`: absent fields are unchanged. */
@@ -4854,6 +4866,8 @@ export interface CohostSettingsPatch {
   /** Replaces the whole list; the backend trims, drops empties and caps it. */
   rules?: string[]
   listen?: boolean
+  wakeWordRequired?: boolean
+  removeConfirm?: RemoveConfirmMode
 }
 
 /** Whether Orcle hears the streamer right now (plan 068). */
@@ -4975,8 +4989,11 @@ export interface CohostMoodScores {
   confusion: number
 }
 
-/** Known sources of an automatic card; the wire may carry a newer one. */
-export type CohostAutoHighlightSource = 'pick' | 'question' | 'voice'
+/**
+ * Known sources of an automatic card; the wire may carry a newer one.
+ * `command`: the streamer asked by voice (plan 140).
+ */
+export type CohostAutoHighlightSource = 'pick' | 'question' | 'voice' | 'command'
 
 /**
  * The engine's automatic "put this on stream" command (plan 060 S1). The
@@ -5034,6 +5051,95 @@ export interface CohostErrorDetail {
   code: string
   message: string
   status: number | null
+}
+
+// --- Orcle voice commands (plan 140 S3; contract part B) ---
+
+/**
+ * What a voice command asked for. `confirm` and `cancel` answer the open card,
+ * so they update that command instead of standing on their own.
+ */
+export type CohostCommandKind = 'highlight' | 'clear' | 'remove' | 'confirm' | 'cancel' | 'unknown'
+
+/**
+ * Where the latest voice command stands:
+ * - `done`: highlighted, cleared, removed or hidden;
+ * - `not-found`: no comment matched, or (kind `unknown`) Orcle didn't catch it;
+ * - `ambiguous`: a chooser is open, `candidates` lists the comments;
+ * - `confirm`: a card waits for a yes: a voice removal (`operationId`) or a
+ *   highlight of a comment Orcle flagged. A removal card without `operationId`
+ *   is still opening; one without `expiresAt` was confirmed and is running;
+ * - `refused`: chat moderation refused, or the removal failed;
+ * - `unavailable`: paused by Videorc, or Premium is required;
+ * - `cancelled`, `expired`: nothing happened.
+ */
+export type CohostCommandStatus =
+  | 'done'
+  | 'not-found'
+  | 'ambiguous'
+  | 'confirm'
+  | 'refused'
+  | 'unavailable'
+  | 'cancelled'
+  | 'expired'
+
+/** The comment a command points at, as its card shows it. */
+export interface CohostCommandTarget {
+  messageId: string
+  authorName: string
+  platform: StreamPlatform
+  /** At most 140 characters of the message. */
+  excerpt: string
+}
+
+/**
+ * The latest voice command and what became of it. The command strip, the
+ * removal card and the chooser render from it; answers go back through
+ * `cohost.command.choose|confirm|cancel` with its `id`.
+ */
+export interface CohostCommand {
+  /** `cmd-<uuid>`. */
+  id: string
+  /** The words that made the command, as Orcle heard them. */
+  heard: string
+  kind: CohostCommandKind
+  status: CohostCommandStatus
+  /** One plain sentence for the strip and the card. */
+  message: string
+  target?: CohostCommandTarget
+  /** The chooser's comments, at most three; absent while empty. */
+  candidates?: CohostCommandTarget[]
+  /** The chat moderation operation behind a removal (`liveChat.moderationOperation`). */
+  operationId?: string
+  /** The audit reason heard with a removal ("toxic", "spam"). */
+  reason?: string
+  /** When the command reached its current status (RFC 3339). */
+  at: string
+  /** When the open card or chooser expires; absent when nothing waits. */
+  expiresAt?: string
+}
+
+export type CohostSwitchState = 'on' | 'paused'
+
+/**
+ * The remote kill switches (contract part D): "Voice commands are paused by
+ * Videorc." and "Removing messages is paused by Videorc." Absent while both
+ * are on.
+ */
+export interface CohostCommandAvailability {
+  voiceCommands: CohostSwitchState
+  remove: CohostSwitchState
+}
+
+/** `cohost.command.choose` (plan 140 S3): pick from the chooser, `index` 0 to 2. */
+export interface CohostCommandChooseParams {
+  commandId: string
+  index: number
+}
+
+/** `cohost.command.confirm` / `cohost.command.cancel` (plan 140 S3). */
+export interface CohostCommandParams {
+  commandId: string
 }
 
 /** The `cohost.state` event payload and every `cohost.*` RPC result. */
@@ -5116,6 +5222,10 @@ export interface CohostState {
    */
   sayHi?: CohostSayHi[]
   deadAirNudge?: CohostDeadAirNudge
+  /** Plan 140 S3: the latest voice command; absent until one was heard this session. */
+  command?: CohostCommand
+  /** Plan 140 S3: the voice-command kill switches; absent while both are on. */
+  commandAvailability?: CohostCommandAvailability
 }
 
 /**
@@ -5220,6 +5330,28 @@ export interface CohostReportRecap {
 }
 
 /**
+ * Plan 140 S3: what the streamer's voice commands did, counts only. A removal
+ * counts once, by its outcome; a card a newer command replaced is not counted
+ * as cancelled.
+ */
+export interface CohostReportCommands {
+  highlighted: number
+  /** Cards taken down by voice. */
+  cleared: number
+  /** The platform removed the message. */
+  removed: number
+  /** The platform could not; Videorc hid it locally. */
+  hiddenLocally: number
+  cancelled: number
+  /** Nobody answered the card in time. */
+  expired: number
+  /** A removal that failed or ended unknown, or a refused request. */
+  failed: number
+  /** No comment matched, or Orcle didn't catch what was said. */
+  notFound: number
+}
+
+/**
  * What Orcle caught in one stream (plan 119 decision 6): counts by outcome,
  * the questions and what became of them, the promises still open. Saved on
  * this computer when the session ends and deleted with the recording.
@@ -5243,6 +5375,8 @@ export interface CohostSessionReport {
   greetings: CohostReportGreetings
   alerts?: CohostReportAlert[]
   recap: CohostReportRecap
+  /** Plan 140 S3: voice commands; absent when none was counted (and in older reports). */
+  commands?: CohostReportCommands
 }
 
 export interface CohostReportChatPlatformCount {

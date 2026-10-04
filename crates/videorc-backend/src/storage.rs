@@ -9505,6 +9505,7 @@ mod tests {
             },
             alerts: Vec::new(),
             recap: crate::protocol::CohostReportRecap::default(),
+            commands: None,
         }
     }
 

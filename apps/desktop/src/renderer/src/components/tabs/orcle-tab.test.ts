@@ -92,6 +92,8 @@ function settings(overrides: Partial<CohostSettings> = {}): CohostSettings {
     voiceHighlight: false,
     rules: [],
     listen: false,
+    wakeWordRequired: false,
+    removeConfirm: 'confirm',
     ...overrides
   }
 }

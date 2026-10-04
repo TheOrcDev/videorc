@@ -624,6 +624,7 @@ pub async fn request(
             .pending_by_message
             .insert(operation.message_id.clone(), operation_id.clone());
         state.emit_event(MODERATION_OPERATION_EVENT, operation.clone());
+        crate::cohost::note_moderation_operation(state, &operation);
         if operation.phase == ModerationPhase::PendingConfirm {
             let timer = if let Some(execute_at) = schedule.execute_at {
                 spawn_timer(
@@ -775,6 +776,7 @@ fn finish_locked(
         runtime.forget(operation);
     }
     state.emit_event(MODERATION_OPERATION_EVENT, operation.clone());
+    crate::cohost::note_moderation_operation(state, operation);
 }
 
 /// Move a pending operation to `executing` under the lock, aborting its timer.
@@ -808,6 +810,7 @@ async fn begin_execution(
         .pending_by_message
         .insert(operation.message_id.clone(), operation.operation_id.clone());
     state.emit_event(MODERATION_OPERATION_EVENT, operation.clone());
+    crate::cohost::note_moderation_operation(state, &operation);
     Ok(operation)
 }
 

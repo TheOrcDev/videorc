@@ -5336,6 +5336,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.recap.draft"
         | "cohost.author.greeted"
         | "cohost.settings.set"
+        | "cohost.command.choose"
+        | "cohost.command.confirm"
+        | "cohost.command.cancel"
         | "clip.mark"
         | "captions.overlay.clear"
         | "captions.cues.submit"
@@ -9215,6 +9218,42 @@ async fn handle_text_message_with_role(
                     Err(error) => {
                         ServerResponse::error(command.id, error.code(), error.to_string())
                     }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 140 S3: answers to the card a voice command opened. Quick
+        // replies: a confirmed removal runs in the background and its outcome
+        // arrives as `cohost.state`. Never routed by the LAN listener.
+        "cohost.command.choose" => {
+            match serde_json::from_value::<protocol::CohostCommandChooseParams>(command.params) {
+                Ok(params) => match cohost::choose_command(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.command.confirm" => {
+            match serde_json::from_value::<protocol::CohostCommandParams>(command.params) {
+                Ok(params) => match cohost::confirm_command(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.command.cancel" => {
+            match serde_json::from_value::<protocol::CohostCommandParams>(command.params) {
+                Ok(params) => match cohost::cancel_command(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
                 },
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
@@ -14700,6 +14739,31 @@ mod tests {
             !crate::remote_lan::LAN_EVENTS
                 .contains(&live_chat_moderation::MODERATION_OPERATION_EVENT)
         );
+        // Plan 140 S3: answers to a voice command's card are quick, ordered
+        // mutations (a confirmed removal runs in the background), and the
+        // state they change is never a LAN projection either.
+        for method in [
+            "cohost.command.choose",
+            "cohost.command.confirm",
+            "cohost.command.cancel",
+        ] {
+            let command = json!({ "id": method, "method": method, "params": {} }).to_string();
+            assert_eq!(
+                websocket_method_execution_policy(method),
+                Some(DEFAULT_MUTATION_POLICY),
+                "{method} must be an inventoried mutation"
+            );
+            assert_eq!(
+                websocket_isolated_command_lane(command.as_str()),
+                None,
+                "{method} answers at once and needs no isolated lane"
+            );
+            assert!(
+                !websocket_command_is_read_only(command.as_str()),
+                "{method} changes the command card"
+            );
+        }
+        assert!(!crate::remote_lan::LAN_EVENTS.contains(&cohost::COHOST_STATE_EVENT));
 
         for method in ["scene.layout.apply_live", "scene.layout.apply_preview"] {
             let command = json!({

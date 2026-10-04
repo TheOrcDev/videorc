@@ -10,6 +10,8 @@ import type {
   ScheduledStreamCapabilities,
   ScheduledStreamCandidate,
   CaptureRecoveryStatus,
+  CohostCommandChooseParams,
+  CohostCommandParams,
   CohostFlagParams,
   CohostAuthorParams,
   CohostPromiseParams,
@@ -284,6 +286,9 @@ export interface BackendRpcMethodMap {
   'cohost.recap.dismiss': BackendRpcDefinition<CohostRecapParams, CohostState>
   'cohost.recap.draft': BackendRpcDefinition<CohostRecapParams, CohostState>
   'cohost.author.greeted': BackendRpcDefinition<CohostAuthorParams, CohostState>
+  'cohost.command.choose': BackendRpcDefinition<CohostCommandChooseParams, CohostState>
+  'cohost.command.confirm': BackendRpcDefinition<CohostCommandParams, CohostState>
+  'cohost.command.cancel': BackendRpcDefinition<CohostCommandParams, CohostState>
   'cohost.settings.get': BackendRpcDefinition<undefined, CohostSettings>
   'cohost.settings.set': BackendRpcDefinition<CohostSettingsPatch, CohostSettings>
   'cohost.report.get': BackendRpcDefinition<CohostReportGetParams, CohostReportPayload>
@@ -2121,7 +2126,10 @@ const cohostSettingsSchema = objectSchema(
     voiceHighlight: booleanSchema,
     rules: cohostRulesSchema,
     // Plan 068: Orcle hears the microphone while live.
-    listen: booleanSchema
+    listen: booleanSchema,
+    // Plan 140 S3: voice commands. The backend always sends both.
+    wakeWordRequired: booleanSchema,
+    removeConfirm: enumSchema(['confirm', 'countdown'])
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSettings>
@@ -2134,7 +2142,9 @@ const cohostSettingsPatchSchema = objectSchema(
     voiceHighlight: optionalSchema(booleanSchema),
     // The patch is what the streamer typed; the backend trims and caps it.
     rules: optionalSchema(arraySchema(stringSchema({ maxLength: 2000 }), { maxLength: 100 })),
-    listen: optionalSchema(booleanSchema)
+    listen: optionalSchema(booleanSchema),
+    wakeWordRequired: optionalSchema(booleanSchema),
+    removeConfirm: optionalSchema(enumSchema(['confirm', 'countdown']))
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSettingsPatch>
@@ -2382,6 +2392,47 @@ const cohostListeningSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+// Plan 140 S3 (contract part B): the latest voice command. Closed: a status,
+// kind or key this build does not know is refused instead of rendered.
+const cohostCommandTargetSchema = objectSchema(
+  {
+    messageId: boundedString,
+    authorName: stringSchema({ maxLength: 1000 }),
+    platform: streamPlatformSchema,
+    excerpt: stringSchema({ maxLength: 1000 })
+  },
+  { allowUnknown: false }
+)
+const cohostCommandSchema = objectSchema(
+  {
+    id: boundedString,
+    heard: stringSchema({ maxLength: 1000 }),
+    kind: enumSchema(['highlight', 'clear', 'remove', 'confirm', 'cancel', 'unknown']),
+    status: enumSchema([
+      'done',
+      'not-found',
+      'ambiguous',
+      'confirm',
+      'refused',
+      'unavailable',
+      'cancelled',
+      'expired'
+    ]),
+    message: stringSchema({ minLength: 1, maxLength: 2000 }),
+    target: optionalSchema(cohostCommandTargetSchema),
+    candidates: optionalSchema(arraySchema(cohostCommandTargetSchema, { maxLength: 3 })),
+    operationId: optionalSchema(boundedString),
+    reason: optionalSchema(stringSchema({ maxLength: 200 })),
+    at: timestamp,
+    expiresAt: optionalSchema(timestamp)
+  },
+  { allowUnknown: false }
+)
+const cohostSwitchStateSchema = enumSchema(['on', 'paused'])
+const cohostCommandAvailabilitySchema = objectSchema(
+  { voiceCommands: cohostSwitchStateSchema, remove: cohostSwitchStateSchema },
+  { allowUnknown: false }
+)
 const cohostStateSchema = objectSchema(
   {
     sessionId: nullableSchema(boundedString),
@@ -2430,7 +2481,10 @@ const cohostStateSchema = objectSchema(
     promiseReminder: optionalSchema(cohostPromiseReminderSchema),
     recap: optionalSchema(cohostRecapSchema),
     sayHi: optionalSchema(arraySchema(cohostSayHiSchema, { maxLength: 5 })),
-    deadAirNudge: optionalSchema(cohostDeadAirNudgeSchema)
+    deadAirNudge: optionalSchema(cohostDeadAirNudgeSchema),
+    // Plan 140 S3: absent until a command was heard / while both switches are on.
+    command: optionalSchema(cohostCommandSchema),
+    commandAvailability: optionalSchema(cohostCommandAvailabilitySchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostState>
@@ -2522,6 +2576,15 @@ const cohostAuthorParamsSchema = objectSchema(
   { sessionId: boundedString, authorKey: boundedString },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostAuthorParams>
+// Plan 140 S3: answers to the card the latest voice command opened.
+const cohostCommandChooseParamsSchema = objectSchema(
+  { commandId: boundedString, index: numberSchema({ integer: true, min: 0, max: 2 }) },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostCommandChooseParams>
+const cohostCommandParamsSchema = objectSchema(
+  { commandId: boundedString },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostCommandParams>
 
 // Plan 119 S1: the Orcle report. The blocks always ride; every optional list
 // is omitted by the backend while empty (never null). `version` is pinned:
@@ -2627,6 +2690,20 @@ const cohostReportRecapSchema = objectSchema(
   { offered: nonNegativeInteger, drafted: nonNegativeInteger, dismissed: nonNegativeInteger },
   { allowUnknown: false }
 )
+// Plan 140 S3: voice-command counts; absent when none was counted.
+const cohostReportCommandsSchema = objectSchema(
+  {
+    highlighted: nonNegativeInteger,
+    cleared: nonNegativeInteger,
+    removed: nonNegativeInteger,
+    hiddenLocally: nonNegativeInteger,
+    cancelled: nonNegativeInteger,
+    expired: nonNegativeInteger,
+    failed: nonNegativeInteger,
+    notFound: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
 const cohostSessionReportSchema = objectSchema(
   {
     version: literalSchema(1),
@@ -2642,7 +2719,8 @@ const cohostSessionReportSchema = objectSchema(
     promises: cohostReportPromisesSchema,
     greetings: cohostReportGreetingsSchema,
     alerts: optionalSchema(arraySchema(cohostReportAlertSchema, { maxLength: 8 })),
-    recap: cohostReportRecapSchema
+    recap: cohostReportRecapSchema,
+    commands: optionalSchema(cohostReportCommandsSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSessionReport>
@@ -3166,6 +3244,9 @@ const runtimeContracts = {
   'cohost.recap.dismiss': { params: cohostRecapParamsSchema, result: cohostStateSchema },
   'cohost.recap.draft': { params: cohostRecapParamsSchema, result: cohostStateSchema },
   'cohost.author.greeted': { params: cohostAuthorParamsSchema, result: cohostStateSchema },
+  'cohost.command.choose': { params: cohostCommandChooseParamsSchema, result: cohostStateSchema },
+  'cohost.command.confirm': { params: cohostCommandParamsSchema, result: cohostStateSchema },
+  'cohost.command.cancel': { params: cohostCommandParamsSchema, result: cohostStateSchema },
   'cohost.settings.get': { params: undefinedSchema, result: cohostSettingsSchema },
   'cohost.settings.set': { params: cohostSettingsPatchSchema, result: cohostSettingsSchema },
   'liveChat.emotes.get': { params: undefinedSchema, result: chatEmotesSettingsSchema },

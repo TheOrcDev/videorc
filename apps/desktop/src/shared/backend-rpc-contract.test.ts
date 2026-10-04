@@ -918,7 +918,10 @@ describe('backend RPC contract', () => {
         'scene.editor.draft.clear',
         'liveChat.moderation.request',
         'liveChat.moderation.confirm',
-        'liveChat.moderation.cancel'
+        'liveChat.moderation.cancel',
+        'cohost.command.choose',
+        'cohost.command.confirm',
+        'cohost.command.cancel'
       ])
     )
   })
@@ -2139,7 +2142,9 @@ describe('backend RPC contract', () => {
       autoHighlight: false,
       voiceHighlight: false,
       rules: ['No spoilers'],
-      listen: false
+      listen: false,
+      wakeWordRequired: false,
+      removeConfirm: 'confirm'
     }
     expect(validateBackendRpcResult('cohost.settings.get', settings)).toEqual(settings)
     expect(validateBackendRpcParams('cohost.settings.set', { listen: true })).toEqual({
@@ -2305,6 +2310,192 @@ describe('backend RPC contract', () => {
     expect(() =>
       validateBackendRpcParams('liveChat.moderation.request', { ...request, sessionId: 'x' })
     ).toThrow('liveChat.moderation.request')
+  })
+
+  it('types and exactly validates Orcle voice commands, their answers and the kill switches (plan 140 S3)', () => {
+    const base = {
+      sessionId: 'session-1',
+      status: 'listening',
+      reason: null,
+      questions: [],
+      flags: [],
+      mood: null,
+      lastTickAt: null,
+      tickSeq: 1,
+      partial: false
+    }
+    const target = {
+      messageId: 'session-1:twitch:default:m-1',
+      authorName: 'coders_x',
+      platform: 'twitch',
+      excerpt: 'this stream is trash'
+    }
+    const card = {
+      id: 'cmd-1',
+      heard: 'this one is toxic remove it from our chat',
+      kind: 'remove',
+      status: 'confirm',
+      message: "Remove coders_x's comment?",
+      target,
+      operationId: '0f1e2d3c-4b5a-4968-8777-66554433aabb',
+      reason: 'toxic',
+      at: '2026-10-04T12:00:00Z',
+      expiresAt: '2026-10-04T12:00:20Z'
+    }
+    const withCard = {
+      ...base,
+      command: card,
+      commandAvailability: { voiceCommands: 'on', remove: 'paused' }
+    }
+    expect(validateBackendEventPayload('cohost.state', withCard)).toEqual(withCard)
+    expect(validateBackendRpcResult('cohost.status', withCard)).toEqual(withCard)
+    const chooser = {
+      ...base,
+      command: {
+        id: 'cmd-2',
+        heard: 'orcle highlight the comment from coders',
+        kind: 'highlight',
+        status: 'ambiguous',
+        message: "Which comment? Say 'the first one' or press 1 or 2.",
+        candidates: [
+          target,
+          {
+            ...target,
+            messageId: 'session-1:youtube:default:m-2',
+            authorName: 'coders_y',
+            platform: 'youtube'
+          }
+        ],
+        at: '2026-10-04T12:00:00Z',
+        expiresAt: '2026-10-04T12:00:20Z'
+      }
+    }
+    expect(validateBackendEventPayload('cohost.state', chooser)).toEqual(chooser)
+    // Every status and kind of the contract validates; the minimal command
+    // carries no optional key at all.
+    const minimal = {
+      id: 'cmd-3',
+      heard: 'what is the weather',
+      kind: 'unknown',
+      status: 'not-found',
+      message: "Orcle didn't catch that: 'what is the weather'.",
+      at: '2026-10-04T12:00:00Z'
+    }
+    for (const status of [
+      'done',
+      'not-found',
+      'ambiguous',
+      'confirm',
+      'refused',
+      'unavailable',
+      'cancelled',
+      'expired'
+    ]) {
+      const state = { ...base, command: { ...minimal, status } }
+      expect(validateBackendEventPayload('cohost.state', state)).toEqual(state)
+    }
+    for (const kind of ['highlight', 'clear', 'remove', 'confirm', 'cancel', 'unknown']) {
+      const state = { ...base, command: { ...minimal, kind } }
+      expect(validateBackendEventPayload('cohost.state', state)).toEqual(state)
+    }
+    // Closed: a status, kind, platform or key this build does not know is
+    // refused, null is never an absent optional, and a chooser holds three.
+    for (const bad of [
+      { ...card, status: 'removing' },
+      { ...card, kind: 'ban' },
+      { ...card, extra: true },
+      { ...card, operationId: null },
+      { ...card, expiresAt: null },
+      { ...card, message: '' },
+      { ...card, target: { ...target, platform: 'myspace' } },
+      { ...card, target: { ...target, color: 'red' } },
+      { ...card, candidates: [target, target, target, target] }
+    ]) {
+      expect(() => validateBackendEventPayload('cohost.state', { ...base, command: bad })).toThrow(
+        'cohost.state'
+      )
+    }
+    for (const bad of [
+      { command: null },
+      { commandAvailability: null },
+      { commandAvailability: { voiceCommands: 'off', remove: 'on' } },
+      { commandAvailability: { voiceCommands: 'on' } }
+    ]) {
+      expect(() => validateBackendEventPayload('cohost.state', { ...base, ...bad })).toThrow(
+        'cohost.state'
+      )
+    }
+    // A command highlight is an automatic card with source `command`.
+    const highlighted = {
+      ...base,
+      autoHighlight: {
+        generation: 7,
+        messageId: target.messageId,
+        source: 'command',
+        refresh: false
+      }
+    }
+    expect(validateBackendEventPayload('cohost.state', highlighted)).toEqual(highlighted)
+
+    // The answers: closed params, the state back.
+    expect(
+      validateBackendRpcParams('cohost.command.choose', { commandId: 'cmd-2', index: 1 })
+    ).toEqual({ commandId: 'cmd-2', index: 1 })
+    for (const bad of [
+      { commandId: 'cmd-2', index: 3 },
+      { commandId: 'cmd-2', index: -1 },
+      { commandId: 'cmd-2', index: 0.5 },
+      { commandId: '', index: 0 },
+      { commandId: 'cmd-2' },
+      { commandId: 'cmd-2', index: 0, sessionId: 'session-1' }
+    ]) {
+      expect(() => validateBackendRpcParams('cohost.command.choose', bad)).toThrow(
+        'cohost.command.choose'
+      )
+    }
+    for (const method of ['cohost.command.confirm', 'cohost.command.cancel'] as const) {
+      expect(validateBackendRpcParams(method, { commandId: 'cmd-1' })).toEqual({
+        commandId: 'cmd-1'
+      })
+      expect(() => validateBackendRpcParams(method, { commandId: '' })).toThrow(method)
+      expect(() => validateBackendRpcParams(method, { commandId: 'cmd-1', index: 0 })).toThrow(
+        method
+      )
+      expect(validateBackendRpcResult(method, withCard)).toEqual(withCard)
+    }
+    expect(validateBackendRpcResult('cohost.command.choose', chooser)).toEqual(chooser)
+    expectTypeOf<BackendRpcResult<'cohost.command.confirm'>>().toEqualTypeOf<
+      BackendEventMap['cohost.state']
+    >()
+    expectTypeOf<BackendRpcParams<'cohost.command.choose'>['index']>().toEqualTypeOf<number>()
+
+    // The settings: both new fields ride every answer; the patch takes them.
+    expect(
+      validateBackendRpcParams('cohost.settings.set', {
+        wakeWordRequired: true,
+        removeConfirm: 'countdown'
+      })
+    ).toEqual({ wakeWordRequired: true, removeConfirm: 'countdown' })
+    expect(() =>
+      validateBackendRpcParams('cohost.settings.set', { removeConfirm: 'auto' })
+    ).toThrow('cohost.settings.set')
+    const settings = {
+      enabled: true,
+      tone: 'short',
+      notes: '',
+      autoHighlight: false,
+      voiceHighlight: false,
+      rules: [],
+      listen: true,
+      wakeWordRequired: true,
+      removeConfirm: 'countdown'
+    }
+    expect(validateBackendRpcResult('cohost.settings.get', settings)).toEqual(settings)
+    const withoutWakeWord: Record<string, unknown> = { ...settings }
+    delete withoutWakeWord.wakeWordRequired
+    expect(() => validateBackendRpcResult('cohost.settings.get', withoutWakeWord)).toThrow(
+      'cohost.settings.get'
+    )
   })
 
   it('bounds unregistered method and event payloads instead of passing arbitrary values', () => {

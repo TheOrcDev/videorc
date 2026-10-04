@@ -14,6 +14,8 @@ import type {
   ClipMark,
   ClipMarkedEvent,
   CohostAuthorParams,
+  CohostCommandChooseParams,
+  CohostCommandParams,
   CohostFlagParams,
   CohostPromiseParams,
   CohostQuestionParams,
@@ -110,6 +112,10 @@ interface HighRiskContractFixtures {
     reportPayload: CohostReportPayload
     reportPayloadWithoutReport: CohostReportPayload
     reportSaved: CohostReportSavedEvent
+    commandChooseParams: CohostCommandChooseParams
+    commandParams: CohostCommandParams
+    commandState: CohostState
+    chooserState: CohostState
   }
   clip: {
     markedSaved: ClipMarkedEvent
@@ -592,6 +598,86 @@ describe('shared high-risk protocol fixture', () => {
     ]) {
       expect(key in fixtures.cohost.legacyState).toBe(false)
     }
+  })
+
+  it('keeps Orcle voice commands, their answers and settings identical across languages (plan 140 S3)', () => {
+    // The Rust side round-trips the same objects in protocol.rs
+    // (`shared_high_risk_contract_fixture_matches_cohost_dtos`).
+    expect(
+      validateBackendRpcParams('cohost.command.choose', fixtures.cohost.commandChooseParams)
+    ).toStrictEqual(fixtures.cohost.commandChooseParams)
+    for (const method of ['cohost.command.confirm', 'cohost.command.cancel'] as const) {
+      expect(validateBackendRpcParams(method, fixtures.cohost.commandParams)).toStrictEqual(
+        fixtures.cohost.commandParams
+      )
+    }
+    for (const state of [fixtures.cohost.commandState, fixtures.cohost.chooserState]) {
+      expect(validateBackendEventPayload('cohost.state', state)).toStrictEqual(state)
+      for (const method of [
+        'cohost.status',
+        'cohost.command.choose',
+        'cohost.command.confirm',
+        'cohost.command.cancel'
+      ] as const) {
+        expect(validateBackendRpcResult(method, state)).toStrictEqual(state)
+      }
+    }
+    // A removal card names its operation, its reason and when it expires.
+    expect(fixtures.cohost.commandState.command).toMatchObject({
+      kind: 'remove',
+      status: 'confirm',
+      operationId: '0f1e2d3c-4b5a-4968-8777-66554433aabb',
+      reason: 'toxic',
+      expiresAt: '2026-10-04T12:00:20Z'
+    })
+    expect(fixtures.cohost.commandState.command).not.toHaveProperty('candidates')
+    expect(fixtures.cohost.commandState.commandAvailability).toStrictEqual({
+      voiceCommands: 'on',
+      remove: 'paused'
+    })
+    // A chooser lists its comments instead of one target.
+    expect(fixtures.cohost.chooserState.command?.candidates).toHaveLength(2)
+    expect(fixtures.cohost.chooserState.command).not.toHaveProperty('target')
+    expect(fixtures.cohost.chooserState.command).not.toHaveProperty('operationId')
+    expect(fixtures.cohost.chooserState).not.toHaveProperty('commandAvailability')
+    // Absent, never null, on every older shape.
+    for (const shape of ['state', 'offState', 'stateV2', 'legacyState'] as const) {
+      expect(fixtures.cohost[shape]).not.toHaveProperty('command')
+      expect(fixtures.cohost[shape]).not.toHaveProperty('commandAvailability')
+    }
+    expect(() =>
+      validateBackendEventPayload('cohost.state', {
+        ...fixtures.cohost.commandState,
+        command: null
+      })
+    ).toThrow('cohost.state')
+    // The settings carry both new fields; the patch may.
+    expect(fixtures.cohost.settings).toMatchObject({
+      wakeWordRequired: false,
+      removeConfirm: 'confirm'
+    })
+    expect(fixtures.cohost.settingsPatch).toMatchObject({
+      wakeWordRequired: true,
+      removeConfirm: 'countdown'
+    })
+    // The report counts commands; the minimal report has none (never null).
+    expect(fixtures.cohost.report.commands).toStrictEqual({
+      highlighted: 3,
+      cleared: 1,
+      removed: 1,
+      hiddenLocally: 1,
+      cancelled: 1,
+      expired: 0,
+      failed: 0,
+      notFound: 2
+    })
+    expect(fixtures.cohost.reportPayload.report).not.toHaveProperty('commands')
+    expect(() =>
+      validateBackendRpcResult('cohost.report.get', {
+        ...fixtures.cohost.reportPayload,
+        report: { ...fixtures.cohost.report, commands: { removed: 1 } }
+      })
+    ).toThrow('cohost.report.get')
   })
 
   it('keeps comment pagination defaults and deletion DTOs identical', () => {

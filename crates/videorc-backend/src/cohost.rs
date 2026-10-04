@@ -24,14 +24,24 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio::task::JoinHandle;
 
 use crate::captions::{CaptionUpdateKind, CaptionsUpdate, ListenStop};
-use crate::cohost_ack::{AuthorLedger, DeadAirLane, GreetedHow, dead_air_due, dead_air_text};
-use crate::cohost_command::{CommandSession, DetectContext, DetectedCommand};
+use crate::cohost_ack::{
+    AuthorLedger, DeadAirLane, GreetedHow, dead_air_due, dead_air_text, match_candidates,
+    name_forms_match, name_match_forms, name_tokens,
+};
+use crate::cohost_command::{
+    CommandKind, CommandSession, CommandTarget, DetectContext, DetectedCommand, is_command_word,
+};
 use crate::comment_highlight::{CommentHighlightPhase, CommentHighlightState};
 use crate::live_chat::{LiveChatEventType, LiveChatMessage};
+use crate::live_chat_moderation::{
+    ModerationOperation, ModerationOutcomeCode, ModerationPhase, ModerationRefusal,
+    ModerationRequest, ModerationSource, RemoveConfirmMode,
+};
 use crate::protocol::{
     COHOST_REPORT_ASKERS_CAP, COHOST_REPORT_OPEN_PROMISES_CAP, COHOST_REPORT_QUESTIONS_CAP,
-    COHOST_SESSION_REPORT_VERSION, CohostAuthorParams, CohostFlagParams, CohostPromiseParams,
-    CohostQuestionParams, CohostRecapParams, CohostReportAlert, CohostReportChat,
+    COHOST_SESSION_REPORT_VERSION, CohostAuthorParams, CohostCommandChooseParams,
+    CohostCommandParams, CohostFlagParams, CohostPromiseParams, CohostQuestionParams,
+    CohostRecapParams, CohostReportAlert, CohostReportChat, CohostReportCommands,
     CohostReportFlagKindCount, CohostReportFlagSeverityCount, CohostReportFlags,
     CohostReportGreetings, CohostReportOpenPromise, CohostReportPayload, CohostReportPromises,
     CohostReportQuestion, CohostReportQuestionOutcome, CohostReportQuestions, CohostReportRecap,
@@ -39,7 +49,7 @@ use crate::protocol::{
 };
 use crate::state::AppState;
 use crate::storage::Database;
-use crate::streaming::StreamPlatform;
+use crate::streaming::{StreamPlatform, stream_platform_label};
 use crate::videorc_api::{
     COHOST_SPOTLIGHT_MAX_BODY_BYTES, CohostApiError, CohostApiErrorKind, CohostSpotlightCandidate,
     CohostSpotlightRequest, CohostSpotlightResponse, CohostTickMessage, CohostTickOpenPromise,
@@ -343,6 +353,10 @@ pub enum CohostAutoHighlightSource {
     Question,
     /// The comment the streamer is talking about (voice spotlight, plan 060 S3).
     Voice,
+    /// The streamer asked for it by voice (plan 140 S3, contract part C). The
+    /// renderer's schema reads the source as a free string, so this is not a
+    /// new closed enum value on the wire.
+    Command,
 }
 
 /// One automatic "put this on stream" command. The renderer keys on
@@ -489,6 +503,16 @@ pub struct CohostSettings {
     /// before the field still loads.
     #[serde(default)]
     pub listen: bool,
+    /// "Commands need 'Orcle' first" (plan 140 S3): the structured phrases
+    /// ("remove it from our chat") stop working without the wake word.
+    /// Default off. `default` so a settings row from before the field loads.
+    #[serde(default)]
+    pub wake_word_required: bool,
+    /// How a voice removal is confirmed (plan 140 S3): `confirm` (the
+    /// default) waits for a yes; `countdown` runs after 5 s unless cancelled,
+    /// except on YouTube, which always waits. `default` for older rows.
+    #[serde(default)]
+    pub remove_confirm: RemoveConfirmMode,
 }
 
 impl Default for CohostSettings {
@@ -501,6 +525,8 @@ impl Default for CohostSettings {
             voice_highlight: false,
             rules: Vec::new(),
             listen: false,
+            wake_word_required: false,
+            remove_confirm: RemoveConfirmMode::Confirm,
         }
     }
 }
@@ -533,6 +559,12 @@ impl CohostSettings {
         }
         if let Some(listen) = patch.listen {
             self.listen = listen;
+        }
+        if let Some(wake_word_required) = patch.wake_word_required {
+            self.wake_word_required = wake_word_required;
+        }
+        if let Some(remove_confirm) = patch.remove_confirm {
+            self.remove_confirm = remove_confirm;
         }
     }
 }
@@ -654,6 +686,129 @@ pub struct CohostDeadAirNudge {
     pub key: String,
     pub text: String,
     pub at: String,
+}
+
+// --- Voice commands (plan 140 S3; contract part B) ------------------------------
+
+/// What a voice command asked for. `confirm` and `cancel` answer the open
+/// card, so they update that command instead of standing on their own.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostCommandKind {
+    Highlight,
+    Clear,
+    Remove,
+    Confirm,
+    Cancel,
+    Unknown,
+}
+
+/// Where the latest voice command stands.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostCommandStatus {
+    /// It happened: highlighted, cleared, removed or hidden.
+    Done,
+    /// No comment matched, or Orcle didn't catch what was said.
+    NotFound,
+    /// A chooser is open: `candidates` holds the comments to pick from.
+    Ambiguous,
+    /// A card waits for a yes: a voice removal (`operationId`), or a highlight
+    /// of a comment Orcle flagged. While a confirmed removal runs at the
+    /// platform the status stays `confirm`, without `expiresAt`.
+    Confirm,
+    /// Chat moderation refused, or the removal failed.
+    Refused,
+    /// Paused by Videorc (kill switch) or not on this plan (Premium).
+    Unavailable,
+    Cancelled,
+    /// Nobody answered in time; nothing happened.
+    Expired,
+}
+
+/// The comment a command points at, as its card shows it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostCommandTarget {
+    pub message_id: String,
+    pub author_name: String,
+    pub platform: StreamPlatform,
+    /// At most 140 UTF-16 units of the message.
+    pub excerpt: String,
+}
+
+/// The latest voice command and what became of it (contract part B). The
+/// renderer draws the command strip, the removal card and the chooser from
+/// it; answers go back through `cohost.command.*`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostCommand {
+    /// `cmd-<uuid>`; the `cohost.command.*` RPCs take it back.
+    pub id: String,
+    /// The words that made the command, as Orcle heard them.
+    pub heard: String,
+    pub kind: CohostCommandKind,
+    pub status: CohostCommandStatus,
+    /// One plain sentence for the strip and the card.
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<CohostCommandTarget>,
+    /// The chooser's comments, at most three; omitted while empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<CohostCommandTarget>,
+    /// The chat moderation operation behind a removal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    /// The audit reason heard with a removal ("toxic", "spam").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// When the command reached its current status (RFC 3339).
+    pub at: String,
+    /// When the open card or chooser expires; omitted when nothing waits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostSwitchState {
+    On,
+    Paused,
+}
+
+/// The remote kill switches (contract part D) as the renderer shows them:
+/// "Voice commands are paused by Videorc." and "Removing messages is paused
+/// by Videorc." Omitted from the state while both are on.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostCommandAvailability {
+    pub voice_commands: CohostSwitchState,
+    pub remove: CohostSwitchState,
+}
+
+/// `cohost.command.*` refusals: `invalid-params` (no command id, or a pick
+/// past the chooser), `not-pending` (no such command is waiting for that
+/// answer: it was answered, replaced or expired).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CohostCommandError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl CohostCommandError {
+    fn invalid(message: impl Into<String>) -> Self {
+        Self {
+            code: "invalid-params",
+            message: message.into(),
+        }
+    }
+
+    fn not_pending() -> Self {
+        Self {
+            code: "not-pending",
+            message: "No Orcle command is waiting for that answer.".to_string(),
+        }
+    }
 }
 
 /// The v2 extras are absent keys when the server did not send them — never
@@ -825,6 +980,13 @@ pub struct CohostState {
     /// The latest dead-air nudge while it is fresh; omitted otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dead_air_nudge: Option<CohostDeadAirNudge>,
+    /// The latest voice command (plan 140 S3); omitted until one was heard
+    /// this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<CohostCommand>,
+    /// The voice-command kill switches; omitted while both are on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_availability: Option<CohostCommandAvailability>,
 }
 
 impl CohostState {
@@ -858,6 +1020,8 @@ impl CohostState {
             recap: None,
             say_hi: Vec::new(),
             dead_air_nudge: None,
+            command: None,
+            command_availability: None,
         }
     }
 }
@@ -1347,6 +1511,11 @@ struct CohostSession {
     started_at_iso: String,
     /// What this session's report will say (plan 119 S1).
     report: ReportLedger,
+    /// Plan 140 S3: the latest voice command and the card it holds open.
+    command: Option<CommandRecord>,
+    /// Removal operations voice commands created this session, for the
+    /// report: each terminal outcome is counted once.
+    command_operations: HashMap<String, CommandOperationTrack>,
 }
 
 /// What the engine remembers about one chat row it noted.
@@ -1363,6 +1532,11 @@ struct KnownMessage {
     /// Provider timestamp as the tick sent it.
     at: String,
     noted_at: Instant,
+    /// Plan 140 S3: the platform a command card names.
+    platform: StreamPlatform,
+    /// A Twitch notification row that arrived as a message: voice commands
+    /// never target it (it has no deletable id).
+    notification: bool,
 }
 
 /// The spotlight lane's per-session memory: cadence, breaker, the current
@@ -1466,6 +1640,8 @@ struct ReportLedger {
     alerts: Vec<CohostReportAlert>,
     /// First seen first, at most `COHOST_REPORT_QUESTIONS_CAP`.
     questions: Vec<CohostReportQuestion>,
+    /// Plan 140 S3: what voice commands did, counts only.
+    commands: CohostReportCommands,
 }
 
 impl ReportLedger {
@@ -1597,6 +1773,448 @@ impl ReportLedger {
     }
 }
 
+// --- Voice commands: the engine's side (plan 140 S3) -------------------------------
+//
+// A detected command (`cohost_command`) runs on its own task, never on the
+// tick pass. Under the engine lock it re-checks its session generation and
+// the gates (Premium, the kill switches), resolves its target from what the
+// engine already knows (`known`, flags, the spotlight, the open questions)
+// and updates `CohostState.command`. Anything slow runs after the lock: the
+// clear, and every chat moderation call. Removals are chat moderation's
+// durable operations (`live_chat_moderation`); their changes come back
+// through `note_moderation_operation`.
+
+/// How long a chooser or a highlight confirm card waits for an answer. A
+/// removal card is its moderation operation's (`confirmBy`/`executeAt`).
+#[cfg(not(test))]
+pub(crate) const COMMAND_CARD_TTL: Duration = Duration::from_secs(20);
+#[cfg(test)]
+pub(crate) const COMMAND_CARD_TTL: Duration = Duration::from_millis(300);
+/// A spoken name matches authors who wrote within this long.
+const COMMAND_NAME_WINDOW: Duration = Duration::from_secs(10 * 60);
+/// A second command that lands on the same comment this soon is the same
+/// request: the detector reports a name a chunk boundary cut twice
+/// ("coders", then "coders x").
+const COMMAND_SAME_TARGET_WINDOW: Duration = Duration::from_secs(10);
+/// A clear this soon after a voice removal opened corrects it: "remove it",
+/// then "from the screen" in the next final.
+const COMMAND_CORRECTION_WINDOW: Duration = Duration::from_secs(6);
+/// "This one" for a removal reaches back this far for a flag.
+const COMMAND_FLAG_MAX_AGE_SECS: i64 = 120;
+/// A chooser lists at most this many comments.
+const COMMAND_CANDIDATES_CAP: usize = 3;
+/// A card's excerpt, in UTF-16 units (like the moderation audit row).
+const COMMAND_EXCERPT_MAX_UNITS: usize = 140;
+/// What Orcle heard, as the strip shows it.
+const COMMAND_HEARD_MAX_UNITS: usize = 300;
+
+const COMMAND_VOICE_PAUSED: &str = "Voice commands are paused by Videorc.";
+const COMMAND_SIGNED_OUT: &str = "Cancelled because you signed out.";
+const COMMAND_STOPPED_LISTENING: &str = "Cancelled because Orcle stopped listening.";
+
+/// What a voice command's card waits for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandPending {
+    /// Nothing: the command is finished.
+    None,
+    /// A chooser: picking one runs the command on it.
+    Choice,
+    /// A highlight of a comment Orcle flagged (high severity) waits for a yes.
+    HighlightConfirm,
+    /// The removal request is on its way to chat moderation.
+    Requesting,
+    /// A voice removal waits for an answer, or for its countdown.
+    Removal,
+    /// A confirmed removal is running at the platform.
+    Removing,
+}
+
+/// The verb of a new command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandIntent {
+    Highlight,
+    Clear,
+    Remove,
+}
+
+impl CommandIntent {
+    fn kind(self) -> CohostCommandKind {
+        match self {
+            Self::Highlight => CohostCommandKind::Highlight,
+            Self::Clear => CohostCommandKind::Clear,
+            Self::Remove => CohostCommandKind::Remove,
+        }
+    }
+}
+
+/// The engine's side of the latest command: its wire shape plus what the
+/// rules need.
+#[derive(Debug, Clone)]
+struct CommandRecord {
+    wire: CohostCommand,
+    /// `None` for an utterance Orcle did not understand.
+    intent: Option<CommandIntent>,
+    pending: CommandPending,
+    /// When it was heard: the same-target and correction windows count from here.
+    heard_at: Instant,
+    /// The comments it resolved to: one, or the chooser's.
+    resolved: Vec<String>,
+    /// The moderation phase last applied: 0 none, 1 pending, 2 running, 3 over.
+    operation_rank: u8,
+}
+
+impl CommandRecord {
+    fn new(command: &NewCommand, ctx: &CommandContext) -> Self {
+        Self::with(
+            command.intent.kind(),
+            Some(command.intent),
+            &command.heard,
+            // Only a removal carries its reason: it is the audit reason.
+            command
+                .reason
+                .clone()
+                .filter(|_| command.intent == CommandIntent::Remove),
+            ctx,
+        )
+    }
+
+    fn unheard(heard: &str, ctx: &CommandContext) -> Self {
+        Self::with(CohostCommandKind::Unknown, None, heard, None, ctx)
+    }
+
+    fn with(
+        kind: CohostCommandKind,
+        intent: Option<CommandIntent>,
+        heard: &str,
+        reason: Option<String>,
+        ctx: &CommandContext,
+    ) -> Self {
+        Self {
+            wire: CohostCommand {
+                id: format!("cmd-{}", uuid::Uuid::new_v4()),
+                heard: truncate_utf16(heard.trim(), COMMAND_HEARD_MAX_UNITS),
+                kind,
+                status: CohostCommandStatus::Done,
+                message: String::new(),
+                target: None,
+                candidates: Vec::new(),
+                operation_id: None,
+                reason,
+                at: ctx.now_iso(),
+                expires_at: None,
+            },
+            intent,
+            pending: CommandPending::None,
+            heard_at: ctx.now,
+            resolved: Vec::new(),
+            operation_rank: 0,
+        }
+    }
+
+    /// Nothing more to answer: the command reached `status`.
+    fn finish(&mut self, status: CohostCommandStatus, message: impl Into<String>, now_iso: &str) {
+        self.pending = CommandPending::None;
+        self.wire.status = status;
+        self.wire.message = message.into();
+        self.wire.expires_at = None;
+        self.wire.at = now_iso.to_string();
+    }
+
+    /// "coders_x's comment", for the strip and the card.
+    fn comment(&self) -> String {
+        comment_of(
+            self.wire
+                .target
+                .as_ref()
+                .map(|target| target.author_name.as_str())
+                .unwrap_or_default(),
+        )
+    }
+}
+
+/// A removal a voice command created, for the report.
+#[derive(Debug, Clone, Copy, Default)]
+struct CommandOperationTrack {
+    /// Its terminal outcome was counted.
+    counted: bool,
+    /// A newer command or a session boundary replaced its card: that
+    /// cancellation is not the streamer's "no" and is not counted.
+    superseded: bool,
+}
+
+/// How a command's target resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CommandResolution {
+    /// Nothing matched; the sentence says so.
+    NotFound(String),
+    One(String),
+    /// A chooser, in the order its card lists them, at most three.
+    Several(Vec<String>),
+}
+
+/// How a new command names its target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CommandTargetSpec {
+    /// The local grammar's target (S2).
+    Spoken {
+        target: CommandTarget,
+        question: bool,
+    },
+    /// Message ids a cloud parser picked (S8, `execute_resolved_command`).
+    Resolved(Vec<String>),
+}
+
+#[derive(Debug, Clone)]
+struct NewCommand {
+    intent: CommandIntent,
+    spec: CommandTargetSpec,
+    heard: String,
+    reason: Option<String>,
+}
+
+/// An answer to the open card, by voice or through `cohost.command.*`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandAnswer {
+    Confirm,
+    Cancel,
+    Choose(u8),
+}
+
+/// What a command step reads before the engine lock: the gates and the
+/// comment on stream.
+#[derive(Debug, Clone)]
+struct CommandContext {
+    premium: bool,
+    voice_enabled: bool,
+    remove_enabled: bool,
+    /// The comment on stream right now (`comments.highlight`, live).
+    on_stream: Option<String>,
+    now: Instant,
+    now_utc: chrono::DateTime<chrono::Utc>,
+}
+
+impl CommandContext {
+    fn availability(&self) -> Option<CohostCommandAvailability> {
+        command_availability(self.voice_enabled, self.remove_enabled)
+    }
+
+    fn now_iso(&self) -> String {
+        self.now_utc.to_rfc3339()
+    }
+}
+
+/// A removal to ask chat moderation for, after the engine lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommandRemovalRequest {
+    command_id: String,
+    message_id: String,
+    reason: Option<String>,
+    confirm_mode: RemoveConfirmMode,
+}
+
+/// The work a command step leaves for after the engine lock.
+#[derive(Debug, Default)]
+struct CommandEffects {
+    /// The visible state changed.
+    emit: bool,
+    /// Removals a newer command replaced: cancelled first, results ignored.
+    cancel_superseded: Vec<String>,
+    clear_highlight: bool,
+    /// Expire this card (command id, its `expiresAt`) unless answered first.
+    expire_card: Option<(String, String)>,
+    request_removal: Option<CommandRemovalRequest>,
+    /// The streamer said yes to this removal operation.
+    confirm_removal: Option<String>,
+    /// The streamer said no to this removal operation.
+    cancel_removal: Option<String>,
+}
+
+/// The kill switches as the state carries them: absent while both are on.
+fn command_availability(
+    voice_enabled: bool,
+    remove_enabled: bool,
+) -> Option<CohostCommandAvailability> {
+    let switch = |on: bool| {
+        if on {
+            CohostSwitchState::On
+        } else {
+            CohostSwitchState::Paused
+        }
+    };
+    (!(voice_enabled && remove_enabled)).then_some(CohostCommandAvailability {
+        voice_commands: switch(voice_enabled),
+        remove: switch(remove_enabled),
+    })
+}
+
+/// The gates a command must pass when it runs, and every answer that acts:
+/// the voice kill switch, Premium, and for a removal the remove switch.
+fn command_gate(ctx: &CommandContext, intent: Option<CommandIntent>) -> Option<&'static str> {
+    if !ctx.voice_enabled {
+        Some(COMMAND_VOICE_PAUSED)
+    } else if !ctx.premium {
+        Some(crate::live_chat_moderation::PREMIUM_REQUIRED_MESSAGE)
+    } else if intent == Some(CommandIntent::Remove) && !ctx.remove_enabled {
+        Some(crate::live_chat_moderation::REMOVE_PAUSED_MESSAGE)
+    } else {
+        None
+    }
+}
+
+/// "coders_x's comment"; "the comment" for a nameless author.
+fn comment_of(name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        "the comment".to_string()
+    } else {
+        format!("{name}'s comment")
+    }
+}
+
+fn chooser_message(count: usize) -> String {
+    let keys = match count {
+        0 | 1 => "press 1".to_string(),
+        2 => "press 1 or 2".to_string(),
+        count => format!("press 1 to {count}"),
+    };
+    format!("Which comment? Say 'the first one' or {keys}.")
+}
+
+/// The flag kind in the highlight confirm card's words.
+fn command_flag_label(kind: CohostFlagKind) -> Option<&'static str> {
+    Some(match kind {
+        CohostFlagKind::Toxicity => "toxic",
+        CohostFlagKind::Spam => "spam",
+        CohostFlagKind::SelfPromo => "self-promotion",
+        CohostFlagKind::PersonalInfo => "personal info",
+        CohostFlagKind::Hate => "hate",
+        CohostFlagKind::Harassment => "harassment",
+        CohostFlagKind::Threat => "threat",
+        CohostFlagKind::Sexual => "sexual",
+        CohostFlagKind::Scam => "scam",
+        CohostFlagKind::SelfHarm => "self-harm",
+        CohostFlagKind::Spoiler => "spoiler",
+        CohostFlagKind::Impersonation => "impersonation",
+        CohostFlagKind::Rule => "a chat rule",
+        CohostFlagKind::Unknown => return None,
+    })
+}
+
+/// A flag raised at `at` (RFC 3339) is recent enough for "this one".
+fn command_flag_is_recent(at: &str, now_utc: chrono::DateTime<chrono::Utc>) -> bool {
+    chrono::DateTime::parse_from_rfc3339(at).is_ok_and(|at| {
+        now_utc.signed_duration_since(at.with_timezone(&chrono::Utc))
+            <= chrono::Duration::seconds(COMMAND_FLAG_MAX_AGE_SECS)
+    })
+}
+
+/// Whole seconds until `at` (RFC 3339), at least one.
+fn seconds_until(at: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(at)
+        .map(|at| {
+            let millis = at
+                .with_timezone(&chrono::Utc)
+                .signed_duration_since(chrono::Utc::now())
+                .num_milliseconds();
+            (millis + 999) / 1000
+        })
+        .unwrap_or(1)
+        .max(1)
+}
+
+/// Moderation phases only move forward on a command card.
+fn command_operation_rank(phase: ModerationPhase) -> u8 {
+    match phase {
+        ModerationPhase::PendingConfirm => 1,
+        ModerationPhase::Executing => 2,
+        ModerationPhase::Cancelled
+        | ModerationPhase::Expired
+        | ModerationPhase::Removed
+        | ModerationPhase::HiddenLocally
+        | ModerationPhase::Failed
+        | ModerationPhase::DeliveryUnknown => 3,
+    }
+}
+
+/// A moderation operation's phase, as its command card says it (contract
+/// part B's mapping).
+fn apply_operation_to_record(
+    record: &mut CommandRecord,
+    operation: &ModerationOperation,
+    now_iso: &str,
+) {
+    let comment = if record.wire.target.is_some() {
+        record.comment()
+    } else {
+        comment_of(&operation.author_name)
+    };
+    let platform = stream_platform_label(operation.platform);
+    record.wire.operation_id = Some(operation.operation_id.clone());
+    match operation.phase {
+        ModerationPhase::PendingConfirm => {
+            record.pending = CommandPending::Removal;
+            record.wire.status = CohostCommandStatus::Confirm;
+            record.wire.expires_at = operation
+                .confirm_by
+                .clone()
+                .or_else(|| operation.execute_at.clone());
+            record.wire.message = match (&operation.confirm_by, &operation.execute_at) {
+                (None, Some(execute_at)) => {
+                    let seconds = seconds_until(execute_at);
+                    let unit = if seconds == 1 { "second" } else { "seconds" };
+                    format!("Removing {comment} in {seconds} {unit}.")
+                }
+                _ => format!("Remove {comment}?"),
+            };
+            record.wire.at = now_iso.to_string();
+        }
+        ModerationPhase::Executing => {
+            record.pending = CommandPending::Removing;
+            record.wire.status = CohostCommandStatus::Confirm;
+            record.wire.expires_at = None;
+            record.wire.message = format!("Removing {comment}…");
+            record.wire.at = now_iso.to_string();
+        }
+        ModerationPhase::Removed => {
+            let message = if operation.outcome_code == Some(ModerationOutcomeCode::NotFound) {
+                format!("{platform} had already removed {comment}.")
+            } else {
+                format!("Removed {comment} from {platform}.")
+            };
+            record.finish(CohostCommandStatus::Done, message, now_iso);
+        }
+        ModerationPhase::HiddenLocally => record.finish(
+            CohostCommandStatus::Done,
+            operation
+                .outcome
+                .clone()
+                .unwrap_or_else(|| format!("Hid {comment} in Videorc.")),
+            now_iso,
+        ),
+        ModerationPhase::Cancelled => record.finish(
+            CohostCommandStatus::Cancelled,
+            operation
+                .outcome
+                .clone()
+                .unwrap_or_else(|| "Cancelled. Nothing was removed.".to_string()),
+            now_iso,
+        ),
+        ModerationPhase::Expired => record.finish(
+            CohostCommandStatus::Expired,
+            "Nothing was removed.",
+            now_iso,
+        ),
+        ModerationPhase::Failed | ModerationPhase::DeliveryUnknown => record.finish(
+            CohostCommandStatus::Refused,
+            operation
+                .outcome
+                .clone()
+                .unwrap_or_else(|| format!("Could not remove {comment}.")),
+            now_iso,
+        ),
+    }
+}
+
 impl CohostSession {
     fn new(
         session_id: String,
@@ -1672,6 +2290,8 @@ impl CohostSession {
             dead_air: DeadAirLane::default(),
             started_at_iso: chrono::Utc::now().to_rfc3339(),
             report: ReportLedger::default(),
+            command: None,
+            command_operations: HashMap::new(),
         }
     }
 
@@ -1734,6 +2354,7 @@ impl CohostSession {
                 drafted: self.report.recap_drafted,
                 dismissed: self.report.recap_dismissed,
             },
+            commands: (!self.report.commands.is_empty()).then(|| self.report.commands.clone()),
         }
     }
 
@@ -1760,6 +2381,9 @@ impl CohostSession {
         if self.in_flight {
             self.discard_in_flight = true;
         }
+        // Plan 140 S3: a card a voice command opened closes with what was
+        // heard (`clear_transcript` cancels its removal).
+        self.abandon_command(COMMAND_SIGNED_OUT, &chrono::Utc::now().to_rfc3339());
     }
 
     fn snapshot(&self) -> CohostState {
@@ -1804,6 +2428,9 @@ impl CohostSession {
             recap: self.recap_at(now),
             say_hi: self.ledger.say_hi(now),
             dead_air_nudge: self.dead_air.current(now),
+            command: self.command.as_ref().map(|record| record.wire.clone()),
+            // The engine sets the kill switches; the session never knows them.
+            command_availability: None,
         }
     }
 
@@ -1986,6 +2613,11 @@ impl CohostSession {
                     text: mapped.text.clone(),
                     at: mapped.at.clone(),
                     noted_at: now,
+                    platform: message.platform,
+                    notification: message
+                        .raw_provider_type
+                        .as_deref()
+                        .is_some_and(|kind| kind.starts_with("channel.chat.notification")),
                 },
             );
             self.pending.push_back(mapped);
@@ -2699,6 +3331,841 @@ impl CohostSession {
         self.dismissed_flags.insert(message_id.to_string());
         self.drop_spotlight_for(message_id);
         before != self.flags.len()
+    }
+
+    // --- Voice commands (plan 140 S3) ----------------------------------------
+
+    /// A known comment a voice command may point at: never the streamer's
+    /// own, never a deleted one (tombstones included), never a notification
+    /// row. Flags do not exclude: the streamer asked.
+    fn command_target_eligible(&self, message_id: &str) -> Option<&KnownMessage> {
+        let known = self.known.get(message_id)?;
+        if self.deleted_ids.contains(message_id)
+            || known.notification
+            || known.roles.iter().any(|role| role == "owner")
+        {
+            return None;
+        }
+        Some(known)
+    }
+
+    /// The card's view of a comment.
+    fn command_target(&self, message_id: &str) -> Option<CohostCommandTarget> {
+        let known = self.known.get(message_id)?;
+        Some(CohostCommandTarget {
+            message_id: message_id.to_string(),
+            author_name: known.author_name.clone(),
+            platform: known.platform,
+            excerpt: truncate_utf16(known.text.trim(), COMMAND_EXCERPT_MAX_UNITS),
+        })
+    }
+
+    /// Up to `limit` comments a command may point at, newest first.
+    fn newest_command_messages(&self, limit: usize) -> Vec<String> {
+        self.known_ids
+            .iter()
+            .rev()
+            .filter(|id| self.command_target_eligible(id).is_some())
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    /// The newest comment that asked an open question, by `author` when
+    /// given (a platform-qualified author key).
+    fn newest_open_question_message(&self, author: Option<&str>) -> Option<String> {
+        let asked: HashSet<&str> = self
+            .questions
+            .iter()
+            .flat_map(|question| question.message_ids.iter().map(String::as_str))
+            .collect();
+        self.known_ids
+            .iter()
+            .rev()
+            .find(|id| {
+                asked.contains(id.as_str())
+                    && self
+                        .command_target_eligible(id)
+                        .is_some_and(|known| author.is_none_or(|author| known.author == author))
+            })
+            .cloned()
+    }
+
+    /// Decision 5: where a command's words point.
+    fn resolve_command_target(
+        &self,
+        intent: CommandIntent,
+        spec: &CommandTargetSpec,
+        on_stream: Option<&str>,
+        now: Instant,
+        now_utc: chrono::DateTime<chrono::Utc>,
+    ) -> CommandResolution {
+        let nothing = || {
+            CommandResolution::NotFound(
+                match intent {
+                    CommandIntent::Remove => "Orcle couldn't find a comment to remove.",
+                    CommandIntent::Highlight | CommandIntent::Clear => {
+                        "Orcle couldn't find a comment to show."
+                    }
+                }
+                .to_string(),
+            )
+        };
+        match spec {
+            CommandTargetSpec::Resolved(ids) => {
+                let mut eligible: Vec<String> = Vec::new();
+                for id in ids {
+                    if self.command_target_eligible(id).is_some() && !eligible.contains(id) {
+                        eligible.push(id.clone());
+                    }
+                }
+                eligible.truncate(COMMAND_CANDIDATES_CAP);
+                match eligible.len() {
+                    0 => {
+                        CommandResolution::NotFound("Orcle couldn't find that comment.".to_string())
+                    }
+                    1 => CommandResolution::One(eligible.remove(0)),
+                    _ => CommandResolution::Several(eligible),
+                }
+            }
+            CommandTargetSpec::Spoken { target, question } => match target {
+                CommandTarget::Name(name) => self.resolve_command_name(name, *question, now),
+                CommandTarget::Last => {
+                    let question_first = (*question)
+                        .then(|| self.newest_open_question_message(None))
+                        .flatten();
+                    match question_first.or_else(|| self.newest_command_messages(1).pop()) {
+                        Some(id) => CommandResolution::One(id),
+                        None => nothing(),
+                    }
+                }
+                CommandTarget::Deixis => match intent {
+                    CommandIntent::Remove => self.resolve_removal_deixis(on_stream, now, now_utc),
+                    CommandIntent::Highlight | CommandIntent::Clear => {
+                        match self.highlight_deixis(now) {
+                            Some(id) => CommandResolution::One(id),
+                            None => nothing(),
+                        }
+                    }
+                },
+                CommandTarget::None => CommandResolution::NotFound(
+                    "Orcle couldn't tell which comment you mean.".to_string(),
+                ),
+            },
+        }
+    }
+
+    /// "The comment from coders x": authors whose name the spoken words
+    /// match, newest first, among comments of the last ten minutes (command
+    /// words stripped first). A name that matches as a whole ("coders x" for
+    /// coders_x) beats one that matches only in part (coders_y also has
+    /// "coders"). One author: their newest comment, or with "question" their
+    /// newest open question. Several: a chooser. None: "couldn't find".
+    fn resolve_command_name(
+        &self,
+        spoken: &str,
+        question: bool,
+        now: Instant,
+    ) -> CommandResolution {
+        let not_found = || {
+            CommandResolution::NotFound(format!(
+                "Orcle couldn't find a comment from {}.",
+                spoken.trim()
+            ))
+        };
+        let words: Vec<String> = name_tokens(spoken)
+            .into_iter()
+            .filter(|word| !is_command_word(word))
+            .collect();
+        if words.is_empty() {
+            return not_found();
+        }
+        let candidates = match_candidates(&words);
+        let spoken_joined = words.concat();
+        // (author key, how specific the match is, that author's newest comment)
+        let mut matched: Vec<(&str, u8, &str)> = Vec::new();
+        let mut seen_authors: HashSet<&str> = HashSet::new();
+        for id in self.known_ids.iter().rev() {
+            let Some(known) = self.known.get(id) else {
+                continue;
+            };
+            // `known_ids` is note order: everything after this is older.
+            if now.saturating_duration_since(known.noted_at) > COMMAND_NAME_WINDOW {
+                break;
+            }
+            if self.command_target_eligible(id).is_none()
+                || !seen_authors.insert(known.author.as_str())
+            {
+                continue;
+            }
+            let forms = name_match_forms(&known.author_name);
+            if !name_forms_match(&words, &candidates, &forms) {
+                continue;
+            }
+            let display_joined = name_tokens(&known.author_name).concat();
+            let specificity = if display_joined == spoken_joined {
+                3
+            } else if candidates.contains(&display_joined) {
+                2
+            } else {
+                1
+            };
+            matched.push((known.author.as_str(), specificity, id.as_str()));
+        }
+        let Some(best) = matched.iter().map(|(_, specificity, _)| *specificity).max() else {
+            return not_found();
+        };
+        let mut ids: Vec<String> = Vec::new();
+        for &(author, specificity, newest) in &matched {
+            if specificity != best {
+                continue;
+            }
+            let id = question
+                .then(|| self.newest_open_question_message(Some(author)))
+                .flatten()
+                .unwrap_or_else(|| newest.to_string());
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+            if ids.len() >= COMMAND_CANDIDATES_CAP {
+                break;
+            }
+        }
+        match ids.len() {
+            0 => not_found(),
+            1 => CommandResolution::One(ids.remove(0)),
+            _ => CommandResolution::Several(ids),
+        }
+    }
+
+    /// "Show this one": the comment the streamer is talking about (the
+    /// spotlight, while it lasts), else the newest open question, else the
+    /// newest comment.
+    fn highlight_deixis(&self, now: Instant) -> Option<String> {
+        self.spotlight
+            .current
+            .as_ref()
+            .filter(|current| {
+                now < current.expires_at && current.score >= SPOTLIGHT_ABOUT_THRESHOLD
+            })
+            .map(|current| current.message_id.clone())
+            .filter(|id| self.command_target_eligible(id).is_some())
+            .or_else(|| self.newest_open_question_message(None))
+            .or_else(|| self.newest_command_messages(1).pop())
+    }
+
+    /// "Remove this one": the comment on stream, the newest flag of the last
+    /// two minutes that is not deleted, and the spotlight. One of them goes
+    /// to the confirm card; several (deduped) to the chooser. With none, a
+    /// chooser of the newest comments: never a guess.
+    fn resolve_removal_deixis(
+        &self,
+        on_stream: Option<&str>,
+        now: Instant,
+        now_utc: chrono::DateTime<chrono::Utc>,
+    ) -> CommandResolution {
+        let mut ids: Vec<String> = Vec::new();
+        let mut consider = |id: &str| {
+            if self.command_target_eligible(id).is_some() && !ids.iter().any(|seen| seen == id) {
+                ids.push(id.to_string());
+            }
+        };
+        if let Some(id) = on_stream {
+            consider(id);
+        }
+        if let Some(flag) = self.flags.iter().rev().find(|flag| {
+            self.command_target_eligible(&flag.message_id).is_some()
+                && command_flag_is_recent(&flag.at, now_utc)
+        }) {
+            consider(flag.message_id.as_str());
+        }
+        if let Some(current) = self
+            .spotlight
+            .current
+            .as_ref()
+            .filter(|current| now < current.expires_at)
+        {
+            consider(current.message_id.as_str());
+        }
+        match ids.len() {
+            0 => {
+                let recent = self.newest_command_messages(COMMAND_CANDIDATES_CAP);
+                if recent.is_empty() {
+                    CommandResolution::NotFound(
+                        "Orcle couldn't find a comment to remove.".to_string(),
+                    )
+                } else {
+                    CommandResolution::Several(recent)
+                }
+            }
+            1 => CommandResolution::One(ids.remove(0)),
+            _ => CommandResolution::Several(ids),
+        }
+    }
+
+    /// Newest wins: the open card closes for a newer command. A pending
+    /// removal is cancelled after the lock, and that cancellation is not
+    /// counted (the streamer moved on; they did not say no). A removal that
+    /// already runs runs on, and its outcome still counts.
+    fn supersede_command(&mut self) -> Vec<String> {
+        let mut cancel = Vec::new();
+        if let Some(record) = self.command.as_mut() {
+            if record.pending == CommandPending::Removal
+                && let Some(operation_id) = record.wire.operation_id.clone()
+            {
+                self.command_operations
+                    .entry(operation_id.clone())
+                    .or_default()
+                    .superseded = true;
+                cancel.push(operation_id);
+            }
+            record.pending = CommandPending::None;
+        }
+        cancel
+    }
+
+    /// A session boundary (a consent change, sign-out) closes the open card;
+    /// `clear_transcript` cancels its removal. Nothing here is counted.
+    fn abandon_command(&mut self, message: &str, now_iso: &str) -> bool {
+        let Some(record) = self.command.as_mut() else {
+            return false;
+        };
+        if matches!(
+            record.pending,
+            CommandPending::None | CommandPending::Removing
+        ) {
+            return false;
+        }
+        if record.pending == CommandPending::Removal
+            && let Some(operation_id) = record.wire.operation_id.clone()
+        {
+            self.command_operations
+                .entry(operation_id)
+                .or_default()
+                .superseded = true;
+        }
+        record.finish(CohostCommandStatus::Cancelled, message, now_iso);
+        true
+    }
+
+    /// A new voice command, under the engine lock. Newest wins: it replaces
+    /// the open card (a pending removal is cancelled after the lock). A
+    /// second command that lands on the same comment within ten seconds is
+    /// the same request and changes nothing.
+    fn begin_command(
+        &mut self,
+        command: NewCommand,
+        ctx: &CommandContext,
+        confirm_mode: RemoveConfirmMode,
+        auto_generation: &mut u64,
+    ) -> CommandEffects {
+        let mut effects = CommandEffects {
+            emit: true,
+            ..CommandEffects::default()
+        };
+        let now_iso = ctx.now_iso();
+        if let Some(message) = command_gate(ctx, Some(command.intent)) {
+            effects.cancel_superseded = self.supersede_command();
+            let mut record = CommandRecord::new(&command, ctx);
+            record.finish(CohostCommandStatus::Unavailable, message, &now_iso);
+            self.command = Some(record);
+            return effects;
+        }
+        if command.intent == CommandIntent::Clear {
+            // "Remove it" then "from the screen": the removal was never meant.
+            let correction = self.command.as_ref().is_some_and(|record| {
+                record.intent == Some(CommandIntent::Remove)
+                    && matches!(
+                        record.pending,
+                        CommandPending::Requesting | CommandPending::Removal
+                    )
+                    && ctx.now.saturating_duration_since(record.heard_at)
+                        <= COMMAND_CORRECTION_WINDOW
+            });
+            effects.cancel_superseded = self.supersede_command();
+            let had_card = ctx.on_stream.is_some() || self.auto.requested.is_some();
+            // A command card the renderer has not set yet must not appear
+            // after the clear.
+            self.auto.requested = None;
+            self.auto.latest = None;
+            let message = match (had_card, correction) {
+                (true, true) => "Cleared the highlight. Nothing was removed.",
+                (true, false) => "Cleared the highlight.",
+                (false, true) => "Nothing was on stream. Nothing was removed.",
+                (false, false) => "Nothing was on stream.",
+            };
+            if had_card {
+                self.report.commands.cleared += 1;
+            }
+            let mut record = CommandRecord::new(&command, ctx);
+            record.finish(CohostCommandStatus::Done, message, &now_iso);
+            self.command = Some(record);
+            effects.clear_highlight = true;
+            return effects;
+        }
+        let resolution = self.resolve_command_target(
+            command.intent,
+            &command.spec,
+            ctx.on_stream.as_deref(),
+            ctx.now,
+            ctx.now_utc,
+        );
+        let resolved: Vec<String> = match &resolution {
+            CommandResolution::One(id) => vec![id.clone()],
+            CommandResolution::Several(ids) => ids.clone(),
+            CommandResolution::NotFound(_) => Vec::new(),
+        };
+        let same_request = !resolved.is_empty()
+            && self.command.as_ref().is_some_and(|record| {
+                record.intent == Some(command.intent)
+                    && record.resolved == resolved
+                    && ctx.now.saturating_duration_since(record.heard_at)
+                        <= COMMAND_SAME_TARGET_WINDOW
+                    && !matches!(
+                        record.wire.status,
+                        CohostCommandStatus::Cancelled
+                            | CohostCommandStatus::Expired
+                            | CohostCommandStatus::Refused
+                            | CohostCommandStatus::Unavailable
+                            | CohostCommandStatus::NotFound
+                    )
+            });
+        if same_request {
+            return CommandEffects::default();
+        }
+        effects.cancel_superseded = self.supersede_command();
+        let mut record = CommandRecord::new(&command, ctx);
+        record.resolved = resolved;
+        match resolution {
+            CommandResolution::NotFound(message) => {
+                record.finish(CohostCommandStatus::NotFound, message, &now_iso);
+                self.report.commands.not_found += 1;
+            }
+            CommandResolution::Several(ids) => {
+                self.open_chooser(&mut record, &ids, ctx, &mut effects)
+            }
+            CommandResolution::One(message_id) => match command.intent {
+                CommandIntent::Remove => self.open_removal_request(
+                    &mut record,
+                    &message_id,
+                    confirm_mode,
+                    &now_iso,
+                    &mut effects,
+                ),
+                CommandIntent::Highlight => self.highlight_or_ask(
+                    &mut record,
+                    &message_id,
+                    ctx,
+                    auto_generation,
+                    &mut effects,
+                ),
+                // A clear returned above; it has no target.
+                CommandIntent::Clear => {}
+            },
+        }
+        self.command = Some(record);
+        effects
+    }
+
+    /// Several comments fit: the chooser opens for 20 s.
+    fn open_chooser(
+        &self,
+        record: &mut CommandRecord,
+        ids: &[String],
+        ctx: &CommandContext,
+        effects: &mut CommandEffects,
+    ) {
+        let candidates: Vec<CohostCommandTarget> = ids
+            .iter()
+            .filter_map(|id| self.command_target(id))
+            .take(COMMAND_CANDIDATES_CAP)
+            .collect();
+        let expires_at = iso_after(ctx.now, ctx.now + COMMAND_CARD_TTL);
+        record.pending = CommandPending::Choice;
+        record.wire.status = CohostCommandStatus::Ambiguous;
+        record.wire.message = chooser_message(candidates.len());
+        record.wire.candidates = candidates;
+        record.wire.target = None;
+        record.wire.expires_at = Some(expires_at.clone());
+        record.wire.at = ctx.now_iso();
+        effects.expire_card = Some((record.wire.id.clone(), expires_at));
+    }
+
+    /// One comment to remove: chat moderation opens the card (after the
+    /// lock); until it answers, the card shows without `operationId`.
+    fn open_removal_request(
+        &self,
+        record: &mut CommandRecord,
+        message_id: &str,
+        confirm_mode: RemoveConfirmMode,
+        now_iso: &str,
+        effects: &mut CommandEffects,
+    ) {
+        record.wire.target = self.command_target(message_id);
+        record.wire.candidates.clear();
+        record.wire.operation_id = None;
+        record.resolved = vec![message_id.to_string()];
+        record.pending = CommandPending::Requesting;
+        record.operation_rank = 0;
+        record.wire.status = CohostCommandStatus::Confirm;
+        record.wire.message = format!("Remove {}?", record.comment());
+        record.wire.expires_at = None;
+        record.wire.at = now_iso.to_string();
+        effects.request_removal = Some(CommandRemovalRequest {
+            command_id: record.wire.id.clone(),
+            message_id: message_id.to_string(),
+            reason: record.wire.reason.clone(),
+            confirm_mode,
+        });
+    }
+
+    /// One comment to show: on stream now (`CohostAutoHighlight`, source
+    /// `command`, past the automatic cadence rules: the streamer asked),
+    /// unless Orcle flagged it high: then it asks first.
+    fn highlight_or_ask(
+        &mut self,
+        record: &mut CommandRecord,
+        message_id: &str,
+        ctx: &CommandContext,
+        auto_generation: &mut u64,
+        effects: &mut CommandEffects,
+    ) {
+        record.wire.target = self.command_target(message_id);
+        record.wire.candidates.clear();
+        record.resolved = vec![message_id.to_string()];
+        let flagged = self
+            .flags
+            .iter()
+            .find(|flag| flag.message_id == message_id && flag.severity == CohostFlagSeverity::High)
+            .map(|flag| flag.kind);
+        if let Some(kind) = flagged {
+            let expires_at = iso_after(ctx.now, ctx.now + COMMAND_CARD_TTL);
+            record.pending = CommandPending::HighlightConfirm;
+            record.wire.status = CohostCommandStatus::Confirm;
+            record.wire.message = match command_flag_label(kind) {
+                Some(label) => format!("Orcle flagged this ({label}). Show it anyway?"),
+                None => "Orcle flagged this. Show it anyway?".to_string(),
+            };
+            record.wire.expires_at = Some(expires_at.clone());
+            record.wire.at = ctx.now_iso();
+            effects.expire_card = Some((record.wire.id.clone(), expires_at));
+            return;
+        }
+        self.apply_command_highlight(
+            message_id,
+            ctx.on_stream.as_deref(),
+            auto_generation,
+            ctx.now,
+        );
+        let message = format!("Highlighted {}.", record.comment());
+        record.finish(CohostCommandStatus::Done, message, &ctx.now_iso());
+        self.report.commands.highlighted += 1;
+    }
+
+    /// Issue the on-stream command the renderer executes exactly once per
+    /// generation. Re-setting the card that is already live is a refresh.
+    fn apply_command_highlight(
+        &mut self,
+        message_id: &str,
+        on_stream: Option<&str>,
+        auto_generation: &mut u64,
+        now: Instant,
+    ) {
+        let author = self
+            .known
+            .get(message_id)
+            .map(|known| known.author.clone())
+            .unwrap_or_default();
+        *auto_generation = auto_generation.wrapping_add(1).max(1);
+        self.apply_auto_decision(
+            AutoHighlightDecision {
+                message_id: message_id.to_string(),
+                author,
+                source: CohostAutoHighlightSource::Command,
+                highlight_type: None,
+                refresh: on_stream == Some(message_id),
+            },
+            *auto_generation,
+            now,
+        );
+    }
+
+    /// An answer to the open card. `command_id` pins the card a renderer
+    /// showed; a voice answer takes whatever is open.
+    fn answer_command(
+        &mut self,
+        command_id: Option<&str>,
+        answer: CommandAnswer,
+        ctx: &CommandContext,
+        confirm_mode: RemoveConfirmMode,
+        auto_generation: &mut u64,
+    ) -> Result<CommandEffects, CohostCommandError> {
+        let Some(mut record) = self.command.take() else {
+            return Err(CohostCommandError::not_pending());
+        };
+        let result = self.answer_record(
+            &mut record,
+            command_id,
+            answer,
+            ctx,
+            confirm_mode,
+            auto_generation,
+        );
+        self.command = Some(record);
+        result
+    }
+
+    fn answer_record(
+        &mut self,
+        record: &mut CommandRecord,
+        command_id: Option<&str>,
+        answer: CommandAnswer,
+        ctx: &CommandContext,
+        confirm_mode: RemoveConfirmMode,
+        auto_generation: &mut u64,
+    ) -> Result<CommandEffects, CohostCommandError> {
+        if command_id.is_some_and(|id| id != record.wire.id) {
+            return Err(CohostCommandError::not_pending());
+        }
+        let mut effects = CommandEffects {
+            emit: true,
+            ..CommandEffects::default()
+        };
+        let now_iso = ctx.now_iso();
+        match (record.pending, answer) {
+            (CommandPending::Choice, CommandAnswer::Choose(index)) => {
+                let Some(message_id) = record
+                    .wire
+                    .candidates
+                    .get(usize::from(index))
+                    .map(|candidate| candidate.message_id.clone())
+                else {
+                    return Err(CohostCommandError::invalid(format!(
+                        "Pick one of the {} comments.",
+                        record.wire.candidates.len()
+                    )));
+                };
+                if let Some(message) = command_gate(ctx, record.intent) {
+                    record.finish(CohostCommandStatus::Unavailable, message, &now_iso);
+                    return Ok(effects);
+                }
+                match record.intent {
+                    Some(CommandIntent::Remove) => self.open_removal_request(
+                        record,
+                        &message_id,
+                        confirm_mode,
+                        &now_iso,
+                        &mut effects,
+                    ),
+                    _ => self.highlight_or_ask(
+                        record,
+                        &message_id,
+                        ctx,
+                        auto_generation,
+                        &mut effects,
+                    ),
+                }
+            }
+            (CommandPending::Choice, CommandAnswer::Cancel) => {
+                record.finish(CohostCommandStatus::Cancelled, "Cancelled.", &now_iso);
+                self.report.commands.cancelled += 1;
+            }
+            (CommandPending::HighlightConfirm, CommandAnswer::Confirm) => {
+                if let Some(message) = command_gate(ctx, record.intent) {
+                    record.finish(CohostCommandStatus::Unavailable, message, &now_iso);
+                    return Ok(effects);
+                }
+                let Some(message_id) = record.resolved.first().cloned() else {
+                    return Err(CohostCommandError::not_pending());
+                };
+                if self.command_target_eligible(&message_id).is_none() {
+                    // Deleted (or gone) while the card was open.
+                    record.finish(
+                        CohostCommandStatus::NotFound,
+                        "That comment is gone.",
+                        &now_iso,
+                    );
+                    self.report.commands.not_found += 1;
+                    return Ok(effects);
+                }
+                self.apply_command_highlight(
+                    &message_id,
+                    ctx.on_stream.as_deref(),
+                    auto_generation,
+                    ctx.now,
+                );
+                let message = format!("Highlighted {}.", record.comment());
+                record.finish(CohostCommandStatus::Done, message, &now_iso);
+                self.report.commands.highlighted += 1;
+            }
+            (CommandPending::HighlightConfirm, CommandAnswer::Cancel) => {
+                record.finish(
+                    CohostCommandStatus::Cancelled,
+                    "Cancelled. Nothing was shown.",
+                    &now_iso,
+                );
+                self.report.commands.cancelled += 1;
+            }
+            (CommandPending::Removal, CommandAnswer::Confirm) => {
+                let Some(operation_id) = record.wire.operation_id.clone() else {
+                    return Err(CohostCommandError::not_pending());
+                };
+                if let Some(message) = command_gate(ctx, record.intent) {
+                    // It cannot run now: cancel it rather than leave it to a
+                    // countdown. Not the streamer's "no", so not counted.
+                    self.command_operations
+                        .entry(operation_id.clone())
+                        .or_default()
+                        .superseded = true;
+                    effects.cancel_superseded.push(operation_id);
+                    record.finish(CohostCommandStatus::Unavailable, message, &now_iso);
+                    return Ok(effects);
+                }
+                record.pending = CommandPending::Removing;
+                record.wire.message = format!("Removing {}…", record.comment());
+                record.wire.expires_at = None;
+                record.wire.at = now_iso;
+                effects.confirm_removal = Some(operation_id);
+            }
+            (CommandPending::Removal, CommandAnswer::Cancel) => {
+                let Some(operation_id) = record.wire.operation_id.clone() else {
+                    return Err(CohostCommandError::not_pending());
+                };
+                // The operation's cancellation updates the card.
+                effects.emit = false;
+                effects.cancel_removal = Some(operation_id);
+            }
+            _ => return Err(CohostCommandError::not_pending()),
+        }
+        Ok(effects)
+    }
+
+    /// Orcle was addressed and understood nothing: "Orcle didn't catch
+    /// that: '…'". Never while a card is open: an unclear utterance must not
+    /// close a card the streamer may still answer.
+    fn note_unheard_command(&mut self, heard: &str, ctx: &CommandContext) -> bool {
+        if self
+            .command
+            .as_ref()
+            .is_some_and(|record| record.pending != CommandPending::None)
+        {
+            return false;
+        }
+        let now_iso = ctx.now_iso();
+        let mut record = CommandRecord::unheard(heard, ctx);
+        if let Some(message) = command_gate(ctx, None) {
+            record.finish(CohostCommandStatus::Unavailable, message, &now_iso);
+        } else {
+            let message = format!("Orcle didn't catch that: '{}'.", record.wire.heard);
+            record.finish(CohostCommandStatus::NotFound, message, &now_iso);
+            self.report.commands.not_found += 1;
+        }
+        self.command = Some(record);
+        true
+    }
+
+    /// Chat moderation answered the removal request a command made. Returns
+    /// whether the card changed, and the operation to cancel when the
+    /// command was replaced while its request was on the way.
+    fn settle_command_removal(
+        &mut self,
+        command_id: &str,
+        result: Result<ModerationOperation, ModerationRefusal>,
+        now_iso: &str,
+    ) -> (bool, Option<String>) {
+        let current = self.command.as_ref().is_some_and(|record| {
+            record.wire.id == command_id && record.pending == CommandPending::Requesting
+        });
+        match result {
+            Ok(operation) if !current => (false, Some(operation.operation_id)),
+            Ok(operation) => {
+                self.command_operations.insert(
+                    operation.operation_id.clone(),
+                    CommandOperationTrack::default(),
+                );
+                if let Some(record) = self.command.as_mut() {
+                    record.wire.operation_id = Some(operation.operation_id.clone());
+                }
+                (self.apply_command_operation(&operation, now_iso), None)
+            }
+            Err(_) if !current => (false, None),
+            Err(refusal) => {
+                let unavailable = matches!(refusal.code, "premium-required" | "disabled");
+                if let Some(record) = self.command.as_mut() {
+                    let status = if unavailable {
+                        CohostCommandStatus::Unavailable
+                    } else {
+                        CohostCommandStatus::Refused
+                    };
+                    record.finish(status, refusal.message, now_iso);
+                }
+                if !unavailable {
+                    self.report.commands.failed += 1;
+                }
+                (true, None)
+            }
+        }
+    }
+
+    /// A change of a removal a voice command created. Counts its terminal
+    /// outcome once for the report, and moves the command's card along while
+    /// it is still the latest command. Phases only move forward: an older
+    /// change that lands late changes nothing.
+    fn apply_command_operation(&mut self, operation: &ModerationOperation, now_iso: &str) -> bool {
+        let Some(track) = self.command_operations.get_mut(&operation.operation_id) else {
+            return false;
+        };
+        if operation.phase.is_terminal() && !track.counted {
+            track.counted = true;
+            let commands = &mut self.report.commands;
+            match operation.phase {
+                ModerationPhase::Removed => commands.removed += 1,
+                ModerationPhase::HiddenLocally => commands.hidden_locally += 1,
+                ModerationPhase::Cancelled => {
+                    if !track.superseded {
+                        commands.cancelled += 1;
+                    }
+                }
+                ModerationPhase::Expired => commands.expired += 1,
+                ModerationPhase::Failed | ModerationPhase::DeliveryUnknown => commands.failed += 1,
+                ModerationPhase::PendingConfirm | ModerationPhase::Executing => {}
+            }
+        }
+        let Some(record) = self.command.as_mut().filter(|record| {
+            record.wire.operation_id.as_deref() == Some(operation.operation_id.as_str())
+        }) else {
+            return false;
+        };
+        let rank = command_operation_rank(operation.phase);
+        if rank <= record.operation_rank {
+            return false;
+        }
+        record.operation_rank = rank;
+        apply_operation_to_record(record, operation, now_iso);
+        true
+    }
+
+    /// A chooser or highlight card nobody answered in time. `expires_at`
+    /// pins the card the timer was armed for: a chooser that became a
+    /// confirm card has a timer of its own.
+    fn expire_command(&mut self, command_id: &str, expires_at: &str, now_iso: &str) -> bool {
+        let Some(record) = self.command.as_mut() else {
+            return false;
+        };
+        if record.wire.id != command_id || record.wire.expires_at.as_deref() != Some(expires_at) {
+            return false;
+        }
+        let message = match record.pending {
+            CommandPending::Choice => "No comment was picked.",
+            CommandPending::HighlightConfirm => "No answer. Nothing was shown.",
+            CommandPending::None
+            | CommandPending::Requesting
+            | CommandPending::Removal
+            | CommandPending::Removing => return false,
+        };
+        record.finish(CohostCommandStatus::Expired, message, now_iso);
+        self.report.commands.expired += 1;
+        true
     }
 
     // --- Spotlight lane (plan 060 S3) ----------------------------------------
@@ -3787,6 +5254,9 @@ pub struct CohostEngine {
     /// Engine-wide counter for automatic-card commands: never repeats across
     /// sessions, so the renderer can key on it alone.
     auto_highlight_generation: u64,
+    /// The voice-command kill switches as last read (plan 140 S3); `None`
+    /// while both are on. Every state carries it, Orcle running or not.
+    command_availability: Option<CohostCommandAvailability>,
 }
 
 impl CohostEngine {
@@ -3798,6 +5268,7 @@ impl CohostEngine {
             scheduler: None,
             spotlight_scheduler: None,
             auto_highlight_generation: 0,
+            command_availability: None,
         }
     }
 
@@ -3806,10 +5277,104 @@ impl CohostEngine {
     }
 
     pub fn snapshot(&self) -> CohostState {
-        self.session
+        let mut state = self
+            .session
             .as_ref()
             .map(CohostSession::snapshot)
-            .unwrap_or_else(CohostState::off)
+            .unwrap_or_else(CohostState::off);
+        state.command_availability = self.command_availability;
+        state
+    }
+
+    /// True when the kill switches changed since the last read.
+    fn set_command_availability(
+        &mut self,
+        availability: Option<CohostCommandAvailability>,
+    ) -> bool {
+        let changed = self.command_availability != availability;
+        self.command_availability = availability;
+        changed
+    }
+
+    /// What the detector must know without this lock: the wake-word setting,
+    /// whether a card or a chooser waits, and the removal a boundary cancels.
+    fn command_slot_mirror(&self) -> (DetectContext, Option<String>) {
+        let record = self
+            .session
+            .as_ref()
+            .and_then(|session| session.command.as_ref());
+        let pending = record.map_or(CommandPending::None, |record| record.pending);
+        (
+            DetectContext {
+                require_wake_word: self.settings.wake_word_required,
+                awaiting_answer: matches!(
+                    pending,
+                    CommandPending::Removal | CommandPending::HighlightConfirm
+                ),
+                awaiting_choice: pending == CommandPending::Choice,
+            },
+            record
+                .filter(|record| record.pending == CommandPending::Removal)
+                .and_then(|record| record.wire.operation_id.clone()),
+        )
+    }
+
+    /// The running session as a voice command's scope.
+    fn current_command_scope(&self) -> Option<CommandSession> {
+        self.session.as_ref().map(|session| CommandSession {
+            session_id: session.session_id.clone(),
+            generation: session.generation,
+        })
+    }
+
+    /// The running session a command was heard for: same session, same
+    /// generation (a consent change or a restart since makes it stale).
+    fn command_session_mut(&mut self, scope: &CommandSession) -> Option<&mut CohostSession> {
+        self.session.as_mut().filter(|session| {
+            session.session_id == scope.session_id && session.generation == scope.generation
+        })
+    }
+
+    /// Plan 140 S3: a new command for `scope`; `None` when its session is gone.
+    fn begin_command(
+        &mut self,
+        scope: &CommandSession,
+        command: NewCommand,
+        ctx: &CommandContext,
+    ) -> Option<CommandEffects> {
+        let confirm_mode = self.settings.remove_confirm;
+        let session = self.session.as_mut().filter(|session| {
+            session.session_id == scope.session_id && session.generation == scope.generation
+        })?;
+        Some(session.begin_command(
+            command,
+            ctx,
+            confirm_mode,
+            &mut self.auto_highlight_generation,
+        ))
+    }
+
+    /// Plan 140 S3: an answer to the open card of `scope`'s session.
+    fn answer_command(
+        &mut self,
+        scope: &CommandSession,
+        command_id: Option<&str>,
+        answer: CommandAnswer,
+        ctx: &CommandContext,
+    ) -> Result<CommandEffects, CohostCommandError> {
+        let confirm_mode = self.settings.remove_confirm;
+        let Some(session) = self.session.as_mut().filter(|session| {
+            session.session_id == scope.session_id && session.generation == scope.generation
+        }) else {
+            return Err(CohostCommandError::not_pending());
+        };
+        session.answer_command(
+            command_id,
+            answer,
+            ctx,
+            confirm_mode,
+            &mut self.auto_highlight_generation,
+        )
     }
 
     fn is_running_for(&self, session_id: &str) -> bool {
@@ -3870,6 +5435,10 @@ impl CohostEngine {
         session.reason = (!consent).then_some(CohostReason::ConsentRequired);
         session.detail = None;
         session.next_attempt_at = None;
+        // Plan 140 S3: listening restarts under the new consent; a card a
+        // voice command opened closes with it (`clear_transcript` cancels
+        // its removal).
+        session.abandon_command(COMMAND_STOPPED_LISTENING, &chrono::Utc::now().to_rfc3339());
         Some(self.generation)
     }
 
@@ -3960,10 +5529,13 @@ impl CohostEngine {
 
     #[cfg(test)]
     fn snapshot_at_for_test(&self, now: Instant) -> CohostState {
-        self.session
+        let mut state = self
+            .session
             .as_ref()
             .map(|session| session.snapshot_at(now))
-            .unwrap_or_else(CohostState::off)
+            .unwrap_or_else(CohostState::off);
+        state.command_availability = self.command_availability;
+        state
     }
 
     /// Messages buffered for the next tick (0 without a session).
@@ -4360,21 +5932,21 @@ pub(crate) fn note_transcript_final(
 
 /// Plan 140 S2: the pure command detector reads the final while an Orcle
 /// session is armed (`arm_command_detector`). Std mutex, no await: the
-/// caption task observes and returns, like the buffers above.
+/// caption task observes and returns, like the buffers above. The context
+/// (the wake-word setting, an open card or chooser) is the engine's mirror
+/// (`mirror_command_slot`), so no engine lock is needed here.
 fn detect_voice_command(
     state: &AppState,
     update: &CaptionsUpdate,
     final_: &RecentSpeechFinal,
 ) -> Option<(CommandSession, DetectedCommand)> {
+    // Contract part D: `voiceCommands: false` stops command detection.
+    if !crate::service_flags::orcle_voice_commands_enabled(state) {
+        return None;
+    }
     let mut commands = state.cohost_commands.lock().ok()?;
     let session = commands.session.clone()?;
-    // S3: wire `require_wake_word` to the `wakeWordRequired` setting, and the
-    // awaiting flags to the open removal card and chooser.
-    let context = DetectContext {
-        require_wake_word: false,
-        awaiting_answer: false,
-        awaiting_choice: false,
-    };
+    let context = commands.context;
     let command = commands.detector.observe_final(
         &update.session_client_id,
         update.seq,
@@ -4385,12 +5957,10 @@ fn detect_voice_command(
     Some((session, command))
 }
 
-/// Plan 140 S2: a detected command leaves the caption path at once and runs
-/// on its own task, never inline in `note_transcript_final` and never on the
-/// tick pass, which can wait 12 s. S3 replaces the body with the command
-/// engine: check the session generation under the engine lock, resolve the
-/// target, then highlight, clear, or hand a removal to chat moderation. Until
-/// then the command is only logged.
+/// Plan 140: a detected command leaves the caption path at once and runs on
+/// its own task, never inline in `note_transcript_final` and never on the
+/// tick pass, which can wait 12 s. The gates (Premium, the kill switches,
+/// the session generation) are checked again when it runs.
 pub(crate) fn dispatch_detected_command(
     state: AppState,
     session: CommandSession,
@@ -4404,38 +5974,39 @@ pub(crate) fn dispatch_detected_command(
         return;
     };
     handle.spawn(async move {
-        // S3: resolve and act here.
-        let _state = state;
-        tracing::info!(
-            session_id = %session.session_id,
-            generation = session.generation,
-            kind = %command.kind.label(),
-            target = %command.target.describe(),
-            question = command.question,
-            reason = command.reason.as_deref().unwrap_or("none"),
-            wake_word = command.wake_word,
-            "Orcle heard a command: '{}'.",
-            command.heard
-        );
+        run_detected_command(&state, &session, command, premium_entitled()).await;
     });
 }
 
 /// Plan 140 S2: voice commands are heard for this engine session only. Armed
 /// when a session starts, or hears again after sign-in; `clear_transcript`
-/// disarms it on every stop and at sign-out.
-fn arm_command_detector(state: &AppState, session_id: &str, generation: u64) {
+/// disarms it on every stop and at sign-out. Nothing waits for an answer in
+/// a session that just (re)started.
+fn arm_command_detector(
+    state: &AppState,
+    session_id: &str,
+    generation: u64,
+    require_wake_word: bool,
+) {
     if let Ok(mut commands) = state.cohost_commands.lock() {
         commands.detector.clear();
         commands.session = Some(CommandSession {
             session_id: session_id.to_string(),
             generation,
         });
+        commands.context = DetectContext {
+            require_wake_word,
+            awaiting_answer: false,
+            awaiting_choice: false,
+        };
     }
 }
 
 /// A session boundary forgets what was said: the next session's spotlight
 /// never sees the previous stream's words, and no half-said voice command
-/// completes across it.
+/// completes across it. A voice removal still waiting for an answer is
+/// cancelled (plan 140 S3): every stop, replacing start, consent change and
+/// sign-out passes here, and none of them may leave a removal to run later.
 fn clear_transcript(state: &AppState) {
     if let Ok(mut window) = state.cohost_transcript.lock() {
         window.clear();
@@ -4443,10 +6014,568 @@ fn clear_transcript(state: &AppState) {
     if let Ok(mut speech) = state.cohost_recent_speech.lock() {
         speech.clear();
     }
-    if let Ok(mut commands) = state.cohost_commands.lock() {
-        commands.detector.clear();
-        commands.session = None;
+    let pending_operation = match state.cohost_commands.lock() {
+        Ok(mut commands) => {
+            commands.detector.clear();
+            commands.session = None;
+            commands.context.awaiting_answer = false;
+            commands.context.awaiting_choice = false;
+            commands.pending_operation.take()
+        }
+        Err(_) => None,
+    };
+    if let Some(operation_id) = pending_operation
+        && let Ok(handle) = tokio::runtime::Handle::try_current()
+    {
+        let state = state.clone();
+        handle.spawn(async move {
+            if let Err(refusal) = crate::live_chat_moderation::cancel(&state, &operation_id).await {
+                tracing::debug!(
+                    "An Orcle removal was no longer pending at a session boundary: {refusal}"
+                );
+            }
+        });
     }
+}
+
+/// Mirror what the detector must know into its slot (plan 140 S3). Called
+/// under the engine lock after every command change, so the mirror never
+/// trails a newer change; the caption task reads it without that lock.
+fn mirror_command_slot(state: &AppState, engine: &CohostEngine) {
+    let (context, pending_operation) = engine.command_slot_mirror();
+    if let Ok(mut commands) = state.cohost_commands.lock() {
+        commands.context = context;
+        commands.pending_operation = pending_operation;
+    }
+}
+
+/// The voice-command kill switches as they are now (contract part D).
+fn command_availability_now(state: &AppState) -> Option<CohostCommandAvailability> {
+    command_availability(
+        crate::service_flags::orcle_voice_commands_enabled(state),
+        crate::service_flags::orcle_remove_enabled(state),
+    )
+}
+
+/// The engine's snapshot with the kill switches as they are now.
+async fn fresh_snapshot(state: &AppState) -> CohostState {
+    let availability = command_availability_now(state);
+    let mut engine = state.cohost.lock().await;
+    engine.set_command_availability(availability);
+    engine.snapshot()
+}
+
+/// The comment on stream right now, if any.
+async fn live_card_message_id(state: &AppState) -> Option<String> {
+    let highlight = state.comment_highlight.lock().await;
+    (highlight.phase == CommentHighlightPhase::Live)
+        .then(|| highlight.message_id.clone())
+        .flatten()
+}
+
+/// Everything a command step reads before the engine lock.
+async fn command_context(state: &AppState, premium: bool) -> CommandContext {
+    CommandContext {
+        premium,
+        voice_enabled: crate::service_flags::orcle_voice_commands_enabled(state),
+        remove_enabled: crate::service_flags::orcle_remove_enabled(state),
+        on_stream: live_card_message_id(state).await,
+        now: Instant::now(),
+        now_utc: chrono::Utc::now(),
+    }
+}
+
+/// One heard command, on its own task (plan 140 S3). Answers (yes, no, the
+/// first one) go to the open card; a new command replaces it.
+async fn run_detected_command(
+    state: &AppState,
+    scope: &CommandSession,
+    command: DetectedCommand,
+    premium: bool,
+) {
+    tracing::info!(
+        session_id = %scope.session_id,
+        generation = scope.generation,
+        kind = %command.kind.label(),
+        target = %command.target.describe(),
+        question = command.question,
+        reason = command.reason.as_deref().unwrap_or("none"),
+        wake_word = command.wake_word,
+        "Orcle heard a command: '{}'.",
+        command.heard
+    );
+    let intent = match command.kind {
+        CommandKind::Confirm => {
+            return answer_by_voice(state, scope, CommandAnswer::Confirm, premium).await;
+        }
+        CommandKind::Cancel => {
+            return answer_by_voice(state, scope, CommandAnswer::Cancel, premium).await;
+        }
+        CommandKind::Choose(index) => {
+            return answer_by_voice(state, scope, CommandAnswer::Choose(index), premium).await;
+        }
+        CommandKind::Unknown => {
+            // Only a clearly addressed "Orcle" earns a reply.
+            if !command.wake_word {
+                return;
+            }
+            if let Some((kind, message_ids)) =
+                resolve_unknown_command(state, scope, &command.heard).await
+            {
+                return execute_resolved_command(
+                    state,
+                    scope,
+                    kind,
+                    message_ids,
+                    command.heard,
+                    None,
+                )
+                .await;
+            }
+            return note_unheard_command(state, scope, &command.heard, premium).await;
+        }
+        CommandKind::Highlight => CommandIntent::Highlight,
+        CommandKind::Clear => CommandIntent::Clear,
+        CommandKind::Remove => CommandIntent::Remove,
+    };
+    run_new_command(
+        state,
+        scope,
+        NewCommand {
+            intent,
+            spec: CommandTargetSpec::Spoken {
+                target: command.target,
+                question: command.question,
+            },
+            heard: command.heard,
+            reason: command.reason,
+        },
+        premium,
+    )
+    .await;
+}
+
+/// Plan 140 S8 seam: every wake-word utterance the local grammar could not
+/// read is offered here first. `None` (always, until S8) shows "Orcle
+/// didn't catch that". S8 calls the cloud parser here (2 s timeout, the
+/// thresholds stay on the desktop) and returns the verb (`Highlight`,
+/// `Clear` or `Remove`) with the message ids it picked; the engine then runs
+/// it through `execute_resolved_command`, chooser and confirm card included.
+async fn resolve_unknown_command(
+    _state: &AppState,
+    _scope: &CommandSession,
+    _heard: &str,
+) -> Option<(CommandKind, Vec<String>)> {
+    None
+}
+
+/// Run a command whose target is already known as message ids (plan 140
+/// S8's cloud parser). One eligible id acts (a highlight, or a removal card),
+/// several open the chooser (at most three), none says "couldn't find".
+/// Every gate applies, as for a spoken command.
+pub(crate) async fn execute_resolved_command(
+    state: &AppState,
+    session: &CommandSession,
+    kind: CommandKind,
+    target_message_ids: Vec<String>,
+    heard: String,
+    reason: Option<String>,
+) {
+    let intent = match kind {
+        CommandKind::Highlight => CommandIntent::Highlight,
+        CommandKind::Clear => CommandIntent::Clear,
+        CommandKind::Remove => CommandIntent::Remove,
+        CommandKind::Confirm
+        | CommandKind::Cancel
+        | CommandKind::Choose(_)
+        | CommandKind::Unknown => {
+            return;
+        }
+    };
+    run_new_command(
+        state,
+        session,
+        NewCommand {
+            intent,
+            spec: CommandTargetSpec::Resolved(target_message_ids),
+            heard,
+            reason,
+        },
+        premium_entitled(),
+    )
+    .await;
+}
+
+/// A new command: decide under the engine lock, act after it.
+async fn run_new_command(
+    state: &AppState,
+    scope: &CommandSession,
+    command: NewCommand,
+    premium: bool,
+) {
+    let ctx = command_context(state, premium).await;
+    let effects = {
+        let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+        let (effects, snapshot) = {
+            let mut engine = state.cohost.lock().await;
+            engine.set_command_availability(ctx.availability());
+            let Some(effects) = engine.begin_command(scope, command, &ctx) else {
+                tracing::info!("Orcle dropped a voice command: its session changed.");
+                return;
+            };
+            mirror_command_slot(state, &engine);
+            // A removal card shows once chat moderation opened it
+            // (`request_command_removal`), with its operation.
+            let snapshot =
+                (effects.emit && effects.request_removal.is_none()).then(|| engine.snapshot());
+            (effects, snapshot)
+        };
+        if let Some(snapshot) = snapshot {
+            emit_state(state, &snapshot, &lifecycle_delivery);
+        }
+        effects
+    };
+    run_command_effects(state, scope, effects, false).await;
+}
+
+/// A voice answer. Answers are never deduped by the detector, so one that
+/// finds nothing waiting is dropped here.
+async fn answer_by_voice(
+    state: &AppState,
+    scope: &CommandSession,
+    answer: CommandAnswer,
+    premium: bool,
+) {
+    if let Err(error) = answer_command_with(state, Some(scope), None, answer, premium, false).await
+    {
+        tracing::debug!(
+            code = error.code,
+            "Orcle dropped a voice answer: {}",
+            error.message
+        );
+    }
+}
+
+/// An answer to the open card, by voice (`voice_scope`) or by RPC
+/// (`command_id`). A yes to a removal runs it after the lock; the RPC path
+/// does that in the background (`background_confirm`), since the platform
+/// can take up to about 16 s.
+async fn answer_command_with(
+    state: &AppState,
+    voice_scope: Option<&CommandSession>,
+    command_id: Option<&str>,
+    answer: CommandAnswer,
+    premium: bool,
+    background_confirm: bool,
+) -> Result<CohostState, CohostCommandError> {
+    let ctx = command_context(state, premium).await;
+    let (scope, effects) = {
+        let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+        let (scope, effects, snapshot) = {
+            let mut engine = state.cohost.lock().await;
+            engine.set_command_availability(ctx.availability());
+            let scope = match voice_scope {
+                Some(scope) => scope.clone(),
+                None => engine
+                    .current_command_scope()
+                    .ok_or_else(CohostCommandError::not_pending)?,
+            };
+            let effects = engine.answer_command(&scope, command_id, answer, &ctx)?;
+            mirror_command_slot(state, &engine);
+            // A pick that opens a removal card shows once chat moderation
+            // opened it, with its operation (`request_command_removal`).
+            let snapshot =
+                (effects.emit && effects.request_removal.is_none()).then(|| engine.snapshot());
+            (scope, effects, snapshot)
+        };
+        if let Some(snapshot) = snapshot {
+            emit_state(state, &snapshot, &lifecycle_delivery);
+        }
+        (scope, effects)
+    };
+    run_command_effects(state, &scope, effects, background_confirm).await;
+    Ok(fresh_snapshot(state).await)
+}
+
+/// The work a command step left for after the engine lock: never under it.
+async fn run_command_effects(
+    state: &AppState,
+    scope: &CommandSession,
+    effects: CommandEffects,
+    background_confirm: bool,
+) {
+    // Replaced removals first: a new request for the same comment would
+    // otherwise find the old one still pending.
+    for operation_id in &effects.cancel_superseded {
+        if let Err(refusal) = crate::live_chat_moderation::cancel(state, operation_id).await {
+            tracing::debug!("A replaced Orcle removal was no longer pending: {refusal}");
+        }
+    }
+    if effects.clear_highlight {
+        crate::comment_highlight::clear_comment_highlight(state).await;
+    }
+    if let Some((command_id, expires_at)) = effects.expire_card {
+        spawn_command_card_timer(state, scope, command_id, expires_at);
+    }
+    if let Some(request) = effects.request_removal {
+        request_command_removal(state, scope, request).await;
+    }
+    if let Some(operation_id) = effects.confirm_removal {
+        if background_confirm {
+            let state = state.clone();
+            tokio::spawn(async move {
+                confirm_command_removal(&state, &operation_id).await;
+            });
+        } else {
+            confirm_command_removal(state, &operation_id).await;
+        }
+    }
+    if let Some(operation_id) = effects.cancel_removal {
+        cancel_command_removal(state, &operation_id).await;
+    }
+}
+
+/// A chooser or highlight card closes as expired after `COMMAND_CARD_TTL`
+/// unless it was answered first. The timer re-checks under the lock and is
+/// never aborted: a stale one finds another card (or none) and does nothing.
+fn spawn_command_card_timer(
+    state: &AppState,
+    scope: &CommandSession,
+    command_id: String,
+    expires_at: String,
+) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let state = state.clone();
+    let scope = scope.clone();
+    handle.spawn(async move {
+        tokio::time::sleep(COMMAND_CARD_TTL).await;
+        let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+        let snapshot = {
+            let mut engine = state.cohost.lock().await;
+            let now_iso = chrono::Utc::now().to_rfc3339();
+            let expired = engine
+                .command_session_mut(&scope)
+                .is_some_and(|session| session.expire_command(&command_id, &expires_at, &now_iso));
+            if !expired {
+                return;
+            }
+            mirror_command_slot(&state, &engine);
+            engine.snapshot()
+        };
+        emit_state(&state, &snapshot, &lifecycle_delivery);
+    });
+}
+
+/// Ask chat moderation for the removal a command resolved (an
+/// `orcle-voice` request, re-checked for Premium and the kill switch
+/// there), then show its card.
+async fn request_command_removal(
+    state: &AppState,
+    scope: &CommandSession,
+    request: CommandRemovalRequest,
+) {
+    let result = crate::live_chat_moderation::request(
+        state,
+        ModerationRequest {
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            message_id: request.message_id.clone(),
+            source: ModerationSource::OrcleVoice,
+            reason: request.reason.clone(),
+            confirm_mode: request.confirm_mode,
+        },
+    )
+    .await
+    // Storage holds the freshest copy: a countdown may have moved it on.
+    .map(|operation| {
+        state
+            .database
+            .get_chat_moderation_operation(&operation.operation_id)
+            .ok()
+            .flatten()
+            .unwrap_or(operation)
+    });
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    let (snapshot, orphan) = {
+        let mut engine = state.cohost.lock().await;
+        let now_iso = chrono::Utc::now().to_rfc3339();
+        let (changed, orphan) = match engine.command_session_mut(scope) {
+            Some(session) => session.settle_command_removal(&request.command_id, result, &now_iso),
+            None => (false, result.ok().map(|operation| operation.operation_id)),
+        };
+        mirror_command_slot(state, &engine);
+        (changed.then(|| engine.snapshot()), orphan)
+    };
+    if let Some(snapshot) = snapshot {
+        emit_state(state, &snapshot, &lifecycle_delivery);
+    }
+    drop(lifecycle_delivery);
+    if let Some(operation_id) = orphan {
+        // Replaced (or its session ended) while the request was on its way:
+        // no card is left to answer it, so nothing may wait for an answer.
+        if let Err(refusal) = crate::live_chat_moderation::cancel(state, &operation_id).await {
+            tracing::debug!("A replaced Orcle removal was no longer pending: {refusal}");
+        }
+    }
+}
+
+/// The streamer said yes: chat moderation runs the removal (up to about
+/// 16 s at the platform), never under the engine lock. The outcome reaches
+/// the card through `sync_command_operation`.
+async fn confirm_command_removal(state: &AppState, operation_id: &str) {
+    let operation = match crate::live_chat_moderation::confirm(state, operation_id).await {
+        Ok(operation) => Some(operation),
+        Err(refusal) => {
+            tracing::info!("An Orcle removal could not run: {refusal}");
+            state
+                .database
+                .get_chat_moderation_operation(operation_id)
+                .ok()
+                .flatten()
+        }
+    };
+    if let Some(operation) = operation {
+        sync_command_operation(state, operation).await;
+    }
+}
+
+/// The streamer said no: chat moderation cancels it; nothing is removed.
+async fn cancel_command_removal(state: &AppState, operation_id: &str) {
+    let operation = match crate::live_chat_moderation::cancel(state, operation_id).await {
+        Ok(operation) => Some(operation),
+        Err(refusal) => {
+            tracing::info!("An Orcle removal could not be cancelled: {refusal}");
+            state
+                .database
+                .get_chat_moderation_operation(operation_id)
+                .ok()
+                .flatten()
+        }
+    };
+    if let Some(operation) = operation {
+        sync_command_operation(state, operation).await;
+    }
+}
+
+/// Apply the freshest copy of a voice removal to the command that asked
+/// for it, and to the report.
+async fn sync_command_operation(state: &AppState, operation: ModerationOperation) {
+    let operation = state
+        .database
+        .get_chat_moderation_operation(&operation.operation_id)
+        .ok()
+        .flatten()
+        .unwrap_or(operation);
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    let snapshot = {
+        let mut engine = state.cohost.lock().await;
+        let now_iso = chrono::Utc::now().to_rfc3339();
+        let changed = engine
+            .session
+            .as_mut()
+            .is_some_and(|session| session.apply_command_operation(&operation, &now_iso));
+        if !changed {
+            return;
+        }
+        mirror_command_slot(state, &engine);
+        engine.snapshot()
+    };
+    emit_state(state, &snapshot, &lifecycle_delivery);
+}
+
+/// Chat moderation's hook (plan 140 S3), called next to every
+/// `liveChat.moderationOperation` emit: in `request`, `begin_execution` and
+/// `finish_locked`, under the moderation runtime's lock. It takes no lock of
+/// its own and never waits: a task updates the command that asked for the
+/// removal (and the report), from the stored copy, so an older change that
+/// lands late never wins. Manual removals are not commands.
+pub(crate) fn note_moderation_operation(state: &AppState, operation: &ModerationOperation) {
+    if operation.source != ModerationSource::OrcleVoice {
+        return;
+    }
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let state = state.clone();
+    let operation = operation.clone();
+    handle.spawn(async move {
+        sync_command_operation(&state, operation).await;
+    });
+}
+
+/// Orcle was addressed and understood nothing.
+async fn note_unheard_command(
+    state: &AppState,
+    scope: &CommandSession,
+    heard: &str,
+    premium: bool,
+) {
+    let ctx = command_context(state, premium).await;
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    let snapshot = {
+        let mut engine = state.cohost.lock().await;
+        engine.set_command_availability(ctx.availability());
+        let changed = engine
+            .command_session_mut(scope)
+            .is_some_and(|session| session.note_unheard_command(heard, &ctx));
+        if !changed {
+            return;
+        }
+        mirror_command_slot(state, &engine);
+        engine.snapshot()
+    };
+    emit_state(state, &snapshot, &lifecycle_delivery);
+}
+
+/// `cohost.command.choose` (plan 140 S3): pick a comment from the chooser.
+pub async fn choose_command(
+    state: &AppState,
+    params: CohostCommandChooseParams,
+) -> Result<CohostState, CohostCommandError> {
+    answer_command_rpc(
+        state,
+        &params.command_id,
+        CommandAnswer::Choose(params.index),
+    )
+    .await
+}
+
+/// `cohost.command.confirm` (plan 140 S3): yes to the open card. A removal
+/// runs in the background; its outcome arrives as `cohost.state`.
+pub async fn confirm_command(
+    state: &AppState,
+    params: CohostCommandParams,
+) -> Result<CohostState, CohostCommandError> {
+    answer_command_rpc(state, &params.command_id, CommandAnswer::Confirm).await
+}
+
+/// `cohost.command.cancel` (plan 140 S3): no to the open card or chooser.
+pub async fn cancel_command(
+    state: &AppState,
+    params: CohostCommandParams,
+) -> Result<CohostState, CohostCommandError> {
+    answer_command_rpc(state, &params.command_id, CommandAnswer::Cancel).await
+}
+
+async fn answer_command_rpc(
+    state: &AppState,
+    command_id: &str,
+    answer: CommandAnswer,
+) -> Result<CohostState, CohostCommandError> {
+    let command_id = command_id.trim();
+    if command_id.is_empty() {
+        return Err(CohostCommandError::invalid("commandId is required."));
+    }
+    answer_command_with(
+        state,
+        None,
+        Some(command_id),
+        answer,
+        premium_entitled(),
+        true,
+    )
+    .await
 }
 
 /// Caption-coordinator hook: the listen intent changed state on its own
@@ -4528,6 +6657,8 @@ pub(crate) async fn purge_speech_for_sign_out(state: &AppState) {
                 "Sign in so Orcle can hear you.",
             ));
         }
+        // Plan 140 S3: the closed card waits for nothing any more.
+        mirror_command_slot(state, &engine);
         engine.snapshot()
     };
     emit_state(state, &snapshot, &lifecycle_delivery);
@@ -4549,20 +6680,21 @@ pub(crate) async fn resume_listen_after_sign_in(state: &AppState) {
                     session.generation,
                     session.consent,
                     engine.settings.listen,
+                    engine.settings.wake_word_required,
                 )
             })
     };
-    let Some((session_id, generation, consent, listen)) = running else {
+    let Some((session_id, generation, consent, listen, wake_word_required)) = running else {
         return;
     };
     // Sign-out disarmed voice commands with the transcript; they resume with
     // listening (plan 140 S2).
-    arm_command_detector(state, &session_id, generation);
+    arm_command_detector(state, &session_id, generation, wake_word_required);
     if consent {
         crate::captions::grant_orcle_speech(state).await;
     }
     start_listen_if_wanted(state, &session_id, consent, listen).await;
-    let snapshot = state.cohost.lock().await.snapshot();
+    let snapshot = fresh_snapshot(state).await;
     emit_state(state, &snapshot, &lifecycle_delivery);
 }
 
@@ -4607,7 +6739,8 @@ pub(crate) async fn start_cohost_session_for_test(state: &AppState, session_id: 
 }
 
 pub async fn cohost_status(state: &AppState) -> CohostState {
-    state.cohost.lock().await.snapshot()
+    // The kill switches ride every state, Orcle running or not (plan 140).
+    fresh_snapshot(state).await
 }
 
 pub async fn get_cohost_settings(state: &AppState) -> CohostSettings {
@@ -4630,6 +6763,8 @@ pub async fn set_cohost_settings(
         .map_err(|error| CohostError::Storage(error.to_string()))?;
     let listen_changed = engine.settings.listen != next.listen;
     engine.settings = next.clone();
+    // Plan 140 S3: the detector reads the wake-word setting from its slot.
+    mirror_command_slot(state, &engine);
     let report = if !next.enabled && engine.session.is_some() {
         engine.stop_session()
     } else {
@@ -4736,6 +6871,7 @@ where
             return Ok(engine.snapshot());
         };
         let listen = engine.settings.listen;
+        let wake_word_required = engine.settings.wake_word_required;
         engine.scheduler = Some(spawn_scheduler(state.clone(), generation));
         engine.spotlight_scheduler = Some(spawn_spotlight_scheduler(state.clone(), generation));
         drop(engine);
@@ -4744,12 +6880,12 @@ where
         crate::captions::retire_orcle_speech(state).await;
         crate::captions::stop_listen(state).await;
         clear_transcript(state);
-        arm_command_detector(state, &session_id, generation);
+        arm_command_detector(state, &session_id, generation, wake_word_required);
         if consent {
             crate::captions::grant_orcle_speech(state).await;
         }
         start_listen_if_wanted(state, &session_id, consent, listen).await;
-        let snapshot = state.cohost.lock().await.snapshot();
+        let snapshot = fresh_snapshot(state).await;
         before_state_emit.await;
         emit_state(state, &snapshot, &lifecycle_delivery);
         return Ok(snapshot);
@@ -4769,12 +6905,13 @@ where
     engine.scheduler = Some(spawn_scheduler(state.clone(), generation));
     engine.spotlight_scheduler = Some(spawn_spotlight_scheduler(state.clone(), generation));
     let listen = engine.settings.listen;
+    let wake_word_required = engine.settings.wake_word_required;
     drop(engine);
     save_session_report(state, replaced);
     crate::captions::retire_orcle_speech(state).await;
     crate::captions::stop_listen(state).await;
     clear_transcript(state);
-    arm_command_detector(state, &session_id, generation);
+    arm_command_detector(state, &session_id, generation, wake_word_required);
     if consent {
         crate::captions::grant_orcle_speech(state).await;
     }
@@ -4782,7 +6919,7 @@ where
     // session) and before the first state emit (so the renderer sees it at
     // once). It never fails or delays the session.
     start_listen_if_wanted(state, &session_id, consent, listen).await;
-    let snapshot = state.cohost.lock().await.snapshot();
+    let snapshot = fresh_snapshot(state).await;
     before_state_emit.await;
     state.emit_log("info", format!("Orcle listening for session {session_id}."));
     emit_state(state, &snapshot, &lifecycle_delivery);
@@ -5370,6 +7507,18 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
         );
         emit_state(state, &snapshot, &lifecycle_delivery);
     }
+    // Plan 140 S3: a kill switch the service flags flipped reaches the state
+    // within a pass.
+    let availability = command_availability_now(state);
+    let availability_snapshot = {
+        let mut engine = state.cohost.lock().await;
+        engine
+            .set_command_availability(availability)
+            .then(|| engine.snapshot())
+    };
+    if let Some(snapshot) = availability_snapshot {
+        emit_state(state, &snapshot, &lifecycle_delivery);
+    }
     // v3 (plan 068): fold what the streamer said since the last pass into the
     // pending transcript (the buffer's own lock, never nested with the
     // engine's), then check the promise triggers against the fresh viewer
@@ -5723,6 +7872,8 @@ mod tests {
             voice_highlight: false,
             rules: Vec::new(),
             listen: false,
+            wake_word_required: false,
+            remove_confirm: RemoveConfirmMode::Confirm,
         }
     }
 
@@ -9292,6 +11443,8 @@ mod tests {
             voice_highlight: None,
             rules: Some(vec!["  No spoilers ".to_string(), "   ".to_string()]),
             listen: None,
+            wake_word_required: None,
+            remove_confirm: None,
         });
         assert_eq!(settings.notes.chars().count(), COHOST_NOTES_MAX_CHARS);
         assert_eq!(settings.rules, vec!["No spoilers".to_string()]);
@@ -9590,6 +11743,8 @@ mod tests {
                 voice_highlight: None,
                 rules: None,
                 listen: None,
+                wake_word_required: None,
+                remove_confirm: None,
             },
         )
         .await
@@ -9661,6 +11816,8 @@ mod tests {
                 voice_highlight: None,
                 rules: None,
                 listen: None,
+                wake_word_required: None,
+                remove_confirm: None,
             },
         )
         .await
@@ -9976,6 +12133,8 @@ mod tests {
                 voice_highlight: None,
                 rules: None,
                 listen: None,
+                wake_word_required: None,
+                remove_confirm: None,
             },
         )
         .await
@@ -11965,6 +14124,2089 @@ mod tests {
         assert_eq!(
             get_session_report(&state, "missing").await.unwrap().report,
             None
+        );
+    }
+
+    // --- Voice commands (plan 140 S3) -------------------------------------------
+
+    const COMMAND_SESSION: &str = "command-session";
+
+    fn command_row(
+        seq: u32,
+        author: &str,
+        platform: StreamPlatform,
+        text: &str,
+    ) -> LiveChatMessage {
+        let provider_message_id = format!("command-{seq}");
+        LiveChatMessage {
+            id: live_chat_message_id(COMMAND_SESSION, platform, None, &provider_message_id),
+            provider_message_id,
+            platform,
+            target_id: None,
+            session_id: COMMAND_SESSION.to_string(),
+            author_id: Some(format!("{author}-id")),
+            author_name: author.to_string(),
+            author_avatar_url: None,
+            author_badges: Vec::new(),
+            author_roles: Vec::new(),
+            published_at: chrono::Utc::now().to_rfc3339(),
+            received_at: format!("2026-10-04T12:{:02}:{:02}Z", seq / 60, seq % 60),
+            message_text: text.to_string(),
+            fragments: Vec::new(),
+            event_type: LiveChatEventType::Message,
+            amount_text: None,
+            is_deleted: false,
+            raw_provider_type: Some("fake".to_string()),
+            details: None,
+            reply: None,
+            first_message: false,
+            author_affiliation: None,
+        }
+    }
+
+    fn command_ctx(now: Instant) -> CommandContext {
+        CommandContext {
+            premium: true,
+            voice_enabled: true,
+            remove_enabled: true,
+            on_stream: None,
+            now,
+            now_utc: chrono::Utc::now(),
+        }
+    }
+
+    fn command_engine(now: Instant, rows: &[LiveChatMessage]) -> (CohostEngine, CommandSession) {
+        let mut engine = CohostEngine::new(enabled_settings());
+        let generation = engine.start_session(COMMAND_SESSION.to_string(), true, None, now);
+        engine.note_messages_at(rows, now);
+        (
+            engine,
+            CommandSession {
+                session_id: COMMAND_SESSION.to_string(),
+                generation,
+            },
+        )
+    }
+
+    fn spoken(intent: CommandIntent, target: CommandTarget) -> NewCommand {
+        NewCommand {
+            intent,
+            spec: CommandTargetSpec::Spoken {
+                target,
+                question: false,
+            },
+            heard: "orcle test".to_string(),
+            reason: None,
+        }
+    }
+
+    fn resolved_removal(message_id: &str) -> NewCommand {
+        NewCommand {
+            intent: CommandIntent::Remove,
+            spec: CommandTargetSpec::Resolved(vec![message_id.to_string()]),
+            heard: "orcle remove that one".to_string(),
+            reason: Some("toxic".to_string()),
+        }
+    }
+
+    fn named(name: &str) -> CommandTarget {
+        CommandTarget::Name(name.to_string())
+    }
+
+    fn current_command(engine: &CohostEngine) -> CohostCommand {
+        engine.snapshot().command.expect("a command")
+    }
+
+    fn command_counts(engine: &CohostEngine) -> CohostReportCommands {
+        engine.session.as_ref().unwrap().report.commands.clone()
+    }
+
+    fn open_question(id: &str, message_ids: &[&str]) -> CohostQuestion {
+        CohostQuestion {
+            id: id.to_string(),
+            text: "Is Rust hard?".to_string(),
+            message_ids: message_ids.iter().map(|id| id.to_string()).collect(),
+            askers: Vec::new(),
+            platforms: vec![StreamPlatform::Twitch],
+            priority: CohostPriority::Normal,
+            suggested_reply: String::new(),
+            from_notes: false,
+            first_seen_at: "2026-10-04T12:00:00Z".to_string(),
+            updated_at: "2026-10-04T12:00:00Z".to_string(),
+            on_topic: false,
+        }
+    }
+
+    fn command_flag(message_id: &str, severity: CohostFlagSeverity, at: String) -> CohostFlag {
+        CohostFlag {
+            message_id: message_id.to_string(),
+            kind: CohostFlagKind::Harassment,
+            severity,
+            reason: "Insults a viewer.".to_string(),
+            at,
+            confidence: None,
+            target: None,
+            action: None,
+            also_kinds: Vec::new(),
+            rule: None,
+        }
+    }
+
+    fn spotlight_on(message_id: &str, now: Instant) -> SpotlightRecord {
+        SpotlightRecord {
+            message_id: message_id.to_string(),
+            question_id: None,
+            score: 0.9,
+            at_iso: chrono::Utc::now().to_rfc3339(),
+            expires_at: now + secs(10),
+            expires_at_iso: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    fn voice_operation(message: &LiveChatMessage, phase: ModerationPhase) -> ModerationOperation {
+        let now = chrono::Utc::now();
+        ModerationOperation {
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            session_id: COMMAND_SESSION.to_string(),
+            message_id: message.id.clone(),
+            platform: message.platform,
+            target_id: None,
+            provider_message_id: message.provider_message_id.clone(),
+            author_name: message.author_name.clone(),
+            excerpt: message.message_text.clone(),
+            source: ModerationSource::OrcleVoice,
+            reason: Some("toxic".to_string()),
+            phase,
+            confirm_mode: RemoveConfirmMode::Confirm,
+            requires_explicit_confirm: true,
+            confirm_by: Some((now + chrono::Duration::seconds(20)).to_rfc3339()),
+            execute_at: None,
+            outcome: None,
+            outcome_code: None,
+            attempts: 0,
+            created_at: now.to_rfc3339(),
+            updated_at: now.to_rfc3339(),
+        }
+    }
+
+    /// The command resolves to `message`, and chat moderation opens its card.
+    fn open_removal_card(
+        engine: &mut CohostEngine,
+        scope: &CommandSession,
+        command: NewCommand,
+        ctx: &CommandContext,
+        message: &LiveChatMessage,
+    ) -> ModerationOperation {
+        let effects = engine.begin_command(scope, command, ctx).unwrap();
+        let request = effects.request_removal.expect("a removal request");
+        assert_eq!(request.message_id, message.id);
+        assert!(
+            !engine.command_slot_mirror().0.awaiting_answer,
+            "nothing to answer before chat moderation opened the card"
+        );
+        let operation = voice_operation(message, ModerationPhase::PendingConfirm);
+        let session = engine.session.as_mut().unwrap();
+        let (changed, orphan) = session.settle_command_removal(
+            &request.command_id,
+            Ok(operation.clone()),
+            &chrono::Utc::now().to_rfc3339(),
+        );
+        assert!(changed && orphan.is_none());
+        operation
+    }
+
+    fn detected(
+        kind: CommandKind,
+        target: CommandTarget,
+        heard: &str,
+        reason: Option<&str>,
+    ) -> DetectedCommand {
+        DetectedCommand {
+            kind,
+            target,
+            question: false,
+            reason: reason.map(str::to_string),
+            heard: heard.to_string(),
+            wake_word: true,
+        }
+    }
+
+    fn command_provider_row() -> crate::live_chat::LiveChatProviderState {
+        crate::live_chat::LiveChatProviderState {
+            id: crate::streaming::stream_platform_id(StreamPlatform::Twitch).to_string(),
+            platform: StreamPlatform::Twitch,
+            target_id: None,
+            account_id: None,
+            account_label: None,
+            read: crate::live_chat::CommentsReadState::Ready,
+            write: crate::live_chat::CommentsWriteState::Ready,
+            moderate: None,
+            state: crate::live_chat::LiveChatProviderConnectionState::Connected,
+            message: "ready".to_string(),
+            last_connected_at: None,
+            last_message_at: None,
+            last_error: None,
+            retry_at: None,
+        }
+    }
+
+    /// A Twitch chat session holding `rows` (with `sender` as its delete
+    /// credentials) and an Orcle session on it that noted them.
+    async fn command_state(
+        rows: &[LiveChatMessage],
+        sender: Option<crate::live_chat::ChatSenderConfig>,
+    ) -> (AppState, CommandSession) {
+        let state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session(COMMAND_SESSION)
+            .unwrap();
+        crate::live_chat_moderation::set_premium_check_for_tests(&state, Arc::new(|| true)).await;
+        {
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.start_session(COMMAND_SESSION.to_string(), vec![command_provider_row()]);
+            if let Some(sender) = sender {
+                coordinator.register_sender(
+                    crate::streaming::stream_platform_id(StreamPlatform::Twitch).to_string(),
+                    sender,
+                );
+            }
+            for row in rows {
+                coordinator.ingest(row.clone());
+                state.database.save_live_chat_message(row).unwrap();
+            }
+        }
+        let generation = {
+            let mut engine = state.cohost.lock().await;
+            engine.settings = enabled_settings();
+            let generation =
+                engine.start_session(COMMAND_SESSION.to_string(), true, None, Instant::now());
+            engine.note_messages(rows);
+            generation
+        };
+        arm_command_detector(&state, COMMAND_SESSION, generation, false);
+        (
+            state,
+            CommandSession {
+                session_id: COMMAND_SESSION.to_string(),
+                generation,
+            },
+        )
+    }
+
+    fn fake_deletes() -> Option<crate::live_chat::ChatSenderConfig> {
+        Some(crate::live_chat::ChatSenderConfig::Fake(
+            crate::live_chat::FakeChatSendBehavior::Sent,
+        ))
+    }
+
+    async fn state_command(state: &AppState) -> CohostCommand {
+        state
+            .cohost
+            .lock()
+            .await
+            .snapshot()
+            .command
+            .expect("a command")
+    }
+
+    async fn state_counts(state: &AppState) -> CohostReportCommands {
+        state
+            .cohost
+            .lock()
+            .await
+            .session
+            .as_ref()
+            .unwrap()
+            .report
+            .commands
+            .clone()
+    }
+
+    async fn wait_for_command(
+        state: &AppState,
+        what: &str,
+        done: impl Fn(&CohostCommand) -> bool,
+    ) -> CohostCommand {
+        let deadline = Instant::now() + secs(3);
+        loop {
+            let command = state.cohost.lock().await.snapshot().command;
+            if let Some(command) = command.filter(|command| done(command)) {
+                return command;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn wait_for_operation_phase(
+        state: &AppState,
+        operation_id: &str,
+        phase: ModerationPhase,
+    ) {
+        let deadline = Instant::now() + secs(3);
+        loop {
+            let stored = state
+                .database
+                .get_chat_moderation_operation(operation_id)
+                .unwrap()
+                .unwrap();
+            if stored.phase == phase {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{stored:?}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn show_on_stream(state: &AppState, message_id: &str) {
+        let mut highlight = state.comment_highlight.lock().await;
+        highlight.session_id = Some(COMMAND_SESSION.to_string());
+        highlight.message_id = Some(message_id.to_string());
+        highlight.phase = CommentHighlightPhase::Live;
+        highlight.generation = highlight.generation.wrapping_add(1).max(1);
+    }
+
+    fn caption_final(seq: u64) -> CaptionsUpdate {
+        CaptionsUpdate {
+            session_client_id: "command-captions".to_string(),
+            seq,
+            kind: CaptionUpdateKind::Final,
+            text: String::new(),
+            chunk_seconds: 3,
+            remaining_seconds: None,
+        }
+    }
+
+    fn spoken_final(text: &str) -> RecentSpeechFinal {
+        RecentSpeechFinal {
+            at: Instant::now(),
+            offset_seconds: 0.0,
+            duration_seconds: 3.0,
+            text: text.to_string(),
+            segments: Vec::new(),
+            presented: false,
+        }
+    }
+
+    fn set_orcle_flags(state: &AppState, orcle: &str) {
+        let flags = crate::service_flags::parse_service_flags(
+            &format!(r#"{{"version":1,"orcle":{orcle}}}"#),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        crate::youtube_quota::apply_service_flags(state, flags);
+    }
+
+    #[test]
+    fn command_wire_shapes_are_additive_and_old_settings_load_with_the_defaults() {
+        // No command and both switches on: the state serializes as before.
+        let off = serde_json::to_value(CohostState::off()).unwrap();
+        assert!(off.get("command").is_none());
+        assert!(off.get("commandAvailability").is_none());
+        let (engine, _) = command_engine(Instant::now(), &[]);
+        let running = serde_json::to_value(engine.snapshot()).unwrap();
+        assert!(running.get("command").is_none());
+        assert!(running.get("commandAvailability").is_none());
+
+        // Settings from before plan 140 load with the defaults, and the
+        // patch carries both new fields (kebab-case confirm mode).
+        let legacy: CohostSettings = serde_json::from_value(serde_json::json!({
+            "enabled": true, "tone": "short", "notes": "", "autoHighlight": false
+        }))
+        .unwrap();
+        assert!(!legacy.wake_word_required);
+        assert_eq!(legacy.remove_confirm, RemoveConfirmMode::Confirm);
+        let wire = serde_json::to_value(&legacy).unwrap();
+        assert_eq!(wire["wakeWordRequired"], serde_json::json!(false));
+        assert_eq!(wire["removeConfirm"], "confirm");
+        let patch: CohostSettingsPatch = serde_json::from_value(serde_json::json!({
+            "wakeWordRequired": true, "removeConfirm": "countdown"
+        }))
+        .unwrap();
+        let mut settings = CohostSettings::default();
+        settings.apply(patch);
+        assert!(settings.wake_word_required);
+        assert_eq!(settings.remove_confirm, RemoveConfirmMode::Countdown);
+        assert!(
+            serde_json::from_value::<CohostSettingsPatch>(serde_json::json!({
+                "removeConfirm": "auto"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::to_value(CohostSettingsPatch::default())
+                .unwrap()
+                .get("wakeWordRequired")
+                .is_none()
+        );
+
+        // A command: camelCase keys, kebab-case enums, empty optionals omitted.
+        let command = CohostCommand {
+            id: "cmd-1".to_string(),
+            heard: "orcle highlight coders x".to_string(),
+            kind: CohostCommandKind::Highlight,
+            status: CohostCommandStatus::NotFound,
+            message: "Orcle couldn't find a comment from coders x.".to_string(),
+            target: None,
+            candidates: Vec::new(),
+            operation_id: None,
+            reason: None,
+            at: "2026-10-04T12:00:00Z".to_string(),
+            expires_at: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&command).unwrap(),
+            serde_json::json!({
+                "id": "cmd-1",
+                "heard": "orcle highlight coders x",
+                "kind": "highlight",
+                "status": "not-found",
+                "message": "Orcle couldn't find a comment from coders x.",
+                "at": "2026-10-04T12:00:00Z"
+            })
+        );
+        // The kill switches: omitted while both are on.
+        assert_eq!(command_availability(true, true), None);
+        assert_eq!(
+            serde_json::to_value(command_availability(false, true)).unwrap(),
+            serde_json::json!({ "voiceCommands": "paused", "remove": "on" })
+        );
+        // A session report with no command counted carries no `commands` key.
+        let (mut engine, _) = command_engine(Instant::now(), &[]);
+        let report = serde_json::to_value(engine.stop_session().unwrap()).unwrap();
+        assert!(report.get("commands").is_none());
+    }
+
+    #[test]
+    fn spoken_names_match_authors_of_the_last_ten_minutes() {
+        let start = Instant::now();
+        let old = command_row(1, "OldTimer", StreamPlatform::Twitch, "hello from before");
+        let rows = vec![
+            command_row(2, "coders_x", StreamPlatform::Twitch, "first from coders"),
+            command_row(3, "someone_else", StreamPlatform::Youtube, "hi all"),
+            command_row(4, "coders_x", StreamPlatform::Twitch, "is rust hard?"),
+        ];
+        let mut engine = CohostEngine::new(enabled_settings());
+        engine.start_session(COMMAND_SESSION.to_string(), true, None, start);
+        engine.note_messages_at(std::slice::from_ref(&old), start);
+        engine.note_messages_at(&rows, start + secs(300));
+        let session = engine.session.as_mut().unwrap();
+        let now = start + secs(660);
+
+        // "coders X", "codersx", "Coders_X": coders_x, their newest comment.
+        for spoken in ["coders x", "codersx", "Coders_X"] {
+            assert_eq!(
+                session.resolve_command_name(spoken, false, now),
+                CommandResolution::One(rows[2].id.clone()),
+                "{spoken}"
+            );
+        }
+        // "Question" prefers their newest open question.
+        session.questions = vec![open_question("q-1", &[rows[0].id.as_str()])];
+        assert_eq!(
+            session.resolve_command_name("coders x", true, now),
+            CommandResolution::One(rows[0].id.clone())
+        );
+        assert_eq!(
+            session.resolve_command_name("coders x", false, now),
+            CommandResolution::One(rows[2].id.clone())
+        );
+        // Older than ten minutes is out of reach; within them it is found.
+        assert_eq!(
+            session.resolve_command_name("old timer", false, now),
+            CommandResolution::NotFound(
+                "Orcle couldn't find a comment from old timer.".to_string()
+            )
+        );
+        assert_eq!(
+            session.resolve_command_name("old timer", false, start + secs(500)),
+            CommandResolution::One(old.id.clone())
+        );
+        // Nobody by that name, or nothing left once command words go.
+        assert!(matches!(
+            session.resolve_command_name("ziggy stardust", false, now),
+            CommandResolution::NotFound(_)
+        ));
+        assert!(matches!(
+            session.resolve_command_name("the comment", false, now),
+            CommandResolution::NotFound(_)
+        ));
+    }
+
+    #[test]
+    fn a_whole_name_beats_a_partial_one_and_several_people_open_a_chooser() {
+        let now = Instant::now();
+        let rows = vec![
+            command_row(1, "coders_x", StreamPlatform::Twitch, "rust is great"),
+            command_row(2, "coders_y", StreamPlatform::Youtube, "which editor?"),
+        ];
+        let (engine, _) = command_engine(now, &rows);
+        let session = engine.session.as_ref().unwrap();
+        // coders_y also has "coders", but only coders_x is "coders x".
+        assert_eq!(
+            session.resolve_command_name("coders x", false, now),
+            CommandResolution::One(rows[0].id.clone())
+        );
+        // "Coders" alone fits both: a chooser, the newest author first.
+        assert_eq!(
+            session.resolve_command_name("coders", false, now),
+            CommandResolution::Several(vec![rows[1].id.clone(), rows[0].id.clone()])
+        );
+        // The same name on two platforms is two people: a chooser too.
+        let twins = vec![
+            command_row(3, "PixelPal", StreamPlatform::Twitch, "gg"),
+            command_row(4, "PixelPal", StreamPlatform::Kick, "gg wp"),
+        ];
+        let (engine, _) = command_engine(now, &twins);
+        let session = engine.session.as_ref().unwrap();
+        assert_eq!(
+            session.resolve_command_name("pixel pal", false, now),
+            CommandResolution::Several(vec![twins[1].id.clone(), twins[0].id.clone()])
+        );
+    }
+
+    #[test]
+    fn show_this_one_prefers_the_spotlight_then_an_open_question_then_the_newest() {
+        let now = Instant::now();
+        let rows = vec![
+            command_row(1, "ada", StreamPlatform::Twitch, "talking point"),
+            command_row(2, "bob", StreamPlatform::Twitch, "is rust hard?"),
+            command_row(3, "cy", StreamPlatform::Twitch, "newest"),
+        ];
+        let (mut engine, _) = command_engine(now, &rows);
+        let session = engine.session.as_mut().unwrap();
+        assert_eq!(session.highlight_deixis(now), Some(rows[2].id.clone()));
+        session.questions = vec![open_question("q-1", &[rows[1].id.as_str()])];
+        assert_eq!(session.highlight_deixis(now), Some(rows[1].id.clone()));
+        session.spotlight.current = Some(spotlight_on(&rows[0].id, now));
+        assert_eq!(session.highlight_deixis(now), Some(rows[0].id.clone()));
+        // An expired spotlight no longer counts.
+        assert_eq!(
+            session.highlight_deixis(now + secs(11)),
+            Some(rows[1].id.clone())
+        );
+        // "Show the last comment" is the newest, whatever is talked about.
+        assert_eq!(
+            session.resolve_command_target(
+                CommandIntent::Highlight,
+                &CommandTargetSpec::Spoken {
+                    target: CommandTarget::Last,
+                    question: false,
+                },
+                None,
+                now,
+                chrono::Utc::now(),
+            ),
+            CommandResolution::One(rows[2].id.clone())
+        );
+    }
+
+    #[test]
+    fn remove_this_one_weighs_the_card_on_stream_a_fresh_flag_and_the_spotlight() {
+        let now = Instant::now();
+        let now_utc = chrono::Utc::now();
+        let names = ["ada", "bob", "cy", "dee", "eve"];
+        let rows: Vec<LiveChatMessage> = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                command_row(index as u32 + 1, name, StreamPlatform::Twitch, "some words")
+            })
+            .collect();
+        let ids: Vec<String> = rows.iter().map(|row| row.id.clone()).collect();
+        let (mut engine, _) = command_engine(now, &rows);
+        let session = engine.session.as_mut().unwrap();
+        // Nothing on stream, flagged or talked about: never a guess, a
+        // chooser of the newest three.
+        assert_eq!(
+            session.resolve_removal_deixis(None, now, now_utc),
+            CommandResolution::Several(vec![ids[4].clone(), ids[3].clone(), ids[2].clone()])
+        );
+        // Only the card on stream: that one.
+        assert_eq!(
+            session.resolve_removal_deixis(Some(ids[0].as_str()), now, now_utc),
+            CommandResolution::One(ids[0].clone())
+        );
+        // A fresh flag on another comment: a chooser, the card on stream first.
+        session.flags.push(command_flag(
+            &ids[1],
+            CohostFlagSeverity::High,
+            now_utc.to_rfc3339(),
+        ));
+        assert_eq!(
+            session.resolve_removal_deixis(Some(ids[0].as_str()), now, now_utc),
+            CommandResolution::Several(vec![ids[0].clone(), ids[1].clone()])
+        );
+        // The flagged comment is the one on stream: deduped to one.
+        assert_eq!(
+            session.resolve_removal_deixis(Some(ids[1].as_str()), now, now_utc),
+            CommandResolution::One(ids[1].clone())
+        );
+        // The spotlight joins as the third.
+        session.spotlight.current = Some(spotlight_on(&ids[2], now));
+        assert_eq!(
+            session.resolve_removal_deixis(Some(ids[0].as_str()), now, now_utc),
+            CommandResolution::Several(vec![ids[0].clone(), ids[1].clone(), ids[2].clone()])
+        );
+        session.spotlight.current = None;
+        // A flag older than two minutes no longer counts.
+        session.flags[0].at = (now_utc - chrono::Duration::seconds(121)).to_rfc3339();
+        assert_eq!(
+            session.resolve_removal_deixis(Some(ids[0].as_str()), now, now_utc),
+            CommandResolution::One(ids[0].clone())
+        );
+        // The newest flag counts, not the first one raised.
+        session.flags[0].at = now_utc.to_rfc3339();
+        session.flags.push(command_flag(
+            &ids[3],
+            CohostFlagSeverity::Low,
+            now_utc.to_rfc3339(),
+        ));
+        assert_eq!(
+            session.resolve_removal_deixis(None, now, now_utc),
+            CommandResolution::One(ids[3].clone())
+        );
+        // A deleted comment never counts, flagged or not.
+        session.deleted_ids.insert(ids[3].clone());
+        assert_eq!(
+            session.resolve_removal_deixis(None, now, now_utc),
+            CommandResolution::One(ids[1].clone())
+        );
+    }
+
+    #[test]
+    fn commands_never_point_at_the_streamer_a_tombstone_or_a_notification_row() {
+        let now = Instant::now();
+        let mut owner = command_row(1, "streamer_bob", StreamPlatform::Twitch, "welcome in");
+        owner.author_roles = vec!["broadcaster".to_string()];
+        let mut raid = command_row(2, "raider_joe", StreamPlatform::Twitch, "raiding with 20");
+        raid.raw_provider_type = Some("channel.chat.notification:raid".to_string());
+        let ann = command_row(3, "viewer_ann", StreamPlatform::Twitch, "bad words");
+        let (mut engine, scope) = command_engine(now, &[owner.clone(), raid.clone(), ann.clone()]);
+        let mut tombstone = ann.clone();
+        tombstone.is_deleted = true;
+        tombstone.event_type = LiveChatEventType::Deleted;
+        engine.note_messages_at(&[tombstone], now);
+        {
+            let session = engine.session.as_ref().unwrap();
+            for name in ["streamer bob", "raider joe", "viewer ann"] {
+                assert!(
+                    matches!(
+                        session.resolve_command_name(name, false, now),
+                        CommandResolution::NotFound(_)
+                    ),
+                    "{name}"
+                );
+            }
+            assert!(session.newest_command_messages(3).is_empty());
+            assert_eq!(session.highlight_deixis(now), None);
+            assert_eq!(
+                session.resolve_removal_deixis(Some(owner.id.as_str()), now, chrono::Utc::now()),
+                CommandResolution::NotFound("Orcle couldn't find a comment to remove.".to_string())
+            );
+        }
+        // An id handed in from elsewhere (S8) gets the same rules.
+        let mut ctx = command_ctx(now);
+        ctx.on_stream = Some(owner.id.clone());
+        engine
+            .begin_command(
+                &scope,
+                NewCommand {
+                    intent: CommandIntent::Highlight,
+                    spec: CommandTargetSpec::Resolved(vec![owner.id.clone(), raid.id.clone()]),
+                    heard: "orcle show that".to_string(),
+                    reason: None,
+                },
+                &ctx,
+            )
+            .unwrap();
+        let command = current_command(&engine);
+        assert_eq!(command.status, CohostCommandStatus::NotFound);
+        assert_eq!(command.message, "Orcle couldn't find that comment.");
+        assert!(engine.snapshot().auto_highlight.is_none());
+    }
+
+    #[test]
+    fn a_highlight_command_puts_the_comment_on_stream_with_source_command() {
+        let now = Instant::now();
+        let rows = vec![
+            command_row(1, "coders_x", StreamPlatform::Twitch, "is rust hard?"),
+            command_row(2, "ada", StreamPlatform::Youtube, "hello"),
+        ];
+        let (mut engine, scope) = command_engine(now, &rows);
+        let effects = engine
+            .begin_command(
+                &scope,
+                spoken(CommandIntent::Highlight, named("coders x")),
+                &command_ctx(now),
+            )
+            .unwrap();
+        assert!(effects.emit);
+        assert!(effects.request_removal.is_none() && effects.cancel_superseded.is_empty());
+        let state = engine.snapshot();
+        let auto = state.auto_highlight.clone().unwrap();
+        assert_eq!(auto.source, CohostAutoHighlightSource::Command);
+        assert_eq!(auto.message_id, rows[0].id);
+        assert!(!auto.refresh);
+        assert_eq!(serde_json::to_value(&auto).unwrap()["source"], "command");
+        let command = state.command.unwrap();
+        assert_eq!(command.kind, CohostCommandKind::Highlight);
+        assert_eq!(command.status, CohostCommandStatus::Done);
+        assert_eq!(command.message, "Highlighted coders_x's comment.");
+        let target = command.target.unwrap();
+        assert_eq!(target.platform, StreamPlatform::Twitch);
+        assert_eq!(target.excerpt, "is rust hard?");
+        assert_eq!(command.expires_at, None);
+
+        // The automatic cadence never holds a command back: the next one goes
+        // straight out with a new generation.
+        engine
+            .begin_command(
+                &scope,
+                spoken(CommandIntent::Highlight, named("ada")),
+                &command_ctx(now + secs(1)),
+            )
+            .unwrap();
+        let next = engine.snapshot().auto_highlight.unwrap();
+        assert_eq!(next.message_id, rows[1].id);
+        assert!(next.generation > auto.generation);
+        assert_eq!(command_counts(&engine).highlighted, 2);
+        // Re-setting the card already on stream is a refresh.
+        let mut ctx = command_ctx(now + secs(2));
+        ctx.on_stream = Some(rows[0].id.clone());
+        engine
+            .begin_command(
+                &scope,
+                spoken(CommandIntent::Highlight, named("coders x")),
+                &ctx,
+            )
+            .unwrap();
+        assert!(engine.snapshot().auto_highlight.unwrap().refresh);
+        // A stale session generation drops the command.
+        let stale = CommandSession {
+            session_id: COMMAND_SESSION.to_string(),
+            generation: scope.generation + 1,
+        };
+        assert!(
+            engine
+                .begin_command(
+                    &stale,
+                    spoken(CommandIntent::Highlight, named("ada")),
+                    &command_ctx(now)
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_highlight_of_a_comment_orcle_flagged_high_asks_first() {
+        let now = Instant::now();
+        let rows = vec![
+            command_row(1, "grumpy_gus", StreamPlatform::Twitch, "you are bad"),
+            command_row(2, "meh_mel", StreamPlatform::Twitch, "check my channel"),
+        ];
+        let (mut engine, scope) = command_engine(now, &rows);
+        {
+            let session = engine.session.as_mut().unwrap();
+            let at = chrono::Utc::now().to_rfc3339();
+            session.flags.push(command_flag(
+                &rows[0].id,
+                CohostFlagSeverity::High,
+                at.clone(),
+            ));
+            session
+                .flags
+                .push(command_flag(&rows[1].id, CohostFlagSeverity::Medium, at));
+        }
+        let effects = engine
+            .begin_command(
+                &scope,
+                spoken(CommandIntent::Highlight, named("grumpy gus")),
+                &command_ctx(now),
+            )
+            .unwrap();
+        assert!(effects.expire_card.is_some());
+        let card = current_command(&engine);
+        assert_eq!(card.status, CohostCommandStatus::Confirm);
+        assert_eq!(card.kind, CohostCommandKind::Highlight);
+        assert_eq!(
+            card.message,
+            "Orcle flagged this (harassment). Show it anyway?"
+        );
+        assert!(card.expires_at.is_some() && card.operation_id.is_none());
+        assert!(
+            engine.snapshot().auto_highlight.is_none(),
+            "nothing on stream before a yes"
+        );
+        assert!(engine.command_slot_mirror().0.awaiting_answer);
+        // Yes: on stream, source command.
+        engine
+            .answer_command(
+                &scope,
+                None,
+                CommandAnswer::Confirm,
+                &command_ctx(now + secs(1)),
+            )
+            .unwrap();
+        let shown = engine.snapshot();
+        assert_eq!(shown.auto_highlight.unwrap().message_id, rows[0].id);
+        let done = shown.command.unwrap();
+        assert_eq!(done.id, card.id);
+        assert_eq!(done.status, CohostCommandStatus::Done);
+        assert!(!engine.command_slot_mirror().0.awaiting_answer);
+        // No: nothing shown, counted as cancelled.
+        engine
+            .begin_command(
+                &scope,
+                spoken(CommandIntent::Highlight, named("grumpy gus")),
+                &command_ctx(now + secs(20)),
+            )
+            .unwrap();
+        let generation = engine.snapshot().auto_highlight.map(|auto| auto.generation);
+        engine
+            .answer_command(
+                &scope,
+                None,
+                CommandAnswer::Cancel,
+                &command_ctx(now + secs(21)),
+            )
+            .unwrap();
+        let cancelled = current_command(&engine);
+        assert_eq!(cancelled.status, CohostCommandStatus::Cancelled);
+        assert_eq!(cancelled.message, "Cancelled. Nothing was shown.");
+        assert_eq!(
+            engine.snapshot().auto_highlight.map(|auto| auto.generation),
+            generation
+        );
+        // A medium flag is the streamer's call: shown at once.
+        engine
+            .begin_command(
+                &scope,
+                spoken(CommandIntent::Highlight, named("meh mel")),
+                &command_ctx(now + secs(40)),
+            )
+            .unwrap();
+        assert_eq!(current_command(&engine).status, CohostCommandStatus::Done);
+        let counts = command_counts(&engine);
+        assert_eq!((counts.highlighted, counts.cancelled), (2, 1));
+    }
+
+    #[test]
+    fn a_chooser_opens_for_several_matches_and_a_pick_runs_the_command() {
+        let now = Instant::now();
+        let rows = vec![
+            command_row(1, "coders_x", StreamPlatform::Twitch, "rust is great"),
+            command_row(2, "coders_y", StreamPlatform::Youtube, "which editor?"),
+        ];
+        let (mut engine, scope) = command_engine(now, &rows);
+        let effects = engine
+            .begin_command(
+                &scope,
+                spoken(CommandIntent::Highlight, named("coders")),
+                &command_ctx(now),
+            )
+            .unwrap();
+        let (timer_id, timer_expires) = effects.expire_card.clone().unwrap();
+        let chooser = current_command(&engine);
+        assert_eq!(chooser.status, CohostCommandStatus::Ambiguous);
+        assert_eq!(chooser.id, timer_id);
+        assert_eq!(chooser.expires_at.as_deref(), Some(timer_expires.as_str()));
+        assert_eq!(
+            chooser.message,
+            "Which comment? Say 'the first one' or press 1 or 2."
+        );
+        assert_eq!(
+            chooser
+                .candidates
+                .iter()
+                .map(|candidate| candidate.author_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["coders_y", "coders_x"]
+        );
+        assert!(chooser.target.is_none());
+        assert!(engine.command_slot_mirror().0.awaiting_choice);
+        assert!(engine.snapshot().auto_highlight.is_none());
+        // A pick past the list, for another card, or a yes are refused, and
+        // change nothing.
+        assert_eq!(
+            engine
+                .answer_command(&scope, None, CommandAnswer::Choose(2), &command_ctx(now))
+                .unwrap_err()
+                .code,
+            "invalid-params"
+        );
+        assert_eq!(
+            engine
+                .answer_command(
+                    &scope,
+                    Some("cmd-other"),
+                    CommandAnswer::Choose(0),
+                    &command_ctx(now)
+                )
+                .unwrap_err()
+                .code,
+            "not-pending"
+        );
+        assert_eq!(
+            engine
+                .answer_command(&scope, None, CommandAnswer::Confirm, &command_ctx(now))
+                .unwrap_err()
+                .code,
+            "not-pending"
+        );
+        assert_eq!(current_command(&engine), chooser);
+        // "The second one": coders_x goes on stream.
+        engine
+            .answer_command(
+                &scope,
+                Some(chooser.id.as_str()),
+                CommandAnswer::Choose(1),
+                &command_ctx(now + secs(1)),
+            )
+            .unwrap();
+        let picked = current_command(&engine);
+        assert_eq!(picked.id, chooser.id, "the same command, answered");
+        assert_eq!(picked.status, CohostCommandStatus::Done);
+        assert_eq!(picked.message, "Highlighted coders_x's comment.");
+        assert!(picked.candidates.is_empty());
+        assert_eq!(
+            engine.snapshot().auto_highlight.unwrap().message_id,
+            rows[0].id
+        );
+        assert!(!engine.command_slot_mirror().0.awaiting_choice);
+        // The chooser's timer finds an answered card and does nothing.
+        assert!(!engine.session.as_mut().unwrap().expire_command(
+            &timer_id,
+            &timer_expires,
+            "2026-10-04T12:00:20Z"
+        ));
+        // A removal chooser: the pick asks chat moderation for that one.
+        let effects = engine
+            .begin_command(
+                &scope,
+                spoken(CommandIntent::Remove, named("coders")),
+                &command_ctx(now + secs(30)),
+            )
+            .unwrap();
+        assert!(effects.request_removal.is_none());
+        let effects = engine
+            .answer_command(
+                &scope,
+                None,
+                CommandAnswer::Choose(0),
+                &command_ctx(now + secs(31)),
+            )
+            .unwrap();
+        let request = effects.request_removal.unwrap();
+        assert_eq!(request.message_id, rows[1].id);
+        assert_eq!(request.confirm_mode, RemoveConfirmMode::Confirm);
+        let card = current_command(&engine);
+        assert_eq!(
+            (card.kind, card.status),
+            (CohostCommandKind::Remove, CohostCommandStatus::Confirm)
+        );
+        assert_eq!(
+            card.operation_id, None,
+            "chat moderation has not opened it yet"
+        );
+        assert!(!engine.command_slot_mirror().0.awaiting_answer);
+    }
+
+    #[test]
+    fn a_name_cut_by_a_chunk_boundary_is_one_request_and_the_newest_command_wins() {
+        let now = Instant::now();
+        let rows = vec![
+            command_row(1, "coders_x", StreamPlatform::Twitch, "you are trash"),
+            command_row(2, "ada", StreamPlatform::Youtube, "hello"),
+        ];
+        let (mut engine, scope) = command_engine(now, &rows);
+        // "remove the comment from coders" ... "coders x" in the next final.
+        let operation = open_removal_card(
+            &mut engine,
+            &scope,
+            spoken(CommandIntent::Remove, named("coders")),
+            &command_ctx(now),
+            &rows[0],
+        );
+        let card = current_command(&engine);
+        assert_eq!(
+            card.operation_id.as_deref(),
+            Some(operation.operation_id.as_str())
+        );
+        assert!(engine.command_slot_mirror().0.awaiting_answer);
+        assert_eq!(
+            engine.command_slot_mirror().1.as_deref(),
+            Some(operation.operation_id.as_str())
+        );
+        let again = engine
+            .begin_command(
+                &scope,
+                spoken(CommandIntent::Remove, named("coders x")),
+                &command_ctx(now + secs(3)),
+            )
+            .unwrap();
+        assert!(
+            !again.emit && again.request_removal.is_none() && again.cancel_superseded.is_empty()
+        );
+        assert_eq!(
+            current_command(&engine),
+            card,
+            "the same request changes nothing"
+        );
+
+        // A different command replaces the card and cancels its removal.
+        let effects = engine
+            .begin_command(
+                &scope,
+                spoken(CommandIntent::Highlight, named("ada")),
+                &command_ctx(now + secs(4)),
+            )
+            .unwrap();
+        assert_eq!(
+            effects.cancel_superseded,
+            vec![operation.operation_id.clone()]
+        );
+        assert_eq!(current_command(&engine).kind, CohostCommandKind::Highlight);
+        assert_eq!(engine.command_slot_mirror().1, None);
+        // Its cancellation lands later: not the streamer's "no", never counted.
+        let mut cancelled = operation.clone();
+        cancelled.phase = ModerationPhase::Cancelled;
+        cancelled.outcome = Some("Cancelled. Nothing was removed.".to_string());
+        assert!(
+            !engine
+                .session
+                .as_mut()
+                .unwrap()
+                .apply_command_operation(&cancelled, "2026-10-04T12:00:05Z"),
+            "the card moved on"
+        );
+        assert_eq!(command_counts(&engine).cancelled, 0);
+        // The same highlight again within ten seconds is the same request...
+        let same = engine
+            .begin_command(
+                &scope,
+                spoken(CommandIntent::Highlight, named("ada")),
+                &command_ctx(now + secs(5)),
+            )
+            .unwrap();
+        assert!(!same.emit);
+        // ...after them it is a new one.
+        let later = engine
+            .begin_command(
+                &scope,
+                spoken(CommandIntent::Highlight, named("ada")),
+                &command_ctx(now + secs(15)),
+            )
+            .unwrap();
+        assert!(later.emit);
+        assert_eq!(command_counts(&engine).highlighted, 2);
+        // A chooser replaced by a newer command is not counted as cancelled.
+        engine
+            .begin_command(
+                &scope,
+                NewCommand {
+                    intent: CommandIntent::Highlight,
+                    spec: CommandTargetSpec::Resolved(vec![rows[0].id.clone(), rows[1].id.clone()]),
+                    heard: "orcle show one of those".to_string(),
+                    reason: None,
+                },
+                &command_ctx(now + secs(30)),
+            )
+            .unwrap();
+        assert_eq!(
+            current_command(&engine).status,
+            CohostCommandStatus::Ambiguous
+        );
+        engine
+            .begin_command(
+                &scope,
+                spoken(CommandIntent::Clear, CommandTarget::None),
+                &command_ctx(now + secs(31)),
+            )
+            .unwrap();
+        assert_eq!(current_command(&engine).kind, CohostCommandKind::Clear);
+        assert_eq!(command_counts(&engine).cancelled, 0);
+    }
+
+    #[test]
+    fn remove_it_then_from_the_screen_is_a_correction() {
+        let now = Instant::now();
+        let rows = vec![command_row(
+            1,
+            "coders_x",
+            StreamPlatform::Twitch,
+            "spam link",
+        )];
+        let (mut engine, scope) = command_engine(now, &rows);
+        let on_stream = |at: Instant| {
+            let mut ctx = command_ctx(at);
+            ctx.on_stream = Some(rows[0].id.clone());
+            ctx
+        };
+        // "Orcle, remove it": the card on stream is the one.
+        let operation = open_removal_card(
+            &mut engine,
+            &scope,
+            spoken(CommandIntent::Remove, CommandTarget::Deixis),
+            &on_stream(now),
+            &rows[0],
+        );
+        // "...from the screen" in the next final: a clear, two seconds later.
+        let effects = engine
+            .begin_command(
+                &scope,
+                spoken(CommandIntent::Clear, CommandTarget::Deixis),
+                &on_stream(now + secs(2)),
+            )
+            .unwrap();
+        assert_eq!(
+            effects.cancel_superseded,
+            vec![operation.operation_id.clone()]
+        );
+        assert!(effects.clear_highlight);
+        let cleared = current_command(&engine);
+        assert_eq!(
+            (cleared.kind, cleared.status),
+            (CohostCommandKind::Clear, CohostCommandStatus::Done)
+        );
+        assert_eq!(
+            cleared.message,
+            "Cleared the highlight. Nothing was removed."
+        );
+        // The removal's cancellation is not counted; the clear is.
+        let mut cancelled = operation;
+        cancelled.phase = ModerationPhase::Cancelled;
+        engine
+            .session
+            .as_mut()
+            .unwrap()
+            .apply_command_operation(&cancelled, "2026-10-04T12:00:03Z");
+        let counts = command_counts(&engine);
+        assert_eq!((counts.cleared, counts.cancelled), (1, 0));
+        // A clear long after a removal card opened just clears; newest still wins.
+        let operation = open_removal_card(
+            &mut engine,
+            &scope,
+            spoken(CommandIntent::Remove, CommandTarget::Deixis),
+            &on_stream(now + secs(30)),
+            &rows[0],
+        );
+        let effects = engine
+            .begin_command(
+                &scope,
+                spoken(CommandIntent::Clear, CommandTarget::Deixis),
+                &on_stream(now + secs(40)),
+            )
+            .unwrap();
+        assert_eq!(effects.cancel_superseded, vec![operation.operation_id]);
+        assert_eq!(current_command(&engine).message, "Cleared the highlight.");
+        // Nothing on stream: it says so, and it is not counted.
+        engine
+            .begin_command(
+                &scope,
+                spoken(CommandIntent::Clear, CommandTarget::None),
+                &command_ctx(now + secs(50)),
+            )
+            .unwrap();
+        assert_eq!(current_command(&engine).message, "Nothing was on stream.");
+        assert_eq!(command_counts(&engine).cleared, 2);
+    }
+
+    #[test]
+    fn a_removal_card_follows_its_operation_and_the_report_counts_the_outcome() {
+        let now = Instant::now();
+        let names = ["ada", "bob", "cy", "dee", "eve", "fay"];
+        let rows: Vec<LiveChatMessage> = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                command_row(index as u32 + 1, name, StreamPlatform::Twitch, "rude words")
+            })
+            .collect();
+        let (mut engine, scope) = command_engine(now, &rows);
+        let hidden = "Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Orcle remove messages.";
+        let outcomes = [
+            (
+                ModerationPhase::Removed,
+                None,
+                CohostCommandStatus::Done,
+                "Removed ada's comment from Twitch.",
+            ),
+            (
+                ModerationPhase::HiddenLocally,
+                Some(hidden),
+                CohostCommandStatus::Done,
+                hidden,
+            ),
+            (
+                ModerationPhase::Cancelled,
+                Some("Cancelled. Nothing was removed."),
+                CohostCommandStatus::Cancelled,
+                "Cancelled. Nothing was removed.",
+            ),
+            (
+                ModerationPhase::Expired,
+                Some("No answer in 20 seconds. Nothing was removed."),
+                CohostCommandStatus::Expired,
+                "Nothing was removed.",
+            ),
+            (
+                ModerationPhase::Failed,
+                Some("Twitch refused the removal."),
+                CohostCommandStatus::Refused,
+                "Twitch refused the removal.",
+            ),
+            (
+                ModerationPhase::DeliveryUnknown,
+                Some("Twitch did not answer in time. Check chat to see whether it was removed."),
+                CohostCommandStatus::Refused,
+                "Twitch did not answer in time. Check chat to see whether it was removed.",
+            ),
+        ];
+        for (index, (phase, outcome, status, message)) in outcomes.into_iter().enumerate() {
+            let at = now + secs(20 * (index as u64 + 1));
+            let operation = open_removal_card(
+                &mut engine,
+                &scope,
+                resolved_removal(&rows[index].id),
+                &command_ctx(at),
+                &rows[index],
+            );
+            let card = current_command(&engine);
+            assert_eq!(card.status, CohostCommandStatus::Confirm);
+            assert_eq!(card.reason.as_deref(), Some("toxic"));
+            assert_eq!(card.expires_at, operation.confirm_by);
+            assert_eq!(card.message, format!("Remove {}'s comment?", names[index]));
+            let session = engine.session.as_mut().unwrap();
+            if phase != ModerationPhase::Cancelled && phase != ModerationPhase::Expired {
+                // Confirmed: it runs at the platform.
+                let mut running = operation.clone();
+                running.phase = ModerationPhase::Executing;
+                assert!(session.apply_command_operation(&running, "2026-10-04T12:00:00Z"));
+                let removing = session.command.as_ref().unwrap();
+                assert_eq!(removing.pending, CommandPending::Removing);
+                assert_eq!(removing.wire.status, CohostCommandStatus::Confirm);
+                assert_eq!(removing.wire.expires_at, None);
+                assert_eq!(
+                    removing.wire.message,
+                    format!("Removing {}'s comment…", names[index])
+                );
+            }
+            let mut finished = operation.clone();
+            finished.phase = phase;
+            finished.outcome = outcome.map(str::to_string);
+            assert!(session.apply_command_operation(&finished, "2026-10-04T12:00:01Z"));
+            let wire = &session.command.as_ref().unwrap().wire;
+            assert_eq!(wire.status, status, "{phase:?}");
+            assert_eq!(wire.message, message, "{phase:?}");
+            assert_eq!(wire.expires_at, None);
+            // A late copy of an older change, or the same one twice: nothing.
+            assert!(!session.apply_command_operation(&operation, "2026-10-04T12:00:02Z"));
+            assert!(!session.apply_command_operation(&finished, "2026-10-04T12:00:02Z"));
+        }
+        let counts = command_counts(&engine);
+        assert_eq!(counts.removed, 1);
+        assert_eq!(counts.hidden_locally, 1);
+        assert_eq!(counts.cancelled, 1);
+        assert_eq!(counts.expired, 1);
+        assert_eq!(counts.failed, 2);
+        assert!(!engine.command_slot_mirror().0.awaiting_answer);
+
+        // Countdown mode: the card says when it runs.
+        let message = &rows[0];
+        let effects = engine
+            .begin_command(
+                &scope,
+                resolved_removal(&message.id),
+                &command_ctx(now + secs(200)),
+            )
+            .unwrap();
+        let request = effects.request_removal.unwrap();
+        let mut countdown = voice_operation(message, ModerationPhase::PendingConfirm);
+        countdown.confirm_mode = RemoveConfirmMode::Countdown;
+        countdown.requires_explicit_confirm = false;
+        countdown.confirm_by = None;
+        countdown.execute_at =
+            Some((chrono::Utc::now() + chrono::Duration::seconds(5)).to_rfc3339());
+        engine.session.as_mut().unwrap().settle_command_removal(
+            &request.command_id,
+            Ok(countdown.clone()),
+            "2026-10-04T12:05:00Z",
+        );
+        let card = current_command(&engine);
+        assert_eq!(card.expires_at, countdown.execute_at);
+        assert!(
+            card.message.starts_with("Removing ada's comment in ")
+                && card.message.ends_with("seconds."),
+            "{}",
+            card.message
+        );
+        assert!(
+            engine.command_slot_mirror().0.awaiting_answer,
+            "a no still stops it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_voice_removal_opens_a_card_and_a_spoken_yes_removes_the_comment() {
+        let rows = vec![
+            command_row(
+                1,
+                "coders_x",
+                StreamPlatform::Twitch,
+                "this stream is trash",
+            ),
+            command_row(2, "ada", StreamPlatform::Twitch, "hello"),
+        ];
+        let (state, scope) = command_state(&rows, fake_deletes()).await;
+        // Orcle flagged it a moment ago: "this one" is that comment.
+        state
+            .cohost
+            .lock()
+            .await
+            .session
+            .as_mut()
+            .unwrap()
+            .flags
+            .push(command_flag(
+                &rows[0].id,
+                CohostFlagSeverity::High,
+                chrono::Utc::now().to_rfc3339(),
+            ));
+        run_detected_command(
+            &state,
+            &scope,
+            detected(
+                CommandKind::Remove,
+                CommandTarget::Deixis,
+                "this one is toxic remove it from our chat",
+                Some("toxic"),
+            ),
+            true,
+        )
+        .await;
+        let card = state_command(&state).await;
+        assert_eq!(
+            (card.kind, card.status),
+            (CohostCommandKind::Remove, CohostCommandStatus::Confirm)
+        );
+        assert_eq!(card.message, "Remove coders_x's comment?");
+        assert_eq!(card.reason.as_deref(), Some("toxic"));
+        assert_eq!(card.heard, "this one is toxic remove it from our chat");
+        let operation_id = card
+            .operation_id
+            .clone()
+            .expect("chat moderation opened the card");
+        let operation = state
+            .database
+            .get_chat_moderation_operation(&operation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(operation.phase, ModerationPhase::PendingConfirm);
+        assert_eq!(operation.source, ModerationSource::OrcleVoice);
+        assert_eq!(operation.message_id, rows[0].id);
+        assert_eq!(operation.reason.as_deref(), Some("toxic"));
+        assert_eq!(card.expires_at, operation.confirm_by);
+        {
+            let slot = state.cohost_commands.lock().unwrap();
+            assert!(slot.context.awaiting_answer);
+            assert_eq!(
+                slot.pending_operation.as_deref(),
+                Some(operation_id.as_str())
+            );
+        }
+
+        // "Yes, remove it."
+        run_detected_command(
+            &state,
+            &scope,
+            detected(
+                CommandKind::Confirm,
+                CommandTarget::None,
+                "yes remove it",
+                None,
+            ),
+            true,
+        )
+        .await;
+        let done = state_command(&state).await;
+        assert_eq!(done.id, card.id);
+        assert_eq!(done.status, CohostCommandStatus::Done);
+        assert_eq!(done.message, "Removed coders_x's comment from Twitch.");
+        let row = state
+            .live_chat
+            .lock()
+            .await
+            .message(&rows[0].id)
+            .cloned()
+            .unwrap();
+        assert!(row.is_deleted);
+        assert_eq!(
+            row.raw_provider_type.as_deref(),
+            Some(crate::live_chat_moderation::REMOVED_PROVIDER_TYPE)
+        );
+        assert_eq!(state_counts(&state).await.removed, 1);
+        {
+            let slot = state.cohost_commands.lock().unwrap();
+            assert!(!slot.context.awaiting_answer);
+            assert_eq!(slot.pending_operation, None);
+        }
+        // A late copy of an older change changes nothing.
+        let stale = ModerationOperation {
+            phase: ModerationPhase::PendingConfirm,
+            ..operation
+        };
+        assert!(
+            !state
+                .cohost
+                .lock()
+                .await
+                .session
+                .as_mut()
+                .unwrap()
+                .apply_command_operation(&stale, "2026-10-04T12:00:00Z")
+        );
+        // A second "yes" finds nothing waiting.
+        run_detected_command(
+            &state,
+            &scope,
+            detected(CommandKind::Confirm, CommandTarget::None, "yes", None),
+            true,
+        )
+        .await;
+        assert_eq!(state_command(&state).await, done);
+        assert_eq!(state_counts(&state).await.removed, 1);
+    }
+
+    #[tokio::test]
+    async fn a_spoken_no_cancels_the_removal_and_keeps_the_comment() {
+        let rows = vec![command_row(
+            1,
+            "coders_x",
+            StreamPlatform::Twitch,
+            "spam link",
+        )];
+        let (state, scope) = command_state(&rows, fake_deletes()).await;
+        show_on_stream(&state, &rows[0].id).await;
+        run_detected_command(
+            &state,
+            &scope,
+            detected(
+                CommandKind::Remove,
+                CommandTarget::Deixis,
+                "remove it from chat",
+                None,
+            ),
+            true,
+        )
+        .await;
+        let card = state_command(&state).await;
+        let operation_id = card.operation_id.clone().unwrap();
+        run_detected_command(
+            &state,
+            &scope,
+            detected(CommandKind::Cancel, CommandTarget::None, "no", None),
+            true,
+        )
+        .await;
+        let cancelled = state_command(&state).await;
+        assert_eq!(cancelled.id, card.id);
+        assert_eq!(cancelled.status, CohostCommandStatus::Cancelled);
+        assert_eq!(cancelled.message, "Cancelled. Nothing was removed.");
+        let stored = state
+            .database
+            .get_chat_moderation_operation(&operation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.phase, ModerationPhase::Cancelled);
+        assert!(
+            !state
+                .live_chat
+                .lock()
+                .await
+                .message(&rows[0].id)
+                .unwrap()
+                .is_deleted
+        );
+        assert_eq!(state_counts(&state).await.cancelled, 1);
+        assert!(
+            !state
+                .cohost_commands
+                .lock()
+                .unwrap()
+                .context
+                .awaiting_answer
+        );
+    }
+
+    #[tokio::test]
+    async fn countdown_mode_removes_unless_cancelled_and_the_card_follows() {
+        let rows = vec![command_row(
+            1,
+            "coders_x",
+            StreamPlatform::Twitch,
+            "spam link",
+        )];
+        let (state, scope) = command_state(&rows, fake_deletes()).await;
+        state.cohost.lock().await.settings.remove_confirm = RemoveConfirmMode::Countdown;
+        show_on_stream(&state, &rows[0].id).await;
+        run_detected_command(
+            &state,
+            &scope,
+            detected(
+                CommandKind::Remove,
+                CommandTarget::Deixis,
+                "remove it from chat",
+                None,
+            ),
+            true,
+        )
+        .await;
+        let card = state_command(&state).await;
+        assert_eq!(card.status, CohostCommandStatus::Confirm);
+        let operation = state
+            .database
+            .get_chat_moderation_operation(card.operation_id.as_deref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(operation.confirm_mode, RemoveConfirmMode::Countdown);
+        assert_eq!(card.expires_at, operation.execute_at);
+        // Nobody says no: chat moderation runs it, and the card follows
+        // through the moderation hook alone.
+        let removed = wait_for_command(&state, "the countdown removal", |command| {
+            command.status == CohostCommandStatus::Done
+        })
+        .await;
+        assert_eq!(removed.message, "Removed coders_x's comment from Twitch.");
+        assert_eq!(state_counts(&state).await.removed, 1);
+    }
+
+    #[tokio::test]
+    async fn a_platform_that_cannot_delete_hides_the_comment_and_the_card_says_so() {
+        let rows = vec![command_row(
+            1,
+            "coders_x",
+            StreamPlatform::Twitch,
+            "spam link",
+        )];
+        // No delete credentials: Twitch is missing the scope.
+        let (state, scope) = command_state(&rows, None).await;
+        run_new_command(&state, &scope, resolved_removal(&rows[0].id), true).await;
+        run_detected_command(
+            &state,
+            &scope,
+            detected(CommandKind::Confirm, CommandTarget::None, "do it", None),
+            true,
+        )
+        .await;
+        let hidden = state_command(&state).await;
+        assert_eq!(hidden.status, CohostCommandStatus::Done);
+        assert!(
+            hidden
+                .message
+                .starts_with("Hidden in Videorc. Viewers on Twitch still see it."),
+            "{}",
+            hidden.message
+        );
+        let counts = state_counts(&state).await;
+        assert_eq!((counts.hidden_locally, counts.removed), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn removal_refusals_show_as_refused_or_unavailable() {
+        let names = [
+            "ada", "bob", "cy", "dee", "eve", "fay", "gil", "hal", "ida", "jon", "kim",
+        ];
+        let rows: Vec<LiveChatMessage> = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                command_row(index as u32 + 1, name, StreamPlatform::Twitch, "rude words")
+            })
+            .collect();
+        let (state, scope) = command_state(&rows, fake_deletes()).await;
+        let no_operations = |state: &AppState| {
+            state
+                .database
+                .list_chat_moderation_operations(COMMAND_SESSION, 200)
+                .unwrap()
+                .is_empty()
+        };
+
+        // Premium lapsed: refused at once, nothing asked of chat moderation.
+        run_new_command(&state, &scope, resolved_removal(&rows[0].id), false).await;
+        let refused = state_command(&state).await;
+        assert_eq!(refused.status, CohostCommandStatus::Unavailable);
+        assert_eq!(refused.message, "Orcle requires Videorc Premium.");
+        assert!(no_operations(&state));
+
+        // Removing paused by Videorc: the same, with its own line.
+        set_orcle_flags(&state, r#"{"remove":false}"#);
+        run_new_command(&state, &scope, resolved_removal(&rows[0].id), true).await;
+        let paused = state_command(&state).await;
+        assert_eq!(paused.status, CohostCommandStatus::Unavailable);
+        assert_eq!(paused.message, "Removing messages is paused by Videorc.");
+        assert!(no_operations(&state));
+        assert_eq!(
+            cohost_status(&state).await.command_availability,
+            Some(CohostCommandAvailability {
+                voice_commands: CohostSwitchState::On,
+                remove: CohostSwitchState::Paused,
+            })
+        );
+        set_orcle_flags(&state, "{}");
+
+        // Chat moderation's own Premium check refuses: unavailable too.
+        crate::live_chat_moderation::set_premium_check_for_tests(&state, Arc::new(|| false)).await;
+        run_new_command(&state, &scope, resolved_removal(&rows[0].id), true).await;
+        let premium = state_command(&state).await;
+        assert_eq!(premium.status, CohostCommandStatus::Unavailable);
+        assert_eq!(premium.message, "Orcle requires Videorc Premium.");
+        crate::live_chat_moderation::set_premium_check_for_tests(&state, Arc::new(|| true)).await;
+
+        // The rate limit: ten removals a minute, then a plain refusal.
+        for row in &rows[..crate::live_chat_moderation::RATE_LIMIT_PER_MINUTE] {
+            crate::live_chat_moderation::request(
+                &state,
+                ModerationRequest {
+                    operation_id: uuid::Uuid::new_v4().to_string(),
+                    message_id: row.id.clone(),
+                    source: ModerationSource::Manual,
+                    reason: None,
+                    confirm_mode: RemoveConfirmMode::Confirm,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        run_new_command(&state, &scope, resolved_removal(&rows[10].id), true).await;
+        let limited = state_command(&state).await;
+        assert_eq!(limited.status, CohostCommandStatus::Refused);
+        assert_eq!(
+            limited.message,
+            format!(
+                "At most {} messages can be removed per minute.",
+                crate::live_chat_moderation::RATE_LIMIT_PER_MINUTE
+            )
+        );
+        let counts = state_counts(&state).await;
+        assert_eq!(
+            counts.failed, 1,
+            "only the refusal counts, not the unavailable ones"
+        );
+        assert_eq!(counts.removed, 0, "manual removals are not commands");
+    }
+
+    #[tokio::test]
+    async fn the_voice_kill_switch_stops_detection_and_every_command() {
+        let rows = vec![command_row(1, "coders_x", StreamPlatform::Twitch, "hello")];
+        let (state, scope) = command_state(&rows, None).await;
+        set_orcle_flags(&state, r#"{"voiceCommands":false}"#);
+        // Detection stops.
+        assert!(
+            detect_voice_command(
+                &state,
+                &caption_final(1),
+                &spoken_final("Orcle, highlight coders x.")
+            )
+            .is_none()
+        );
+        // A command already on its way is refused when it runs.
+        run_detected_command(
+            &state,
+            &scope,
+            detected(
+                CommandKind::Highlight,
+                named("coders x"),
+                "highlight coders x",
+                None,
+            ),
+            true,
+        )
+        .await;
+        let refused = state_command(&state).await;
+        assert_eq!(refused.status, CohostCommandStatus::Unavailable);
+        assert_eq!(refused.message, "Voice commands are paused by Videorc.");
+        assert!(
+            state
+                .cohost
+                .lock()
+                .await
+                .snapshot()
+                .auto_highlight
+                .is_none()
+        );
+        assert_eq!(
+            cohost_status(&state).await.command_availability,
+            Some(CohostCommandAvailability {
+                voice_commands: CohostSwitchState::Paused,
+                remove: CohostSwitchState::On,
+            })
+        );
+        // Back on: heard again, and the state stops saying paused.
+        set_orcle_flags(&state, "{}");
+        let (_, command) = detect_voice_command(
+            &state,
+            &caption_final(2),
+            &spoken_final("Orcle, highlight coders x."),
+        )
+        .unwrap();
+        assert_eq!(command.kind, CommandKind::Highlight);
+        assert_eq!(cohost_status(&state).await.command_availability, None);
+    }
+
+    #[tokio::test]
+    async fn the_wake_word_setting_persists_and_reaches_the_detector() {
+        let state = test_state();
+        let settings = set_cohost_settings(
+            &state,
+            CohostSettingsPatch {
+                wake_word_required: Some(true),
+                remove_confirm: Some(RemoveConfirmMode::Countdown),
+                ..CohostSettingsPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(settings.wake_word_required);
+        assert_eq!(settings.remove_confirm, RemoveConfirmMode::Countdown);
+        assert_eq!(load_cohost_settings(&state.database), settings);
+        assert!(
+            state
+                .cohost_commands
+                .lock()
+                .unwrap()
+                .context
+                .require_wake_word
+        );
+        // An armed session hears it: a structured phrase alone is nothing...
+        arm_command_detector(&state, "session-1", 1, true);
+        assert!(
+            detect_voice_command(
+                &state,
+                &caption_final(1),
+                &spoken_final("This one is toxic. Remove it from our chat.")
+            )
+            .is_none()
+        );
+        // ...with "Orcle" first it is a command.
+        let (session, command) = detect_voice_command(
+            &state,
+            &caption_final(2),
+            &spoken_final("Orcle, remove it from our chat."),
+        )
+        .unwrap();
+        assert_eq!(session.session_id, "session-1");
+        assert_eq!(command.kind, CommandKind::Remove);
+        assert!(command.wake_word);
+        // Without the setting the structured phrase works on its own.
+        set_cohost_settings(
+            &state,
+            CohostSettingsPatch {
+                wake_word_required: Some(false),
+                ..CohostSettingsPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            !state
+                .cohost_commands
+                .lock()
+                .unwrap()
+                .context
+                .require_wake_word
+        );
+        let (_, command) = detect_voice_command(
+            &state,
+            &caption_final(3),
+            &spoken_final("Highlight the comment from coders x."),
+        )
+        .unwrap();
+        assert_eq!(command.kind, CommandKind::Highlight);
+        assert!(!command.wake_word);
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_chooser_expires_and_nothing_happens() {
+        let rows = vec![
+            command_row(1, "coders_x", StreamPlatform::Twitch, "rust is great"),
+            command_row(2, "coders_y", StreamPlatform::Twitch, "which editor?"),
+        ];
+        let (state, scope) = command_state(&rows, None).await;
+        run_detected_command(
+            &state,
+            &scope,
+            detected(
+                CommandKind::Highlight,
+                named("coders"),
+                "highlight coders",
+                None,
+            ),
+            true,
+        )
+        .await;
+        let chooser = state_command(&state).await;
+        assert_eq!(chooser.status, CohostCommandStatus::Ambiguous);
+        assert!(
+            state
+                .cohost_commands
+                .lock()
+                .unwrap()
+                .context
+                .awaiting_choice
+        );
+        let expired = wait_for_command(&state, "the chooser to expire", |command| {
+            command.status == CohostCommandStatus::Expired
+        })
+        .await;
+        assert_eq!(expired.id, chooser.id);
+        assert_eq!(expired.message, "No comment was picked.");
+        assert_eq!(expired.expires_at, None);
+        assert!(
+            state
+                .cohost
+                .lock()
+                .await
+                .snapshot()
+                .auto_highlight
+                .is_none()
+        );
+        assert!(
+            !state
+                .cohost_commands
+                .lock()
+                .unwrap()
+                .context
+                .awaiting_choice
+        );
+        assert_eq!(state_counts(&state).await.expired, 1);
+    }
+
+    #[tokio::test]
+    async fn a_session_boundary_cancels_an_open_voice_removal() {
+        let rows = vec![command_row(
+            1,
+            "coders_x",
+            StreamPlatform::Twitch,
+            "spam link",
+        )];
+        let (state, scope) = command_state(&rows, fake_deletes()).await;
+        run_new_command(&state, &scope, resolved_removal(&rows[0].id), true).await;
+        let card = state_command(&state).await;
+        let operation_id = card.operation_id.clone().unwrap();
+        // Consent changed: listening restarts, and so does everything heard.
+        assert!(state.cohost.lock().await.update_consent(false).is_some());
+        clear_transcript(&state);
+        wait_for_operation_phase(&state, &operation_id, ModerationPhase::Cancelled).await;
+        let closed = wait_for_command(&state, "the card to close", |command| {
+            command.status == CohostCommandStatus::Cancelled
+        })
+        .await;
+        assert_eq!(closed.id, card.id);
+        assert!(
+            !state
+                .live_chat
+                .lock()
+                .await
+                .message(&rows[0].id)
+                .unwrap()
+                .is_deleted
+        );
+        assert_eq!(
+            state_counts(&state).await.cancelled,
+            0,
+            "not the streamer's no"
+        );
+        let slot = state.cohost_commands.lock().unwrap();
+        assert_eq!(slot.pending_operation, None);
+        assert!(slot.session.is_none() && !slot.context.awaiting_answer);
+    }
+
+    #[tokio::test]
+    async fn orcle_says_it_did_not_catch_an_unclear_request_unless_a_card_is_open() {
+        let rows = vec![
+            command_row(1, "coders_x", StreamPlatform::Twitch, "rust is great"),
+            command_row(2, "coders_y", StreamPlatform::Twitch, "which editor?"),
+        ];
+        let (state, scope) = command_state(&rows, None).await;
+        let unclear = |wake_word: bool| DetectedCommand {
+            kind: CommandKind::Unknown,
+            target: CommandTarget::None,
+            question: false,
+            reason: None,
+            heard: "what is the weather".to_string(),
+            wake_word,
+        };
+        run_detected_command(&state, &scope, unclear(true), true).await;
+        let unheard = state_command(&state).await;
+        assert_eq!(
+            (unheard.kind, unheard.status),
+            (CohostCommandKind::Unknown, CohostCommandStatus::NotFound)
+        );
+        assert_eq!(
+            unheard.message,
+            "Orcle didn't catch that: 'what is the weather'."
+        );
+        assert_eq!(state_counts(&state).await.not_found, 1);
+        // Never without the wake word.
+        run_detected_command(&state, &scope, unclear(false), true).await;
+        assert_eq!(state_command(&state).await, unheard);
+        // An open chooser stays open.
+        run_detected_command(
+            &state,
+            &scope,
+            detected(
+                CommandKind::Highlight,
+                named("coders"),
+                "highlight coders",
+                None,
+            ),
+            true,
+        )
+        .await;
+        let chooser = state_command(&state).await;
+        run_detected_command(&state, &scope, unclear(true), true).await;
+        assert_eq!(state_command(&state).await, chooser);
+        assert_eq!(state_counts(&state).await.not_found, 1);
+    }
+
+    #[tokio::test]
+    async fn command_answers_need_the_open_card() {
+        let empty = test_state();
+        assert_eq!(
+            confirm_command(
+                &empty,
+                CohostCommandParams {
+                    command_id: "cmd-1".to_string()
+                }
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "not-pending"
+        );
+        assert_eq!(
+            cancel_command(
+                &empty,
+                CohostCommandParams {
+                    command_id: "  ".to_string()
+                }
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "invalid-params"
+        );
+        let rows = vec![
+            command_row(1, "coders_x", StreamPlatform::Twitch, "rust is great"),
+            command_row(2, "coders_y", StreamPlatform::Twitch, "which editor?"),
+        ];
+        let (state, scope) = command_state(&rows, fake_deletes()).await;
+        run_detected_command(
+            &state,
+            &scope,
+            detected(CommandKind::Remove, named("coders"), "remove coders", None),
+            true,
+        )
+        .await;
+        let chooser = state_command(&state).await;
+        assert_eq!(chooser.status, CohostCommandStatus::Ambiguous);
+        // A stale id, an answer the card does not take, a pick past the list.
+        assert_eq!(
+            choose_command(
+                &state,
+                CohostCommandChooseParams {
+                    command_id: "cmd-stale".to_string(),
+                    index: 0
+                }
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "not-pending"
+        );
+        assert_eq!(
+            confirm_command(
+                &state,
+                CohostCommandParams {
+                    command_id: chooser.id.clone()
+                }
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "not-pending"
+        );
+        assert_eq!(
+            choose_command(
+                &state,
+                CohostCommandChooseParams {
+                    command_id: chooser.id.clone(),
+                    index: 2
+                }
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "invalid-params"
+        );
+        // A pick opens the removal card, and the RPC returns it.
+        let opened = answer_command_with(
+            &state,
+            None,
+            Some(chooser.id.as_str()),
+            CommandAnswer::Choose(1),
+            true,
+            true,
+        )
+        .await
+        .unwrap()
+        .command
+        .unwrap();
+        assert_eq!(opened.id, chooser.id);
+        assert_eq!(opened.status, CohostCommandStatus::Confirm);
+        assert_eq!(opened.target.as_ref().unwrap().author_name, "coders_x");
+        assert!(opened.operation_id.is_some());
+        // Yes through the RPC: it returns at once, the removal follows.
+        let answered = answer_command_with(
+            &state,
+            None,
+            Some(opened.id.as_str()),
+            CommandAnswer::Confirm,
+            true,
+            true,
+        )
+        .await
+        .unwrap()
+        .command
+        .unwrap();
+        assert_eq!(answered.id, opened.id);
+        assert!(
+            matches!(
+                answered.status,
+                CohostCommandStatus::Confirm | CohostCommandStatus::Done
+            ),
+            "{answered:?}"
+        );
+        let removed = wait_for_command(&state, "the removal", |command| {
+            command.status == CohostCommandStatus::Done
+        })
+        .await;
+        assert_eq!(removed.message, "Removed coders_x's comment from Twitch.");
+        // Answered: the same id is no longer pending.
+        assert_eq!(
+            cancel_command(
+                &state,
+                CohostCommandParams {
+                    command_id: opened.id.clone()
+                }
+            )
+            .await
+            .unwrap_err()
+            .code,
+            "not-pending"
         );
     }
 }

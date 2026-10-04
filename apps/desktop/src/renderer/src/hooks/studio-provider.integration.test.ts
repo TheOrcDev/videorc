@@ -448,7 +448,9 @@ class StudioBackend {
     autoHighlight: false,
     voiceHighlight: false,
     rules: [],
-    listen: false
+    listen: false,
+    wakeWordRequired: false,
+    removeConfirm: 'confirm'
   }
   cohostState: CohostState = {
     sessionId: null,
