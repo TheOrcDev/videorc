@@ -21,17 +21,20 @@ import { cn } from '@/lib/utils'
 /**
  * A page's intro: the toolbar already names the page, so the title is for
  * assistive tech; the description is a flush intro line, with any action at
- * its end (never in the toolbar's corner).
+ * its end (never in the toolbar's corner). `media` leads the line: a page
+ * with its own mark (the Orcle tab's emblem, plan 149) puts it there.
  */
 export function PageHeader({
   title,
   description,
   action,
+  media,
   className
 }: {
   title: string
   description?: ReactNode
   action?: ReactNode
+  media?: ReactNode
   className?: string
 }): ReactElement {
   return (
@@ -40,6 +43,7 @@ export function PageHeader({
       data-slot="page-header"
     >
       <h2 className="sr-only">{title}</h2>
+      {media}
       <p className="min-w-0 flex-1 text-xs text-muted-foreground">{description}</p>
       {action ? <div className="flex shrink-0 items-center gap-2">{action}</div> : null}
     </div>
