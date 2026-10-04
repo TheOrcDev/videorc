@@ -910,5 +910,169 @@
         "createdAt": "2026-09-27T10:12:34Z"
       }
     ]
+  },
+  "cleanCut": {
+    "startParams": {
+      "sessionId": "session-fixture",
+      "mode": "clean",
+      "consentToUploadAudio": true
+    },
+    "condensedStartParams": {
+      "sessionId": "session-fixture",
+      "mode": "condensed",
+      "consentToUploadAudio": true,
+      "targetDurationSeconds": 900
+    },
+    "getParams": { "sessionId": "session-fixture" },
+    "queuedJob": {
+      "id": "clean-cut-fixture-1",
+      "sourceSessionId": "session-fixture",
+      "mode": "clean",
+      "state": "queued",
+      "progress": 0.0,
+      "edlRevision": 0,
+      "createdAt": "2026-10-04T10:00:00Z",
+      "updatedAt": "2026-10-04T10:00:00Z"
+    },
+    "readyJob": {
+      "id": "clean-cut-fixture-1",
+      "sourceSessionId": "session-fixture",
+      "mode": "clean",
+      "state": "ready",
+      "progress": 1.0,
+      "edlRevision": 0,
+      "edlSummary": {
+        "durationMs": 1834200,
+        "keptMs": 1499965,
+        "removalCount": 3,
+        "byKind": [
+          { "kind": "head", "count": 1, "ms": 1702 },
+          { "kind": "retake", "count": 1, "ms": 332532 }
+        ]
+      },
+      "transcriptPath": "Artifacts/session-fixture/clean-cut/transcript.words.json",
+      "createdAt": "2026-10-04T10:00:00Z",
+      "updatedAt": "2026-10-04T10:09:30Z"
+    },
+    "failedJob": {
+      "id": "clean-cut-fixture-2",
+      "sourceSessionId": "session-fixture",
+      "mode": "condensed",
+      "state": "failed",
+      "step": "upload",
+      "progress": 0.45,
+      "edlRevision": 0,
+      "errorCode": "clean-cut-monthly-quota-exhausted",
+      "errorMessage": "This month's Clean cut minutes are used up. Start it again next month; it resumes where it stopped.",
+      "createdAt": "2026-10-04T11:00:00Z",
+      "updatedAt": "2026-10-04T11:02:00Z"
+    },
+    "edl": {
+      "version": 1,
+      "sourceIdentity": {
+        "path": "Recordings/talk.mp4",
+        "sizeBytes": 734003200,
+        "modifiedUnixMs": 1759572000000
+      },
+      "frameRate": { "num": 30000, "den": 1001 },
+      "durationMs": 1834200,
+      "removals": [
+        {
+          "id": "r1",
+          "startMs": 0,
+          "endMs": 1702,
+          "startFrame": 0,
+          "endFrame": 51,
+          "kind": "head",
+          "reason": "Before the first word",
+          "enabled": true
+        },
+        {
+          "id": "r2",
+          "startMs": 120120,
+          "endMs": 452652,
+          "startFrame": 3600,
+          "endFrame": 13566,
+          "kind": "retake",
+          "reason": "Restarted the same sentence; the later take is kept.",
+          "confidence": 0.82,
+          "enabled": true
+        },
+        {
+          "id": "r3",
+          "startMs": 500500,
+          "endMs": 501501,
+          "startFrame": 15000,
+          "endFrame": 15030,
+          "kind": "false_start",
+          "reason": "An abandoned start",
+          "confidence": 0.55,
+          "enabled": false
+        }
+      ],
+      "stats": {
+        "byKind": [
+          { "kind": "head", "count": 1, "ms": 1702 },
+          { "kind": "retake", "count": 1, "ms": 332532 }
+        ],
+        "keptMs": 1499965
+      }
+    },
+    "getResult": {
+      "sessionId": "session-fixture",
+      "jobs": [
+        {
+          "job": {
+            "id": "clean-cut-fixture-1",
+            "sourceSessionId": "session-fixture",
+            "mode": "clean",
+            "state": "ready",
+            "progress": 1.0,
+            "edlRevision": 0,
+            "edlSummary": {
+              "durationMs": 1834200,
+              "keptMs": 1832498,
+              "removalCount": 1,
+              "byKind": [{ "kind": "head", "count": 1, "ms": 1702 }]
+            },
+            "transcriptPath": "Artifacts/session-fixture/clean-cut/transcript.words.json",
+            "createdAt": "2026-10-04T10:00:00Z",
+            "updatedAt": "2026-10-04T10:09:30Z"
+          },
+          "edl": {
+            "version": 1,
+            "sourceIdentity": {
+              "path": "Recordings/talk.mp4",
+              "sizeBytes": 734003200,
+              "modifiedUnixMs": 1759572000000
+            },
+            "frameRate": { "num": 30000, "den": 1001 },
+            "durationMs": 1834200,
+            "removals": [
+              {
+                "id": "r1",
+                "startMs": 0,
+                "endMs": 1702,
+                "startFrame": 0,
+                "endFrame": 51,
+                "kind": "head",
+                "reason": "Before the first word",
+                "enabled": true
+              }
+            ],
+            "stats": {
+              "byKind": [{ "kind": "head", "count": 1, "ms": 1702 }],
+              "keptMs": 1832498
+            }
+          }
+        }
+      ]
+    },
+    "updateEdlParams": {
+      "jobId": "clean-cut-fixture-1",
+      "revision": 0,
+      "removals": [{ "id": "r3", "enabled": true }],
+      "addManual": [{ "startMs": 600000, "endMs": 601000 }]
+    }
   }
 }

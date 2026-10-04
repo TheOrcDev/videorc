@@ -24,13 +24,13 @@ The contract has three parts:
 
 `POST /api/ai/transcripts/chunks`, as `multipart/form-data`.
 
-| Field | Type | Rules |
-| --- | --- | --- |
-| `audio` | file | `audio/wav`, canonical RIFF/WAVE, PCM s16le, mono, 16 000 Hz. At most 120 s and 4 000 000 bytes. |
-| `sessionClientId` | string | The desktop session id. 1–120 chars of `[A-Za-z0-9._:-]`. |
-| `chunkIndex` | integer | ≥ 0. |
-| `chunkStartMs` | integer | ≥ 0. Where the chunk starts in the recording. Echoed only, never trusted for metering. |
-| `language` | string, optional | A BCP-47 code such as `en`. Absent means auto-detect. |
+| Field             | Type             | Rules                                                                                            |
+| ----------------- | ---------------- | ------------------------------------------------------------------------------------------------ |
+| `audio`           | file             | `audio/wav`, canonical RIFF/WAVE, PCM s16le, mono, 16 000 Hz. At most 120 s and 4 000 000 bytes. |
+| `sessionClientId` | string           | The desktop session id. 1–120 chars of `[A-Za-z0-9._:-]`.                                        |
+| `chunkIndex`      | integer          | ≥ 0.                                                                                             |
+| `chunkStartMs`    | integer          | ≥ 0. Where the chunk starts in the recording. Echoed only, never trusted for metering.           |
+| `language`        | string, optional | A BCP-47 code such as `en`. Absent means auto-detect.                                            |
 
 ### Server order
 
@@ -68,7 +68,13 @@ The provider comes from env: `VIDEORC_AI_VERBATIM_TRANSCRIPTION_PROVIDER`
   "text": "So um today we are going to build the thing.",
   "words": [
     { "text": "So", "startMs": 40, "endMs": 220, "confidence": 0.98 },
-    { "text": "um", "startMs": 260, "endMs": 610, "confidence": 0.91, "filler": true }
+    {
+      "text": "um",
+      "startMs": 260,
+      "endMs": 610,
+      "confidence": 0.91,
+      "filler": true
+    }
   ],
   "remainingSeconds": 64000,
   "monthlySecondsLimit": 72000
@@ -90,16 +96,16 @@ Response rules:
 
 ### Errors
 
-| Status | `error.code` | When |
-| --- | --- | --- |
-| 401 | `unauthorized` | No session, or an invalid session. |
-| 400 | `invalid-transcript-chunk` | The form or WAV is malformed, or the audio is longer than 120 s or bigger than 4 000 000 bytes. |
-| 403 | `premium-required` | Cloud AI is not allowed for this account. |
-| 403 | `ai-access-blocked` | The account is on the blocklist. |
-| 503 | `clean-cut-disabled` | `VIDEORC_AI_DISABLED` or `VIDEORC_AI_CLEAN_CUT_DISABLED` is set. |
-| 503 | `clean-cut-provider-unconfigured` | The provider env or key is missing. |
-| 429 | `clean-cut-monthly-quota-exhausted` | The reservation would exceed the monthly limit. The reservation is not taken. |
-| 502 | `clean-cut-provider-error` | The provider failed or timed out. The reservation is kept, as the caption route does. |
+| Status | `error.code`                        | When                                                                                            |
+| ------ | ----------------------------------- | ----------------------------------------------------------------------------------------------- |
+| 401    | `unauthorized`                      | No session, or an invalid session.                                                              |
+| 400    | `invalid-transcript-chunk`          | The form or WAV is malformed, or the audio is longer than 120 s or bigger than 4 000 000 bytes. |
+| 403    | `premium-required`                  | Cloud AI is not allowed for this account.                                                       |
+| 403    | `ai-access-blocked`                 | The account is on the blocklist.                                                                |
+| 503    | `clean-cut-disabled`                | `VIDEORC_AI_DISABLED` or `VIDEORC_AI_CLEAN_CUT_DISABLED` is set.                                |
+| 503    | `clean-cut-provider-unconfigured`   | The provider env or key is missing.                                                             |
+| 429    | `clean-cut-monthly-quota-exhausted` | The reservation would exceed the monthly limit. The reservation is not taken.                   |
+| 502    | `clean-cut-provider-error`          | The provider failed or timed out. The reservation is kept, as the caption route does.           |
 
 ## B. Capabilities
 
@@ -126,8 +132,9 @@ Response rules:
 provider is configured.
 
 `cleanCut.reasonCode` is `null` when `available` is true. Otherwise it is one
-of `disabled`, `premium-required`, `provider-unconfigured` or
-`quota-exhausted`. New codes may be added later.
+of `disabled`, `blocked` (the account is on the blocklist),
+`premium-required`, `provider-unconfigured` or `quota-exhausted`, in the same
+order as the chunk route's gates. New codes may be added later.
 
 On the desktop:
 
@@ -155,7 +162,12 @@ On the desktop:
     "durationMs": 1834200,
     "language": "en",
     "segments": [
-      { "id": "s1", "startMs": 0, "endMs": 4200, "text": "So today we are going to build the thing." }
+      {
+        "id": "s1",
+        "startMs": 0,
+        "endMs": 4200,
+        "text": "So today we are going to build the thing."
+      }
     ],
     "targetDurationSeconds": 900,
     "mustKeep": [{ "fromId": "s40", "toId": "s44", "reason": "clip-mark" }]
@@ -176,12 +188,37 @@ Input rules:
   prefix keeps it from ever colliding with a publish job.
 - Clean-cut jobs are limited by their own `VIDEORC_AI_CLEAN_CUT_DAILY_JOBS`
   (default 20) and the existing monthly job cap.
+- `consentToUploadAudio` is required: the boolean `true`, or one of the
+  strings `true`, `1`, `yes`, `on`.
+- Once the job is terminal (completed, failed with no retries left, or
+  cancelled) the server replaces the stored `segments` with `segmentCount`
+  and `mustKeep` with `mustKeepCount`; the sentence texts are gone. The
+  results name segment ids only.
+
+### Create errors
+
+The shared job gates answer first with their existing codes: `401
+unauthorized`, `400 invalid-ai-job` (the body, the consent, or an input
+rule above; the message says which), `503 ai-disabled`, `403
+ai-user-disabled`, `403 cloud-ai-premium-required`, `429
+ai-daily-quota-exhausted`, `429 ai-monthly-quota-exhausted`. Then, for this
+kind only:
+
+| Status | `error.code`                      | When                                                              |
+| ------ | --------------------------------- | ----------------------------------------------------------------- |
+| 503    | `clean-cut-disabled`              | `VIDEORC_AI_DISABLED` or `VIDEORC_AI_CLEAN_CUT_DISABLED` is set.  |
+| 429    | `clean-cut-daily-quota-exhausted` | More than `VIDEORC_AI_CLEAN_CUT_DAILY_JOBS` clean-cut jobs today. |
 
 ### Poll
 
 `GET /api/ai/jobs/{id}` returns the existing owner job snapshot.
 `artifacts.cleanCut` appears only on clean-cut jobs, and only once
-`status` is `completed`.
+`status` is `completed`. While a clean-cut job is `running` and has finished
+at least one window, `artifacts.cleanCutProgress` is
+`{ "windows": { "total": 8, "completed": 3 } }`; it is absent otherwise and
+never present on publish-pack jobs. A job that runs out of its worker
+invocation budget goes back to `queued` with its progress kept, so the desktop
+may see `queued` again after `running`; it resumes by itself.
 
 ```json
 {
@@ -224,6 +261,13 @@ Field rules:
 - `beats` and `keeps` appear for `condensed` only.
 - `keeps` is the ordered selection whose total length hits the target within
   ±10%. It always contains the hook and the close, and every `mustKeep` range.
+  Keeps never overlap, and adjacent keeps are merged into one range whose
+  `title` is the most important beat's. When the hook, the close and the
+  `mustKeep` beats alone exceed the target, the least important kept ranges
+  are shortened at sentence boundaries (never through a `mustKeep` sentence),
+  so a hook or close may be shorter than its beat but is never missing. The
+  beats are tiled over the whole recording: they never overlap and together
+  cover every segment.
 - Every `fromId` and `toId` refers to a segment from the request. The server
   drops anything else, and `fromId` comes at or before `toId` in segment order.
 - `windows` reports progress.

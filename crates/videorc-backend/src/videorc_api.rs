@@ -1170,6 +1170,256 @@ impl VideorcApiClient {
         self.post_bearer_json("/api/ai/jobs", bearer_token, body)
             .await
     }
+
+    // --- Clean cut (plan 119; docs/clean-cut-contract.md) --------------------
+
+    /// One verbatim, word-timed transcript chunk (contract part A). The WAV
+    /// is canonical PCM s16le mono 16 kHz, at most 120 s and 4 000 000 bytes.
+    /// Every failure keeps the server's `error.code`, so the job can tell a
+    /// used-up allowance from a network blip.
+    pub async fn transcribe_transcript_chunk(
+        &self,
+        bearer_token: &str,
+        request: TranscriptChunkRequest,
+    ) -> std::result::Result<TranscriptChunkResponse, AiApiFailure> {
+        let file_part = multipart::Part::bytes(request.wav)
+            .file_name(format!("clean-cut-chunk-{}.wav", request.chunk_index))
+            .mime_str("audio/wav")
+            .map_err(|error| AiApiFailure::Transport {
+                message: format!("Could not build the transcript chunk upload: {error}"),
+            })?;
+        let mut form = multipart::Form::new()
+            .text("sessionClientId", request.session_client_id)
+            .text("chunkIndex", request.chunk_index.to_string())
+            .text("chunkStartMs", request.chunk_start_ms.to_string())
+            .part("audio", file_part);
+        if let Some(language) = request.language {
+            form = form.text("language", language);
+        }
+
+        let response = self
+            .http
+            .post(self.endpoint(TRANSCRIPT_CHUNKS_PATH))
+            .bearer_auth(bearer_token)
+            .multipart(form)
+            .timeout(TRANSCRIPT_CHUNK_UPLOAD_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| AiApiFailure::Transport {
+                message: format!("Could not reach the transcription service: {error}"),
+            })?;
+        let status = response.status();
+        if status.is_success() {
+            return response
+                .json::<TranscriptChunkResponse>()
+                .await
+                .map_err(|error| AiApiFailure::Transport {
+                    message: format!("Could not read the transcript chunk response: {error}"),
+                });
+        }
+        let (code, message) = read_error_code_and_message(response).await;
+        Err(AiApiFailure::Http {
+            status: status.as_u16(),
+            code,
+            message,
+        })
+    }
+
+    /// `POST /api/ai/jobs` keeping the error envelope's code. The publish
+    /// path's `create_ai_job` flattens the code into a message and stays as
+    /// it is.
+    pub async fn create_ai_job_checked(
+        &self,
+        bearer_token: &str,
+        body: &serde_json::Value,
+    ) -> std::result::Result<AiJobPollSnapshot, AiApiFailure> {
+        let response = self
+            .http
+            .post(self.endpoint("/api/ai/jobs"))
+            .bearer_auth(bearer_token)
+            .json(body)
+            .timeout(AI_JOB_REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| AiApiFailure::Transport {
+                message: format!("Could not reach the Videorc AI job service: {error}"),
+            })?;
+        read_ai_job_poll_response(response).await
+    }
+
+    /// `GET /api/ai/jobs/{id}` as a lenient snapshot: only the fields the
+    /// Clean cut poller reads, every one of them defaulted.
+    pub async fn get_ai_job_checked(
+        &self,
+        bearer_token: &str,
+        job_id: &str,
+    ) -> std::result::Result<AiJobPollSnapshot, AiApiFailure> {
+        let response = self
+            .http
+            .get(self.endpoint(&format!("/api/ai/jobs/{job_id}")))
+            .bearer_auth(bearer_token)
+            .timeout(AI_JOB_REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| AiApiFailure::Transport {
+                message: format!("Could not reach the Videorc AI job service: {error}"),
+            })?;
+        read_ai_job_poll_response(response).await
+    }
+}
+
+const TRANSCRIPT_CHUNKS_PATH: &str = "/api/ai/transcripts/chunks";
+// A 120 s chunk is under 4 MB; a provider call sits behind the upload.
+const TRANSCRIPT_CHUNK_UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+const AI_JOB_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+async fn read_ai_job_poll_response(
+    response: reqwest::Response,
+) -> std::result::Result<AiJobPollSnapshot, AiApiFailure> {
+    let status = response.status();
+    if status.is_success() {
+        let envelope: AiJobPollEnvelope =
+            response
+                .json()
+                .await
+                .map_err(|error| AiApiFailure::Transport {
+                    message: format!("Could not read the Videorc AI job response: {error}"),
+                })?;
+        return Ok(envelope.job);
+    }
+    let (code, message) = read_error_code_and_message(response).await;
+    Err(AiApiFailure::Http {
+        status: status.as_u16(),
+        code,
+        message,
+    })
+}
+
+/// A failed `/api/ai/*` call with the envelope's code kept whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AiApiFailure {
+    /// The server answered with `{ error: { code, message } }` (or a body that
+    /// was not the envelope: then `code` is `unknown`).
+    Http {
+        status: u16,
+        code: String,
+        message: String,
+    },
+    /// No usable answer: network, timeout, or an unreadable body.
+    Transport { message: String },
+}
+
+impl AiApiFailure {
+    /// Worth another attempt after a pause: the network, a timeout or a
+    /// server-side failure. Quota, auth, consent and validation answers are
+    /// final until something changes.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Transport { .. } => true,
+            Self::Http { status, .. } => *status >= 500 || *status == 408,
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Http { message, .. } | Self::Transport { message } => message.as_str(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TranscriptChunkRequest {
+    pub session_client_id: String,
+    pub chunk_index: u32,
+    pub chunk_start_ms: u64,
+    pub language: Option<String>,
+    pub wav: Vec<u8>,
+}
+
+/// One word of a transcript chunk, timed relative to the chunk start. Times
+/// are read as numbers (the contract says integers; a provider rounding slip
+/// must not fail a whole chunk).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptChunkWord {
+    pub text: String,
+    pub start_ms: f64,
+    pub end_ms: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filler: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptChunkResponse {
+    #[serde(default)]
+    pub chunk_index: u32,
+    #[serde(default)]
+    pub chunk_seconds: f64,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub words: Vec<TranscriptChunkWord>,
+    #[serde(default)]
+    pub remaining_seconds: Option<u64>,
+    #[serde(default)]
+    pub monthly_seconds_limit: Option<u64>,
+}
+
+/// The owner job snapshot as the Clean cut poller reads it (contract part C).
+/// Publish-pack fields are ignored; nothing here is required.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiJobPollSnapshot {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub workflow_kind: Option<String>,
+    #[serde(default)]
+    pub error_code: Option<String>,
+    #[serde(default)]
+    pub error_message: Option<String>,
+    #[serde(default)]
+    pub artifacts: Option<AiJobPollArtifacts>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiJobPollArtifacts {
+    /// `artifacts.cleanCut`: present only once the job is completed.
+    #[serde(default)]
+    pub clean_cut: Option<serde_json::Value>,
+    /// `artifacts.cleanCutProgress`: present while the job runs.
+    #[serde(default)]
+    pub clean_cut_progress: Option<AiJobCleanCutProgress>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiJobCleanCutProgress {
+    #[serde(default)]
+    pub windows: AiJobCleanCutWindows,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiJobCleanCutWindows {
+    #[serde(default)]
+    pub total: u32,
+    #[serde(default)]
+    pub completed: u32,
+}
+
+#[derive(Deserialize)]
+struct AiJobPollEnvelope {
+    job: AiJobPollSnapshot,
 }
 
 #[derive(Debug, Clone, Deserialize)]

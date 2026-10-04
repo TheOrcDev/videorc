@@ -18,6 +18,7 @@ mod capture_health;
 mod capture_input;
 mod capture_interruption;
 mod capture_recovery;
+mod clean_cut;
 mod clip_marks;
 mod cohost;
 mod cohost_ack;
@@ -606,6 +607,7 @@ async fn run_backend() -> Result<()> {
     // Resume interrupted repair jobs through the idle-only maintenance queue.
     tokio::spawn(resume_pending_repair_jobs(state.clone()));
     noise_cleanup::resume_interrupted(&state);
+    clean_cut::resume_interrupted(&state);
     recording::resume_pending_recording_finalizations(&state);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(state.clone()))
@@ -690,6 +692,7 @@ async fn cleanup_process_owners_after_finalization(state: AppState) {
     crate::remote_lan_server::stop(&state);
     captions::shutdown_caption_runtime(&state).await;
     state.noise_cleanup.interrupt_all_for_shutdown();
+    state.clean_cut.interrupt_all_for_shutdown();
     if !compositor::shutdown_compositor(&state).await {
         state.emit_log(
             "warn",
@@ -5414,6 +5417,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "test.youtubeQuota.seedAccount"
         | "noiseCleanup.start"
         | "noiseCleanup.cancel"
+        | "cleanCut.start"
+        | "cleanCut.cancel"
+        | "cleanCut.updateEdl"
         | "performance.check.run"
         | "performance.check.cancel"
         | "encoder.preference.set" => Some(DEFAULT_MUTATION_POLICY),
@@ -5496,6 +5502,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "screens.list"
         | "repair.assess_file"
         | "noiseCleanup.list"
+        | "cleanCut.get"
+        | "cleanCut.list"
         | "clip.marks.list"
         | "preview.live.status"
         | "session.sources.get"
@@ -10418,6 +10426,17 @@ async fn handle_text_message_with_role(
                         "This recording cannot be deleted while Noise Cleanup is active.",
                     )
                 }
+                Ok(params)
+                    if params.session_ids.iter().any(|session_id| {
+                        clean_cut::session_mutation_blocked(state, session_id).unwrap_or(true)
+                    }) =>
+                {
+                    ServerResponse::error(
+                        command.id,
+                        "clean-cut-mutation-blocked",
+                        "This recording cannot be deleted while Clean cut is working on it.",
+                    )
+                }
                 Ok(params) => {
                     // A deletion wins over an in-flight background export: stop
                     // the export so it cannot publish an MP4 into a Trashed row.
@@ -10536,6 +10555,13 @@ async fn handle_text_message_with_role(
                     command.id,
                     "noise-cleanup-mutation-blocked",
                     "This recording cannot be duplicated while Noise Cleanup is active.",
+                );
+            }
+            if clean_cut::session_mutation_blocked(state, session_id).unwrap_or(true) {
+                return ServerResponse::error(
+                    command.id,
+                    "clean-cut-mutation-blocked",
+                    "This recording cannot be duplicated while Clean cut is working on it.",
                 );
             }
             match session_ops::duplicate_session(state, session_id).await {
@@ -11594,6 +11620,16 @@ async fn handle_text_message_with_role(
                         "This recording cannot be remuxed while Noise Cleanup is active.",
                     )
                 }
+                Ok(params)
+                    if clean_cut::session_mutation_blocked(state, &params.session_id)
+                        .unwrap_or(true) =>
+                {
+                    ServerResponse::error(
+                        command.id,
+                        "clean-cut-mutation-blocked",
+                        "This recording cannot be remuxed while Clean cut is working on it.",
+                    )
+                }
                 Ok(params) => match remux_session(state.clone(), params).await {
                     Ok(mp4_path) => {
                         ServerResponse::ok(command.id, serde_json::json!({ "mp4Path": mp4_path }))
@@ -11631,6 +11667,22 @@ async fn handle_text_message_with_role(
                     "This recording cannot be repaired while Noise Cleanup is active.",
                 )
             }
+            Ok(params)
+                if state
+                    .database
+                    .session_id_for_media_path(&params.path)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|session_id| {
+                        clean_cut::session_mutation_blocked(state, &session_id).unwrap_or(true)
+                    }) =>
+            {
+                ServerResponse::error(
+                    command.id,
+                    "clean-cut-mutation-blocked",
+                    "This recording cannot be repaired while Clean cut is working on it.",
+                )
+            }
             Ok(params) => match repair_service::repair_file(state.clone(), params).await {
                 Ok(status) => ServerResponse::ok(command.id, status),
                 Err(error) => ServerResponse::error(command.id, "repair-failed", error),
@@ -11652,6 +11704,22 @@ async fn handle_text_message_with_role(
                     command.id,
                     "noise-cleanup-mutation-blocked",
                     "This recording cannot be restored while Noise Cleanup is active.",
+                )
+            }
+            Ok(params)
+                if state
+                    .database
+                    .session_id_for_media_path(&params.path)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|session_id| {
+                        clean_cut::session_mutation_blocked(state, &session_id).unwrap_or(true)
+                    }) =>
+            {
+                ServerResponse::error(
+                    command.id,
+                    "clean-cut-mutation-blocked",
+                    "This recording cannot be restored while Clean cut is working on it.",
                 )
             }
             Ok(params) => match repair_service::restore_file(state.clone(), params).await {
@@ -11709,6 +11777,70 @@ async fn handle_text_message_with_role(
                     Err(error) => {
                         ServerResponse::error(command.id, "noise-cleanup-list-failed", error)
                     }
+                }
+            }
+        }
+        "cleanCut.start" => {
+            match serde_json::from_value::<protocol::CleanCutStartParams>(command.params) {
+                Ok(params) => match clean_cut::start(state.clone(), params).await {
+                    Ok(job) => ServerResponse::ok(command.id, job),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cleanCut.get" => {
+            match serde_json::from_value::<protocol::CleanCutGetParams>(command.params) {
+                Ok(params) => match clean_cut::get(state, params).await {
+                    Ok(result) => ServerResponse::ok(command.id, result),
+                    Err(error) => ServerResponse::error(command.id, "clean-cut-get-failed", error),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cleanCut.list" => {
+            if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "cleanCut.list does not accept parameters.",
+                )
+            } else {
+                match clean_cut::list(state).await {
+                    Ok(jobs) => ServerResponse::ok(command.id, jobs),
+                    Err(error) => ServerResponse::error(command.id, "clean-cut-list-failed", error),
+                }
+            }
+        }
+        "cleanCut.cancel" => {
+            match serde_json::from_value::<protocol::CleanCutCancelParams>(command.params) {
+                Ok(params) => match clean_cut::cancel(state.clone(), params).await {
+                    Ok(job) => ServerResponse::ok(command.id, job),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "clean-cut-cancel-failed", error)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cleanCut.updateEdl" => {
+            match serde_json::from_value::<protocol::CleanCutUpdateEdlParams>(command.params) {
+                Ok(params) => match clean_cut::update_edl(state, params).await {
+                    Ok(detail) => ServerResponse::ok(command.id, detail),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
         }

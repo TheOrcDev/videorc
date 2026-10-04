@@ -141,6 +141,153 @@ export interface NoiseCleanupJob {
   updatedAt: string
 }
 
+// --- Clean cut (plan 119 S12a/S12b) -----------------------------------------
+// Mirrors the Rust `CleanCut*` types in `protocol.rs`. The closed schemas in
+// `backend-rpc-contract.ts` validate every one of these shapes.
+
+export type CleanCutMode = 'clean' | 'condensed'
+
+/** `queued → transcribing → analyzing → ready` here; `ready → rendering →
+ * validating → completed` once rendering (S13) lands. `failed` and `cancelled`
+ * are final; starting again on the same recording resumes the transcript. */
+export type CleanCutJobState =
+  | 'queued'
+  | 'transcribing'
+  | 'analyzing'
+  | 'ready'
+  | 'rendering'
+  | 'validating'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+
+export type CleanCutRemovalKind =
+  | 'head'
+  | 'tail'
+  | 'silence'
+  | 'gap'
+  | 'filler'
+  | 'retake'
+  | 'false_start'
+  | 'condensed'
+  | 'manual'
+
+export interface CleanCutKindStat {
+  kind: CleanCutRemovalKind
+  count: number
+  ms: number
+}
+
+/** The part of the cut list that rides on every job snapshot. */
+export interface CleanCutEdlSummary {
+  durationMs: number
+  keptMs: number
+  removalCount: number
+  byKind: CleanCutKindStat[]
+}
+
+/** Durable backend-owned Clean cut state; also the `cleanCut.status` event. */
+export interface CleanCutJob {
+  id: string
+  sourceSessionId: string
+  mode: CleanCutMode
+  state: CleanCutJobState
+  /** Free-form: `extract-audio`, `probe`, `upload`, `stitch`, `analyze`, `cut-list`. */
+  step?: string
+  /** 0..1 across the whole job. */
+  progress: number
+  edlRevision: number
+  edlSummary?: CleanCutEdlSummary
+  /** `<Artifacts>/<sessionId>/clean-cut/transcript.words.json` once stitched. */
+  transcriptPath?: string
+  outputSessionId?: string
+  errorCode?: string
+  errorMessage?: string
+  createdAt: string
+  updatedAt: string
+}
+
+/** The source frame grid as `num/den` frames per second. */
+export interface CleanCutFrameRate {
+  num: number
+  den: number
+}
+
+export interface CleanCutSourceIdentity {
+  path: string
+  sizeBytes: number
+  modifiedUnixMs?: number
+}
+
+export interface CleanCutRemoval {
+  id: string
+  startMs: number
+  endMs: number
+  /** Exact frame indices on the source grid; `endFrame` is exclusive. */
+  startFrame: number
+  endFrame: number
+  kind: CleanCutRemovalKind
+  reason: string
+  confidence?: number
+  enabled: boolean
+}
+
+export interface CleanCutEdlStats {
+  byKind: CleanCutKindStat[]
+  keptMs: number
+}
+
+/** The cut list, version 1. */
+export interface CleanCutEdl {
+  version: 1
+  sourceIdentity: CleanCutSourceIdentity
+  frameRate: CleanCutFrameRate
+  durationMs: number
+  removals: CleanCutRemoval[]
+  stats: CleanCutEdlStats
+}
+
+export interface CleanCutJobDetail {
+  job: CleanCutJob
+  edl?: CleanCutEdl
+}
+
+/** `cleanCut.get`: the newest job per mode for one source session. */
+export interface CleanCutGetResult {
+  sessionId: string
+  jobs: CleanCutJobDetail[]
+}
+
+export interface CleanCutStartParams {
+  sessionId: string
+  mode: CleanCutMode
+  /** The Cloud AI consent the renderer holds; `false` is refused. */
+  consentToUploadAudio: boolean
+  /** Condensed only: 120..3600 seconds, default 900. */
+  targetDurationSeconds?: number
+}
+
+export interface CleanCutRemovalToggle {
+  id: string
+  enabled: boolean
+}
+
+export interface CleanCutManualRange {
+  startMs: number
+  endMs: number
+}
+
+/** `cleanCut.updateEdl`: optimistic on `revision`; toggles flip `enabled`,
+ * `addManual` adds frame-snapped manual removals, `removeManual` deletes
+ * manual removals by id. */
+export interface CleanCutUpdateEdlParams {
+  jobId: string
+  revision: number
+  removals?: CleanCutRemovalToggle[]
+  addManual?: CleanCutManualRange[]
+  removeManual?: string[]
+}
+
 export type VideorcAccountStatus = 'signed-out' | 'signed-in'
 
 // The desktop's Videorc PRODUCT account (mirrors the Rust VideorcAccountSnapshot).
