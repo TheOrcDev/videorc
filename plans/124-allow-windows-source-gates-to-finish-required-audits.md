@@ -19,7 +19,7 @@ Before cancellation, Clippy, preview25, source/audio ownership25, three full Rus
 
 - [x] Cancellation is attributed to the configured orchestration limit by GitHub's annotation and timestamps.
 - [x] Reviewed one-file correction preserves every mandatory verification step and is merged.
-- [ ] Actual Windows source CI reaches all audits and completes successfully, with required stability evidence.
+- [x] Actual Windows source CI reaches all audits and completes successfully, with required stability evidence.
 - [ ] Final QA docs retain original cancelled evidence and distinguish it from app/device acceptance.
 
 Actual job metadata confirms run37161677976. Private metadata/annotations are retained at `/tmp/videorc-plan124-windows-source-{job,annotations}.json`. Measured long steps: Clippy 194s (success), Preview bounds concurrency (25 stability passes) 1322s (success), Source and audio ownership (25 stability passes) 1861s (success), Test (3 stability passes) 587s (success), Desktop tests 121s (success), Install Rust advisory auditor 248s (cancelled).
@@ -29,3 +29,7 @@ Actual job metadata confirms run37161677976. Private metadata/annotations are re
 Only the existing workflow comment and job allowance change (75→120 minutes), two insertions/two deletions; all other bytes remain identical. Root independently verifies exact baseline equivalence, frozen fileSHA256 `4388c0a03d2df85f9777a68218dcdc4455ff8fa79a74043edf7f259dc74ddfda` and direct formatting. Executor YAML parse/deep equivalence/format/diff checks pass, with no new tests. Shadscan baseline/floor/immediate pre-commit remains37. Commit `7ce7d9ea` normally merges via [PR570](https://github.com/TheOrcDev/videorc/pull/570) as main `2f999dac`, at2026-10-04T00:57:18Z. Both source checkouts are clean, execution HEAD=origin/main.
 
 Actual updated120-minute Windows source job111330354018/run37166493873 is running. Its completion and all required audits/stability loops remain unproven. The completed36-stage recording/device batch retains exact9710de9a provenance; runtime code is byte-identical after this CI-only merge. Original cancelled job is preserved separately. No final source gate is claimed from configuration wiring alone.
+
+## Actual updated Windows job completed
+
+Job 111330354018/run 37166493873 now completes successfully with all steps and audits. The retained complete raw log `/tmp/videorc-fix124-ci-windows-source-green.log` confirms 25 preview-bounds passes, 25 source/audio iterations (68 audio tests pass in each), and three full Windows backend suites: 2,813 passed, 0 failed and 13 existing ignored, plus one integration test in each full pass. Auditor installation and the Rust advisory audit succeed. This closes the workflow execution allowance requirement; later source slices and Plan 126's original intermittent mixer failures remain separate acceptance work. The earlier cancelled job remains retained above.
