@@ -34,14 +34,14 @@ import {
 describe('Electron IPC contract', () => {
   it('maps every renderer-facing invoke channel to a real async API method', () => {
     expectTypeOf<ElectronInvokeMappingInvariant>().toEqualTypeOf<true>()
-    // 112: plan 140 added the Stream Manager's reconnect-scopes channel (plan
-    // 119 the in-app player's media:grant-session; plan 095 the highlight
-    // card's avatars:read; plan 071 the Stream Manager Show who followed
-    // channel; plan 068 the mark-clip relay pair; plan 062 the shortcut
-    // recorder arm; plan 055 the dashboard push and get; plan 050 retired
-    // glass:wallpaper:get).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(112)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(112)
+    // 114: plan 140 S6 added the chat removal relay pair (S5 the Stream
+    // Manager's reconnect-scopes channel; plan 119 the in-app player's
+    // media:grant-session; plan 095 the highlight card's avatars:read; plan 071
+    // the Stream Manager Show who followed channel; plan 068 the mark-clip
+    // relay pair; plan 062 the shortcut recorder arm; plan 055 the dashboard
+    // push and get; plan 050 retired glass:wallpaper:get).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(114)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(114)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -302,6 +302,120 @@ describe('Electron IPC contract', () => {
     expect(() =>
       validateElectronInvokeResult('comments-window:reconnect-scopes', 'opened')
     ).toThrow()
+  })
+
+  it('relays one manual removal or one card answer, never a source (plan 140, S6)', () => {
+    const operationId = '6f1c2e9a-3b7d-4c51-9e2f-0a1b2c3d4e5f'
+    const remove = {
+      requestId: 'r-1',
+      sessionId: 'session-1',
+      action: 'remove',
+      operationId,
+      messageId: 'session-1:twitch:default:m-1'
+    }
+    const confirm = { requestId: 'r-2', sessionId: 'session-1', action: 'confirm', operationId }
+    const cancel = { requestId: 'r-3', sessionId: 'session-1', action: 'cancel', operationId }
+    for (const command of [remove, confirm, cancel]) {
+      expect(validateElectronInvokeArgs('comments-window:moderation', [command])).toEqual([command])
+      expect(validateElectronEventPayload('comments-window:moderation-request', command)).toEqual(
+        command
+      )
+    }
+    // The window never picks the source, a countdown, a reason, or a bulk
+    // target, and the id must be a UUID the backend can bind.
+    for (const forged of [
+      { ...remove, source: 'orcle-voice' },
+      { ...remove, confirmMode: 'countdown' },
+      { ...remove, reason: 'toxic' },
+      { ...remove, messageId: '' },
+      { ...remove, operationId: 'not-a-uuid' },
+      { ...remove, action: 'ban' },
+      { ...confirm, messageId: 'session-1:twitch:default:m-1' },
+      { ...cancel, sessionId: '' },
+      { requestId: 'r-4', action: 'remove', operationId, messageId: 'm' },
+      null
+    ]) {
+      expect(() => validateElectronInvokeArgs('comments-window:moderation', [forged])).toThrow()
+      expect(() =>
+        validateElectronEventPayload('comments-window:moderation-request', forged)
+      ).toThrow()
+    }
+
+    const operation = {
+      operationId,
+      sessionId: 'session-1',
+      messageId: 'session-1:twitch:default:m-1',
+      platform: 'twitch',
+      authorName: 'coders_x',
+      excerpt: 'this stream is trash',
+      source: 'manual',
+      phase: 'removed',
+      confirmMode: 'confirm',
+      requiresExplicitConfirm: false,
+      outcome: 'Removed from Twitch.',
+      outcomeCode: 'removed',
+      createdAt: '2026-10-04T12:00:00Z',
+      updatedAt: '2026-10-04T12:00:01Z',
+      // A newer optional field passes through whole.
+      laterField: 'kept'
+    }
+    expect(validateElectronInvokeResult('comments-window:moderation', operation)).toEqual(operation)
+    expect(() =>
+      validateElectronInvokeResult('comments-window:moderation', { ...operation, phase: 'gone' })
+    ).toThrow()
+    const resolution = { requestId: 'r-1', ok: true, value: operation }
+    expect(
+      validateElectronInvokeArgs('comments-window:moderation-result-push', [resolution])
+    ).toEqual([resolution])
+    expect(
+      validateElectronInvokeArgs('comments-window:moderation-result-push', [
+        { requestId: 'r-1', ok: false, error: 'At most 10 messages can be removed per minute.' }
+      ])
+    ).toHaveLength(1)
+    expect(() =>
+      validateElectronInvokeArgs('comments-window:moderation-result-push', [
+        { ...resolution, extra: true }
+      ])
+    ).toThrow()
+    expect(validateElectronInvokeResult('comments-window:moderation-result-push', true)).toBe(true)
+  })
+
+  it('carries a bounded list of removals in a live comments view only (plan 140, S6)', () => {
+    const operation = {
+      operationId: '6f1c2e9a-3b7d-4c51-9e2f-0a1b2c3d4e5f',
+      sessionId: 's',
+      messageId: 's:twitch:default:m-1',
+      platform: 'twitch',
+      authorName: 'coders_x',
+      excerpt: 'spam',
+      source: 'orcle-voice',
+      phase: 'pending-confirm',
+      confirmMode: 'confirm',
+      requiresExplicitConfirm: true,
+      confirmBy: '2026-10-04T12:00:20Z',
+      createdAt: '2026-10-04T12:00:00Z',
+      updatedAt: '2026-10-04T12:00:00Z'
+    }
+    const view = {
+      mode: { kind: 'live' },
+      snapshot: { sessionId: 's', providers: [], messages: [], unreadCount: 0, updatedAt: 'now' },
+      moderationOperations: [operation]
+    }
+    expect(validateElectronInvokeArgs('comments-window:push-snapshot', [view])).toEqual([view])
+    expect(validateElectronEventPayload('comments-window:snapshot', view)).toEqual(view)
+    expect(validateElectronInvokeResult('comments-window:get-snapshot', view)).toEqual(view)
+    for (const malformed of [
+      { ...view, moderationOperations: Array.from({ length: 101 }, () => operation) },
+      { ...view, moderationOperations: [{ ...operation, phase: 'unknown' }] },
+      { ...view, moderationOperations: [{ ...operation, operationId: '' }] },
+      { ...view, moderationOperations: operation },
+      {
+        ...view,
+        mode: { kind: 'history', sessionId: 's', title: 'Stream', startedAt: 'then' }
+      }
+    ]) {
+      expect(() => validateElectronEventPayload('comments-window:snapshot', malformed)).toThrow()
+    }
   })
 
   it('semantically validates native host, scene, and compositor IPC', () => {

@@ -398,6 +398,10 @@ import {
   COMMENTS_COMMAND_RELAY_TIMEOUT_MS,
   COMMENTS_HIGHLIGHT_RELAY_TIMEOUT_MS
 } from '../shared/comments-command-timing'
+import {
+  COMMENTS_MODERATION_RELAY_TIMEOUT_MS,
+  nextRelayedModerationOperations
+} from '../shared/chat-moderation'
 import { AccountRefreshBroker } from './account-refresh-broker'
 import { reconcileCommentsSendOperation } from '../shared/comments-send-operation'
 import {
@@ -457,6 +461,7 @@ import type {
   ClipMarkedEvent,
   CommentsClearCommand,
   CommentsCommandResolution,
+  CommentsModerationCommand,
   CommentsSendCommand,
   CommentsSendOperation,
   CommentsSnapshotDelta,
@@ -469,6 +474,7 @@ import type {
   LayoutSettings,
   LiveChatSnapshot,
   LiveChatMessage,
+  ModerationOperation,
   NativePreviewHostCommand,
   NotesDocument,
   NotesFontScale,
@@ -651,6 +657,9 @@ let latestLiveCommentsSnapshot: LiveChatSnapshot | null = null
 const commentsHistoryCache = new CommentsHistoryCache()
 const commentsViewSelection = new CommentsViewSelection({ kind: 'live' })
 let latestLiveCommentsSendOperation: CommentsSendOperation | undefined
+// The live session's chat removals (plan 140, S6), as Studio last published
+// them; the Stream Manager reads them from its snapshot.
+let latestLiveCommentsModerationOperations: ModerationOperation[] | undefined
 const commentsCommandBroker = new CommentsCommandBroker()
 type CommentsSmokeCommandFixture =
   | {
@@ -2987,7 +2996,10 @@ function currentCommentsView(): CommentsViewSnapshot | null {
         unreadCount: 0,
         updatedAt: new Date().toISOString()
       },
-      latestSendOperation: latestLiveCommentsSendOperation
+      latestSendOperation: latestLiveCommentsSendOperation,
+      ...(latestLiveCommentsModerationOperations
+        ? { moderationOperations: latestLiveCommentsModerationOperations }
+        : {})
     }
   }
   const cached = commentsHistoryCache.get(mode.sessionId)
@@ -3028,6 +3040,12 @@ function cacheCommentsView(view: CommentsViewSnapshot): void {
         ? reconcileCommentsSendOperation(latestLiveCommentsSendOperation, view.latestSendOperation)
         : undefined
     }
+    latestLiveCommentsModerationOperations = nextRelayedModerationOperations(
+      latestLiveCommentsModerationOperations,
+      view.moderationOperations,
+      next.sessionId,
+      sessionChanged
+    )
   } else {
     const existing = commentsHistoryCache.peek(view.mode.sessionId)
     const selectedMode = commentsViewSelection.current()
@@ -14266,6 +14284,38 @@ app.whenReady().then(async () => {
   secureIpcHandle(
     'comments-window:clip-mark-result-push',
     (event, resolution: CommentsCommandResolution<ClipMarkedEvent>) => {
+      if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+      return commentsCommandBroker.resolve(resolution)
+    }
+  )
+  // Chat removal relay (plan 140, S6): the Stream Manager asks, the MAIN
+  // renderer owns the backend socket and makes the liveChat.moderation.* call,
+  // and the operation comes back as the reply. The window can ask for one
+  // manual removal or answer an open card; it never picks the source, so a
+  // window can never start a voice-sourced (countdown) removal.
+  secureIpcHandle(
+    'comments-window:moderation',
+    (event, value: unknown): Promise<ModerationOperation> => {
+      if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+        return Promise.reject(new Error('Only the Chat window can remove chat messages.'))
+      }
+      const requestId = commentsCommandRequestId(value)
+      const command = value as CommentsModerationCommand
+      assertLiveCommentsCommandSession(command.sessionId)
+      return commentsCommandBroker.request(
+        requestId,
+        () => {
+          if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+          sendElectronEvent(mainWindow.webContents, 'comments-window:moderation-request', command)
+          return true
+        },
+        COMMENTS_MODERATION_RELAY_TIMEOUT_MS
+      )
+    }
+  )
+  secureIpcHandle(
+    'comments-window:moderation-result-push',
+    (event, resolution: CommentsCommandResolution<ModerationOperation>) => {
       if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
       return commentsCommandBroker.resolve(resolution)
     }

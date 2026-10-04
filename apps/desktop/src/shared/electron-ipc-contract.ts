@@ -20,6 +20,7 @@ import type {
   CommentHighlightState,
   ClipMarkCommand,
   CommentsClearCommand,
+  CommentsModerationCommand,
   CommentsSendCommand,
   CommentsSnapshotDelta,
   CommentsViewSnapshot,
@@ -41,6 +42,7 @@ import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { COMMENT_HIGHLIGHT_ANCHORS, DOCK_SLOTS, LAYOUT_PRESET_VALUES } from './backend'
 import { CHAT_AVATAR_MAX_BYTES, chatAvatarBytesWithinCap } from './chat-avatar-bytes'
 import { SCOPE_RECONNECT_PLATFORMS } from './platform-scopes'
+import { MAX_RELAYED_MODERATION_OPERATIONS, MODERATION_PHASES } from './chat-moderation'
 import {
   arraySchema,
   booleanSchema,
@@ -142,6 +144,8 @@ export const electronInvokeApiMethods = {
   'comments-window:clip-mark-result-push': 'pushClipMarkResult',
   'comments-window:follow-names': 'showFollowNamesFromCommentsWindow',
   'comments-window:reconnect-scopes': 'reconnectScopesFromCommentsWindow',
+  'comments-window:moderation': 'moderateFromCommentsWindow',
+  'comments-window:moderation-result-push': 'pushModerationResult',
   'comments-window:viewers-push': 'pushViewerSample',
   'comments-window:viewers-get': 'getViewerSample',
   'comments-window:dashboard-push': 'pushDashboard',
@@ -216,6 +220,7 @@ export interface ElectronIpcEventMap {
   'comments-window:send-request': CommentsSendCommand
   'comments-window:clear-request': CommentsClearCommand
   'comments-window:clip-mark-request': ClipMarkCommand
+  'comments-window:moderation-request': CommentsModerationCommand
   'comments-window:viewers': ViewerSample | null
   'comments-window:dashboard': LiveDashboardState | null
   'comments-window:cohost': CohostWindowState
@@ -255,6 +260,7 @@ export const electronEventChannels = [
   'comments-window:send-request',
   'comments-window:clear-request',
   'comments-window:clip-mark-request',
+  'comments-window:moderation-request',
   'comments-window:viewers',
   'comments-window:dashboard',
   'comments-window:cohost',
@@ -999,6 +1005,56 @@ const videorcAccountRefreshResultSchema = unionSchema([
   objectSchema({ outcome: literalSchema('deferred') }, { allowUnknown: false })
 ])
 const boundedFallbackInvokeContract = invokeContract(boundedIpcArgsSchema)
+// Chat removal relay (plan 140, S6). The window may name one message to
+// remove or answer an open card, nothing more: no source, no reason, no
+// confirmation mode. Studio sends every removal as `manual`.
+const moderationOperationIdSchema = runtimeSchema<string>('a UUID operation id', (value, path) => {
+  const input = stringSchema({ minLength: 36, maxLength: 36 }).parse(value, path)
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input)) {
+    throw new RuntimeSchemaError(path, 'a UUID operation id')
+  }
+  return input
+})
+const commentsModerationCommandSchema = unionSchema([
+  objectSchema(
+    {
+      requestId: boundedIdentifier,
+      sessionId: boundedIdentifier,
+      action: literalSchema('remove'),
+      operationId: moderationOperationIdSchema,
+      messageId: boundedIdentifier
+    },
+    { allowUnknown: false }
+  ),
+  objectSchema(
+    {
+      requestId: boundedIdentifier,
+      sessionId: boundedIdentifier,
+      action: enumSchema(['confirm', 'cancel']),
+      operationId: moderationOperationIdSchema
+    },
+    { allowUnknown: false }
+  )
+])
+// The operation as the backend left it. The backend contract already closed
+// its shape; here only the core fields are checked and the value passes
+// through whole, so a newer optional field never breaks the relay.
+const moderationOperationIpcSchema = boundedSemanticValue(
+  'a chat moderation operation',
+  objectSchema(
+    {
+      operationId: boundedIdentifier,
+      sessionId: boundedIdentifier,
+      messageId: boundedIdentifier,
+      source: enumSchema(['manual', 'orcle-voice']),
+      phase: enumSchema(MODERATION_PHASES)
+    },
+    { allowUnknown: true }
+  )
+)
+const relayedModerationOperationsSchema = arraySchema(moderationOperationIpcSchema, {
+  maxLength: MAX_RELAYED_MODERATION_OPERATIONS
+})
 const commentsViewSchema = runtimeSchema<unknown>(
   'a bounded comments view with valid delivery metadata',
   (value, path) => {
@@ -1016,6 +1072,15 @@ const commentsViewSchema = runtimeSchema<unknown>(
       } catch {
         throw new RuntimeSchemaError(`${path}.snapshot.delivery`, 'bounded chat delivery metadata')
       }
+    }
+    if (view?.moderationOperations !== undefined) {
+      if (view.mode?.kind !== 'live') {
+        throw new RuntimeSchemaError(`${path}.moderationOperations`, 'a live view only')
+      }
+      relayedModerationOperationsSchema.parse(
+        view.moderationOperations,
+        `${path}.moderationOperations`
+      )
     }
     return value
   }
@@ -1071,6 +1136,25 @@ const specificRuntimeInvokeContracts = {
     tupleSchema([
       objectSchema(
         { requestId: boundedIdentifier, platform: enumSchema(SCOPE_RECONNECT_PLATFORMS) },
+        { allowUnknown: false }
+      )
+    ]),
+    booleanSchema
+  ),
+  // Plan 140, S6: one manual removal or one card answer, relayed to Studio.
+  'comments-window:moderation': invokeContract(
+    tupleSchema([commentsModerationCommandSchema]),
+    moderationOperationIpcSchema
+  ),
+  'comments-window:moderation-result-push': invokeContract(
+    tupleSchema([
+      objectSchema(
+        {
+          requestId: boundedIdentifier,
+          ok: booleanSchema,
+          value: optionalSchema(moderationOperationIpcSchema),
+          error: optionalSchema(boundedStatusText)
+        },
         { allowUnknown: false }
       )
     ]),
@@ -1269,6 +1353,7 @@ const specificRuntimeEventSchemas = {
   'comments-window:dashboard': dashboardSchema,
   'comments-window:snapshot': commentsViewSchema,
   'comments-window:delta': commentsDeltaSchema,
+  'comments-window:moderation-request': commentsModerationCommandSchema,
   'account:callback': accountCallbackSchema,
   'backend:connection': backendConnectionSchema,
   'notes-window:document': notesDocumentSchema,

@@ -124,7 +124,8 @@ async function render({
   live = false,
   state = null as CohostState | null,
   reportSessionId = undefined as string | null | undefined,
-  cleanCutRequest = undefined as CleanCutTabRequest | undefined
+  cleanCutRequest = undefined as CleanCutTabRequest | undefined,
+  core = {} as Record<string, unknown>
 } = {}): Promise<void> {
   mocked.core = {
     sessions: [],
@@ -138,7 +139,8 @@ async function render({
     setOrcleLive: calls.setOrcleLive,
     answerOrcleConsent: calls.answerOrcleConsent,
     setAiConsent: calls.setAiConsent,
-    patchCohostSettings: calls.patchCohostSettings
+    patchCohostSettings: calls.patchCohostSettings,
+    ...core
   }
   mocked.chat = { cohostState: state }
   mocked.recording = {
@@ -385,5 +387,95 @@ describe('Clean cut in the Orcle tab (plan 119 S14)', () => {
     expect(document.querySelector('[data-slot="orcle-tab"]')).toBeNull()
     await act(async () => button('Close review').click())
     expect(document.querySelector('[data-slot="orcle-tab"]')).toBeTruthy()
+  })
+})
+
+describe('Orcle tab: Voice commands (plan 140, S6 part A)', () => {
+  const connectPlatformAccount = vi.fn(async () => undefined)
+  const authorizeXLive = vi.fn(async () => undefined)
+  const accounts = [
+    {
+      platform: 'twitch',
+      scopes: ['user:write:chat'],
+      status: 'connected',
+      accountLabel: 'orc_streams'
+    },
+    {
+      platform: 'youtube',
+      scopes: ['https://www.googleapis.com/auth/youtube.force-ssl'],
+      status: 'connected',
+      accountLabel: 'Orc Dev'
+    },
+    { platform: 'x', scopes: [], status: 'connected', accountLabel: '@orcdev' }
+  ]
+
+  function section(): HTMLElement {
+    const element = document.querySelector<HTMLElement>('[data-slot="orcle-voice-commands"]')
+    expect(element).toBeTruthy()
+    return element!
+  }
+
+  it('sits inside Orcle Live: what you can say, and the promise', async () => {
+    await render({ cohost: settings({ enabled: true }) })
+    const voice = section()
+    expect(voice.closest('[data-slot="panel-section"]')?.textContent).toContain('Orcle Live')
+    const text = voice.textContent ?? ''
+    expect(text).toContain('Voice commands')
+    expect(text).toContain('What you can say')
+    for (const title of ['Highlight', 'Clear', 'Remove', 'Answer']) expect(text).toContain(title)
+    expect(text).toContain('“Orcle, highlight the comment from coders X”')
+    expect(text).toContain('“This one is toxic. Remove it from our chat.”')
+    expect(text).toContain(
+      'Orcle never acts on its own. It removes a comment only when you tell it to.'
+    )
+    expect(text).toContain('20 seconds')
+    expect(text).toContain('At most 10 removals a minute.')
+    expect(voice.querySelector('[data-slot="orcle-voice-commands-off"]')).toBeNull()
+  })
+
+  it('says to turn on Orcle Live first while it is off', async () => {
+    await render()
+    expect(section().querySelector('[data-slot="orcle-voice-commands-off"]')?.textContent).toBe(
+      'Turn on Orcle Live to use voice commands.'
+    )
+  })
+
+  it('lists Remove messages per account, with the one fix for each', async () => {
+    connectPlatformAccount.mockClear()
+    authorizeXLive.mockClear()
+    await render({
+      core: {
+        platformAccounts: accounts,
+        xNativeCapability: { nativeAvailable: false },
+        connectPlatformAccount,
+        authorizeXLive
+      }
+    })
+    const rows = [
+      ...section().querySelectorAll<HTMLElement>('[data-slot="list-row"][data-platform]')
+    ]
+    expect(rows.map((row) => row.dataset.platform)).toEqual(['youtube', 'twitch', 'x'])
+    expect(rows[0].textContent).toContain('Ready')
+    expect(rows[1].textContent).toContain('Reconnect Twitch to let Orcle remove messages.')
+    expect(rows[2].textContent).toContain('Authorize X Live to let Orcle remove messages.')
+
+    await act(async () => rows[1].querySelector('button')!.click())
+    // A permission reconnect asks for every optional Twitch permission.
+    expect(connectPlatformAccount).toHaveBeenCalledWith('twitch', {
+      optionalScopes: [
+        'moderator:read:followers',
+        'channel:read:subscriptions',
+        'moderator:manage:chat_messages'
+      ]
+    })
+    await act(async () => rows[2].querySelector('button')!.click())
+    expect(authorizeXLive).toHaveBeenCalledTimes(1)
+  })
+
+  it('says where to connect when no platform is connected', async () => {
+    await render({ core: { platformAccounts: [] } })
+    expect(section().querySelector('[data-slot="remove-messages-empty"]')?.textContent).toBe(
+      'Connect YouTube, Twitch, Kick or X under Livestream to remove their chat messages.'
+    )
   })
 })

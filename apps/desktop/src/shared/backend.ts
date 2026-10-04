@@ -3885,6 +3885,29 @@ export interface ModerationOperationParams {
   operationId: string
 }
 
+/**
+ * Stream Manager → main → Studio renderer (plan 140, S6): "Remove from chat"
+ * on one message, or an answer to an open removal card. The window never
+ * picks the source: Studio sends every `remove` as `manual`, which runs at
+ * once (the menu click is the express consent). Voice removals come from the
+ * backend's own Orcle engine, never through this relay.
+ */
+export type CommentsModerationCommand =
+  | {
+      requestId: string
+      sessionId: string
+      action: 'remove'
+      /** UUID v4 minted by the window: the idempotency key. */
+      operationId: string
+      messageId: string
+    }
+  | {
+      requestId: string
+      sessionId: string
+      action: 'confirm' | 'cancel'
+      operationId: string
+    }
+
 export interface CommentsSendCommand {
   requestId: string
   operationId: string
@@ -3971,6 +3994,12 @@ export interface CommentsViewSnapshot {
   mode: CommentsViewMode
   snapshot: LiveChatSnapshot
   latestSendOperation?: CommentsSendOperation
+  /**
+   * Live mode only (plan 140, S6): the live session's chat removals, every
+   * open one then the newest finished ones, at most 100. Studio publishes it;
+   * the Stream Manager renders the row status and Orcle's removal cards.
+   */
+  moderationOperations?: ModerationOperation[]
   /** History mode only: the finished session's saved stats (plan 055, S9). */
   history?: CommentsHistoryStats
 }
@@ -4279,6 +4308,15 @@ export interface VideorcApi {
    * (plan 140, S5): like Show who followed, main starts the reconnect with
    * every optional permission and opens the browser. Resolves once it opened. */
   reconnectScopesFromCommentsWindow: (command: ScopeReconnectCommand) => Promise<boolean>
+  /** Chat removal relay (plan 140, S6): the Stream Manager's "Remove from
+   * chat" and its removal-card answers. The MAIN renderer owns the backend
+   * socket and makes the `liveChat.moderation.*` call; the reply is the
+   * operation as the backend left it. */
+  moderateFromCommentsWindow: (command: CommentsModerationCommand) => Promise<ModerationOperation>
+  onModerationRequest: (callback: (command: CommentsModerationCommand) => void) => () => void
+  pushModerationResult: (
+    resolution: CommentsCommandResolution<ModerationOperation>
+  ) => Promise<boolean>
   /** Co-host relay: the main renderer pushes state, the window seeds + follows
    * it, and window actions come back through the same correlated broker. */
   pushCohostWindowState: (state: CohostWindowState) => Promise<void>

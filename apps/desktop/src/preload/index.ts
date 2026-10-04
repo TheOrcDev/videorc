@@ -74,6 +74,10 @@ const api: VideorcApi = {
   showFollowNamesFromCommentsWindow: (command) => invoke('comments-window:follow-names', command),
   reconnectScopesFromCommentsWindow: (command) =>
     invoke('comments-window:reconnect-scopes', command),
+  moderateFromCommentsWindow: (command) => invoke('comments-window:moderation', command),
+  onModerationRequest: (callback) => subscribe('comments-window:moderation-request', callback),
+  pushModerationResult: (resolution) =>
+    invoke('comments-window:moderation-result-push', resolution),
   onCommentHighlightState: (callback) => subscribe('comments-window:highlight-state', callback),
   getBundledBackgroundAssets: () => invoke('backgrounds:bundled-assets'),
   beginAccountSignIn: (authorizeUrl) => invoke('account:begin-sign-in', authorizeUrl),
