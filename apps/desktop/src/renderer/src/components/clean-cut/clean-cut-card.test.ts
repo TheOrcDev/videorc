@@ -395,6 +395,20 @@ describe('Clean cut card (plan 119 S14)', () => {
     })
   })
 
+  it('scrolls to the card once per ask, not on every update', async () => {
+    const scrolled = vi.fn()
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrolled
+    })
+    await render({ focus: { sessionId: 'rec-2', nonce: 1 } })
+    await render({ focus: { sessionId: 'rec-2', nonce: 1 }, cut: client({ jobs: [job()] }) })
+    expect(scrolled).toHaveBeenCalledTimes(1)
+    await render({ focus: { sessionId: 'rec-1', nonce: 2 } })
+    expect(scrolled).toHaveBeenCalledTimes(2)
+    Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView')
+  })
+
   it('keeps Condensed for recordings of 25 minutes or more', async () => {
     await render({ focus: { sessionId: 'rec-short', nonce: 1 } })
     await chooseTab('Condensed')

@@ -291,6 +291,8 @@ describe('Clean cut review (plan 119 S14)', () => {
       '11:05 shorter'
     )
     expect(review().textContent).toContain('So today')
+    // It opens ready for the keys.
+    expect(document.activeElement).toBe(review())
     expect(cut('r2').getAttribute('data-cut')).toBe('on')
     expect(cut('r4').getAttribute('data-cut')).toBe('off')
     // The chips count every kind, suggestions included.

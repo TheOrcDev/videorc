@@ -269,10 +269,15 @@ export function cleanCutDurationsLabel(summary: Durations): string {
   return `${formatCutClock(summary.durationMs)} → ${formatCutClock(summary.keptMs)}`
 }
 
-/** "11:05 shorter", from the same rounding as the two clocks. */
+/** The time a cut saves, as the difference of the two clocks shown, so
+ * 42:10 → 31:05 always reads 11:05, never 11:04 from leftover milliseconds. */
+export function cleanCutSavedMs(durationMs: number, keptMs: number): number {
+  return Math.max(0, Math.floor(durationMs / 1000) - Math.floor(keptMs / 1000)) * 1000
+}
+
+/** "11:05 shorter". */
 export function cleanCutSavedLabel(summary: Durations): string {
-  const saved = Math.max(0, summary.durationMs - summary.keptMs)
-  return `${formatCutClock(saved)} shorter`
+  return `${formatCutClock(cleanCutSavedMs(summary.durationMs, summary.keptMs))} shorter`
 }
 
 const COUNT = new Intl.NumberFormat()

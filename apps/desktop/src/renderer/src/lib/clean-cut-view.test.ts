@@ -18,6 +18,7 @@ import {
   cleanCutMinutesLeftLabel,
   cleanCutReadyTitle,
   cleanCutSavedLabel,
+  cleanCutSavedMs,
   cleanCutStatusView,
   cleanCutUnavailableReason,
   cleanCutUnlock,
@@ -236,6 +237,13 @@ describe('time labels', () => {
     expect(formatCutClock(-5)).toBe('0:00')
     expect(cleanCutDurationsLabel(SUMMARY)).toBe('42:10 → 31:05')
     expect(cleanCutSavedLabel(SUMMARY)).toBe('11:05 shorter')
+  })
+
+  it('saves the difference of the two clocks, never a second less from milliseconds', () => {
+    // 42:10.000 → 31:05.640 shows 31:05, so it saves 11:05, not 11:04.
+    expect(cleanCutSavedMs(2_530_000, 1_865_640)).toBe(665_000)
+    expect(formatCutClock(cleanCutSavedMs(2_530_000, 1_865_640))).toBe('11:05')
+    expect(cleanCutSavedMs(1_000, 2_000)).toBe(0)
   })
 
   it('says the minutes left this month, or nothing when unlimited', () => {

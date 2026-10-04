@@ -75,6 +75,7 @@ import {
 import {
   cleanCutJobEditable,
   cleanCutModeLabel,
+  cleanCutSavedMs,
   cleanCutStatusView,
   formatCutClock,
   latestCleanCutJob,
@@ -171,6 +172,11 @@ export function CleanCutReview({
   const [notice, setNotice] = useState<string | null>(null)
   const [leaving, setLeaving] = useState(false)
   const playerRef = useRef<SessionPlayerHandle>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
+  // The review opens ready for the keys.
+  useEffect(() => {
+    rootRef.current?.focus({ preventScroll: true })
+  }, [])
 
   const { connected, get, transcript: readTranscript, subscribe } = client
 
@@ -471,10 +477,14 @@ export function CleanCutReview({
   }
 
   return (
+    // Focusable without a tab stop: a click on plain transcript text lands
+    // here, so the keys keep working wherever the pointer went.
     <div
+      ref={rootRef}
       className="flex h-full min-h-0 flex-col outline-none"
       data-slot="clean-cut-review"
       data-mode={mode}
+      tabIndex={-1}
       onKeyDown={handleKeyDown}
     >
       <header className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border px-gutter py-1.5">
@@ -497,7 +507,7 @@ export function CleanCutReview({
               {formatCutClock(stats.durationMs)} → {formatCutClock(stats.keptMs)}
             </span>
             <span className="text-xs text-muted-foreground">
-              {formatCutClock(stats.savedMs)} shorter
+              {formatCutClock(cleanCutSavedMs(stats.durationMs, stats.keptMs))} shorter
               {condensedMode && blocks
                 ? ` · ${blocks.filter((block) => !block.removed).length} parts`
                 : ` · ${stats.cuts} cuts`}

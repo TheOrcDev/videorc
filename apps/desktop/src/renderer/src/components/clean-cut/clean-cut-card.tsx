@@ -117,9 +117,11 @@ export function CleanCutCard({
     setAppliedFocus(focus.nonce)
     setPicked(focus.sessionId)
   }
+  // Once per ask: the card re-renders on every job update, the ask does not change.
+  const focusNonce = focus?.nonce ?? null
   useEffect(() => {
-    if (focus) sectionRef.current?.scrollIntoView?.({ block: 'nearest' })
-  }, [focus])
+    if (focusNonce !== null) sectionRef.current?.scrollIntoView?.({ block: 'nearest' })
+  }, [focusNonce])
 
   const selected =
     (picked ? rows.find((session) => session.id === picked) : undefined) ?? recordings[0] ?? null
