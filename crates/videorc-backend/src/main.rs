@@ -147,7 +147,7 @@ use std::convert::Infallible;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use axum::body::{Body, Bytes};
@@ -4571,14 +4571,17 @@ fn websocket_mutation_executor() -> Result<WebSocketMutationExecutor, &'static s
 /// before they stop replying. Putting both that work and its deadline on the
 /// same runtime recreates the exact failure the deadline is meant to contain.
 ///
-/// The returned sender belongs to the handler task. Sending means the handler
-/// reached a terminal outcome. A timeout or an unexpectedly dropped sender
-/// latches process shutdown without logging, allocating, or waiting on a
-/// renderer response queue.
+/// The returned completion owner belongs to the handler task. Its budget
+/// starts at arm time, including delayed watchdog scheduling or executor
+/// admission. Completion records the terminal time and synchronously latches
+/// an overdue outcome before notifying the watchdog. The watchdog preserves an
+/// on-time outcome even if it observes completion after the budget expired.
+/// Timeout or an unexpectedly dropped owner still latches shutdown without
+/// logging, allocating, or waiting on a renderer response queue.
 fn arm_runtime_independent_mutation_deadline(
     state: AppState,
     max_execution_age: Duration,
-) -> Option<std::sync::mpsc::Sender<()>> {
+) -> Option<MutationDeadlineCompletion> {
     arm_runtime_independent_mutation_deadline_with(state, max_execution_age, |deadline| {
         std::thread::Builder::new()
             .name("videorc-mutation-deadline".to_string())
@@ -4587,27 +4590,59 @@ fn arm_runtime_independent_mutation_deadline(
     })
 }
 
+struct MutationDeadlineCompletion {
+    state: AppState,
+    armed_at: Instant,
+    max_execution_age: Duration,
+    completion_tx: std::sync::mpsc::Sender<Instant>,
+}
+
+impl MutationDeadlineCompletion {
+    fn invocation_permitted(&self) -> bool {
+        if self.armed_at.elapsed() < self.max_execution_age {
+            return true;
+        }
+        self.state.request_process_shutdown();
+        false
+    }
+
+    fn complete(self) -> Result<(), std::sync::mpsc::SendError<Instant>> {
+        let completed_at = Instant::now();
+        if completed_at.duration_since(self.armed_at) >= self.max_execution_age {
+            self.state.request_process_shutdown();
+        }
+        self.completion_tx.send(completed_at)
+    }
+}
+
 fn arm_runtime_independent_mutation_deadline_with<Spawn>(
     state: AppState,
     max_execution_age: Duration,
     spawn: Spawn,
-) -> Option<std::sync::mpsc::Sender<()>>
+) -> Option<MutationDeadlineCompletion>
 where
     Spawn: FnOnce(Box<dyn FnOnce() + Send + 'static>) -> std::io::Result<()>,
 {
-    let (completion_tx, completion_rx) = std::sync::mpsc::channel();
+    let armed_at = Instant::now();
+    let (completion_tx, completion_rx) = std::sync::mpsc::channel::<Instant>();
     let deadline_state = state.clone();
     match spawn(Box::new(move || {
         use std::sync::mpsc::RecvTimeoutError;
 
-        match completion_rx.recv_timeout(max_execution_age) {
-            Ok(()) => {}
-            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+        let remaining = max_execution_age.saturating_sub(armed_at.elapsed());
+        match completion_rx.recv_timeout(remaining) {
+            Ok(completed_at) if completed_at.duration_since(armed_at) < max_execution_age => {}
+            Ok(_) | Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
                 deadline_state.request_process_shutdown();
             }
         }
     })) {
-        Ok(_) => Some(completion_tx),
+        Ok(_) => Some(MutationDeadlineCompletion {
+            state,
+            armed_at,
+            max_execution_age,
+            completion_tx,
+        }),
         Err(_) => {
             // Thread exhaustion is itself an unsafe execution environment for
             // an operator mutation. Fail closed and let the existing process
@@ -5902,9 +5937,9 @@ enum WebSocketMutationStartFailure {
 
 /// Transfer an admitted mutation and every completion owner it retains to the
 /// process-lifetime mutation runtime. The OS-thread deadline is armed before
-/// `spawn`, and the queued task checks the shutdown latch at the last possible
-/// edge before it invokes the handler. Therefore an executor backlog can never
-/// start stale work after its own deadline has already retired the generation.
+/// `spawn`, and the queued task checks shutdown and the original arm budget at
+/// the last possible edge before invoking the handler. An executor backlog
+/// cannot start expired work even if its watchdog has not been scheduled yet.
 fn spawn_websocket_mutation_execution<Retention>(
     executor: Result<WebSocketMutationExecutor, &'static str>,
     state: AppState,
@@ -5916,6 +5951,32 @@ fn spawn_websocket_mutation_execution<Retention>(
 ) -> Result<tokio::task::JoinHandle<WebSocketMutationExecutionOutcome>, WebSocketMutationStartFailure>
 where
     Retention: Send + 'static,
+{
+    spawn_websocket_mutation_execution_with_deadline(
+        executor,
+        state,
+        text,
+        handler,
+        retention,
+        stateful_tracker,
+        move |deadline_state| {
+            arm_runtime_independent_mutation_deadline(deadline_state, max_execution_age)
+        },
+    )
+}
+
+fn spawn_websocket_mutation_execution_with_deadline<Retention, Arm>(
+    executor: Result<WebSocketMutationExecutor, &'static str>,
+    state: AppState,
+    text: String,
+    handler: WebSocketCommandHandler,
+    retention: Retention,
+    stateful_tracker: Option<WebSocketRunningStatefulCommand>,
+    arm: Arm,
+) -> Result<tokio::task::JoinHandle<WebSocketMutationExecutionOutcome>, WebSocketMutationStartFailure>
+where
+    Retention: Send + 'static,
+    Arm: FnOnce(AppState) -> Option<MutationDeadlineCompletion>,
 {
     let executor = match executor {
         Ok(executor) => executor,
@@ -5931,9 +5992,7 @@ where
             return Err(WebSocketMutationStartFailure::ExecutorUnavailable);
         }
     };
-    let Some(execution_deadline_completion) =
-        arm_runtime_independent_mutation_deadline(state.clone(), max_execution_age)
-    else {
+    let Some(execution_deadline_completion) = arm(state.clone()) else {
         if let Some(tracker) = stateful_tracker.as_ref() {
             tracker.clear();
         }
@@ -5951,9 +6010,11 @@ where
 
         // This task may have spent its entire budget queued behind blocking
         // mutation workers. Recheck at the invocation edge and never apply it
-        // in the generation its OS deadline has already retired.
-        if restart_state.process_shutdown_requested() {
-            let _ = execution_deadline_completion.send(());
+        // after the arm budget even if its OS watchdog has not run yet.
+        if restart_state.process_shutdown_requested()
+            || !execution_deadline_completion.invocation_permitted()
+        {
+            let _ = execution_deadline_completion.complete();
             return WebSocketMutationExecutionOutcome::NotInvokedAfterShutdown;
         }
 
@@ -5962,14 +6023,14 @@ where
             .await;
         match response {
             Ok(response) => {
-                let _ = execution_deadline_completion.send(());
+                let _ = execution_deadline_completion.complete();
                 WebSocketMutationExecutionOutcome::Completed(response)
             }
             Err(_panic) => {
                 // Latch before disarming the independent deadline or dropping
                 // any retained ordering owner.
                 restart_state.request_process_shutdown();
-                let _ = execution_deadline_completion.send(());
+                let _ = execution_deadline_completion.complete();
                 WebSocketMutationExecutionOutcome::Panicked
             }
         }
@@ -12557,7 +12618,7 @@ mod tests {
                 // Deliberately block the runtime's only worker. A Tokio timer
                 // cannot run here; the OS-thread deadline still must latch.
                 std::thread::sleep(Duration::from_millis(150));
-                let _ = completion.send(());
+                let _ = completion.complete();
             })
             .await
             .expect("blocking handler task");
@@ -12574,12 +12635,201 @@ mod tests {
         let completion =
             arm_runtime_independent_mutation_deadline(state.clone(), Duration::from_millis(75))
                 .expect("deadline thread");
-        completion.send(()).expect("completion signal");
+        completion.complete().expect("completion signal");
         std::thread::sleep(Duration::from_millis(150));
         assert!(
             !state.process_shutdown_requested(),
             "a completed live-control command must not trigger a later recycle"
         );
+    }
+
+    #[test]
+    fn live_control_deadline_late_completion_latches_before_deferred_owner_runs() {
+        let state = test_state();
+        let mut deferred_owner = None;
+        let completion = arm_runtime_independent_mutation_deadline_with(
+            state.clone(),
+            Duration::ZERO,
+            |owner| {
+                deferred_owner = Some(owner);
+                Ok(())
+            },
+        )
+        .expect("captured actual deadline owner");
+
+        // No scheduling or clock-passage assumption: every completion after
+        // arming a zero-budget mutation is late, while Spawn keeps the real
+        // watchdog closure from running at all.
+        completion.complete().expect("late terminal outcome");
+        let latched_before_owner = state.process_shutdown_requested();
+        deferred_owner.take().expect("release exact deadline owner")();
+        assert!(
+            latched_before_owner,
+            "late terminal completion must latch before its deferred watchdog runs"
+        );
+    }
+
+    #[test]
+    fn live_control_deadline_deferred_owner_rejects_buffered_late_completion() {
+        let state = test_state();
+        let mut deferred_owner = None;
+        let completion = arm_runtime_independent_mutation_deadline_with(
+            state.clone(),
+            Duration::ZERO,
+            |owner| {
+                deferred_owner = Some(owner);
+                Ok(())
+            },
+        )
+        .expect("captured actual deadline owner");
+
+        completion
+            .complete()
+            .expect("buffered late terminal outcome");
+        deferred_owner.take().expect("release exact deadline owner")();
+        assert!(
+            state.process_shutdown_requested(),
+            "the actual watchdog must reject completion later than the original arm budget"
+        );
+    }
+
+    #[test]
+    fn live_control_deadline_deferred_owner_preserves_on_time_terminal_outcome() {
+        let state = test_state();
+        let mut deferred_owner = None;
+        let budget = Duration::from_secs(1);
+        let before_arm = Instant::now();
+        let completion =
+            arm_runtime_independent_mutation_deadline_with(state.clone(), budget, |owner| {
+                deferred_owner = Some(owner);
+                Ok(())
+            })
+            .expect("captured actual deadline owner");
+        let after_arm = Instant::now();
+        completion.complete().expect("on-time terminal outcome");
+        let completion_age = before_arm.elapsed();
+
+        // The bounded empty-channel timeout establishes actual budget passage,
+        // not owner readiness. No background task or sleep handshake is used.
+        let (_passage_tx, passage_rx) = std::sync::mpsc::channel::<()>();
+        let passage = passage_rx.recv_timeout(budget);
+        let observation_age = after_arm.elapsed();
+        deferred_owner.take().expect("release exact deadline owner")();
+        assert!(completion_age < budget, "completion was actually on time");
+        assert!(matches!(
+            passage,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert!(observation_age >= budget, "owner observed after arm expiry");
+        assert!(
+            !state.process_shutdown_requested(),
+            "late observation must preserve an on-time terminal outcome"
+        );
+    }
+
+    #[test]
+    fn live_control_deadline_deferred_owner_latches_dropped_completion() {
+        let state = test_state();
+        let mut deferred_owner = None;
+        let completion = arm_runtime_independent_mutation_deadline_with(
+            state.clone(),
+            Duration::from_secs(10),
+            |owner| {
+                deferred_owner = Some(owner);
+                Ok(())
+            },
+        )
+        .expect("captured actual deadline owner");
+        drop(completion);
+        deferred_owner.take().expect("release exact deadline owner")();
+        assert!(
+            state.process_shutdown_requested(),
+            "losing the terminal-outcome owner must remain fail closed"
+        );
+    }
+
+    #[test]
+    fn live_control_deadline_expired_before_invocation_never_calls_handler() {
+        struct RetentionProbe(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+        impl Drop for RetentionProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            }
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("owned mutation test runtime");
+        runtime.block_on(async {
+            let state = test_state();
+            let invoked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let released = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let tracker = WebSocketRunningStatefulCommand::default();
+            tracker.set("screens.activate".to_string());
+            let handler: WebSocketCommandHandler = {
+                let invoked = invoked.clone();
+                std::sync::Arc::new(move |_state, _text| {
+                    invoked.store(true, std::sync::atomic::Ordering::Release);
+                    Box::pin(async { ServerResponse::ok("expired", json!({})) })
+                })
+            };
+            let mut deferred_owner = None;
+            let mut execution = spawn_websocket_mutation_execution_with_deadline(
+                Ok(WebSocketMutationExecutor {
+                    handle: runtime.handle().clone(),
+                }),
+                state.clone(),
+                json!({ "id": "expired", "method": "screens.activate", "params": {} })
+                    .to_string(),
+                handler,
+                RetentionProbe(released.clone()),
+                Some(tracker.clone()),
+                |deadline_state| {
+                    arm_runtime_independent_mutation_deadline_with(
+                        deadline_state,
+                        Duration::ZERO,
+                        |owner| {
+                            deferred_owner = Some(owner);
+                            Ok(())
+                        },
+                    )
+                },
+            )
+            .expect("actual mutation task with captured watchdog");
+            let shutdown_before_invocation = state.process_shutdown_requested();
+            let retained_before_invocation = released.load(std::sync::atomic::Ordering::Acquire);
+            let tracked_before_invocation = tracker.snapshot().is_some();
+            let outcome = timeout(Duration::from_secs(1), &mut execution).await;
+            let aborted_cleanup = if outcome.is_err() {
+                execution.abort();
+                Some(timeout(Duration::from_secs(1), execution).await)
+            } else {
+                None
+            };
+            // Release the actual watchdog only after the exact task has
+            // terminated, including the timeout cleanup path, before failing.
+            deferred_owner.take().expect("release exact deadline owner")();
+
+            if let Some(cleanup) = aborted_cleanup {
+                assert!(matches!(cleanup, Ok(Err(error)) if error.is_cancelled()));
+            }
+            assert!(!shutdown_before_invocation, "watchdog was actually deferred");
+            assert_eq!(retained_before_invocation, 0);
+            assert!(tracked_before_invocation);
+            assert_eq!(released.load(std::sync::atomic::Ordering::Acquire), 1);
+            assert!(tracker.snapshot().is_none());
+            assert!(
+                !invoked.load(std::sync::atomic::Ordering::Acquire),
+                "an expired queued mutation must not invoke its handler even before the watchdog runs"
+            );
+            assert!(matches!(
+                outcome,
+                Ok(Ok(WebSocketMutationExecutionOutcome::NotInvokedAfterShutdown))
+            ));
+            assert!(state.process_shutdown_requested());
+        });
     }
 
     #[test]
