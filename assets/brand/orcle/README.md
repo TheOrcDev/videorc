@@ -27,9 +27,9 @@ for height in 64 112; do
 done
 ```
 
-| File | Size | Shown at |
-| --- | --- | --- |
-| `orcle-emblem-64.webp` | 92 × 64 | 32 px tall (`size="md"`) |
+| File                    | Size      | Shown at                 |
+| ----------------------- | --------- | ------------------------ |
+| `orcle-emblem-64.webp`  | 92 × 64   | 32 px tall (`size="md"`) |
 | `orcle-emblem-112.webp` | 160 × 112 | 56 px tall (`size="lg"`) |
 
 Each file is the 2× asset for its display height. CI never runs these
