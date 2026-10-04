@@ -27,7 +27,7 @@ import { join, resolve } from 'node:path'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { isLinuxSmokeEvidenceLine } from './lib/linux-smoke-evidence.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
-import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
+import { analyzeRecording, DEFAULT_GATES, writeReports } from './lib/recording-analyzer.mjs'
 import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { selectRecordingMatrixProfiles } from './lib/recording-matrix-profiles.mjs'
@@ -85,6 +85,8 @@ const MATRIX_GATES = Object.freeze({
   // The test tone is never silent, so any mid-take digital-zero run is a
   // dropped audio packet (plan 056).
   requireNoDigitalZeroRuns: true,
+  minDurationSeconds: (recordingMs / 1000) * (1 - DEFAULT_GATES.frameCountTolerance),
+  requireKeyframeEvidence: true,
   keyframeMaxIntervalSeconds: 2.5,
   maxTailMismatchMs: 100
 })
