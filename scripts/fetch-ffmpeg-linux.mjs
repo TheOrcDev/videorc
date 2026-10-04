@@ -108,7 +108,8 @@ if (
   if (recorded.includes(pin.sha256)) {
     const capabilities = assessLinuxFfmpegCapabilities({
       versionOutput: runText(ffmpegBin, ['-version']),
-      encodersOutput: runText(ffmpegBin, ['-hide_banner', '-encoders'])
+      encodersOutput: runText(ffmpegBin, ['-hide_banner', '-encoders']),
+      filtersOutput: runText(ffmpegBin, ['-hide_banner', '-filters'])
     })
     if (capabilities.ok) {
       verifyOpenH264Encoder(ffmpegBin)
@@ -195,7 +196,14 @@ await chmod(ffprobeBin, 0o755)
 
 const versionOutput = runText(ffmpegBin, ['-version'])
 const encodersOutput = runText(ffmpegBin, ['-hide_banner', '-encoders'])
-const capabilityAssessment = assessLinuxFfmpegCapabilities({ versionOutput, encodersOutput })
+// Clean cut renders with these filters (plan 119); the policy fails closed
+// without the listing.
+const filtersOutput = runText(ffmpegBin, ['-hide_banner', '-filters'])
+const capabilityAssessment = assessLinuxFfmpegCapabilities({
+  versionOutput,
+  encodersOutput,
+  filtersOutput
+})
 if (!capabilityAssessment.ok) {
   await rm(outputDir, { recursive: true, force: true })
   fail(`archive violates the Linux encoder policy:\n  - ${capabilityAssessment.problems.join('\n  - ')}`)
