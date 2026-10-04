@@ -3260,6 +3260,18 @@ export interface FollowNamesCommand {
   platform: 'twitch'
 }
 
+/** The platforms the Stream Manager can reconnect for a missing permission
+ * (plan 140, S5). The list lives in `shared/platform-scopes.ts`. */
+export type ScopeReconnectPlatform = Extract<StreamPlatform, 'twitch' | 'kick'>
+
+/** Stream Manager → main: reconnect Twitch or Kick asking for every optional
+ * permission, so Orcle can remove messages (plan 140, S5). Main picks the
+ * scopes; the window only names the platform. */
+export interface ScopeReconnectCommand {
+  requestId: string
+  platform: ScopeReconnectPlatform
+}
+
 export interface AiCapabilities {
   /** Optional during rolling web deployments. Missing must fail closed when captions are enabled. */
   captions?: {
@@ -3315,6 +3327,8 @@ export interface AiCapabilities {
     /** Clean cut kill switch off and its provider configured; older servers omit it. */
     cleanCutEnabled?: boolean
     cloudAiEnabled: boolean
+    /** The Orcle command parser route is on (plan 140 S8); older servers omit it. */
+    cohostCommandEnabled?: boolean
     gatewayConfigured: boolean
     modelTestingEnabled: boolean
     multipartAudioJobsEnabled: boolean
@@ -3803,6 +3817,99 @@ export interface CommentsSendOperation {
   updatedAt: string
 }
 
+// --- Chat moderation (plan 140 S4) ---
+// Wire mirror of crates/videorc-backend/src/live_chat_moderation.rs. Every
+// removal is a durable, audited operation; the backend owns the timers. The
+// event `liveChat.moderationOperation` carries a ModerationOperation on every
+// change. Manual removal is free; `orcle-voice` needs Premium.
+
+export type ModerationSource = 'manual' | 'orcle-voice'
+export type RemoveConfirmMode = 'confirm' | 'countdown'
+export type ModerationPhase =
+  | 'pending-confirm'
+  | 'cancelled'
+  | 'expired'
+  | 'executing'
+  | 'removed'
+  | 'hidden-locally'
+  | 'failed'
+  | 'delivery-unknown'
+export type ModerationOutcomeCode =
+  | 'removed'
+  | 'missing-scope'
+  | 'unsupported'
+  | 'quota-paused'
+  | 'too-old'
+  | 'provider-error'
+  | 'not-found'
+
+/** One audited removal, as `liveChat.moderation.*` return it and the event carries it. */
+export interface ModerationOperation {
+  operationId: string
+  sessionId: string
+  messageId: string
+  platform: StreamPlatform
+  targetId?: string
+  authorName: string
+  /** At most 140 characters of the message, for the card and the audit row. */
+  excerpt: string
+  source: ModerationSource
+  /** Audit only ("toxic", "spam"), at most 40 characters. */
+  reason?: string
+  phase: ModerationPhase
+  confirmMode: RemoveConfirmMode
+  /** True whenever the operation runs only on an explicit confirm (always on YouTube). */
+  requiresExplicitConfirm: boolean
+  /** Confirm mode: when the open card expires (20 s), RFC 3339. */
+  confirmBy?: string
+  /** Countdown mode: when the removal runs unless cancelled (5 s), RFC 3339. */
+  executeAt?: string
+  /** A plain sentence for the chip, the card and the operation list. */
+  outcome?: string
+  outcomeCode?: ModerationOutcomeCode
+  createdAt: string
+  updatedAt: string
+}
+
+/** `liveChat.moderation.request` params. `confirmMode` defaults to `confirm`. */
+export interface ModerationRequestParams {
+  /** UUID v4 minted by the caller: the idempotency key. */
+  operationId: string
+  /** The app message id (`LiveChatMessage.id`). */
+  messageId: string
+  source: ModerationSource
+  reason?: string
+  confirmMode?: RemoveConfirmMode
+}
+
+/** `liveChat.moderation.confirm` and `liveChat.moderation.cancel` params. */
+export interface ModerationOperationParams {
+  operationId: string
+}
+
+/**
+ * Stream Manager → main → Studio renderer (plan 140, S6): "Remove from chat"
+ * on one message, or an answer to an open removal card. The window never
+ * picks the source: Studio sends every `remove` as `manual`, which runs at
+ * once (the menu click is the express consent). Voice removals come from the
+ * backend's own Orcle engine, never through this relay.
+ */
+export type CommentsModerationCommand =
+  | {
+      requestId: string
+      sessionId: string
+      action: 'remove'
+      /** UUID v4 minted by the window: the idempotency key. */
+      operationId: string
+      messageId: string
+    }
+  | {
+      requestId: string
+      sessionId: string
+      action: 'confirm' | 'cancel'
+      operationId: string
+    }
+
 export interface CommentsSendCommand {
   requestId: string
   operationId: string
@@ -3889,6 +3996,12 @@ export interface CommentsViewSnapshot {
   mode: CommentsViewMode
   snapshot: LiveChatSnapshot
   latestSendOperation?: CommentsSendOperation
+  /**
+   * Live mode only (plan 140, S6): the live session's chat removals, every
+   * open one then the newest finished ones, at most 100. Studio publishes it;
+   * the Stream Manager renders the row status and Orcle's removal cards.
+   */
+  moderationOperations?: ModerationOperation[]
   /** History mode only: the finished session's saved stats (plan 055, S9). */
   history?: CommentsHistoryStats
 }
@@ -4193,6 +4306,19 @@ export interface VideorcApi {
    * socket and opens the browser, so the main window's eager bundle carries
    * none of it. Resolves once the browser opened. */
   showFollowNamesFromCommentsWindow: (command: FollowNamesCommand) => Promise<boolean>
+  /** "Reconnect Twitch to let Orcle remove messages" from the Stream Manager
+   * (plan 140, S5): like Show who followed, main starts the reconnect with
+   * every optional permission and opens the browser. Resolves once it opened. */
+  reconnectScopesFromCommentsWindow: (command: ScopeReconnectCommand) => Promise<boolean>
+  /** Chat removal relay (plan 140, S6): the Stream Manager's "Remove from
+   * chat" and its removal-card answers. The MAIN renderer owns the backend
+   * socket and makes the `liveChat.moderation.*` call; the reply is the
+   * operation as the backend left it. */
+  moderateFromCommentsWindow: (command: CommentsModerationCommand) => Promise<ModerationOperation>
+  onModerationRequest: (callback: (command: CommentsModerationCommand) => void) => () => void
+  pushModerationResult: (
+    resolution: CommentsCommandResolution<ModerationOperation>
+  ) => Promise<boolean>
   /** Co-host relay: the main renderer pushes state, the window seeds + follows
    * it, and window actions come back through the same correlated broker. */
   pushCohostWindowState: (state: CohostWindowState) => Promise<void>
@@ -4200,6 +4326,11 @@ export interface VideorcApi {
   getCohostWindowState: () => Promise<CohostWindowState>
   onCohostWindowState: (callback: (state: CohostWindowState) => void) => () => void
   sendCohostAction: (command: CohostActionCommand) => Promise<CohostState>
+  /** Answers to Orcle's voice command cards (plan 140, S6 part B), relayed
+   * like the other Orcle actions: the MAIN renderer makes the call. */
+  sendCohostCommand: (command: CohostCommandRelayCommand) => Promise<CohostState>
+  onCohostCommandRequest: (callback: (command: CohostCommandRelayCommand) => void) => () => void
+  pushCohostCommandResult: (resolution: CommentsCommandResolution<CohostState>) => Promise<boolean>
   onCohostActionRequest: (callback: (command: CohostActionCommand) => void) => () => void
   pushCohostActionResult: (resolution: CommentsCommandResolution<CohostState>) => Promise<boolean>
   /** Turning co-host on (and granting cloud-AI consent) from the Comments
@@ -4434,6 +4565,8 @@ export interface ChatCapability {
   state: ChatCapabilityState
   read: CommentsReadState
   write: CommentsWriteState
+  /** "Remove messages" readiness (plan 140); absent without an account. */
+  moderate?: CommentsModerateState
   /** True only when chat can actually be read right now. */
   chatReadAvailable: boolean
   requiredScope?: string
@@ -4462,6 +4595,13 @@ export type CommentsReadState =
   | 'unavailable'
 
 export type CommentsWriteState = 'ready' | 'missing-scope' | 'read-only' | 'failed' | 'unavailable'
+
+/**
+ * Whether Videorc can remove a viewer's message on a destination (plan 140):
+ * `missing-scope` means reconnect (or authorize X Live), `paused` means the
+ * YouTube quota breaker is set.
+ */
+export type CommentsModerateState = 'ready' | 'missing-scope' | 'unsupported' | 'paused'
 
 /** What kind of chat row a message is — drives styling for monetized/system events. */
 export type LiveChatEventType =
@@ -4548,6 +4688,8 @@ export interface LiveChatProviderState {
   accountLabel?: string
   read: CommentsReadState
   write: CommentsWriteState
+  /** "Remove messages" readiness (plan 140), next to `write`; absent without an account. */
+  moderate?: CommentsModerateState
   state: LiveChatProviderConnectionState
   message: string
   lastConnectedAt?: string
@@ -4745,6 +4887,18 @@ export interface CohostSettings {
    * live captions off (plan 068; default off).
    */
   listen: boolean
+  /**
+   * Plan 140: "Commands need 'Orcle' first". On, the structured phrases
+   * ("remove it from our chat") stop working without the wake word
+   * (default off).
+   */
+  wakeWordRequired: boolean
+  /**
+   * Plan 140: how a voice removal is confirmed. `confirm` (the default) waits
+   * for a yes; `countdown` runs after 5 s unless cancelled, except on YouTube,
+   * which always waits for a yes.
+   */
+  removeConfirm: RemoveConfirmMode
 }
 
 /** `cohost.settings.set`: absent fields are unchanged. */
@@ -4757,6 +4911,8 @@ export interface CohostSettingsPatch {
   /** Replaces the whole list; the backend trims, drops empties and caps it. */
   rules?: string[]
   listen?: boolean
+  wakeWordRequired?: boolean
+  removeConfirm?: RemoveConfirmMode
 }
 
 /** Whether Orcle hears the streamer right now (plan 068). */
@@ -4878,8 +5034,11 @@ export interface CohostMoodScores {
   confusion: number
 }
 
-/** Known sources of an automatic card; the wire may carry a newer one. */
-export type CohostAutoHighlightSource = 'pick' | 'question' | 'voice'
+/**
+ * Known sources of an automatic card; the wire may carry a newer one.
+ * `command`: the streamer asked by voice (plan 140).
+ */
+export type CohostAutoHighlightSource = 'pick' | 'question' | 'voice' | 'command'
 
 /**
  * The engine's automatic "put this on stream" command (plan 060 S1). The
@@ -4937,6 +5096,95 @@ export interface CohostErrorDetail {
   code: string
   message: string
   status: number | null
+}
+
+// --- Orcle voice commands (plan 140 S3; contract part B) ---
+
+/**
+ * What a voice command asked for. `confirm` and `cancel` answer the open card,
+ * so they update that command instead of standing on their own.
+ */
+export type CohostCommandKind = 'highlight' | 'clear' | 'remove' | 'confirm' | 'cancel' | 'unknown'
+
+/**
+ * Where the latest voice command stands:
+ * - `done`: highlighted, cleared, removed or hidden;
+ * - `not-found`: no comment matched, or (kind `unknown`) Orcle didn't catch it;
+ * - `ambiguous`: a chooser is open, `candidates` lists the comments;
+ * - `confirm`: a card waits for a yes: a voice removal (`operationId`) or a
+ *   highlight of a comment Orcle flagged. A removal card without `operationId`
+ *   is still opening; one without `expiresAt` was confirmed and is running;
+ * - `refused`: chat moderation refused, or the removal failed;
+ * - `unavailable`: paused by Videorc, or Premium is required;
+ * - `cancelled`, `expired`: nothing happened.
+ */
+export type CohostCommandStatus =
+  | 'done'
+  | 'not-found'
+  | 'ambiguous'
+  | 'confirm'
+  | 'refused'
+  | 'unavailable'
+  | 'cancelled'
+  | 'expired'
+
+/** The comment a command points at, as its card shows it. */
+export interface CohostCommandTarget {
+  messageId: string
+  authorName: string
+  platform: StreamPlatform
+  /** At most 140 characters of the message. */
+  excerpt: string
+}
+
+/**
+ * The latest voice command and what became of it. The command strip, the
+ * removal card and the chooser render from it; answers go back through
+ * `cohost.command.choose|confirm|cancel` with its `id`.
+ */
+export interface CohostCommand {
+  /** `cmd-<uuid>`. */
+  id: string
+  /** The words that made the command, as Orcle heard them. */
+  heard: string
+  kind: CohostCommandKind
+  status: CohostCommandStatus
+  /** One plain sentence for the strip and the card. */
+  message: string
+  target?: CohostCommandTarget
+  /** The chooser's comments, at most three; absent while empty. */
+  candidates?: CohostCommandTarget[]
+  /** The chat moderation operation behind a removal (`liveChat.moderationOperation`). */
+  operationId?: string
+  /** The audit reason heard with a removal ("toxic", "spam"). */
+  reason?: string
+  /** When the command reached its current status (RFC 3339). */
+  at: string
+  /** When the open card or chooser expires; absent when nothing waits. */
+  expiresAt?: string
+}
+
+export type CohostSwitchState = 'on' | 'paused'
+
+/**
+ * The remote kill switches (contract part D): "Voice commands are paused by
+ * Videorc." and "Removing messages is paused by Videorc." Absent while both
+ * are on.
+ */
+export interface CohostCommandAvailability {
+  voiceCommands: CohostSwitchState
+  remove: CohostSwitchState
+}
+
+/** `cohost.command.choose` (plan 140 S3): pick from the chooser, `index` 0 to 2. */
+export interface CohostCommandChooseParams {
+  commandId: string
+  index: number
+}
+
+/** `cohost.command.confirm` / `cohost.command.cancel` (plan 140 S3). */
+export interface CohostCommandParams {
+  commandId: string
 }
 
 /** The `cohost.state` event payload and every `cohost.*` RPC result. */
@@ -5019,6 +5267,10 @@ export interface CohostState {
    */
   sayHi?: CohostSayHi[]
   deadAirNudge?: CohostDeadAirNudge
+  /** Plan 140 S3: the latest voice command; absent until one was heard this session. */
+  command?: CohostCommand
+  /** Plan 140 S3: the voice-command kill switches; absent while both are on. */
+  commandAvailability?: CohostCommandAvailability
 }
 
 /**
@@ -5123,6 +5375,28 @@ export interface CohostReportRecap {
 }
 
 /**
+ * Plan 140 S3: what the streamer's voice commands did, counts only. A removal
+ * counts once, by its outcome; a card a newer command replaced is not counted
+ * as cancelled.
+ */
+export interface CohostReportCommands {
+  highlighted: number
+  /** Cards taken down by voice. */
+  cleared: number
+  /** The platform removed the message. */
+  removed: number
+  /** The platform could not; Videorc hid it locally. */
+  hiddenLocally: number
+  cancelled: number
+  /** Nobody answered the card in time. */
+  expired: number
+  /** A removal that failed or ended unknown, or a refused request. */
+  failed: number
+  /** No comment matched, or Orcle didn't catch what was said. */
+  notFound: number
+}
+
+/**
  * What Orcle caught in one stream (plan 119 decision 6): counts by outcome,
  * the questions and what became of them, the promises still open. Saved on
  * this computer when the session ends and deleted with the recording.
@@ -5146,6 +5420,8 @@ export interface CohostSessionReport {
   greetings: CohostReportGreetings
   alerts?: CohostReportAlert[]
   recap: CohostReportRecap
+  /** Plan 140 S3: voice commands; absent when none was counted (and in older reports). */
+  commands?: CohostReportCommands
 }
 
 export interface CohostReportChatPlatformCount {
@@ -5312,6 +5588,27 @@ export const COHOST_ACTION_KINDS: readonly CohostActionKind[] = [
 
 /** Correlated co-host action from the Comments window, brokered through main
  * to the main renderer (which makes the actual `cohost.*` RPC). */
+/**
+ * Stream Manager → main → Studio (plan 140, S6 part B): an answer to Orcle's
+ * open voice command, by its id. `choose` picks from the chooser (0 to 2),
+ * `confirm` and `cancel` answer the card. Studio makes the matching
+ * `cohost.command.*` call; the reply is the state after the answer.
+ */
+export type CohostCommandRelayCommand =
+  | {
+      requestId: string
+      sessionId: string
+      action: 'choose'
+      commandId: string
+      index: number
+    }
+  | {
+      requestId: string
+      sessionId: string
+      action: 'confirm' | 'cancel'
+      commandId: string
+    }
+
 export interface CohostActionCommand {
   requestId: string
   sessionId: string

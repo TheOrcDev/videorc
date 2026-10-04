@@ -33,6 +33,7 @@ import {
   cohostErrorToastMessage,
   cohostFlagRowKey,
   cohostHighlightMessageId,
+  cohostStoppedToast,
   cohostListenAllowanceLabel,
   cohostListeningView,
   cohostListenPromptVisible,
@@ -516,6 +517,34 @@ describe('cohostErrorToast', () => {
     expect(cohostErrorToast(recovered, { ...tick5, tickSeq: 11 })?.key).toBe(
       'gateway-error:ai-gateway-error'
     )
+  })
+})
+
+describe('cohostStoppedToast', () => {
+  const stoppedForPremium = state({ sessionId: null, status: 'off', reason: 'premium-required' })
+
+  it('says one plain line when the backend ends a running session', () => {
+    expect(cohostStoppedToast(state(), stoppedForPremium)).toBe('Orcle stopped. Premium ended.')
+    expect(
+      cohostStoppedToast(
+        state({ status: 'paused', reason: 'consent-required' }),
+        state({ sessionId: null, status: 'off', reason: 'signed-out' })
+      )
+    ).toBe('Orcle stopped. You signed out.')
+    // It is never the error toast: an off state has no error key.
+    expect(cohostErrorToast(state(), stoppedForPremium)).toBeNull()
+  })
+
+  it("stays silent for a streamer's own Stop and for the first state seen", () => {
+    expect(cohostStoppedToast(state(), state({ sessionId: null, status: 'off' }))).toBeNull()
+    expect(cohostStoppedToast(null, stoppedForPremium)).toBeNull()
+    expect(
+      cohostStoppedToast(state({ sessionId: null, status: 'off' }), stoppedForPremium)
+    ).toBeNull()
+    // A paused Premium precondition is the pane's to show, not a toast.
+    expect(
+      cohostStoppedToast(state(), state({ status: 'paused', reason: 'premium-required' }))
+    ).toBeNull()
   })
 })
 
@@ -1046,5 +1075,39 @@ describe('promises and recaps (plan 068 D8)', () => {
       cohostDeadAirToast(state({ deadAirNudge: { ...nudge, key: 'dead-air-1-2' } }), 'dead-air-1-1')
     ).toEqual({ key: 'dead-air-1-2', text: nudge.text })
     expect(cohostDeadAirToast(state({ deadAirNudge: { ...nudge, text: ' ' } }), null)).toBeNull()
+  })
+})
+
+describe('applyCohostState: voice commands (plan 140, S6)', () => {
+  const base = { ...EMPTY_COHOST_STATE, sessionId: 's1', status: 'listening' as const, tickSeq: 4 }
+  const command = (status: 'confirm' | 'done', at: string) => ({
+    id: 'cmd-1',
+    heard: 'orcle highlight the comment from coders x',
+    kind: 'highlight' as const,
+    status,
+    message: status === 'done' ? "Highlighted coders_x's comment." : 'Show it anyway?',
+    at
+  })
+
+  it('keeps the newer command when an older reply crosses a newer event', () => {
+    const current = { ...base, command: command('done', '2026-10-04T12:00:05Z') }
+    const staleReply = {
+      ...base,
+      mood: 'hype' as const,
+      command: command('confirm', '2026-10-04T12:00:01Z')
+    }
+    const merged = applyCohostState(current, staleReply)
+    expect(merged.command?.status).toBe('done')
+    expect(merged.mood).toBe('hype')
+    expect(applyCohostState(current, base).command?.status).toBe('done')
+  })
+
+  it('takes a newer command, and a new session as it is', () => {
+    const current = { ...base, command: command('confirm', '2026-10-04T12:00:01Z') }
+    expect(
+      applyCohostState(current, { ...base, command: command('done', '2026-10-04T12:00:05Z') })
+        .command?.status
+    ).toBe('done')
+    expect(applyCohostState(current, { ...base, sessionId: 's2' }).command).toBeUndefined()
   })
 })

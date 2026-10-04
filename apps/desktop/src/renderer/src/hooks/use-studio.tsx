@@ -258,6 +258,7 @@ import type {
   LiveLayoutApplyStatus,
   LiveChatMessage,
   LiveChatProviderState,
+  ModerationOperation,
   CaptionsStatus,
   CaptionsUpdate,
   CaptionsWindowState,
@@ -387,6 +388,7 @@ import {
   applyCohostState,
   cohostErrorToast,
   cohostHighlightMessageId,
+  cohostStoppedToast,
   orcleLiveSettingsPatch
 } from '@/lib/cohost-state'
 import { entitlementDisabledReason } from '@/lib/entitlements'
@@ -2249,6 +2251,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   const latestLiveChatSendOperationRef = useRef<CommentsSendOperation | undefined>(undefined)
   const liveChatSendOperationRevisionRef = useRef(0)
+  // Chat removals (plan 140, S6): the lazy relay while a backend is connected.
+  // It follows the live chat session.
+  const chatModerationRef = useRef<
+    import('@/lib/chat-moderation-relay').ChatModerationRelay | null
+  >(null)
+  useEffect(() => {
+    chatModerationRef.current?.session(liveChatSnapshot.sessionId)
+  }, [liveChatSnapshot.sessionId])
   const replaceLiveChatSendOperation = useCallback(
     (
       operation: CommentsSendOperation | undefined,
@@ -3901,6 +3911,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const errorToast = cohostErrorToast(previous, merged)
     if (errorToast) {
       toast.error(errorToast.message, { id: 'cohost-error' })
+    }
+    // Plan 140 S1: the backend ends a running session when Premium lapses
+    // mid-stream (or the account signs out). The chip only turns "off", so
+    // one plain, untinted line says why; a streamer's own Stop stays silent.
+    const stoppedToast = cohostStoppedToast(previous, merged)
+    if (stoppedToast) {
+      toast(stoppedToast, { id: 'cohost-stopped' })
     }
   }, [])
 
@@ -5803,6 +5820,39 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         for (const [event, payload] of dashboardBacklog.splice(0)) started.feed(event, payload)
       })
       .catch(() => undefined)
+    // Chat removals (plan 140, S6): a lazy chunk keeps the live session's
+    // removal ledger, relays the Stream Manager's Remove from chat and card
+    // answers, and mirrors an open Orcle card as a toast while the Stream
+    // Manager is closed. Events that arrive first wait for it.
+    let moderation: typeof chatModerationRef.current = null
+    let stopCohostCommandRelay: (() => void) | null = null
+    const moderationBacklog: ModerationOperation[] = []
+    void import('@/lib/chat-moderation-relay')
+      .then(({ startChatModerationRelay, startCohostCommandRelay }) => {
+        if (!generationIsCurrent()) return
+        // Plan 140, S6 part B: the Stream Manager's answers to Orcle's cards.
+        stopCohostCommandRelay = startCohostCommandRelay({
+          client: nextClient,
+          sessionId: () => liveChatSnapshotRef.current.sessionId,
+          commit: commitCohostState
+        })
+        moderation = startChatModerationRelay({
+          client: nextClient,
+          sessionId: () => liveChatSnapshotRef.current.sessionId,
+          publish: (moderationOperations) => {
+            const snapshot = liveChatSnapshotRef.current
+            if (!snapshot.sessionId) return
+            void publishLiveCommentsSnapshot({
+              mode: { kind: 'live' },
+              snapshot,
+              moderationOperations
+            })
+          }
+        })
+        chatModerationRef.current = moderation
+        for (const operation of moderationBacklog.splice(0)) moderation.feed(operation)
+      })
+      .catch(() => undefined)
     const bufferLiveChatBootstrapEvent = (event: LiveChatBootstrapEvent): void => {
       if (liveChatBootstrapComplete) {
         return
@@ -6620,6 +6670,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           applyLiveChatSendOperation(operation)
         }
       }),
+      nextClient.on('liveChat.moderationOperation', (operation) => {
+        if (moderation) moderation.feed(operation)
+        else if (moderationBacklog.length < 64) moderationBacklog.push(operation)
+      }),
       nextClient.on('cohost.state', (payload) => {
         commitCohostState(payload as CohostState)
       }),
@@ -7152,6 +7206,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       liveChatMessageBatcher.dispose()
       dashboard?.dispose()
       dashboardBacklog.length = 0
+      moderation?.dispose()
+      stopCohostCommandRelay?.()
+      if (chatModerationRef.current === moderation) chatModerationRef.current = null
+      moderationBacklog.length = 0
       if (liveChatRecoveryRetryTimer !== null) {
         window.clearTimeout(liveChatRecoveryRetryTimer)
         liveChatRecoveryRetryTimer = null
@@ -10917,6 +10975,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       try {
         setLastError(null)
         const redirectUri = await window.videorc.getOAuthCallbackRedirectUri(platform)
+        // A pass-through: callers send `platformConnectOptions(platform)` or,
+        // from a permission row, `permissionReconnectOptions(platform)`
+        // (shared/platform-scopes, kept out of this eager bundle), and the
+        // backend keeps any optional scope the account already holds.
+        // Plan 140, S5.
         const optionalScopes = options?.optionalScopes?.length
           ? { optionalScopes: [...options.optionalScopes] }
           : {}

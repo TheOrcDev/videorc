@@ -375,7 +375,12 @@ describe('CohostPane', () => {
     for (const label of ['Reply', 'Show on stream', 'Answered', 'Dismiss']) {
       expect(markup).toContain(label)
     }
-    expect(markup).toContain('Nothing sends without you.')
+    // Plan 140: Orcle can now remove a comment, but only when asked.
+    expect(markup).not.toContain('Nothing sends without you.')
+    expect(markup).toContain('Orcle never acts on its own.')
+    expect(markup).toContain(
+      'title="Orcle never acts on its own. It removes a comment only when you tell it to."'
+    )
   })
 
   it('fits a narrow window: key chips and hint fold, actions stay named and wrap', () => {

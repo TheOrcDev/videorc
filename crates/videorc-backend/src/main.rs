@@ -21,6 +21,7 @@ mod clean_cut;
 mod clip_marks;
 mod cohost;
 mod cohost_ack;
+mod cohost_command;
 mod color;
 mod comment_highlight;
 mod compositor;
@@ -48,6 +49,7 @@ mod linux_v4l2_camera;
 #[cfg(any(test, target_os = "linux"))]
 mod linux_vaapi;
 mod live_chat;
+mod live_chat_moderation;
 mod live_chat_persistence;
 mod live_layout;
 mod live_pipeline;
@@ -497,6 +499,15 @@ async fn run_backend() -> Result<()> {
             "Marked {reconciled} interrupted Comments send operation(s) as delivery unknown."
         ),
         Err(error) => tracing::warn!("Could not reconcile Comments send operations: {error:#}"),
+    }
+    // Plan 140: never act on a removal after a restart. A card that was open
+    // is cancelled; a delete that was in flight is delivery unknown.
+    match database.reconcile_orphaned_chat_moderation_operations() {
+        Ok((0, 0)) => {}
+        Ok((cancelled, unknown)) => tracing::warn!(
+            "Reconciled chat moderation after restart: {cancelled} pending removal(s) cancelled, {unknown} in-flight removal(s) marked delivery unknown."
+        ),
+        Err(error) => tracing::warn!("Could not reconcile chat moderation operations: {error:#}"),
     }
     let mut state = AppState::new(token.clone(), port, events, database);
     state.oauth_callback_port = oauth_callback_port;
@@ -2338,8 +2349,13 @@ async fn refresh_platform_access_token(
         .context("No OAuth refresh token is stored for this account.")?;
     let refresh_token =
         secrets::get_secret(refresh_ref).context("Could not read OAuth refresh token.")?;
-    let token =
-        oauth::refresh_provider_token(credential.account.platform, &refresh_token, client).await?;
+    let token = oauth::refresh_provider_token(
+        credential.account.platform,
+        &refresh_token,
+        &credential.account.scopes,
+        client,
+    )
+    .await?;
 
     persist_refreshed_platform_access_token(state, credential, access_ref, refresh_ref, token)
 }
@@ -5320,6 +5336,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.recap.draft"
         | "cohost.author.greeted"
         | "cohost.settings.set"
+        | "cohost.command.choose"
+        | "cohost.command.confirm"
+        | "cohost.command.cancel"
         | "clip.mark"
         | "captions.overlay.clear"
         | "captions.cues.submit"
@@ -5369,6 +5388,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "liveChat.x.start"
         | "liveChat.stop"
         | "liveChat.send"
+        | "liveChat.moderation.request"
+        | "liveChat.moderation.confirm"
+        | "liveChat.moderation.cancel"
         | "liveChat.clearLocal"
         | "liveChat.emotes.set"
         | "platformAccounts.oauth.providerCredentials"
@@ -5448,6 +5470,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         COMMAND_LANE_SMOKE_BLOCK_METHOD
         | "test.youtubeQuota.forceExpiry"
         | "test.youtubeQuota.seedAccount"
+        | "test.youtubeQuota.setBudget"
         | "noiseCleanup.start"
         | "noiseCleanup.cancel"
         | "cleanCut.start"
@@ -5522,6 +5545,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "liveChat.diagnostics"
         | "liveChat.sendOperations.list"
         | "liveChat.sendOperations.latest"
+        | "liveChat.moderationOperations.list"
         | "liveChat.xCommentsReadiness"
         | "liveChat.emotes.get"
         | "streamTargets.metadata.get"
@@ -5579,7 +5603,10 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
         | COMMAND_LANE_SMOKE_BLOCK_METHOD => {
             Some(WebSocketIsolatedCommandLaneKind::AccountMaintenance)
         }
-        "liveChat.send" => Some(WebSocketIsolatedCommandLaneKind::DurableChat),
+        "liveChat.send"
+        | "liveChat.moderation.request"
+        | "liveChat.moderation.confirm"
+        | "liveChat.moderation.cancel" => Some(WebSocketIsolatedCommandLaneKind::DurableChat),
         "screens.active"
         | "screens.activate"
         | "screens.clear"
@@ -8451,6 +8478,38 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 140 (S9): the drill sets the daily budget (`limit`, units; null
+        // restores the compiled default) to prove a removal sheds at 100%.
+        // Same gates as the hooks above.
+        #[cfg(debug_assertions)]
+        "test.youtubeQuota.setBudget" => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct BudgetParams {
+                #[serde(default)]
+                limit: Option<u64>,
+            }
+            if youtube_quota::youtube_api_base_url_override().is_none() {
+                ServerResponse::error(
+                    command.id,
+                    "youtube-quota-smoke-disabled",
+                    format!(
+                        "{} must point at a local fake for the quota smoke hooks.",
+                        youtube_quota::YOUTUBE_API_BASE_URL_ENV
+                    ),
+                )
+            } else {
+                match serde_json::from_value::<BudgetParams>(command.params) {
+                    Ok(params) => {
+                        youtube_quota::set_daily_budget_limit(state, params.limit);
+                        ServerResponse::ok(command.id, youtube_quota::budget_status(state))
+                    }
+                    Err(error) => {
+                        ServerResponse::error(command.id, "invalid-params", error.to_string())
+                    }
+                }
+            }
+        }
         #[cfg(debug_assertions)]
         "test.youtubeQuota.seedAccount" => {
             #[derive(Deserialize)]
@@ -8777,10 +8836,7 @@ async fn handle_text_message_with_role(
                 clear_result = Some(clear_account_credentials_fail_closed(
                     || {
                         if entitlements::clear_account_entitlements() {
-                            state.emit_event(
-                                "entitlements.updated",
-                                entitlements::current_entitlements(),
-                            );
+                            publish_entitlements_updated(state);
                         }
                     },
                     account::clear_persisted_account_and_advance_intent,
@@ -8923,10 +8979,7 @@ async fn handle_text_message_with_role(
                         // hydration directly, so spawning the revocation would
                         // expose a SignedOut/Premium race.
                         if entitlements::clear_account_entitlements() {
-                            state.emit_event(
-                                "entitlements.updated",
-                                entitlements::current_entitlements(),
-                            );
+                            publish_entitlements_updated(state);
                         }
                     },
                 ) {
@@ -9198,6 +9251,42 @@ async fn handle_text_message_with_role(
                     Err(error) => {
                         ServerResponse::error(command.id, error.code(), error.to_string())
                     }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // Plan 140 S3: answers to the card a voice command opened. Quick
+        // replies: a confirmed removal runs in the background and its outcome
+        // arrives as `cohost.state`. Never routed by the LAN listener.
+        "cohost.command.choose" => {
+            match serde_json::from_value::<protocol::CohostCommandChooseParams>(command.params) {
+                Ok(params) => match cohost::choose_command(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.command.confirm" => {
+            match serde_json::from_value::<protocol::CohostCommandParams>(command.params) {
+                Ok(params) => match cohost::confirm_command(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.command.cancel" => {
+            match serde_json::from_value::<protocol::CohostCommandParams>(command.params) {
+                Ok(params) => match cohost::cancel_command(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
                 },
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
@@ -10715,7 +10804,14 @@ async fn handle_text_message_with_role(
             ),
         },
         "liveChat.capability" => match state.database.list_platform_accounts() {
-            Ok(accounts) => ServerResponse::ok(command.id, live_chat::chat_capabilities(&accounts)),
+            // Plan 140: the YouTube quota pause shows as `moderate: paused`.
+            Ok(accounts) => ServerResponse::ok(
+                command.id,
+                live_chat::chat_capabilities_with_quota(
+                    &accounts,
+                    crate::youtube_quota::paused_until(state).is_some(),
+                ),
+            ),
             Err(error) => {
                 ServerResponse::error(command.id, "live-chat-capability-failed", error.to_string())
             }
@@ -10811,6 +10907,79 @@ async fn handle_text_message_with_role(
                     Err(error) => ServerResponse::error(
                         command.id,
                         "live-chat-send-operation-latest-failed",
+                        error.to_string(),
+                    ),
+                }
+            }
+        }
+        // Chat moderation (plan 140 S4). Refusal codes are the contract's
+        // closed set; the operation itself travels on `liveChat.moderationOperation`.
+        "liveChat.moderation.request" => {
+            match serde_json::from_value::<live_chat_moderation::ModerationRequestParams>(
+                command.params,
+            ) {
+                Ok(params) => match live_chat_moderation::request(state, params.into()).await {
+                    Ok(operation) => ServerResponse::ok(command.id, operation),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "liveChat.moderation.confirm" => {
+            match serde_json::from_value::<live_chat_moderation::ModerationOperationParams>(
+                command.params,
+            ) {
+                Ok(params) => {
+                    match live_chat_moderation::confirm(state, &params.operation_id).await {
+                        Ok(operation) => ServerResponse::ok(command.id, operation),
+                        Err(refusal) => {
+                            ServerResponse::error(command.id, refusal.code, refusal.message)
+                        }
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "liveChat.moderation.cancel" => {
+            match serde_json::from_value::<live_chat_moderation::ModerationOperationParams>(
+                command.params,
+            ) {
+                Ok(params) => {
+                    match live_chat_moderation::cancel(state, &params.operation_id).await {
+                        Ok(operation) => ServerResponse::ok(command.id, operation),
+                        Err(refusal) => {
+                            ServerResponse::error(command.id, refusal.code, refusal.message)
+                        }
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "liveChat.moderationOperations.list" => {
+            let session_id = command
+                .params
+                .get("sessionId")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            if session_id.is_empty() {
+                ServerResponse::error(command.id, "invalid-params", "sessionId is required.")
+            } else {
+                match state
+                    .database
+                    .list_chat_moderation_operations(session_id, live_chat_moderation::LIST_LIMIT)
+                {
+                    Ok(operations) => ServerResponse::ok(command.id, operations),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "live-chat-moderation-operations-list-failed",
                         error.to_string(),
                     ),
                 }
@@ -12221,9 +12390,20 @@ async fn refresh_account_entitlements(state: &AppState) {
     // Phase 3: compare+hydrate+persist atomically with sign-in/sign-out. A
     // newer refresh generation also wins for the same token/account.
     let transition = state.account_auth_transition.lock().await;
+    // Plan 140 S8: the same read turns Orcle's cloud command parser on or
+    // off (applied below, outside this lock). Signed out reads as off; a
+    // failed read keeps the last answer.
+    let mut command_parser = None;
     let changed = match current_account_entitlement_refresh_identity(state) {
         Ok(current) => {
             commit_account_entitlement_refresh_if_current(&prepared.identity, &current, || {
+                command_parser = match &prepared.outcome {
+                    PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some(false),
+                    PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
+                        Some(capabilities.features.cohost_command_enabled)
+                    }
+                    PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
+                };
                 apply_prepared_account_entitlement_refresh(prepared.outcome)
             })
             .unwrap_or(false)
@@ -12237,9 +12417,34 @@ async fn refresh_account_entitlements(state: &AppState) {
     // concurrent sign-out must not emit Basic and then be followed by a stale
     // Premium event from the refresh that it superseded.
     if changed {
-        state.emit_event("entitlements.updated", entitlements::current_entitlements());
+        publish_entitlements_updated(state);
     }
     drop(transition);
+    if let Some(enabled) = command_parser {
+        cohost::set_command_parser_capability(state, enabled).await;
+    }
+}
+
+/// Every `entitlements.updated` goes out through here (plan 140 S1): publish
+/// the effective snapshot, then let Orcle react to it. A session running
+/// without `LiveCohost` stops through its normal stop path, with its report
+/// saved. The stop runs on its own task: two of the three emitters call from a
+/// synchronous closure under `account_auth_transition`, and the stop takes the
+/// live-chat lifecycle fence, which must never be awaited there. The spawned
+/// task re-reads the entitlements itself, so a stale order of events cannot
+/// stop a session that is entitled again by the time it runs.
+fn publish_entitlements_updated(state: &AppState) {
+    state.emit_event("entitlements.updated", entitlements::current_entitlements());
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        tracing::warn!(
+            "Entitlements changed outside the runtime; Orcle re-checks on its next start."
+        );
+        return;
+    };
+    let lapse_state = state.clone();
+    handle.spawn(async move {
+        cohost::stop_cohost_if_premium_lapsed(&lapse_state).await;
+    });
 }
 
 async fn get_ai_quota() -> Result<protocol::AiQuotaStatus> {
@@ -14497,6 +14702,7 @@ mod tests {
             "liveChat.status",
             "liveChat.sendOperations.list",
             "liveChat.sendOperations.latest",
+            "liveChat.moderationOperations.list",
             "sessions.comments.totals",
             "screens.list",
             "recording.status",
@@ -14558,13 +14764,53 @@ mod tests {
             );
         }
 
-        let durable_chat =
-            json!({ "id": "chat", "method": "liveChat.send", "params": {} }).to_string();
-        assert_eq!(
-            websocket_isolated_command_lane(durable_chat.as_str()),
-            Some(WebSocketIsolatedCommandLaneKind::DurableChat)
+        for method in [
+            "liveChat.send",
+            "liveChat.moderation.request",
+            "liveChat.moderation.confirm",
+            "liveChat.moderation.cancel",
+        ] {
+            let durable_chat = json!({ "id": method, "method": method, "params": {} }).to_string();
+            assert_eq!(
+                websocket_isolated_command_lane(durable_chat.as_str()),
+                Some(WebSocketIsolatedCommandLaneKind::DurableChat),
+                "{method} must run in the durable chat lane"
+            );
+            assert!(
+                websocket_command_mutation_max_execution_age(durable_chat.as_str()).is_some(),
+                "{method} must recycle a generation that stops replying after dispatch"
+            );
+        }
+        // Plan 140: the moderation event is desktop-only, never a LAN projection.
+        assert!(
+            !crate::remote_lan::LAN_EVENTS
+                .contains(&live_chat_moderation::MODERATION_OPERATION_EVENT)
         );
-        assert!(websocket_command_mutation_max_execution_age(durable_chat.as_str()).is_some());
+        // Plan 140 S3: answers to a voice command's card are quick, ordered
+        // mutations (a confirmed removal runs in the background), and the
+        // state they change is never a LAN projection either.
+        for method in [
+            "cohost.command.choose",
+            "cohost.command.confirm",
+            "cohost.command.cancel",
+        ] {
+            let command = json!({ "id": method, "method": method, "params": {} }).to_string();
+            assert_eq!(
+                websocket_method_execution_policy(method),
+                Some(DEFAULT_MUTATION_POLICY),
+                "{method} must be an inventoried mutation"
+            );
+            assert_eq!(
+                websocket_isolated_command_lane(command.as_str()),
+                None,
+                "{method} answers at once and needs no isolated lane"
+            );
+            assert!(
+                !websocket_command_is_read_only(command.as_str()),
+                "{method} changes the command card"
+            );
+        }
+        assert!(!crate::remote_lan::LAN_EVENTS.contains(&cohost::COHOST_STATE_EVENT));
 
         for method in ["scene.layout.apply_live", "scene.layout.apply_preview"] {
             let command = json!({

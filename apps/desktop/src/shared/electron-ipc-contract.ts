@@ -14,12 +14,14 @@ import type {
   CaptionsUpdate,
   CaptionsWindowState,
   CohostActionCommand,
+  CohostCommandRelayCommand,
   CohostEnableCommand,
   CohostWindowState,
   CommentHighlightCommand,
   CommentHighlightState,
   ClipMarkCommand,
   CommentsClearCommand,
+  CommentsModerationCommand,
   CommentsSendCommand,
   CommentsSnapshotDelta,
   CommentsViewSnapshot,
@@ -40,6 +42,8 @@ import { sessionChatTotalsSchema } from './session-chat-totals'
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { COMMENT_HIGHLIGHT_ANCHORS, DOCK_SLOTS, LAYOUT_PRESET_VALUES } from './backend'
 import { CHAT_AVATAR_MAX_BYTES, chatAvatarBytesWithinCap } from './chat-avatar-bytes'
+import { SCOPE_RECONNECT_PLATFORMS } from './platform-scopes'
+import { MAX_RELAYED_MODERATION_OPERATIONS, MODERATION_PHASES } from './chat-moderation'
 import {
   arraySchema,
   booleanSchema,
@@ -140,6 +144,9 @@ export const electronInvokeApiMethods = {
   'comments-window:clip-mark': 'markClipFromCommentsWindow',
   'comments-window:clip-mark-result-push': 'pushClipMarkResult',
   'comments-window:follow-names': 'showFollowNamesFromCommentsWindow',
+  'comments-window:reconnect-scopes': 'reconnectScopesFromCommentsWindow',
+  'comments-window:moderation': 'moderateFromCommentsWindow',
+  'comments-window:moderation-result-push': 'pushModerationResult',
   'comments-window:viewers-push': 'pushViewerSample',
   'comments-window:viewers-get': 'getViewerSample',
   'comments-window:dashboard-push': 'pushDashboard',
@@ -148,6 +155,8 @@ export const electronInvokeApiMethods = {
   'comments-window:cohost-get': 'getCohostWindowState',
   'comments-window:cohost-action': 'sendCohostAction',
   'comments-window:cohost-action-result-push': 'pushCohostActionResult',
+  'comments-window:cohost-command': 'sendCohostCommand',
+  'comments-window:cohost-command-result-push': 'pushCohostCommandResult',
   'comments-window:cohost-enable': 'sendCohostEnable',
   'comments-window:cohost-enable-result-push': 'pushCohostEnableResult',
   'captions-window:open': 'openCaptionsWindow',
@@ -214,10 +223,12 @@ export interface ElectronIpcEventMap {
   'comments-window:send-request': CommentsSendCommand
   'comments-window:clear-request': CommentsClearCommand
   'comments-window:clip-mark-request': ClipMarkCommand
+  'comments-window:moderation-request': CommentsModerationCommand
   'comments-window:viewers': ViewerSample | null
   'comments-window:dashboard': LiveDashboardState | null
   'comments-window:cohost': CohostWindowState
   'comments-window:cohost-action-request': CohostActionCommand
+  'comments-window:cohost-command-request': CohostCommandRelayCommand
   'comments-window:cohost-enable-request': CohostEnableCommand
   'captions-window:state': CaptionsWindowState
   'captions-window:snapshot': CaptionWindowSnapshot
@@ -253,11 +264,13 @@ export const electronEventChannels = [
   'comments-window:send-request',
   'comments-window:clear-request',
   'comments-window:clip-mark-request',
+  'comments-window:moderation-request',
   'comments-window:viewers',
   'comments-window:dashboard',
   'comments-window:cohost',
   'comments-window:cohost-action-request',
   'comments-window:cohost-enable-request',
+  'comments-window:cohost-command-request',
   'captions-window:state',
   'captions-window:snapshot',
   'captions-window:lines',
@@ -997,6 +1010,80 @@ const videorcAccountRefreshResultSchema = unionSchema([
   objectSchema({ outcome: literalSchema('deferred') }, { allowUnknown: false })
 ])
 const boundedFallbackInvokeContract = invokeContract(boundedIpcArgsSchema)
+// Chat removal relay (plan 140, S6). The window may name one message to
+// remove or answer an open card, nothing more: no source, no reason, no
+// confirmation mode. Studio sends every removal as `manual`.
+const moderationOperationIdSchema = runtimeSchema<string>('a UUID operation id', (value, path) => {
+  const input = stringSchema({ minLength: 36, maxLength: 36 }).parse(value, path)
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input)) {
+    throw new RuntimeSchemaError(path, 'a UUID operation id')
+  }
+  return input
+})
+const commentsModerationCommandSchema = unionSchema([
+  objectSchema(
+    {
+      requestId: boundedIdentifier,
+      sessionId: boundedIdentifier,
+      action: literalSchema('remove'),
+      operationId: moderationOperationIdSchema,
+      messageId: boundedIdentifier
+    },
+    { allowUnknown: false }
+  ),
+  objectSchema(
+    {
+      requestId: boundedIdentifier,
+      sessionId: boundedIdentifier,
+      action: enumSchema(['confirm', 'cancel']),
+      operationId: moderationOperationIdSchema
+    },
+    { allowUnknown: false }
+  )
+])
+// The operation as the backend left it. The backend contract already closed
+// its shape; here only the core fields are checked and the value passes
+// through whole, so a newer optional field never breaks the relay.
+const moderationOperationIpcSchema = boundedSemanticValue(
+  'a chat moderation operation',
+  objectSchema(
+    {
+      operationId: boundedIdentifier,
+      sessionId: boundedIdentifier,
+      messageId: boundedIdentifier,
+      source: enumSchema(['manual', 'orcle-voice']),
+      phase: enumSchema(MODERATION_PHASES)
+    },
+    { allowUnknown: true }
+  )
+)
+const relayedModerationOperationsSchema = arraySchema(moderationOperationIpcSchema, {
+  maxLength: MAX_RELAYED_MODERATION_OPERATIONS
+})
+// Answers to Orcle's voice command cards (plan 140, S6 part B): a command id
+// and, for the chooser, an index. Nothing else crosses.
+const cohostCommandIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
+const cohostCommandRelaySchema = unionSchema([
+  objectSchema(
+    {
+      requestId: boundedIdentifier,
+      sessionId: boundedIdentifier,
+      action: literalSchema('choose'),
+      commandId: cohostCommandIdSchema,
+      index: numberSchema({ integer: true, min: 0, max: 2 })
+    },
+    { allowUnknown: false }
+  ),
+  objectSchema(
+    {
+      requestId: boundedIdentifier,
+      sessionId: boundedIdentifier,
+      action: enumSchema(['confirm', 'cancel']),
+      commandId: cohostCommandIdSchema
+    },
+    { allowUnknown: false }
+  )
+])
 const commentsViewSchema = runtimeSchema<unknown>(
   'a bounded comments view with valid delivery metadata',
   (value, path) => {
@@ -1014,6 +1101,15 @@ const commentsViewSchema = runtimeSchema<unknown>(
       } catch {
         throw new RuntimeSchemaError(`${path}.snapshot.delivery`, 'bounded chat delivery metadata')
       }
+    }
+    if (view?.moderationOperations !== undefined) {
+      if (view.mode?.kind !== 'live') {
+        throw new RuntimeSchemaError(`${path}.moderationOperations`, 'a live view only')
+      }
+      relayedModerationOperationsSchema.parse(
+        view.moderationOperations,
+        `${path}.moderationOperations`
+      )
     }
     return value
   }
@@ -1062,6 +1158,52 @@ const specificRuntimeInvokeContracts = {
   'oauth:open-url': invokeContract(tupleSchema([boundedUrl])),
   'comments-window:set-highlight-anchor': invokeContract(
     tupleSchema([enumSchema(COMMENT_HIGHLIGHT_ANCHORS)])
+  ),
+  // Plan 140, S5: the window names a platform and nothing else. Main picks
+  // the scopes, so a forged command can never widen what is requested.
+  'comments-window:reconnect-scopes': invokeContract(
+    tupleSchema([
+      objectSchema(
+        { requestId: boundedIdentifier, platform: enumSchema(SCOPE_RECONNECT_PLATFORMS) },
+        { allowUnknown: false }
+      )
+    ]),
+    booleanSchema
+  ),
+  // Plan 140, S6: one manual removal or one card answer, relayed to Studio.
+  'comments-window:moderation': invokeContract(
+    tupleSchema([commentsModerationCommandSchema]),
+    moderationOperationIpcSchema
+  ),
+  'comments-window:moderation-result-push': invokeContract(
+    tupleSchema([
+      objectSchema(
+        {
+          requestId: boundedIdentifier,
+          ok: booleanSchema,
+          value: optionalSchema(moderationOperationIpcSchema),
+          error: optionalSchema(boundedStatusText)
+        },
+        { allowUnknown: false }
+      )
+    ]),
+    booleanSchema
+  ),
+  // Plan 140, S6 part B: one answer to Orcle's open voice command.
+  'comments-window:cohost-command': invokeContract(tupleSchema([cohostCommandRelaySchema])),
+  'comments-window:cohost-command-result-push': invokeContract(
+    tupleSchema([
+      objectSchema(
+        {
+          requestId: boundedIdentifier,
+          ok: booleanSchema,
+          value: optionalSchema(boundedIpcValueSchema),
+          error: optionalSchema(boundedStatusText)
+        },
+        { allowUnknown: false }
+      )
+    ]),
+    booleanSchema
   ),
   'notes-window:get-document': invokeContract(noArgs, notesDocumentSchema),
   'notes-window:save-document': invokeContract(
@@ -1256,6 +1398,8 @@ const specificRuntimeEventSchemas = {
   'comments-window:dashboard': dashboardSchema,
   'comments-window:snapshot': commentsViewSchema,
   'comments-window:delta': commentsDeltaSchema,
+  'comments-window:moderation-request': commentsModerationCommandSchema,
+  'comments-window:cohost-command-request': cohostCommandRelaySchema,
   'account:callback': accountCallbackSchema,
   'backend:connection': backendConnectionSchema,
   'notes-window:document': notesDocumentSchema,

@@ -4714,6 +4714,29 @@ pub struct CohostSettingsPatch {
     /// Orcle hears the microphone while live (plan 068 D2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen: Option<bool>,
+    /// Voice commands need "Orcle" first (plan 140 S3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake_word_required: Option<bool>,
+    /// How a voice removal is confirmed (plan 140 S3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remove_confirm: Option<crate::live_chat_moderation::RemoveConfirmMode>,
+}
+
+/// `cohost.command.choose` (plan 140 S3): pick one comment from the chooser
+/// the latest voice command opened. `index` is 0 to 2.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostCommandChooseParams {
+    pub command_id: String,
+    pub index: u8,
+}
+
+/// `cohost.command.confirm` / `cohost.command.cancel` (plan 140 S3): answer
+/// the card the latest voice command opened.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostCommandParams {
+    pub command_id: String,
 }
 
 // --- Orcle report (plan 119 S1; mirrored in shared/backend.ts) ---
@@ -4895,6 +4918,54 @@ pub struct CohostReportRecap {
     pub dismissed: u64,
 }
 
+/// What the streamer's voice commands did in one stream (plan 140 S3).
+/// Counts only. A removal counts once, by its outcome; a card a newer
+/// command replaced is not counted as cancelled (the streamer moved on).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportCommands {
+    #[serde(default)]
+    pub highlighted: u64,
+    /// Cards taken down by voice ("take it down").
+    #[serde(default)]
+    pub cleared: u64,
+    /// The platform removed the message.
+    #[serde(default)]
+    pub removed: u64,
+    /// The platform could not; Videorc hid it locally.
+    #[serde(default)]
+    pub hidden_locally: u64,
+    #[serde(default)]
+    pub cancelled: u64,
+    /// Nobody answered the card in time.
+    #[serde(default)]
+    pub expired: u64,
+    /// A removal that failed or ended unknown, or a refused request.
+    #[serde(default)]
+    pub failed: u64,
+    /// No comment matched, or Orcle didn't catch what was said.
+    #[serde(default)]
+    pub not_found: u64,
+}
+
+impl CohostReportCommands {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    fn merged_with(mut self, later: Self) -> Self {
+        self.highlighted = self.highlighted.saturating_add(later.highlighted);
+        self.cleared = self.cleared.saturating_add(later.cleared);
+        self.removed = self.removed.saturating_add(later.removed);
+        self.hidden_locally = self.hidden_locally.saturating_add(later.hidden_locally);
+        self.cancelled = self.cancelled.saturating_add(later.cancelled);
+        self.expired = self.expired.saturating_add(later.expired);
+        self.failed = self.failed.saturating_add(later.failed);
+        self.not_found = self.not_found.saturating_add(later.not_found);
+        self
+    }
+}
+
 /// What Orcle caught in one stream, saved on this computer when the session
 /// ends and deleted with the recording (plan 119 decision 6). Counts and the
 /// question log; never raw chat or drafts. Every optional field is omitted,
@@ -4929,6 +5000,10 @@ pub struct CohostSessionReport {
     pub alerts: Vec<CohostReportAlert>,
     #[serde(default)]
     pub recap: CohostReportRecap,
+    /// Voice commands (plan 140 S3). Omitted when no command was counted, so
+    /// a report from before voice commands reads and writes unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commands: Option<CohostReportCommands>,
 }
 
 impl CohostSessionReport {
@@ -5062,6 +5137,10 @@ impl CohostSessionReport {
         self.recap.offered = self.recap.offered.saturating_add(later.recap.offered);
         self.recap.drafted = self.recap.drafted.saturating_add(later.recap.drafted);
         self.recap.dismissed = self.recap.dismissed.saturating_add(later.recap.dismissed);
+        self.commands = match (self.commands.take(), later.commands) {
+            (Some(base), Some(later)) => Some(base.merged_with(later)),
+            (base, later) => base.or(later),
+        };
         self
     }
 }
@@ -5277,6 +5356,10 @@ pub struct AiCapabilitiesFeatures {
     #[serde(default)]
     pub clean_cut_enabled: bool,
     pub cloud_ai_enabled: bool,
+    /// The Orcle command route is on and its model configured (plan 140 S8,
+    /// contract part E). Older servers omit it: the parser stays off.
+    #[serde(default)]
+    pub cohost_command_enabled: bool,
     pub gateway_configured: bool,
     pub model_testing_enabled: bool,
     pub multipart_audio_jobs_enabled: bool,
@@ -6872,6 +6955,64 @@ mod tests {
         );
         assert!(legacy.say_hi.is_empty());
         assert_eq!(legacy.dead_air_nudge, None);
+
+        // Plan 140 S3: the voice-command settings, the command RPC params, and
+        // the latest command with the kill switches. All of them absent (never
+        // null) from the older payloads; old settings load with the defaults.
+        assert!(!settings_wire["wakeWordRequired"].as_bool().unwrap());
+        assert_eq!(settings_wire["removeConfirm"], "confirm");
+        assert!(!legacy_settings.wake_word_required);
+        assert_eq!(
+            legacy_settings.remove_confirm,
+            crate::live_chat_moderation::RemoveConfirmMode::Confirm
+        );
+        assert_eq!(patch.wake_word_required, Some(true));
+        assert_eq!(
+            patch.remove_confirm,
+            Some(crate::live_chat_moderation::RemoveConfirmMode::Countdown)
+        );
+        let choose_wire = shared_high_risk_contract_fixture_value("/cohost/commandChooseParams");
+        let choose: CohostCommandChooseParams =
+            serde_json::from_value(choose_wire.clone()).unwrap();
+        assert_eq!(choose.index, 1);
+        assert_eq!(serde_json::to_value(choose).unwrap(), choose_wire);
+        let answer_wire = shared_high_risk_contract_fixture_value("/cohost/commandParams");
+        let answer: CohostCommandParams = serde_json::from_value(answer_wire.clone()).unwrap();
+        assert!(answer.command_id.starts_with("cmd-"));
+        assert_eq!(serde_json::to_value(answer).unwrap(), answer_wire);
+        let command_wire = shared_high_risk_contract_fixture_value("/cohost/commandState");
+        let with_command: crate::cohost::CohostState =
+            serde_json::from_value(command_wire.clone()).unwrap();
+        let command = with_command.command.as_ref().unwrap();
+        assert_eq!(command.kind, crate::cohost::CohostCommandKind::Remove);
+        assert_eq!(command.status, crate::cohost::CohostCommandStatus::Confirm);
+        assert!(command.operation_id.is_some() && command.candidates.is_empty());
+        assert_eq!(
+            with_command.command_availability,
+            Some(crate::cohost::CohostCommandAvailability {
+                voice_commands: crate::cohost::CohostSwitchState::On,
+                remove: crate::cohost::CohostSwitchState::Paused,
+            })
+        );
+        assert_eq!(serde_json::to_value(&with_command).unwrap(), command_wire);
+        let chooser_wire = shared_high_risk_contract_fixture_value("/cohost/chooserState");
+        let chooser: crate::cohost::CohostState =
+            serde_json::from_value(chooser_wire.clone()).unwrap();
+        let command = chooser.command.as_ref().unwrap();
+        assert_eq!(
+            command.status,
+            crate::cohost::CohostCommandStatus::Ambiguous
+        );
+        assert_eq!(command.candidates.len(), 2);
+        assert!(command.target.is_none() && command.operation_id.is_none());
+        assert_eq!(chooser.command_availability, None);
+        assert_eq!(serde_json::to_value(&chooser).unwrap(), chooser_wire);
+        for wire in [&state_wire, &v2_wire, &off_wire] {
+            assert!(wire.get("command").is_none());
+            assert!(wire.get("commandAvailability").is_none());
+        }
+        assert_eq!(legacy.command, None);
+        assert_eq!(legacy.command_availability, None);
     }
 
     #[test]
@@ -6927,6 +7068,74 @@ mod tests {
         assert!(empty.moments.is_empty() && empty.chat.by_platform.is_empty());
         // `report` is the one explicit null: the renderer keys on it.
         assert_eq!(serde_json::to_value(&empty).unwrap(), empty_wire);
+
+        // Plan 140 S3: the voice-command counts ride the full report and are
+        // absent (never null) from a report without commands.
+        let commands = report
+            .commands
+            .as_ref()
+            .expect("the full report counts commands");
+        assert_eq!(commands.highlighted, 3);
+        assert_eq!(commands.hidden_locally, 1);
+        assert_eq!(commands.not_found, 2);
+        assert_eq!(minimal.commands, None);
+        assert!(
+            payload_wire["report"].get("commands").is_none(),
+            "omitted, never null"
+        );
+    }
+
+    #[test]
+    fn cohost_report_commands_merge_by_sum_and_stay_absent_without_commands() {
+        let base: CohostSessionReport =
+            serde_json::from_value(shared_high_risk_contract_fixture_value("/cohost/report"))
+                .unwrap();
+        let counted = base.commands.clone().unwrap();
+        let mut without = base.clone();
+        without.commands = None;
+
+        // Orcle off and on mid-stream: the counts add up.
+        let merged = base.clone().merged_with(base.clone());
+        let doubled = merged.commands.unwrap();
+        assert_eq!(doubled.highlighted, counted.highlighted * 2);
+        assert_eq!(doubled.cleared, counted.cleared * 2);
+        assert_eq!(doubled.removed, counted.removed * 2);
+        assert_eq!(doubled.hidden_locally, counted.hidden_locally * 2);
+        assert_eq!(doubled.cancelled, counted.cancelled * 2);
+        assert_eq!(doubled.not_found, counted.not_found * 2);
+        // Either side alone keeps its counts.
+        assert_eq!(
+            without.clone().merged_with(base.clone()).commands,
+            Some(counted.clone())
+        );
+        assert_eq!(
+            base.clone().merged_with(without.clone()).commands,
+            Some(counted)
+        );
+        // Neither side: still absent, and the key never appears.
+        let neither = without.clone().merged_with(without);
+        assert_eq!(neither.commands, None);
+        assert!(
+            serde_json::to_value(&neither)
+                .unwrap()
+                .get("commands")
+                .is_none()
+        );
+        // A stored report from before plan 140 reads with no commands.
+        let legacy = serde_json::json!({
+            "version": 1,
+            "sessionId": "s-1",
+            "startedAt": "2026-10-04T10:00:00Z",
+            "endedAt": "2026-10-04T11:00:00Z"
+        });
+        let legacy = CohostSessionReport::from_stored_json(&legacy.to_string()).unwrap();
+        assert_eq!(legacy.commands, None);
+        assert!(CohostReportCommands::default().is_empty());
+        // Partial counts default the rest.
+        let partial: CohostReportCommands =
+            serde_json::from_value(serde_json::json!({ "removed": 2 })).unwrap();
+        assert_eq!(partial.removed, 2);
+        assert_eq!(partial.highlighted, 0);
     }
 
     #[test]

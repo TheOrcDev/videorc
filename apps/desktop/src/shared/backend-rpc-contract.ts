@@ -10,6 +10,8 @@ import type {
   ScheduledStreamCapabilities,
   ScheduledStreamCandidate,
   CaptureRecoveryStatus,
+  CohostCommandChooseParams,
+  CohostCommandParams,
   CohostFlagParams,
   CohostAuthorParams,
   CohostPromiseParams,
@@ -47,6 +49,9 @@ import type {
   GateStatus,
   LiveLayoutApplyStatus,
   MainOwnedPreviewSurfaceBoundsParams,
+  ModerationOperation,
+  ModerationOperationParams,
+  ModerationRequestParams,
   NoiseCleanupJob,
   OAuthCallbackResult,
   OAuthCompleteParams,
@@ -281,12 +286,25 @@ export interface BackendRpcMethodMap {
   'cohost.recap.dismiss': BackendRpcDefinition<CohostRecapParams, CohostState>
   'cohost.recap.draft': BackendRpcDefinition<CohostRecapParams, CohostState>
   'cohost.author.greeted': BackendRpcDefinition<CohostAuthorParams, CohostState>
+  'cohost.command.choose': BackendRpcDefinition<CohostCommandChooseParams, CohostState>
+  'cohost.command.confirm': BackendRpcDefinition<CohostCommandParams, CohostState>
+  'cohost.command.cancel': BackendRpcDefinition<CohostCommandParams, CohostState>
   'cohost.settings.get': BackendRpcDefinition<undefined, CohostSettings>
   'cohost.settings.set': BackendRpcDefinition<CohostSettingsPatch, CohostSettings>
   'cohost.report.get': BackendRpcDefinition<CohostReportGetParams, CohostReportPayload>
   'cohost.report.latest': BackendRpcDefinition<undefined, CohostReportPayload | null>
   'liveChat.emotes.get': BackendRpcDefinition<undefined, ChatEmotesSettings>
   'liveChat.emotes.set': BackendRpcDefinition<ChatEmotesSettingsPatch, ChatEmotesSettings>
+  'liveChat.moderation.request': BackendRpcDefinition<ModerationRequestParams, ModerationOperation>
+  'liveChat.moderation.confirm': BackendRpcDefinition<
+    ModerationOperationParams,
+    ModerationOperation
+  >
+  'liveChat.moderation.cancel': BackendRpcDefinition<ModerationOperationParams, ModerationOperation>
+  'liveChat.moderationOperations.list': BackendRpcDefinition<
+    { sessionId: string },
+    ModerationOperation[]
+  >
   'clip.mark': BackendRpcDefinition<undefined, ClipMarkedEvent>
   'clip.marks.list': BackendRpcDefinition<{ sessionId: string }, ClipMark[]>
 }
@@ -323,6 +341,7 @@ export interface BackendEventMap {
   'performance.check.progress': PerformanceCheckProgress
   'performance.check.completed': PerformanceCheckState
   'liveChat.emotes': ChatEmotesSettings
+  'liveChat.moderationOperation': ModerationOperation
   'youtube.quota': YouTubeQuotaStatus
 }
 
@@ -2107,7 +2126,10 @@ const cohostSettingsSchema = objectSchema(
     voiceHighlight: booleanSchema,
     rules: cohostRulesSchema,
     // Plan 068: Orcle hears the microphone while live.
-    listen: booleanSchema
+    listen: booleanSchema,
+    // Plan 140 S3: voice commands. The backend always sends both.
+    wakeWordRequired: booleanSchema,
+    removeConfirm: enumSchema(['confirm', 'countdown'])
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSettings>
@@ -2120,7 +2142,9 @@ const cohostSettingsPatchSchema = objectSchema(
     voiceHighlight: optionalSchema(booleanSchema),
     // The patch is what the streamer typed; the backend trims and caps it.
     rules: optionalSchema(arraySchema(stringSchema({ maxLength: 2000 }), { maxLength: 100 })),
-    listen: optionalSchema(booleanSchema)
+    listen: optionalSchema(booleanSchema),
+    wakeWordRequired: optionalSchema(booleanSchema),
+    removeConfirm: optionalSchema(enumSchema(['confirm', 'countdown']))
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSettingsPatch>
@@ -2368,6 +2392,47 @@ const cohostListeningSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+// Plan 140 S3 (contract part B): the latest voice command. Closed: a status,
+// kind or key this build does not know is refused instead of rendered.
+const cohostCommandTargetSchema = objectSchema(
+  {
+    messageId: boundedString,
+    authorName: stringSchema({ maxLength: 1000 }),
+    platform: streamPlatformSchema,
+    excerpt: stringSchema({ maxLength: 1000 })
+  },
+  { allowUnknown: false }
+)
+const cohostCommandSchema = objectSchema(
+  {
+    id: boundedString,
+    heard: stringSchema({ maxLength: 1000 }),
+    kind: enumSchema(['highlight', 'clear', 'remove', 'confirm', 'cancel', 'unknown']),
+    status: enumSchema([
+      'done',
+      'not-found',
+      'ambiguous',
+      'confirm',
+      'refused',
+      'unavailable',
+      'cancelled',
+      'expired'
+    ]),
+    message: stringSchema({ minLength: 1, maxLength: 2000 }),
+    target: optionalSchema(cohostCommandTargetSchema),
+    candidates: optionalSchema(arraySchema(cohostCommandTargetSchema, { maxLength: 3 })),
+    operationId: optionalSchema(boundedString),
+    reason: optionalSchema(stringSchema({ maxLength: 200 })),
+    at: timestamp,
+    expiresAt: optionalSchema(timestamp)
+  },
+  { allowUnknown: false }
+)
+const cohostSwitchStateSchema = enumSchema(['on', 'paused'])
+const cohostCommandAvailabilitySchema = objectSchema(
+  { voiceCommands: cohostSwitchStateSchema, remove: cohostSwitchStateSchema },
+  { allowUnknown: false }
+)
 const cohostStateSchema = objectSchema(
   {
     sessionId: nullableSchema(boundedString),
@@ -2416,7 +2481,10 @@ const cohostStateSchema = objectSchema(
     promiseReminder: optionalSchema(cohostPromiseReminderSchema),
     recap: optionalSchema(cohostRecapSchema),
     sayHi: optionalSchema(arraySchema(cohostSayHiSchema, { maxLength: 5 })),
-    deadAirNudge: optionalSchema(cohostDeadAirNudgeSchema)
+    deadAirNudge: optionalSchema(cohostDeadAirNudgeSchema),
+    // Plan 140 S3: absent until a command was heard / while both switches are on.
+    command: optionalSchema(cohostCommandSchema),
+    commandAvailability: optionalSchema(cohostCommandAvailabilitySchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostState>
@@ -2436,6 +2504,66 @@ const cohostFlagParamsSchema = objectSchema(
   { sessionId: boundedString, messageId: boundedString },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostFlagParams>
+// Chat moderation (plan 140 S4): closed shapes, kebab-case enums, optional
+// fields absent (never null) when the backend has nothing to say.
+const moderationSourceSchema = enumSchema(['manual', 'orcle-voice'])
+const removeConfirmModeSchema = enumSchema(['confirm', 'countdown'])
+const moderationOperationSchema = objectSchema(
+  {
+    operationId: boundedString,
+    sessionId: boundedString,
+    messageId: boundedString,
+    platform: streamPlatformSchema,
+    targetId: optionalSchema(boundedString),
+    authorName: stringSchema({ maxLength: 1000 }),
+    excerpt: stringSchema({ maxLength: 1000 }),
+    source: moderationSourceSchema,
+    reason: optionalSchema(stringSchema({ maxLength: 200 })),
+    phase: enumSchema([
+      'pending-confirm',
+      'cancelled',
+      'expired',
+      'executing',
+      'removed',
+      'hidden-locally',
+      'failed',
+      'delivery-unknown'
+    ]),
+    confirmMode: removeConfirmModeSchema,
+    requiresExplicitConfirm: booleanSchema,
+    confirmBy: optionalSchema(timestamp),
+    executeAt: optionalSchema(timestamp),
+    outcome: optionalSchema(stringSchema({ maxLength: 2000 })),
+    outcomeCode: optionalSchema(
+      enumSchema([
+        'removed',
+        'missing-scope',
+        'unsupported',
+        'quota-paused',
+        'too-old',
+        'provider-error',
+        'not-found'
+      ])
+    ),
+    createdAt: timestamp,
+    updatedAt: timestamp
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ModerationOperation>
+const moderationRequestParamsSchema = objectSchema(
+  {
+    operationId: boundedString,
+    messageId: boundedString,
+    source: moderationSourceSchema,
+    reason: optionalSchema(stringSchema({ maxLength: 200 })),
+    confirmMode: optionalSchema(removeConfirmModeSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ModerationRequestParams>
+const moderationOperationParamsSchema = objectSchema(
+  { operationId: boundedString },
+  { allowUnknown: false }
+) as RuntimeSchema<ModerationOperationParams>
 const cohostPromiseParamsSchema = objectSchema(
   { sessionId: boundedString, promiseId: boundedString },
   { allowUnknown: false }
@@ -2448,6 +2576,15 @@ const cohostAuthorParamsSchema = objectSchema(
   { sessionId: boundedString, authorKey: boundedString },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostAuthorParams>
+// Plan 140 S3: answers to the card the latest voice command opened.
+const cohostCommandChooseParamsSchema = objectSchema(
+  { commandId: boundedString, index: numberSchema({ integer: true, min: 0, max: 2 }) },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostCommandChooseParams>
+const cohostCommandParamsSchema = objectSchema(
+  { commandId: boundedString },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostCommandParams>
 
 // Plan 119 S1: the Orcle report. The blocks always ride; every optional list
 // is omitted by the backend while empty (never null). `version` is pinned:
@@ -2553,6 +2690,20 @@ const cohostReportRecapSchema = objectSchema(
   { offered: nonNegativeInteger, drafted: nonNegativeInteger, dismissed: nonNegativeInteger },
   { allowUnknown: false }
 )
+// Plan 140 S3: voice-command counts; absent when none was counted.
+const cohostReportCommandsSchema = objectSchema(
+  {
+    highlighted: nonNegativeInteger,
+    cleared: nonNegativeInteger,
+    removed: nonNegativeInteger,
+    hiddenLocally: nonNegativeInteger,
+    cancelled: nonNegativeInteger,
+    expired: nonNegativeInteger,
+    failed: nonNegativeInteger,
+    notFound: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
 const cohostSessionReportSchema = objectSchema(
   {
     version: literalSchema(1),
@@ -2568,7 +2719,8 @@ const cohostSessionReportSchema = objectSchema(
     promises: cohostReportPromisesSchema,
     greetings: cohostReportGreetingsSchema,
     alerts: optionalSchema(arraySchema(cohostReportAlertSchema, { maxLength: 8 })),
-    recap: cohostReportRecapSchema
+    recap: cohostReportRecapSchema,
+    commands: optionalSchema(cohostReportCommandsSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSessionReport>
@@ -3092,12 +3244,31 @@ const runtimeContracts = {
   'cohost.recap.dismiss': { params: cohostRecapParamsSchema, result: cohostStateSchema },
   'cohost.recap.draft': { params: cohostRecapParamsSchema, result: cohostStateSchema },
   'cohost.author.greeted': { params: cohostAuthorParamsSchema, result: cohostStateSchema },
+  'cohost.command.choose': { params: cohostCommandChooseParamsSchema, result: cohostStateSchema },
+  'cohost.command.confirm': { params: cohostCommandParamsSchema, result: cohostStateSchema },
+  'cohost.command.cancel': { params: cohostCommandParamsSchema, result: cohostStateSchema },
   'cohost.settings.get': { params: undefinedSchema, result: cohostSettingsSchema },
   'cohost.settings.set': { params: cohostSettingsPatchSchema, result: cohostSettingsSchema },
   'liveChat.emotes.get': { params: undefinedSchema, result: chatEmotesSettingsSchema },
   'liveChat.emotes.set': {
     params: chatEmotesSettingsPatchSchema,
     result: chatEmotesSettingsSchema
+  },
+  'liveChat.moderation.request': {
+    params: moderationRequestParamsSchema,
+    result: moderationOperationSchema
+  },
+  'liveChat.moderation.confirm': {
+    params: moderationOperationParamsSchema,
+    result: moderationOperationSchema
+  },
+  'liveChat.moderation.cancel': {
+    params: moderationOperationParamsSchema,
+    result: moderationOperationSchema
+  },
+  'liveChat.moderationOperations.list': {
+    params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
+    result: arraySchema(moderationOperationSchema, { maxLength: 200 })
   },
   'clip.mark': { params: undefinedSchema, result: clipMarkedEventSchema },
   'clip.marks.list': {
@@ -3159,6 +3330,7 @@ const runtimeEventSchemas = {
   'performance.check.progress': performanceCheckProgressSchema,
   'performance.check.completed': performanceCheckStateSchema,
   'liveChat.emotes': chatEmotesSettingsSchema,
+  'liveChat.moderationOperation': moderationOperationSchema,
   'youtube.quota': youtubeQuotaStatusSchema,
   'liveChat.totals': sessionChatTotalsSchema
 } satisfies Record<BackendEvent, RuntimeSchema<unknown>>

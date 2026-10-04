@@ -120,6 +120,14 @@ export const IPC_INVOKE_ROLES = {
   'comments-window:clip-mark': MAIN_AND_COMMENTS,
   'comments-window:clip-mark-result-push': MAIN_ONLY,
   'comments-window:follow-names': MAIN_AND_COMMENTS,
+  'comments-window:reconnect-scopes': MAIN_AND_COMMENTS,
+  // Remove from chat and the removal card's answers (plan 140, S6): the Chat
+  // window asks (its handler refuses any other sender), Studio replies.
+  'comments-window:moderation': MAIN_AND_COMMENTS,
+  'comments-window:moderation-result-push': MAIN_ONLY,
+  // Answers to Orcle's voice command cards (plan 140, S6 part B).
+  'comments-window:cohost-command': MAIN_AND_COMMENTS,
+  'comments-window:cohost-command-result-push': MAIN_ONLY,
   'captions-window:open': MAIN_ONLY,
   'captions-window:close': MAIN_ONLY,
   'captions-window:toggle': MAIN_ONLY,

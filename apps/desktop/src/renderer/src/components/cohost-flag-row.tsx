@@ -13,9 +13,10 @@ import {
 import { cn } from '@/lib/utils'
 
 /**
- * One flagged message. The co-host NEVER acts on it — this row exists so the
- * streamer can jump to the message and decide. Only `high` severity earns the
- * destructive accent; medium/low stay in the monochrome text tiers.
+ * One flagged message. Orcle never acts on it by itself: this row exists so
+ * the streamer can jump to the message and decide, and the pane's action bar
+ * offers "Remove from chat" when they do (plan 140, S6). Only `high` severity
+ * earns the destructive accent; medium/low stay in the monochrome text tiers.
  */
 export function CohostFlagRow({
   flag,
@@ -57,7 +58,7 @@ export function CohostFlagRow({
         {flag.reason}
       </span>
       {action ? (
-        // A suggestion label, not a control: the co-host never moderates.
+        // A suggestion label, not a control: Orcle never moderates on its own.
         <span className="shrink-0 text-[11px] text-subtle" data-slot="cohost-flag-action">
           {action}
         </span>

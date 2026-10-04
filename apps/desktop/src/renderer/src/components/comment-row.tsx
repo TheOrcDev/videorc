@@ -4,7 +4,15 @@ import { commentCanHighlight } from '@/lib/live-chat-view'
 export { commentCanHighlight } from '@/lib/live-chat-view'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
-import { CopyIcon, MicrophoneIcon, PreviewIcon, SendIcon, SparkleIcon } from '@/components/icons'
+import {
+  CopyIcon,
+  DeleteIcon,
+  MicrophoneIcon,
+  PreviewIcon,
+  SendIcon,
+  SparkleIcon,
+  SpinnerIcon
+} from '@/components/icons'
 import { KebabMenu, type KebabMenuItem } from '@/components/kebab-menu'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
@@ -17,6 +25,7 @@ import type {
   LiveChatMessageFragment
 } from '@/lib/backend'
 import { monogramInitials, useCachedAvatar } from '@/lib/chat-avatar'
+import { REMOVE_FROM_CHAT_LABEL, type RemovalStatusView } from '@/lib/chat-removal-view'
 import { groupEmoteOverlays } from '@/lib/chat-emotes'
 import { cohostFlagActionLabel, cohostFlagChipLabel, cohostFlagDetail } from '@/lib/cohost-view'
 import { cn } from '@/lib/utils'
@@ -103,11 +112,50 @@ export function HighlightStatus({
 }
 
 /**
- * What the co-host says about this comment. A flag names its kind (plus who it
- * is aimed at, or the chat rule it broke) and, at most, LABELS a suggested
- * action — the row never moderates. "Suggested" marks a comment worth showing;
- * it sits inside the row's own show-on-stream button, so activating it is the
- * same manual highlight as any other row. Nothing goes on stream by itself.
+ * A removal's state on its row (plan 140, S6): "Removing…" while it runs,
+ * then "Removed" or "Hidden in Videorc" (whose tooltip says viewers may still
+ * see it, and why), or a quiet "Not removed" / "Unconfirmed" with the
+ * outcome on hover. Outside the struck-through text, so it stays readable.
+ */
+export function RemovalStatus({
+  status
+}: {
+  status: RemovalStatusView | null | undefined
+}): ReactElement | null {
+  if (!status) return null
+  if (status.kind === 'removing') {
+    return (
+      <Badge data-removal={status.kind} data-slot="removal-status" variant="secondary">
+        <SpinnerIcon
+          aria-hidden
+          className="motion-safe:animate-spin"
+          data-icon="inline-start"
+          weight="bold"
+        />
+        {status.label}
+      </Badge>
+    )
+  }
+  return (
+    <Badge
+      className="shrink-0"
+      data-removal={status.kind}
+      data-slot="removal-status"
+      title={status.detail ?? undefined}
+      variant="outline"
+    >
+      {status.label}
+    </Badge>
+  )
+}
+
+/**
+ * What Orcle says about this comment. A flag names its kind (plus who it is
+ * aimed at, or the chat rule it broke) and, at most, LABELS a suggested
+ * action: the flag itself never moderates; only the streamer's "Remove from
+ * chat" does. "Suggested" marks a comment worth showing; it sits inside the
+ * row's own show-on-stream button, so activating it is the same manual
+ * highlight as any other row. Nothing goes on stream by itself.
  */
 function CohostMarks({
   flag,
@@ -304,6 +352,7 @@ function CommentContent({
   message,
   density,
   highlight,
+  removal,
   flag,
   suggested,
   spotlight,
@@ -313,6 +362,7 @@ function CommentContent({
   message: LiveChatMessage
   density: 'compact' | 'comfortable'
   highlight: CommentHighlightPresentation
+  removal?: RemovalStatusView | null
   flag?: CohostFlag
   suggested: boolean
   spotlight: boolean
@@ -360,6 +410,7 @@ function CommentContent({
           <EventStatus message={message} />
           <CohostMarks flag={flag} spotlight={spotlight} suggested={suggested} />
           <HighlightStatus status={highlight} />
+          <RemovalStatus status={removal} />
           {time ? (
             // While live the time waits for the pointer, like the row's ⋯:
             // a clock on every row is noise mid-stream (plan 057, D3).
@@ -400,17 +451,78 @@ function CommentContent({
   )
 }
 
+/**
+ * The row's ⋯ menu: show on (or take off) stream, reply, copy, and, for a row
+ * that can be removed, "Remove from chat" (destructive: it sorts last, below
+ * a separator, in the destructive tone). The stream toggle says "Take off
+ * stream", never "Remove": only the irreversible item may say remove.
+ * Empty without Reply or Remove from chat: a row outside a live session has
+ * no menu.
+ */
+export function commentRowMenu({
+  message,
+  highlightable,
+  highlightPhase,
+  onHighlight,
+  onReply,
+  onRemoveFromChat
+}: {
+  message: LiveChatMessage
+  highlightable: boolean
+  highlightPhase: CommentHighlightPhase
+  onHighlight?: (message: LiveChatMessage) => void
+  onReply?: (message: LiveChatMessage) => void
+  onRemoveFromChat?: (message: LiveChatMessage) => void
+}): KebabMenuItem[] {
+  if (!onReply && !onRemoveFromChat) return []
+  return [
+    ...(highlightable
+      ? [
+          {
+            id: 'show',
+            label: highlightPhase === 'live' ? 'Take off stream' : 'Show on stream',
+            icon: PreviewIcon,
+            onSelect: () => onHighlight?.(message)
+          }
+        ]
+      : []),
+    ...(onReply && (message.eventType === 'message' || message.eventType === 'paid')
+      ? [{ id: 'reply', label: 'Reply', icon: SendIcon, onSelect: () => onReply(message) }]
+      : []),
+    {
+      id: 'copy',
+      label: 'Copy',
+      icon: CopyIcon,
+      onSelect: () =>
+        void navigator.clipboard?.writeText(`${message.authorName}: ${message.messageText}`)
+    },
+    ...(onRemoveFromChat
+      ? [
+          {
+            id: 'remove-from-chat',
+            label: REMOVE_FROM_CHAT_LABEL,
+            icon: DeleteIcon,
+            destructive: true,
+            onSelect: () => onRemoveFromChat(message)
+          }
+        ]
+      : [])
+  ]
+}
+
 export function CommentRow({
   message,
   density = 'compact',
   timestamps = 'always',
   highlight = { phase: 'idle' },
+  removal,
   cohostFlag,
   cohostSuggested = false,
   cohostSpotlight = false,
   mentionNames = [],
   onHighlight,
   onReply,
+  onRemoveFromChat,
   ref,
   style,
   index
@@ -420,6 +532,8 @@ export function CommentRow({
   /** 'hover' keeps the time out of sight until the pointer is on the row. */
   timestamps?: CommentTimestamps
   highlight?: CommentHighlightPresentation
+  /** The removal chip (plan 140, S6), from `removalStatusView`. */
+  removal?: RemovalStatusView | null
   /** The co-host's flag for this message, already filtered by Sensitivity. */
   cohostFlag?: CohostFlag
   /** The co-host suggests showing this comment (`cohost.state.highlights`). */
@@ -431,6 +545,9 @@ export function CommentRow({
   onHighlight?: (message: LiveChatMessage) => void
   /** The Stream Manager's ⋯ Reply: prefills the composer with @name. */
   onReply?: (message: LiveChatMessage) => void
+  /** ⋯ Remove from chat (plan 140, S6). Pass it only for a row that can be
+   * removed now (`removeFromChatAvailable`); the backend re-checks. */
+  onRemoveFromChat?: (message: LiveChatMessage) => void
   /** Virtualized lists measure and place the row (plan 055, S10). */
   ref?: Ref<HTMLLIElement>
   style?: CSSProperties
@@ -448,35 +565,20 @@ export function CommentRow({
       highlight={highlight}
       mentioned={mentioned}
       message={message}
+      removal={removal}
       spotlight={cohostSpotlight && !cohostFlag}
       suggested={suggested}
       timestamps={timestamps}
     />
   )
-  const menu: KebabMenuItem[] = onReply
-    ? [
-        ...(highlightable
-          ? [
-              {
-                id: 'show',
-                label: highlight.phase === 'live' ? 'Remove from stream' : 'Show on stream',
-                icon: PreviewIcon,
-                onSelect: () => onHighlight?.(message)
-              }
-            ]
-          : []),
-        ...(message.eventType === 'message' || message.eventType === 'paid'
-          ? [{ id: 'reply', label: 'Reply', icon: SendIcon, onSelect: () => onReply(message) }]
-          : []),
-        {
-          id: 'copy',
-          label: 'Copy',
-          icon: CopyIcon,
-          onSelect: () =>
-            void navigator.clipboard?.writeText(`${message.authorName}: ${message.messageText}`)
-        }
-      ]
-    : []
+  const menu = commentRowMenu({
+    message,
+    highlightable,
+    highlightPhase: highlight.phase,
+    onHighlight,
+    onReply,
+    onRemoveFromChat
+  })
 
   return (
     <li
@@ -493,7 +595,7 @@ export function CommentRow({
         <Button
           aria-label={
             highlight.phase === 'live'
-              ? `Remove ${message.authorName}'s message from the stream`
+              ? `Take ${message.authorName}'s message off the stream`
               : suggested
                 ? `Show ${message.authorName}'s message on the stream (Orcle suggestion)`
                 : `Show ${message.authorName}'s message on the stream`
@@ -505,9 +607,7 @@ export function CommentRow({
             cohostSpotlight && highlight.phase !== 'live' && 'bg-accent',
             message.amountText && 'bg-warning/10 ring-1 ring-warning/30'
           )}
-          title={
-            highlight.phase === 'live' ? 'Remove from stream' : 'Show this message on the stream'
-          }
+          title={highlight.phase === 'live' ? 'Take off stream' : 'Show this message on the stream'}
           type="button"
           variant={highlight.phase === 'live' ? 'secondary' : 'ghost'}
           onClick={() => onHighlight?.(message)}

@@ -8,6 +8,7 @@ import {
 } from '@/components/clean-cut/clean-cut-card'
 import { CohostSettingsSection } from '@/components/cohost-settings-section'
 import { OrcleReportCard } from '@/components/orcle-report-card'
+import { OrcleVoiceCommands } from '@/components/orcle-voice-commands'
 import { PageHeader } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
@@ -242,6 +243,8 @@ function OrcleLiveSection(): ReactElement {
           </li>
         ))}
       </ul>
+
+      <OrcleVoiceCommands />
     </PanelSection>
   )
 }

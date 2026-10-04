@@ -146,7 +146,7 @@ import {
 } from '../shared/comments-snapshot-delta'
 import { normalizeLiveDashboardState, type LiveDashboardState } from '../shared/live-dashboard'
 import { sessionChatTotalsSchema } from '../shared/session-chat-totals'
-import { TWITCH_AUDIENCE_SCOPES } from '../shared/platform-scopes'
+import { isScopeReconnectPlatform, permissionReconnectScopes } from '../shared/platform-scopes'
 import {
   migrateStreamManagerFrame,
   STREAM_MANAGER_DEFAULT_SIZE,
@@ -398,6 +398,10 @@ import {
   COMMENTS_COMMAND_RELAY_TIMEOUT_MS,
   COMMENTS_HIGHLIGHT_RELAY_TIMEOUT_MS
 } from '../shared/comments-command-timing'
+import {
+  COMMENTS_MODERATION_RELAY_TIMEOUT_MS,
+  nextRelayedModerationOperations
+} from '../shared/chat-moderation'
 import { AccountRefreshBroker } from './account-refresh-broker'
 import { reconcileCommentsSendOperation } from '../shared/comments-send-operation'
 import {
@@ -448,6 +452,7 @@ import type {
   CaptionsUpdate,
   CaptionsWindowState,
   CohostActionCommand,
+  CohostCommandRelayCommand,
   CohostEnableCommand,
   CohostState,
   CohostWindowState,
@@ -457,6 +462,7 @@ import type {
   ClipMarkedEvent,
   CommentsClearCommand,
   CommentsCommandResolution,
+  CommentsModerationCommand,
   CommentsSendCommand,
   CommentsSendOperation,
   CommentsSnapshotDelta,
@@ -469,6 +475,7 @@ import type {
   LayoutSettings,
   LiveChatSnapshot,
   LiveChatMessage,
+  ModerationOperation,
   NativePreviewHostCommand,
   NotesDocument,
   NotesFontScale,
@@ -488,6 +495,7 @@ import type {
   PreviewSupervisorState,
   SceneSource,
   SceneTransform,
+  ScopeReconnectPlatform,
   StreamScreen,
   SystemPermissionPane,
   RuntimeInfo,
@@ -650,6 +658,9 @@ let latestLiveCommentsSnapshot: LiveChatSnapshot | null = null
 const commentsHistoryCache = new CommentsHistoryCache()
 const commentsViewSelection = new CommentsViewSelection({ kind: 'live' })
 let latestLiveCommentsSendOperation: CommentsSendOperation | undefined
+// The live session's chat removals (plan 140, S6), as Studio last published
+// them; the Stream Manager reads them from its snapshot.
+let latestLiveCommentsModerationOperations: ModerationOperation[] | undefined
 const commentsCommandBroker = new CommentsCommandBroker()
 type CommentsSmokeCommandFixture =
   | {
@@ -2986,7 +2997,10 @@ function currentCommentsView(): CommentsViewSnapshot | null {
         unreadCount: 0,
         updatedAt: new Date().toISOString()
       },
-      latestSendOperation: latestLiveCommentsSendOperation
+      latestSendOperation: latestLiveCommentsSendOperation,
+      ...(latestLiveCommentsModerationOperations
+        ? { moderationOperations: latestLiveCommentsModerationOperations }
+        : {})
     }
   }
   const cached = commentsHistoryCache.get(mode.sessionId)
@@ -3027,6 +3041,12 @@ function cacheCommentsView(view: CommentsViewSnapshot): void {
         ? reconcileCommentsSendOperation(latestLiveCommentsSendOperation, view.latestSendOperation)
         : undefined
     }
+    latestLiveCommentsModerationOperations = nextRelayedModerationOperations(
+      latestLiveCommentsModerationOperations,
+      view.moderationOperations,
+      next.sessionId,
+      sessionChanged
+    )
   } else {
     const existing = commentsHistoryCache.peek(view.mode.sessionId)
     const selectedMode = commentsViewSelection.current()
@@ -14131,6 +14151,32 @@ app.whenReady().then(async () => {
       return commentsCommandBroker.resolve(resolution)
     }
   )
+  // Answers to Orcle's voice command cards (plan 140, S6 part B), relayed like
+  // the Orcle actions above: the window names the command and its answer,
+  // the MAIN renderer makes the cohost.command.* call.
+  secureIpcHandle(
+    'comments-window:cohost-command',
+    (event, value: unknown): Promise<CohostState> => {
+      if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+        return Promise.reject(new Error('Only the Chat window can answer Orcle.'))
+      }
+      const requestId = commentsCommandRequestId(value)
+      const command = value as CohostCommandRelayCommand
+      assertLiveCommentsCommandSession(command.sessionId)
+      return commentsCommandBroker.request(requestId, () => {
+        if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+        sendElectronEvent(mainWindow.webContents, 'comments-window:cohost-command-request', command)
+        return true
+      })
+    }
+  )
+  secureIpcHandle(
+    'comments-window:cohost-command-result-push',
+    (event, resolution: CommentsCommandResolution<CohostState>) => {
+      if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+      return commentsCommandBroker.resolve(resolution)
+    }
+  )
   // Turning the co-host on from the window's presence popover / nudge. Unlike
   // the row actions this is deliberately session-independent: a streamer who
   // is not live yet is exactly who needs to find the switch.
@@ -14269,10 +14315,57 @@ app.whenReady().then(async () => {
       return commentsCommandBroker.resolve(resolution)
     }
   )
-  // Show who followed (plan 071, S2): main starts the Twitch reconnect with
-  // the follow and sub permissions over its admin socket and opens the
-  // browser. The callback completes it like any connect, and none of this
-  // rides in the main window's eager bundle.
+  // Chat removal relay (plan 140, S6): the Stream Manager asks, the MAIN
+  // renderer owns the backend socket and makes the liveChat.moderation.* call,
+  // and the operation comes back as the reply. The window can ask for one
+  // manual removal or answer an open card; it never picks the source, so a
+  // window can never start a voice-sourced (countdown) removal.
+  secureIpcHandle(
+    'comments-window:moderation',
+    (event, value: unknown): Promise<ModerationOperation> => {
+      if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+        return Promise.reject(new Error('Only the Chat window can remove chat messages.'))
+      }
+      const requestId = commentsCommandRequestId(value)
+      const command = value as CommentsModerationCommand
+      assertLiveCommentsCommandSession(command.sessionId)
+      return commentsCommandBroker.request(
+        requestId,
+        () => {
+          if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+          sendElectronEvent(mainWindow.webContents, 'comments-window:moderation-request', command)
+          return true
+        },
+        COMMENTS_MODERATION_RELAY_TIMEOUT_MS
+      )
+    }
+  )
+  secureIpcHandle(
+    'comments-window:moderation-result-push',
+    (event, resolution: CommentsCommandResolution<ModerationOperation>) => {
+      if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+      return commentsCommandBroker.resolve(resolution)
+    }
+  )
+  // A Stream Manager reconnect (plan 071, S2; plan 140, S5): main starts it
+  // over its admin socket and opens the browser. The callback completes it
+  // like any connect, and none of this rides in the main window's eager
+  // bundle. Main picks the scopes, always the platform's whole optional set,
+  // so a reconnect from here never drops the follow, sub or moderation grant.
+  const startScopeReconnect = async (platform: ScopeReconnectPlatform): Promise<boolean> => {
+    const redirectUri = oauthCallbackRedirectUri(platform)
+    const { authUrl } = await requestBackendAdmin<{ authUrl: string }>(
+      'platformAccounts.oauth.startProvider',
+      {
+        platform,
+        ...(redirectUri ? { redirectUri } : {}),
+        optionalScopes: [...permissionReconnectScopes(platform)]
+      }
+    )
+    await openOAuthUrl(authUrl)
+    return true
+  }
+  // Show who followed (plan 071, S2): a Twitch reconnect.
   secureIpcHandle(
     'comments-window:follow-names',
     async (event, value: unknown): Promise<boolean> => {
@@ -14283,17 +14376,24 @@ app.whenReady().then(async () => {
       if ((value as { platform?: unknown }).platform !== 'twitch') {
         throw new Error('Only Twitch needs a reconnect to show who followed.')
       }
-      const redirectUri = oauthCallbackRedirectUri('twitch')
-      const { authUrl } = await requestBackendAdmin<{ authUrl: string }>(
-        'platformAccounts.oauth.startProvider',
-        {
-          platform: 'twitch',
-          ...(redirectUri ? { redirectUri } : {}),
-          optionalScopes: [...TWITCH_AUDIENCE_SCOPES]
-        }
-      )
-      await openOAuthUrl(authUrl)
-      return true
+      return startScopeReconnect('twitch')
+    }
+  )
+  // "Reconnect Twitch to let Orcle remove messages" (plan 140, S5). The
+  // runtime contract already admits only {requestId, platform: twitch | kick};
+  // the checks below keep the handler safe on its own.
+  secureIpcHandle(
+    'comments-window:reconnect-scopes',
+    async (event, value: unknown): Promise<boolean> => {
+      if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+        throw new Error('Only the Chat window can ask to reconnect an account.')
+      }
+      commentsCommandRequestId(value)
+      const platform = (value as { platform?: unknown }).platform
+      if (!isScopeReconnectPlatform(platform)) {
+        throw new Error('Only Twitch and Kick reconnect from the Stream Manager.')
+      }
+      return startScopeReconnect(platform)
     }
   )
   secureIpcHandle('captions-window:open', () => openCaptionsWindow())

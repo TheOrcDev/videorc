@@ -4,9 +4,11 @@ import { createServer } from 'node:http'
 // backend points every YouTube client at it through
 // `VIDEORC_YOUTUBE_API_BASE_URL`: OAuth token exchange, channels, broadcast
 // prepare/bind/transition, liveStreams, liveChat list and insert, videos and
-// the thumbnail upload. It records every request, and `controls.quotaExhausted`
-// flips every Data API route to Google's 403 `quotaExceeded` envelope on
-// command. Never accepts anything but its own fixture token.
+// the thumbnail upload, and the chat message delete (plan 140: 204, 50 units).
+// It records every request, `controls.quotaExhausted` flips every Data API
+// route to Google's 403 `quotaExceeded` envelope on command, and
+// `controls.deleteFailure` scripts the delete. Never accepts anything but its
+// own fixture token.
 
 export const FAKE_YOUTUBE_ACCESS_TOKEN = 'smoke-youtube-token'
 export const FAKE_YOUTUBE_REFRESH_TOKEN = 'smoke-youtube-refresh'
@@ -53,6 +55,7 @@ export function youtubeAttemptCost(method, path) {
     'POST liveBroadcasts': 'liveBroadcasts.insert',
     'PUT liveBroadcasts': 'liveBroadcasts.update',
     'DELETE liveBroadcasts': 'liveBroadcasts.delete',
+    'DELETE liveChat/messages': 'liveChatMessages.delete',
     'POST liveBroadcasts/bind': 'liveBroadcasts.bind',
     'POST liveBroadcasts/transition': 'liveBroadcasts.transition',
     'POST liveStreams': 'liveStreams.insert',
@@ -110,10 +113,13 @@ export async function startFakeYouTubeApi({
   concurrentViewers = 7
 } = {}) {
   const requests = []
-  const controls = { quotaExhausted: false }
+  // `deleteFailure` scripts every `liveChatMessages.delete`: null answers 204;
+  // 'forbidden' is a 403 insufficientPermissions (missing scope), 'not-found'
+  // a 404, 'quota' the 403 quotaExceeded envelope.
+  const controls = { quotaExhausted: false, deleteFailure: null }
   const broadcasts = new Map()
   const streams = new Map()
-  const chat = { messages: [], sent: [] }
+  const chat = { messages: [], sent: [], deleted: [] }
   let counter = 0
   let autoChat = null
 
@@ -311,6 +317,24 @@ export async function startFakeYouTubeApi({
       }
       case '/youtube/v3/liveChat/messages':
       case '/youtube/v3/liveChat/messages/stream': {
+        if (request.method === 'DELETE' && url.pathname === '/youtube/v3/liveChat/messages') {
+          // Plan 140: `liveChatMessages.delete` answers 204 with no body. The
+          // message stays in the list so page tokens (indexes) never shift.
+          const id = url.searchParams.get('id') ?? ''
+          const failure = deleteFailureResponse(controls.deleteFailure)
+          if (failure) {
+            send(failure.body, failure.status)
+            return
+          }
+          if (!id || !chat.messages.some((message) => message.id === id)) {
+            send(notFound('liveChatMessageNotFound'), 404)
+            return
+          }
+          chat.deleted.push(id)
+          record.status = 204
+          response.writeHead(204).end()
+          return
+        }
         if (request.method === 'POST') {
           const text = body?.snippet?.textMessageDetails?.messageText ?? ''
           const sent = postChat(text, 'videorc_streamer')
@@ -383,6 +407,35 @@ export async function startFakeYouTubeApi({
         server.close(() => resolveClose())
       })
     }
+  }
+}
+
+/** Pure: the scripted answer for a `liveChatMessages.delete`, or null for 204. */
+export function deleteFailureResponse(mode) {
+  switch (mode) {
+    case 'forbidden':
+      return {
+        status: 403,
+        body: {
+          error: {
+            code: 403,
+            message: 'Request had insufficient authentication scopes.',
+            errors: [
+              {
+                domain: 'global',
+                reason: 'insufficientPermissions',
+                message: 'Insufficient Permission'
+              }
+            ]
+          }
+        }
+      }
+    case 'not-found':
+      return { status: 404, body: notFound('liveChatMessageNotFound') }
+    case 'quota':
+      return { status: 403, body: quotaExceededBody() }
+    default:
+      return null
   }
 }
 

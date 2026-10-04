@@ -24,11 +24,13 @@ import type { EntitlementUiGate } from './entitlement-ui'
 export {
   applyCohostState,
   COHOST_ERROR_TOAST_MESSAGES,
+  COHOST_STOPPED_TOAST_MESSAGES,
   cohostErrorDetail,
   cohostErrorToast,
   cohostErrorToastKey,
   cohostErrorToastMessage,
   cohostHighlightMessageId,
+  cohostStoppedToast,
   type CohostErrorToast
 } from './cohost-state'
 
@@ -46,6 +48,17 @@ export const COHOST_CHAT_CONSENT_SENTENCE = 'Orcle reads live chat with Videorc 
  * Orcle on also turns listening on (Orcle Live, plan 119), so the sentence
  * names both halves as what happens, not as an option.
  */
+/**
+ * Orcle acts only when asked (plan 140). The full sentence is the Orcle tab's
+ * and the pane hint's tooltip; the pane's action bar shows its first half.
+ */
+export const COHOST_ACTS_ON_ASK_COPY =
+  'Orcle never acts on its own. It removes a comment only when you tell it to.'
+export const COHOST_ACTS_ON_ASK_HINT = 'Orcle never acts on its own.'
+
+/** The flag row's "Remove from chat" key (plan 140, S6): ⌫ alone dismisses. */
+export const COHOST_REMOVE_FLAGGED_KEY = '⇧⌫'
+
 export const COHOST_CONSENT_SENTENCE = `${COHOST_CHAT_CONSENT_SENTENCE} While you're live it also hears you: your microphone audio goes to Videorc's cloud speech-to-text to be turned into text. Videorc servers don't keep it. The transcript is saved with your recording on this computer.`
 
 /** The listening half, as the description of the listening switch under the
@@ -380,8 +393,9 @@ const COHOST_FLAG_ACTION_LABELS: Record<CohostFlagAction, string> = {
   ban: 'Suggests ban'
 }
 
-/** A suggestion LABEL only — the co-host never moderates, and neither does
- * this chip. Null when the server suggested nothing. */
+/** A suggestion LABEL only: Orcle never moderates on its own, and neither
+ * does this chip. Only the streamer's "Remove from chat" removes anything.
+ * Null when the server suggested nothing. */
 export function cohostFlagActionLabel(flag: Pick<CohostFlag, 'action'>): string | null {
   return flag.action ? (COHOST_FLAG_ACTION_LABELS[flag.action] ?? null) : null
 }

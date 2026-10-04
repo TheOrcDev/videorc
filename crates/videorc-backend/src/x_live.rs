@@ -1338,6 +1338,129 @@ pub async fn send_broadcast_chat_message(
         .to_string())
 }
 
+/// The hide reason the moderation engine shows after "Viewers on X still see it."
+pub const X_MODERATE_REAUTHORIZE_REASON: &str =
+    "Authorize X Live again to let Orcle remove messages.";
+
+/// X chat message ids are snowflake-sized decimal strings. The relay's
+/// `messageId` is validated to this shape before it ever becomes a path
+/// segment (plan 140, pending the owner's live id check).
+pub fn x_chat_message_id_is_valid(message_id: &str) -> bool {
+    !message_id.is_empty()
+        && message_id.len() <= 19
+        && message_id
+            .chars()
+            .all(|character| character.is_ascii_digit())
+}
+
+/// Remove one chat message from a LIVE broadcast (plan 140 S4):
+/// `DELETE /2/broadcasts/{broadcast_id}/chat/{message_id}` answers
+/// `{"data":{"deleted":true}}` for the owner or a chat moderator, with the
+/// same OAuth 1.0a "Authorize X Live" credentials the chat send uses.
+pub async fn delete_broadcast_chat_message(
+    client: &reqwest::Client,
+    credentials: &XLivestreamCredentials,
+    base_url: &str,
+    broadcast_id: &str,
+    message_id: &str,
+) -> crate::live_chat_moderation::ProviderDeleteOutcome {
+    use crate::live_chat_moderation::{ModerationOutcomeCode, ProviderDeleteOutcome};
+
+    let message_id = message_id.trim();
+    if !x_chat_message_id_is_valid(message_id) {
+        return ProviderDeleteOutcome::CannotDelete {
+            code: ModerationOutcomeCode::Unsupported,
+            reason: "X gave this message an id Videorc cannot remove.".to_string(),
+        };
+    }
+    let broadcast_id = broadcast_id.trim();
+    if broadcast_id.is_empty()
+        || !broadcast_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return ProviderDeleteOutcome::Failed(
+            "X needs the broadcast id to remove a chat message; nothing was sent.".to_string(),
+        );
+    }
+    let url = match endpoint(
+        base_url,
+        &format!("/2/broadcasts/{broadcast_id}/chat/{message_id}"),
+    ) {
+        Ok(url) => url,
+        Err(error) => {
+            return ProviderDeleteOutcome::Failed(format!(
+                "X chat endpoint could not be built: {error}"
+            ));
+        }
+    };
+    let authorization = match oauth1_authorization_header(
+        "DELETE",
+        url.as_str(),
+        credentials,
+        &oauth_nonce(),
+        oauth_timestamp(),
+    ) {
+        Ok(authorization) => authorization,
+        Err(error) => {
+            return ProviderDeleteOutcome::Failed(format!(
+                "X chat request could not be signed: {error}"
+            ));
+        }
+    };
+    let response = match client
+        .delete(url)
+        .header("Authorization", authorization)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return ProviderDeleteOutcome::Transient(format!(
+                "Could not reach X to remove the chat message: {error}"
+            ));
+        }
+    };
+    let status = response.status().as_u16();
+    let body: serde_json::Value = response.json().await.unwrap_or_default();
+    classify_x_delete_response(status, &body)
+}
+
+/// Pure: what an X chat delete status and body mean. A 2xx without
+/// `data.deleted: true` is not a removal; 400 is X refusing because the
+/// broadcast is not running.
+pub(crate) fn classify_x_delete_response(
+    status: u16,
+    body: &serde_json::Value,
+) -> crate::live_chat_moderation::ProviderDeleteOutcome {
+    use crate::live_chat_moderation::{ModerationOutcomeCode, ProviderDeleteOutcome};
+
+    match status {
+        200..=299 => {
+            if body
+                .pointer("/data/deleted")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                ProviderDeleteOutcome::Deleted
+            } else {
+                ProviderDeleteOutcome::Failed("X did not confirm the removal.".to_string())
+            }
+        }
+        404 => ProviderDeleteOutcome::NotFound,
+        400 => ProviderDeleteOutcome::CannotDelete {
+            code: ModerationOutcomeCode::Unsupported,
+            reason: "X only removes messages while the broadcast is live.".to_string(),
+        },
+        401 | 403 => ProviderDeleteOutcome::CannotDelete {
+            code: ModerationOutcomeCode::MissingScope,
+            reason: X_MODERATE_REAUTHORIZE_REASON.to_string(),
+        },
+        429 | 500..=599 => ProviderDeleteOutcome::Transient(format!("X answered HTTP {status}.")),
+        _ => ProviderDeleteOutcome::Failed(format!("X removal failed with HTTP {status}.")),
+    }
+}
+
 pub const X_BROADCAST_CHAT_EVENT_TYPE: &str = "broadcast.chat";
 /// Someone followed (inbound) or the user followed someone (outbound);
 /// Videorc subscribes inbound only (plan 071, S4).
@@ -2523,5 +2646,173 @@ mod tests {
             "backend-id"
         );
         assert!(select_x_account(&accounts, Some("missing")).is_err());
+    }
+
+    // --- Removing (plan 140 S4) ----------------------------------------------------
+
+    #[test]
+    fn x_chat_message_ids_are_one_to_nineteen_digits() {
+        assert!(x_chat_message_id_is_valid("1"));
+        assert!(x_chat_message_id_is_valid("1759600000000000000"));
+        assert!(!x_chat_message_id_is_valid(""));
+        assert!(!x_chat_message_id_is_valid("17596000000000000000"));
+        assert!(!x_chat_message_id_is_valid("12a"));
+        assert!(!x_chat_message_id_is_valid("-1"));
+        assert!(!x_chat_message_id_is_valid("1 2"));
+    }
+
+    #[tokio::test]
+    async fn delete_signs_the_request_and_reads_deleted_true() {
+        use crate::live_chat_moderation::{ModerationOutcomeCode, ProviderDeleteOutcome};
+        use axum::Router;
+        use axum::extract::Path;
+        use axum::http::HeaderMap;
+        use axum::routing::delete;
+        use std::sync::{Arc, Mutex};
+        let seen: Arc<Mutex<Vec<(String, String, String)>>> = Arc::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let recorder = seen.clone();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/2/broadcasts/{broadcast}/chat/{message}",
+                    delete(
+                        move |Path((broadcast, message)): Path<(String, String)>,
+                              headers: HeaderMap| {
+                            let recorder = recorder.clone();
+                            async move {
+                                let authorization = headers
+                                    .get("authorization")
+                                    .and_then(|value| value.to_str().ok())
+                                    .unwrap_or_default()
+                                    .to_string();
+                                recorder.lock().unwrap().push((
+                                    broadcast,
+                                    message.clone(),
+                                    authorization,
+                                ));
+                                if message == "404" {
+                                    (
+                                        axum::http::StatusCode::NOT_FOUND,
+                                        axum::Json(json!({"errors":[{"message":"not found"}]})),
+                                    )
+                                } else if message == "401" {
+                                    (axum::http::StatusCode::UNAUTHORIZED, axum::Json(json!({})))
+                                } else if message == "200" {
+                                    (
+                                        axum::http::StatusCode::OK,
+                                        axum::Json(json!({"data":{"deleted":false}})),
+                                    )
+                                } else {
+                                    (
+                                        axum::http::StatusCode::OK,
+                                        axum::Json(json!({"data":{"deleted":true}})),
+                                    )
+                                }
+                            }
+                        },
+                    ),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let base = format!("http://{address}");
+        assert_eq!(
+            delete_broadcast_chat_message(&client, &credentials(), &base, "1AbCdEf", "1759600")
+                .await,
+            ProviderDeleteOutcome::Deleted
+        );
+        {
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), 1);
+            assert_eq!(seen[0].0, "1AbCdEf");
+            assert_eq!(seen[0].1, "1759600");
+            assert!(seen[0].2.starts_with("OAuth "), "{}", seen[0].2);
+            assert!(
+                seen[0].2.contains("oauth_token=\"12345-token\""),
+                "{}",
+                seen[0].2
+            );
+        }
+        assert_eq!(
+            delete_broadcast_chat_message(&client, &credentials(), &base, "1AbCdEf", "404").await,
+            ProviderDeleteOutcome::NotFound
+        );
+        assert_eq!(
+            delete_broadcast_chat_message(&client, &credentials(), &base, "1AbCdEf", "401").await,
+            ProviderDeleteOutcome::CannotDelete {
+                code: ModerationOutcomeCode::MissingScope,
+                reason: X_MODERATE_REAUTHORIZE_REASON.to_string(),
+            }
+        );
+        assert_eq!(
+            delete_broadcast_chat_message(&client, &credentials(), &base, "1AbCdEf", "200").await,
+            ProviderDeleteOutcome::Failed("X did not confirm the removal.".to_string())
+        );
+        // An id outside the 1-19 digit shape never becomes a request.
+        for bad in ["", "abc", "17596000000000000000", "../x"] {
+            let outcome =
+                delete_broadcast_chat_message(&client, &credentials(), &base, "1AbCdEf", bad).await;
+            assert!(
+                matches!(
+                    outcome,
+                    ProviderDeleteOutcome::CannotDelete {
+                        code: ModerationOutcomeCode::Unsupported,
+                        ..
+                    }
+                ),
+                "{bad:?}: {outcome:?}"
+            );
+        }
+        assert!(matches!(
+            delete_broadcast_chat_message(&client, &credentials(), &base, "", "1759600").await,
+            ProviderDeleteOutcome::Failed(_)
+        ));
+        assert_eq!(seen.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn x_delete_answers_classify_by_status() {
+        use crate::live_chat_moderation::{ModerationOutcomeCode, ProviderDeleteOutcome};
+        assert_eq!(
+            classify_x_delete_response(200, &json!({"data":{"deleted":true}})),
+            ProviderDeleteOutcome::Deleted
+        );
+        assert!(matches!(
+            classify_x_delete_response(200, &json!({})),
+            ProviderDeleteOutcome::Failed(_)
+        ));
+        assert_eq!(
+            classify_x_delete_response(404, &json!({})),
+            ProviderDeleteOutcome::NotFound
+        );
+        assert_eq!(
+            classify_x_delete_response(400, &json!({})),
+            ProviderDeleteOutcome::CannotDelete {
+                code: ModerationOutcomeCode::Unsupported,
+                reason: "X only removes messages while the broadcast is live.".to_string(),
+            }
+        );
+        for status in [401, 403] {
+            assert_eq!(
+                classify_x_delete_response(status, &json!({})),
+                ProviderDeleteOutcome::CannotDelete {
+                    code: ModerationOutcomeCode::MissingScope,
+                    reason: X_MODERATE_REAUTHORIZE_REASON.to_string(),
+                }
+            );
+        }
+        assert!(matches!(
+            classify_x_delete_response(503, &json!({})),
+            ProviderDeleteOutcome::Transient(_)
+        ));
+        assert!(matches!(
+            classify_x_delete_response(418, &json!({})),
+            ProviderDeleteOutcome::Failed(_)
+        ));
     }
 }

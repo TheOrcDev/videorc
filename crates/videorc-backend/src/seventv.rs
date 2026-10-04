@@ -2012,6 +2012,7 @@ mod tests {
             account_label: None,
             read: CommentsReadState::Ready,
             write: CommentsWriteState::Unavailable,
+            moderate: None,
             state: LiveChatProviderConnectionState::Connected,
             message: String::new(),
             last_connected_at: None,

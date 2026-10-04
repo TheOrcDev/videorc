@@ -474,7 +474,9 @@
       "autoHighlight": false,
       "voiceHighlight": true,
       "rules": ["No spoilers", "English only"],
-      "listen": true
+      "listen": true,
+      "wakeWordRequired": true,
+      "removeConfirm": "countdown"
     },
     "settings": {
       "enabled": true,
@@ -483,7 +485,9 @@
       "autoHighlight": false,
       "voiceHighlight": false,
       "rules": [],
-      "listen": false
+      "listen": false,
+      "wakeWordRequired": false,
+      "removeConfirm": "confirm"
     },
     "state": {
       "sessionId": "session-fixture",
@@ -807,7 +811,17 @@
       "alerts": [
         { "kind": "audio", "peakViewers": 2, "active": true, "firstSeenAt": "2026-08-22T10:40:00Z" }
       ],
-      "recap": { "offered": 1, "drafted": 0, "dismissed": 1 }
+      "recap": { "offered": 1, "drafted": 0, "dismissed": 1 },
+      "commands": {
+        "highlighted": 3,
+        "cleared": 1,
+        "removed": 1,
+        "hiddenLocally": 1,
+        "cancelled": 1,
+        "expired": 0,
+        "failed": 0,
+        "notFound": 2
+      }
     },
     "reportPayload": {
       "sessionId": "session-fixture",
@@ -876,6 +890,168 @@
       "report": null,
       "moments": [],
       "chat": { "messages": 0, "byPlatform": [] }
+    },
+    "commandChooseParams": { "commandId": "cmd-11111111-1111-4111-8111-111111111111", "index": 1 },
+    "commandParams": { "commandId": "cmd-0f1e2d3c-4b5a-4968-8777-66554433aabb" },
+    "commandState": {
+      "sessionId": "session-fixture",
+      "status": "listening",
+      "reason": null,
+      "detail": null,
+      "questions": [],
+      "flags": [],
+      "mood": null,
+      "lastTickAt": null,
+      "tickSeq": 0,
+      "partial": false,
+      "tickInFlight": false,
+      "pendingMessages": 0,
+      "nextTickAt": null,
+      "messagesSeen": 3,
+      "questionsTotal": 0,
+      "command": {
+        "id": "cmd-0f1e2d3c-4b5a-4968-8777-66554433aabb",
+        "heard": "this one is toxic remove it from our chat",
+        "kind": "remove",
+        "status": "confirm",
+        "message": "Remove coders_x's comment?",
+        "target": {
+          "messageId": "session-fixture:twitch:default:message-fixture",
+          "authorName": "coders_x",
+          "platform": "twitch",
+          "excerpt": "this stream is trash"
+        },
+        "operationId": "0f1e2d3c-4b5a-4968-8777-66554433aabb",
+        "reason": "toxic",
+        "at": "2026-10-04T12:00:00Z",
+        "expiresAt": "2026-10-04T12:00:20Z"
+      },
+      "commandAvailability": { "voiceCommands": "on", "remove": "paused" }
+    },
+    "chooserState": {
+      "sessionId": "session-fixture",
+      "status": "listening",
+      "reason": null,
+      "detail": null,
+      "questions": [],
+      "flags": [],
+      "mood": null,
+      "lastTickAt": null,
+      "tickSeq": 0,
+      "partial": false,
+      "tickInFlight": false,
+      "pendingMessages": 0,
+      "nextTickAt": null,
+      "messagesSeen": 3,
+      "questionsTotal": 0,
+      "command": {
+        "id": "cmd-11111111-1111-4111-8111-111111111111",
+        "heard": "orcle highlight the comment from coders",
+        "kind": "highlight",
+        "status": "ambiguous",
+        "message": "Which comment? Say 'the first one' or press 1 or 2.",
+        "candidates": [
+          {
+            "messageId": "session-fixture:youtube:default:message-coders-y",
+            "authorName": "coders_y",
+            "platform": "youtube",
+            "excerpt": "Which editor is that?"
+          },
+          {
+            "messageId": "session-fixture:twitch:default:message-fixture",
+            "authorName": "coders_x",
+            "platform": "twitch",
+            "excerpt": "Is Rust hard?"
+          }
+        ],
+        "at": "2026-10-04T12:00:00Z",
+        "expiresAt": "2026-10-04T12:00:20Z"
+      }
+    }
+  },
+  "moderation": {
+    "requestParams": {
+      "operationId": "0f1e2d3c-4b5a-4968-8777-66554433aabb",
+      "messageId": "session-fixture:twitch:default:message-fixture",
+      "source": "orcle-voice",
+      "reason": "toxic",
+      "confirmMode": "confirm"
+    },
+    "manualRequestParams": {
+      "operationId": "1a2b3c4d-5e6f-4071-8293-a4b5c6d7e8f9",
+      "messageId": "session-fixture:twitch:default:message-fixture",
+      "source": "manual"
+    },
+    "confirmParams": { "operationId": "0f1e2d3c-4b5a-4968-8777-66554433aabb" },
+    "listParams": { "sessionId": "session-fixture" },
+    "pendingOperation": {
+      "operationId": "0f1e2d3c-4b5a-4968-8777-66554433aabb",
+      "sessionId": "session-fixture",
+      "messageId": "session-fixture:twitch:default:message-fixture",
+      "platform": "twitch",
+      "authorName": "coders_x",
+      "excerpt": "this stream is trash",
+      "source": "orcle-voice",
+      "reason": "toxic",
+      "phase": "pending-confirm",
+      "confirmMode": "confirm",
+      "requiresExplicitConfirm": true,
+      "confirmBy": "2026-10-04T12:00:20Z",
+      "createdAt": "2026-10-04T12:00:00Z",
+      "updatedAt": "2026-10-04T12:00:00Z"
+    },
+    "removedOperation": {
+      "operationId": "1a2b3c4d-5e6f-4071-8293-a4b5c6d7e8f9",
+      "sessionId": "session-fixture",
+      "messageId": "session-fixture:twitch:default:message-fixture",
+      "platform": "twitch",
+      "targetId": "twitch-target-fixture",
+      "authorName": "coders_x",
+      "excerpt": "this stream is trash",
+      "source": "manual",
+      "phase": "removed",
+      "confirmMode": "confirm",
+      "requiresExplicitConfirm": false,
+      "outcome": "Removed from Twitch.",
+      "outcomeCode": "removed",
+      "createdAt": "2026-10-04T12:01:00Z",
+      "updatedAt": "2026-10-04T12:01:01Z"
+    },
+    "hiddenOperation": {
+      "operationId": "2b3c4d5e-6f70-4182-93a4-b5c6d7e8f901",
+      "sessionId": "session-fixture",
+      "messageId": "session-fixture:youtube:default:yt-fixture",
+      "platform": "youtube",
+      "authorName": "coders_x",
+      "excerpt": "buy my coins at scam dot example",
+      "source": "orcle-voice",
+      "reason": "spam",
+      "phase": "hidden-locally",
+      "confirmMode": "countdown",
+      "requiresExplicitConfirm": true,
+      "confirmBy": "2026-10-04T12:02:20Z",
+      "outcome": "Hidden in Videorc. Viewers on YouTube still see it. YouTube removals are paused for today to save Videorc's daily YouTube limit.",
+      "outcomeCode": "quota-paused",
+      "createdAt": "2026-10-04T12:02:00Z",
+      "updatedAt": "2026-10-04T12:02:09Z"
+    },
+    "removedMessage": {
+      "id": "session-fixture:twitch:default:message-fixture",
+      "providerMessageId": "message-fixture",
+      "platform": "twitch",
+      "targetId": "twitch-target-fixture",
+      "sessionId": "session-fixture",
+      "authorId": "1002",
+      "authorName": "coders_x",
+      "authorBadges": [],
+      "authorRoles": [],
+      "publishedAt": "2026-10-04T11:59:50Z",
+      "receivedAt": "2026-10-04T11:59:50.200Z",
+      "messageText": "Removed by you",
+      "fragments": [],
+      "eventType": "deleted",
+      "isDeleted": true,
+      "rawProviderType": "videorc.removed"
     }
   },
   "clip": {

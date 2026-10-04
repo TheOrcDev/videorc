@@ -2,12 +2,15 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
-import { StreamManager } from '@/components/stream-manager/stream-manager'
+import { StreamManager, type StreamManagerProps } from '@/components/stream-manager/stream-manager'
 import type {
   CohostQuestion,
   CommentHighlightState,
   LiveChatMessage,
-  LiveChatSnapshot
+  LiveChatProviderState,
+  LiveChatSnapshot,
+  ModerationOperation,
+  StreamPlatform
 } from '@/lib/backend'
 import { EMPTY_COHOST_STATE } from '@/lib/cohost-view'
 import { emptyLiveDashboardState } from '../../../../shared/live-dashboard'
@@ -129,6 +132,173 @@ describe('StreamManager highlight slot (plan 095, S2)', () => {
     expect(markup).not.toContain('data-slot="pane-on-stream"')
     expect(markup).not.toContain('data-highlight-phase="live"')
     expect(markup).not.toMatch(/data-variant="success"[^>]*>On stream</)
+  })
+})
+
+describe('StreamManager Remove messages reconnect (plan 140, S5)', () => {
+  // The backend's per-destination `moderate` state (S4) drives the rows.
+  const provider = (platform: StreamPlatform, moderate: string): LiveChatProviderState =>
+    ({
+      id: `${platform}-destination`,
+      platform,
+      read: 'ready',
+      write: 'ready',
+      state: 'connected',
+      message: '',
+      moderate
+    }) as LiveChatProviderState
+  const missing = [
+    provider('twitch', 'missing-scope'),
+    provider('youtube', 'missing-scope'),
+    provider('kick', 'ready')
+  ]
+  const renderWith = (patch: Partial<StreamManagerProps>): string =>
+    renderToStaticMarkup(
+      createElement(StreamManager, {
+        snapshot: { ...snapshot, providers: missing },
+        dashboard: null,
+        cohostGate: { allowed: true },
+        cohostConsented: true,
+        cohostEnabled: true,
+        cohostState: { ...EMPTY_COHOST_STATE, sessionId: 's1', status: 'listening' },
+        onReconnectScopes: () => undefined,
+        ...patch
+      })
+    )
+
+  it('puts one quiet row in the Orcle pane for each platform missing the permission', () => {
+    const markup = renderWith({})
+    const orcle = markup.slice(markup.indexOf('data-slot="orcle-pane"'))
+    expect(orcle).toContain('data-slot="remove-messages-reconnect"')
+    expect(orcle).toContain('Reconnect Twitch to let Orcle remove messages.')
+    expect(markup.match(/to let Orcle remove messages/g)).toHaveLength(1)
+    expect(markup).not.toContain('Reconnect YouTube')
+    expect(markup).not.toContain('Reconnect Kick')
+  })
+
+  it('stays away in history, without a handler, and when nothing is missing', () => {
+    expect(
+      renderWith({
+        viewMode: {
+          kind: 'history',
+          sessionId: 's1',
+          title: 'Earlier stream',
+          startedAt: '2026-10-02T10:00:00Z'
+        }
+      })
+    ).not.toContain('remove-messages-reconnect')
+    expect(renderWith({ onReconnectScopes: undefined })).not.toContain('remove-messages-reconnect')
+    expect(
+      renderWith({
+        snapshot: { ...snapshot, providers: [provider('twitch', 'ready')] }
+      })
+    ).not.toContain('remove-messages-reconnect')
+  })
+})
+
+describe('StreamManager removal cards (plan 140, S6)', () => {
+  const pending: ModerationOperation = {
+    operationId: '6f1c2e9a-3b7d-4c51-9e2f-0a1b2c3d4e5f',
+    sessionId: 's1',
+    messageId: chat.id,
+    platform: 'twitch',
+    authorName: 'Ada',
+    excerpt: 'What keyboard is that?',
+    source: 'orcle-voice',
+    reason: 'spam',
+    phase: 'pending-confirm',
+    confirmMode: 'confirm',
+    requiresExplicitConfirm: true,
+    confirmBy: '2099-01-01T00:00:00Z',
+    createdAt: '2026-10-04T12:00:00Z',
+    updatedAt: '2026-10-04T12:00:00Z'
+  }
+  const renderWith = (patch: Partial<StreamManagerProps>): string =>
+    renderToStaticMarkup(
+      createElement(StreamManager, {
+        snapshot,
+        dashboard: null,
+        cohostGate: { allowed: true },
+        cohostConsented: true,
+        cohostEnabled: true,
+        cohostState: { ...EMPTY_COHOST_STATE, sessionId: 's1', status: 'listening' },
+        onReconnectScopes: () => undefined,
+        moderationOperations: [pending],
+        onAnswerRemoval: () => undefined,
+        onRemoveFromChat: () => undefined,
+        ...patch
+      })
+    )
+
+  it('puts the open card at the top of the Orcle pane, above everything that scrolls', () => {
+    const markup = renderWith({})
+    const orcle = markup.slice(markup.indexOf('data-slot="orcle-pane"'))
+    const cards = orcle.indexOf('data-slot="removal-cards"')
+    expect(cards).toBeGreaterThan(orcle.indexOf('data-slot="orcle-pane-header"'))
+    expect(cards).toBeLessThan(orcle.indexOf('data-slot="cohost-pane"'))
+    expect(orcle).toContain('Remove from chat?')
+    expect(orcle).toContain('spam')
+    // Only the Orcle pane carries cards.
+    expect(markup.match(/data-slot="removal-card"/g)).toHaveLength(1)
+  })
+
+  it('puts what Orcle heard, then the chooser, above the removal cards (part B)', () => {
+    const markup = renderWith({
+      onAnswerCommand: () => undefined,
+      cohostState: {
+        ...EMPTY_COHOST_STATE,
+        sessionId: 's1',
+        status: 'listening',
+        command: {
+          id: 'cmd-1',
+          heard: 'orcle remove it',
+          kind: 'remove',
+          status: 'ambiguous',
+          message: 'Which comment?',
+          candidates: [
+            { messageId: chat.id, authorName: 'Ada', platform: 'twitch', excerpt: 'hi' }
+          ],
+          at: '2099-01-01T00:00:00Z',
+          expiresAt: '2099-01-01T00:00:20Z'
+        }
+      }
+    })
+    const orcle = markup.slice(markup.indexOf('data-slot="orcle-pane"'))
+    const strip = orcle.indexOf('data-slot="command-strip"')
+    const chooser = orcle.indexOf('data-slot="command-chooser"')
+    expect(strip).toBeGreaterThan(-1)
+    expect(chooser).toBeGreaterThan(strip)
+    expect(orcle.indexOf('data-slot="removal-cards"')).toBeGreaterThan(chooser)
+    expect(orcle).toContain('Heard: “orcle remove it”')
+    // History never shows a command.
+    expect(
+      renderWith({
+        onAnswerCommand: () => undefined,
+        viewMode: {
+          kind: 'history',
+          sessionId: 's1',
+          title: 'Earlier stream',
+          startedAt: '2026-10-02T10:00:00Z'
+        }
+      })
+    ).not.toContain('data-slot="command-strip"')
+  })
+
+  it('never shows a card in history, without a handler, or for a manual removal', () => {
+    expect(
+      renderWith({
+        viewMode: {
+          kind: 'history',
+          sessionId: 's1',
+          title: 'Earlier stream',
+          startedAt: '2026-10-02T10:00:00Z'
+        }
+      })
+    ).not.toContain('data-slot="removal-card"')
+    expect(renderWith({ onAnswerRemoval: undefined })).not.toContain('data-slot="removal-card"')
+    expect(
+      renderWith({ moderationOperations: [{ ...pending, source: 'manual', phase: 'executing' }] })
+    ).not.toContain('data-slot="removal-card"')
   })
 })
 

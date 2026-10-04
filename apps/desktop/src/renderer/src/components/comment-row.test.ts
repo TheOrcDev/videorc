@@ -4,12 +4,15 @@ import { describe, expect, it } from 'vitest'
 
 import {
   CommentRow,
+  RemovalStatus,
   commentCanHighlight,
   commentHighlightPresentationForMessage,
+  commentRowMenu,
   formatCommentTime,
   type CommentHighlightPresentation
 } from '@/components/comment-row'
 import type { LiveChatMessage } from '@/lib/backend'
+import { removalStatusView, removeFromChatAvailable } from '@/lib/chat-removal-view'
 
 function message(overrides: Partial<LiveChatMessage> = {}): LiveChatMessage {
   return {
@@ -202,5 +205,133 @@ describe('CommentRow: Talking about this', () => {
     )
     expect(quiet).not.toContain('Talking about this')
     expect(quiet).not.toContain('data-spotlight')
+  })
+})
+
+describe('CommentRow: Remove from chat (plan 140, S6)', () => {
+  const remove = (): void => undefined
+  const reply = (): void => undefined
+  const menuIds = (target: LiveChatMessage, onRemoveFromChat?: () => void): string[] =>
+    commentRowMenu({
+      message: target,
+      highlightable: commentCanHighlight(target),
+      highlightPhase: 'idle',
+      onHighlight: () => undefined,
+      onReply: reply,
+      onRemoveFromChat
+    }).map((item) => item.id)
+  /** What the chat pane passes: the action only for a row that can be removed. */
+  const offered = (target: LiveChatMessage): (() => void) | undefined =>
+    removeFromChatAvailable(target) ? remove : undefined
+
+  it('offers Remove from chat last, as the destructive item, on a viewer message', () => {
+    const items = commentRowMenu({
+      message: message(),
+      highlightable: true,
+      highlightPhase: 'idle',
+      onHighlight: () => undefined,
+      onReply: reply,
+      onRemoveFromChat: remove
+    })
+    expect(items.map((item) => item.id)).toEqual(['show', 'reply', 'copy', 'remove-from-chat'])
+    expect(items.at(-1)).toMatchObject({ label: 'Remove from chat', destructive: true })
+    expect(items.filter((item) => item.destructive)).toHaveLength(1)
+    // The stream toggle never says "Remove" next to the irreversible item.
+    const live = commentRowMenu({
+      message: message(),
+      highlightable: true,
+      highlightPhase: 'live',
+      onHighlight: () => undefined,
+      onReply: reply,
+      onRemoveFromChat: remove
+    })
+    expect(live[0]).toMatchObject({ id: 'show', label: 'Take off stream' })
+    expect(live.filter((item) => item.label.startsWith('Remove'))).toEqual([
+      expect.objectContaining({ id: 'remove-from-chat', destructive: true })
+    ])
+    const paid = message({ eventType: 'paid', amountText: '$5' })
+    expect(menuIds(paid, offered(paid))).toContain('remove-from-chat')
+  })
+
+  it('never on the streamer, a tombstone, or a notification row', () => {
+    for (const target of [
+      message({ authorRoles: ['owner'] }),
+      message({ authorRoles: ['broadcaster'] }),
+      message({ isDeleted: true, eventType: 'deleted', rawProviderType: 'videorc.removed' }),
+      message({ eventType: 'membership' }),
+      message({ eventType: 'follow' }),
+      message({ eventType: 'system', details: { kind: 'raid', viewerCount: 3 } }),
+      message({ rawProviderType: 'channel.chat.notification.resub' })
+    ]) {
+      expect(menuIds(target, offered(target))).not.toContain('remove-from-chat')
+    }
+  })
+
+  it('has no menu at all outside a live session', () => {
+    expect(
+      commentRowMenu({
+        message: message(),
+        highlightable: true,
+        highlightPhase: 'idle'
+      })
+    ).toEqual([])
+    // Remove from chat alone still opens the menu, without Reply.
+    expect(
+      commentRowMenu({
+        message: message(),
+        highlightable: false,
+        highlightPhase: 'idle',
+        onRemoveFromChat: remove
+      }).map((item) => item.id)
+    ).toEqual(['copy', 'remove-from-chat'])
+  })
+
+  it('shows the removal chip outside the struck-through text, readable', () => {
+    const tombstone = message({
+      isDeleted: true,
+      eventType: 'deleted',
+      messageText: 'Hidden in Videorc',
+      rawProviderType: 'videorc.hidden'
+    })
+    const markup = renderToStaticMarkup(
+      createElement(CommentRow, {
+        message: tombstone,
+        removal: removalStatusView(tombstone, {
+          operationId: 'op-1',
+          sessionId: 'session-1',
+          messageId: tombstone.id,
+          platform: 'youtube',
+          authorName: 'Ada Lovelace',
+          excerpt: 'Ship it!',
+          source: 'manual',
+          phase: 'hidden-locally',
+          confirmMode: 'confirm',
+          requiresExplicitConfirm: false,
+          outcome: 'Hidden in Videorc. Viewers on YouTube still see it. YouTube quota is paused.',
+          createdAt: '2026-07-10T12:00:02.000Z',
+          updatedAt: '2026-07-10T12:00:03.000Z'
+        })
+      })
+    )
+    const chip = /<span[^>]*data-slot="removal-status"[^>]*>([^<]*)<\/span>/.exec(markup)
+    expect(chip?.[0]).toContain('data-removal="hidden"')
+    expect(chip?.[0]).toContain(
+      'title="Hidden in Videorc. Viewers on YouTube still see it. YouTube quota is paused."'
+    )
+    expect(chip?.[1]).toBe('Hidden in Videorc')
+    // The body keeps its muted line-through; the chip is not inside it.
+    expect(markup).toContain('line-through')
+    expect(markup.indexOf('data-slot="removal-status"')).toBeLessThan(
+      markup.indexOf('line-through')
+    )
+  })
+
+  it('spins while removing, and says nothing when there is nothing to say', () => {
+    const removing = renderToStaticMarkup(
+      createElement(RemovalStatus, { status: removalStatusView(message(), undefined, true) })
+    )
+    expect(removing).toContain('Removing…')
+    expect(removing).toContain('motion-safe:animate-spin')
+    expect(renderToStaticMarkup(createElement(RemovalStatus, { status: null }))).toBe('')
   })
 })

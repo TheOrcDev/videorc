@@ -58,6 +58,11 @@ const api: VideorcApi = {
   getCohostWindowState: () => invoke('comments-window:cohost-get'),
   onCohostWindowState: (callback) => subscribe('comments-window:cohost', callback),
   sendCohostAction: (command) => invoke('comments-window:cohost-action', command),
+  sendCohostCommand: (command) => invoke('comments-window:cohost-command', command),
+  onCohostCommandRequest: (callback) =>
+    subscribe('comments-window:cohost-command-request', callback),
+  pushCohostCommandResult: (resolution) =>
+    invoke('comments-window:cohost-command-result-push', resolution),
   onCohostActionRequest: (callback) => subscribe('comments-window:cohost-action-request', callback),
   pushCohostActionResult: (resolution) =>
     invoke('comments-window:cohost-action-result-push', resolution),
@@ -72,6 +77,12 @@ const api: VideorcApi = {
   onClipMarkRequest: (callback) => subscribe('comments-window:clip-mark-request', callback),
   pushClipMarkResult: (resolution) => invoke('comments-window:clip-mark-result-push', resolution),
   showFollowNamesFromCommentsWindow: (command) => invoke('comments-window:follow-names', command),
+  reconnectScopesFromCommentsWindow: (command) =>
+    invoke('comments-window:reconnect-scopes', command),
+  moderateFromCommentsWindow: (command) => invoke('comments-window:moderation', command),
+  onModerationRequest: (callback) => subscribe('comments-window:moderation-request', callback),
+  pushModerationResult: (resolution) =>
+    invoke('comments-window:moderation-result-push', resolution),
   onCommentHighlightState: (callback) => subscribe('comments-window:highlight-state', callback),
   getBundledBackgroundAssets: () => invoke('backgrounds:bundled-assets'),
   beginAccountSignIn: (authorizeUrl) => invoke('account:begin-sign-in', authorizeUrl),

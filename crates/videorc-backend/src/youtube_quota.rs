@@ -342,6 +342,8 @@ pub fn pause_target(now: DateTime<Utc>, previous_expiry: Option<DateTime<Utc>>) 
 pub enum YouTubeEndpoint {
     LiveChatMessagesList,
     LiveChatMessagesInsert,
+    /// Plan 140: the streamer removes one chat message (50 units).
+    LiveChatMessagesDelete,
     VideosList,
     ChannelsList,
     LiveBroadcastsList,
@@ -360,6 +362,7 @@ impl YouTubeEndpoint {
         match self {
             Self::LiveChatMessagesList => "liveChatMessages.list",
             Self::LiveChatMessagesInsert => "liveChatMessages.insert",
+            Self::LiveChatMessagesDelete => "liveChatMessages.delete",
             Self::VideosList => "videos.list",
             Self::ChannelsList => "channels.list",
             Self::LiveBroadcastsList => "liveBroadcasts.list",
@@ -383,6 +386,7 @@ impl YouTubeEndpoint {
             | Self::LiveBroadcastsList
             | Self::LiveStreamsList => 1,
             Self::LiveChatMessagesInsert
+            | Self::LiveChatMessagesDelete
             | Self::LiveBroadcastsInsert
             | Self::LiveBroadcastsUpdate
             | Self::LiveBroadcastsDelete
@@ -554,6 +558,9 @@ pub enum BudgetCall {
     #[allow(dead_code)]
     ChatRead,
     ChatSend,
+    /// Plan 140: `liveChatMessages.delete` on the streamer's request. Shed at
+    /// 100% like a send, so a used-up day keeps only Go Live and chat reads.
+    ChatModerate,
     Viewers,
     Subscribers,
     Thumbnail,
@@ -581,7 +588,7 @@ pub fn budget_step(units: u64, limit: u64) -> BudgetStep {
 pub fn budget_allows(step: BudgetStep, call: BudgetCall) -> bool {
     match call {
         BudgetCall::GoLiveEssential | BudgetCall::ChatRead => true,
-        BudgetCall::ChatSend => step < BudgetStep::EssentialsOnly,
+        BudgetCall::ChatSend | BudgetCall::ChatModerate => step < BudgetStep::EssentialsOnly,
         BudgetCall::Viewers => step < BudgetStep::ShedViewers,
         BudgetCall::Subscribers | BudgetCall::Thumbnail => step < BudgetStep::ShedExtras,
     }
@@ -1230,7 +1237,7 @@ pub fn admit_attempt(
         inner.ensure_daily_loaded(state);
         let before = inner.budget_status_at(Utc::now());
         if !budget_allows(before.step, priority)
-            || (priority == BudgetCall::ChatSend
+            || (matches!(priority, BudgetCall::ChatSend | BudgetCall::ChatModerate)
                 && before.limit != 0
                 && before.units.saturating_add(endpoint.units()) > before.limit)
         {
@@ -1345,6 +1352,7 @@ pub fn apply_service_flags(state: &AppState, flags: crate::service_flags::YouTub
             || previous.viewer_sample_ms != flags.viewer_sample_ms
             || previous.daily_budget_units != flags.daily_budget_units
             || previous.paused_until != flags.paused_until
+            || previous.orcle != flags.orcle
             || previous.source != flags.source
     };
     set_daily_budget_limit(state, flags.daily_budget_units);
@@ -1814,6 +1822,40 @@ mod tests {
         assert!(budget_allows(ShedViewers, ChatSend));
         assert!(!budget_allows(EssentialsOnly, ChatSend));
         assert!(!budget_allows(EssentialsOnly, Viewers));
+        // Plan 140: a removal sheds exactly like a send, never earlier.
+        assert!(budget_allows(Normal, ChatModerate));
+        assert!(budget_allows(ShedExtras, ChatModerate));
+        assert!(budget_allows(ShedViewers, ChatModerate));
+        assert!(!budget_allows(EssentialsOnly, ChatModerate));
+        assert_eq!(YouTubeEndpoint::LiveChatMessagesDelete.units(), 50);
+        assert_eq!(
+            YouTubeEndpoint::LiveChatMessagesDelete.name(),
+            "liveChatMessages.delete"
+        );
+    }
+
+    #[test]
+    fn a_delete_at_the_soft_limit_is_refused_before_it_is_counted() {
+        let state = test_state();
+        set_daily_budget_limit(&state, Some(60));
+        admit_attempt(
+            &state,
+            YouTubeEndpoint::LiveChatMessagesDelete,
+            BudgetCall::ChatModerate,
+        )
+        .expect("the first delete fits the day");
+        assert_eq!(daily_usage(&state).units, 50);
+        // 50 + 50 would cross the 60-unit limit: refused, not counted.
+        assert!(matches!(
+            admit_attempt(
+                &state,
+                YouTubeEndpoint::LiveChatMessagesDelete,
+                BudgetCall::ChatModerate
+            ),
+            Err(YouTubeNotAttempted::Budget)
+        ));
+        assert_eq!(daily_usage(&state).units, 50);
+        assert_eq!(usage_snapshot(&state).total_calls, 1);
     }
 
     #[tokio::test]

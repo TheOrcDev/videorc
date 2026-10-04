@@ -31,6 +31,7 @@ import type {
 } from '@/lib/backend'
 import { cohostEmptyStateCopy, cohostPresenceView, cohostQuestionIds } from '@/lib/cohost-presence'
 import { activeCohostSpotlight } from '@/lib/cohost-marks'
+import { REMOVE_FROM_CHAT_LABEL } from '@/lib/chat-removal-view'
 import {
   activeCohostAlerts,
   activeCohostRecap,
@@ -54,7 +55,10 @@ import {
   resolveCohostSelection,
   sortedCohostFlags,
   sortedCohostQuestions,
+  COHOST_ACTS_ON_ASK_COPY,
+  COHOST_ACTS_ON_ASK_HINT,
   COHOST_MOOD_LABELS,
+  COHOST_REMOVE_FLAGGED_KEY,
   EMPTY_COHOST_UNREAD
 } from '@/lib/cohost-view'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
@@ -63,13 +67,14 @@ import { cn } from '@/lib/utils'
 /**
  * The Orcle pane in the Stream Manager, which only the detached Comments
  * window mounts. It renders the backend's `cohost.state` and nothing else: it
- * never decides what is a question, never sends anything, and never acts on a
- * flag.
+ * never decides what is a question and never sends anything. A flag is only
+ * acted on when the streamer asks: "Remove from chat" on the selected flag
+ * (plan 140, S6) is the same manual removal as the chat row's ⋯ menu.
  *
  * Keyboard-first (videorc-design): the rows stay dense single lines and the
  * footer bar carries the actions for the selected row with their key chips.
  * ⌘J focuses the pane; ↑/↓ move; R reply, H show on stream, A answered,
- * ⌫ dismiss.
+ * ⌫ dismiss, ⇧⌫ remove a flagged message from chat.
  */
 export function CohostPane({
   state,
@@ -87,6 +92,8 @@ export function CohostPane({
   onRestoreQuestion,
   onDismissQuestion,
   onDismissFlag,
+  onRemoveFlagged,
+  removableMessageIds,
   onPromiseDone,
   onPromiseDismiss,
   onRecapPost,
@@ -117,6 +124,10 @@ export function CohostPane({
   onRestoreQuestion?: (question: CohostQuestion) => void
   onDismissQuestion: (question: CohostQuestion) => void
   onDismissFlag: (flag: CohostFlag) => void
+  /** "Remove from chat" on a flagged message (plan 140, S6): a manual
+   * removal, offered only for messages in `removableMessageIds`. */
+  onRemoveFlagged?: (flag: CohostFlag) => void
+  removableMessageIds?: ReadonlySet<string>
   /** Promises and recaps (plan 068 D8). Nothing here sends: Post to chat
    * pre-fills the composer, Draft a recap asks the backend for a draft. */
   onPromiseDone?: (promise: CohostPromise) => void
@@ -297,6 +308,13 @@ export function CohostPane({
         ? flags.find((candidate) => candidate.messageId === activeRow.id)
         : undefined
 
+    // ⇧⌫ removes a flagged message from chat, and never falls back to a
+    // dismissal when removal is not offered.
+    if ((event.key === 'Backspace' || event.key === 'Delete') && event.shiftKey && flag) {
+      event.preventDefault()
+      if (onRemoveFlagged && removableMessageIds?.has(flag.messageId)) onRemoveFlagged(flag)
+      return
+    }
     if (event.key === 'Enter') {
       event.preventDefault()
       primaryAction()
@@ -542,8 +560,10 @@ export function CohostPane({
                   'min-w-0 flex-1 truncate text-[11px] text-subtle',
                   PANE_NARROW_HIDDEN
                 )}
+                data-slot="cohost-acts-on-ask"
+                title={COHOST_ACTS_ON_ASK_COPY}
               >
-                Nothing sends without you.
+                {COHOST_ACTS_ON_ASK_HINT}
               </span>
               {activeRow.kind === 'question' ? (
                 <>
@@ -606,6 +626,17 @@ export function CohostPane({
                       if (flag) onDismissFlag(flag)
                     }}
                   />
+                  {onRemoveFlagged && removableMessageIds?.has(activeRow.id) ? (
+                    <CohostAction
+                      keyLabel={COHOST_REMOVE_FLAGGED_KEY}
+                      label={REMOVE_FROM_CHAT_LABEL}
+                      variant="destructive"
+                      onClick={() => {
+                        const flag = flags.find((candidate) => candidate.messageId === activeRow.id)
+                        if (flag) onRemoveFlagged(flag)
+                      }}
+                    />
+                  ) : null}
                 </>
               )}
             </div>
@@ -920,11 +951,14 @@ function CohostAction({
   label,
   keyLabel,
   disabled = false,
+  variant = 'ghost',
   onClick
 }: {
   label: string
   keyLabel: string
   disabled?: boolean
+  /** Destructive only for Remove from chat: red is information. */
+  variant?: 'ghost' | 'destructive'
   onClick: () => void
 }): ReactElement {
   return (
@@ -933,7 +967,7 @@ function CohostAction({
       size="xs"
       title={`${label} (${keyLabel})`}
       type="button"
-      variant="ghost"
+      variant={variant}
       onClick={onClick}
     >
       {label}

@@ -27,6 +27,7 @@ import {
   orcleReportView,
   questionTally,
   reportAlertLabel,
+  reportCommands,
   reportMoments,
   reportPlatforms,
   reportSessionChoice,
@@ -454,6 +455,73 @@ describe('report view', () => {
     expect(quiet.stats.every((stat) => stat.value === '0')).toBe(true)
     expect(quiet.chat).toEqual({ messages: 0, label: 'No chat messages', platforms: [] })
     expect([quiet.missed, quiet.promises, quiet.moments, quiet.alerts]).toEqual([[], [], [], []])
+    expect(quiet.commands).toBeNull()
+  })
+
+  it('counts what voice commands did, non-zero counts only (plan 140)', () => {
+    const counts = {
+      highlighted: 3,
+      cleared: 1,
+      removed: 1,
+      hiddenLocally: 1,
+      cancelled: 0,
+      expired: 1,
+      failed: 0,
+      notFound: 2
+    }
+    expect(reportCommands(counts)).toEqual({
+      total: '9 commands',
+      counts: [
+        { id: 'highlighted', value: '3', label: 'Highlighted' },
+        { id: 'cleared', value: '1', label: 'Cleared' },
+        { id: 'removed', value: '1', label: 'Removed' },
+        { id: 'hidden-locally', value: '1', label: 'Hidden in Videorc' },
+        { id: 'expired', value: '1', label: 'No answer' },
+        { id: 'not-found', value: '2', label: 'Not found' }
+      ]
+    })
+    expect(
+      reportCommands({
+        ...counts,
+        highlighted: 0,
+        cleared: 0,
+        hiddenLocally: 0,
+        expired: 0,
+        notFound: 0
+      })
+    ).toEqual({
+      total: '1 command',
+      counts: [{ id: 'removed', value: '1', label: 'Removed' }]
+    })
+    // A report from before voice commands, or one where nothing counted.
+    expect(reportCommands(undefined)).toBeNull()
+    expect(
+      reportCommands({
+        highlighted: 0,
+        cleared: 0,
+        removed: 0,
+        hiddenLocally: 0,
+        cancelled: 0,
+        expired: 0,
+        failed: 0,
+        notFound: 0
+      })
+    ).toBeNull()
+    // The card's view carries it; a stream Orcle missed has none.
+    const view = orcleReportView({
+      payload: payload({ report: report({ commands: counts }) }),
+      session: SESSION,
+      orcleOn: true
+    })
+    if (view.kind !== 'report') throw new Error(view.kind)
+    expect(view.commands?.total).toBe('9 commands')
+    const off = orcleReportView({
+      payload: payload({ report: null }),
+      session: SESSION,
+      orcleOn: true
+    })
+    if (off.kind !== 'orcle-off') throw new Error(off.kind)
+    expect(off.commands).toBeNull()
   })
 
   it('times events into the stream and gives up on unreadable times', () => {

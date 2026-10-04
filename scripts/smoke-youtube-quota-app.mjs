@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { mkdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -27,6 +28,10 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 //      stream-key code, a non-YouTube destination still goes live (G5);
 //   e. connect YouTube while paused: the callback is terminal (reason
 //      `youtube-quota`), zero profile requests, one renderer toast (bug 7).
+// Plan 140 (S9) adds Remove from chat: while paused it hides the message in
+// Videorc (`quota-paused`) without a request; after the resume one delete
+// reaches the fake (204, 50 units, metered on both sides); with the daily
+// budget used up (the smoke budget hook) it sheds the same way, no request.
 // The dev-only `VIDEORC_YOUTUBE_API_BASE_URL` routes every YouTube client
 // (prepare, bind, transition, chat read, viewers, subscribers, OAuth token and
 // profile, the quota probe) at the fake; packaged builds refuse it.
@@ -226,6 +231,19 @@ try {
       `${listener.label} output did not advance during the outage (${sizesBefore[index]} -> ${sizesAfter[index]} bytes)`
     )
   })
+  // Plan 140: Remove from chat while paused hides it in Videorc, no request.
+  const deleteFloor = fake.requests.length
+  const pausedRemoval = await removeYouTubeMessage(ws, sessionId, events, 0)
+  assert(
+    pausedRemoval.phase === 'hidden-locally' &&
+      pausedRemoval.outcomeCode === 'quota-paused' &&
+      /^Hidden in Videorc\. Viewers on YouTube still see it\./.test(pausedRemoval.outcome ?? ''),
+    `removal while paused ${JSON.stringify(pausedRemoval)}`
+  )
+  assert(
+    youtubeDeletes(fake, deleteFloor).length === 0,
+    'a removal while paused must not reach YouTube'
+  )
   const pausedEvents = events.quota.slice(quotaEventsBefore).filter((status) => status.pausedUntil)
   assert(pausedEvents.length === 1, `expected one paused notice, got ${pausedEvents.length}`)
   const toastsDuringOutage = await countToasts(smoke, /YouTube/i)
@@ -270,6 +288,42 @@ try {
   assert(clearedEvents >= 1, 'the youtube.quota cleared event')
   results.push(
     `b: forced expiry → probe ok (${probeCalls.length} channels.list) → chat connected, ${events.messages.filter((m) => m.platform === 'youtube').length - resumedFloor} new message(s) delivered with no click`
+  )
+  console.log(`[quota] ${results.at(-1)}`)
+
+  // --- Plan 140: Remove from chat after the resume, then under shed. -------------
+  const removedFloor = fake.requests.length
+  const removal = await removeYouTubeMessage(ws, sessionId, events, 1)
+  const sentDeletes = youtubeDeletes(fake, removedFloor)
+  assert(
+    removal.phase === 'removed' && removal.outcomeCode === 'removed',
+    `removal after the resume ${JSON.stringify(removal)}`
+  )
+  assert(
+    sentDeletes.length === 1 &&
+      sentDeletes[0].status === 204 &&
+      sentDeletes[0].query.id === removal.providerMessageId &&
+      fake.chat.deleted.includes(removal.providerMessageId),
+    `one liveChatMessages.delete should reach the fake: ${JSON.stringify(sentDeletes)}`
+  )
+  const shedBudget = await request(ws, timeoutMs, 'test.youtubeQuota.setBudget', { limit: 1 })
+  assert(shedBudget.step === 'essentials-only', `budget hook ${JSON.stringify(shedBudget)}`)
+  const shedFloor = fake.requests.length
+  const shedRemoval = await removeYouTubeMessage(ws, sessionId, events, 2)
+  await request(ws, timeoutMs, 'test.youtubeQuota.setBudget', { limit: null })
+  assert(
+    shedRemoval.phase === 'hidden-locally' &&
+      shedRemoval.outcomeCode === 'quota-paused' &&
+      /daily YouTube limit/.test(shedRemoval.outcome ?? ''),
+    `removal under shed ${JSON.stringify(shedRemoval)}`
+  )
+  assert(
+    youtubeDeletes(fake, shedFloor).length === 0,
+    'a removal under shed must not reach YouTube'
+  )
+  results.push(
+    `remove: paused → hidden (${pausedRemoval.outcomeCode}, 0 requests); resumed → removed (1 delete, 204); ` +
+      `budget used up → hidden (${shedRemoval.outcomeCode}, 0 requests)`
   )
   console.log(`[quota] ${results.at(-1)}`)
 
@@ -484,6 +538,34 @@ function fileSize(path) {
   } catch {
     return 0
   }
+}
+
+/** `liveChatMessages.delete` requests the fake recorded since `floor`. */
+function youtubeDeletes(api, floor) {
+  return api.requests
+    .slice(floor)
+    .filter((entry) => entry.method === 'DELETE' && entry.path === '/youtube/v3/liveChat/messages')
+}
+
+/**
+ * Manual Remove from chat (plan 140) on the `index`th YouTube message of the
+ * session, oldest first. Returns the terminal moderation operation.
+ */
+async function removeYouTubeMessage(socket, sessionId, collection, index) {
+  const messages = collection.messages.filter(
+    (message) =>
+      message.sessionId === sessionId && message.platform === 'youtube' && !message.isDeleted
+  )
+  const unique = [...new Map(messages.map((message) => [message.id, message])).values()]
+  const target = unique[index]
+  assert(target, `no YouTube message #${index} to remove (${unique.length} delivered)`)
+  const operation = await request(socket, timeoutMs, 'liveChat.moderation.request', {
+    operationId: randomUUID(),
+    messageId: target.id,
+    source: 'manual'
+  })
+  // The provider id never reaches the wire operation; keep the row's.
+  return { ...operation, providerMessageId: target.providerMessageId }
 }
 
 async function youtubeProvider(socket, sessionId) {

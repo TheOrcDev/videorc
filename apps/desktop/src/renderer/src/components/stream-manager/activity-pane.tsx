@@ -146,7 +146,8 @@ export function activityHighlight(
 }
 
 /** The row's ⋯ menu. Show on stream toggles, so on a live row it says what a
- * click does: Remove from stream (plan 095, S2). */
+ * click does: Take off stream (plan 095, S2; plan 140 review: only removing
+ * a chat message says "Remove"). */
 export function activityRowActions(
   item: ActivityItem,
   highlight: CommentHighlightPresentation,
@@ -166,7 +167,7 @@ export function activityRowActions(
       ? [
           {
             id: 'show',
-            label: highlight.phase === 'live' ? 'Remove from stream' : 'Show on stream',
+            label: highlight.phase === 'live' ? 'Take off stream' : 'Show on stream',
             icon: PreviewIcon,
             disabled: highlight.phase === 'applying',
             onSelect: () => onShowOnStream(item)

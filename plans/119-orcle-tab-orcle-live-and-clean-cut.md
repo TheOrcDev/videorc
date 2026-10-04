@@ -9,7 +9,7 @@
 
 ## Status and decisions
 
-- Status: **EXECUTED 2026-10-04, in review.** The owner said: "Pick defaults
+- Status: **MERGED 2026-10-04**: desktop #579 → `462cb480`, web #69 → `ef0df149`. The owner said: "Pick defaults
   and execute the entire plan and create a pr."
   - Desktop branch: `feat/119-orcle-tab`. Web branch: `feat/119-orcle-clean-cut`.
   - All slices are built except S8 (deferred) and the owner-only parts of

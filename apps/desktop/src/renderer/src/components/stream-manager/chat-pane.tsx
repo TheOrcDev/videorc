@@ -49,8 +49,10 @@ import type {
   CommentsSendOperation,
   LiveChatMessage,
   LiveChatProviderState,
+  ModerationOperation,
   StreamPlatform
 } from '@/lib/backend'
+import { removalStatusView, removeFromChatAvailable } from '@/lib/chat-removal-view'
 import { chatDraftMaxChars, validateChatDraft, type ChatSendFailure } from '@/lib/chat-send'
 import {
   chatPaneMessages,
@@ -96,6 +98,9 @@ export function ChatPane({
   questionMessageIds,
   mentionNames,
   onHighlight,
+  removals,
+  removalRequestIds,
+  onRemoveFromChat,
   sendPending = false,
   sendOperation = null,
   sendFailures = [],
@@ -127,6 +132,12 @@ export function ChatPane({
   /** The streamer's own account names (the Mentions filter). */
   mentionNames: readonly string[]
   onHighlight?: (message: LiveChatMessage) => void
+  /** Each message's newest removal (plan 140, S6), for its row chip. */
+  removals?: ReadonlyMap<string, ModerationOperation>
+  /** "Remove from chat" asked for, before any operation answered. */
+  removalRequestIds?: ReadonlySet<string>
+  /** ⋯ Remove from chat on a removable row; only while live. */
+  onRemoveFromChat?: (message: LiveChatMessage) => void
   sendPending?: boolean
   sendOperation?: CommentsSendOperation | null
   sendFailures?: ChatSendFailure[]
@@ -522,6 +533,8 @@ export function ChatPane({
               {virtualizer.getVirtualItems().map((item) => {
                 const message = shown[item.index]
                 if (!message) return null
+                const removal = removals?.get(message.id)
+                const requesting = removalRequestIds?.has(message.id) ?? false
                 return (
                   <CommentRow
                     key={item.key}
@@ -541,6 +554,7 @@ export function ChatPane({
                     index={item.index}
                     mentionNames={mentionNames}
                     message={message}
+                    removal={removalStatusView(message, removal, requesting)}
                     style={{
                       position: 'absolute',
                       top: 0,
@@ -550,6 +564,13 @@ export function ChatPane({
                       paddingBottom: 4
                     }}
                     onHighlight={live ? onHighlight : undefined}
+                    onRemoveFromChat={
+                      live &&
+                      onRemoveFromChat &&
+                      removeFromChatAvailable(message, removal, requesting)
+                        ? onRemoveFromChat
+                        : undefined
+                    }
                     onReply={
                       composerVisible
                         ? (target) => pushPrefill(`@${target.authorName} `)
