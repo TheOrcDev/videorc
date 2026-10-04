@@ -126,14 +126,20 @@ impl Default for YouTubeServiceFlags {
 }
 
 /// Whether Orcle voice commands are allowed right now (contract part D).
+/// (`YouTubeQuota::flags` is private to `youtube_quota`; read the copy in
+/// effect through its public accessor.)
 pub fn orcle_voice_commands_enabled(state: &AppState) -> bool {
-    state.youtube_quota.flags.borrow().orcle.voice_commands
+    crate::youtube_quota::service_flags_in_effect(state)
+        .orcle
+        .voice_commands
 }
 
 /// Whether `orcle-voice` removals are allowed right now. Manual removal never
 /// consults this.
 pub fn orcle_remove_enabled(state: &AppState) -> bool {
-    state.youtube_quota.flags.borrow().orcle.remove
+    crate::youtube_quota::service_flags_in_effect(state)
+        .orcle
+        .remove
 }
 
 impl YouTubeServiceFlags {
