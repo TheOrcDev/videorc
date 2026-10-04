@@ -356,6 +356,192 @@ describe('entitlement UI gates', () => {
     })
   })
 
+  for (const [snapshotLabel, entitlements] of [
+    ['Basic', basicEntitlements],
+    ['missing snapshot', null]
+  ] as const) {
+    for (const [profileLabel, width, height, fps, bitrateKbps] of [
+      ['1440p30', 2560, 1440, 30, 8000],
+      ['1440p60', 2560, 1440, 60, 16000],
+      ['4K30', 3840, 2160, 30, 30000]
+    ] as const) {
+      it(`allows equivalent landscape and portrait Custom ${profileLabel} recording on ${snapshotLabel}`, () => {
+        for (const [videoWidth, videoHeight] of [
+          [width, height],
+          [height, width]
+        ]) {
+          expect(
+            videoProfileEntitlementGate({
+              entitlements,
+              kind: 'recording',
+              video: {
+                preset: 'custom',
+                width: videoWidth,
+                height: videoHeight,
+                fps,
+                bitrateKbps
+              }
+            })
+          ).toEqual({ allowed: true })
+        }
+      })
+    }
+  }
+
+  it('rejects recording long-side and short-side overflow in both orientations', () => {
+    for (const [width, height] of [
+      [3850, 2160],
+      [2160, 3850],
+      [3000, 2200],
+      [2200, 3000]
+    ]) {
+      expect(
+        videoProfileEntitlementGate({
+          entitlements: basicEntitlements,
+          kind: 'recording',
+          video: { preset: 'custom', width, height, fps: 30, bitrateKbps: 8000 }
+        })
+      ).toMatchObject({ allowed: false, featureId: 'local-recording', allowFixAction: true })
+    }
+  })
+
+  it('preserves the recording FPS cap in both orientations', () => {
+    for (const [width, height] of [
+      [2560, 1440],
+      [1440, 2560]
+    ]) {
+      expect(
+        videoProfileEntitlementGate({
+          entitlements: basicEntitlements,
+          kind: 'recording',
+          video: { preset: 'custom', width, height, fps: 61, bitrateKbps: 16000 }
+        })
+      ).toMatchObject({ allowed: false, featureId: 'local-recording', allowFixAction: true })
+    }
+  })
+
+  it('keeps an explicitly disabled local-recording capability closed in both orientations', () => {
+    const entitlements: EntitlementsSnapshot = {
+      ...basicEntitlements,
+      capabilities: basicEntitlements.capabilities.map((capability) =>
+        capability.featureId === 'local-recording'
+          ? { ...capability, state: 'disabled', reason: 'Local recording is disabled.' }
+          : capability
+      )
+    }
+
+    for (const [width, height] of [
+      [2560, 1440],
+      [1440, 2560]
+    ]) {
+      expect(
+        videoProfileEntitlementGate({
+          entitlements,
+          kind: 'recording',
+          video: { preset: 'custom', width, height, fps: 30, bitrateKbps: 8000 }
+        })
+      ).toEqual({
+        allowed: false,
+        featureId: 'local-recording',
+        reason: 'Local recording is disabled.'
+      })
+    }
+  })
+
+  it('accepts the exact narrower recording rectangle in both orientations', () => {
+    const entitlements: EntitlementsSnapshot = {
+      ...basicEntitlements,
+      limits: {
+        ...basicEntitlements.limits,
+        recording: { maxWidth: 1920, maxHeight: 1080, maxFps: 60 }
+      }
+    }
+
+    for (const [width, height] of [
+      [1920, 1080],
+      [1080, 1920]
+    ]) {
+      expect(
+        videoProfileEntitlementGate({
+          entitlements,
+          kind: 'recording',
+          video: { preset: 'custom', width, height, fps: 30, bitrateKbps: 6000 }
+        })
+      ).toEqual({ allowed: true })
+    }
+    for (const [width, height] of [
+      [1920, 1081],
+      [1081, 1920]
+    ]) {
+      expect(
+        videoProfileEntitlementGate({
+          entitlements,
+          kind: 'recording',
+          video: { preset: 'custom', width, height, fps: 30, bitrateKbps: 6000 }
+        })
+      ).toMatchObject({ allowed: false, featureId: 'local-recording' })
+    }
+  })
+
+  it('allows both orientations below an explicit recording bitrate cap', () => {
+    const entitlements: EntitlementsSnapshot = {
+      ...basicEntitlements,
+      limits: {
+        ...basicEntitlements.limits,
+        recording: { ...basicEntitlements.limits.recording, maxBitrateKbps: 8000 }
+      }
+    }
+
+    for (const [width, height] of [
+      [2560, 1440],
+      [1440, 2560]
+    ]) {
+      expect(
+        videoProfileEntitlementGate({
+          entitlements,
+          kind: 'recording',
+          video: { preset: 'custom', width, height, fps: 30, bitrateKbps: 7999 }
+        })
+      ).toEqual({ allowed: true })
+      expect(
+        videoProfileEntitlementGate({
+          entitlements,
+          kind: 'recording',
+          video: { preset: 'custom', width, height, fps: 30, bitrateKbps: 8001 }
+        })
+      ).toMatchObject({ allowed: false, featureId: 'local-recording' })
+    }
+  })
+
+  it('keeps streaming account ceilings on their original width and height axes', () => {
+    const entitlements: EntitlementsSnapshot = {
+      ...basicEntitlements,
+      limits: {
+        ...basicEntitlements.limits,
+        streaming: { ...basicEntitlements.limits.streaming, maxWidth: 1920, maxHeight: 1080 }
+      }
+    }
+
+    expect(
+      videoProfileEntitlementGate({
+        entitlements,
+        kind: 'streaming',
+        video: { preset: 'custom', width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 }
+      })
+    ).toEqual({ allowed: true })
+    expect(
+      videoProfileEntitlementGate({
+        entitlements,
+        kind: 'streaming',
+        video: { preset: 'custom', width: 1080, height: 1920, fps: 30, bitrateKbps: 6000 }
+      })
+    ).toMatchObject({
+      allowed: false,
+      featureId: 'livestreaming',
+      reason: expect.stringContaining('exceeds the streaming limit')
+    })
+  })
+
   it('keeps premium toasts as fallbacks by linking normal locked controls', () => {
     // Only the cloud features carry an upgrade link since Plan 075; streaming
     // profile gates are covered by the neutral-reason test above.

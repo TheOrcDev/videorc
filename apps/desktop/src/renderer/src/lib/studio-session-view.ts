@@ -43,12 +43,13 @@ export function qualityName(height: number): string {
   return `${height}p`
 }
 
-/** "4K · 2160p30" — resolution class + height + fps. When the class IS the
- *  height ("1080p"), skip the redundant doubling and show "1080p30". */
+/** "4K · 2160p30" — resolution class + short edge + fps. When the class IS the
+ *  resolution ("1080p"), skip the redundant doubling and show "1080p30". */
 export function recordingQuality(video: SessionVideo): string {
-  const name = qualityName(video.height)
-  const detail = `${video.height}p${video.fps}`
-  return name === `${video.height}p` ? detail : `${name} · ${detail}`
+  const resolution = Math.min(video.width, video.height)
+  const name = qualityName(resolution)
+  const detail = `${resolution}p${video.fps}`
+  return name === `${resolution}p` ? detail : `${name} · ${detail}`
 }
 
 /** "3840×2160 · 30fps" — the full output dimensions. */
