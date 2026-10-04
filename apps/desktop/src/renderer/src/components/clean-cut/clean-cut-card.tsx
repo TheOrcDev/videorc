@@ -33,7 +33,7 @@ import { useVideorcAccount } from '@/hooks/use-account'
 import type { CleanCutClient } from '@/hooks/use-clean-cut'
 import { setCleanCutAuto, useCleanCutAuto } from '@/hooks/use-clean-cut-auto'
 import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
-import type { CleanCutJob } from '@/lib/backend'
+import type { CleanCutJob, CleanCutMode } from '@/lib/backend'
 import {
   CLEAN_CUT_AUTO_LABEL,
   CLEAN_CUT_DESCRIPTION,
@@ -59,6 +59,13 @@ import { cn } from '@/lib/utils'
 import { openVideorcWebLink } from '@/lib/videorc-web-links'
 import { sessionIsLive } from '../../../../shared/capture-state'
 
+/** Which cut the review opens. */
+export interface CleanCutReviewTarget {
+  sessionId: string
+  mode: CleanCutMode
+  jobId: string | null
+}
+
 /** Library's "Clean cut" ask: select this recording (the nonce re-applies the same one). */
 export interface CleanCutFocus {
   sessionId: string
@@ -81,10 +88,12 @@ function errorMessage(error: unknown): string | undefined {
 export function CleanCutCard({
   client,
   focus,
+  onReview,
   onOpenLibrarySession
 }: {
   client: CleanCutClient
   focus: CleanCutFocus | null
+  onReview: (target: CleanCutReviewTarget) => void
   onOpenLibrarySession: (sessionId: string) => void
 }): ReactElement {
   const { sessions, account, entitlements, aiConsent, setAiConsent } = useStudioCore()
@@ -200,6 +209,9 @@ export function CleanCutCard({
       )
   }
 
+  const review = (target: CleanCutJob): void =>
+    onReview({ sessionId: target.sourceSessionId, mode: target.mode, jobId: target.id })
+
   const unlockAction = unlock?.action ?? null
   const makeLabel = 'Make a clean cut'
 
@@ -275,6 +287,11 @@ export function CleanCutCard({
                   <AlertTitle>The clean cut failed</AlertTitle>
                   <AlertDescription className="text-xs">{status.detail}</AlertDescription>
                   <AlertAction className="flex items-center gap-1.5">
+                    {status.canReview ? (
+                      <Button size="xs" type="button" variant="ghost" onClick={() => review(job)}>
+                        Review
+                      </Button>
+                    ) : null}
                     <Button
                       disabled={cannotRetry}
                       size="xs"
@@ -312,6 +329,7 @@ export function CleanCutCard({
                       onCancel={cancel}
                       onMake={make}
                       onOpenLibrary={(outputSessionId) => onOpenLibrarySession(outputSessionId)}
+                      onReview={review}
                     />
                   </ListRow>
                 </GroupedList>
@@ -392,6 +410,7 @@ function StatusActions({
   cannotStart,
   onMake,
   onCancel,
+  onReview,
   onOpenLibrary
 }: {
   job: CleanCutJob | null
@@ -400,6 +419,7 @@ function StatusActions({
   cannotStart: boolean
   onMake: () => void
   onCancel: (job: CleanCutJob) => void
+  onReview: (job: CleanCutJob) => void
   onOpenLibrary: (outputSessionId: string) => void
 }): ReactElement | null {
   if (!job || status.kind === 'cancelled' || status.kind === 'none') {
@@ -413,6 +433,11 @@ function StatusActions({
   if (status.busy) {
     return (
       <>
+        {status.canReview ? (
+          <Button size="sm" type="button" variant="ghost" onClick={() => onReview(job)}>
+            Review
+          </Button>
+        ) : null}
         <Button size="sm" type="button" variant="ghost" onClick={() => onCancel(job)}>
           Cancel
         </Button>
@@ -422,6 +447,11 @@ function StatusActions({
   const output = job.outputSessionId
   return (
     <>
+      {status.canReview ? (
+        <Button size="sm" type="button" variant="outline" onClick={() => onReview(job)}>
+          Review
+        </Button>
+      ) : null}
       {output ? (
         <>
           <Button

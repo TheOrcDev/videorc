@@ -45,6 +45,23 @@ vi.mock('@/hooks/use-clean-cut', () => ({
     subscribe: () => () => undefined
   })
 }))
+vi.mock('@/components/clean-cut/clean-cut-review', async () => {
+  const { createElement } = await import('react')
+  return {
+    CleanCutReview: ({
+      target,
+      onClose
+    }: {
+      target: { sessionId: string; mode: string; jobId: string | null }
+      onClose: () => void
+    }) =>
+      createElement(
+        'div',
+        { 'data-slot': 'review-stub', 'data-target': JSON.stringify(target) },
+        createElement('button', { type: 'button', onClick: onClose }, 'Close review')
+      )
+  }
+})
 
 let root: Root
 let container: HTMLDivElement
@@ -345,5 +362,26 @@ describe('Clean cut in the Orcle tab (plan 119 S14)', () => {
     expect(
       cleanCut.compareDocumentPosition(customize) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy()
+  })
+
+  it("opens a cut's review on the ready toast's ask, and goes back to the tab", async () => {
+    await render({
+      cleanCutRequest: {
+        sessionId: 'rec-1',
+        jobId: 'job-1',
+        mode: 'condensed',
+        review: true,
+        nonce: 1
+      }
+    })
+    const review = document.querySelector('[data-slot="review-stub"]') as HTMLElement
+    expect(JSON.parse(review.dataset.target ?? '{}')).toEqual({
+      sessionId: 'rec-1',
+      mode: 'condensed',
+      jobId: 'job-1'
+    })
+    expect(document.querySelector('[data-slot="orcle-tab"]')).toBeNull()
+    await act(async () => button('Close review').click())
+    expect(document.querySelector('[data-slot="orcle-tab"]')).toBeTruthy()
   })
 })

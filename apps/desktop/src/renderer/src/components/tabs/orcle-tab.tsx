@@ -1,7 +1,11 @@
 import { ChatIcon, ChevronDownIcon, LockIcon } from '@/components/icons'
-import { useState, type ReactElement } from 'react'
+import { lazy, Suspense, useState, type ReactElement } from 'react'
 
-import { CleanCutCard, type CleanCutFocus } from '@/components/clean-cut/clean-cut-card'
+import {
+  CleanCutCard,
+  type CleanCutFocus,
+  type CleanCutReviewTarget
+} from '@/components/clean-cut/clean-cut-card'
 import { CohostSettingsSection } from '@/components/cohost-settings-section'
 import { OrcleReportCard } from '@/components/orcle-report-card'
 import { PageHeader } from '@/components/page'
@@ -44,16 +48,31 @@ import { openVideorcWebLink } from '@/lib/videorc-web-links'
 import type { CleanCutTabRequest } from '@/lib/clean-cut-events'
 import { sessionIsLive } from '../../../../shared/capture-state'
 
+// The review is the heaviest part of Clean cut (player, transcript editor):
+// it loads the first time a cut is reviewed.
+const CleanCutReview = lazy(async () => ({
+  default: (await import('@/components/clean-cut/clean-cut-review')).CleanCutReview
+}))
+
+function reviewTargetOf(request: CleanCutTabRequest | null): CleanCutReviewTarget | null {
+  if (!request?.review) return null
+  return {
+    sessionId: request.sessionId,
+    mode: request.mode ?? 'clean',
+    jobId: request.jobId ?? null
+  }
+}
+
 /**
  * The Orcle tab (plan 119 S2, S14): Videorc's AI tab, right under Studio.
  * Orcle Live (one switch, consent, settings under Customize), the last
- * stream's report (S3) and Clean cut (S14). The toolbar names the page;
- * nothing sits in its corner.
+ * stream's report (S3) and Clean cut (S14), whose review takes the whole tab
+ * while it is open. The toolbar names the page; nothing sits in its corner.
  *
  * `reportSessionId` is the Library's "Orcle report" ask: the report opens on
  * that session. Without it the report follows the last stream.
- * `cleanCutRequest` is the Library's "Clean cut": the card selects that
- * recording.
+ * `cleanCutRequest` is the Library's "Clean cut" (select that recording) or
+ * the ready toast's Review (open that cut's review).
  */
 export function OrcleTab({
   reportSessionId = null,
@@ -66,22 +85,61 @@ export function OrcleTab({
 }): ReactElement {
   const [reportSession, setReportSession] = useState<string | null>(reportSessionId)
   const cleanCut = useCleanCut()
-  const focus: CleanCutFocus | null = cleanCutRequest
-    ? { sessionId: cleanCutRequest.sessionId, nonce: cleanCutRequest.nonce }
-    : null
+  const [review, setReview] = useState<CleanCutReviewTarget | null>(() =>
+    reviewTargetOf(cleanCutRequest)
+  )
+  const [appliedRequest, setAppliedRequest] = useState<number | null>(
+    cleanCutRequest?.nonce ?? null
+  )
+  if (cleanCutRequest && cleanCutRequest.nonce !== appliedRequest) {
+    setAppliedRequest(cleanCutRequest.nonce)
+    setReview(reviewTargetOf(cleanCutRequest))
+  }
+  const focus: CleanCutFocus | null =
+    cleanCutRequest && !cleanCutRequest.review
+      ? { sessionId: cleanCutRequest.sessionId, nonce: cleanCutRequest.nonce }
+      : null
   const openLibrarySession = onOpenLibrarySession ?? (() => undefined)
 
   return (
     <>
-      <div className="flex flex-col" data-slot="orcle-tab">
-        <PageHeader description={ORCLE_TAB_DESCRIPTION} title="Orcle" />
-        <OrcleLiveSection />
-        <OrcleReportCard sessionId={reportSession} onSessionChange={setReportSession} />
-        <CleanCutCard client={cleanCut} focus={focus} onOpenLibrarySession={openLibrarySession} />
-        <OrcleCustomize />
-      </div>
+      {review ? (
+        <Suspense fallback={<CleanCutReviewFallback />}>
+          <CleanCutReview
+            client={cleanCut}
+            target={review}
+            onClose={() => setReview(null)}
+            onOpenLibrarySession={openLibrarySession}
+          />
+        </Suspense>
+      ) : (
+        <div className="flex flex-col" data-slot="orcle-tab">
+          <PageHeader description={ORCLE_TAB_DESCRIPTION} title="Orcle" />
+          <OrcleLiveSection />
+          <OrcleReportCard sessionId={reportSession} onSessionChange={setReportSession} />
+          <CleanCutCard
+            client={cleanCut}
+            focus={focus}
+            onOpenLibrarySession={openLibrarySession}
+            onReview={setReview}
+          />
+          <OrcleCustomize />
+        </div>
+      )}
       <OrcleConsentDialog />
     </>
+  )
+}
+
+function CleanCutReviewFallback(): ReactElement {
+  return (
+    <div
+      aria-live="polite"
+      className="flex min-h-40 items-center justify-center text-xs text-muted-foreground"
+      role="status"
+    >
+      Loading the review…
+    </div>
   )
 }
 

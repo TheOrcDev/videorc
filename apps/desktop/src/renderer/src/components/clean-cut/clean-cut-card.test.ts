@@ -106,6 +106,7 @@ const AVAILABLE: CleanCutCapabilities = {
 
 let root: Root
 let container: HTMLDivElement
+const onReview = vi.fn()
 const onOpenLibrarySession = vi.fn()
 const setAiConsent = vi.fn()
 const revealSession = vi.fn(async (_sessionId: string) => undefined)
@@ -150,7 +151,7 @@ async function render({
     recording: live ? { state: 'recording', streamUrl: 'rtmp://live' } : { state: 'idle' }
   }
   await act(async () =>
-    root.render(createElement(CleanCutCard, { client: cut, focus, onOpenLibrarySession }))
+    root.render(createElement(CleanCutCard, { client: cut, focus, onReview, onOpenLibrarySession }))
   )
 }
 
@@ -172,7 +173,7 @@ function autoSwitch(): HTMLButtonElement {
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
-  for (const spy of [onOpenLibrarySession, setAiConsent, revealSession, signIn]) {
+  for (const spy of [onReview, onOpenLibrarySession, setAiConsent, revealSession, signIn]) {
     spy.mockClear()
   }
   localStorage.clear()
@@ -247,7 +248,7 @@ describe('Clean cut card (plan 119 S14)', () => {
     expect(signIn).toHaveBeenCalledTimes(1)
   })
 
-  it('says why the server cannot cut', async () => {
+  it('says why the server cannot cut, and still lets a finished cut be reviewed', async () => {
     await render({
       cut: client({
         jobs: [job()],
@@ -265,6 +266,7 @@ describe('Clean cut card (plan 119 S14)', () => {
     expect(document.querySelector('[data-slot="clean-cut-minutes"]')?.textContent).toBe(
       'No minutes left this month'
     )
+    expect(button('Review').disabled).toBe(false)
   })
 
   it('makes a clean cut of the newest recording', async () => {
@@ -310,11 +312,13 @@ describe('Clean cut card (plan 119 S14)', () => {
     expect(statusRow().textContent).toContain('Waiting until you stop streaming')
   })
 
-  it('opens a finished cut: the file, and its Library row', async () => {
+  it('opens a finished cut: review, the file, and its Library row', async () => {
     await render({ cut: client({ jobs: [job()] }) })
     expect(statusRow().getAttribute('data-status')).toBe('ready')
     expect(statusRow().textContent).toContain('Ready')
     expect(statusRow().textContent).toContain('42:10 → 31:05 · 11:05 shorter')
+    await act(async () => button('Review').click())
+    expect(onReview).toHaveBeenCalledWith({ sessionId: 'rec-1', mode: 'clean', jobId: 'job-1' })
     const reveal = [...document.querySelectorAll('button')].find((candidate) =>
       /^Show in/.test(candidate.textContent?.trim() ?? '')
     ) as HTMLButtonElement
