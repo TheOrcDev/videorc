@@ -289,6 +289,7 @@ import type {
   OAuthCallbackEnvelope,
   OAuthStartResult,
   OAuthProviderCredentialStatus,
+  RecordingFinalizationEvent,
   RecordingStatus,
   RemoteControlStatus,
   RemoteLanPairing,
@@ -3992,6 +3993,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [patchCohostSettings, setAiConsent]
   )
 
+  // Plan 119 S15: with "Make a clean cut of every recording" on, a finished
+  // recording starts its clean cut once. The decision, the ledger and the
+  // call live in lib/clean-cut-auto.ts, loaded only when a session finalizes.
+  const autoRunCleanCutRef = useRef<((event: RecordingFinalizationEvent) => void) | null>(null)
+  autoRunCleanCutRef.current = (event) => {
+    const activeClient = clientRef.current
+    if (!activeClient) return
+    void import('@/lib/clean-cut-auto')
+      .then((auto) =>
+        auto.autoRunCleanCut(event, {
+          request: activeClient.request.bind(activeClient),
+          sessions: sessionsRef.current,
+          consent: aiConsent,
+          entitlements,
+          capabilities: aiCapabilities
+        })
+      )
+      .catch(() => undefined)
+  }
+
   const runCohostAction = useCallback(
     async (
       method:
@@ -6078,6 +6099,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (finalizationEventNeedsRefresh(sessionsRef.current, event)) {
           void refreshSessions(nextClient)
         }
+        if (event.state === 'finalized') {
+          autoRunCleanCutRef.current?.(event)
+        }
         if (event.state === 'failed') {
           toast.error('MP4 export failed', {
             id: `finalization-${event.sessionId}`,
@@ -6088,6 +6112,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             }
           })
         }
+      }),
+      // A clean cut that finished out of view (plan 119 S15): its copy joins
+      // the Library, and the ready toast says so once per cut-list revision.
+      nextClient.on('cleanCut.status', (job) => {
+        if (job.state !== 'completed') return
+        void refreshSessions(nextClient)
+        void import('@/lib/clean-cut-notify')
+          .then((notify) => notify.announceCleanCutReady(job))
+          .catch(() => undefined)
       }),
       nextClient.on('noiseCleanup.status', (payload) => {
         const job = payload

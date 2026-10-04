@@ -8163,6 +8163,212 @@ describe('real StudioProvider lifecycle', () => {
     ).toEqual([])
   }, 15_000)
 
+  // Plan 119 S15: with "Make a clean cut of every recording" on, a recording
+  // that finalizes starts one clean cut; a second finalized event for it starts
+  // nothing, and a completed cut is announced once per cut-list revision.
+  it('starts one clean cut when a recording finalizes with the switch on', async () => {
+    class CleanCutBackend extends StudioBackend {
+      override response(command: BackendCommand): unknown {
+        if (command.method === 'ai.capabilities.get') {
+          return {
+            entitlement: { cloudAi: true },
+            features: { cloudAiEnabled: true, cleanCutEnabled: true },
+            models: { defaultTextModel: 'test-model' },
+            readiness: {
+              access: { cloudAiEntitled: true, globallyDisabled: false },
+              gateway: { configured: true, configError: null },
+              transcription: { configured: true, configError: null },
+              worker: { configured: true, configError: null }
+            },
+            workflow: { inputModes: [{ enabled: true, kind: 'transcript' }] },
+            cleanCut: { supported: true, available: true, reasonCode: null }
+          }
+        }
+        if (command.method === 'ai.quota.get') {
+          return {
+            access: { allowed: true, code: null, message: null, status: null },
+            today: { limit: 20, remaining: 20 },
+            monthly: { limit: 500, remaining: 500 }
+          }
+        }
+        if (command.method === 'cleanCut.start') {
+          return {
+            id: 'clean-job-1',
+            sourceSessionId: 'clean-cut-1',
+            mode: 'clean',
+            state: 'queued',
+            progress: 0,
+            edlRevision: 0,
+            createdAt: now,
+            updatedAt: now
+          }
+        }
+        return super.response(command)
+      }
+    }
+    const backend = new CleanCutBackend()
+    backend.entitlements = premiumEntitlements
+    backend.accountSnapshot = signedInAccount
+    backend.sessionSummaries = [
+      sessionSummary({
+        id: 'clean-cut-1',
+        title: 'Tutorial',
+        mode: 'record',
+        durationMs: 600_000,
+        mp4Path: '/recordings/clean-cut-1.mp4'
+      }),
+      sessionSummary({
+        id: 'clean-cut-stream-only',
+        title: 'Stream only',
+        mode: 'stream',
+        durationMs: 600_000
+      })
+    ]
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem('videorc.aiConsent', '1')
+    localStorage.setItem('videorc.cleanCutAuto', '1')
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    await waitForObservation(() => latest()?.core.account?.status === 'signed-in')
+    await waitForObservation(() => latest()?.core.aiCapabilities !== null)
+    await waitForObservation(
+      () => latest()?.core.sessions.some((row) => row.id === 'clean-cut-1') === true
+    )
+
+    const emit = async (event: string, payload: unknown): Promise<void> => {
+      await act(async () => {
+        for (const socket of backend.sockets) {
+          socket.onmessage?.({ data: JSON.stringify({ event, payload }) })
+        }
+        await Promise.resolve()
+      })
+    }
+    const settle = async (): Promise<void> => {
+      // Room for the lazy import the auto-run goes through.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      })
+    }
+    const starts = (): unknown[] =>
+      backend.sentCommands
+        .filter((command) => command.method === 'cleanCut.start')
+        .map((command) => command.params)
+
+    for (const sessionId of ['clean-cut-1', 'clean-cut-1', 'clean-cut-stream-only']) {
+      await emit('recording.finalization', {
+        sessionId,
+        state: 'finalized',
+        mp4Path: `/recordings/${sessionId}.mp4`,
+        updatedAt: now
+      })
+      await settle()
+    }
+    expect(starts()).toEqual([
+      { sessionId: 'clean-cut-1', mode: 'clean', consentToUploadAudio: true }
+    ])
+    expect(JSON.parse(localStorage.getItem('videorc.cleanCutAttempted') ?? '[]')).toEqual([
+      'clean-cut-1'
+    ])
+
+    const completed = {
+      id: 'clean-job-1',
+      sourceSessionId: 'clean-cut-1',
+      mode: 'clean',
+      state: 'completed',
+      progress: 1,
+      edlRevision: 0,
+      edlSummary: { durationMs: 600_000, keptMs: 450_000, removalCount: 12, byKind: [] },
+      outputSessionId: 'clean-cut-1-out',
+      createdAt: now,
+      updatedAt: now
+    }
+    const listsBefore = backend.sentCommands.filter(
+      (command) => command.method === 'sessions.list'
+    ).length
+    await emit('cleanCut.status', completed)
+    await settle()
+    await emit('cleanCut.status', completed)
+    await settle()
+    const ready = toastSpies.success.mock.calls.filter(
+      ([title]) => typeof title === 'string' && title.startsWith('Your clean cut is ready')
+    )
+    expect(ready).toHaveLength(1)
+    expect(ready[0][0]).toBe('Your clean cut is ready (10:00 → 7:30)')
+    expect(ready[0][1]).toMatchObject({ action: { label: 'Review' } })
+    // The cut copy joins the Library without a click.
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'sessions.list').length
+    ).toBeGreaterThan(listsBefore)
+  }, 15_000)
+
+  it('starts no clean cut with the switch off', async () => {
+    const backend = new StudioBackend()
+    backend.entitlements = premiumEntitlements
+    backend.accountSnapshot = signedInAccount
+    backend.sessionSummaries = [
+      sessionSummary({
+        id: 'clean-cut-off',
+        mode: 'record',
+        durationMs: 600_000,
+        mp4Path: '/recordings/clean-cut-off.mp4'
+      })
+    ]
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    localStorage.setItem('videorc.aiConsent', '1')
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    await waitForObservation(
+      () => latest()?.core.sessions.some((row) => row.id === 'clean-cut-off') === true
+    )
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'recording.finalization',
+            payload: {
+              sessionId: 'clean-cut-off',
+              state: 'finalized',
+              mp4Path: '/recordings/clean-cut-off.mp4',
+              updatedAt: now
+            }
+          })
+        })
+      }
+    })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    })
+    expect(backend.sentCommands.some((command) => command.method.startsWith('cleanCut.'))).toBe(
+      false
+    )
+  }, 15_000)
+
   it('does not reuse a stale permission snapshot when the click-time status read fails', async () => {
     const backend = new StudioBackend()
     TestWebSocket.backend = backend

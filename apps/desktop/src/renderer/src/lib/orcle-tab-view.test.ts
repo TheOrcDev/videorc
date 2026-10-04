@@ -53,7 +53,7 @@ function input(overrides: Partial<OrcleLiveViewInput> = {}): OrcleLiveViewInput 
 
 describe('Orcle tab copy (plan 119 S2)', () => {
   it('introduces the page and names the three powers', () => {
-    expect(ORCLE_TAB_DESCRIPTION).toBe("Your AI producer while you're live.")
+    expect(ORCLE_TAB_DESCRIPTION).toBe('Live with you. Edits after.')
     expect(ORCLE_LIVE_POWERS.map((power) => power.title)).toEqual([
       'Never miss a question',
       'Chat stays safe',
@@ -80,7 +80,8 @@ describe('Orcle tab copy (plan 119 S2)', () => {
   it('names every cloud use and what is kept, the one list consent shows', () => {
     expect(CLOUD_AI_USES).toEqual([
       'Orcle reads your live chat.',
-      "Orcle hears you while you're live: your microphone audio goes to Videorc's cloud speech-to-text and comes back as text."
+      "Orcle hears you while you're live: your microphone audio goes to Videorc's cloud speech-to-text and comes back as text.",
+      "Clean cut uploads a recording's audio, never the video, in short chunks for a word-by-word transcript, and sends its sentences to Videorc's cloud AI to find retakes. Neither is kept on Videorc servers after the job finishes."
     ])
     expect(CLOUD_AI_KEEPS).toContain("Videorc servers don't keep your chat or your audio.")
     expect(CLOUD_AI_KEEPS).toContain('A short report of each stream is saved on this computer.')

@@ -8,9 +8,8 @@ import type { EntitlementUiGate } from './entitlement-ui'
 // its tests and the Comments window cannot disagree about what Orcle Live is
 // doing.
 
-/** The page's intro line. Clean cut (phase 2) changes it to "Live with you.
- * Edits after." */
-export const ORCLE_TAB_DESCRIPTION = "Your AI producer while you're live."
+/** The page's intro line (plan 119 decision 1): Orcle Live, then Clean cut. */
+export const ORCLE_TAB_DESCRIPTION = 'Live with you. Edits after.'
 
 /** What Orcle Live does, in three powers (plan 119 decision 4). */
 export const ORCLE_LIVE_POWERS: readonly { title: string; description: string }[] = [
@@ -32,14 +31,15 @@ export const ORCLE_LIVE_POWERS: readonly { title: string; description: string }[
 ]
 
 /**
- * What Cloud AI covers, one line per use (plan 119 decision 3). The consent
- * dialog and the Cloud AI row show this one list, so a feature that needs
- * cloud AI extends the consent here, never in a second store. Clean cut adds
- * its line: "Clean cut uploads your recording's audio to transcribe it."
+ * What Cloud AI covers, one line per use (plan 119 decision 3). Every consent
+ * dialog (Orcle Live, Clean cut) and the Cloud AI row show this one list, so a
+ * feature that needs cloud AI extends the consent here, never in a second
+ * store.
  */
 export const CLOUD_AI_USES: readonly string[] = [
   'Orcle reads your live chat.',
-  "Orcle hears you while you're live: your microphone audio goes to Videorc's cloud speech-to-text and comes back as text."
+  "Orcle hears you while you're live: your microphone audio goes to Videorc's cloud speech-to-text and comes back as text.",
+  "Clean cut uploads a recording's audio, never the video, in short chunks for a word-by-word transcript, and sends its sentences to Videorc's cloud AI to find retakes. Neither is kept on Videorc servers after the job finishes."
 ]
 
 /** What is kept, and where, after the list of uses. */

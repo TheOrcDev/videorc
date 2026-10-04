@@ -23,6 +23,7 @@ vi.mock('@/hooks/use-studio', () => ({
 let root: Root
 let container: HTMLDivElement
 const onOpenOrcleReport = vi.fn((_sessionId: string) => undefined)
+const onOpenCleanCut = vi.fn((_sessionId: string) => undefined)
 
 function session(overrides: Partial<SessionSummary>): SessionSummary {
   return {
@@ -102,7 +103,11 @@ async function render(): Promise<void> {
       createElement(
         WorkspaceNavContext.Provider,
         { value: nav },
-        createElement(TooltipProvider, null, createElement(LibraryTab, { onOpenOrcleReport }))
+        createElement(
+          TooltipProvider,
+          null,
+          createElement(LibraryTab, { onOpenOrcleReport, onOpenCleanCut })
+        )
       )
     )
   )

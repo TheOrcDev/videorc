@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { CohostSettings, CohostState } from '@/lib/backend'
+import type { CleanCutTabRequest } from '@/lib/clean-cut-events'
 import { CLOUD_AI_KEEPS, CLOUD_AI_USES, ORCLE_LIVE_POWERS } from '@/lib/orcle-tab-view'
 
 import { OrcleTab } from './orcle-tab'
@@ -29,6 +30,38 @@ vi.mock('@/hooks/use-orcle-report', () => ({
     return { payload: null, loading: false, error: null, reload: () => undefined }
   }
 }))
+vi.mock('@/hooks/use-clean-cut', () => ({
+  useCleanCut: () => ({
+    connected: true,
+    jobs: [],
+    jobsLoaded: true,
+    capabilities: null,
+    start: async () => undefined,
+    cancel: async () => undefined,
+    render: async () => undefined,
+    get: async () => ({ sessionId: '', jobs: [] }),
+    updateEdl: async () => undefined,
+    transcript: async () => undefined,
+    subscribe: () => () => undefined
+  })
+}))
+vi.mock('@/components/clean-cut/clean-cut-review', async () => {
+  const { createElement } = await import('react')
+  return {
+    CleanCutReview: ({
+      target,
+      onClose
+    }: {
+      target: { sessionId: string; mode: string; jobId: string | null }
+      onClose: () => void
+    }) =>
+      createElement(
+        'div',
+        { 'data-slot': 'review-stub', 'data-target': JSON.stringify(target) },
+        createElement('button', { type: 'button', onClick: onClose }, 'Close review')
+      )
+  }
+})
 
 let root: Root
 let container: HTMLDivElement
@@ -88,10 +121,12 @@ async function render({
   consentRequested = false,
   live = false,
   state = null as CohostState | null,
-  reportSessionId = undefined as string | null | undefined
+  reportSessionId = undefined as string | null | undefined,
+  cleanCutRequest = undefined as CleanCutTabRequest | undefined
 } = {}): Promise<void> {
   mocked.core = {
     sessions: [],
+    entitlements: null,
     account: signedIn ? { status: 'signed-in' } : { status: 'signed-out' },
     aiConsent: consented,
     cohostGate: gate,
@@ -113,11 +148,16 @@ async function render({
   mocked.account = { signIn: calls.signIn }
   await act(async () =>
     root.render(
-      reportSessionId === undefined
-        ? createElement(OrcleTab)
-        : createElement(OrcleTab, { reportSessionId })
+      createElement(OrcleTab, {
+        ...(reportSessionId === undefined ? {} : { reportSessionId }),
+        ...(cleanCutRequest === undefined ? {} : { cleanCutRequest })
+      })
     )
   )
+  // The review is lazy.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  })
 }
 
 function liveSwitch(): HTMLButtonElement {
@@ -142,7 +182,7 @@ describe('Orcle tab (plan 119 S2)', () => {
   it('introduces Orcle Live with its switch, its status and its three powers', async () => {
     await render()
     const text = document.body.textContent ?? ''
-    expect(text).toContain("Your AI producer while you're live.")
+    expect(text).toContain('Live with you. Edits after.')
     expect(text).toContain('Orcle Live')
     expect(text).toContain('Alpha')
     expect(text).toContain('Orcle joins my streams')
@@ -250,7 +290,7 @@ describe('Stream report (plan 119 S3)', () => {
 
   it('sits under Orcle Live, before Customize, and follows the last stream', async () => {
     await render()
-    expect(sectionTitles()).toEqual(['Orcle Live', 'Last stream'])
+    expect(sectionTitles()).toEqual(['Orcle Live', 'Last stream', 'Clean cut'])
     const tab = document.querySelector('[data-slot="orcle-tab"]') as HTMLElement
     const report = tab.querySelector('[data-slot="orcle-report"]') as HTMLElement
     const customize = tab.querySelector('[data-slot="orcle-customize"]') as HTMLElement
@@ -308,5 +348,40 @@ describe('Customize (plan 119 S2)', () => {
     expect(document.getElementById('cohost-listen')).toBeTruthy()
     expect(document.getElementById('cohost-enabled')).toBeNull()
     expect(document.body.textContent).not.toContain('Enable Orcle')
+  })
+})
+
+describe('Clean cut in the Orcle tab (plan 119 S14)', () => {
+  it('sits after the stream report, before Customize', async () => {
+    await render()
+    const tab = document.querySelector('[data-slot="orcle-tab"]') as HTMLElement
+    const report = tab.querySelector('[data-slot="orcle-report"]') as HTMLElement
+    const cleanCut = tab.querySelector('[data-slot="clean-cut"]') as HTMLElement
+    const customize = tab.querySelector('[data-slot="orcle-customize"]') as HTMLElement
+    expect(report.compareDocumentPosition(cleanCut) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(
+      cleanCut.compareDocumentPosition(customize) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+  })
+
+  it("opens a cut's review on the ready toast's ask, and goes back to the tab", async () => {
+    await render({
+      cleanCutRequest: {
+        sessionId: 'rec-1',
+        jobId: 'job-1',
+        mode: 'condensed',
+        review: true,
+        nonce: 1
+      }
+    })
+    const review = document.querySelector('[data-slot="review-stub"]') as HTMLElement
+    expect(JSON.parse(review.dataset.target ?? '{}')).toEqual({
+      sessionId: 'rec-1',
+      mode: 'condensed',
+      jobId: 'job-1'
+    })
+    expect(document.querySelector('[data-slot="orcle-tab"]')).toBeNull()
+    await act(async () => button('Close review').click())
+    expect(document.querySelector('[data-slot="orcle-tab"]')).toBeTruthy()
   })
 })

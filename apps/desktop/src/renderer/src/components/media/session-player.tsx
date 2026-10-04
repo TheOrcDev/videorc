@@ -1,11 +1,13 @@
 import {
   useCallback,
   useEffect,
+  useImperativeHandle,
   useMemo,
   useRef,
   useState,
   type KeyboardEvent,
-  type ReactElement
+  type ReactElement,
+  type Ref
 } from 'react'
 
 import { PauseIcon, PlayIcon } from '@/components/icons'
@@ -51,7 +53,16 @@ export type SessionPlayerProps = {
   onTimeUpdate?: (positionMs: number) => void
   /** Set to a new value to seek there; the same value twice seeks once. */
   seekToMs?: number | null
+  /** Drive the player from outside its own focus (the Clean cut review's keys). */
+  handleRef?: Ref<SessionPlayerHandle>
   className?: string
+}
+
+/** What a host may do to the player without owning its focus. */
+export type SessionPlayerHandle = {
+  togglePlayback: () => void
+  seekTo: (ms: number) => void
+  seekBy: (deltaMs: number) => void
 }
 
 export type SessionPlayerGrantState =
@@ -65,6 +76,7 @@ export function SessionPlayer({
   skipRanges,
   onTimeUpdate,
   seekToMs = null,
+  handleRef,
   className
 }: SessionPlayerProps): ReactElement {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -210,6 +222,19 @@ export function SessionPlayer({
       video.pause()
     }
   }, [ready])
+
+  useImperativeHandle(
+    handleRef,
+    () => ({
+      togglePlayback,
+      seekTo,
+      seekBy: (deltaMs: number) => {
+        const video = videoRef.current
+        seekTo((video ? video.currentTime * 1000 : 0) + deltaMs)
+      }
+    }),
+    [seekTo, togglePlayback]
+  )
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
     const target = event.target instanceof HTMLElement ? event.target : null
