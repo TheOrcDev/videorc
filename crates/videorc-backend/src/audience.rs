@@ -912,16 +912,22 @@ async fn read_source(
             Err(error) => return token_error_reading(source.platform, &error).into(),
         }
     }
-    let audience_scopes = (source.platform == StreamPlatform::Twitch).then(|| {
-        crate::oauth::optional_scopes_for(StreamPlatform::Twitch)
-            .iter()
-            .all(|scope| credential.account.scopes.iter().any(|held| held == scope))
-    });
+    let audience_scopes = (source.platform == StreamPlatform::Twitch)
+        .then(|| twitch_audience_scopes_granted(&credential.account.scopes));
     SourceRead {
         subscribers: read_twitch_subscribers(client, source.platform, &credential, &token).await,
         reading,
         audience_scopes,
     }
+}
+
+/// Whether a Twitch account allows follow alerts and the sub count: the two
+/// audience scopes, never every optional scope. Plan 140 made the moderation
+/// scope optional too, and an account without it must still name followers.
+fn twitch_audience_scopes_granted(scopes: &[String]) -> bool {
+    crate::oauth::TWITCH_AUDIENCE_SCOPES
+        .iter()
+        .all(|scope| scopes.iter().any(|held| held == scope))
 }
 
 /// The Twitch sub total, only when the account opted into the scope (S6).
@@ -1752,6 +1758,37 @@ mod tests {
                 "platforms": [{ "platform": "youtube", "metric": "subscribers", "capability": "pending" }],
                 "updatedAt": "t0"
             })
+        );
+    }
+
+    #[test]
+    fn follow_names_need_only_the_audience_scopes_not_moderation() {
+        fn scopes(extra: &[&str]) -> Vec<String> {
+            let mut held = vec!["user:read:chat".to_string(), "user:write:chat".to_string()];
+            held.extend(extra.iter().map(|scope| scope.to_string()));
+            held
+        }
+        let audience = [
+            crate::oauth::TWITCH_FOLLOWERS_SCOPE,
+            crate::oauth::TWITCH_SUBSCRIPTIONS_SCOPE,
+        ];
+        // Plan 140: an account without the moderation scope still names
+        // followers, so Activity never asks it to allow follows again.
+        assert!(twitch_audience_scopes_granted(&scopes(&audience)));
+        assert!(twitch_audience_scopes_granted(&scopes(&[
+            crate::oauth::TWITCH_FOLLOWERS_SCOPE,
+            crate::oauth::TWITCH_SUBSCRIPTIONS_SCOPE,
+            crate::oauth::TWITCH_MODERATION_SCOPE,
+        ])));
+        assert!(!twitch_audience_scopes_granted(&scopes(&[
+            crate::oauth::TWITCH_MODERATION_SCOPE
+        ])));
+        assert!(!twitch_audience_scopes_granted(&scopes(&[
+            crate::oauth::TWITCH_FOLLOWERS_SCOPE
+        ])));
+        assert!(!twitch_audience_scopes_granted(&scopes(&[])));
+        assert!(
+            !crate::oauth::TWITCH_AUDIENCE_SCOPES.contains(&crate::oauth::TWITCH_MODERATION_SCOPE)
         );
     }
 

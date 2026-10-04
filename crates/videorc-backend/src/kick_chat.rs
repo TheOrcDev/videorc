@@ -1228,6 +1228,96 @@ pub async fn send_kick_chat_message(
     })
 }
 
+// --- Removing ------------------------------------------------------------------
+
+/// The optional scope that lets Videorc delete chat messages (plan 140). Only
+/// the "Remove messages" Reconnect row asks for it; until an account grants
+/// it, removals hide locally with `missing-scope`.
+pub const KICK_CHAT_MODERATE_SCOPE: &str = crate::oauth::KICK_MODERATION_SCOPE;
+
+/// The hide reason the moderation engine shows after "Viewers on Kick still
+/// see it."
+pub const KICK_MODERATE_RECONNECT_REASON: &str = "Reconnect Kick to let Orcle remove messages.";
+
+/// Kick message ids are UUIDs; anything else never becomes a path segment.
+fn kick_message_id_is_safe(message_id: &str) -> bool {
+    !message_id.is_empty()
+        && message_id.len() <= 128
+        && message_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
+/// Remove one chat message (plan 140 S4): `DELETE /public/v1/chat/{message_id}`
+/// answers 204 (added by Kick 2025-12-02). Kick sends no delete webhook, so the
+/// caller tombstones the row locally after a 204.
+pub async fn delete_kick_chat_message(
+    client: &reqwest::Client,
+    config: &KickChatSenderConfig,
+    message_id: &str,
+) -> crate::live_chat_moderation::ProviderDeleteOutcome {
+    use crate::live_chat_moderation::{ModerationOutcomeCode, ProviderDeleteOutcome};
+
+    let message_id = message_id.trim();
+    if message_id.is_empty() {
+        return ProviderDeleteOutcome::Failed(
+            "Kick needs the message id to remove a message; nothing was sent.".to_string(),
+        );
+    }
+    if !kick_message_id_is_safe(message_id) {
+        return ProviderDeleteOutcome::CannotDelete {
+            code: ModerationOutcomeCode::Unsupported,
+            reason: "Kick gave this message an id Videorc cannot use.".to_string(),
+        };
+    }
+    let base = kick_base(config.api_base_url.as_deref());
+    let response = match client
+        .delete(format!("{base}{KICK_CHAT_PATH}/{message_id}"))
+        .bearer_auth(&config.access_token)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return ProviderDeleteOutcome::Transient(format!("Could not reach Kick: {error}"));
+        }
+    };
+    let status = response.status().as_u16();
+    let body = response.bytes().await.unwrap_or_default();
+    classify_kick_delete_response(status, &body)
+}
+
+/// Pure: what a Kick delete status and body mean.
+pub(crate) fn classify_kick_delete_response(
+    status: u16,
+    body: &[u8],
+) -> crate::live_chat_moderation::ProviderDeleteOutcome {
+    use crate::live_chat_moderation::{ModerationOutcomeCode, ProviderDeleteOutcome};
+
+    if (200..300).contains(&status) {
+        return ProviderDeleteOutcome::Deleted;
+    }
+    let detail = serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|body| {
+            body.get("message")
+                .and_then(Value::as_str)
+                .map(|message| format!(" ({message})"))
+        })
+        .unwrap_or_default();
+    match status {
+        404 => ProviderDeleteOutcome::NotFound,
+        401 | 403 => ProviderDeleteOutcome::CannotDelete {
+            code: ModerationOutcomeCode::MissingScope,
+            reason: KICK_MODERATE_RECONNECT_REASON.to_string(),
+        },
+        429 | 500..=599 => {
+            ProviderDeleteOutcome::Transient(format!("Kick answered HTTP {status}{detail}."))
+        }
+        _ => ProviderDeleteOutcome::Failed(format!("Kick removal failed ({status}){detail}.")),
+    }
+}
+
 // --- Mapping ---------------------------------------------------------------------
 
 async fn ensure_active_session(
@@ -1969,6 +2059,7 @@ mod tests {
             account_label: Some("Kick Account".to_string()),
             read: CommentsReadState::Connecting,
             write: CommentsWriteState::Ready,
+            moderate: None,
             state: LiveChatProviderConnectionState::Connecting,
             message: "Connecting to Kick live chat.".to_string(),
             last_connected_at: None,
@@ -2729,5 +2820,148 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.contains("500 characters"));
+    }
+
+    // --- Removing (plan 140 S4) ----------------------------------------------------
+
+    #[derive(Clone)]
+    struct DeleteProbe {
+        status: StatusCode,
+        hits: Arc<AtomicUsize>,
+        /// `(message id path segment, authorization)` per request.
+        requests: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    async fn probe_delete(
+        State(probe): State<DeleteProbe>,
+        axum::extract::Path(message_id): axum::extract::Path<String>,
+        headers: HeaderMap,
+    ) -> StatusCode {
+        probe.hits.fetch_add(1, Ordering::SeqCst);
+        probe.requests.lock().unwrap().push((
+            message_id,
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string(),
+        ));
+        probe.status
+    }
+
+    async fn spawn_delete_probe(status: StatusCode) -> (String, DeleteProbe) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let probe = DeleteProbe {
+            status,
+            hits: Arc::new(AtomicUsize::new(0)),
+            requests: Arc::default(),
+        };
+        let app = Router::new()
+            .route(
+                &format!("{KICK_CHAT_PATH}/{{message_id}}"),
+                axum::routing::delete(probe_delete),
+            )
+            .with_state(probe.clone());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{address}"), probe)
+    }
+
+    fn delete_config(base_url: &str) -> KickChatSenderConfig {
+        KickChatSenderConfig {
+            access_token: KICK_TOKEN.to_string(),
+            account_id: "4242".to_string(),
+            broadcaster_user_id: "4242".to_string(),
+            api_base_url: Some(base_url.to_string()),
+            token_source: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_targets_the_message_path_and_refuses_unsafe_ids_without_a_request() {
+        use crate::live_chat_moderation::{ModerationOutcomeCode, ProviderDeleteOutcome};
+        let (base, probe) = spawn_delete_probe(StatusCode::NO_CONTENT).await;
+        let client = reqwest::Client::new();
+        let outcome = delete_kick_chat_message(
+            &client,
+            &delete_config(&base),
+            " 3f2a9c1e-7b4d-4e0a-9f1c-2d8e6b5a4c3f ",
+        )
+        .await;
+        assert_eq!(outcome, ProviderDeleteOutcome::Deleted);
+        assert_eq!(probe.hits.load(Ordering::SeqCst), 1);
+        let (message_id, authorization) = probe.requests.lock().unwrap()[0].clone();
+        assert_eq!(message_id, "3f2a9c1e-7b4d-4e0a-9f1c-2d8e6b5a4c3f");
+        assert_eq!(authorization, format!("Bearer {KICK_TOKEN}"));
+
+        // Ids that are not path-safe never leave the process.
+        for unsafe_id in ["../chat", "a b", "x/y", "id?x=1"] {
+            let outcome = delete_kick_chat_message(&client, &delete_config(&base), unsafe_id).await;
+            assert!(
+                matches!(
+                    outcome,
+                    ProviderDeleteOutcome::CannotDelete {
+                        code: ModerationOutcomeCode::Unsupported,
+                        ..
+                    }
+                ),
+                "{unsafe_id}: {outcome:?}"
+            );
+        }
+        let outcome = delete_kick_chat_message(&client, &delete_config(&base), "  ").await;
+        assert!(matches!(outcome, ProviderDeleteOutcome::Failed(_)));
+        assert_eq!(probe.hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_answers_classify_by_status() {
+        use crate::live_chat_moderation::{ModerationOutcomeCode, ProviderDeleteOutcome};
+        let (base, probe) = spawn_delete_probe(StatusCode::FORBIDDEN).await;
+        let outcome = delete_kick_chat_message(
+            &reqwest::Client::new(),
+            &delete_config(&base),
+            "3f2a9c1e-7b4d-4e0a-9f1c-2d8e6b5a4c3f",
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            ProviderDeleteOutcome::CannotDelete {
+                code: ModerationOutcomeCode::MissingScope,
+                reason: KICK_MODERATE_RECONNECT_REASON.to_string(),
+            }
+        );
+        assert_eq!(probe.hits.load(Ordering::SeqCst), 1);
+
+        assert_eq!(
+            classify_kick_delete_response(204, b""),
+            ProviderDeleteOutcome::Deleted
+        );
+        assert_eq!(
+            classify_kick_delete_response(404, b""),
+            ProviderDeleteOutcome::NotFound
+        );
+        assert_eq!(
+            classify_kick_delete_response(401, br#"{"message":"Unauthenticated"}"#),
+            ProviderDeleteOutcome::CannotDelete {
+                code: ModerationOutcomeCode::MissingScope,
+                reason: KICK_MODERATE_RECONNECT_REASON.to_string(),
+            }
+        );
+        assert!(matches!(
+            classify_kick_delete_response(429, b""),
+            ProviderDeleteOutcome::Transient(_)
+        ));
+        assert!(matches!(
+            classify_kick_delete_response(500, b""),
+            ProviderDeleteOutcome::Transient(_)
+        ));
+        assert_eq!(
+            classify_kick_delete_response(400, br#"{"message":"bad"}"#),
+            ProviderDeleteOutcome::Failed("Kick removal failed (400) (bad).".to_string())
+        );
     }
 }

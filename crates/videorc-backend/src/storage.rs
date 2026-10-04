@@ -19,6 +19,7 @@ use crate::live_chat::{
     CommentsSendOperation, CommentsSendOperationPhase, LiveChatEventDetails, LiveChatEventType,
     LiveChatMessage, LiveChatMessageFragment, MembershipKind, SubscriptionKind,
 };
+use crate::live_chat_moderation::{ModerationOperation, ModerationPhase};
 use crate::process_job::output_owned_std_with_timeout;
 use crate::protocol::{
     AiArtifact, AiArtifactKind, AiArtifactStatus, CleanCutEdl, CleanCutJob, CleanCutJobState,
@@ -3781,6 +3782,151 @@ impl Database {
             .map_err(Into::into)
     }
 
+    // --- Chat moderation operations (plan 140 S4) -----------------------------------
+
+    pub fn save_chat_moderation_operation(&self, operation: &ModerationOperation) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO live_chat_moderation_operations (
+                id, session_id, message_id, platform, target_id, provider_message_id,
+                author_name, excerpt, source_json, reason, phase_json, confirm_mode_json,
+                requires_explicit_confirm, confirm_by, execute_at, outcome, outcome_code_json,
+                attempts, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+             ON CONFLICT(id) DO UPDATE SET
+                phase_json = excluded.phase_json,
+                confirm_by = excluded.confirm_by,
+                execute_at = excluded.execute_at,
+                outcome = excluded.outcome,
+                outcome_code_json = excluded.outcome_code_json,
+                attempts = excluded.attempts,
+                updated_at = excluded.updated_at",
+            params![
+                operation.operation_id,
+                operation.session_id,
+                operation.message_id,
+                stream_platform_id(operation.platform),
+                operation.target_id,
+                operation.provider_message_id,
+                operation.author_name,
+                operation.excerpt,
+                serde_json::to_string(&operation.source)?,
+                operation.reason,
+                serde_json::to_string(&operation.phase)?,
+                serde_json::to_string(&operation.confirm_mode)?,
+                operation.requires_explicit_confirm,
+                operation.confirm_by,
+                operation.execute_at,
+                operation.outcome,
+                operation
+                    .outcome_code
+                    .map(|code| serde_json::to_string(&code))
+                    .transpose()?,
+                i64::from(operation.attempts),
+                operation.created_at,
+                operation.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_chat_moderation_operation(&self, id: &str) -> Result<Option<ModerationOperation>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            &format!(
+                "SELECT {CHAT_MODERATION_OPERATION_COLUMNS}
+                 FROM live_chat_moderation_operations WHERE id = ?1"
+            ),
+            params![id],
+            chat_moderation_operation_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Newest first, at most `limit` (clamped to 1..=1000).
+    pub fn list_chat_moderation_operations(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ModerationOperation>> {
+        let limit = i64::try_from(limit.clamp(1, 1_000)).unwrap_or(200);
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(&format!(
+            "SELECT {CHAT_MODERATION_OPERATION_COLUMNS}
+             FROM live_chat_moderation_operations
+             WHERE session_id = ?1
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?2"
+        ))?;
+        let rows = statement.query_map(
+            params![session_id, limit],
+            chat_moderation_operation_from_row,
+        )?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// The restart sweep (plan 140): never act on a removal after a restart.
+    /// Returns `(cancelled pending, executing marked delivery unknown)`.
+    pub fn reconcile_orphaned_chat_moderation_operations(&self) -> Result<(usize, usize)> {
+        let pending = serde_json::to_string(&ModerationPhase::PendingConfirm)?;
+        let executing = serde_json::to_string(&ModerationPhase::Executing)?;
+        let operations = {
+            let conn = self.lock()?;
+            let mut statement = conn.prepare(&format!(
+                "SELECT {CHAT_MODERATION_OPERATION_COLUMNS}
+                 FROM live_chat_moderation_operations
+                 WHERE phase_json = ?1 OR phase_json = ?2"
+            ))?;
+            let rows = statement.query_map(
+                params![pending, executing],
+                chat_moderation_operation_from_row,
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let now = Utc::now().to_rfc3339();
+        let mut cancelled = 0;
+        let mut unknown = 0;
+        for mut operation in operations {
+            match operation.phase {
+                ModerationPhase::PendingConfirm => {
+                    operation.phase = ModerationPhase::Cancelled;
+                    operation.outcome =
+                        Some(crate::live_chat_moderation::RESTART_CANCELLED_OUTCOME.to_string());
+                    cancelled += 1;
+                }
+                ModerationPhase::Executing => {
+                    operation.phase = ModerationPhase::DeliveryUnknown;
+                    operation.outcome =
+                        Some(crate::live_chat_moderation::RESTART_UNKNOWN_OUTCOME.to_string());
+                    unknown += 1;
+                }
+                _ => continue,
+            }
+            operation.updated_at = now.clone();
+            self.save_chat_moderation_operation(&operation)?;
+        }
+        Ok((cancelled, unknown))
+    }
+
+    /// One persisted chat row by its app id, whatever its session.
+    pub fn get_live_chat_message(&self, id: &str) -> Result<Option<LiveChatMessage>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, session_id, provider_message_id, platform, target_id, author_id,
+                    author_name, author_avatar_url, author_badges_json, author_roles_json,
+                    published_at, received_at, message_text, fragments_json, event_type,
+                    amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message,
+                    author_affiliation_json
+             FROM live_chat_messages WHERE id = ?1",
+            params![id],
+            live_chat_message_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn reconcile_orphaned_chat_send_operations(&self) -> Result<usize> {
         let sending = serde_json::to_string(&CommentsSendOperationPhase::Sending)?;
         let operations = {
@@ -6995,6 +7141,38 @@ impl Database {
              CREATE INDEX IF NOT EXISTS idx_ai_artifacts_session_created
                 ON ai_artifacts(session_id, created_at DESC, id DESC);",
         )?;
+        // Chat moderation (plan 140 S4): every removal is an audited row,
+        // persisted before any provider call. A new table only; older backends
+        // ignore it. Enum columns hold the serde JSON string (`"removed"`),
+        // like `live_chat_send_operations.phase_json`.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS live_chat_moderation_operations (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                message_id TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                target_id TEXT,
+                provider_message_id TEXT NOT NULL,
+                author_name TEXT NOT NULL,
+                excerpt TEXT NOT NULL,
+                source_json TEXT NOT NULL,
+                reason TEXT,
+                phase_json TEXT NOT NULL,
+                confirm_mode_json TEXT NOT NULL,
+                requires_explicit_confirm INTEGER NOT NULL DEFAULT 0,
+                confirm_by TEXT,
+                execute_at TEXT,
+                outcome TEXT,
+                outcome_code_json TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_live_chat_moderation_operations_session_created
+                ON live_chat_moderation_operations(session_id, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_live_chat_moderation_operations_phase
+                ON live_chat_moderation_operations(phase_json);",
+        )?;
         // Clean cut jobs (plan 119 S12a). A new table only: older backends
         // ignore it, and `sessions.processing_kind` never gains a value.
         conn.execute_batch(
@@ -7688,6 +7866,67 @@ fn live_chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveC
             crate::kick_chat::kick_message_parts(&message.message_text);
     }
     Ok(message)
+}
+
+/// The moderation operation columns, in the order `chat_moderation_operation_from_row` reads.
+const CHAT_MODERATION_OPERATION_COLUMNS: &str =
+    "id, session_id, message_id, platform, target_id, provider_message_id,
+     author_name, excerpt, source_json, reason, phase_json, confirm_mode_json,
+     requires_explicit_confirm, confirm_by, execute_at, outcome, outcome_code_json,
+     attempts, created_at, updated_at";
+
+fn chat_moderation_operation_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ModerationOperation> {
+    fn json_column<T: serde::de::DeserializeOwned>(
+        row: &rusqlite::Row<'_>,
+        index: usize,
+    ) -> rusqlite::Result<T> {
+        let json: String = row.get(index)?;
+        serde_json::from_str(&json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                index,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })
+    }
+    let platform_id: String = row.get(3)?;
+    let outcome_code = row
+        .get::<_, Option<String>>(16)?
+        .map(|json| {
+            serde_json::from_str(&json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    16,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()?;
+    let attempts: i64 = row.get(17)?;
+    Ok(ModerationOperation {
+        operation_id: row.get(0)?,
+        session_id: row.get(1)?,
+        message_id: row.get(2)?,
+        platform: stream_platform_from_id(&platform_id).unwrap_or(StreamPlatform::Custom),
+        target_id: row.get(4)?,
+        provider_message_id: row.get(5)?,
+        author_name: row.get(6)?,
+        excerpt: row.get(7)?,
+        source: json_column(row, 8)?,
+        reason: row.get(9)?,
+        phase: json_column(row, 10)?,
+        confirm_mode: json_column(row, 11)?,
+        requires_explicit_confirm: row.get(12)?,
+        confirm_by: row.get(13)?,
+        execute_at: row.get(14)?,
+        outcome: row.get(15)?,
+        outcome_code,
+        attempts: u32::try_from(attempts).unwrap_or(0),
+        created_at: row.get(18)?,
+        updated_at: row.get(19)?,
+    })
 }
 
 fn chat_send_operation_from_row(

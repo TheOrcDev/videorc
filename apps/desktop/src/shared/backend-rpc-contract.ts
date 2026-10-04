@@ -47,6 +47,9 @@ import type {
   GateStatus,
   LiveLayoutApplyStatus,
   MainOwnedPreviewSurfaceBoundsParams,
+  ModerationOperation,
+  ModerationOperationParams,
+  ModerationRequestParams,
   NoiseCleanupJob,
   OAuthCallbackResult,
   OAuthCompleteParams,
@@ -287,6 +290,16 @@ export interface BackendRpcMethodMap {
   'cohost.report.latest': BackendRpcDefinition<undefined, CohostReportPayload | null>
   'liveChat.emotes.get': BackendRpcDefinition<undefined, ChatEmotesSettings>
   'liveChat.emotes.set': BackendRpcDefinition<ChatEmotesSettingsPatch, ChatEmotesSettings>
+  'liveChat.moderation.request': BackendRpcDefinition<ModerationRequestParams, ModerationOperation>
+  'liveChat.moderation.confirm': BackendRpcDefinition<
+    ModerationOperationParams,
+    ModerationOperation
+  >
+  'liveChat.moderation.cancel': BackendRpcDefinition<ModerationOperationParams, ModerationOperation>
+  'liveChat.moderationOperations.list': BackendRpcDefinition<
+    { sessionId: string },
+    ModerationOperation[]
+  >
   'clip.mark': BackendRpcDefinition<undefined, ClipMarkedEvent>
   'clip.marks.list': BackendRpcDefinition<{ sessionId: string }, ClipMark[]>
 }
@@ -323,6 +336,7 @@ export interface BackendEventMap {
   'performance.check.progress': PerformanceCheckProgress
   'performance.check.completed': PerformanceCheckState
   'liveChat.emotes': ChatEmotesSettings
+  'liveChat.moderationOperation': ModerationOperation
   'youtube.quota': YouTubeQuotaStatus
 }
 
@@ -2436,6 +2450,66 @@ const cohostFlagParamsSchema = objectSchema(
   { sessionId: boundedString, messageId: boundedString },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostFlagParams>
+// Chat moderation (plan 140 S4): closed shapes, kebab-case enums, optional
+// fields absent (never null) when the backend has nothing to say.
+const moderationSourceSchema = enumSchema(['manual', 'orcle-voice'])
+const removeConfirmModeSchema = enumSchema(['confirm', 'countdown'])
+const moderationOperationSchema = objectSchema(
+  {
+    operationId: boundedString,
+    sessionId: boundedString,
+    messageId: boundedString,
+    platform: streamPlatformSchema,
+    targetId: optionalSchema(boundedString),
+    authorName: stringSchema({ maxLength: 1000 }),
+    excerpt: stringSchema({ maxLength: 1000 }),
+    source: moderationSourceSchema,
+    reason: optionalSchema(stringSchema({ maxLength: 200 })),
+    phase: enumSchema([
+      'pending-confirm',
+      'cancelled',
+      'expired',
+      'executing',
+      'removed',
+      'hidden-locally',
+      'failed',
+      'delivery-unknown'
+    ]),
+    confirmMode: removeConfirmModeSchema,
+    requiresExplicitConfirm: booleanSchema,
+    confirmBy: optionalSchema(timestamp),
+    executeAt: optionalSchema(timestamp),
+    outcome: optionalSchema(stringSchema({ maxLength: 2000 })),
+    outcomeCode: optionalSchema(
+      enumSchema([
+        'removed',
+        'missing-scope',
+        'unsupported',
+        'quota-paused',
+        'too-old',
+        'provider-error',
+        'not-found'
+      ])
+    ),
+    createdAt: timestamp,
+    updatedAt: timestamp
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ModerationOperation>
+const moderationRequestParamsSchema = objectSchema(
+  {
+    operationId: boundedString,
+    messageId: boundedString,
+    source: moderationSourceSchema,
+    reason: optionalSchema(stringSchema({ maxLength: 200 })),
+    confirmMode: optionalSchema(removeConfirmModeSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<ModerationRequestParams>
+const moderationOperationParamsSchema = objectSchema(
+  { operationId: boundedString },
+  { allowUnknown: false }
+) as RuntimeSchema<ModerationOperationParams>
 const cohostPromiseParamsSchema = objectSchema(
   { sessionId: boundedString, promiseId: boundedString },
   { allowUnknown: false }
@@ -3099,6 +3173,22 @@ const runtimeContracts = {
     params: chatEmotesSettingsPatchSchema,
     result: chatEmotesSettingsSchema
   },
+  'liveChat.moderation.request': {
+    params: moderationRequestParamsSchema,
+    result: moderationOperationSchema
+  },
+  'liveChat.moderation.confirm': {
+    params: moderationOperationParamsSchema,
+    result: moderationOperationSchema
+  },
+  'liveChat.moderation.cancel': {
+    params: moderationOperationParamsSchema,
+    result: moderationOperationSchema
+  },
+  'liveChat.moderationOperations.list': {
+    params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
+    result: arraySchema(moderationOperationSchema, { maxLength: 200 })
+  },
   'clip.mark': { params: undefinedSchema, result: clipMarkedEventSchema },
   'clip.marks.list': {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
@@ -3159,6 +3249,7 @@ const runtimeEventSchemas = {
   'performance.check.progress': performanceCheckProgressSchema,
   'performance.check.completed': performanceCheckStateSchema,
   'liveChat.emotes': chatEmotesSettingsSchema,
+  'liveChat.moderationOperation': moderationOperationSchema,
   'youtube.quota': youtubeQuotaStatusSchema,
   'liveChat.totals': sessionChatTotalsSchema
 } satisfies Record<BackendEvent, RuntimeSchema<unknown>>

@@ -163,6 +163,127 @@ pub async fn send_twitch_chat_message(
     })
 }
 
+/// The optional scope that lets Videorc delete chat messages (plan 140). Every
+/// Twitch connect asks for it; until an account reconnects with it, removals
+/// hide locally with `missing-scope`.
+pub const TWITCH_CHAT_MODERATE_SCOPE: &str = crate::oauth::TWITCH_MODERATION_SCOPE;
+
+/// Helix deletes only messages younger than this (checked before any call).
+pub const TWITCH_DELETE_MAX_AGE: chrono::Duration = chrono::Duration::hours(6);
+
+/// The hide reasons the moderation engine shows after "Viewers on Twitch
+/// still see it."
+pub const TWITCH_TOO_OLD_REASON: &str = "Twitch only removes messages under 6 hours old.";
+pub const TWITCH_MODERATE_RECONNECT_REASON: &str = "Reconnect Twitch to let Orcle remove messages.";
+
+/// Why an empty id is refused before any request is built: Helix clears the
+/// WHOLE chat when `message_id` is omitted.
+pub const TWITCH_EMPTY_MESSAGE_ID_REFUSED: &str = "Twitch needs the message id to remove one message; without it Twitch would clear the whole chat, so nothing was sent.";
+
+/// Whether Helix would refuse to delete a message published at `published_at`
+/// (RFC 3339) because it is 6 hours old or more. An unreadable time lets
+/// Twitch decide.
+pub fn twitch_message_too_old(published_at: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
+    match chrono::DateTime::parse_from_rfc3339(published_at.trim()) {
+        Ok(published) => {
+            now.signed_duration_since(published.with_timezone(&chrono::Utc))
+                >= TWITCH_DELETE_MAX_AGE
+        }
+        Err(_) => false,
+    }
+}
+
+/// Remove one chat message via Helix (plan 140 S4):
+/// `DELETE /helix/moderation/chat?broadcaster_id&moderator_id&message_id`
+/// answers 204. Needs the `moderator:manage:chat_messages` scope; the
+/// authorized user is the moderator (the broadcaster moderates their own
+/// chat). An empty or blank `message_id` is refused before any request is
+/// built, because Helix clears the whole chat without one.
+pub async fn delete_twitch_chat_message(
+    client: &reqwest::Client,
+    config: &TwitchChatSenderConfig,
+    message_id: &str,
+) -> crate::live_chat_moderation::ProviderDeleteOutcome {
+    use crate::live_chat_moderation::ProviderDeleteOutcome;
+
+    let message_id = message_id.trim();
+    if message_id.is_empty() {
+        return ProviderDeleteOutcome::Failed(TWITCH_EMPTY_MESSAGE_ID_REFUSED.to_string());
+    }
+    let base = config
+        .api_base_url
+        .as_deref()
+        .unwrap_or(TWITCH_API_BASE_URL);
+    let response = match client
+        .delete(format!("{base}/helix/moderation/chat"))
+        .query(&[
+            ("broadcaster_id", config.broadcaster_user_id.as_str()),
+            ("moderator_id", config.sender_user_id.as_str()),
+            ("message_id", message_id),
+        ])
+        .bearer_auth(&config.access_token)
+        .header("Client-Id", &config.client_id)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return ProviderDeleteOutcome::Transient(format!("Could not reach Twitch: {error}"));
+        }
+    };
+    let status = response.status().as_u16();
+    let body = response.bytes().await.unwrap_or_default();
+    classify_twitch_delete_response(status, &body)
+}
+
+/// Pure: what a Helix delete status and body mean. 400 carries Helix's reason
+/// (a message over 6 hours old, or a broadcaster's or moderator's message);
+/// 401/403 means the scope or the moderator role is missing.
+pub(crate) fn classify_twitch_delete_response(
+    status: u16,
+    body: &[u8],
+) -> crate::live_chat_moderation::ProviderDeleteOutcome {
+    use crate::live_chat_moderation::{ModerationOutcomeCode, ProviderDeleteOutcome};
+
+    if (200..300).contains(&status) {
+        return ProviderDeleteOutcome::Deleted;
+    }
+    let message = serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|body| {
+            body.get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|message| !message.trim().is_empty());
+    let lowered = message.as_deref().unwrap_or_default().to_ascii_lowercase();
+    let detail = message
+        .as_deref()
+        .map(|message| format!(" ({message})"))
+        .unwrap_or_default();
+    match status {
+        404 => ProviderDeleteOutcome::NotFound,
+        400 if lowered.contains("6 hours") || lowered.contains("too old") => {
+            ProviderDeleteOutcome::CannotDelete {
+                code: ModerationOutcomeCode::TooOld,
+                reason: TWITCH_TOO_OLD_REASON.to_string(),
+            }
+        }
+        400 => ProviderDeleteOutcome::CannotDelete {
+            code: ModerationOutcomeCode::Unsupported,
+            reason: format!("Twitch does not allow removing this message{detail}."),
+        },
+        401 | 403 => ProviderDeleteOutcome::CannotDelete {
+            code: ModerationOutcomeCode::MissingScope,
+            reason: TWITCH_MODERATE_RECONNECT_REASON.to_string(),
+        },
+        429 | 500..=599 => {
+            ProviderDeleteOutcome::Transient(format!("Twitch answered HTTP {status}{detail}."))
+        }
+        _ => ProviderDeleteOutcome::Failed(format!("Twitch removal failed ({status}){detail}.")),
+    }
+}
+
 /// The credentials the send path needs (captured at liveChat.start).
 #[derive(Debug, Clone)]
 pub struct TwitchChatSenderConfig {
@@ -1571,6 +1692,7 @@ mod tests {
             account_label: Some("Twitch Channel".to_string()),
             read: crate::live_chat::CommentsReadState::Connecting,
             write: crate::live_chat::CommentsWriteState::Ready,
+            moderate: None,
             state: LiveChatProviderConnectionState::Connecting,
             message: "Connecting to Twitch live chat…".to_string(),
             last_connected_at: None,
@@ -2713,5 +2835,194 @@ mod tests {
         assert_eq!(next_backoff_ms(2_000), 4_000);
         assert_eq!(next_backoff_ms(20_000), MAX_BACKOFF_MS);
         assert_eq!(next_backoff_ms(MAX_BACKOFF_MS), MAX_BACKOFF_MS);
+    }
+
+    // --- Removing (plan 140 S4) ----------------------------------------------------
+
+    #[derive(Clone)]
+    struct DeleteProbe {
+        status: StatusCode,
+        body: &'static str,
+        hits: Arc<AtomicUsize>,
+        /// `(uri, "authorization|client-id")` per request.
+        requests: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    async fn probe_delete(
+        State(probe): State<DeleteProbe>,
+        request: axum::extract::Request,
+    ) -> impl IntoResponse {
+        probe.hits.fetch_add(1, Ordering::SeqCst);
+        let header = |name: &str| {
+            request
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string()
+        };
+        probe.requests.lock().unwrap().push((
+            request.uri().to_string(),
+            format!("{}|{}", header("authorization"), header("client-id")),
+        ));
+        (probe.status, probe.body)
+    }
+
+    async fn spawn_delete_probe(status: StatusCode, body: &'static str) -> (String, DeleteProbe) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let probe = DeleteProbe {
+            status,
+            body,
+            hits: Arc::new(AtomicUsize::new(0)),
+            requests: Arc::default(),
+        };
+        let app = Router::new()
+            .route(
+                "/helix/moderation/chat",
+                axum::routing::delete(probe_delete),
+            )
+            .with_state(probe.clone());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{address}"), probe)
+    }
+
+    #[tokio::test]
+    async fn delete_refuses_an_empty_message_id_before_building_any_request() {
+        use crate::live_chat_moderation::ProviderDeleteOutcome;
+        let (base, probe) = spawn_delete_probe(StatusCode::NO_CONTENT, "").await;
+        let client = reqwest::Client::new();
+        // Helix clears the WHOLE chat when message_id is omitted. Blank ids
+        // must be refused before a request exists, so none reaches the server.
+        for empty in ["", "   ", "\n\t"] {
+            let outcome =
+                delete_twitch_chat_message(&client, &sender_config(base.clone()), empty).await;
+            assert_eq!(
+                outcome,
+                ProviderDeleteOutcome::Failed(TWITCH_EMPTY_MESSAGE_ID_REFUSED.to_string()),
+                "{empty:?}"
+            );
+        }
+        assert_eq!(
+            probe.hits.load(Ordering::SeqCst),
+            0,
+            "an empty message_id must never become a Helix request"
+        );
+        assert!(TWITCH_EMPTY_MESSAGE_ID_REFUSED.contains("whole chat"));
+
+        // With an id, exactly one request goes out, with the documented query
+        // and the chat credentials.
+        let outcome =
+            delete_twitch_chat_message(&client, &sender_config(base.clone()), " msg-1 ").await;
+        assert_eq!(outcome, ProviderDeleteOutcome::Deleted);
+        assert_eq!(probe.hits.load(Ordering::SeqCst), 1);
+        let (uri, headers) = probe.requests.lock().unwrap()[0].clone();
+        assert!(uri.starts_with("/helix/moderation/chat?"), "{uri}");
+        assert!(uri.contains("broadcaster_id=broadcaster"), "{uri}");
+        assert!(uri.contains("moderator_id=sender"), "{uri}");
+        assert!(uri.contains("message_id=msg-1"), "{uri}");
+        assert!(!uri.contains("message_id=&"), "{uri}");
+        assert_eq!(headers, "Bearer token|client");
+    }
+
+    #[tokio::test]
+    async fn delete_reports_a_missing_scope_as_a_local_hide() {
+        use crate::live_chat_moderation::{ModerationOutcomeCode, ProviderDeleteOutcome};
+        let (base, probe) = spawn_delete_probe(
+            StatusCode::UNAUTHORIZED,
+            r#"{"error":"Unauthorized","status":401,"message":"Missing scope: moderator:manage:chat_messages"}"#,
+        )
+        .await;
+        let outcome = delete_twitch_chat_message(
+            &reqwest::Client::new(),
+            &sender_config(base.clone()),
+            "msg-1",
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            ProviderDeleteOutcome::CannotDelete {
+                code: ModerationOutcomeCode::MissingScope,
+                reason: TWITCH_MODERATE_RECONNECT_REASON.to_string(),
+            }
+        );
+        assert_eq!(probe.hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn delete_answers_classify_by_status_and_helix_message() {
+        use crate::live_chat_moderation::{ModerationOutcomeCode, ProviderDeleteOutcome};
+        let body = |message: &str| {
+            serde_json::to_vec(
+                &json!({ "error": "Bad Request", "status": 400, "message": message }),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            classify_twitch_delete_response(204, b""),
+            ProviderDeleteOutcome::Deleted
+        );
+        assert_eq!(
+            classify_twitch_delete_response(404, b""),
+            ProviderDeleteOutcome::NotFound
+        );
+        assert_eq!(
+            classify_twitch_delete_response(
+                400,
+                &body("The message_id was for a message that was created more than 6 hours ago.")
+            ),
+            ProviderDeleteOutcome::CannotDelete {
+                code: ModerationOutcomeCode::TooOld,
+                reason: TWITCH_TOO_OLD_REASON.to_string(),
+            }
+        );
+        assert_eq!(
+            classify_twitch_delete_response(
+                400,
+                &body("You may not delete another moderator's messages.")
+            ),
+            ProviderDeleteOutcome::CannotDelete {
+                code: ModerationOutcomeCode::Unsupported,
+                reason: "Twitch does not allow removing this message (You may not delete another moderator's messages.).".to_string(),
+            }
+        );
+        for status in [401, 403] {
+            assert_eq!(
+                classify_twitch_delete_response(status, b""),
+                ProviderDeleteOutcome::CannotDelete {
+                    code: ModerationOutcomeCode::MissingScope,
+                    reason: TWITCH_MODERATE_RECONNECT_REASON.to_string(),
+                }
+            );
+        }
+        assert!(matches!(
+            classify_twitch_delete_response(429, b""),
+            ProviderDeleteOutcome::Transient(_)
+        ));
+        assert!(matches!(
+            classify_twitch_delete_response(503, b"<html>"),
+            ProviderDeleteOutcome::Transient(_)
+        ));
+        assert!(matches!(
+            classify_twitch_delete_response(418, b""),
+            ProviderDeleteOutcome::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn the_six_hour_rule_is_checked_against_the_published_time() {
+        let now = chrono::Utc::now();
+        let published = |hours_ago: i64| (now - chrono::Duration::hours(hours_ago)).to_rfc3339();
+        assert!(twitch_message_too_old(&published(7), now));
+        assert!(twitch_message_too_old(&published(6), now));
+        assert!(!twitch_message_too_old(&published(5), now));
+        assert!(!twitch_message_too_old(&published(0), now));
+        // An unreadable time lets Twitch decide.
+        assert!(!twitch_message_too_old("yesterday", now));
+        assert!(!twitch_message_too_old("", now));
     }
 }

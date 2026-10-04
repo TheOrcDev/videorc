@@ -1109,6 +1109,9 @@ pub struct AppState {
     /// `session.start` takes it instead of opening the device.
     pub warm_microphone: Arc<crate::warm_microphone::WarmMicrophoneSlot>,
     pub live_chat: LiveChatSlot,
+    /// Chat moderation (plan 140 S4): pending removals, their timers and the
+    /// rate limiter. The durable rows live in SQLite.
+    pub live_chat_moderation: crate::live_chat_moderation::ModerationSlot,
     pub live_chat_persistence: LiveChatPersistence,
     /// One viewer total per session across every sampler (plan 055, B1).
     pub viewer_aggregator: Arc<std::sync::Mutex<crate::viewer_stats::ViewerAggregator>>,
@@ -1342,6 +1345,7 @@ impl AppState {
             performance_check: Arc::default(),
             warm_microphone: Arc::new(crate::warm_microphone::WarmMicrophoneSlot::default()),
             live_chat: Arc::new(tokio::sync::Mutex::new(LiveChatCoordinator::default())),
+            live_chat_moderation: crate::live_chat_moderation::new_moderation_slot(),
             account_session: Arc::new(tokio::sync::Mutex::new(
                 crate::account::restore_persisted_account(),
             )),

@@ -29,6 +29,9 @@ import type {
   CompositorStatus,
   LayoutSettings,
   LiveChatMessage,
+  ModerationOperation,
+  ModerationOperationParams,
+  ModerationRequestParams,
   PreviewSurfaceBounds,
   RecordingStatus,
   Scene,
@@ -44,6 +47,7 @@ import {
   validateBackendRpcResult,
   type BackendRpcParams
 } from './backend-rpc-contract'
+import { localRemovalKind } from './chat-moderation'
 import { applyCommentsSnapshotDelta } from './comments-snapshot-delta'
 import { validateElectronEventPayload, validateElectronInvokeArgs } from './electron-ipc-contract'
 import { normalizePreviewSurfaceBounds } from './native-preview-bounds'
@@ -131,6 +135,16 @@ interface HighRiskContractFixtures {
     transcriptWithoutLanguage: CleanCutTranscript
     condensedGetResult: CleanCutGetResult
   }
+  moderation: {
+    requestParams: ModerationRequestParams
+    manualRequestParams: ModerationRequestParams
+    confirmParams: ModerationOperationParams
+    listParams: BackendRpcParams<'liveChat.moderationOperations.list'>
+    pendingOperation: ModerationOperation
+    removedOperation: ModerationOperation
+    hiddenOperation: ModerationOperation
+    removedMessage: LiveChatMessage
+  }
 }
 
 const fixtures = JSON.parse(
@@ -159,6 +173,93 @@ describe('shared high-risk protocol fixture', () => {
   })
   it('has the expected schema version', () => {
     expect(fixtures.schemaVersion).toBe(2)
+  })
+
+  it('keeps the chat moderation RPC params, operations and tombstones identical across languages', () => {
+    // Plan 140 S4. The Rust side round-trips the same objects in
+    // live_chat_moderation.rs (`shared_high_risk_contract_fixture_round_trips_moderation_shapes`).
+    expect(
+      validateBackendRpcParams('liveChat.moderation.request', fixtures.moderation.requestParams)
+    ).toStrictEqual(fixtures.moderation.requestParams)
+    expect(
+      validateBackendRpcParams(
+        'liveChat.moderation.request',
+        fixtures.moderation.manualRequestParams
+      )
+    ).toStrictEqual(fixtures.moderation.manualRequestParams)
+    for (const method of ['liveChat.moderation.confirm', 'liveChat.moderation.cancel'] as const) {
+      expect(validateBackendRpcParams(method, fixtures.moderation.confirmParams)).toStrictEqual(
+        fixtures.moderation.confirmParams
+      )
+    }
+    expect(
+      validateBackendRpcParams('liveChat.moderationOperations.list', fixtures.moderation.listParams)
+    ).toStrictEqual(fixtures.moderation.listParams)
+    const operations = [
+      fixtures.moderation.pendingOperation,
+      fixtures.moderation.removedOperation,
+      fixtures.moderation.hiddenOperation
+    ]
+    for (const operation of operations) {
+      for (const method of [
+        'liveChat.moderation.request',
+        'liveChat.moderation.confirm',
+        'liveChat.moderation.cancel'
+      ] as const) {
+        expect(validateBackendRpcResult(method, operation)).toStrictEqual(operation)
+      }
+      expect(validateBackendEventPayload('liveChat.moderationOperation', operation)).toStrictEqual(
+        operation
+      )
+    }
+    expect(
+      validateBackendRpcResult('liveChat.moderationOperations.list', operations)
+    ).toStrictEqual(operations)
+    // The contract's phase rules, pinned on the fixtures.
+    expect(fixtures.moderation.pendingOperation).toMatchObject({
+      source: 'orcle-voice',
+      phase: 'pending-confirm',
+      requiresExplicitConfirm: true,
+      confirmBy: '2026-10-04T12:00:20Z'
+    })
+    expect(fixtures.moderation.pendingOperation).not.toHaveProperty('executeAt')
+    expect(fixtures.moderation.removedOperation).toMatchObject({
+      source: 'manual',
+      requiresExplicitConfirm: false,
+      outcomeCode: 'removed'
+    })
+    // YouTube: explicit confirmation even in countdown mode.
+    expect(fixtures.moderation.hiddenOperation).toMatchObject({
+      platform: 'youtube',
+      confirmMode: 'countdown',
+      requiresExplicitConfirm: true,
+      outcomeCode: 'quota-paused'
+    })
+    expect(fixtures.moderation.hiddenOperation).not.toHaveProperty('executeAt')
+    // Absent optionals are never null, and unknown keys are refused.
+    expect(() =>
+      validateBackendEventPayload('liveChat.moderationOperation', {
+        ...fixtures.moderation.pendingOperation,
+        outcome: null
+      })
+    ).toThrow('liveChat.moderationOperation')
+    expect(() =>
+      validateBackendEventPayload('liveChat.moderationOperation', {
+        ...fixtures.moderation.pendingOperation,
+        attempts: 1
+      })
+    ).toThrow('liveChat.moderationOperation')
+    // The tombstone a removal writes: same row id, flagged as removed by you.
+    expect(fixtures.moderation.removedMessage.id).toBe(
+      fixtures.moderation.removedOperation.messageId
+    )
+    expect(localRemovalKind(fixtures.moderation.removedMessage)).toBe('removed')
+    expect(fixtures.moderation.removedMessage).toMatchObject({
+      isDeleted: true,
+      eventType: 'deleted',
+      messageText: 'Removed by you',
+      rawProviderType: 'videorc.removed'
+    })
   })
 
   it('keeps native preview bounds and detached stacking fields through IPC normalization', () => {

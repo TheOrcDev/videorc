@@ -60,6 +60,21 @@ pub enum CommentsWriteState {
     Unavailable,
 }
 
+/// Whether Videorc can remove a viewer's message on this destination (plan
+/// 140 S4): the optional moderation scopes, the X Live credentials, and the
+/// YouTube quota pause. Absent when no account is connected.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CommentsModerateState {
+    Ready,
+    /// Reconnect (or authorize X Live) to grant the moderation permission.
+    MissingScope,
+    /// The platform has no way to remove messages from Videorc.
+    Unsupported,
+    /// YouTube calls are paused by the quota breaker.
+    Paused,
+}
+
 /// What kind of chat row a message is — drives special styling for monetized/system events.
 // Message-level types are constructed by the platform connectors (slices 4+); this slice
 // only defines the shared model + serialization.
@@ -92,6 +107,9 @@ pub struct LiveChatProviderState {
     pub account_label: Option<String>,
     pub read: CommentsReadState,
     pub write: CommentsWriteState,
+    /// "Remove messages" readiness (plan 140 S4), next to `write`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moderate: Option<CommentsModerateState>,
     pub state: LiveChatProviderConnectionState,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -329,7 +347,7 @@ pub fn live_chat_message_id(
     )
 }
 
-fn comments_destination_id(platform: StreamPlatform, target_id: Option<&str>) -> String {
+pub(crate) fn comments_destination_id(platform: StreamPlatform, target_id: Option<&str>) -> String {
     target_id
         .map(str::to_string)
         .unwrap_or_else(|| stream_platform_id(platform).to_string())
@@ -370,6 +388,7 @@ fn provider_state_from_capability(capability: ChatCapability) -> LiveChatProvide
         account_label: capability.account_label,
         read: capability.read,
         write: capability.write,
+        moderate: capability.moderate,
         state,
         message: capability.message,
         last_connected_at: None,
@@ -410,6 +429,9 @@ pub struct ChatCapability {
     pub state: ChatCapabilityState,
     pub read: CommentsReadState,
     pub write: CommentsWriteState,
+    /// "Remove messages" readiness (plan 140 S4); absent without an account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moderate: Option<CommentsModerateState>,
     /// True only when chat can actually be read right now.
     pub chat_read_available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -445,6 +467,12 @@ pub fn chat_capability(
                     CommentsWriteState::Unavailable
                 }
             };
+            // `force-ssl` also covers liveChatMessages.delete (plan 140).
+            capability.moderate = match capability.state {
+                ChatCapabilityState::Available => Some(CommentsModerateState::Ready),
+                ChatCapabilityState::NeedsReconnect => Some(CommentsModerateState::MissingScope),
+                ChatCapabilityState::NotConnected | ChatCapabilityState::Unsupported => None,
+            };
             capability
         }
         StreamPlatform::Twitch => {
@@ -469,6 +497,8 @@ pub fn chat_capability(
                 Some(_) => CommentsWriteState::MissingScope,
                 None => CommentsWriteState::Unavailable,
             };
+            capability.moderate =
+                moderate_state_for_scope(account, crate::twitch_chat::TWITCH_CHAT_MODERATE_SCOPE);
             capability
         }
         StreamPlatform::X => {
@@ -497,6 +527,15 @@ pub fn chat_capability(
                     CommentsWriteState::Ready
                 } else {
                     CommentsWriteState::ReadOnly
+                },
+                // The same credentials sign DELETE .../chat/{id} (plan 140);
+                // without them "Authorize X Live" is the fix, like a scope.
+                moderate: if x_live_ready {
+                    Some(CommentsModerateState::Ready)
+                } else if account.is_some() {
+                    Some(CommentsModerateState::MissingScope)
+                } else {
+                    None
                 },
                 required_scope: None,
                 account_id: account.map(|account| account.account_id.clone()),
@@ -528,6 +567,8 @@ pub fn chat_capability(
                 Some(_) => CommentsWriteState::MissingScope,
                 None => CommentsWriteState::Unavailable,
             };
+            capability.moderate =
+                moderate_state_for_scope(account, crate::kick_chat::KICK_CHAT_MODERATE_SCOPE);
             capability
         }
         StreamPlatform::Tiktok | StreamPlatform::Instagram => ChatCapability {
@@ -535,6 +576,7 @@ pub fn chat_capability(
             state: ChatCapabilityState::Unsupported,
             read: CommentsReadState::Unavailable,
             write: CommentsWriteState::Unavailable,
+            moderate: Some(CommentsModerateState::Unsupported),
             chat_read_available: false,
             required_scope: None,
             account_id: None,
@@ -549,12 +591,32 @@ pub fn chat_capability(
             state: ChatCapabilityState::Unsupported,
             read: CommentsReadState::Unavailable,
             write: CommentsWriteState::Unavailable,
+            moderate: Some(CommentsModerateState::Unsupported),
             chat_read_available: false,
             required_scope: None,
             account_id: None,
             account_label: None,
             message: "Comments are not available for this destination yet.".to_string(),
         },
+    }
+}
+
+/// "Remove messages" readiness for a platform whose delete needs an optional
+/// OAuth scope (Twitch, Kick): `missing-scope` is the honest default until the
+/// account reconnects with it (plan 140 S5 adds it to the connect flows).
+fn moderate_state_for_scope(
+    account: Option<&PlatformAccount>,
+    moderate_scope: &str,
+) -> Option<CommentsModerateState> {
+    match account {
+        Some(account)
+            if account.status == crate::streaming::PlatformAccountStatus::Connected
+                && account.scopes.iter().any(|scope| scope == moderate_scope) =>
+        {
+            Some(CommentsModerateState::Ready)
+        }
+        Some(_) => Some(CommentsModerateState::MissingScope),
+        None => None,
     }
 }
 
@@ -572,6 +634,7 @@ fn scope_capability(
             state: ChatCapabilityState::NotConnected,
             read: CommentsReadState::Unavailable,
             write: CommentsWriteState::Unavailable,
+            moderate: None,
             chat_read_available: false,
             required_scope: Some(required_scope.to_string()),
             account_id: None,
@@ -584,6 +647,7 @@ fn scope_capability(
                 state: ChatCapabilityState::NeedsReconnect,
                 read: CommentsReadState::Unavailable,
                 write: CommentsWriteState::MissingScope,
+                moderate: None,
                 chat_read_available: false,
                 required_scope: Some(required_scope.to_string()),
                 account_id: Some(account.account_id.clone()),
@@ -607,6 +671,7 @@ fn scope_capability(
                     CommentsReadState::Unavailable
                 },
                 write: CommentsWriteState::Unavailable,
+                moderate: None,
                 required_scope: Some(required_scope.to_string()),
                 account_id: Some(account.account_id.clone()),
                 account_label: Some(account.account_label.clone()),
@@ -624,6 +689,16 @@ fn scope_capability(
 /// Chat capability for every native platform (YouTube, Twitch, X, Kick), preferring a connected
 /// account over stale saved rows. Custom RTMP has no platform comments and is omitted.
 pub fn chat_capabilities(accounts: &[PlatformAccount]) -> Vec<ChatCapability> {
+    chat_capabilities_with_quota(accounts, false)
+}
+
+/// Like [`chat_capabilities`], with the YouTube quota breaker folded into the
+/// "Remove messages" readiness (plan 140 S4): while YouTube is paused, a
+/// ready YouTube destination reports `paused`.
+pub fn chat_capabilities_with_quota(
+    accounts: &[PlatformAccount],
+    youtube_paused: bool,
+) -> Vec<ChatCapability> {
     [
         StreamPlatform::Youtube,
         StreamPlatform::Twitch,
@@ -639,7 +714,14 @@ pub fn chat_capabilities(accounts: &[PlatformAccount]) -> Vec<ChatCapability> {
                     && account.status == crate::streaming::PlatformAccountStatus::Connected
             })
             .or_else(|| accounts.iter().find(|account| account.platform == platform));
-        chat_capability(platform, account)
+        let mut capability = chat_capability(platform, account);
+        if youtube_paused
+            && platform == StreamPlatform::Youtube
+            && capability.moderate == Some(CommentsModerateState::Ready)
+        {
+            capability.moderate = Some(CommentsModerateState::Paused);
+        }
+        capability
     })
     .collect()
 }
@@ -1005,6 +1087,17 @@ impl LiveChatCoordinator {
 
     pub fn sender(&self, destination_id: &str) -> Option<ChatSenderConfig> {
         self.senders.get(destination_id).cloned()
+    }
+
+    /// One retained row by app id (the bounded buffer only; SQLite holds the
+    /// rest). Chat moderation reads the target through it (plan 140 S4).
+    pub(crate) fn message(&self, message_id: &str) -> Option<&LiveChatMessage> {
+        if !self.seen.contains(message_id) {
+            return None;
+        }
+        self.messages
+            .iter()
+            .find(|message| message.id == message_id)
     }
 
     pub(crate) fn highlight_message_eligibility(
@@ -2035,6 +2128,7 @@ where
             account_label: None,
             read: CommentsReadState::WaitingForBroadcastContext,
             write: CommentsWriteState::Ready,
+            moderate: None,
             state: LiveChatProviderConnectionState::Disabled,
             message: crate::x_chat::x_chat_message(false).to_string(),
             last_connected_at: None,
@@ -2507,7 +2601,7 @@ fn aggregate_send_phase(deliveries: &[DestinationDelivery]) -> CommentsSendOpera
 
 /// A send hours into a stream takes the account's current token, refreshed
 /// when near expiry, instead of the one captured at Go Live (plan 055, B2).
-async fn with_current_sender_token(
+pub(crate) async fn with_current_sender_token(
     state: &AppState,
     client: &reqwest::Client,
     sender: ChatSenderConfig,
@@ -2680,16 +2774,22 @@ where
     F: std::future::Future<Output = ()>,
 {
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
-    let kick_cleanup = {
+    let (kick_cleanup, ended_session) = {
         let mut coordinator = state.live_chat.lock().await;
         if let Some(session_id) = coordinator.session_id() {
             crate::youtube_quota::log_usage_summary(state, session_id, "session end");
         }
+        let ended_session = coordinator.session_id().map(str::to_string);
         let kick_cleanup = coordinator.kick_cleanup_account();
         coordinator.stop_session();
-        kick_cleanup
+        (kick_cleanup, ended_session)
     };
     spawn_kick_cleanup(state, kick_cleanup);
+    if let Some(session_id) = ended_session {
+        // Plan 140: a removal card still open when the session ends is
+        // cancelled; nothing may act on a session that is over.
+        crate::live_chat_moderation::note_session_ended(state, session_id);
+    }
     crate::cohost::stop_cohost_for_session_end_under_lifecycle_fence(
         state,
         &lifecycle_delivery,
@@ -2742,6 +2842,7 @@ where
     };
     let kick_cleanup = stopped?;
     spawn_kick_cleanup(state, kick_cleanup);
+    crate::live_chat_moderation::note_session_ended(state, expected_session_id.to_string());
 
     crate::cohost::stop_cohost_for_session_end_if_matching_before_emit(
         state,
@@ -3808,6 +3909,7 @@ mod tests {
             account_label: None,
             read: CommentsReadState::Connecting,
             write: CommentsWriteState::Unavailable,
+            moderate: None,
             state: LiveChatProviderConnectionState::Connecting,
             message: "Connecting…".to_string(),
             last_connected_at: None,
@@ -3830,6 +3932,7 @@ mod tests {
             } else {
                 CommentsWriteState::Ready
             },
+            moderate: None,
             state: LiveChatProviderConnectionState::Connected,
             message: "Comments connected.".to_string(),
             last_connected_at: Some("2026-07-10T00:00:00Z".to_string()),
@@ -4986,6 +5089,7 @@ mod tests {
             account_label: Some("OrcDev".to_string()),
             read: CommentsReadState::Ready,
             write: CommentsWriteState::ReadOnly,
+            moderate: None,
             state: LiveChatProviderConnectionState::Disabled,
             message: "X comments ready.".to_string(),
             last_connected_at: None,
@@ -6443,6 +6547,108 @@ mod tests {
             chat_capability(StreamPlatform::Twitch, None).state,
             ChatCapabilityState::NotConnected
         );
+    }
+
+    #[test]
+    fn moderate_readiness_follows_the_moderation_scopes_and_the_quota_pause() {
+        // Plan 140 S4: honest per-destination "Remove messages" readiness.
+        // No account: absent on the wire.
+        let no_account = chat_capability(StreamPlatform::Twitch, None);
+        assert_eq!(no_account.moderate, None);
+        assert!(
+            serde_json::to_value(&no_account)
+                .unwrap()
+                .get("moderate")
+                .is_none()
+        );
+        // Twitch and Kick need the optional moderation scope (S5 adds it).
+        let twitch = account(
+            StreamPlatform::Twitch,
+            &[TWITCH_CHAT_SCOPE, TWITCH_CHAT_WRITE_SCOPE],
+        );
+        assert_eq!(
+            chat_capability(StreamPlatform::Twitch, Some(&twitch)).moderate,
+            Some(CommentsModerateState::MissingScope)
+        );
+        let twitch_moderator = account(
+            StreamPlatform::Twitch,
+            &[
+                TWITCH_CHAT_SCOPE,
+                crate::twitch_chat::TWITCH_CHAT_MODERATE_SCOPE,
+            ],
+        );
+        assert_eq!(
+            chat_capability(StreamPlatform::Twitch, Some(&twitch_moderator)).moderate,
+            Some(CommentsModerateState::Ready)
+        );
+        let kick = account(StreamPlatform::Kick, &[crate::kick_chat::KICK_EVENTS_SCOPE]);
+        assert_eq!(
+            chat_capability(StreamPlatform::Kick, Some(&kick)).moderate,
+            Some(CommentsModerateState::MissingScope)
+        );
+        let kick_moderator = account(
+            StreamPlatform::Kick,
+            &[
+                crate::kick_chat::KICK_EVENTS_SCOPE,
+                crate::kick_chat::KICK_CHAT_MODERATE_SCOPE,
+            ],
+        );
+        assert_eq!(
+            chat_capability(StreamPlatform::Kick, Some(&kick_moderator)).moderate,
+            Some(CommentsModerateState::Ready)
+        );
+        // YouTube's force-ssl already covers deletes.
+        let youtube = account(StreamPlatform::Youtube, &[YOUTUBE_CHAT_SCOPE]);
+        assert_eq!(
+            chat_capability(StreamPlatform::Youtube, Some(&youtube)).moderate,
+            Some(CommentsModerateState::Ready)
+        );
+        let youtube_stale = account(StreamPlatform::Youtube, &[]);
+        assert_eq!(
+            chat_capability(StreamPlatform::Youtube, Some(&youtube_stale)).moderate,
+            Some(CommentsModerateState::MissingScope)
+        );
+        // No native path at all.
+        let custom = chat_capability(StreamPlatform::Custom, None);
+        assert_eq!(custom.moderate, Some(CommentsModerateState::Unsupported));
+        assert_eq!(
+            serde_json::to_value(&custom).unwrap()["moderate"],
+            "unsupported"
+        );
+        // The quota pause downgrades a ready YouTube destination only.
+        let paused =
+            chat_capabilities_with_quota(&[youtube.clone(), twitch_moderator.clone()], true);
+        let by_platform = |capabilities: &[ChatCapability], platform: StreamPlatform| {
+            capabilities
+                .iter()
+                .find(|capability| capability.platform == platform)
+                .unwrap()
+                .moderate
+        };
+        assert_eq!(
+            by_platform(&paused, StreamPlatform::Youtube),
+            Some(CommentsModerateState::Paused)
+        );
+        assert_eq!(
+            by_platform(&paused, StreamPlatform::Twitch),
+            Some(CommentsModerateState::Ready)
+        );
+        let running = chat_capabilities_with_quota(&[youtube.clone()], false);
+        assert_eq!(
+            by_platform(&running, StreamPlatform::Youtube),
+            Some(CommentsModerateState::Ready)
+        );
+        // Provider rows carry it, and a row from an older backend still parses.
+        let row = provider_state_from_capability(chat_capability(
+            StreamPlatform::Youtube,
+            Some(&youtube),
+        ));
+        assert_eq!(row.moderate, Some(CommentsModerateState::Ready));
+        let mut wire = serde_json::to_value(&row).unwrap();
+        assert_eq!(wire["moderate"], "ready");
+        wire.as_object_mut().unwrap().remove("moderate");
+        let legacy: LiveChatProviderState = serde_json::from_value(wire).unwrap();
+        assert_eq!(legacy.moderate, None);
     }
 
     #[test]

@@ -4,6 +4,7 @@ import { toast } from '@/lib/toast'
 
 import { AppErrorBoundary } from '@/components/error-boundary'
 import { StreamManager } from '@/components/stream-manager/stream-manager'
+import { removeMessagesReconnectStarted } from '@/components/stream-manager/remove-messages-reconnect'
 import { WindowFrame } from '@/components/window-frame'
 import type {
   CohostActionKind,
@@ -453,6 +454,23 @@ function CommentsWindowApp(): ReactElement {
               toast.error(
                 error instanceof Error ? error.message : 'Could not open the Twitch reconnect.',
                 { id: 'follow-names' }
+              )
+            )
+        }}
+        onReconnectScopes={(platform) => {
+          const started = removeMessagesReconnectStarted(platform)
+          void window.videorc
+            ?.reconnectScopesFromCommentsWindow?.({ requestId: crypto.randomUUID(), platform })
+            .then(() =>
+              toast.success(started.title, {
+                id: 'reconnect-scopes',
+                description: started.description
+              })
+            )
+            .catch((error) =>
+              toast.error(
+                error instanceof Error ? error.message : 'Could not open the reconnect.',
+                { id: 'reconnect-scopes' }
               )
             )
         }}

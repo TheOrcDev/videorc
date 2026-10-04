@@ -67,6 +67,27 @@ pub enum ServiceFlagsSource {
     Remote { fetched_at: String },
 }
 
+/// The Orcle kill switches (plan 140, contract part D): the document's
+/// optional top-level `orcle` object. A missing object or field means enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrcleServiceFlags {
+    /// `false` stops command detection.
+    pub voice_commands: bool,
+    /// `false` refuses every `orcle-voice` removal with `disabled`. Manual
+    /// removal is unaffected.
+    pub remove: bool,
+}
+
+impl Default for OrcleServiceFlags {
+    fn default() -> Self {
+        Self {
+            voice_commands: true,
+            remove: true,
+        }
+    }
+}
+
 /// The YouTube flags in effect, after clamping. Compiled defaults by default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,6 +101,9 @@ pub struct YouTubeServiceFlags {
     /// An owner-set global pause, UTC. Fed to the breaker while in the future.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_until: Option<DateTime<Utc>>,
+    /// The Orcle switches ride the same document and the same refresh.
+    #[serde(default)]
+    pub orcle: OrcleServiceFlags,
     pub source: ServiceFlagsSource,
     /// What was clamped, ignored or translated, for the log.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -94,10 +118,22 @@ impl Default for YouTubeServiceFlags {
             viewer_sample_ms: DEFAULT_VIEWER_SAMPLE_MS,
             daily_budget_units: None,
             paused_until: None,
+            orcle: OrcleServiceFlags::default(),
             source: ServiceFlagsSource::Compiled,
             notes: Vec::new(),
         }
     }
+}
+
+/// Whether Orcle voice commands are allowed right now (contract part D).
+pub fn orcle_voice_commands_enabled(state: &AppState) -> bool {
+    state.youtube_quota.flags.borrow().orcle.voice_commands
+}
+
+/// Whether `orcle-voice` removals are allowed right now. Manual removal never
+/// consults this.
+pub fn orcle_remove_enabled(state: &AppState) -> bool {
+    state.youtube_quota.flags.borrow().orcle.remove
 }
 
 impl YouTubeServiceFlags {
@@ -117,6 +153,7 @@ impl YouTubeServiceFlags {
             && self.viewer_sample_ms == defaults.viewer_sample_ms
             && self.daily_budget_units.is_none()
             && self.paused_until.is_none()
+            && self.orcle == defaults.orcle
     }
 
     /// One line for the backend log.
@@ -141,13 +178,21 @@ impl YouTubeServiceFlags {
             Some(until) => format!("paused until {}", until.to_rfc3339()),
             None => "no remote pause".to_string(),
         };
+        let orcle = match (self.orcle.voice_commands, self.orcle.remove) {
+            (true, true) => String::new(),
+            (voice_commands, remove) => format!(
+                ", Orcle voice commands {}, Orcle removals {}",
+                if voice_commands { "on" } else { "paused" },
+                if remove { "on" } else { "paused" }
+            ),
+        };
         let notes = if self.notes.is_empty() {
             String::new()
         } else {
             format!("; notes: {}", self.notes.join(" | "))
         };
         format!(
-            "YouTube service flags in effect ({source}): chat {transport}, poll floor {} ms, viewers every {} ms, daily budget {budget}, {paused}{notes}",
+            "YouTube service flags in effect ({source}): chat {transport}, poll floor {} ms, viewers every {} ms, daily budget {budget}, {paused}{orcle}{notes}",
             self.min_poll_ms, self.viewer_sample_ms
         )
     }
@@ -161,6 +206,48 @@ struct WireDocument {
     /// Judged below: an object becomes [`WireYouTube`], anything else is noted.
     #[serde(default)]
     youtube: Option<serde_json::Value>,
+    /// Plan 140: `{ "voiceCommands": bool, "remove": bool }`, judged below.
+    #[serde(default)]
+    orcle: Option<serde_json::Value>,
+}
+
+/// Read one Orcle switch: only a JSON boolean counts; anything else keeps the
+/// switch on and leaves a note.
+fn orcle_switch(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    notes: &mut Vec<String>,
+) -> bool {
+    match object.get(key) {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::Bool(enabled)) => *enabled,
+        Some(other) => {
+            notes.push(format!(
+                "orcle.{key} {other} is not a boolean; keeping it enabled"
+            ));
+            true
+        }
+    }
+}
+
+/// The `orcle` block, parsed on its own so a broken YouTube block never hides it.
+fn parse_orcle_flags(
+    value: Option<serde_json::Value>,
+    notes: &mut Vec<String>,
+) -> OrcleServiceFlags {
+    match value {
+        None | Some(serde_json::Value::Null) => OrcleServiceFlags::default(),
+        Some(serde_json::Value::Object(object)) => OrcleServiceFlags {
+            voice_commands: orcle_switch(&object, "voiceCommands", notes),
+            remove: orcle_switch(&object, "remove", notes),
+        },
+        Some(other) => {
+            notes.push(format!(
+                "orcle {other} is not an object; keeping Orcle enabled"
+            ));
+            OrcleServiceFlags::default()
+        }
+    }
 }
 
 /// Loose on purpose: every field optional, any JSON type accepted and judged
@@ -215,6 +302,7 @@ pub fn parse_service_flags(body: &str, now: DateTime<Utc>) -> Result<YouTubeServ
         },
         ..YouTubeServiceFlags::default()
     };
+    flags.orcle = parse_orcle_flags(document.orcle, &mut flags.notes);
     let youtube = match document.youtube {
         None | Some(serde_json::Value::Null) => return Ok(flags),
         Some(value) if value.is_object() => serde_json::from_value::<WireYouTube>(value)
@@ -563,6 +651,63 @@ mod tests {
         assert_eq!(defaults.source, ServiceFlagsSource::Compiled);
         assert!(defaults.summary().contains("compiled defaults"));
         assert!(defaults.summary().contains("fail-open: test"));
+    }
+
+    #[test]
+    fn orcle_switches_default_to_enabled_and_read_only_booleans() {
+        // Plan 140, contract part D: a missing object or field means enabled.
+        let absent = parse_service_flags(r#"{"version":1}"#, now()).unwrap();
+        assert_eq!(absent.orcle, OrcleServiceFlags::default());
+        assert!(absent.orcle.voice_commands && absent.orcle.remove);
+        assert!(absent.is_default_behaviour());
+        assert!(!absent.summary().contains("Orcle"));
+
+        let partial =
+            parse_service_flags(r#"{"version":1,"orcle":{"remove":false}}"#, now()).unwrap();
+        assert!(partial.orcle.voice_commands);
+        assert!(!partial.orcle.remove);
+        assert!(!partial.is_default_behaviour());
+        assert!(
+            partial.summary().contains("Orcle removals paused"),
+            "{}",
+            partial.summary()
+        );
+        assert!(partial.notes.is_empty());
+
+        let both = parse_service_flags(
+            r#"{"version":1,"orcle":{"voiceCommands":false,"remove":false},"youtube":{}}"#,
+            now(),
+        )
+        .unwrap();
+        assert!(!both.orcle.voice_commands && !both.orcle.remove);
+        assert!(both.summary().contains("Orcle voice commands paused"));
+
+        // Wrong types keep the switch on, with a note; so does a non-object.
+        let wrong = parse_service_flags(
+            r#"{"version":1,"orcle":{"voiceCommands":"no","remove":0}}"#,
+            now(),
+        )
+        .unwrap();
+        assert_eq!(wrong.orcle, OrcleServiceFlags::default());
+        assert_eq!(wrong.notes.len(), 2, "{:?}", wrong.notes);
+        let not_object = parse_service_flags(r#"{"version":1,"orcle":[false]}"#, now()).unwrap();
+        assert_eq!(not_object.orcle, OrcleServiceFlags::default());
+        assert_eq!(not_object.notes.len(), 1);
+        let null = parse_service_flags(r#"{"version":1,"orcle":null}"#, now()).unwrap();
+        assert!(null.is_default_behaviour());
+
+        // The switches round-trip through the persisted/serialized shape and
+        // an older document without them still parses.
+        let json = serde_json::to_value(&partial).unwrap();
+        assert_eq!(json["orcle"]["remove"], false);
+        let legacy: YouTubeServiceFlags = serde_json::from_value(serde_json::json!({
+            "chatTransport": "list",
+            "minPollMs": 5000,
+            "viewerSampleMs": 120000,
+            "source": { "kind": "compiled" }
+        }))
+        .unwrap();
+        assert_eq!(legacy.orcle, OrcleServiceFlags::default());
     }
 
     async fn spawn_flags_server(status: StatusCode, body: String) -> String {

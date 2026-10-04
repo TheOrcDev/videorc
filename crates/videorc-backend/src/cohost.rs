@@ -2688,6 +2688,19 @@ impl CohostSession {
         changed
     }
 
+    /// Plan 140 S4: the streamer removed (or hid) the message, so its flag is
+    /// resolved. Like a dismissal it leaves for good and never comes back as a
+    /// spotlight or suggestion, but it is not counted as dismissed.
+    fn resolve_flag(&mut self, message_id: &str) -> bool {
+        let before = self.flags.len();
+        self.highlights
+            .retain(|highlight| highlight.message_id != message_id);
+        self.flags.retain(|flag| flag.message_id != message_id);
+        self.dismissed_flags.insert(message_id.to_string());
+        self.drop_spotlight_for(message_id);
+        before != self.flags.len()
+    }
+
     // --- Spotlight lane (plan 060 S3) ----------------------------------------
 
     /// The spotlight as the wire sees it: `None` once it expired.
@@ -4288,6 +4301,16 @@ impl CohostEngine {
         }
         Ok(session.dismiss_flag(message_id))
     }
+
+    fn resolve_flag(&mut self, session_id: &str, message_id: &str) -> Result<bool, CohostError> {
+        let Some(session) = self.session.as_mut() else {
+            return Err(CohostError::SessionMismatch);
+        };
+        if session.session_id != session_id {
+            return Err(CohostError::SessionMismatch);
+        }
+        Ok(session.resolve_flag(message_id))
+    }
 }
 
 // --- AppState integration ------------------------------------------------------------
@@ -5191,6 +5214,26 @@ pub async fn dismiss_flag(
         emit_state(state, &snapshot, &lifecycle_delivery);
     }
     Ok(snapshot)
+}
+
+/// Chat moderation hook (plan 140 S4): a message the streamer removed or hid
+/// takes its flag with it. A deletion alone never cleared flags; this does,
+/// without counting a dismissal. Silent when Orcle is off or on another
+/// session. Called after the tombstone delivery, never under its fence.
+pub(crate) async fn resolve_flag_for_removed_message(
+    state: &AppState,
+    session_id: &str,
+    message_id: &str,
+) {
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    let snapshot = {
+        let mut engine = state.cohost.lock().await;
+        match engine.resolve_flag(session_id, message_id) {
+            Ok(true) => engine.snapshot(),
+            Ok(false) | Err(_) => return,
+        }
+    };
+    emit_state(state, &snapshot, &lifecycle_delivery);
 }
 
 /// `cohost.promise.done` (plan 068 D8): the promise leaves and its id never
@@ -8550,6 +8593,57 @@ mod tests {
         assert_eq!(wire["target"], "streamer");
         assert_eq!(wire["action"], "timeout");
         assert_eq!(wire["alsoKinds"], serde_json::json!(["scam"]));
+    }
+
+    #[test]
+    fn a_removed_message_resolves_its_flag_without_counting_a_dismissal() {
+        // Plan 140 S4: the moderation engine resolves the flag of a message
+        // the streamer removed; a deletion alone never did.
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine(start);
+        let rows = messages("session-1", 0..3);
+        engine.note_messages(&rows);
+        engine
+            .prepare_tick(generation, true, true, start + secs(1))
+            .unwrap();
+        let mut tick = response(Vec::new());
+        tick.flags = vec![
+            flag(
+                &rows[0].id,
+                CohostFlagKind::Harassment,
+                CohostFlagSeverity::High,
+            ),
+            flag(&rows[1].id, CohostFlagKind::Spam, CohostFlagSeverity::Low),
+        ];
+        assert!(engine.apply_tick_result(generation, 0, Ok(tick), start + secs(2), "t1"));
+        assert_eq!(engine.snapshot().flags.len(), 2);
+
+        assert!(engine.resolve_flag("session-1", &rows[0].id).unwrap());
+        let flags = engine.snapshot().flags;
+        assert_eq!(flags.len(), 1);
+        assert_eq!(flags[0].message_id, rows[1].id);
+        assert_eq!(
+            engine.session.as_ref().unwrap().report.flags_dismissed,
+            0,
+            "a removal is not a dismissal"
+        );
+        // Resolved for good: a second resolve changes nothing, and a tick
+        // may not raise the same flag again.
+        assert!(!engine.resolve_flag("session-1", &rows[0].id).unwrap());
+        assert!(
+            engine
+                .session
+                .as_ref()
+                .unwrap()
+                .dismissed_flags
+                .contains(&rows[0].id)
+        );
+        assert_eq!(
+            engine.resolve_flag("other-session", &rows[1].id),
+            Err(CohostError::SessionMismatch)
+        );
+        // An unflagged message resolves to "nothing changed".
+        assert!(!engine.resolve_flag("session-1", &rows[2].id).unwrap());
     }
 
     #[test]
