@@ -35,7 +35,7 @@
   | S14, S15 and S19 UI | `98475bbc`, `89ca78de`, `17722314`, `840aaaa4`, `7cd9004e` | |
   | S16 | `a3e1be2c`, `c713d2e9` | |
 
-  Latest `main` (`180b509c`) is merged in.
+  Latest `main` (`1e8cb13f`) is merged in.
 - Execution record, web:
 
   | Slice | Commits |
@@ -60,12 +60,13 @@
     - `smoke:captions-contract`, `smoke:remote-control`, `smoke:session-ops`,
       `smoke:noise-cleanup`, `probe:comments-window`, `smoke:dev`, and
       `smoke:repair-encoder` (with the bundled FFmpeg).
-  - **Smokes that also fail on `main`:** both fail identically on pristine
-    `180b509c`.
-    - `smoke:cohost-fake`: the main scenario passes, including the new report
-      assertions. The plan 098/128 consent scenario stops at "lost its caption
-      socket".
-    - `smoke:live-chat-fake-providers`: "fake activity accounting disagreed".
+  - **Smokes that also fail on `main`:** each fails identically on pristine
+    `main`.
+    - `smoke:cohost-fake` (vs `1e8cb13f`): the main scenario passes, including
+      the new report assertions, and so does the consent scenario. The
+      spotlight scenario times out on a caption final.
+    - `smoke:live-chat-fake-providers` (vs `180b509c`): "fake activity
+      accounting disagreed".
   - **Not run:** `smoke:recording-studio`. `recording.rs` only gained a
     read-only accessor for the cached encoder probe.
 - Web gates: typecheck shows only the 2 baseline errors; `pnpm test` 709 pass,
