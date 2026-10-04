@@ -150,6 +150,174 @@ pub async fn send_youtube_chat_message_guarded(
     }
 }
 
+/// The hide reasons the moderation engine shows after "Viewers on YouTube
+/// still see it." (plan 140 S4).
+pub const YOUTUBE_MODERATE_PAUSED_REASON: &str =
+    "YouTube calls are paused until the daily quota resets.";
+pub const YOUTUBE_MODERATE_SHED_REASON: &str =
+    "YouTube removals are paused for today to save Videorc's daily YouTube limit.";
+pub const YOUTUBE_MODERATE_RECONNECT_REASON: &str =
+    "Reconnect YouTube to let Orcle remove messages.";
+
+/// Remove one message from the broadcast's live chat (plan 140 S4):
+/// `DELETE /youtube/v3/liveChat/messages?id=` answers 204. The already-held
+/// `youtube.force-ssl` scope authorizes it; the broadcast owner or a
+/// moderator may call it.
+///
+/// Like the send, it goes through the shared quota breaker: nothing goes out
+/// while YouTube is paused or the daily budget is used up (a removal costs 50
+/// units and sheds at 100% like a send), every attempt is counted, and a quota
+/// refusal pauses every other YouTube caller too. Quota outcomes come back as
+/// a local hide with `quota-paused`.
+pub async fn delete_youtube_chat_message_guarded(
+    state: &AppState,
+    client: &reqwest::Client,
+    api_base_url: Option<&str>,
+    access_token: &str,
+    message_id: &str,
+) -> crate::live_chat_moderation::ProviderDeleteOutcome {
+    use crate::live_chat_moderation::{ModerationOutcomeCode, ProviderDeleteOutcome};
+
+    let message_id = message_id.trim();
+    if message_id.is_empty() {
+        return ProviderDeleteOutcome::Failed(
+            "YouTube needs the message id to remove a message; nothing was sent.".to_string(),
+        );
+    }
+    if crate::youtube_quota::paused_until(state).is_some() {
+        return ProviderDeleteOutcome::CannotDelete {
+            code: ModerationOutcomeCode::QuotaPaused,
+            reason: YOUTUBE_MODERATE_PAUSED_REASON.to_string(),
+        };
+    }
+    if crate::youtube_quota::budget_refuses(state, crate::youtube_quota::BudgetCall::ChatModerate)
+        .is_some()
+    {
+        return ProviderDeleteOutcome::CannotDelete {
+            code: ModerationOutcomeCode::QuotaPaused,
+            reason: YOUTUBE_MODERATE_SHED_REASON.to_string(),
+        };
+    }
+    let base = crate::youtube_quota::youtube_api_base_url(api_base_url);
+    let request = client
+        .delete(format!(
+            "{}{LIVE_CHAT_MESSAGES_PATH}",
+            base.trim_end_matches('/')
+        ))
+        .query(&[("id", message_id)])
+        .bearer_auth(access_token);
+    let response = match crate::youtube_quota::send_attempt(
+        state,
+        crate::youtube_quota::YouTubeEndpoint::LiveChatMessagesDelete,
+        crate::youtube_quota::BudgetCall::ChatModerate,
+        client,
+        request,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return match error.downcast_ref::<crate::youtube_quota::YouTubeNotAttempted>() {
+                Some(crate::youtube_quota::YouTubeNotAttempted::Paused) => {
+                    ProviderDeleteOutcome::CannotDelete {
+                        code: ModerationOutcomeCode::QuotaPaused,
+                        reason: YOUTUBE_MODERATE_PAUSED_REASON.to_string(),
+                    }
+                }
+                Some(crate::youtube_quota::YouTubeNotAttempted::Budget) => {
+                    ProviderDeleteOutcome::CannotDelete {
+                        code: ModerationOutcomeCode::QuotaPaused,
+                        reason: YOUTUBE_MODERATE_SHED_REASON.to_string(),
+                    }
+                }
+                Some(crate::youtube_quota::YouTubeNotAttempted::Invalid) => {
+                    ProviderDeleteOutcome::Failed(
+                        "YouTube request was invalid and was not sent.".to_string(),
+                    )
+                }
+                None => {
+                    ProviderDeleteOutcome::Transient(format!("Could not reach YouTube: {error}"))
+                }
+            };
+        }
+    };
+    let status = response.status().as_u16();
+    let body = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return ProviderDeleteOutcome::Transient(format!(
+                "Could not read YouTube's response: {error}"
+            ));
+        }
+    };
+    classify_youtube_delete_response(status, &body)
+}
+
+/// Pure: what a `liveChatMessages.delete` status and body mean. A quota
+/// refusal is reported as paused (the breaker is already set by
+/// `send_attempt`); `insufficientPermissions`/`authError` hide with
+/// `missing-scope`; any other 403 is YouTube refusing to delete that message.
+pub(crate) fn classify_youtube_delete_response(
+    status: u16,
+    body: &[u8],
+) -> crate::live_chat_moderation::ProviderDeleteOutcome {
+    use crate::live_chat_moderation::{ModerationOutcomeCode, ProviderDeleteOutcome};
+
+    if (200..300).contains(&status) {
+        return ProviderDeleteOutcome::Deleted;
+    }
+    let body = serde_json::from_slice::<Value>(body).ok();
+    let (reason, domain) = body
+        .as_ref()
+        .map(crate::youtube_quota::error_reason_and_domain)
+        .unwrap_or((None, None));
+    if crate::youtube_quota::classify_youtube_api_error(
+        status,
+        reason.as_deref(),
+        domain.as_deref(),
+    ) == crate::youtube_quota::YouTubeApiErrorClass::QuotaExhausted
+    {
+        return ProviderDeleteOutcome::CannotDelete {
+            code: ModerationOutcomeCode::QuotaPaused,
+            reason: YOUTUBE_MODERATE_PAUSED_REASON.to_string(),
+        };
+    }
+    let normalized_reason = reason.as_deref().unwrap_or_default().to_ascii_lowercase();
+    let provider_message = body
+        .as_ref()
+        .and_then(|body| body.pointer("/error/message"))
+        .and_then(Value::as_str)
+        .map(|message| format!(" ({message})"))
+        .unwrap_or_default();
+    match status {
+        404 => ProviderDeleteOutcome::NotFound,
+        401 => ProviderDeleteOutcome::CannotDelete {
+            code: ModerationOutcomeCode::MissingScope,
+            reason: YOUTUBE_MODERATE_RECONNECT_REASON.to_string(),
+        },
+        403 if matches!(
+            normalized_reason.as_str(),
+            "insufficientpermissions" | "autherror"
+        ) =>
+        {
+            ProviderDeleteOutcome::CannotDelete {
+                code: ModerationOutcomeCode::MissingScope,
+                reason: YOUTUBE_MODERATE_RECONNECT_REASON.to_string(),
+            }
+        }
+        403 => ProviderDeleteOutcome::CannotDelete {
+            code: ModerationOutcomeCode::ProviderError,
+            reason: format!("YouTube did not allow removing this message{provider_message}."),
+        },
+        429 | 500..=599 => ProviderDeleteOutcome::Transient(format!(
+            "YouTube answered HTTP {status}{provider_message}."
+        )),
+        _ => ProviderDeleteOutcome::Failed(format!(
+            "YouTube removal failed ({status}){provider_message}."
+        )),
+    }
+}
+
 /// A failed send: the user-facing message, and whether it was the shared
 /// quota (so the caller can set the breaker).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2109,6 +2277,7 @@ mod tests {
             account_label: None,
             read: crate::live_chat::CommentsReadState::Connecting,
             write: crate::live_chat::CommentsWriteState::Ready,
+            moderate: None,
             state: LiveChatProviderConnectionState::Connecting,
             message: String::new(),
             last_connected_at: None,
@@ -2511,6 +2680,242 @@ mod tests {
         assert_eq!(error, crate::youtube_quota::SEND_PAUSED_MESSAGE);
         assert!(crate::youtube_quota::paused_until(&state).is_some());
         assert_eq!(crate::youtube_quota::usage_snapshot(&state).sends.units, 50);
+    }
+
+    // --- Removing (plan 140 S4) ----------------------------------------------------
+
+    #[derive(Clone)]
+    struct DeleteCapture {
+        status: StatusCode,
+        body: Value,
+        /// `(method, path?query, authorization)` per request.
+        hits: Arc<Mutex<Vec<(String, String, String)>>>,
+    }
+
+    async fn capture_delete(
+        State(capture): State<DeleteCapture>,
+        method: axum::http::Method,
+        OriginalUri(uri): OriginalUri,
+        headers: axum::http::HeaderMap,
+    ) -> axum::response::Response {
+        capture.hits.lock().unwrap().push((
+            method.to_string(),
+            format!("{}?{}", uri.path(), uri.query().unwrap_or_default()),
+            headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string(),
+        ));
+        if capture.status == StatusCode::NO_CONTENT {
+            capture.status.into_response()
+        } else {
+            (capture.status, Json(capture.body.clone())).into_response()
+        }
+    }
+
+    async fn spawn_delete_server(status: StatusCode, body: Value) -> (String, DeleteCapture) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let capture = DeleteCapture {
+            status,
+            body,
+            hits: Arc::default(),
+        };
+        let app = Router::new()
+            .route(
+                LIVE_CHAT_MESSAGES_PATH,
+                axum::routing::delete(capture_delete),
+            )
+            .with_state(capture.clone());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{address}"), capture)
+    }
+
+    #[tokio::test]
+    async fn delete_sends_the_documented_request_and_meters_fifty_units() {
+        use crate::live_chat_moderation::ProviderDeleteOutcome;
+        let (base, capture) = spawn_delete_server(StatusCode::NO_CONTENT, Value::Null).await;
+        let state = test_quota_state();
+        let client = reqwest::Client::new();
+        let outcome =
+            delete_youtube_chat_message_guarded(&state, &client, Some(&base), "token-1", "msg-1")
+                .await;
+        assert_eq!(outcome, ProviderDeleteOutcome::Deleted);
+        let hits = capture.hits.lock().unwrap().clone();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, "DELETE");
+        assert_eq!(hits[0].1, format!("{LIVE_CHAT_MESSAGES_PATH}?id=msg-1"));
+        assert_eq!(hits[0].2, "Bearer token-1");
+        // Metered through `send_attempt`: 50 units on its own endpoint row,
+        // never counted as a send.
+        let usage = crate::youtube_quota::usage_snapshot(&state);
+        assert_eq!(usage.total_calls, 1);
+        assert_eq!(usage.total_units, 50);
+        assert_eq!(usage.sends.units, 0);
+        assert!(
+            usage
+                .endpoints
+                .iter()
+                .any(|row| row.endpoint == "liveChatMessages.delete" && row.units == 50),
+            "{usage:?}"
+        );
+        assert_eq!(crate::youtube_quota::daily_usage(&state).units, 50);
+
+        // A blank id never builds a request.
+        let outcome =
+            delete_youtube_chat_message_guarded(&state, &client, Some(&base), "token-1", "  ")
+                .await;
+        assert!(
+            matches!(outcome, ProviderDeleteOutcome::Failed(_)),
+            "{outcome:?}"
+        );
+        assert_eq!(capture.hits.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_is_shed_at_the_full_daily_budget_without_a_request() {
+        use crate::live_chat_moderation::{ModerationOutcomeCode, ProviderDeleteOutcome};
+        let (base, capture) = spawn_delete_server(StatusCode::NO_CONTENT, Value::Null).await;
+        let state = test_quota_state();
+        crate::youtube_quota::set_daily_budget_limit(&state, Some(50));
+        crate::youtube_quota::record_call(
+            &state,
+            crate::youtube_quota::YouTubeEndpoint::LiveChatMessagesInsert,
+        );
+        assert_eq!(
+            crate::youtube_quota::budget_status(&state).step,
+            crate::youtube_quota::BudgetStep::EssentialsOnly
+        );
+        let outcome = delete_youtube_chat_message_guarded(
+            &state,
+            &reqwest::Client::new(),
+            Some(&base),
+            "token-1",
+            "msg-1",
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            ProviderDeleteOutcome::CannotDelete {
+                code: ModerationOutcomeCode::QuotaPaused,
+                reason: YOUTUBE_MODERATE_SHED_REASON.to_string(),
+            }
+        );
+        assert!(
+            capture.hits.lock().unwrap().is_empty(),
+            "shed means no request"
+        );
+        assert_eq!(crate::youtube_quota::usage_snapshot(&state).total_calls, 1);
+    }
+
+    #[tokio::test]
+    async fn delete_is_refused_while_paused_and_a_quota_refusal_sets_the_breaker() {
+        use crate::live_chat_moderation::{ModerationOutcomeCode, ProviderDeleteOutcome};
+        let paused = ProviderDeleteOutcome::CannotDelete {
+            code: ModerationOutcomeCode::QuotaPaused,
+            reason: YOUTUBE_MODERATE_PAUSED_REASON.to_string(),
+        };
+        let state = test_quota_state();
+        crate::youtube_quota::record_quota_exhausted(&state, "test");
+        let (base, capture) = spawn_delete_server(StatusCode::NO_CONTENT, Value::Null).await;
+        let outcome = delete_youtube_chat_message_guarded(
+            &state,
+            &reqwest::Client::new(),
+            Some(&base),
+            "token-1",
+            "msg-1",
+        )
+        .await;
+        assert_eq!(outcome, paused);
+        assert!(
+            capture.hits.lock().unwrap().is_empty(),
+            "no request while paused"
+        );
+        assert_eq!(crate::youtube_quota::usage_snapshot(&state).total_calls, 0);
+
+        // YouTube answers quotaExceeded: the shared breaker is set for everyone.
+        let state = test_quota_state();
+        let (base, capture) = spawn_delete_server(
+            StatusCode::FORBIDDEN,
+            json!({ "error": { "errors": [{ "reason": "quotaExceeded", "domain": "youtube.quota" }] } }),
+        )
+        .await;
+        let outcome = delete_youtube_chat_message_guarded(
+            &state,
+            &reqwest::Client::new(),
+            Some(&base),
+            "token-1",
+            "msg-1",
+        )
+        .await;
+        assert_eq!(outcome, paused);
+        assert_eq!(capture.hits.lock().unwrap().len(), 1);
+        assert!(crate::youtube_quota::paused_until(&state).is_some());
+        assert_eq!(
+            crate::youtube_quota::usage_snapshot(&state).total_units,
+            50,
+            "the refused attempt still counts"
+        );
+    }
+
+    #[test]
+    fn delete_answers_classify_by_status_and_reason() {
+        use crate::live_chat_moderation::{ModerationOutcomeCode, ProviderDeleteOutcome};
+        let body = |reason: &str| {
+            serde_json::to_vec(&json!({
+                "error": {
+                    "message": "nope",
+                    "errors": [{ "reason": reason, "domain": "youtube.liveChat" }]
+                }
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            classify_youtube_delete_response(204, b""),
+            ProviderDeleteOutcome::Deleted
+        );
+        assert_eq!(
+            classify_youtube_delete_response(404, &body("liveChatMessageNotFound")),
+            ProviderDeleteOutcome::NotFound
+        );
+        assert_eq!(
+            classify_youtube_delete_response(401, b""),
+            ProviderDeleteOutcome::CannotDelete {
+                code: ModerationOutcomeCode::MissingScope,
+                reason: YOUTUBE_MODERATE_RECONNECT_REASON.to_string(),
+            }
+        );
+        assert_eq!(
+            classify_youtube_delete_response(403, &body("insufficientPermissions")),
+            ProviderDeleteOutcome::CannotDelete {
+                code: ModerationOutcomeCode::MissingScope,
+                reason: YOUTUBE_MODERATE_RECONNECT_REASON.to_string(),
+            }
+        );
+        // YouTube refusing to delete that particular message is not a scope
+        // problem: hidden locally, with YouTube's own words.
+        assert_eq!(
+            classify_youtube_delete_response(403, &body("forbidden")),
+            ProviderDeleteOutcome::CannotDelete {
+                code: ModerationOutcomeCode::ProviderError,
+                reason: "YouTube did not allow removing this message (nope).".to_string(),
+            }
+        );
+        assert!(matches!(
+            classify_youtube_delete_response(500, b""),
+            ProviderDeleteOutcome::Transient(_)
+        ));
+        assert!(matches!(
+            classify_youtube_delete_response(429, b"<html>"),
+            ProviderDeleteOutcome::Transient(_)
+        ));
+        assert!(matches!(
+            classify_youtube_delete_response(400, b"not json"),
+            ProviderDeleteOutcome::Failed(_)
+        ));
     }
 }
 

@@ -1244,6 +1244,7 @@ mod tests {
             account_label: Some("X Account".to_string()),
             read: CommentsReadState::Connecting,
             write: CommentsWriteState::ReadOnly,
+            moderate: None,
             state: LiveChatProviderConnectionState::Connecting,
             message: "Connecting to X live chat.".to_string(),
             last_connected_at: None,

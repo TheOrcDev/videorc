@@ -48,6 +48,7 @@ mod linux_v4l2_camera;
 #[cfg(any(test, target_os = "linux"))]
 mod linux_vaapi;
 mod live_chat;
+mod live_chat_moderation;
 mod live_chat_persistence;
 mod live_layout;
 mod live_pipeline;
@@ -497,6 +498,15 @@ async fn run_backend() -> Result<()> {
             "Marked {reconciled} interrupted Comments send operation(s) as delivery unknown."
         ),
         Err(error) => tracing::warn!("Could not reconcile Comments send operations: {error:#}"),
+    }
+    // Plan 140: never act on a removal after a restart. A card that was open
+    // is cancelled; a delete that was in flight is delivery unknown.
+    match database.reconcile_orphaned_chat_moderation_operations() {
+        Ok((0, 0)) => {}
+        Ok((cancelled, unknown)) => tracing::warn!(
+            "Reconciled chat moderation after restart: {cancelled} pending removal(s) cancelled, {unknown} in-flight removal(s) marked delivery unknown."
+        ),
+        Err(error) => tracing::warn!("Could not reconcile chat moderation operations: {error:#}"),
     }
     let mut state = AppState::new(token.clone(), port, events, database);
     state.oauth_callback_port = oauth_callback_port;
@@ -5369,6 +5379,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "liveChat.x.start"
         | "liveChat.stop"
         | "liveChat.send"
+        | "liveChat.moderation.request"
+        | "liveChat.moderation.confirm"
+        | "liveChat.moderation.cancel"
         | "liveChat.clearLocal"
         | "liveChat.emotes.set"
         | "platformAccounts.oauth.providerCredentials"
@@ -5522,6 +5535,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "liveChat.diagnostics"
         | "liveChat.sendOperations.list"
         | "liveChat.sendOperations.latest"
+        | "liveChat.moderationOperations.list"
         | "liveChat.xCommentsReadiness"
         | "liveChat.emotes.get"
         | "streamTargets.metadata.get"
@@ -5579,7 +5593,10 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
         | COMMAND_LANE_SMOKE_BLOCK_METHOD => {
             Some(WebSocketIsolatedCommandLaneKind::AccountMaintenance)
         }
-        "liveChat.send" => Some(WebSocketIsolatedCommandLaneKind::DurableChat),
+        "liveChat.send"
+        | "liveChat.moderation.request"
+        | "liveChat.moderation.confirm"
+        | "liveChat.moderation.cancel" => Some(WebSocketIsolatedCommandLaneKind::DurableChat),
         "screens.active"
         | "screens.activate"
         | "screens.clear"
@@ -10715,7 +10732,14 @@ async fn handle_text_message_with_role(
             ),
         },
         "liveChat.capability" => match state.database.list_platform_accounts() {
-            Ok(accounts) => ServerResponse::ok(command.id, live_chat::chat_capabilities(&accounts)),
+            // Plan 140: the YouTube quota pause shows as `moderate: paused`.
+            Ok(accounts) => ServerResponse::ok(
+                command.id,
+                live_chat::chat_capabilities_with_quota(
+                    &accounts,
+                    crate::youtube_quota::paused_until(state).is_some(),
+                ),
+            ),
             Err(error) => {
                 ServerResponse::error(command.id, "live-chat-capability-failed", error.to_string())
             }
@@ -10811,6 +10835,79 @@ async fn handle_text_message_with_role(
                     Err(error) => ServerResponse::error(
                         command.id,
                         "live-chat-send-operation-latest-failed",
+                        error.to_string(),
+                    ),
+                }
+            }
+        }
+        // Chat moderation (plan 140 S4). Refusal codes are the contract's
+        // closed set; the operation itself travels on `liveChat.moderationOperation`.
+        "liveChat.moderation.request" => {
+            match serde_json::from_value::<live_chat_moderation::ModerationRequestParams>(
+                command.params,
+            ) {
+                Ok(params) => match live_chat_moderation::request(state, params.into()).await {
+                    Ok(operation) => ServerResponse::ok(command.id, operation),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "liveChat.moderation.confirm" => {
+            match serde_json::from_value::<live_chat_moderation::ModerationOperationParams>(
+                command.params,
+            ) {
+                Ok(params) => {
+                    match live_chat_moderation::confirm(state, &params.operation_id).await {
+                        Ok(operation) => ServerResponse::ok(command.id, operation),
+                        Err(refusal) => {
+                            ServerResponse::error(command.id, refusal.code, refusal.message)
+                        }
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "liveChat.moderation.cancel" => {
+            match serde_json::from_value::<live_chat_moderation::ModerationOperationParams>(
+                command.params,
+            ) {
+                Ok(params) => {
+                    match live_chat_moderation::cancel(state, &params.operation_id).await {
+                        Ok(operation) => ServerResponse::ok(command.id, operation),
+                        Err(refusal) => {
+                            ServerResponse::error(command.id, refusal.code, refusal.message)
+                        }
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "liveChat.moderationOperations.list" => {
+            let session_id = command
+                .params
+                .get("sessionId")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            if session_id.is_empty() {
+                ServerResponse::error(command.id, "invalid-params", "sessionId is required.")
+            } else {
+                match state
+                    .database
+                    .list_chat_moderation_operations(session_id, live_chat_moderation::LIST_LIMIT)
+                {
+                    Ok(operations) => ServerResponse::ok(command.id, operations),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "live-chat-moderation-operations-list-failed",
                         error.to_string(),
                     ),
                 }
@@ -14497,6 +14594,7 @@ mod tests {
             "liveChat.status",
             "liveChat.sendOperations.list",
             "liveChat.sendOperations.latest",
+            "liveChat.moderationOperations.list",
             "sessions.comments.totals",
             "screens.list",
             "recording.status",
@@ -14558,13 +14656,28 @@ mod tests {
             );
         }
 
-        let durable_chat =
-            json!({ "id": "chat", "method": "liveChat.send", "params": {} }).to_string();
-        assert_eq!(
-            websocket_isolated_command_lane(durable_chat.as_str()),
-            Some(WebSocketIsolatedCommandLaneKind::DurableChat)
+        for method in [
+            "liveChat.send",
+            "liveChat.moderation.request",
+            "liveChat.moderation.confirm",
+            "liveChat.moderation.cancel",
+        ] {
+            let durable_chat = json!({ "id": method, "method": method, "params": {} }).to_string();
+            assert_eq!(
+                websocket_isolated_command_lane(durable_chat.as_str()),
+                Some(WebSocketIsolatedCommandLaneKind::DurableChat),
+                "{method} must run in the durable chat lane"
+            );
+            assert!(
+                websocket_command_mutation_max_execution_age(durable_chat.as_str()).is_some(),
+                "{method} must recycle a generation that stops replying after dispatch"
+            );
+        }
+        // Plan 140: the moderation event is desktop-only, never a LAN projection.
+        assert!(
+            !crate::remote_lan::LAN_EVENTS
+                .contains(&live_chat_moderation::MODERATION_OPERATION_EVENT)
         );
-        assert!(websocket_command_mutation_max_execution_age(durable_chat.as_str()).is_some());
 
         for method in ["scene.layout.apply_live", "scene.layout.apply_preview"] {
             let command = json!({
