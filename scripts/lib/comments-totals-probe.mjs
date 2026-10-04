@@ -1,6 +1,38 @@
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 
+export async function waitForFakeActivityReceipts({
+  eventMessages,
+  eventsSessionId,
+  expectedKinds,
+  waitFor,
+  timeoutMs
+}) {
+  const distinctOwnedReceipts = () =>
+    new Set(
+      eventMessages
+        .filter(
+          (message) =>
+            message.sessionId === eventsSessionId &&
+            typeof message.id === 'string' &&
+            message.id.length > 0
+        )
+        .map((message) => message.id)
+    ).size
+  const eventKinds = () =>
+    new Set(
+      eventMessages
+        .filter((message) => message.sessionId === eventsSessionId && message.details)
+        .map((message) => message.details.kind)
+    )
+  await waitFor(
+    () => distinctOwnedReceipts() >= 13 && expectedKinds.every((kind) => eventKinds().has(kind)),
+    timeoutMs,
+    `every activity kind (${expectedKinds.join(', ')})`
+  )
+  return eventMessages.filter((message) => message.sessionId === eventsSessionId)
+}
+
 export function assertFakeActivityTotals(eventTotals) {
   if (
     eventTotals?.status !== 'available' ||

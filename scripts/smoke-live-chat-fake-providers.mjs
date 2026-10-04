@@ -3,7 +3,10 @@ import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 
 import { smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
-import { assertFakeActivityTotals } from './lib/comments-totals-probe.mjs'
+import {
+  assertFakeActivityTotals,
+  waitForFakeActivityReceipts
+} from './lib/comments-totals-probe.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 // Unified-comments smoke with the fake connector: drives the LiveChatCoordinator end to
@@ -430,18 +433,13 @@ try {
       'membership',
       'kicks'
     ]
-    const eventKinds = () =>
-      new Set(
-        eventMessages
-          .filter((message) => message.sessionId === eventsSessionId && message.details)
-          .map((message) => message.details.kind)
-      )
-    await waitFor(
-      () => expectedKinds.every((kind) => eventKinds().has(kind)),
-      timeoutMs,
-      `every activity kind (${expectedKinds.join(', ')})`
-    )
-    const eventRows = eventMessages.filter((message) => message.sessionId === eventsSessionId)
+    const eventRows = await waitForFakeActivityReceipts({
+      eventMessages,
+      eventsSessionId,
+      expectedKinds,
+      waitFor,
+      timeoutMs
+    })
     const cheer = eventRows.find((message) => message.details?.kind === 'cheer')
     const raid = eventRows.find((message) => message.details?.kind === 'raid')
     const follow = eventRows.find((message) => message.details?.kind === 'follow')
