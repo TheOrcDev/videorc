@@ -32,3 +32,11 @@ Reviewed four-file correction is committed27d2942d7c1fff37ac37c04ce00e63ef3c1b45
 ## Final-batch real-app prefix
 
 The full original local bundle on source6dbabec actually passes the five enforced recording-latency cycles, remote-control and LAN gates, then advances through provider readiness. It subsequently fails at strict fake-provider accounting; Plan138 independently proves a premature readiness defect, while the rejected RPC fields remain unknown. Later stages and long soaks remain unexecuted. Exact child84288/group and14observed app-ledger PIDs are absent after the terminal469.34s run. No source correction, timeout change or per-fix E2E was introduced for these passes. The new Windows shared/latency Node cases each25times and fullRust3 remain pending actual terminal/raw review.
+
+## Actual Windows stability verified — 2026-10-04
+
+Windows source [job111380686785](https://github.com/TheOrcDev/videorc/actions/runs/37183528265/job/111380686785) completes successfully. Reviewed head `27d2942d` and actual CI checkout `c356cb1c` have the same complete Git tree `6361eb53e7782b56edcc1690916036e93850c1df`. Root independently verifies the raw log's size/hash, source hashes, all 1,350 focused Node outcome rows, 25 preview outcomes, all 26 Rust filter series repeated 25 times, and three full Rust runs.
+
+Each of the seven shared-client and nineteen latency-owner cases passes exactly 25 times with zero failures, cancellations or skips. The affected Rust filters total 6,475 passing and 125 ignored case executions; exclusions are counted separately. Each full Rust run passes 2,819 backend cases plus one integration case with 13 ignored cases. Desktop passes 2,850 cases with two skips; full Node passes 1,861 with ten skips and zero failures/cancellations. Rust and desktop do not report literal cancellation counters. All source gate/audit steps succeed; ESLint reports zero errors and one warning. Raw SHA-256 is `9ab07e84d9f3c5c5a7563ade36168fa5cdb6e8334993c2476b48cda6af8ac34d` (54,950,296 bytes). Independent review is `/tmp/videorc-fix137-implementation-preparation-20261004/root-windows137-raw-review.json`.
+
+This establishes source stability for this slice. Physical Windows recording failures, the newer Plan138 job's distinct source-clock failure, complete app acceptance and long soaks remain separate and incomplete.
