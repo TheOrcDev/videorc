@@ -1,8 +1,8 @@
-# Plan 140: Bound legacy PCM recording synchronization
+# Plan 146: Bound legacy PCM recording synchronization
 
 ## Status
 
-P1. Attributed during final acceptance on main `b3771763`. Source repair prepared; the real-command regression is RED before the fix and GREEN after it. Focused app and full source verification pass; aggregate verification remains in progress; no aggregate acceptance claimed.
+P1. Attributed during final acceptance on main `b3771763`. Source repair merged in PR 600 (`c88f3ad4`, main `2310b6fd`); the real-command regression is RED before the fix and GREEN after it. Focused app and full source verification pass; aggregate verification remains in progress; no aggregate acceptance claimed.
 
 ## Reproduction and attribution
 
@@ -18,9 +18,12 @@ Use the production argument builder and the real live PCM bus in a macOS FFmpeg 
 
 Bound only legacy padded-PCM recording synchronization, preserving the existing Linux Pulse bound and bridge/AAC policies. Keep audio padding and video-owned EOF, encoder selection, the 4K60 experimental profile, duration/keyframe requirements, and all quality gates unchanged. Run the microphone-EOF control, recording unit tests, strict Clippy/format, the unmodified 4K60 app smoke, the complete profile matrix, recording-studio/device gates, and the final local bundle. A focused pass cannot substitute for those aggregates.
 
-The independent shared record/stream pressure stop failure remains in [Plan 141](141-diagnose-shared-record-stream-stop.md).
+The independent shared record/stream pressure stop failure remains in [Plan 147](147-diagnose-shared-record-stream-stop.md).
 
 
 ## Source regression results
 
 The production-command/live-bus regression fails before the fix: video stalls at five frames / 0.066667 seconds for its complete eight-second progress deadline, then the exact FFmpeg child is stopped and reaped. After the source change, all three real-FFmpeg cases pass: live legacy PCM progress plus finished frame-count/clean-stop checks, the original microphone-EOF video-clock control, and staged MP4 export ownership. Logs: `legacy-pcm-red.log` and `legacy-pcm-green.log` under the private evidence root. Added pure policy controls retain existing AAC and bridge behavior. Full Rust passes 3,080 cases / 13 ignored; full desktop passes 3,097 / one existing skip; all 1,935 Node cases pass. Strict Clippy, Rust formatting, global formatting/text checks, and the fresh backend build pass. The unmodified source-app 4K60 smoke passes: 6.233 seconds, 374 observed/expected/distinct frames, 60 fps, four keyframes, maximum keyframe interval two seconds, BT.709/video-range tags, High level 5.2, 13 ms A/V tail difference. Source backend SHA-256 `f29cf7383be43f7b8e17ffa0d09aefbddb5483fe197de3e50c67249b87bb8e12`. No wrapper is present for this run. The complete matrix/studio/local bundle remains pending.
+
+
+These QA follow-ups use Plan146/147 because open Orcle PR599 already reserves Plan140. The local private evidence filenames retain their original `fix140` names. Shadscan baseline/floor/pre-commit:37/37/37. The source fix is merged through the normal protected PR workflow; no release is published.
