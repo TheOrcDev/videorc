@@ -200,6 +200,32 @@ describe('fake transcript service', () => {
     }
   )
 
+  it('serves the words set after start to every later chunk', { timeout: 15_000 }, async () => {
+    const fake = await startFakeTranscriptService({ smokeSessionToken: TOKEN })
+    try {
+      const before = await uploadChunk(fake, { index: 0, startMs: 0, seconds: 5 })
+      assert.equal(before.status, 200)
+      assert.deepEqual(before.body.words, [], 'no words were scripted yet')
+
+      fake.setWords(SCRIPT)
+      const after = await uploadChunk(fake, { index: 0, startMs: 0, seconds: 5 })
+      assert.equal(after.status, 200)
+      assert.equal(after.body.words.length, 10)
+      assert.deepEqual(after.body.words[1], {
+        text: 'um',
+        startMs: 800,
+        endMs: 1_100,
+        filler: true
+      })
+
+      fake.setWords(null)
+      const cleared = await uploadChunk(fake, { index: 0, startMs: 0, seconds: 5 })
+      assert.deepEqual(cleared.body.words, [], 'anything but an array clears the script')
+    } finally {
+      await fake.close()
+    }
+  })
+
   it('runs the analysis job deterministically through queued, running and completed', async () => {
     const fake = await startFakeTranscriptService({ smokeSessionToken: TOKEN, words: SCRIPT })
     const headers = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' }

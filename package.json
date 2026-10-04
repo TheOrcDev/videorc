@@ -164,6 +164,7 @@
     "smoke:repair-encoder": "node scripts/smoke-repair-encoder.mjs",
     "smoke:noise-cleanup": "node scripts/smoke-noise-cleanup.mjs",
     "smoke:noise-cleanup:bundled": "node scripts/smoke-noise-cleanup.mjs --require-bundled",
+    "smoke:clean-cut": "cargo build -p videorc-backend && node scripts/smoke-clean-cut-app.mjs",
     "smoke:obs-import": "node scripts/smoke-obs-import.mjs",
     "smoke:app-quit-recording": "node scripts/smoke-app-quit-recording-finalization.mjs",
     "smoke:process-lifecycle": "node scripts/smoke-process-lifecycle.mjs",

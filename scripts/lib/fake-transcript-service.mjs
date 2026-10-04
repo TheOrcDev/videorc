@@ -15,6 +15,9 @@ import { inspectPcm16Wav } from './audio-amplitude.mjs'
  * - `words`: `[{ text, startMs, endMs, filler?, confidence? }]` in recording
  *   time. A chunk upload answers with the words whose midpoint falls inside
  *   the chunk, re-based to the chunk start; the lexicon tags fillers too.
+ *   `setWords(words)` replaces them later: the S16 smoke measures the speech
+ *   in the finished recording, lays its script over it, and only then starts
+ *   Clean cut, so the words line up with the audio exactly.
  * - `retakeMarkers`: lowercase phrases; a sentence containing one makes the
  *   sentence before it a `retake` drop (confidence 0.9). Default: "let me say
  *   that again", "one more time", "let me try that again".
@@ -215,6 +218,7 @@ export async function startFakeTranscriptService({
   }
   let remaining = Number.isFinite(remainingSeconds) ? remainingSeconds : monthlySecondsLimit
   let jobSeq = 0
+  let scriptedWords = Array.isArray(words) ? words : []
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
@@ -288,7 +292,11 @@ export async function startFakeTranscriptService({
       }
       remaining = Math.max(0, remaining - chunkSeconds)
       state.usedSeconds += chunkSeconds
-      const chunkWords = wordsForChunk(words, chunkStartMs, chunkStartMs + chunkSeconds * 1000)
+      const chunkWords = wordsForChunk(
+        scriptedWords,
+        chunkStartMs,
+        chunkStartMs + chunkSeconds * 1000
+      )
       return json(res, 200, {
         chunkIndex,
         chunkSeconds: Math.round(chunkSeconds * 100) / 100,
@@ -411,6 +419,10 @@ export async function startFakeTranscriptService({
     state,
     get remainingSeconds() {
       return remaining
+    },
+    /** Replace the scripted words every later chunk upload hears. */
+    setWords(nextWords) {
+      scriptedWords = Array.isArray(nextWords) ? nextWords : []
     },
     close: () =>
       new Promise((resolveClose) => {
