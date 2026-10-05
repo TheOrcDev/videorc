@@ -52,6 +52,12 @@ repository's optimization level 2. This local configuration is not committed.
 `RUST_MIN_STACK=16777216` gives the unoptimized test binary enough stack for
 the existing preview warm-up test. CI retains the repository's normal profile.
 
+CI run `37299435869` passed all 3,206 Rust tests under the normal repository
+profile, but its cold test compilation took 38 minutes and the 45-minute job
+limit cancelled the separate dev backend build before the process/memory
+sentinel ran. The Rust job limit is now 60 minutes; every test, audit, lint,
+build and sentinel step is retained.
+
 ### Local verification, 2026-10-05
 
 - Full Rust suite after final review: 3,206 passed, 13 ignored; Rust format and Clippy pass.
