@@ -37,7 +37,7 @@ jobs:
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 11.0.9
+          version: 11.28.4
           run_install: false
 
       - name: Set up Node
@@ -105,7 +105,7 @@ jobs:
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 11.0.9
+          version: 11.28.4
           run_install: false
 
       - name: Set up Node
