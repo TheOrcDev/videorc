@@ -226,6 +226,24 @@ describe('commentHighlightCardText', () => {
     ).toBe('Cheered 1,500 bits: amazing setup')
   })
 
+  it("leads a watch streak with its length, then the viewer's words (plan 151)", () => {
+    const streak = {
+      ...base,
+      authorName: 'Snowy77x',
+      eventType: 'system' as const,
+      rawProviderType: 'channel.chat.notification:watch_streak',
+      messageText: 'Snowy77x watched 20 consecutive streams and sparked a watch streak!',
+      details: { kind: 'watch-streak' as const, streakCount: 20 }
+    }
+    expect(
+      commentHighlightCardText({
+        ...streak,
+        fragments: [{ type: 'text', text: 'welcome back hands <3' }]
+      })
+    ).toBe('Reached a 20-stream watch streak: welcome back hands <3')
+    expect(commentHighlightCardText(streak)).toBe('Reached a 20-stream watch streak')
+  })
+
   it('keeps plain chat as the message itself', () => {
     expect(commentHighlightCardText({ ...base, eventType: 'message', messageText: 'hi' })).toBe(
       'hi'

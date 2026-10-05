@@ -6,6 +6,8 @@ import type {
   StreamPlatform
 } from '@/lib/backend'
 
+import { noticeViewerWords } from '@/lib/chat-notice'
+
 import type { DestinationEvent } from '../../../shared/live-dashboard'
 
 // The Stream Manager's Activity pane (plan 055, D4): a projection of the chat
@@ -22,18 +24,20 @@ export type ActivityKind =
   | 'super-chat'
   | 'super-sticker'
   | 'raid'
+  | 'watch-streak'
   | 'announcement'
   | 'destination-failed'
   | 'destination-recovered'
 
 /** The pane's filter chips. Announcements show only under All. */
-export type ActivityFilter = 'follows' | 'support' | 'tips' | 'raids' | 'destinations'
+export type ActivityFilter = 'follows' | 'support' | 'tips' | 'raids' | 'streaks' | 'destinations'
 
 export const ACTIVITY_FILTERS: readonly { id: ActivityFilter; label: string; title: string }[] = [
   { id: 'follows', label: 'Follows', title: 'New followers' },
   { id: 'support', label: 'Subs', title: 'Subs, gifts and memberships' },
   { id: 'tips', label: 'Tips', title: 'Bits, KICKs, Super Chats and Super Stickers' },
   { id: 'raids', label: 'Raids', title: 'Raids into your channel' },
+  { id: 'streaks', label: 'Streaks', title: 'Viewers who watched several streams in a row' },
   { id: 'destinations', label: 'Destinations', title: 'A destination failed or came back' }
 ]
 
@@ -63,6 +67,8 @@ export interface ActivityItem {
   /** The follower's @-mentionable login (plan 071, S5); the row still shows
    * the display name, but "Thank in chat" mentions this. */
   handle?: string
+  /** A watch streak's length in streams (plan 151): "Thank in chat" says it. */
+  streak?: number
 }
 
 export interface TipTotal {
@@ -217,11 +223,14 @@ function itemFromMessage(message: LiveChatMessage): ActivityItem | null {
     ...(message.authorAvatarUrl ? { authorAvatarUrl: message.authorAvatarUrl } : {})
   }
   // Notices put Twitch's system text in messageText; only a viewer's own
-  // words are worth quoting.
+  // words are worth quoting. A Twitch sub or streak carries them in its
+  // fragments (plan 151, D3).
   const viewerWords =
     message.eventType === 'paid' || details.kind === 'membership'
       ? message.messageText.trim() || undefined
-      : undefined
+      : details.kind === 'subscription' || details.kind === 'watch-streak'
+        ? noticeViewerWords(message)
+        : undefined
   switch (details.kind) {
     case 'follow':
       return {
@@ -241,7 +250,8 @@ function itemFromMessage(message: LiveChatMessage): ActivityItem | null {
         short: subscriptionShort(details),
         ...(details.subscription === 'sub-gift' || details.subscription === 'community-sub-gift'
           ? { gift: true }
-          : {})
+          : {}),
+        ...(viewerWords ? { message: viewerWords } : {})
       }
     case 'membership':
       return {
@@ -300,6 +310,16 @@ function itemFromMessage(message: LiveChatMessage): ActivityItem | null {
         filter: 'raids',
         line: `Raided with ${plural(details.viewerCount, 'viewer', 'viewers')}`,
         short: `Raid · ${plural(details.viewerCount, 'viewer', 'viewers')}`
+      }
+    case 'watch-streak':
+      return {
+        ...base,
+        kind: 'watch-streak',
+        filter: 'streaks',
+        line: `Reached a ${details.streakCount.toLocaleString()}-stream watch streak`,
+        short: `Streak · ${plural(details.streakCount, 'stream', 'streams')}`,
+        streak: details.streakCount,
+        ...(viewerWords ? { message: viewerWords } : {})
       }
     case 'announcement':
       return {
@@ -460,6 +480,8 @@ export function activityTotals(messages: readonly LiveChatMessage[]): ActivityTo
       case 'raid':
         totals.raids += 1
         break
+      // Loyalty, not support: listed in Activity, never summed (plan 151, D4).
+      case 'watch-streak':
       case 'announcement':
         break
     }
@@ -479,6 +501,7 @@ export function activityFilterCounts(
     support: 0,
     tips: 0,
     raids: 0,
+    streaks: 0,
     destinations: 0
   }
   for (const item of items) {
@@ -540,6 +563,8 @@ export function thankYouDraft(item: ActivityItem): string {
       return `Thank you so much, ${name}!`
     case 'raid':
       return `Thanks for the raid, ${name}! Welcome in, everyone!`
+    case 'watch-streak':
+      return `Thanks for watching ${plural(item.streak ?? 0, 'stream', 'streams')} in a row, ${name}!`
     case 'announcement':
     case 'destination-failed':
     case 'destination-recovered':

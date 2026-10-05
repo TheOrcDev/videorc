@@ -27,6 +27,7 @@ import type {
 import { monogramInitials, useCachedAvatar } from '@/lib/chat-avatar'
 import { REMOVE_FROM_CHAT_LABEL, type RemovalStatusView } from '@/lib/chat-removal-view'
 import { groupEmoteOverlays } from '@/lib/chat-emotes'
+import { noticeViewerWords } from '@/lib/chat-notice'
 import { cohostFlagActionLabel, cohostFlagChipLabel, cohostFlagDetail } from '@/lib/cohost-view'
 import { cn } from '@/lib/utils'
 
@@ -287,17 +288,17 @@ function Emote({
   )
 }
 
-/** The message body: emotes inline when the platform sent them (Twitch,
- * Kick) or the backend matched them (7TV), zero-width 7TV emotes stacked on
- * the emote before them. */
-function MessageBody({
-  message,
+/** Text with emotes inline when the platform sent them (Twitch, Kick) or
+ * the backend matched them (7TV), zero-width 7TV emotes stacked on the emote
+ * before them. Without an emote it is `text` as is. */
+function FragmentText({
+  text,
   fragments
 }: {
-  message: LiveChatMessage
+  text: string
   fragments: readonly LiveChatMessageFragment[]
 }): ReactNode {
-  if (!fragments.some((fragment) => fragment.imageUrl)) return message.messageText
+  if (!fragments.some((fragment) => fragment.imageUrl)) return text
   return groupEmoteOverlays(fragments).map((piece, index) => {
     if (piece.kind === 'text') return <span key={index}>{piece.text}</span>
     if (piece.overlays.length === 0) {
@@ -317,6 +318,30 @@ function MessageBody({
       </span>
     )
   })
+}
+
+/** The message body. A Twitch notice the viewer wrote something with shows
+ * Twitch's sentence, then the viewer's own words below it (plan 151, D3). */
+function MessageBody({
+  message,
+  noticeWords
+}: {
+  message: LiveChatMessage
+  noticeWords: string | undefined
+}): ReactNode {
+  if (!noticeWords) {
+    return <FragmentText fragments={message.fragments} text={message.messageText} />
+  }
+  return (
+    <>
+      <span className="block italic text-muted-foreground" data-slot="comment-notice">
+        {message.messageText}
+      </span>
+      <span className="block" data-slot="comment-notice-words">
+        <FragmentText fragments={message.fragments} text={noticeWords} />
+      </span>
+    </>
+  )
 }
 
 /** True when the message names one of the streamer's own accounts. */
@@ -371,6 +396,7 @@ function CommentContent({
 }): ReactElement {
   const avatarUrl = useCachedAvatar(message.authorAvatarUrl)
   const time = formatCommentTime(message.receivedAt)
+  const noticeWords = noticeViewerWords(message)
 
   return (
     <>
@@ -439,12 +465,12 @@ function CommentContent({
           className={cn(
             'text-left break-words text-foreground select-text',
             density === 'comfortable' ? 'text-[15px] leading-snug' : 'text-xs leading-relaxed',
-            message.eventType === 'system' && 'italic text-muted-foreground',
+            message.eventType === 'system' && !noticeWords && 'italic text-muted-foreground',
             message.eventType === 'moderation' && 'italic text-muted-foreground',
             message.isDeleted && 'text-muted-foreground line-through'
           )}
         >
-          <MessageBody fragments={message.fragments} message={message} />
+          <MessageBody message={message} noticeWords={noticeWords} />
         </span>
       </span>
     </>
