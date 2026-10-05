@@ -156,7 +156,12 @@ import { providerOAuthRetryDelayMs } from '@/lib/provider-oauth-retry'
 import { isRetryableBackgroundSurfaceSyncError } from '@/lib/surface-sync-retry'
 import { accountCallbackRetryDelayMs } from '@/lib/account-callback-retry'
 import { buildStartSessionParams } from '@/lib/session-params'
-import { applyFinalizationEvent, finalizationEventNeedsRefresh } from '@/lib/session-finalization'
+import {
+  applyFinalizationEvent,
+  finalizationEventNeedsRefresh,
+  finalizingBadgeLabel,
+  FinalizationSnapshotJournal
+} from '@/lib/session-finalization'
 import {
   clickEpochMs,
   createRecordLatencyTracker,
@@ -2101,6 +2106,54 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const remuxSessionRef = useRef<((sessionId: string) => Promise<void>) | null>(null)
   const [sessionsNextCursor, setSessionsNextCursor] = useState<string | null>(null)
   const [sessionsLoadingMore, setSessionsLoadingMore] = useState(false)
+  const announcedFinalizationsRef = useRef(new Set<string>())
+  const finalizationJournalRef = useRef(new FinalizationSnapshotJournal())
+  const activeFinalizationNoticesRef = useRef(new Set<string>())
+  useEffect(() => {
+    // Restore progress after relaunch; settle a notice whose terminal event
+    // was missed while disconnected using the authoritative database row.
+    for (const session of sessions) {
+      const id = `finalization-${session.id}`
+      if (session.finalizationState === 'finalizing') {
+        activeFinalizationNoticesRef.current.add(session.id)
+        toast.loading(finalizingBadgeLabel(session), {
+          id,
+          duration: Infinity,
+          description:
+            'Your recording is safe. Long recordings can take several minutes to save as MP4.'
+        })
+      } else if (activeFinalizationNoticesRef.current.delete(session.id)) {
+        if (
+          session.finalizationState === 'finalized' &&
+          !announcedFinalizationsRef.current.has(session.id)
+        ) {
+          announcedFinalizationsRef.current.add(session.id)
+          toast.success('MP4 ready', {
+            id,
+            duration: 15000,
+            action: {
+              label: 'Show in folder',
+              onClick: () => {
+                void window.videorc?.revealSession(session.id)
+              }
+            }
+          })
+        } else if (session.finalizationState === 'failed') {
+          toast.error('MP4 export failed', {
+            duration: Infinity,
+            id,
+            description: session.finalizationError ?? 'The original MKV recording was kept.',
+            action: {
+              label: 'Retry export',
+              onClick: () => {
+                void remuxSessionRef.current?.(session.id)
+              }
+            }
+          })
+        }
+      }
+    }
+  }, [sessions])
   const sessionListGenerationRef = useRef(0)
   const sessionListRefreshRequestRef = useRef(new LatestRequestByKey<'first-page'>())
   const sessionListMoreSingleFlightRef = useRef(new SingleFlightByKey<'next-page', BackendClient>())
@@ -5145,6 +5198,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
 
       const refreshRequests = sessionListRefreshRequestRef.current
+      const finalizationCheckpoint = finalizationJournalRef.current.checkpoint()
       const requestToken = refreshRequests.begin('first-page')
       sessionListGenerationRef.current += 1
       sessionListMoreSingleFlightRef.current.invalidate('next-page')
@@ -5165,7 +5219,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // the old cursor. Advancing again at commit prevents it from appending
         // that stale page after the new first page becomes authoritative.
         sessionListGenerationRef.current += 1
-        setSessions(nextPage.items)
+        setSessions(
+          finalizationJournalRef.current.reconcile(nextPage.items, finalizationCheckpoint)
+        )
         setSessionsNextCursor(nextPage.nextCursor ?? null)
         setSessionStorageTotals(nextTotals)
       } finally {
@@ -5184,6 +5240,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
     await sessionListMoreSingleFlightRef.current.run('next-page', activeClient, async () => {
       const generation = sessionListGenerationRef.current
+      const finalizationCheckpoint = finalizationJournalRef.current.checkpoint()
       setSessionsLoadingMore(true)
       try {
         const page = await activeClient.requestTyped('sessions.list', {
@@ -5195,7 +5252,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
         setSessions((current) => {
           const seen = new Set(current.map((session) => session.id))
-          return [...current, ...page.items.filter((session) => !seen.has(session.id))]
+          return [
+            ...current,
+            ...finalizationJournalRef.current
+              .reconcile(page.items, finalizationCheckpoint)
+              .filter((session) => !seen.has(session.id))
+          ]
         })
         setSessionsNextCursor(page.nextCursor ?? null)
       } finally {
@@ -5859,6 +5921,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     entitlementsRevisionRef.current += 1
     accountSnapshotCoordinator.invalidate()
     accountRefreshInFlightRef.current = null
+    finalizationJournalRef.current = new FinalizationSnapshotJournal()
     const sessionListRefreshRequests = sessionListRefreshRequestRef.current
     const sessionListMoreSingleFlight = sessionListMoreSingleFlightRef.current
     const sessionDetailRequests = sessionDetailRequestRef.current
@@ -6260,15 +6323,48 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // Background MP4 export (instant-record P2): patch the Library row in
         // place; refetch only when a finalized row is not loaded yet.
         const event = payload
+        bootstrapGuard.mark('sessions')
+        finalizationJournalRef.current.record(event)
         setSessions((current) => applyFinalizationEvent(current, event))
+        if (event.state === 'finalizing') {
+          activeFinalizationNoticesRef.current.add(event.sessionId)
+          announcedFinalizationsRef.current.delete(event.sessionId)
+          toast.loading(
+            finalizingBadgeLabel({
+              status: 'completed',
+              finalizationProgressPercent: event.progressPercent
+            }),
+            {
+              id: `finalization-${event.sessionId}`,
+              duration: Infinity,
+              description:
+                'Your recording is safe. Long recordings can take several minutes to save as MP4.'
+            }
+          )
+        }
         if (finalizationEventNeedsRefresh(sessionsRef.current, event)) {
           void refreshSessions(nextClient)
         }
-        if (event.state === 'finalized') {
+        if (
+          event.state === 'finalized' &&
+          !announcedFinalizationsRef.current.has(event.sessionId)
+        ) {
+          announcedFinalizationsRef.current.add(event.sessionId)
+          toast.success('MP4 ready', {
+            id: `finalization-${event.sessionId}`,
+            duration: 15000,
+            action: {
+              label: 'Show in folder',
+              onClick: () => {
+                void window.videorc?.revealSession(event.sessionId)
+              }
+            }
+          })
           autoRunCleanCutRef.current?.(event)
         }
         if (event.state === 'failed') {
           toast.error('MP4 export failed', {
+            duration: Infinity,
             id: `finalization-${event.sessionId}`,
             description: event.error ?? 'The original MKV recording was kept.',
             action: {
@@ -7535,6 +7631,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           const refreshIsCurrent = (): boolean =>
             generationIsCurrent() && clientRef.current === activeClient
           const sessionListRefreshRequests = sessionListRefreshRequestRef.current
+          const finalizationCheckpoint = finalizationJournalRef.current.checkpoint()
           const sessionListRequestToken = sessionListRefreshRequests.begin('first-page')
           sessionListGenerationRef.current += 1
           sessionListMoreSingleFlightRef.current.invalidate('next-page')
@@ -7607,7 +7704,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             setDeviceList(nextDevices)
             if (sessionListRefreshRequests.isCurrent('first-page', sessionListRequestToken)) {
               sessionListGenerationRef.current += 1
-              setSessions(nextSessions.items)
+              setSessions(
+                finalizationJournalRef.current.reconcile(nextSessions.items, finalizationCheckpoint)
+              )
               setSessionsNextCursor(nextSessions.nextCursor ?? null)
               setSessionStorageTotals(nextSessionStorage)
             }
@@ -12447,11 +12546,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     settleRetainedPreparedPlatformLifecycles
   ])
 
+  const preparedGoLiveOutputRef = useRef<GoLiveOutput.GoLiveSessionOutput | null>(null)
   const runStartSessionRef = useRef<
-    ((streamingOverride?: StreamingSettings) => Promise<boolean>) | null
+    | ((
+        streamingOverride?: StreamingSettings,
+        preparedOutput?: GoLiveOutput.GoLiveSessionOutput | null
+      ) => Promise<boolean>)
+    | null
   >(null)
   const runStartSession = useCallback(
-    (streamingOverride?: StreamingSettings) => {
+    (
+      streamingOverride?: StreamingSettings,
+      preparedOutput?: GoLiveOutput.GoLiveSessionOutput | null
+    ) => {
       recordLatencyTrackerRef.current.markClick('start', performance.now(), 'session-call')
       const requestSnapshot = {
         captureConfig,
@@ -12504,7 +12611,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           streamingForStart = streamingOverride ?? null
           let sessionCaptureConfig = captureConfig
           if (streamingForStart) {
-            const output = await settleStreamOutputTopology(streamingForStart)
+            const output = preparedOutput
+              ? { ...preparedOutput, streaming: streamingForStart }
+              : await settleStreamOutputTopology(streamingForStart)
             if (output.reason) {
               throw new Error(output.reason)
             }
@@ -12777,7 +12886,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // probe, platform activation, the RPC itself — is unmissable: keyed
           // persistent toast + Session-panel line, Retry re-runs this exact start.
           reportSessionStartFailure(error, () => {
-            void runStartSessionRef.current?.(streamingOverride)
+            void runStartSessionRef.current?.(streamingOverride, preparedOutput)
           })
           if (recordingRef.current.state === 'starting' && !recordingRef.current.sessionId) {
             applyRecordingStatus({ state: 'idle', message: 'Ready to start a capture session.' })
@@ -12906,10 +13015,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                   targetId: target.id,
                   // The vertical-bound broadcast advertises the PORTRAIT profile —
                   // the same transposition the simulcast leg composes at.
-                  video:
-                    target.outputOrientation === 'vertical'
-                      ? coerceVideoToOrientation(captureConfig.video, 'vertical')
-                      : outputVideo
+                  video: coerceVideoToOrientation(
+                    streamOutputVideoForTarget(outputVideo, outputStreaming, outputTarget(target)),
+                    target.outputOrientation ?? 'horizontal'
+                  )
                 })
             const completionKey = JSON.stringify([prepared.accountId, prepared.broadcastId])
             youtubeCompletionInFlightByBroadcastRef.current.delete(completionKey)
@@ -13120,10 +13229,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         bridgeStreamingToLegacy({ ...current, streaming: nextStreaming })
       )
       await refreshPlatformAccountsForClient(client)
+      // Keep saved preferences intact while carrying the exact profiles used
+      // for provider preparation through to the media start.
+      const preparedStreaming = {
+        ...outputStreaming,
+        targets: nextStreaming.targets.map((target) => ({
+          ...target,
+          outputPreset: outputTarget(target).outputPreset,
+          outputBitrateKbps: outputTarget(target).outputBitrateKbps,
+          outputOrientation: outputTarget(target).outputOrientation
+        }))
+      }
       return {
-        streaming: nextStreaming,
+        streaming: preparedStreaming,
         failures,
-        readyLabels: readyStreamTargetLabels(nextStreaming)
+        readyLabels: readyStreamTargetLabels(preparedStreaming)
       }
     },
     [
@@ -13320,6 +13440,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (sessionOutput.reason) {
           throw new Error(sessionOutput.reason)
         }
+        preparedGoLiveOutputRef.current = sessionOutput
         const setup = await prepareOauthTargetsForGoLive(preflight, sessionOutput)
         const setupDecision = decidePreparedGoLiveSetup(setup)
         if (setupDecision.kind === 'no-ready-destinations') {
@@ -13333,7 +13454,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           return
         }
         setGoLiveConfirmationOpen(false)
-        await runStartSession(setupDecision.streaming)
+        await runStartSession(setupDecision.streaming, sessionOutput)
       } catch (error) {
         // A Go Live that dies BEFORE the start RPC (metadata, preflight, platform
         // setup) is just as silent as a refused start: same persistent surface.
@@ -13389,7 +13510,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setGoLiveConfirmationPending(true)
       setGoLivePartialSetup(null)
       setGoLiveConfirmationOpen(false)
-      await runStartSession(decision.streaming)
+      await runStartSession(decision.streaming, preparedGoLiveOutputRef.current)
     } catch (error) {
       reportError(error)
     } finally {

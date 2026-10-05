@@ -865,6 +865,12 @@ async fn execute_provider(
             bail!("This event is no longer an upcoming broadcast.");
         }
         let video = mutation.video.as_ref().context("Output profile required")?;
+        crate::youtube::validate_scheduled_youtube_latency(
+            video,
+            current
+                .pointer("/contentDetails/latencyPreference")
+                .and_then(Value::as_str),
+        )?;
         let target = mutation.target_id.as_ref().context("Target ID required")?;
         crate::resource_authority::validate_asset_id(target)?;
         let profile = serde_json::to_value(video)?;

@@ -7,7 +7,8 @@ import {
   normalizeLayoutSettings,
   simulcastLegLayout,
   simulcastLegLiveRequest,
-  simulcastLegPreset
+  simulcastLegPreset,
+  videoPresets
 } from './capture'
 
 /** A horizontal program with the built-in YouTube Vertical destination armed. */
@@ -47,6 +48,17 @@ describe('vertical simulcast leg', () => {
     expect(params?.layout.cameraTransformMode).toBe('preset')
     expect(params?.layout.cameraTransform).toBeNull()
     expect(params?.video).toMatchObject({ width: 1080, height: 1920 })
+  })
+
+  it('uses HD vertical stream settings independently of 4K local recording', () => {
+    const config = dualOrientationConfig({ video: videoPresets['record-4k30'] })
+    expect(buildSimulcastParams(config)?.video).toMatchObject({
+      width: 1080,
+      height: 1920,
+      fps: 30,
+      bitrateKbps: 6000
+    })
+    expect(config.video).toEqual(videoPresets['record-4k30'])
   })
 
   it('the leg framing is its own setting, never the recording layout framing', () => {

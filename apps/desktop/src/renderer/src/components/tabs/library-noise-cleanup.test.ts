@@ -59,7 +59,7 @@ describe('Library Noise Cleanup direct action', () => {
     const menuPlay = rowActions.indexOf('Play\n', menu)
     const orcleReport = rowActions.indexOf('Orcle report', menu)
     const cleanCut = rowActions.indexOf('Clean cut\n', menu)
-    const reveal = rowActions.indexOf('{revealInFileManagerLabel()}', menu)
+    const reveal = rowActions.indexOf('revealInFileManagerLabel()', menu)
     expect(menuPlay).toBeGreaterThan(menu)
     expect(orcleReport).toBeGreaterThan(menuPlay)
     expect(cleanCut).toBeGreaterThan(orcleReport)

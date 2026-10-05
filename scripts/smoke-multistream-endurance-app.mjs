@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
-import { analyzeRecording } from './lib/recording-analyzer.mjs'
+import { analyzeRecording, probeMedia } from './lib/recording-analyzer.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 // Endurance proof for the multi-platform fan-out under REAL downstream
@@ -43,6 +43,13 @@ const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120000)
 const basePort = Number(process.env.VIDEORC_SMOKE_RTMP_PORT ?? 12935)
 // Session A duration; the release endurance run passes 600000.
 const streamMs = Number(process.env.VIDEORC_SMOKE_STREAM_MS ?? 60000)
+// Plan 153: exercise the actual two-encoder path, independently of the
+// existing 720p stress profile. The long gate passes 9,000,000ms (150min).
+const verticalSplit = process.env.VIDEORC_SMOKE_SPLIT_4K_VERTICAL === '1'
+const split4k = verticalSplit || process.env.VIDEORC_SMOKE_SPLIT_4K === '1'
+const recordingProfile = split4k
+  ? { preset: 'record-4k30', width: 3840, height: 2160, fps: 30, bitrateKbps: 30000 }
+  : { preset: 'custom', width: 1280, height: 720, fps: 30, bitrateKbps: 4000 }
 const listenerBindMs = Number(process.env.VIDEORC_SMOKE_LISTENER_BIND_MS ?? 2500)
 const finalizationTimeoutMs = Number(process.env.VIDEORC_SMOKE_FINALIZATION_TIMEOUT_MS ?? 30000)
 // Network stall profile for the proxied leg in session A.
@@ -60,7 +67,10 @@ const TARGETS = [
   { id: 'x', label: 'X (stalling)', stalled: true }
 ]
 
-const targets = TARGETS.map((platform, index) => {
+const activeTargets = verticalSplit
+  ? [{ id: 'youtube', label: 'YouTube Vertical (stalling)', stalled: true }]
+  : TARGETS
+const targets = activeTargets.map((platform, index) => {
   const listenPort = basePort + index
   const proxyPort = platform.stalled ? basePort + 100 + index : null
   const streamKey = `endurance${index}`
@@ -155,6 +165,7 @@ try {
     }
 
     let froze = false
+    let nextDiagnosticAt = Date.now()
     const deadlineA = Date.now() + streamMs
     while (Date.now() < deadlineA) {
       await sleep(2000)
@@ -164,6 +175,17 @@ try {
           `SESSION A DIED ${Math.round((Date.now() - (deadlineA - streamMs)) / 1000)}s in ` +
             `(state ${status.state}) after ${stallCycles} stall cycle(s): ${status.message ?? 'no message'}`
         )
+      }
+      if (Date.now() >= nextDiagnosticAt) {
+        const diagnostics = await request(ws, timeoutMs, 'diagnostics.stats')
+        console.log(
+          JSON.stringify({
+            type: 'endurance-sample',
+            elapsedSeconds: Math.round((Date.now() - (deadlineA - streamMs)) / 1000),
+            diagnostics
+          })
+        )
+        nextDiagnosticAt = Date.now() + 60000
       }
       if (!froze && Date.now() > deadlineA - streamMs / 2) {
         froze = true
@@ -253,6 +275,15 @@ async function verifySessionA(outputPath) {
     const size = existsSync(target.recvPath) ? statSync(target.recvPath).size : 0
     if (size > 0) {
       console.log(`  ✓ ${target.label} (:${target.listenPort}) received ${size} bytes`)
+      if (split4k) {
+        const media = await probeMedia(target.recvPath)
+        if (
+          media.video?.width !== (verticalSplit ? 1080 : 1920) ||
+          media.video?.height !== (verticalSplit ? 1920 : 1080)
+        ) {
+          failures.push(`${target.label} did not receive the selected HD stream dimensions`)
+        }
+      }
     } else if (target.stalled) {
       const latest = targetSnapshotsLatestState(target.id)
       console.log(`  • ${target.label} no bytes; final reported state: ${latest ?? 'absent'}`)
@@ -327,20 +358,31 @@ async function verifyRecording(reportedPath, failures, { spansFreeze = false } =
   const outputPath = await waitForFinalRecording(reportedPath)
   const recordingSize = outputPath && existsSync(outputPath) ? statSync(outputPath).size : 0
   if (recordingSize > 0) {
+    if (split4k) {
+      if (!outputPath.endsWith('.mp4'))
+        failures.push('MP4 finalization did not complete before the deadline')
+      const media = await probeMedia(outputPath)
+      if (media.video?.width !== 3840 || media.video?.height !== 2160) {
+        failures.push('The local recording was not preserved at 3840×2160')
+      }
+    }
     const quality = await analyzeRecording(outputPath, {
       ffmpegPath,
       ffprobePath: process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe',
       // A recording that waited out a multi-second freeze keeps a truthful
       // gap, so its average cadence is below the session rate by design.
       intendedFps: spansFreeze ? undefined : 30,
-      expectAudio: false,
+      expectAudio: split4k,
       gates: {
         requireMotion: false,
         avSyncTargetMs: Number.POSITIVE_INFINITY,
         avSyncHardFailMs: Number.POSITIVE_INFINITY,
         // Freezes legitimately drop frames; timestamp sanity is the gate.
         frameCountTolerance: Number.POSITIVE_INFINITY,
-        maxDurationStretchRatio: Number.POSITIVE_INFINITY
+        maxDurationStretchRatio: Number.POSITIVE_INFINITY,
+        ...(split4k
+          ? { requireColorTags: true, requireValidLevel: true, maxTailMismatchMs: 100 }
+          : {})
       }
     })
     if (quality.verdict.pass) {
@@ -451,9 +493,31 @@ function sessionParams(outputDirectoryCapability) {
       recordEnabled: true,
       streamEnabled: true,
       outputDirectoryCapability,
-      video: { preset: 'custom', width: 1280, height: 720, fps: 30, bitrateKbps: 4000 },
+      video: recordingProfile,
       rtmp: { preset: 'custom', serverUrl: targets[0].serverUrl, streamKey: targets[0].streamKey }
     },
+    ...(verticalSplit
+      ? {
+          simulcast: {
+            layout: {
+              layoutPreset: 'vertical-screen-only',
+              cameraTransformMode: 'preset',
+              cameraCorner: 'bottom-right',
+              cameraSize: 'medium',
+              cameraShape: 'rectangle',
+              cameraMargin: 32,
+              cameraFit: 'fill',
+              cameraMirror: false,
+              cameraZoom: 100,
+              cameraOffsetX: 0,
+              cameraOffsetY: 0,
+              sideBySideSplit: '70-30',
+              sideBySideCameraSide: 'right'
+            },
+            video: { preset: 'custom', width: 1080, height: 1920, fps: 30, bitrateKbps: 6000 }
+          }
+        }
+      : {}),
     streaming: {
       enabled: true,
       mode: 'multi',
@@ -462,6 +526,7 @@ function sessionParams(outputDirectoryCapability) {
         platform: target.id,
         label: target.label,
         enabled: true,
+        ...(verticalSplit ? { outputOrientation: 'vertical' } : {}),
         serverUrl: target.serverUrl,
         urlMode: 'server-and-key',
         streamKey: target.streamKey,

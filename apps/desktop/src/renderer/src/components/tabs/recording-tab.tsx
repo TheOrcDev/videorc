@@ -1,3 +1,4 @@
+import { recordingResolutionSettings } from '@/lib/output-quality'
 import { AlertIcon, SpinnerIcon, VideoFileIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
@@ -27,6 +28,8 @@ export function RecordingTab(): ReactElement {
     patchVideo,
     applyVideoPreset,
     isSessionActive,
+    goLiveConfirmationPending,
+    goLivePartialSetup,
     entitlements,
     performanceCheck,
     performanceCheckProgress,
@@ -34,7 +37,7 @@ export function RecordingTab(): ReactElement {
   } = useStudioCore()
   const { video } = captureConfig
   // One-click resolutions so nobody has to remember pixel counts; picking one
-  // patches width/height (switching the preset to Custom). The list follows
+  // changes dimensions and standard bitrates while preserving custom rates. The list follows
   // the Studio mode — vertical mode offers only portrait canvases, so the
   // canvas can never contradict the scene's orientation.
   const orientation = layoutPresetOrientation(captureConfig.layout.layoutPreset)
@@ -54,9 +57,9 @@ export function RecordingTab(): ReactElement {
       <PanelSection
         action={
           <Switch
-            aria-label="Record MKV"
+            aria-label="Save local recording"
             checked={captureConfig.recordEnabled}
-            disabled={isSessionActive}
+            disabled={isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)}
             onCheckedChange={(checked) =>
               setCaptureConfig((current) => ({ ...current, recordEnabled: checked }))
             }
@@ -64,7 +67,7 @@ export function RecordingTab(): ReactElement {
         }
         description="Local recording exports MP4 into the recordings folder after capture finalizes. Completed files live in the Library."
         icon={VideoFileIcon}
-        title="Output"
+        title="Recording quality"
       >
         {isSessionActive ? (
           <p className="text-sm text-muted-foreground">
@@ -73,9 +76,9 @@ export function RecordingTab(): ReactElement {
         ) : null}
         <FieldGroup>
           <Field>
-            <FieldLabel htmlFor="video-preset">Video preset</FieldLabel>
+            <FieldLabel htmlFor="video-preset">Recording preset</FieldLabel>
             <Select
-              disabled={isSessionActive}
+              disabled={isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)}
               value={video.preset}
               onValueChange={(value) =>
                 applyVideoPreset(value as VideoPreset, { kind: 'recording' })
@@ -107,7 +110,9 @@ export function RecordingTab(): ReactElement {
                 <span>{checkLine.text}</span>
                 {checkLine.applyPreset ? (
                   <Button
-                    disabled={isSessionActive}
+                    disabled={
+                      isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)
+                    }
                     size="xs"
                     variant="outline"
                     onClick={() =>
@@ -120,7 +125,9 @@ export function RecordingTab(): ReactElement {
                 ) : null}
                 {checkLine.checkLabel ? (
                   <Button
-                    disabled={isSessionActive}
+                    disabled={
+                      isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)
+                    }
                     size="xs"
                     variant="ghost"
                     onClick={() => void runPerformanceCheck()}
@@ -162,10 +169,14 @@ export function RecordingTab(): ReactElement {
                 <button
                   aria-pressed={video.width === preset.width && video.height === preset.height}
                   className="rounded-row border border-border px-3 py-1.5 text-left text-sm font-medium hover:bg-accent aria-pressed:glass-chip disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={isSessionActive}
+                  disabled={
+                    isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)
+                  }
                   key={preset.label}
                   type="button"
-                  onClick={() => patchVideo({ width: preset.width, height: preset.height })}
+                  onClick={() =>
+                    patchVideo(recordingResolutionSettings(video, preset.width, preset.height))
+                  }
                 >
                   <div>{preset.label}</div>
                   <div className="text-xs font-normal text-muted-foreground">{preset.detail}</div>
@@ -179,7 +190,7 @@ export function RecordingTab(): ReactElement {
                 transposed landscape one); patchVideo transposes any entry
                 that would contradict the Studio mode's orientation. */}
             <NumberField
-              disabled={isSessionActive}
+              disabled={isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)}
               label="Width"
               max={3840}
               min={360}
@@ -187,7 +198,7 @@ export function RecordingTab(): ReactElement {
               onChange={(width) => patchVideo({ width })}
             />
             <NumberField
-              disabled={isSessionActive}
+              disabled={isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)}
               label="Height"
               max={3840}
               min={360}
@@ -195,7 +206,7 @@ export function RecordingTab(): ReactElement {
               onChange={(height) => patchVideo({ height })}
             />
             <NumberField
-              disabled={isSessionActive}
+              disabled={isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)}
               label="FPS"
               max={60}
               min={24}
@@ -203,7 +214,7 @@ export function RecordingTab(): ReactElement {
               onChange={(fps) => patchVideo({ fps })}
             />
             <NumberField
-              disabled={isSessionActive}
+              disabled={isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)}
               label="Bitrate kbps"
               max={50000}
               min={1000}

@@ -103,6 +103,8 @@ function StreamingSetup(): ReactElement {
     selectYouTubeChannel,
     entitlements,
     isSessionActive,
+    goLiveConfirmationPending,
+    goLivePartialSetup,
     streamMetadataDraft,
     streamMetadataSavePending,
     streamMetadataValidation,
@@ -123,7 +125,11 @@ function StreamingSetup(): ReactElement {
   const youtubeQuotaPaused = youtubeQuotaPausedUntil(youtubeQuota)
   const streaming = captureConfig.streaming
   const livestreamingEntitlementReason = entitlementDisabledReason(entitlements, 'livestreaming')
-  const streamingControlsDisabled = isSessionActive || Boolean(livestreamingEntitlementReason)
+  const streamingControlsDisabled =
+    isSessionActive ||
+    goLiveConfirmationPending ||
+    Boolean(goLivePartialSetup) ||
+    Boolean(livestreamingEntitlementReason)
 
   const runtimeById = useMemo(() => {
     const map = new Map<string, StreamTargetRuntime>()
@@ -221,7 +227,9 @@ function StreamingSetup(): ReactElement {
                   <Button
                     size="sm"
                     variant="ghost"
-                    disabled={isSessionActive}
+                    disabled={
+                      isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)
+                    }
                     onClick={() =>
                       patchStreamingTarget(target.id, {
                         scheduledEventId: undefined,

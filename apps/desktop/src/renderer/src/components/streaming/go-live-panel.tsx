@@ -1,3 +1,5 @@
+import { StreamQualityControl } from './stream-quality-control'
+import { withStreamQuality } from '@/lib/output-quality'
 import { AlertIcon, ChevronDownIcon, SuccessIcon, SyncIcon } from '@/components/icons'
 import { useMemo, useState, type ReactElement } from 'react'
 
@@ -21,6 +23,9 @@ import type {
   VideoSettings
 } from '@/lib/backend'
 import {
+  coerceVideoToOrientation,
+  simulcastArmed,
+  simulcastStreamVideo,
   providerStreamOutputPlanOptions,
   resolveProviderStreamOutputPlan,
   STREAM_OUTPUT_GOP_SECONDS,
@@ -54,6 +59,9 @@ export function GoLivePanel({
 }): ReactElement {
   const {
     captureConfig,
+    setCaptureConfig,
+    goLiveConfirmationPending,
+    goLivePartialSetup,
     health,
     isSessionActive,
     platformAccounts,
@@ -78,11 +86,23 @@ export function GoLivePanel({
   const separateEncodedOutputRoleAvailable = isSessionActive
     ? diagnosticStats.encoderBridgeSeparateOutputEncodersActive
     : preflightProvesSeparateOutput
-  const providerPlan = resolveProviderStreamOutputPlan(
+  let providerPlan = resolveProviderStreamOutputPlan(
     video,
     captureConfig.streamEnabled ? streaming : undefined,
     providerStreamOutputPlanOptions(captureConfig, separateEncodedOutputRoleAvailable)
   )
+  if (simulcastArmed(captureConfig)) {
+    const verticalVideo = simulcastStreamVideo(video, streaming)
+    providerPlan = {
+      ...providerPlan,
+      targets: [
+        ...providerPlan.targets,
+        ...streaming.targets
+          .filter((target) => target.enabled && target.outputOrientation === 'vertical')
+          .map((target) => ({ target, video: verticalVideo }))
+      ]
+    }
+  }
   const compatibility = videoProfileCompatibility(captureConfig)
   const compatibilityMessage = compatibility.blockingReason ?? compatibility.warning
   const accountByPlatform = useMemo(() => {
@@ -108,6 +128,22 @@ export function GoLivePanel({
           </Alert>
         </div>
       ) : null}
+      <PanelSection title="Output quality">
+        <StreamQualityControl
+          value={streaming.defaultOutputPreset}
+          disabled={isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)}
+          youtube={streaming.targets.some(
+            (target) => target.enabled && target.platform === 'youtube'
+          )}
+          onChange={(preset) => {
+            if (preset !== 'default')
+              setCaptureConfig((current) => ({
+                ...current,
+                streaming: withStreamQuality(current.streaming, preset)
+              }))
+          }}
+        />
+      </PanelSection>
       <ReadyToGoLive
         accountByPlatform={accountByPlatform}
         diagnosticStats={diagnosticStats}
@@ -497,7 +533,9 @@ export function formatQuality(video: VideoSettings): string {
 export function qualitySummary(outputs: StreamOutput[]): { text: string; title?: string } {
   const lines = outputs.map(({ target, video }) => ({
     label: target?.label,
-    quality: formatQuality(video)
+    quality: formatQuality(
+      target?.outputOrientation === 'vertical' ? coerceVideoToOrientation(video, 'vertical') : video
+    )
   }))
   const distinct = new Set(lines.map((line) => line.quality))
   if (distinct.size <= 1) return { text: lines[0]?.quality ?? '-' }

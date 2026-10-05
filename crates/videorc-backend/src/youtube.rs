@@ -498,6 +498,54 @@ pub async fn prepare_youtube_broadcast(
     client: &reqwest::Client,
     put_secret: impl FnOnce(&str, &str) -> Result<()>,
 ) -> Result<PreparedYouTubeBroadcast> {
+    let attempt_id = uuid::Uuid::new_v4().to_string();
+    let latency = youtube_latency(&request.video);
+    let _ = crate::recording::emit_health_event(
+        state,
+        None,
+        crate::protocol::HealthLevel::Info,
+        "youtube-prepare-started",
+        &format!(
+            "attempt={attempt_id} target={} profile={}x{} fps={} bitrate_kbps={} latency={latency}",
+            request
+                .target_id
+                .as_deref()
+                .unwrap_or("youtube")
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .take(80)
+                .collect::<String>(),
+            request.video.width,
+            request.video.height,
+            request.video.fps,
+            request.video.bitrate_kbps
+        ),
+    );
+    let result =
+        prepare_youtube_broadcast_inner(state, request, client, put_secret, &attempt_id).await;
+    if let Err(error) = &result {
+        let _ = crate::recording::emit_health_event(
+            state,
+            None,
+            crate::protocol::HealthLevel::Warn,
+            "youtube-prepare-attempt-failed",
+            &format!(
+                "attempt={attempt_id} latency={latency} {}",
+                preparation_failure_diagnostic(error)
+            ),
+        );
+    }
+    result
+}
+
+async fn prepare_youtube_broadcast_inner(
+    state: &crate::state::AppState,
+    request: YouTubePrepareRequest,
+    client: &reqwest::Client,
+    put_secret: impl FnOnce(&str, &str) -> Result<()>,
+    attempt_id: &str,
+) -> Result<PreparedYouTubeBroadcast> {
+    let latency = youtube_latency(&request.video);
     let metadata = effective_youtube_metadata(&request.metadata)?;
     let stream_key_secret_ref =
         youtube_stream_key_secret_ref(&request.account_id, request.target_id.as_deref())?;
@@ -537,10 +585,8 @@ pub async fn prepare_youtube_broadcast(
                     "monitorStream": {
                         "enableMonitorStream": false,
                     },
-                    // YouTube defaults to "normal" latency (30-60s by design). Low keeps
-                    // every feature at ~10-15s glass-to-glass; ultraLow restricts
-                    // resolutions and is deliberately not the default here.
-                    "latencyPreference": "low",
+                    // YouTube requires normal latency for 4K, including portrait 4K.
+                    "latencyPreference": latency,
                 },
             })),
     )
@@ -559,6 +605,8 @@ pub async fn prepare_youtube_broadcast(
     // From here on a failure must roll back what was already created on the
     // channel; otherwise every failed Go Live leaves an orphaned scheduled
     // broadcast behind in YouTube Studio.
+    let mut created_stream_id = None;
+    let mut preparation_stage = "create-stream";
     let stream_and_bind = async {
         let stream_response = crate::youtube_quota::send_attempt(
             state,
@@ -601,6 +649,8 @@ pub async fn prepare_youtube_broadcast(
                 .await
                 .context("Could not parse YouTube stream response.")?;
 
+        created_stream_id = Some(live_stream.id.clone());
+        preparation_stage = "bind";
         let bind_response = crate::youtube_quota::send_attempt(
             state,
             crate::youtube_quota::YouTubeEndpoint::LiveBroadcastsBind,
@@ -638,8 +688,19 @@ pub async fn prepare_youtube_broadcast(
     let live_stream = match stream_and_bind {
         Ok(live_stream) => live_stream,
         Err(error) => {
+            let _ = crate::recording::emit_health_event(
+                state,
+                None,
+                crate::protocol::HealthLevel::Warn,
+                "youtube-prepare-failed",
+                &format!(
+                    "attempt={attempt_id} latency={latency} stage={preparation_stage} {}",
+                    preparation_failure_diagnostic(&error)
+                ),
+            );
             delete_youtube_resource(
                 state,
+                attempt_id,
                 client,
                 &base_url,
                 &request.access_token,
@@ -647,15 +708,57 @@ pub async fn prepare_youtube_broadcast(
                 &broadcast.id,
             )
             .await;
+            if let Some(id) = created_stream_id {
+                delete_youtube_resource(
+                    state,
+                    attempt_id,
+                    client,
+                    &base_url,
+                    &request.access_token,
+                    "/youtube/v3/liveStreams",
+                    &id,
+                )
+                .await;
+            }
             return Err(error);
         }
     };
 
-    put_secret(
+    if let Err(error) = put_secret(
         &stream_key_secret_ref,
         &live_stream.cdn.ingestion_info.stream_name,
     )
-    .context("Could not store YouTube stream key.")?;
+    .context("Could not store YouTube stream key.")
+    {
+        delete_youtube_resource(
+            state,
+            attempt_id,
+            client,
+            &base_url,
+            &request.access_token,
+            "/youtube/v3/liveBroadcasts",
+            &broadcast.id,
+        )
+        .await;
+        delete_youtube_resource(
+            state,
+            attempt_id,
+            client,
+            &base_url,
+            &request.access_token,
+            "/youtube/v3/liveStreams",
+            &live_stream.id,
+        )
+        .await;
+        return Err(error);
+    }
+    let _ = crate::recording::emit_health_event(
+        state,
+        None,
+        crate::protocol::HealthLevel::Info,
+        "youtube-prepare-ready",
+        &format!("attempt={attempt_id} latency={latency} stage=bound"),
+    );
 
     Ok(PreparedYouTubeBroadcast {
         platform: StreamPlatform::Youtube,
@@ -1077,6 +1180,7 @@ fn youtube_api_url(base_url: &str, path: &str, query: &[(&str, &str)]) -> Result
 /// what the user must see.
 async fn delete_youtube_resource(
     state: &crate::state::AppState,
+    attempt_id: &str,
     client: &reqwest::Client,
     base_url: &str,
     access_token: &str,
@@ -1092,7 +1196,11 @@ async fn delete_youtube_resource(
     };
     match crate::youtube_quota::send_attempt(
         state,
-        crate::youtube_quota::YouTubeEndpoint::LiveBroadcastsDelete,
+        if path == "/youtube/v3/liveStreams" {
+            crate::youtube_quota::YouTubeEndpoint::LiveStreamsDelete
+        } else {
+            crate::youtube_quota::YouTubeEndpoint::LiveBroadcastsDelete
+        },
         crate::youtube_quota::BudgetCall::GoLiveEssential,
         client,
         client.delete(url).bearer_auth(access_token),
@@ -1100,16 +1208,40 @@ async fn delete_youtube_resource(
     .await
     {
         Ok(response) if response.status().is_success() => {
+            let _ = crate::recording::emit_health_event(
+                state,
+                None,
+                crate::protocol::HealthLevel::Info,
+                "youtube-prepare-rollback",
+                &format!("attempt={attempt_id} resource={path} outcome=deleted"),
+            );
             tracing::info!("Rolled back orphaned YouTube resource {path} id redacted.");
         }
         Ok(response) => {
+            let _ = crate::recording::emit_health_event(
+                state,
+                None,
+                crate::protocol::HealthLevel::Warn,
+                "youtube-prepare-rollback",
+                &format!(
+                    "attempt={attempt_id} resource={path} outcome=failed http_status={}",
+                    response.status().as_u16()
+                ),
+            );
             tracing::warn!(
                 "YouTube rollback delete for {path} returned {}.",
                 response.status()
             );
         }
         Err(error) => {
-            state.emit_log("warn", format!("YouTube broadcast {id} could not be cleaned up after preparation failed. It may remain in YouTube Studio; remove it after API access resumes."));
+            let _ = crate::recording::emit_health_event(
+                state,
+                None,
+                crate::protocol::HealthLevel::Warn,
+                "youtube-prepare-rollback",
+                &format!("attempt={attempt_id} resource={path} outcome=not-confirmed"),
+            );
+            state.emit_log("warn", format!("YouTube resource {id} could not be cleaned up after preparation failed. It may remain in YouTube Studio; remove it after API access resumes."));
             tracing::warn!("YouTube rollback delete for {path} failed: {error}");
         }
     }
@@ -1186,6 +1318,45 @@ pub fn youtube_stream_key_secret_ref(account_id: &str, target_id: Option<&str>) 
     ))
 }
 
+fn preparation_failure_diagnostic(error: &anyhow::Error) -> String {
+    if let Some(api) = error.downcast_ref::<crate::youtube_quota::YouTubeApiError>() {
+        let reason: String = api
+            .reason
+            .as_deref()
+            .unwrap_or("unknown")
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .take(80)
+            .collect();
+        format!(
+            "stage={} http_status={} reason={reason}",
+            api.action, api.status
+        )
+    } else {
+        "reason=transport-or-local-failure".to_string()
+    }
+}
+
+pub(crate) fn youtube_latency(video: &VideoSettings) -> &'static str {
+    if youtube_resolution(video.width.min(video.height)) == "2160p" {
+        "normal"
+    } else {
+        "low"
+    }
+}
+
+pub(crate) fn validate_scheduled_youtube_latency(
+    video: &VideoSettings,
+    latency: Option<&str>,
+) -> Result<()> {
+    if youtube_latency(video) == "normal" && latency != Some("normal") {
+        bail!(
+            "4K streaming requires normal latency. Set this upcoming event to Normal latency in YouTube Studio, refresh it, and confirm Go Live again."
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn youtube_resolution(height: u32) -> &'static str {
     match height {
         0..=240 => "240p",
@@ -1211,6 +1382,27 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::*;
+    #[test]
+    fn scheduled_4k_requires_confirmed_normal_latency() {
+        let video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 2160,
+            height: 3840,
+            fps: 30,
+            bitrate_kbps: 30000,
+        };
+        assert!(validate_scheduled_youtube_latency(&video, Some("normal")).is_ok());
+        for latency in [None, Some("low"), Some("ultraLow")] {
+            assert!(validate_scheduled_youtube_latency(&video, latency).is_err());
+        }
+        let hd = VideoSettings {
+            width: 1920,
+            height: 1080,
+            ..video
+        };
+        assert!(validate_scheduled_youtube_latency(&hd, Some("low")).is_ok());
+    }
+
     fn test_quota_state() -> crate::state::AppState {
         crate::state::AppState::new(
             "test".into(),
@@ -1411,7 +1603,7 @@ mod tests {
             OriginalUri(uri): OriginalUri,
         ) -> impl axum::response::IntoResponse {
             logs.lock().unwrap().push(RequestLog {
-                path: "DELETE /youtube/v3/liveBroadcasts".to_string(),
+                path: format!("DELETE {}", uri.path()),
                 query: uri.query().unwrap_or_default().to_string(),
                 authorization: None,
                 body: Value::Null,
@@ -1432,7 +1624,10 @@ mod tests {
                             "/youtube/v3/liveBroadcasts",
                             post(create_broadcast).delete(delete_broadcast),
                         )
-                        .route("/youtube/v3/liveStreams", post(create_stream))
+                        .route(
+                            "/youtube/v3/liveStreams",
+                            post(create_stream).delete(delete_broadcast),
+                        )
                         .route("/youtube/v3/liveBroadcasts/bind", post(bind_fails))
                         .with_state(logs),
                 )
@@ -1472,7 +1667,7 @@ mod tests {
         let message = format!("{error:#}");
         assert_eq!(
             crate::youtube_quota::usage_snapshot(&quota).total_units,
-            200
+            250
         );
         assert!(
             message.contains("liveStreamingNotEnabled"),
@@ -1489,6 +1684,11 @@ mod tests {
             delete.query.contains("id=broadcast-123"),
             "{}",
             delete.query
+        );
+        assert!(
+            logs.iter()
+                .any(|log| log.path == "DELETE /youtube/v3/liveStreams"
+                    && log.query.contains("id=stream-456"))
         );
     }
 
@@ -1580,6 +1780,20 @@ mod tests {
             OriginalUri(uri): OriginalUri,
             headers: HeaderMap,
         ) -> impl axum::response::IntoResponse {
+            // Modeled provider contract: 4K is unsupported with low latency.
+            // This catches request regressions; it does not prove the incident's 403 cause.
+            let incompatible = {
+                let captured = logs.lock().unwrap();
+                captured[1].body["cdn"]["resolution"] == "2160p"
+                    && captured[0].body["contentDetails"]["latencyPreference"] != "normal"
+            };
+            if incompatible {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({"error":{"errors":[{"reason":"liveBroadcastBindingNotAllowed"}]}})),
+                )
+                    .into_response();
+            }
             logs.lock().unwrap().push(RequestLog {
                 path: "/youtube/v3/liveBroadcasts/bind".to_string(),
                 query: uri.query().unwrap_or_default().to_string(),
@@ -1592,131 +1806,141 @@ mod tests {
             Json(json!({ "id": "broadcast-123" })).into_response()
         }
 
-        let logs = Arc::new(Mutex::new(Vec::new()));
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn({
-            let logs = logs.clone();
-            async move {
-                axum::serve(
-                    listener,
-                    Router::new()
-                        .route("/youtube/v3/liveBroadcasts", post(create_broadcast))
-                        .route("/youtube/v3/liveStreams", post(create_stream))
-                        .route("/youtube/v3/liveBroadcasts/bind", post(bind_broadcast))
-                        .with_state(logs),
-                )
-                .await
+        for (width, height, fps, expected_latency, expected_resolution) in [
+            (1920, 1080, 60, "low", "1080p"),
+            (3840, 2160, 30, "normal", "2160p"),
+            (1080, 1920, 60, "low", "1080p"),
+            (2160, 3840, 30, "normal", "2160p"),
+        ] {
+            let logs = Arc::new(Mutex::new(Vec::new()));
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn({
+                let logs = logs.clone();
+                async move {
+                    axum::serve(
+                        listener,
+                        Router::new()
+                            .route("/youtube/v3/liveBroadcasts", post(create_broadcast))
+                            .route("/youtube/v3/liveStreams", post(create_stream))
+                            .route("/youtube/v3/liveBroadcasts/bind", post(bind_broadcast))
+                            .with_state(logs),
+                    )
+                    .await
+                    .unwrap();
+                }
+            });
+
+            let mut metadata = default_stream_metadata_draft("2026-06-03T00:00:00Z".to_string());
+            metadata.title = "Global title".to_string();
+            metadata.description = "Global description".to_string();
+            metadata.default_privacy = StreamPrivacy::Public;
+            let youtube_override = metadata
+                .target_overrides
+                .iter_mut()
+                .find(|target| target.platform == StreamPlatform::Youtube)
                 .unwrap();
-            }
-        });
+            youtube_override.customize = true;
+            youtube_override.title = "YouTube title".to_string();
+            youtube_override.description = "YouTube description".to_string();
+            youtube_override.privacy = StreamPrivacy::Unlisted;
+            youtube_override.youtube_made_for_kids = Some(false);
 
-        let mut metadata = default_stream_metadata_draft("2026-06-03T00:00:00Z".to_string());
-        metadata.title = "Global title".to_string();
-        metadata.description = "Global description".to_string();
-        metadata.default_privacy = StreamPrivacy::Public;
-        let youtube_override = metadata
-            .target_overrides
-            .iter_mut()
-            .find(|target| target.platform == StreamPlatform::Youtube)
-            .unwrap();
-        youtube_override.customize = true;
-        youtube_override.title = "YouTube title".to_string();
-        youtube_override.description = "YouTube description".to_string();
-        youtube_override.privacy = StreamPrivacy::Unlisted;
-        youtube_override.youtube_made_for_kids = Some(false);
-
-        let mut stored = Vec::new();
-        let prepared = prepare_youtube_broadcast(
-            &test_quota_state(),
-            YouTubePrepareRequest {
-                access_token: "access-token".to_string(),
-                account_id: "UC123".to_string(),
-                account_label: "Videorc Channel".to_string(),
-                target_id: None,
-                metadata,
-                video: VideoSettings {
-                    preset: VideoPreset::Stream1080p60,
-                    width: 1920,
-                    height: 1080,
-                    fps: 60,
-                    bitrate_kbps: 6000,
+            let mut stored = Vec::new();
+            let prepared = prepare_youtube_broadcast(
+                &test_quota_state(),
+                YouTubePrepareRequest {
+                    access_token: "access-token".to_string(),
+                    account_id: "UC123".to_string(),
+                    account_label: "Videorc Channel".to_string(),
+                    target_id: None,
+                    metadata,
+                    video: VideoSettings {
+                        preset: VideoPreset::Custom,
+                        width,
+                        height,
+                        fps,
+                        bitrate_kbps: 6000,
+                    },
+                    api_base_url: Some(format!("http://{address}")),
+                    scheduled_start_time: Some("2026-06-03T10:05:00Z".to_string()),
                 },
-                api_base_url: Some(format!("http://{address}")),
-                scheduled_start_time: Some("2026-06-03T10:05:00Z".to_string()),
-            },
-            &reqwest::Client::new(),
-            |secret_ref, value| {
-                stored.push((secret_ref.to_string(), value.to_string()));
-                Ok(())
-            },
-        )
-        .await
-        .unwrap();
+                &reqwest::Client::new(),
+                |secret_ref, value| {
+                    stored.push((secret_ref.to_string(), value.to_string()));
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
 
-        assert_eq!(prepared.broadcast_id, "broadcast-123");
-        assert_eq!(prepared.stream_id, "stream-456");
-        assert_eq!(prepared.server_url, "rtmp://a.rtmp.youtube.com/live2");
-        assert_eq!(
-            prepared.stream_key_secret_ref,
-            "platform:youtube:UC123:stream-key"
-        );
-        assert_eq!(
-            prepared.redacted_url,
-            "rtmp://<youtube-ingest>/<stream-key>"
-        );
-        assert_eq!(prepared.title, "YouTube title");
-        assert_eq!(prepared.description, "YouTube description");
-        assert_eq!(prepared.privacy, StreamPrivacy::Unlisted);
-        assert_eq!(
-            serde_json::to_string(&prepared)
-                .unwrap()
-                .contains("secret-stream-name"),
-            false
-        );
-        assert_eq!(
-            stored,
-            vec![(
-                "platform:youtube:UC123:stream-key".to_string(),
-                "secret-stream-name".to_string()
-            )]
-        );
+            assert_eq!(prepared.broadcast_id, "broadcast-123");
+            assert_eq!(prepared.stream_id, "stream-456");
+            assert_eq!(prepared.server_url, "rtmp://a.rtmp.youtube.com/live2");
+            assert_eq!(
+                prepared.stream_key_secret_ref,
+                "platform:youtube:UC123:stream-key"
+            );
+            assert_eq!(
+                prepared.redacted_url,
+                "rtmp://<youtube-ingest>/<stream-key>"
+            );
+            assert_eq!(prepared.title, "YouTube title");
+            assert_eq!(prepared.description, "YouTube description");
+            assert_eq!(prepared.privacy, StreamPrivacy::Unlisted);
+            assert_eq!(
+                serde_json::to_string(&prepared)
+                    .unwrap()
+                    .contains("secret-stream-name"),
+                false
+            );
+            assert_eq!(
+                stored,
+                vec![(
+                    "platform:youtube:UC123:stream-key".to_string(),
+                    "secret-stream-name".to_string()
+                )]
+            );
 
-        let logs = logs.lock().unwrap();
-        assert_eq!(logs.len(), 3);
-        assert!(
-            logs.iter()
-                .all(|request| request.authorization.as_deref() == Some("Bearer access-token"))
-        );
-        assert_eq!(logs[0].path, "/youtube/v3/liveBroadcasts");
-        assert_eq!(logs[0].query, "part=snippet%2Cstatus%2CcontentDetails");
-        // Low latency is the product default: YouTube's "normal" mode buffers 30-60s.
-        assert_eq!(logs[0].body["contentDetails"]["latencyPreference"], "low");
-        assert_eq!(logs[0].body["contentDetails"]["enableAutoStart"], true);
-        assert_eq!(
-            logs[0].body["contentDetails"]["monitorStream"]["enableMonitorStream"],
-            false
-        );
-        assert_eq!(logs[0].body["snippet"]["title"], "YouTube title");
-        assert_eq!(
-            logs[0].body["snippet"]["description"],
-            "YouTube description"
-        );
-        assert_eq!(logs[0].body["status"]["privacyStatus"], "unlisted");
-        assert_eq!(logs[0].body["status"]["selfDeclaredMadeForKids"], false);
-        assert_eq!(logs[1].path, "/youtube/v3/liveStreams");
-        assert_eq!(
-            logs[1].query,
-            "part=snippet%2Ccdn%2CcontentDetails%2Cstatus"
-        );
-        assert_eq!(logs[1].body["cdn"]["ingestionType"], "rtmp");
-        assert_eq!(logs[1].body["cdn"]["resolution"], "1080p");
-        assert_eq!(logs[1].body["cdn"]["frameRate"], "60fps");
-        assert_eq!(logs[2].path, "/youtube/v3/liveBroadcasts/bind");
-        assert_eq!(
-            logs[2].query,
-            "id=broadcast-123&part=id%2CcontentDetails&streamId=stream-456"
-        );
+            let logs = logs.lock().unwrap();
+            assert_eq!(logs.len(), 3);
+            assert!(
+                logs.iter()
+                    .all(|request| request.authorization.as_deref() == Some("Bearer access-token"))
+            );
+            assert_eq!(logs[0].path, "/youtube/v3/liveBroadcasts");
+            assert_eq!(logs[0].query, "part=snippet%2Cstatus%2CcontentDetails");
+            // Low latency is the product default: YouTube's "normal" mode buffers 30-60s.
+            assert_eq!(
+                logs[0].body["contentDetails"]["latencyPreference"],
+                expected_latency
+            );
+            assert_eq!(logs[0].body["contentDetails"]["enableAutoStart"], true);
+            assert_eq!(
+                logs[0].body["contentDetails"]["monitorStream"]["enableMonitorStream"],
+                false
+            );
+            assert_eq!(logs[0].body["snippet"]["title"], "YouTube title");
+            assert_eq!(
+                logs[0].body["snippet"]["description"],
+                "YouTube description"
+            );
+            assert_eq!(logs[0].body["status"]["privacyStatus"], "unlisted");
+            assert_eq!(logs[0].body["status"]["selfDeclaredMadeForKids"], false);
+            assert_eq!(logs[1].path, "/youtube/v3/liveStreams");
+            assert_eq!(
+                logs[1].query,
+                "part=snippet%2Ccdn%2CcontentDetails%2Cstatus"
+            );
+            assert_eq!(logs[1].body["cdn"]["ingestionType"], "rtmp");
+            assert_eq!(logs[1].body["cdn"]["resolution"], expected_resolution);
+            assert_eq!(logs[1].body["cdn"]["frameRate"], youtube_frame_rate(fps));
+            assert_eq!(logs[2].path, "/youtube/v3/liveBroadcasts/bind");
+            assert_eq!(
+                logs[2].query,
+                "id=broadcast-123&part=id%2CcontentDetails&streamId=stream-456"
+            );
+        }
     }
 
     #[tokio::test]
