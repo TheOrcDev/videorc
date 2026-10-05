@@ -145,6 +145,11 @@ try {
   assert.ok(sessionId)
   await command('comments-window-open')
   await waitFor(
+    () => command('eval-js', { code: 'return window.videorc.getMarkerContext()' }),
+    (view) => view?.result?.available && view.result.sessionId === sessionId,
+    'Recording marker context did not become available'
+  )
+  await waitFor(
     () => command('comments-window-reader-state'),
     (view) => view.composerCount === 1,
     'Record-only composer did not become available'
@@ -388,6 +393,11 @@ try {
   captureSessionId = streamId
   assert.ok(streamId)
   assert.equal(streaming.outputPath, undefined)
+  await waitFor(
+    () => command('eval-js', { code: 'return window.videorc.getMarkerContext()' }),
+    (view) => view?.result?.available && view.result.sessionId === streamId,
+    'Stream-only marker context did not become available'
+  )
   await waitFor(
     () => command('comments-window-reader-state'),
     (view) => view.composerCount === 1,

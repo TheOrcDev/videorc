@@ -54,8 +54,8 @@ the existing preview warm-up test. CI retains the repository's normal profile.
 
 ### Local verification, 2026-10-05
 
-- Full Rust suite after rebase: 3,204 passed, 13 ignored; Rust format and Clippy pass.
-- Full desktop suite after rebase: 306 files, 3,328 passed, one skipped. Node logic suite:
+- Full Rust suite after final review: 3,206 passed, 13 ignored; Rust format and Clippy pass.
+- Full desktop suite after final review: 306 files, 3,331 passed, one skipped. Node logic suite:
   1,936 passed. Typecheck, lint, production build and renderer asset budget pass.
   Lint retains the existing `captureConfig` dependency warning in `use-studio`.
 - JS production and Rust dependency advisory audits pass; no dependencies added.
@@ -64,6 +64,10 @@ the existing preview warm-up test. CI retains the repository's normal profile.
   consent cancellation, both typed and voice stream-only markers, durable
   deletion receipts, and finished-video timestamp bounds. The Library viewer
   repeats the original-video seek and saves a rename through the real frontend.
+  With both transports delayed 3.5 seconds, saved voice points match the
+  independent caption artifact's audio/segment timestamps within 2 ms.
+  The smoke waits for the intended capture's available marker context before
+  submitting; the earlier composer-count check could see the previous capture.
 - `smoke:orcle-commands` and `smoke:cohost-fake` cover existing chat commands.
   Pure regression coverage also forwards a wake-only chunk to the existing
   detector with wake required, while assembling the split marker prefix.
