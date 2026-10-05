@@ -11146,6 +11146,10 @@ async function runSmokePreviewMotionCommand(
             row.getAttribute('data-message-id'),
             row.getAttribute('data-highlight-phase')
           ])),
+          rowTints: Object.fromEntries(rows.map((row) => [
+            row.getAttribute('data-message-id'),
+            row.getAttribute('data-row-tint')
+          ])),
           highlightReasons: Object.fromEntries(rows.map((row) => [
             row.getAttribute('data-message-id'),
             row.querySelector('[data-slot="badge"][title]')?.getAttribute('title') ?? null

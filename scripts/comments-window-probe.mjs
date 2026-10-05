@@ -29,6 +29,8 @@ const LIVE_SESSION_ID = 'comments-window-probe-live'
 const NEXT_LIVE_SESSION_ID = 'comments-window-probe-next-live'
 // Plan 151: the row whose link the probe right-clicks.
 const LINK_MESSAGE_ID = `${NEXT_LIVE_SESSION_ID}:twitch:probe-link`
+// Plan 154: the member whose row must paint the member tint.
+const MEMBER_MESSAGE_ID = `${NEXT_LIVE_SESSION_ID}:youtube:probe-member`
 const HISTORY_SESSION_ID = 'comments-window-probe-history'
 const HISTORY_MODE = {
   kind: 'history',
@@ -676,6 +678,17 @@ async function probeLinksAndStreaks() {
     "streak: Activity lists the watch streak, and chat shows the viewer's words",
     JSON.stringify(seen.last?.text?.slice(0, 1500))
   )
+  // Plan 154: a member's row paints the member tint, a plain row paints none.
+  const tinted = await waitFor(
+    () => smokeCommand('comments-window-reader-state'),
+    (s) => s.rowTints?.[MEMBER_MESSAGE_ID] === 'member' && s.rowTints?.[LINK_MESSAGE_ID] === null,
+    5000
+  )
+  assertProbe(
+    tinted.ok,
+    'member: a member row paints the member tint and a plain row paints none',
+    JSON.stringify(tinted.last?.rowTints)
+  )
   const menu = await smokeCommand('comments-window-context-click-link', {
     messageId: LINK_MESSAGE_ID
   })
@@ -1248,10 +1261,21 @@ function linksAndStreakSnapshot() {
         rawProviderType: 'channel.chat.notification:watch_streak',
         fragments: [{ type: 'text', text: 'welcome back hands <3' }],
         details: { kind: 'watch-streak', streakCount: 20, channelPointsAwarded: 450 }
+      },
+      {
+        ...messageFixture({
+          id: MEMBER_MESSAGE_ID,
+          platform: 'youtube',
+          sessionId: NEXT_LIVE_SESSION_ID,
+          authorName: 'Member Viewer',
+          messageText: 'Members get a quiet tint (plan 154)',
+          at: '2026-07-10T10:00:05Z'
+        }),
+        authorRoles: ['member']
       }
     ],
-    unreadCount: 3,
-    updatedAt: '2026-07-10T10:00:05Z'
+    unreadCount: 4,
+    updatedAt: '2026-07-10T10:00:06Z'
   }
 }
 

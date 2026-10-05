@@ -101,6 +101,9 @@
   --warning-foreground: oklch(0.27 0.06 75);
   --info: oklch(0.58 0.14 250);
   --info-foreground: oklch(0.985 0 0);
+  /* Membership (plan 154): the member row tint. Never chrome, never text. */
+  --member: oklch(0.55 0.13 300);
+  --member-foreground: oklch(0.985 0 0);
 
   /* Hairlines: black-12% on light — 8% vanished on pale glass over a bright
      wallpaper (plan 022 Q5 contrast pass). */
@@ -223,6 +226,8 @@
   --warning-foreground: oklch(0.25 0.06 75);
   --info: oklch(0.68 0.14 250);
   --info-foreground: oklch(0.205 0.04 250);
+  --member: oklch(0.7 0.12 300);
+  --member-foreground: oklch(0.205 0.04 300);
 
   /* Hairlines: white-10% — the polished edge of the black glass. */
   --border: oklch(1 0 0 / 10%);
@@ -438,6 +443,8 @@
   --color-border: var(--border);
   --color-info-foreground: var(--info-foreground);
   --color-info: var(--info);
+  --color-member-foreground: var(--member-foreground);
+  --color-member: var(--member);
   --color-live-foreground: var(--live-foreground);
   --color-live: var(--live);
   --color-destructive-foreground: var(--destructive-foreground);
