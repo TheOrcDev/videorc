@@ -9,7 +9,32 @@
 
 ## Status and decisions
 
-- **Status: PLANNED, 2026-10-05.** Not started.
+- **Status: EXECUTED, in review, 2026-10-05.** The owner said: "execute
+  the entire plan and create a pr". D1, D3 and D13 stand as written.
+  - **Built differently from the slices below, on purpose:**
+    - D5: no flame glyph. An Activity row about a person always shows their
+      avatar, and a streak always is about one viewer, so the glyph would
+      never be drawn. `KIND_ICONS['watch-streak']` is `null`, no licence
+      count is spent, and `docs/icon-set.md` is unchanged.
+    - S1: when Twitch sends a notice's `message.text` without fragments,
+      the backend keeps the words as one text fragment. Without that, D3
+      would depend on Twitch always sending fragments.
+    - S3: `noticeViewerWords` lives in its own `lib/chat-notice.ts`, not in
+      `lib/live-chat-view.ts`, so `stream-activity` does not pull the chat
+      view module into more chunks.
+    - S4: `ActivityItem` gains `streak`, so "Thank in chat" says the
+      length without parsing `short`.
+    - S6: the URL rule is one shared function, `openableChatLink` in
+      `shared/chat-link.ts`. The renderer, the `chatLinkUrl` contract schema
+      and main all use it. The channel answers `true` when it opened.
+    - S7: the native menu cannot stack on the link menu, and the probe
+      proves it (see S8). No guard in `installContextMenu` was needed.
+    - S8: no link in the fake connector's messages. The fake cohost smoke
+      matches `Fake chat message #N` exactly, so the probe seeds its own
+      link row instead. The fake Twitch provider does send a watch streak,
+      so fake activity counts 14 rows (13 before).
+      `comments-window-context-click-link` right-clicks with real input
+      events and reports whether Electron's `context-menu` also fired.
 - **The owner's asks:**
   - A Twitch screenshot of a watch streak notice ("Snowy77x · Reached
     20-Stream Streak · *welcome back hands <3 hopefully everything is
