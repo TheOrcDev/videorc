@@ -31,8 +31,7 @@ export type AcceleratorKeyResult =
   | { kind: 'unsupported'; modifiers: AcceleratorModifier[] }
 
 export type AcceleratorValidation =
-  | { ok: true }
-  | { ok: false; reason: 'needs-modifier' | 'system-reserved' }
+  { ok: true } | { ok: false; reason: 'needs-modifier' | 'system-reserved' }
 
 const isMac = (platform: string | undefined): boolean => platform === 'darwin'
 

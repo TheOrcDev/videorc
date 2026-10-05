@@ -16,13 +16,7 @@ import {
 // Everything else is monochrome chrome.
 
 export type CohostPresenceKind =
-  | 'off'
-  | 'starting'
-  | 'listening'
-  | 'reading'
-  | 'thinking'
-  | 'paused'
-  | 'error'
+  'off' | 'starting' | 'listening' | 'reading' | 'thinking' | 'paused' | 'error'
 
 export interface CohostPresenceView {
   kind: CohostPresenceKind

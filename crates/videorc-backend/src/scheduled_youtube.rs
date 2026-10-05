@@ -335,7 +335,7 @@ impl YouTubeEvents {
         std::fs::File::open(path)?
             .take(2 * 1024 * 1024 + 1)
             .read_to_end(&mut bytes)?;
-        if format!("{:x}", Sha256::digest(&bytes)) != asset_id {
+        if crate::digest_hex::lower_hex(Sha256::digest(&bytes)) != asset_id {
             bail!("Thumbnail content changed. Pick it again.");
         }
         let format = validate_thumbnail(&bytes)?;
@@ -529,7 +529,7 @@ mod tests {
         image::RgbImage::new(16, 9)
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .unwrap();
-        let asset_id = format!("{:x}", Sha256::digest(&png));
+        let asset_id = crate::digest_hex::lower_hex(Sha256::digest(&png));
         let dir = std::env::temp_dir().join(format!("videorc-thumb-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("{asset_id}.png"));

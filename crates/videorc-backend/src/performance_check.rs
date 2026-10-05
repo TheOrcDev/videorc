@@ -368,7 +368,10 @@ pub(crate) fn capability_key_from(
     hasher.update(graphics_identity);
     hasher.update(app_version);
     hasher.update(backend_crate_version);
-    format!("{CAPABILITY_KEY_VERSION}:{:x}", hasher.finalize())
+    format!(
+        "{CAPABILITY_KEY_VERSION}:{}",
+        crate::digest_hex::lower_hex(hasher.finalize())
+    )
 }
 
 /// v1 keys never match the v2 hasher, and Linux `belowFloor` rows whose

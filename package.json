@@ -5,7 +5,7 @@
   "description": "AI-native recording and livestreaming studio for creators.",
   "author": "TheOrcDev",
   "license": "AGPL-3.0-only",
-  "packageManager": "pnpm@11.0.9",
+  "packageManager": "pnpm@11.28.4",
   "engines": {
     "node": ">=24.0.0 <25",
     "pnpm": ">=11.0.0 <12"
@@ -272,12 +272,13 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@neon/config": "^1.7.2",
-    "eslint": "^10.4.1",
+    "@neon/config": "^1.8.3",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.12.0",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "js-yaml": "4.3.0",
-    "prettier": "^3.8.4",
-    "typescript-eslint": "^8.61.0",
-    "ws": "^8.21.0"
+    "js-yaml": "4.3.2",
+    "prettier": "^3.9.9",
+    "typescript-eslint": "^8.71.0",
+    "ws": "^8.22.0"
   }
 }

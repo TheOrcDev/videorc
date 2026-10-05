@@ -25,12 +25,7 @@ import { keptDurationMs, type SkipRange } from './skip-ranges'
 export type CleanCutTone = 'neutral' | 'warning' | 'destructive' | 'info'
 
 export type CleanCutKindGroupId =
-  | 'silences'
-  | 'fillers'
-  | 'retakes'
-  | 'false-starts'
-  | 'start-end'
-  | 'manual'
+  'silences' | 'fillers' | 'retakes' | 'false-starts' | 'start-end' | 'manual'
 
 export interface CleanCutKindGroup {
   id: CleanCutKindGroupId
@@ -872,8 +867,7 @@ export function toggleCondensedBlock(
 
 /** One row of the virtual transcript list. */
 export type CleanCutTranscriptItem =
-  | CleanCutParagraph
-  | { type: 'block'; key: string; block: CondensedBlock }
+  CleanCutParagraph | { type: 'block'; key: string; block: CondensedBlock }
 
 /**
  * The rows the transcript shows. Clean: paragraphs. Condensed: each part's

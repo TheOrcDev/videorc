@@ -431,7 +431,7 @@ impl XScheduledBroadcasts {
         std::fs::File::open(path)?
             .take(2 * 1024 * 1024 + 1)
             .read_to_end(&mut bytes)?;
-        if format!("{:x}", Sha256::digest(&bytes)) != asset_id {
+        if crate::digest_hex::lower_hex(Sha256::digest(&bytes)) != asset_id {
             bail!("Thumbnail content changed. Pick it again.");
         }
         let mime = crate::scheduled_youtube::validate_thumbnail(&bytes)?;
@@ -741,7 +741,7 @@ mod tests {
         std::fs::write(&path, &png).unwrap();
         let asset = {
             use sha2::{Digest, Sha256};
-            format!("{:x}", Sha256::digest(&png))
+            crate::digest_hex::lower_hex(Sha256::digest(&png))
         };
         assert_eq!(
             api.upload_thumbnail(&path, &asset).await.unwrap(),

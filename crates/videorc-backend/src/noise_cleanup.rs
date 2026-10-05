@@ -1360,7 +1360,7 @@ fn full_file_sha256_cancellable(path: &Path, is_cancelled: &dyn Fn() -> bool) ->
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(crate::digest_hex::lower_hex(hasher.finalize()))
 }
 
 fn bind_partial_and_cancel(state: &AppState, operation: &SessionFileOperation, staging: &Path) {

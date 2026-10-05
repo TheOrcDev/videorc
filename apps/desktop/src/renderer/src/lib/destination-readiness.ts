@@ -9,8 +9,7 @@ import { isStreamTargetReady, oauthUnavailableReason } from '@/lib/capture'
  * connected by sign-in never counted as ready.
  */
 export type DestinationSetup =
-  | { ready: true }
-  | { ready: false; reason: 'sign-in' | 'reconnect' | 'stream-key' }
+  { ready: true } | { ready: false; reason: 'sign-in' | 'reconnect' | 'stream-key' }
 
 export function destinationSetup(
   target: StreamTargetSettings,

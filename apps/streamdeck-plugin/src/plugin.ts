@@ -4,8 +4,9 @@
 // optimistic intent. When Videorc is closed or Remote Control is disabled in
 // Settings, every key shows an alert glyph on press and the title says so.
 
+import type { JsonObject } from '@elgato/utils'
 import streamDeck, { action, SingletonAction } from '@elgato/streamdeck'
-import type { JsonObject, KeyDownEvent, WillAppearEvent } from '@elgato/streamdeck'
+import type { KeyDownEvent, WillAppearEvent } from '@elgato/streamdeck'
 
 import { VideorcClient, type RemoteState } from './videorc-client.js'
 
@@ -20,10 +21,10 @@ type InspectorOption = {
 
 abstract class VideorcAction<TSettings extends JsonObject> extends SingletonAction<TSettings> {
   protected abstract renderTitle: TitleRenderer
-  protected abstract intentFor(settings: TSettings, state: RemoteState | null): Record<
-    string,
-    unknown
-  > | null
+  protected abstract intentFor(
+    settings: TSettings,
+    state: RemoteState | null
+  ): Record<string, unknown> | null
 
   constructor() {
     super()
@@ -37,13 +38,16 @@ abstract class VideorcAction<TSettings extends JsonObject> extends SingletonActi
   }
 
   private refresh = (): void => {
+    const title = this.renderTitle(client.state, client.connected)
     for (const visible of this.actions) {
-      void visible.setTitle(this.renderTitle(client.state, client.connected))
+      if (visible.isKey()) {
+        void visible.setTitle(title)
+      }
     }
   }
 
   private pushInspectorOptions = (): void => {
-    void streamDeck.ui.current?.sendToPropertyInspector({
+    void streamDeck.ui.sendToPropertyInspector({
       event: 'videorc-options',
       connected: client.connected,
       options: this.inspectorOptions()
@@ -56,7 +60,9 @@ abstract class VideorcAction<TSettings extends JsonObject> extends SingletonActi
   }
 
   override onWillAppear(ev: WillAppearEvent<TSettings>): void {
-    void ev.action.setTitle(this.renderTitle(client.state, client.connected))
+    if (ev.action.isKey()) {
+      void ev.action.setTitle(this.renderTitle(client.state, client.connected))
+    }
   }
 
   /** The property inspector asks for options when it opens. */

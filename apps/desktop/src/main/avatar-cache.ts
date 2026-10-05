@@ -115,8 +115,7 @@ export type AvatarCacheRejection =
   | { kind: 'fetch-error'; host: string; message: string }
 
 export type AvatarUrlDecision =
-  | { allowed: true; host: string }
-  | { allowed: false; rejection: AvatarCacheRejection }
+  { allowed: true; host: string } | { allowed: false; rejection: AvatarCacheRejection }
 
 export function avatarUrlDecision(rawUrl: unknown): AvatarUrlDecision {
   if (typeof rawUrl !== 'string') {

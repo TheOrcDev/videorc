@@ -3288,15 +3288,13 @@ export function isTypedBackendRpcMethod(method: string): method is BackendRpcMet
 
 export function validateBackendRpcParams(method: string, params: unknown): unknown {
   const contract = runtimeContracts[method as keyof typeof runtimeContracts] as
-    | RuntimeBackendRpcContract
-    | undefined
+    RuntimeBackendRpcContract | undefined
   return (contract?.params ?? boundedBackendParamsSchema).parse(params, `backend.${method}.params`)
 }
 
 export function validateBackendRpcResult(method: string, result: unknown): unknown {
   const contract = runtimeContracts[method as keyof typeof runtimeContracts] as
-    | RuntimeBackendRpcContract
-    | undefined
+    RuntimeBackendRpcContract | undefined
   return (contract?.result ?? boundedBackendPayloadSchema).parse(result, `backend.${method}.result`)
 }
 
@@ -3337,8 +3335,7 @@ const runtimeEventSchemas = {
 
 export function validateBackendEventPayload(event: string, payload: unknown): unknown {
   const schema = runtimeEventSchemas[event as keyof typeof runtimeEventSchemas] as
-    | RuntimeSchema<unknown>
-    | undefined
+    RuntimeSchema<unknown> | undefined
   return (schema ?? boundedBackendPayloadSchema).parse(payload, `backend.event.${event}`)
 }
 

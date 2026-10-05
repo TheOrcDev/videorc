@@ -1,10 +1,5 @@
 export type ElectronWindowRole =
-  | 'main'
-  | 'preview'
-  | 'notes'
-  | 'comments'
-  | 'captions'
-  | 'proof-surface'
+  'main' | 'preview' | 'notes' | 'comments' | 'captions' | 'proof-surface'
 
 export type ElectronBackgroundPolicy = 'scoped' | 'legacy-unthrottled'
 

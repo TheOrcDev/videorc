@@ -1,9 +1,5 @@
 export type BackendRuntimeState =
-  | 'active'
-  | 'awaiting-shutdown-receipt'
-  | 'stopping'
-  | 'shutdown-unconfirmed'
-  | 'completed'
+  'active' | 'awaiting-shutdown-receipt' | 'stopping' | 'shutdown-unconfirmed' | 'completed'
 
 export interface OwnedBackendRuntime<TProcess extends object> {
   readonly generation: number

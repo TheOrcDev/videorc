@@ -14,14 +14,7 @@ import { Kbd } from './ui/kbd'
 const styles = readFileSync(new URL('../styles.css', import.meta.url), 'utf8')
 
 type BadgeVariant =
-  | 'default'
-  | 'secondary'
-  | 'outline'
-  | 'success'
-  | 'warning'
-  | 'neutral'
-  | 'destructive'
-  | 'live'
+  'default' | 'secondary' | 'outline' | 'success' | 'warning' | 'neutral' | 'destructive' | 'live'
 
 const badge = (variant: BadgeVariant): string =>
   renderToStaticMarkup(createElement(Badge, { variant }, 'Ready'))

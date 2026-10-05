@@ -214,12 +214,10 @@ export async function runBoundedLiveChatRecovery<T>(
 }
 
 export type LiveChatSendOperationsQueryResult =
-  | { ok: true; operations: CommentsSendOperation[] }
-  | { ok: false }
+  { ok: true; operations: CommentsSendOperation[] } | { ok: false }
 
 export type LiveChatSendOperationQueryDecision =
-  | { kind: 'preserve' }
-  | { kind: 'replace'; operation?: CommentsSendOperation }
+  { kind: 'preserve' } | { kind: 'replace'; operation?: CommentsSendOperation }
 
 export function liveChatSendOperationQueryDecision({
   result,

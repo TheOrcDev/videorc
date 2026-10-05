@@ -251,8 +251,7 @@ describe('createMicStreamController', () => {
 
   it('does not request a stream after close wins a deferred device enumeration', async () => {
     let resolveDevices:
-      | ((devices: Array<{ kind: string; deviceId: string; label: string }>) => void)
-      | undefined
+      ((devices: Array<{ kind: string; deviceId: string; label: string }>) => void) | undefined
     const getUserMedia = vi.fn(async () => fakeStream().stream)
     const controller = createMicStreamController({
       enumerateDevices: () =>

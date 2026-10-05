@@ -612,10 +612,9 @@ mod tests {
 
 pub fn mutation_fingerprint(mutation: &Mutation) -> Result<String> {
     use sha2::{Digest, Sha256};
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(mutation)?)
-    ))
+    Ok(crate::digest_hex::lower_hex(Sha256::digest(
+        serde_json::to_vec(mutation)?,
+    )))
 }
 
 #[cfg(test)]
@@ -781,5 +780,5 @@ pub fn confirmation_fingerprint(provider: &str, remote: &Value) -> String {
     } else {
         crate::scheduled_youtube::metadata_snapshot(remote)
     };
-    format!("{:x}", Sha256::digest(snapshot.to_string().as_bytes()))
+    crate::digest_hex::lower_hex(Sha256::digest(snapshot.to_string().as_bytes()))
 }

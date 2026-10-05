@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { Mock } from 'vitest'
 
-import { closeVisualMicrophoneStreams } from './mic-stream'
+import { closeVisualMicrophoneStreams, type MicStreamConstraints } from './mic-stream'
 import { dbToMeterLevel } from './mic-meter'
 import {
   advanceBandLevelsInto,
@@ -21,6 +22,8 @@ const FFT_SIZE = 2048
 const BIN_COUNT = FFT_SIZE / 2
 const BIN_HZ = SAMPLE_RATE / FFT_SIZE
 const BAND_COUNT = 32
+
+type GetUserMedia = (constraints: MicStreamConstraints) => Promise<TestStream>
 
 /** Synthetic analyser content: a time-domain block plus a matching bin spectrum. */
 type AnalyserSignal = {
@@ -78,7 +81,7 @@ function bandTargets(signal: AnalyserSignal): number[] {
 
 function pipelineHarness(): {
   dependencies: MicVisualPipelineDependencies<TestStream>
-  getUserMedia: ReturnType<typeof vi.fn>
+  getUserMedia: Mock<GetUserMedia>
   contexts: Array<MicVisualAudioContextLike<TestStream> & { close: ReturnType<typeof vi.fn> }>
   analysers: MicVisualAnalyserLike[]
   frames: Array<(at: number) => void>
@@ -93,7 +96,7 @@ function pipelineHarness(): {
   let signal: AnalyserSignal = { time: () => 0.25, frequencyDb: () => -60 }
   const analysers: MicVisualAnalyserLike[] = []
   const stream: TestStream = { getTracks: () => [{ stop: stoppedTracks }] }
-  const getUserMedia = vi.fn(async () => stream)
+  const getUserMedia = vi.fn<GetUserMedia>(async () => stream)
   const contexts: Array<
     MicVisualAudioContextLike<TestStream> & { close: ReturnType<typeof vi.fn> }
   > = []

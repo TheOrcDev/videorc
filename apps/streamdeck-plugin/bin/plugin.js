@@ -52,12 +52,15 @@ class VideorcAction extends SingletonAction {
         client.on('disconnected', this.refresh);
     }
     refresh = () => {
+        const title = this.renderTitle(client.state, client.connected);
         for (const visible of this.actions) {
-            void visible.setTitle(this.renderTitle(client.state, client.connected));
+            if (visible.isKey()) {
+                void visible.setTitle(title);
+            }
         }
     };
     pushInspectorOptions = () => {
-        void streamDeck.ui.current?.sendToPropertyInspector({
+        void streamDeck.ui.sendToPropertyInspector({
             event: 'videorc-options',
             connected: client.connected,
             options: this.inspectorOptions()
@@ -68,7 +71,9 @@ class VideorcAction extends SingletonAction {
         return [];
     }
     onWillAppear(ev) {
-        void ev.action.setTitle(this.renderTitle(client.state, client.connected));
+        if (ev.action.isKey()) {
+            void ev.action.setTitle(this.renderTitle(client.state, client.connected));
+        }
     }
     /** The property inspector asks for options when it opens. */
     onSendToPlugin() {

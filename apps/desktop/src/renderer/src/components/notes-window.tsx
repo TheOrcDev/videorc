@@ -15,12 +15,7 @@ import { MAX_NOTES_TEXT_LENGTH } from '../../../shared/notes-limits'
 const SAVE_DELAY_MS = 120
 
 export type NotesSaveStatus =
-  | 'Saved'
-  | 'Saving'
-  | 'Unsaved'
-  | 'Save failed'
-  | 'Pin unavailable'
-  | 'Pin failed'
+  'Saved' | 'Saving' | 'Unsaved' | 'Save failed' | 'Pin unavailable' | 'Pin failed'
 
 // The md: twins beat the shadcn Textarea's own md:text-sm.
 const FONT_SIZE_CLASS: Record<NotesFontScale, string> = {

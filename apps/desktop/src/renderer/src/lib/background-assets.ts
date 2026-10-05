@@ -23,11 +23,7 @@ import {
 import type { EffectiveSceneBackground } from './backend'
 
 export type BackgroundAssetSlotStatus =
-  | 'empty'
-  | 'ready'
-  | 'active'
-  | 'missing-file'
-  | 'unsupported'
+  'empty' | 'ready' | 'active' | 'missing-file' | 'unsupported'
 export type BackgroundAssetKind = 'preset-placeholder' | 'builtin' | 'imported'
 export type BackgroundFit = 'fill' | 'fit' | 'stretch'
 
@@ -235,9 +231,8 @@ export function applySlot(
     ...registry,
     activeSlotId: slotId,
     slots: canRecoverBundledSlot
-      ? registry.slots.map(
-          (entry): BackgroundAssetSlot =>
-            entry.id === slotId ? { ...entry, status: 'ready' } : entry
+      ? registry.slots.map((entry): BackgroundAssetSlot =>
+          entry.id === slotId ? { ...entry, status: 'ready' } : entry
         )
       : registry.slots
   }
@@ -287,13 +282,12 @@ export function applyBundledBackgroundAssets(
       }
     }
 
-    const nextSlots = slots.map(
-      (slot): BackgroundAssetSlot =>
-        slot.id === def.id &&
-        slot.assetId === assetId &&
-        (slot.assetId !== assetId || slot.status !== 'ready')
-          ? { ...slot, assetId, status: 'ready' }
-          : slot
+    const nextSlots = slots.map((slot): BackgroundAssetSlot =>
+      slot.id === def.id &&
+      slot.assetId === assetId &&
+      (slot.assetId !== assetId || slot.status !== 'ready')
+        ? { ...slot, assetId, status: 'ready' }
+        : slot
     )
     if (nextSlots.some((slot, index) => slot !== slots[index])) {
       changed = true
@@ -352,9 +346,8 @@ export function importIntoSlot(
   return {
     ...registry,
     assets,
-    slots: registry.slots.map(
-      (entry): BackgroundAssetSlot =>
-        entry.id === slotId ? { ...entry, assetId: asset.id, status: 'ready' } : entry
+    slots: registry.slots.map((entry): BackgroundAssetSlot =>
+      entry.id === slotId ? { ...entry, assetId: asset.id, status: 'ready' } : entry
     )
   }
 }
@@ -478,8 +471,8 @@ export function markSlotStatus(
   }
   return {
     ...registry,
-    slots: registry.slots.map(
-      (entry): BackgroundAssetSlot => (entry.id === slotId ? { ...entry, status } : entry)
+    slots: registry.slots.map((entry): BackgroundAssetSlot =>
+      entry.id === slotId ? { ...entry, status } : entry
     )
   }
 }

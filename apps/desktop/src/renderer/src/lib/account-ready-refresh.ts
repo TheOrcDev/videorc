@@ -18,8 +18,7 @@ export const INITIAL_ACCOUNT_READY_REFRESH_STATE: AccountReadyRefreshState = {
 }
 
 export type AccountReadyRefreshEvent =
-  | { type: 'connected'; client: object; signedIn: boolean }
-  | { type: 'disconnected' }
+  { type: 'connected'; client: object; signedIn: boolean } | { type: 'disconnected' }
 
 export interface AccountReadyRefreshResult {
   state: AccountReadyRefreshState

@@ -801,7 +801,7 @@ pub(crate) fn capture_session_file_content_identity_from_file(
     Ok(SessionFileIdentity {
         len,
         modified_unix_nanos,
-        sample_sha256: format!("{:x}", hasher.finalize()),
+        sample_sha256: crate::digest_hex::lower_hex(hasher.finalize()),
     })
 }
 

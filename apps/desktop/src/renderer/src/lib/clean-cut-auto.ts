@@ -63,8 +63,7 @@ export type CleanCutAutoSkipReason =
   | 'unavailable'
 
 export type CleanCutAutoDecision =
-  | { kind: 'run' }
-  | { kind: 'skip'; reason: CleanCutAutoSkipReason }
+  { kind: 'run' } | { kind: 'skip'; reason: CleanCutAutoSkipReason }
 
 export interface CleanCutAutoInput {
   event: Pick<RecordingFinalizationEvent, 'sessionId' | 'state'>

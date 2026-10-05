@@ -2,7 +2,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use reqwest::{Method, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::json;

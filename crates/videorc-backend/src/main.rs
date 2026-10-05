@@ -28,6 +28,7 @@ mod compositor;
 mod compositor_synthetic;
 mod devices;
 mod diagnostics;
+mod digest_hex;
 mod echo_guard;
 mod editor_chrome;
 mod encoder_bridge;

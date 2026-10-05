@@ -614,8 +614,7 @@ function previewTransportLabel(
   transport: PreviewLiveStatus['transport'] | PreviewSupervisorState['transport'],
   backing?: PreviewSurfaceStatus['backing'] | PreviewSupervisorState['backing'],
   hostKind?:
-    | PreviewSurfaceStatus['nativePreviewHostKind']
-    | PreviewSupervisorState['nativePreviewHostKind'],
+    PreviewSurfaceStatus['nativePreviewHostKind'] | PreviewSupervisorState['nativePreviewHostKind'],
   platform?: string
 ): string | null {
   switch (transport) {

@@ -2,11 +2,12 @@ packages:
   - apps/*
 overrides:
   # Keep electron-builder/updater's YAML parser on the security patch for
-  # GHSA-2883-xcg3-v3hh (>=4.0.0 <4.3.2).
+  # GHSA-2883-xcg3-v3hh (>=4.0.0 <4.3.2). js-yaml 5 is a separate major and
+  # would replace that parser, so the pin stays on 4.3.2.
   js-yaml: 4.3.2
-patchedDependencies:
-  app-builder-lib@26.8.1: patches/app-builder-lib@26.8.1.patch
 allowBuilds:
   electron: true
   electron-winstaller: true
   esbuild: true
+patchedDependencies:
+  app-builder-lib@26.15.3: patches/app-builder-lib@26.15.3.patch

@@ -442,7 +442,7 @@ async fn run_matrix(cases: Vec<ProbeCase>) -> Result<()> {
         generated_at: chrono::Utc::now().to_rfc3339(),
         platform: std::env::consts::OS.into(),
         backend_version: env!("CARGO_PKG_VERSION").into(),
-        backend_sha256: format!("{:x}", Sha256::digest(std::fs::read(&executable)?)),
+        backend_sha256: crate::digest_hex::lower_hex(Sha256::digest(std::fs::read(&executable)?)),
         source_commit: normalized_source_commit(
             option_env!("VIDEORC_GIT_SHA")
                 .or(option_env!("GIT_SHA"))

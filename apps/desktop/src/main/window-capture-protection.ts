@@ -1,12 +1,7 @@
 import type { BrowserWindow } from 'electron'
 
 export type VideorcWindowRole =
-  | 'main'
-  | 'preview'
-  | 'comments'
-  | 'notes'
-  | 'captions'
-  | 'proof-surface'
+  'main' | 'preview' | 'comments' | 'notes' | 'captions' | 'proof-surface'
 
 type ContentProtectionWindow = Pick<BrowserWindow, 'setContentProtection'>
 

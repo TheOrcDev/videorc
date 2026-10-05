@@ -18,14 +18,10 @@ export type NativePreviewRendererTimingFields = Pick<
 >
 
 export type NativePreviewCompositorPresentDecision =
-  | { kind: 'disabled' }
-  | { kind: 'suppress-starting' }
-  | { kind: 'queue' }
+  { kind: 'disabled' } | { kind: 'suppress-starting' } | { kind: 'queue' }
 
 export type NativePreviewSceneProofPresentationOwner =
-  | 'main-pump'
-  | 'renderer-fallback'
-  | 'unavailable'
+  'main-pump' | 'renderer-fallback' | 'unavailable'
 
 export function rendererFallbackSeedCompositorStatus({
   wasMainPumpActive,

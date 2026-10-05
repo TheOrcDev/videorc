@@ -142,7 +142,7 @@ fn expected_bgra_sha256(
     for _ in split_y..dimensions.height {
         hasher.update(&bottom_row);
     }
-    format!("{:x}", hasher.finalize())
+    crate::digest_hex::lower_hex(hasher.finalize())
 }
 
 fn append_pixels(row: &mut Vec<u8>, color: WindowsD3d11TestPatternColor, count: u32) {
@@ -276,7 +276,7 @@ mod tests {
         .concat();
         assert_eq!(
             metadata.expected_bgra_sha256,
-            format!("{:x}", Sha256::digest(expected_pixels))
+            crate::digest_hex::lower_hex(Sha256::digest(expected_pixels))
         );
         assert_eq!(
             metadata.samples.map(|sample| sample.expected_bgra),

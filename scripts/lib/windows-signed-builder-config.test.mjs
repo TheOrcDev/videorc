@@ -69,7 +69,7 @@ describe('signed Windows electron-builder config', () => {
     await assert.doesNotReject(() => validateConfiguration(config, new DebugLogger()))
 
     const signingManager = await readFile(
-      new URL('../../patches/app-builder-lib@26.8.1.patch', import.meta.url),
+      new URL('../../patches/app-builder-lib@26.15.3.patch', import.meta.url),
       'utf8'
     )
     const addedSigningManagerLines = signingManager
@@ -90,7 +90,7 @@ describe('signed Windows electron-builder config', () => {
     const lockfile = await readFile(new URL('../../pnpm-lock.yaml', import.meta.url), 'utf8')
     assert.match(
       lockfile,
-      new RegExp(`app-builder-lib@26\\.8\\.1: ${patchHash}`),
+      new RegExp(`app-builder-lib@26\\.15\\.3: ${patchHash}`),
       'pnpm lockfile must bind the exact signing patch bytes'
     )
   })

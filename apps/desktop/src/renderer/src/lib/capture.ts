@@ -443,8 +443,7 @@ export type AudioSyncCalibrationState = {
 }
 
 export type AudioSyncRecommendationParseResult =
-  | { ok: true; recommendation: AudioSyncRecommendationReport }
-  | { ok: false; error: string }
+  { ok: true; recommendation: AudioSyncRecommendationReport } | { ok: false; error: string }
 
 export type WsStatus = 'waiting' | 'connecting' | 'connected' | 'failed' | 'closed'
 export type SetupTone = 'good' | 'warn' | 'neutral'

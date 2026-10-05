@@ -28,11 +28,7 @@ export type GlassMode =
   | {
       kind: 'solid'
       reason:
-        | 'disabled'
-        | 'platform'
-        | 'appearance-unpinned'
-        | 'software-rendering'
-        | 'paint-check-blank'
+        'disabled' | 'platform' | 'appearance-unpinned' | 'software-rendering' | 'paint-check-blank'
     }
 
 export interface GlassEnvironment {

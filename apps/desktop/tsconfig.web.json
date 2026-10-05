@@ -11,9 +11,8 @@
     "types": ["vite/client"],
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "allowSyntheticDefaultImports": true,
-    "baseUrl": ".",
     "paths": {
-      "@/*": ["src/renderer/src/*"]
+      "@/*": ["./src/renderer/src/*"]
     }
   },
   "include": ["src/renderer/**/*.ts", "src/renderer/**/*.tsx", "src/shared/**/*.ts"]

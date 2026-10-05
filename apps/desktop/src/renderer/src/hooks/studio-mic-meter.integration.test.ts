@@ -423,9 +423,9 @@ function installBrowserAudio() {
   const descriptor = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices')
   const contexts: Array<{ close: ReturnType<typeof vi.fn> }> = []
   const stopped = vi.fn()
-  const getUserMedia = vi.fn(
-    async (): Promise<TestStream> => ({ getTracks: () => [{ stop: stopped }] })
-  )
+  const getUserMedia = vi.fn(async (): Promise<TestStream> => ({
+    getTracks: () => [{ stop: stopped }]
+  }))
   const media = new EventTarget()
   Object.defineProperty(navigator, 'mediaDevices', {
     configurable: true,
