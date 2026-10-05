@@ -787,18 +787,17 @@ fn normalize_chat_notification(
     // The viewer's own words ride in the fragments, beside Twitch's system
     // sentence in `message_text` (plan 151, S3): keep them when Twitch sent
     // the text without fragments.
-    if message.fragments.is_empty() {
-        if let Some(words) = event["message"]["text"]
+    if message.fragments.is_empty()
+        && let Some(words) = event["message"]["text"]
             .as_str()
             .filter(|words| !words.trim().is_empty())
-        {
-            message.fragments = vec![LiveChatMessageFragment {
-                fragment_type: "text".to_string(),
-                text: words.to_string(),
-                image_url: None,
-                zero_width: false,
-            }];
-        }
+    {
+        message.fragments = vec![LiveChatMessageFragment {
+            fragment_type: "text".to_string(),
+            text: words.to_string(),
+            image_url: None,
+            zero_width: false,
+        }];
     }
     message.event_type = notice_event_type(notice_type);
     message.details = notification_details(notice_type, event);
