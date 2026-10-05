@@ -4671,6 +4671,9 @@ export type LiveChatEventDetails =
   | { kind: 'announcement'; color?: string }
   /** `handle`: the @-mentionable login when the platform sent one (plan 071). */
   | { kind: 'follow'; handle?: string }
+  /** A Twitch watch streak (plan 151): `streakCount` streams in a row.
+   * `channelPointsAwarded` is what the viewer earned; kept, never shown. */
+  | { kind: 'watch-streak'; streakCount: number; channelPointsAwarded?: number }
 
 /** The message a chat message replies to, when the platform threads replies. */
 export interface LiveChatReply {
