@@ -1,4 +1,4 @@
-# Plan 154: Twitch GIFs (GIPHY) in the Stream Manager
+# Plan 155: Twitch GIFs (GIPHY) in the Stream Manager
 
 **Status:** EXECUTED 2026-10-05, in review on
 `cursor/giphy-gifs-stream-manager-4f7e` (S1–S6 and the S8 code and docs;
@@ -319,7 +319,7 @@ with `createImageBitmap` (frame 0). Otherwise the card keeps D8's text.
 
 **S8: fakes, docs, privacy, live acceptance.**
 - D13's fake GIF; `docs/specs/stream-manager-provider-facts.md` gets a
-  "GIFs (plan 154)" row and amends the plan 151 row's fragment list;
+  "GIFs (plan 155)" row and amends the plan 151 row's fragment list;
   `docs/icon-set.md` unchanged (no new glyph).
 - The videorc-web privacy paragraph (D15).
 - Release note: "Twitch GIFs from Tier 2 and Tier 3 subscribers now show in

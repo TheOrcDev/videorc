@@ -13,7 +13,7 @@ import { useChatEmoteSettings } from '@/hooks/use-chat-emote-settings'
 import type { ChatEmotesSettings, TwitchGifMode } from '@/lib/backend'
 import { sevenTvStatusLine } from '@/lib/seventv-status'
 
-/** Settings → General: 7TV emotes (plan 089) and Twitch GIFs (plan 154) in
+/** Settings → General: 7TV emotes (plan 089) and Twitch GIFs (plan 155) in
  * the Stream Manager's chat. One backend row, so one client for both. */
 export function ChatEmoteSettingsFields(): ReactElement {
   const { settings, error, setSevenTv, setTwitchGifs } = useChatEmoteSettings()
@@ -67,7 +67,7 @@ export const TWITCH_GIF_MODE_OPTIONS: ReadonlyArray<{ value: TwitchGifMode; labe
 ]
 
 /**
- * Settings → General → "GIFs in Twitch chat" (plan 154, D6). Animated is the
+ * Settings → General → "GIFs in Twitch chat" (plan 155, D6). Animated is the
  * default; Still shows one frame; Off keeps the GIF's title and never
  * fetches the image. A system set to reduce motion shows stills whatever
  * this says.

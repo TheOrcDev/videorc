@@ -193,7 +193,7 @@ describe('Stream Manager chat pane', () => {
     expect(markup).not.toContain('>RainTime<')
   })
 
-  it('draws a Twitch GIF as its own fixed-height block with the title until cached (plan 154)', () => {
+  it('draws a Twitch GIF as its own fixed-height block with the title until cached (plan 155)', () => {
     const gif = {
       type: 'gif',
       text: '[Y A Y Yes GIF]',
@@ -228,7 +228,7 @@ describe('Stream Manager chat pane', () => {
     expect(render('compact', 'still')).toContain('data-gif-mode="still"')
   })
 
-  it('keeps the words around a GIF, and a refused GIF as its title text (plan 154)', () => {
+  it('keeps the words around a GIF, and a refused GIF as its title text (plan 155)', () => {
     const markup = renderToStaticMarkup(
       createElement(CommentRow, {
         message: message('12', 'twitch', 'gg [Y A Y Yes GIF] wow', {

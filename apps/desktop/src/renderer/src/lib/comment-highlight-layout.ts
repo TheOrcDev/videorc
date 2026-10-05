@@ -50,7 +50,7 @@ export type HighlightEmoteSizer = (url: string) => HighlightEmoteSize | null
  * (zero-width overlays folded onto the emote before them); every other
  * fragment and plain text splits into words. `text` is used when the
  * fragments carry no image, so activity prefixes and fragment-less messages
- * lay out exactly as before. A Twitch GIF (plan 154, D8) is never painted
+ * lay out exactly as before. A Twitch GIF (plan 155, D8) is never painted
  * on stream: the card says `GIF: <title>` in its place.
  */
 export function highlightTokens(

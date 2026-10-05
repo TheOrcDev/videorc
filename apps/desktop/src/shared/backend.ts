@@ -4277,11 +4277,11 @@ export interface VideorcApi {
   /** Fetch-and-cache a chat avatar from an allowlisted platform CDN; returns a
    * local videorc-asset:// URL or null (disallowed host / fetch failure). */
   cacheChatAvatar: (url: string) => Promise<string | null>
-  /** A Twitch GIF Keyboard asset through main's cache (plan 154): the
+  /** A Twitch GIF Keyboard asset through main's cache (plan 155): the
    * managed local URL, or null when the gate, the size cap, the deadline or
    * the image sniff refused it. */
   cacheChatGif: (url: string) => Promise<string | null>
-  /** The main renderer relays Settings → "GIFs in Twitch chat" (plan 154);
+  /** The main renderer relays Settings → "GIFs in Twitch chat" (plan 155);
    * the Stream Manager window seeds from main's cache and follows pushes. */
   pushChatGifMode: (mode: TwitchGifMode) => Promise<void>
   getChatGifMode: () => Promise<TwitchGifMode>
@@ -4754,7 +4754,7 @@ export interface SevenTvStatus {
 export interface ChatEmotesSettings {
   sevenTv: boolean
   sevenTvStatus: SevenTvStatus
-  /** Settings → General → "GIFs in Twitch chat" (plan 154, D6). */
+  /** Settings → General → "GIFs in Twitch chat" (plan 155, D6). */
   twitchGifs: TwitchGifMode
 }
 

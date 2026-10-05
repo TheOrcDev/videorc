@@ -2191,7 +2191,7 @@ describe('backend RPC contract', () => {
     expect(validateBackendRpcParams('liveChat.emotes.set', { sevenTv: false })).toEqual({
       sevenTv: false
     })
-    // Plan 154: the GIF mode is one of three words, and always present.
+    // Plan 155: the GIF mode is one of three words, and always present.
     expect(validateBackendRpcParams('liveChat.emotes.set', { twitchGifs: 'off' })).toEqual({
       twitchGifs: 'off'
     })

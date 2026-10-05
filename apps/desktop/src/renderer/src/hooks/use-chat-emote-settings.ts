@@ -9,13 +9,13 @@ export interface ChatEmoteSettingsState {
   /** Set when the setting could not be read or saved. */
   error: string | null
   setSevenTv: (on: boolean) => void
-  /** "GIFs in Twitch chat" (plan 154, D6). */
+  /** "GIFs in Twitch chat" (plan 155, D6). */
   setTwitchGifs: (mode: TwitchGifMode) => void
 }
 
 /**
  * Settings → General → "Show 7TV emotes in chat" (plan 089) and "GIFs in
- * Twitch chat" (plan 154): one backend row, one client. It opens its own
+ * Twitch chat" (plan 155): one backend row, one client. It opens its own
  * backend client while the panel is mounted, as Upcoming does, so the
  * controls add nothing to the main window's startup bundle. `liveChat.emotes`
  * keeps the status line current while Settings is open, for example when a

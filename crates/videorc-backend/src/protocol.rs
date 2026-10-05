@@ -6547,7 +6547,7 @@ mod tests {
                 channel_points_awarded: Some(450),
             })
         );
-        // Plan 154: a Twitch GIF Keyboard row is a plain message whose one
+        // Plan 155: a Twitch GIF Keyboard row is a plain message whose one
         // `gif` fragment carries Twitch's URL; no new field, no `zeroWidth`.
         assert_eq!(messages[9].event_type, LiveChatEventType::Message);
         assert_eq!(messages[9].fragments[0].fragment_type, "gif");

@@ -20,7 +20,7 @@ export function monogramInitials(name: string): string {
 }
 
 /** Which of main's two cache kinds resolves a URL: avatars and emotes share
- * one allowlist and cap; Twitch GIFs (plan 154) have their own. */
+ * one allowlist and cap; Twitch GIFs (plan 155) have their own. */
 export type CachedImageKind = 'avatar' | 'gif'
 
 // One in-flight/settled promise per remote URL for the whole renderer: a busy

@@ -17,7 +17,7 @@ export const AUXILIARY_API_KEYS = {
   comments: [
     'cacheChatAvatar',
     'readChatAvatar',
-    // Twitch GIFs in chat rows (plan 154).
+    // Twitch GIFs in chat rows (plan 155).
     'cacheChatGif',
     'getChatGifMode',
     'onChatGifMode',

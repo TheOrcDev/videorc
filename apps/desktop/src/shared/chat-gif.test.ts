@@ -8,7 +8,7 @@ import {
   twitchGifAssetUrl
 } from './chat-gif'
 
-describe('twitchGifAssetUrl (plan 154)', () => {
+describe('twitchGifAssetUrl (plan 155)', () => {
   it('returns an allowlisted https URL exactly as sent', () => {
     const url = 'https://media2.giphy.com/media/aUovxH8Vf9qDu/giphy.gif?cid=abc'
     expect(twitchGifAssetUrl(url)).toBe(url)

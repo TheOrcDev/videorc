@@ -897,7 +897,7 @@ fn split_text_run(
 /// Where the Settings switch is stored (`app_settings`).
 const CHAT_EMOTE_SETTINGS_KEY: &str = "chatEmoteSettings";
 
-/// Settings → General → "GIFs in Twitch chat" (plan 154, D6): how a GIF a
+/// Settings → General → "GIFs in Twitch chat" (plan 155, D6): how a GIF a
 /// Tier 2/3 subscriber sent from Twitch's GIF Keyboard draws in the Stream
 /// Manager. The renderer applies it; `Off` means it never fetches the image
 /// and the row keeps the GIF's title. Mirrors `TwitchGifMode` in
@@ -913,7 +913,7 @@ pub(crate) enum TwitchGifMode {
 
 /// Settings → General → "Show 7TV emotes in chat" and "GIFs in Twitch
 /// chat". 7TV is on unless the streamer turned it off; off means Videorc
-/// never contacts 7TV. Rows persisted before plan 154 have no `twitchGifs`
+/// never contacts 7TV. Rows persisted before plan 155 have no `twitchGifs`
 /// and read as Animated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2389,7 +2389,7 @@ mod tests {
         assert_eq!(versions.active_sets, load.versions.active_sets);
     }
 
-    /// Plan 154, D6: the GIF mode rides the 7TV settings row. A row saved
+    /// Plan 155, D6: the GIF mode rides the 7TV settings row. A row saved
     /// before the field existed reads as Animated, the wire name is
     /// camelCase, and the patch still refuses keys it does not know.
     #[test]

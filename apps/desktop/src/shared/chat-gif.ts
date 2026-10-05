@@ -1,4 +1,4 @@
-// Twitch GIF Keyboard assets (plan 154). Twitch requires the `gif.url` it
+// Twitch GIF Keyboard assets (plan 155). Twitch requires the `gif.url` it
 // sends to be used unmodified, so Videorc cannot build the URL the way it
 // does for emotes. Instead the URL is gated three times with this one rule:
 // the backend when it parses the fragment (`twitch_chat.rs`, the Rust twin of
@@ -63,7 +63,7 @@ export function gifTitle(text: string): string {
   return inner
 }
 
-/** Settings → General → "GIFs in Twitch chat" (plan 154, D6). Mirrors
+/** Settings → General → "GIFs in Twitch chat" (plan 155, D6). Mirrors
  * `TwitchGifMode` in `crates/videorc-backend/src/seventv.rs`. */
 export const TWITCH_GIF_MODES = ['animated', 'still', 'off'] as const
 export type TwitchGifMode = (typeof TWITCH_GIF_MODES)[number]

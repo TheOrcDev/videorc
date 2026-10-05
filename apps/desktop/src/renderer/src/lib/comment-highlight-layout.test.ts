@@ -55,7 +55,7 @@ describe('highlightTokens', () => {
     expect(highlightTokens('hi', undefined)).toEqual([{ kind: 'word', text: 'hi' }])
   })
 
-  it('names a Twitch GIF by its title instead of painting it (plan 154, D8)', () => {
+  it('names a Twitch GIF by its title instead of painting it (plan 155, D8)', () => {
     const gif = {
       type: 'gif',
       text: '[Y A Y Yes GIF]',

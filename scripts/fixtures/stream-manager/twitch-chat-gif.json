@@ -1,5 +1,5 @@
 {
-  "_note": "Plan 154. Shaped per the EventSub reference (Channel Chat Message Event, `gif` fragment, 2026-07-16 changelog) and third-party reports of the bracketed title text; not yet replaced by a captured payload (S0). The changelog names the id `gif_id`, the reference `id`: the parser reads neither, only the gated `url`.",
+  "_note": "Plan 155. Shaped per the EventSub reference (Channel Chat Message Event, `gif` fragment, 2026-07-16 changelog) and third-party reports of the bracketed title text; not yet replaced by a captured payload (S0). The changelog names the id `gif_id`, the reference `id`: the parser reads neither, only the gated `url`.",
   "broadcaster_user_id": "1971641",
   "broadcaster_user_login": "streamer",
   "broadcaster_user_name": "Streamer",

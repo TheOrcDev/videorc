@@ -342,7 +342,7 @@ describe('renderer security policy', () => {
     expect(roleCanInvokeChannel('comments', 'oauth:open-url')).toBe(false)
   })
 
-  it('lets only main and the Stream Manager cache a Twitch GIF (plan 154)', () => {
+  it('lets only main and the Stream Manager cache a Twitch GIF (plan 155)', () => {
     expect(roleCanInvokeChannel('main', 'chat-gifs:cache')).toBe(true)
     expect(roleCanInvokeChannel('comments', 'chat-gifs:cache')).toBe(true)
     expect(roleCanInvokeChannel('notes', 'chat-gifs:cache')).toBe(false)

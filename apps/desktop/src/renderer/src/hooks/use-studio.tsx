@@ -6531,7 +6531,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         void window.videorc?.pushViewerSample?.(payload as ViewerSample)
         feedDashboard('stream.viewers', payload)
       }),
-      // Twitch GIFs in chat (plan 154, D6): the Stream Manager window has no
+      // Twitch GIFs in chat (plan 155, D6): the Stream Manager window has no
       // backend socket, so this renderer relays the setting through main.
       nextClient.on('liveChat.emotes', (payload) => {
         const settings = payload as ChatEmotesSettings

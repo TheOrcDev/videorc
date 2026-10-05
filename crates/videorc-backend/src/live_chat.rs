@@ -1740,7 +1740,7 @@ pub struct FakeChatConfig {
     /// on the card, plan 095).
     #[serde(default)]
     pub emote: Option<FakeChatEmote>,
-    /// After its messages, deliver one Twitch GIF Keyboard row (plan 154): a
+    /// After its messages, deliver one Twitch GIF Keyboard row (plan 155): a
     /// `gif` fragment with this URL, from a Tier 2 subscriber. The URL is
     /// taken as given; the real connector gates it in `twitch_chat.rs`.
     #[serde(default)]
@@ -1775,7 +1775,7 @@ pub struct FakeChatEmote {
     pub image_url: String,
 }
 
-/// A fake Twitch GIF (plan 154). `title` is the GIPHY title as Twitch sends
+/// A fake Twitch GIF (plan 155). `title` is the GIPHY title as Twitch sends
 /// it in the fragment text, brackets included (`[Y A Y Yes GIF]`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -4128,7 +4128,7 @@ mod tests {
         }
     }
 
-    /// Plan 154: the fake connector's GIF row is shaped like the real one, so
+    /// Plan 155: the fake connector's GIF row is shaped like the real one, so
     /// the fake-providers smoke exercises the same renderer path.
     #[test]
     fn the_fake_twitch_gif_row_is_a_plain_message_with_one_gif_fragment() {

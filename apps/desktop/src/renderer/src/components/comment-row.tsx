@@ -310,7 +310,7 @@ function Emote({
 }
 
 /**
- * A Twitch GIF Keyboard GIF (plan 154, D5): its own block under the text,
+ * A Twitch GIF Keyboard GIF (plan 155, D5): its own block under the text,
  * at a fixed height so the virtualized list never re-measures when the image
  * lands. Until main's cache resolves it (and whenever it refuses it) the
  * block shows the GIF's title with a "GIF" tag; the row never changes
@@ -396,7 +396,7 @@ function StillFrame({ alt, src }: { alt: string; src: string }): ReactElement {
 
 /** Text with emotes inline when the platform sent them (Twitch, Kick) or
  * the backend matched them (7TV), zero-width 7TV emotes stacked on the emote
- * before them. A Twitch GIF (plan 154) is its own block after the text it
+ * before them. A Twitch GIF (plan 155) is its own block after the text it
  * came with. Without an emote or GIF it is `text` as is. */
 function FragmentText({
   text,

@@ -18,7 +18,7 @@ const emote = (): LiveChatMessageFragment => ({
   imageUrl: 'https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/1.0'
 })
 
-describe('splitGifFragments (plan 154)', () => {
+describe('splitGifFragments (plan 155)', () => {
   it('keeps a GIF-only message as one GIF part', () => {
     expect(splitGifFragments([gif()])).toEqual([{ kind: 'gif', fragment: gif() }])
   })
@@ -44,7 +44,7 @@ describe('splitGifFragments (plan 154)', () => {
   })
 })
 
-describe('effectiveTwitchGifMode (plan 154, D6)', () => {
+describe('effectiveTwitchGifMode (plan 155, D6)', () => {
   it('forces Still when the system reduces motion, and never turns Off back on', () => {
     expect(effectiveTwitchGifMode('animated', false)).toBe('animated')
     expect(effectiveTwitchGifMode('animated', true)).toBe('still')

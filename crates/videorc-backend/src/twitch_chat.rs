@@ -355,7 +355,7 @@ fn parse_envelope(text: &str) -> EventSubFrame {
     }
 }
 
-/// Hosts a Twitch GIF Keyboard asset may be served from (plan 154, D3).
+/// Hosts a Twitch GIF Keyboard asset may be served from (plan 155, D3).
 /// Twitch requires the `gif.url` it sends to be used unmodified, so unlike
 /// emotes the URL is taken from the payload and gated here and again in
 /// main's image cache. GIPHY's media CDNs (`media0-4.giphy.com`,
@@ -425,7 +425,7 @@ fn warn_rejected_gif_assets(state: &AppState, fragments: &Value) {
         state.emit_log(
             "warn",
             format!(
-                "Twitch GIF not shown: {host} is not an allowlisted GIF asset host (plan 154). The row keeps the GIF's title."
+                "Twitch GIF not shown: {host} is not an allowlisted GIF asset host (plan 155). The row keeps the GIF's title."
             ),
         );
     }
@@ -459,7 +459,7 @@ fn parse_fragments(fragments: &Value) -> Vec<LiveChatMessageFragment> {
                     let fragment_type = fragment["type"].as_str()?.to_string();
                     let text = fragment["text"].as_str().unwrap_or_default().to_string();
                     let image_url = if fragment_type == "gif" {
-                        // Plan 154: Twitch's GIF Keyboard. The id is `gif_id`
+                        // Plan 155: Twitch's GIF Keyboard. The id is `gif_id`
                         // in the changelog and `id` in the reference; neither
                         // is stored, only the gated URL.
                         fragment["gif"]["url"]
@@ -2891,7 +2891,7 @@ mod tests {
 
     #[test]
     fn gif_fragment_keeps_twitch_url_through_the_gate() {
-        // Plan 154: a GIF Keyboard message is one `gif` fragment whose text
+        // Plan 155: a GIF Keyboard message is one `gif` fragment whose text
         // is the bracketed title; the URL is Twitch's, unmodified.
         let message =
             normalize_chat_message(&fixture!("twitch-chat-gif"), "s1", None, None, "now").unwrap();

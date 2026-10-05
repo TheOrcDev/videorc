@@ -2197,7 +2197,7 @@ const sevenTvStatusSchema = objectSchema(
   },
   { allowUnknown: false }
 )
-// Plan 154: the GIF mode rides the same row; the backend always sends it.
+// Plan 155: the GIF mode rides the same row; the backend always sends it.
 const twitchGifModeSchema = enumSchema(TWITCH_GIF_MODES)
 const chatEmotesSettingsSchema = objectSchema(
   { sevenTv: booleanSchema, sevenTvStatus: sevenTvStatusSchema, twitchGifs: twitchGifModeSchema },

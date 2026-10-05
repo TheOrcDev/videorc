@@ -44,7 +44,7 @@ describe('Settings → General → Show 7TV emotes in chat', () => {
   })
 })
 
-describe('Settings → General → GIFs in Twitch chat (plan 154)', () => {
+describe('Settings → General → GIFs in Twitch chat (plan 155)', () => {
   it('waits for the backend with the select disabled', () => {
     const markup = renderGifs(null)
     expect(markup).toContain('GIFs in Twitch chat')

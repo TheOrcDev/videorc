@@ -143,7 +143,7 @@ function CommentsWindowApp(): ReactElement {
     setSendFailures(chatSendFailures(operation))
   }, [])
   const [viewerSample, setViewerSample] = useState<ViewerSample | null>(null)
-  // Settings → "GIFs in Twitch chat" (plan 154, D6): relayed through main.
+  // Settings → "GIFs in Twitch chat" (plan 155, D6): relayed through main.
   const [gifMode, setGifMode] = useState<TwitchGifMode>(DEFAULT_TWITCH_GIF_MODE)
   // The Stream Manager's live data (plan 055, S7): relayed through main.
   const [dashboard, setDashboard] = useState<LiveDashboardState | null>(null)

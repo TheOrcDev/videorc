@@ -457,7 +457,7 @@ const chatAvatarBytesSchema = runtimeSchema<Uint8Array | null>(
     return value
   }
 )
-/** What the GIF cache hands back (plan 154): null, or the managed
+/** What the GIF cache hands back (plan 155): null, or the managed
  * `videorc-asset://avatar/<file>` URL of the cached file, nothing else. */
 const chatImageLocalUrlSchema = runtimeSchema<string | null>(
   'null or a managed videorc-asset://avatar/<file> URL',
@@ -517,7 +517,7 @@ const chatLinkUrl = runtimeSchema<string>('an http or https chat link', (value, 
   return value as string
 })
 
-/** A Twitch GIF Keyboard asset URL (plan 154): https, an allowlisted GIF
+/** A Twitch GIF Keyboard asset URL (plan 155): https, an allowlisted GIF
  * host, no credentials, bounded; the string Twitch sent, unmodified. */
 const twitchGifModeSchema = enumSchema(TWITCH_GIF_MODES)
 const chatGifUrl = runtimeSchema<string>('an allowlisted https GIF asset URL', (value, path) => {

@@ -1063,7 +1063,7 @@ mod tests {
 
     #[test]
     fn chat_projection_keeps_a_gif_as_its_title_text_only() {
-        // Plan 154: a Twitch GIF Keyboard fragment reaches the phone as
+        // Plan 155: a Twitch GIF Keyboard fragment reaches the phone as
         // `type` + `text`; the GIPHY URL never does.
         let mut message = full_message();
         message["fragments"] = serde_json::json!([

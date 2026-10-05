@@ -5347,7 +5347,7 @@ pub(crate) fn tick_message_from_chat(message: &LiveChatMessage) -> Option<Cohost
     })
 }
 
-/// What Orcle reads for a message with Twitch GIFs (plan 154, D7). The raw
+/// What Orcle reads for a message with Twitch GIFs (plan 155, D7). The raw
 /// text is the GIPHY title in brackets (`[Y A Y Yes GIF]`), which reads as a
 /// viewer's words. A GIF alone becomes `sent a GIF: <title>`; a GIF among
 /// words becomes `(GIF: <title>)` in its place. Without a gif fragment the
@@ -11073,7 +11073,7 @@ mod tests {
         }
     }
 
-    /// Plan 154, D7: Orcle hears a Twitch GIF as an action with its title,
+    /// Plan 155, D7: Orcle hears a Twitch GIF as an action with its title,
     /// never as the bracketed GIPHY title pretending to be the viewer's words.
     #[test]
     fn orcle_reads_a_twitch_gif_as_an_action_with_its_title() {

@@ -182,7 +182,7 @@ describe('avatar cache rejection diagnostics', () => {
     ).toBe(`Chat avatar not cached: h.example returned 3000000 bytes (cap ${AVATAR_MAX_BYTES}).`)
   })
 
-  it('names the GIF subject and its own cap for Twitch GIFs (plan 154)', () => {
+  it('names the GIF subject and its own cap for Twitch GIFs (plan 155)', () => {
     expect(
       avatarCacheRejectionMessage(
         { kind: 'too-large', host: 'media2.giphy.com', bytes: 9_000_000, cap: CHAT_GIF_MAX_BYTES },
@@ -252,7 +252,7 @@ describe('avatarCacheFileName', () => {
   })
 })
 
-describe('chatGifUrlDecision (plan 154)', () => {
+describe('chatGifUrlDecision (plan 155)', () => {
   it('allows https GIPHY and Twitch CDN assets, naming the host', () => {
     expect(chatGifUrlDecision('https://media2.giphy.com/media/aUovxH8Vf9qDu/giphy.gif')).toEqual({
       allowed: true,
@@ -286,7 +286,7 @@ describe('chatGifUrlDecision (plan 154)', () => {
   })
 })
 
-describe('avatarPrunePlan (plan 154)', () => {
+describe('avatarPrunePlan (plan 155)', () => {
   const entry = (name: string, mtimeMs: number, bytes: number) => ({
     filePath: `/cache/${name}`,
     mtimeMs,

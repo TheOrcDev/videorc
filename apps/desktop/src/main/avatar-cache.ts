@@ -44,7 +44,7 @@ const AVATAR_ALLOWED_HOST_SUFFIXES = [
  * 7TV chats are emote-dense, hence 1000 rather than 500 (plan 089). */
 export const AVATAR_CACHE_MAX_FILES = 1000
 
-/** The cache's byte budget (plan 154). A thousand 50 KB emotes is nothing;
+/** The cache's byte budget (plan 155). A thousand 50 KB emotes is nothing;
  * a thousand multi-megabyte GIFs is not, so the prune also walks oldest-first
  * until the directory fits. */
 export const AVATAR_CACHE_MAX_BYTES = 256 * 1024 * 1024
@@ -186,7 +186,7 @@ export function avatarHostAllowed(rawUrl: string): boolean {
 }
 
 /**
- * The gate for a Twitch GIF Keyboard asset (plan 154): the shared rule in
+ * The gate for a Twitch GIF Keyboard asset (plan 155): the shared rule in
  * `shared/chat-gif.ts`, which the backend and the IPC contract also apply.
  * GIPHY hosts pass here and nowhere else: an avatar never comes from GIPHY,
  * and a GIF never comes from an avatar CDN other than Twitch's own.

@@ -885,7 +885,7 @@ describe('shared high-risk protocol fixture', () => {
       description: 'Neon',
       url: 'https://x.com/neondatabase'
     })
-    // Plan 154: a Twitch GIF is a plain message with one `gif` fragment.
+    // Plan 155: a Twitch GIF is a plain message with one `gif` fragment.
     expect(gif.eventType).toBe('message')
     expect(gif.fragments).toEqual([
       {

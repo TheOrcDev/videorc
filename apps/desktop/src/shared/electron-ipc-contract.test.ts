@@ -34,7 +34,7 @@ import {
 describe('Electron IPC contract', () => {
   it('maps every renderer-facing invoke channel to a real async API method', () => {
     expectTypeOf<ElectronInvokeMappingInvariant>().toEqualTypeOf<true>()
-    // 124: plan 154 adds chat-gifs:cache and the GIF mode relay (push, get).
+    // 124: plan 155 adds chat-gifs:cache and the GIF mode relay (push, get).
     // 121: plan 152 adds marker request/reply and capture context get/push.
     // 117: plan 151 added chat:open-link.
     // 116: plan 140 S6 part B added the Orcle command answer pair (part A
@@ -175,7 +175,7 @@ describe('Electron IPC contract', () => {
     expect(() => validateElectronInvokeArgs('chat:open-link', [])).toThrow()
   })
 
-  it('caches only https GIF assets from allowlisted hosts, unmodified (plan 154)', () => {
+  it('caches only https GIF assets from allowlisted hosts, unmodified (plan 155)', () => {
     const url = 'https://media2.giphy.com/media/aUovxH8Vf9qDu/giphy.gif?cid=x'
     expect(validateElectronInvokeArgs('chat-gifs:cache', [url])).toEqual([url])
     for (const refused of [
@@ -199,7 +199,7 @@ describe('Electron IPC contract', () => {
     ).toThrow()
   })
 
-  it('relays the GIF display mode as one of three words (plan 154, D6)', () => {
+  it('relays the GIF display mode as one of three words (plan 155, D6)', () => {
     for (const mode of ['animated', 'still', 'off']) {
       expect(validateElectronInvokeArgs('chat-gifs:push-mode', [mode])).toEqual([mode])
       expect(validateElectronInvokeResult('chat-gifs:get-mode', mode)).toBe(mode)

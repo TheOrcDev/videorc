@@ -655,7 +655,7 @@ let notesWindowContentProtected = false
 let notesWindowCloseFlushReady = false
 let notesWindowCloseFlushTimer: ReturnType<typeof setTimeout> | null = null
 let latestViewerSample: ViewerSample | null = null
-/** Settings → "GIFs in Twitch chat" (plan 154), relayed by the main renderer. */
+/** Settings → "GIFs in Twitch chat" (plan 155), relayed by the main renderer. */
 let latestChatGifMode: TwitchGifMode = DEFAULT_TWITCH_GIF_MODE
 /** The Stream Manager's latest dashboard, history included (plan 055, S7). */
 let latestDashboardState: LiveDashboardState | null = null
@@ -3225,7 +3225,7 @@ function emitCommentsViewerSample(sample: ViewerSample | null): void {
   }
 }
 
-// Twitch GIF display relay (plan 154, D6): the setting lives in the backend
+// Twitch GIF display relay (plan 155, D6): the setting lives in the backend
 // beside 7TV; the main renderer owns that socket and pushes the mode here.
 // The Stream Manager window seeds from the cache and follows pushes, like the
 // viewer relay. Nothing is persisted here: the backend is the truth.
@@ -13330,7 +13330,7 @@ const avatarFetchesInFlight = new Map<string, Promise<string | null>>()
 const avatarRejectionsLogged = new Set<string>()
 
 /** The two things the cache holds: avatars and emotes on the avatar policy,
- * and Twitch GIF Keyboard assets (plan 154) on their own gate, size cap and
+ * and Twitch GIF Keyboard assets (plan 155) on their own gate, size cap and
  * deadline. One directory, one file-name scheme, one prune. */
 interface ChatImagePolicy {
   subject: 'Chat avatar' | 'Chat GIF'
@@ -14061,7 +14061,7 @@ app.whenReady().then(async () => {
   )
   secureIpcHandle('avatars:cache', (_event, url: unknown) => cacheChatAvatar(url))
   secureIpcHandle('avatars:read', (_event, localUrl: unknown) => readChatAvatar(localUrl))
-  // Twitch GIF Keyboard assets (plan 154): the contract already gates the URL;
+  // Twitch GIF Keyboard assets (plan 155): the contract already gates the URL;
   // main gates it again and sniffs the body before it is written.
   secureIpcHandle('chat-gifs:cache', (_event, url: unknown) => cacheChatGif(url))
   secureIpcHandle('oauth:open-url', (_event, authUrl: string) => openOAuthUrl(authUrl))

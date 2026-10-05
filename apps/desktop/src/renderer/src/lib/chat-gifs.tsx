@@ -8,7 +8,7 @@ import {
 import { useReducedMotion } from '@/hooks/use-reduced-motion'
 import type { LiveChatMessageFragment } from '@/lib/backend'
 
-// Twitch GIF Keyboard rows (plan 154). A `gif` fragment is not an emote: it
+// Twitch GIF Keyboard rows (plan 155). A `gif` fragment is not an emote: it
 // is drawn as its own block under the text (D5), and whether it animates
 // comes from Settings → General → "GIFs in Twitch chat" (D6), relayed into
 // the Stream Manager window by main.

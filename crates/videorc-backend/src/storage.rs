@@ -10369,7 +10369,7 @@ mod tests {
 
     #[test]
     fn stored_twitch_gif_fragments_round_trip_with_their_url() {
-        // Plan 154: History replays a GIF Keyboard row with its image; a row
+        // Plan 155: History replays a GIF Keyboard row with its image; a row
         // stored before the plan (type `gif`, no URL) stays its title.
         let database = test_database();
         database

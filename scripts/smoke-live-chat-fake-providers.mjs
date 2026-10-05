@@ -18,7 +18,7 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
-// The reference-shaped Twitch GIF (plan 154; scripts/fixtures/stream-manager/
+// The reference-shaped Twitch GIF (plan 155; scripts/fixtures/stream-manager/
 // twitch-chat-gif.json). The backend never fetches it; only the Stream
 // Manager window would, through main's allowlisted GIF cache.
 const SMOKE_TWITCH_GIF = {
@@ -424,7 +424,7 @@ try {
         count: 1,
         intervalMs: 60,
         events: true,
-        // Plan 154: Twitch's fake also sends one GIF Keyboard row.
+        // Plan 155: Twitch's fake also sends one GIF Keyboard row.
         ...(destination.platform === 'twitch' ? { gif: SMOKE_TWITCH_GIF } : {})
       })),
       fakeAudience: [
@@ -477,7 +477,7 @@ try {
     if (kickFollow?.authorName !== 'kick_fan' || kickFollow.targetId !== 'smoke-kick-events') {
       throw new Error(`Kick follow row missing: ${JSON.stringify(eventRows)}`)
     }
-    // Plan 154: the Twitch GIF row is a plain message with one `gif`
+    // Plan 155: the Twitch GIF row is a plain message with one `gif`
     // fragment whose URL arrives exactly as sent (Twitch's unmodified rule).
     await waitFor(
       () =>
