@@ -355,6 +355,100 @@ fn parse_envelope(text: &str) -> EventSubFrame {
     }
 }
 
+/// Hosts a Twitch GIF Keyboard asset may be served from (plan 154, D3).
+/// Twitch requires the `gif.url` it sends to be used unmodified, so unlike
+/// emotes the URL is taken from the payload and gated here and again in
+/// main's image cache. GIPHY's media CDNs (`media0-4.giphy.com`,
+/// `i.giphy.com`) and Twitch's own CDN, pending the S0 capture.
+pub(crate) const TWITCH_GIF_ASSET_HOSTS: &[&str] = &["giphy.com", "static-cdn.jtvnw.net"];
+
+/// Longer than this is not a GIF asset URL (matches `chatLinkUrl`).
+const TWITCH_GIF_URL_MAX_CHARS: usize = 2_048;
+
+/// The `gif.url` of a GIF fragment, when it is safe to fetch: `https:`, no
+/// userinfo, bounded, and on an allowlisted host. Anything else is `None`,
+/// so the fragment keeps its title text and never a modified URL.
+pub(crate) fn twitch_gif_asset_url(raw: &str) -> Option<String> {
+    if raw.len() > TWITCH_GIF_URL_MAX_CHARS {
+        return None;
+    }
+    let url = reqwest::Url::parse(raw).ok()?;
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
+    let host = url.host_str()?.to_ascii_lowercase();
+    TWITCH_GIF_ASSET_HOSTS
+        .iter()
+        .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
+        .then(|| raw.to_string())
+}
+
+/// The host of a GIF URL, for the one deduped warning a refused asset earns.
+pub(crate) fn gif_url_host(raw: &str) -> String {
+    reqwest::Url::parse(raw)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .unwrap_or_else(|| "<not a url>".to_string())
+}
+
+/// Hosts of the GIF fragments in a message whose URL the gate refused.
+pub(crate) fn rejected_gif_hosts(fragments: &Value) -> Vec<String> {
+    fragments
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter(|fragment| fragment["type"].as_str() == Some("gif"))
+                .filter_map(|fragment| fragment["gif"]["url"].as_str())
+                .filter(|url| twitch_gif_asset_url(url).is_none())
+                .map(gif_url_host)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One `warn` per refused GIF host per process, so a chat full of GIFs from a
+/// host the allowlist does not know shows up once in the support bundle, not
+/// once per message. The host only: a GIF URL path is not sensitive, but the
+/// line stays short and the rule matches main's avatar-cache log.
+fn warn_rejected_gif_assets(state: &AppState, fragments: &Value) {
+    static WARNED_HOSTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    for host in rejected_gif_hosts(fragments) {
+        let mut warned = WARNED_HOSTS
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if warned.iter().any(|known| *known == host) {
+            continue;
+        }
+        warned.push(host.clone());
+        drop(warned);
+        state.emit_log(
+            "warn",
+            format!(
+                "Twitch GIF not shown: {host} is not an allowlisted GIF asset host (plan 154). The row keeps the GIF's title."
+            ),
+        );
+    }
+}
+
+/// A GIF's title from its fragment text: Twitch sends the GIPHY title in
+/// brackets with a ` GIF` suffix (`[Y A Y Yes GIF]` → `Y A Y Yes`). Text in
+/// another shape is returned as is, trimmed.
+pub(crate) fn gif_title(text: &str) -> String {
+    let trimmed = text.trim();
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(trimmed)
+        .trim();
+    let title = inner
+        .strip_suffix(" GIF")
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or(inner);
+    title.to_string()
+}
+
 fn parse_fragments(fragments: &Value) -> Vec<LiveChatMessageFragment> {
     fragments
         .as_array()
@@ -364,14 +458,23 @@ fn parse_fragments(fragments: &Value) -> Vec<LiveChatMessageFragment> {
                 .filter_map(|fragment| {
                     let fragment_type = fragment["type"].as_str()?.to_string();
                     let text = fragment["text"].as_str().unwrap_or_default().to_string();
-                    let image_url = fragment
-                        .get("emote")
-                        .and_then(|emote| emote["id"].as_str())
-                        .map(|id| {
-                            format!(
-                                "https://static-cdn.jtvnw.net/emoticons/v2/{id}/default/dark/1.0"
-                            )
-                        });
+                    let image_url = if fragment_type == "gif" {
+                        // Plan 154: Twitch's GIF Keyboard. The id is `gif_id`
+                        // in the changelog and `id` in the reference; neither
+                        // is stored, only the gated URL.
+                        fragment["gif"]["url"]
+                            .as_str()
+                            .and_then(twitch_gif_asset_url)
+                    } else {
+                        fragment
+                            .get("emote")
+                            .and_then(|emote| emote["id"].as_str())
+                            .map(|id| {
+                                format!(
+                                    "https://static-cdn.jtvnw.net/emoticons/v2/{id}/default/dark/1.0"
+                                )
+                            })
+                    };
                     Some(LiveChatMessageFragment {
                         fragment_type,
                         text,
@@ -1232,6 +1335,7 @@ async fn run_eventsub_session(
                     event,
                 } => {
                     let now = chrono::Utc::now().to_rfc3339();
+                    warn_rejected_gif_assets(state, &event["message"]["fragments"]);
                     if let Some(mut message) = normalize_notification(
                         &subscription_type,
                         &event,
@@ -2783,6 +2887,116 @@ mod tests {
             cheer.details,
             Some(LiveChatEventDetails::Cheer { bits: 1500 })
         );
+    }
+
+    #[test]
+    fn gif_fragment_keeps_twitch_url_through_the_gate() {
+        // Plan 154: a GIF Keyboard message is one `gif` fragment whose text
+        // is the bracketed title; the URL is Twitch's, unmodified.
+        let message =
+            normalize_chat_message(&fixture!("twitch-chat-gif"), "s1", None, None, "now").unwrap();
+        assert_eq!(message.message_text, "[Y A Y Yes GIF]");
+        assert_eq!(message.event_type, LiveChatEventType::Message);
+        assert_eq!(message.fragments.len(), 1);
+        assert_eq!(message.fragments[0].fragment_type, "gif");
+        assert_eq!(message.fragments[0].text, "[Y A Y Yes GIF]");
+        assert_eq!(
+            message.fragments[0].image_url.as_deref(),
+            Some("https://media2.giphy.com/media/aUovxH8Vf9qDu/giphy.gif")
+        );
+        assert!(!message.fragments[0].zero_width);
+        assert_eq!(
+            rejected_gif_hosts(&fixture!("twitch-chat-gif")["message"]["fragments"]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn gif_fragment_beside_an_emote_keeps_both() {
+        let fragments = json!([
+            { "type": "emote", "text": "Kappa", "emote": { "id": "25" } },
+            { "type": "text", "text": " " },
+            { "type": "gif", "text": "[Clap GIF]", "gif": { "gif_id": "x1", "url": "https://i.giphy.com/x1.gif" } }
+        ]);
+        let parsed = parse_fragments(&fragments);
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].fragment_type, "emote");
+        assert!(
+            parsed[0]
+                .image_url
+                .as_deref()
+                .unwrap()
+                .starts_with("https://static-cdn.jtvnw.net/emoticons/v2/25/")
+        );
+        assert_eq!(parsed[2].fragment_type, "gif");
+        assert_eq!(
+            parsed[2].image_url.as_deref(),
+            Some("https://i.giphy.com/x1.gif")
+        );
+    }
+
+    #[test]
+    fn gif_url_gate_refuses_everything_but_https_allowlisted_hosts() {
+        assert_eq!(
+            twitch_gif_asset_url("https://media0.giphy.com/media/a/giphy.gif").as_deref(),
+            Some("https://media0.giphy.com/media/a/giphy.gif")
+        );
+        assert_eq!(
+            twitch_gif_asset_url("https://static-cdn.jtvnw.net/gifs/a.gif").as_deref(),
+            Some("https://static-cdn.jtvnw.net/gifs/a.gif")
+        );
+        assert_eq!(
+            twitch_gif_asset_url("https://GIPHY.com/a.gif").as_deref(),
+            Some("https://GIPHY.com/a.gif"),
+            "host matching is case-insensitive and the URL is returned untouched"
+        );
+        for refused in [
+            "http://media0.giphy.com/media/a/giphy.gif",
+            "https://user:pw@media0.giphy.com/a.gif",
+            "https://user@media0.giphy.com/a.gif",
+            "https://giphy.com.evil.example/a.gif",
+            "https://cdn.7tv.app/emote/x/2x.webp",
+            "javascript:alert(1)",
+            "not a url",
+        ] {
+            assert_eq!(twitch_gif_asset_url(refused), None, "{refused}");
+        }
+        let long = format!("https://i.giphy.com/{}", "a".repeat(3_000));
+        assert_eq!(twitch_gif_asset_url(&long), None);
+
+        // A refused URL leaves the fragment with its title and no image.
+        let fragments = json!([
+            { "type": "gif", "text": "[Nope GIF]", "gif": { "id": "n", "url": "http://media0.giphy.com/n.gif" } }
+        ]);
+        let parsed = parse_fragments(&fragments);
+        assert_eq!(parsed[0].fragment_type, "gif");
+        assert_eq!(parsed[0].text, "[Nope GIF]");
+        assert_eq!(parsed[0].image_url, None);
+        assert_eq!(
+            rejected_gif_hosts(&fragments),
+            vec!["media0.giphy.com".to_string()]
+        );
+        assert_eq!(
+            rejected_gif_hosts(&json!([{ "type": "gif", "text": "x", "gif": { "url": "nope" } }])),
+            vec!["<not a url>".to_string()]
+        );
+        // A GIF fragment without a url is a title, not a rejection.
+        assert_eq!(
+            rejected_gif_hosts(&json!([{ "type": "gif", "text": "[x GIF]" }])),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn gif_title_strips_brackets_and_suffix() {
+        assert_eq!(gif_title("[Y A Y Yes GIF]"), "Y A Y Yes");
+        assert_eq!(gif_title("[Clap GIF]"), "Clap");
+        assert_eq!(gif_title("[GIF]"), "GIF");
+        assert_eq!(gif_title("Y A Y Yes GIF"), "Y A Y Yes");
+        assert_eq!(gif_title("[no suffix]"), "no suffix");
+        assert_eq!(gif_title("  plain  "), "plain");
+        assert_eq!(gif_title(""), "");
+        assert_eq!(gif_title("[ GIF ]"), "GIF");
     }
 
     #[test]

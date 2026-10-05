@@ -466,6 +466,29 @@
           "streakCount": 20,
           "channelPointsAwarded": 450
         }
+      },
+      {
+        "id": "session-fixture:twitch:gif-1",
+        "providerMessageId": "gif-1",
+        "platform": "twitch",
+        "sessionId": "session-fixture",
+        "authorId": "1005",
+        "authorName": "Tier2Fan",
+        "authorBadges": ["subscriber"],
+        "authorRoles": ["member"],
+        "publishedAt": "2026-09-24T10:08:00Z",
+        "receivedAt": "2026-09-24T10:08:00.040Z",
+        "messageText": "[Y A Y Yes GIF]",
+        "fragments": [
+          {
+            "type": "gif",
+            "text": "[Y A Y Yes GIF]",
+            "imageUrl": "https://media2.giphy.com/media/aUovxH8Vf9qDu/giphy.gif"
+          }
+        ],
+        "eventType": "message",
+        "isDeleted": false,
+        "rawProviderType": "channel.chat.message"
       }
     ]
   },

@@ -1,0 +1,38 @@
+{
+  "_note": "Plan 154. Shaped per the EventSub reference (Channel Chat Message Event, `gif` fragment, 2026-07-16 changelog) and third-party reports of the bracketed title text; not yet replaced by a captured payload (S0). The changelog names the id `gif_id`, the reference `id`: the parser reads neither, only the gated `url`.",
+  "broadcaster_user_id": "1971641",
+  "broadcaster_user_login": "streamer",
+  "broadcaster_user_name": "Streamer",
+  "chatter_user_id": "42",
+  "chatter_user_login": "tier2fan",
+  "chatter_user_name": "Tier2Fan",
+  "message_id": "chat-gif-1",
+  "message": {
+    "text": "[Y A Y Yes GIF]",
+    "fragments": [
+      {
+        "type": "gif",
+        "text": "[Y A Y Yes GIF]",
+        "cheermote": null,
+        "emote": null,
+        "mention": null,
+        "gif": {
+          "id": "aUovxH8Vf9qDu",
+          "url": "https://media2.giphy.com/media/aUovxH8Vf9qDu/giphy.gif"
+        }
+      }
+    ]
+  },
+  "color": "#1E90FF",
+  "badges": [
+    {
+      "set_id": "subscriber",
+      "id": "2000",
+      "info": "4"
+    }
+  ],
+  "message_type": "text",
+  "cheer": null,
+  "reply": null,
+  "channel_points_custom_reward_id": null
+}
