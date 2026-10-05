@@ -158,6 +158,7 @@
     "smoke:youtube-quota": "node scripts/smoke-youtube-quota-app.mjs",
     "smoke:captions-contract": "cargo build -p videorc-backend && node scripts/smoke-captions-contract.mjs",
     "smoke:cohost-fake": "cargo build -p videorc-backend && node scripts/smoke-cohost-fake.mjs",
+    "smoke:session-markers": "cargo build -p videorc-backend && node scripts/smoke-session-markers.mjs",
     "smoke:orcle-commands": "cargo build -p videorc-backend && node scripts/smoke-orcle-commands.mjs",
     "smoke:captions-live": "node scripts/smoke-captions-live-app.mjs",
     "smoke:captions-dual-orientation": "node scripts/smoke-captions-dual-orientation-app.mjs",

@@ -56,6 +56,7 @@ mod live_pipeline;
 mod live_render;
 mod live_scene;
 mod live_source_switch;
+mod marker_voice;
 mod metal_compositor;
 mod moments;
 mod mpeg_ts;
@@ -93,6 +94,7 @@ mod screen_capture;
 mod secrets;
 mod service_flags;
 mod session_audio;
+mod session_markers;
 mod session_ops;
 mod session_token;
 mod seventv;
@@ -5340,6 +5342,10 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.command.confirm"
         | "cohost.command.cancel"
         | "clip.mark"
+        | "session.marker.voice.configure"
+        | "session.marker.create"
+        | "session.marker.rename"
+        | "session.marker.delete"
         | "captions.overlay.clear"
         | "captions.cues.submit"
         | "capture.recovery.retry"
@@ -5564,6 +5570,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cleanCut.list"
         | "cleanCut.transcript"
         | "clip.marks.list"
+        | "session.markers.list"
+        | "session.marker.get"
         | "preview.live.status"
         | "session.sources.get"
         | "recording.status"
@@ -9060,7 +9068,12 @@ async fn handle_text_message_with_role(
                 .get("durationMs")
                 .and_then(|value| value.as_u64())
                 .unwrap_or(600);
-            match captions::inject_caption_contract_test_audio(duration_ms).await {
+            let result = if command.params.get("quiet").and_then(|v| v.as_bool()) == Some(true) {
+                captions::inject_caption_contract_test_quiet(duration_ms).await
+            } else {
+                captions::inject_caption_contract_test_audio(duration_ms).await
+            };
+            match result {
                 Ok(frames_accepted) => ServerResponse::ok(
                     command.id,
                     serde_json::json!({ "framesAccepted": frames_accepted }),
@@ -12098,6 +12111,63 @@ async fn handle_text_message_with_role(
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
+            }
+        }
+        "session.marker.voice.configure" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct Params {
+                session_id: String,
+                consent: bool,
+            }
+            match serde_json::from_value::<Params>(command.params) {
+                Ok(params) => match captions::configure_marker_voice(
+                    state,
+                    &params.session_id,
+                    params.consent,
+                )
+                .await
+                {
+                    Ok(listening) => ServerResponse::ok(command.id, listening),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "marker-voice-refused", error.to_string())
+                    }
+                },
+                Err(_) => ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "Invalid marker voice scope.",
+                ),
+            }
+        }
+        "session.marker.create" => {
+            match session_markers::dispatch(state, &command.method, command.params).await {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => ServerResponse::error(command.id, error.code(), error.to_string()),
+            }
+        }
+        "session.marker.rename" => {
+            match session_markers::dispatch(state, &command.method, command.params).await {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => ServerResponse::error(command.id, error.code(), error.to_string()),
+            }
+        }
+        "session.marker.delete" => {
+            match session_markers::dispatch(state, &command.method, command.params).await {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => ServerResponse::error(command.id, error.code(), error.to_string()),
+            }
+        }
+        "session.markers.list" => {
+            match session_markers::dispatch(state, &command.method, command.params).await {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => ServerResponse::error(command.id, error.code(), error.to_string()),
+            }
+        }
+        "session.marker.get" => {
+            match session_markers::dispatch(state, &command.method, command.params).await {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => ServerResponse::error(command.id, error.code(), error.to_string()),
             }
         }
         "clip.mark" => match clip_marks::mark_manual(state).await {

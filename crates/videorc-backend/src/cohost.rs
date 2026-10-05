@@ -7235,6 +7235,12 @@ pub async fn set_cohost_settings(
     let snapshot = engine.snapshot();
     drop(engine);
     save_session_report(state, report);
+    if !next.enabled || !next.listen {
+        crate::captions::retire_marker_voice(state).await;
+        if running.is_none() {
+            crate::captions::stop_listen(state).await;
+        }
+    }
     if stopped {
         crate::captions::retire_orcle_speech(state).await;
         clear_transcript(state);
@@ -7303,6 +7309,9 @@ where
         return Err(CohostError::InvalidParams);
     }
     let consent = params.consent_to_process_chat;
+    if !consent {
+        crate::captions::retire_marker_voice(state).await;
+    }
     // Chat replacement/retirement and co-host admission are one session
     // lifecycle transaction. Keep this fence from validation through the
     // authoritative state publication, but never hold the chat coordinator
@@ -7411,6 +7420,10 @@ pub async fn stop_cohost(state: &AppState) -> CohostState {
 pub(crate) async fn stop_cohost_if_premium_lapsed(state: &AppState) -> bool {
     if premium_entitled() {
         return false;
+    }
+    crate::captions::retire_marker_voice(state).await;
+    if state.cohost.lock().await.session.is_none() {
+        crate::captions::stop_listen(state).await;
     }
     let reason = if crate::account::stored_session_token().is_some() {
         CohostReason::PremiumRequired
@@ -7924,7 +7937,7 @@ fn current_viewer_total(state: &AppState) -> Option<u64> {
         .and_then(|aggregator| aggregator.current_total(chrono::Utc::now()))
 }
 
-fn premium_entitled() -> bool {
+pub(crate) fn premium_entitled() -> bool {
     crate::entitlements::require_feature(
         &crate::entitlements::current_entitlements(),
         FeatureId::LiveCohost,

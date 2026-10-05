@@ -217,6 +217,20 @@ async function runPremiumScenario(profile) {
     )
     pass('A setup: chat from scripted authors, captions live, the tick flagged spam_bot')
 
+    // Named point commands have a capture owner. Without a recording they
+    // cannot become an Unknown moderation card or invoke the cloud parser.
+    phase('A0: named and negated markers remain outside chat commands')
+    await say(events, ORCLE_COMMAND_FINALS.namedMarker)
+    await say(events, ORCLE_COMMAND_FINALS.negatedMarker)
+    expect(
+      (await request(ws, timeoutMs, 'session.markers.list', { sessionId })).markers.length === 0,
+      'A chat session without capture saved a named marker'
+    )
+    const markerOnlyState = await request(ws, timeoutMs, 'cohost.status', {})
+    expect(!markerOnlyState.command, 'A marker command became a chat moderation card')
+    expect(captionFake.state.commandRequests === 0, 'Named markers invoked a cloud command parser')
+    pass('A0 named markers: no capture write, moderation card or cloud parser request')
+
     // 1. Highlight by name, one command split across two finals.
     phase('A1: "Orcle, highlight the comment" | "from coders X."')
     const highlightSince = Date.now()
@@ -351,7 +365,10 @@ async function runPremiumScenario(profile) {
     const cancelCard = await waitForCommand(
       events,
       (command) =>
-        command.kind === 'remove' && command.status === 'confirm' && Boolean(command.operationId),
+        command.kind === 'remove' &&
+        command.status === 'confirm' &&
+        Boolean(command.operationId) &&
+        command.id !== card.command.id,
       'the second removal card',
       cancelSince
     )

@@ -14,6 +14,9 @@ import {
   type ReactElement
 } from 'react'
 
+import { classifyComposerDraft, markerTime } from '../../../../shared/session-markers'
+import type { MarkerContext, SessionMarker } from '@/lib/backend'
+import { Command, CommandItem, CommandList } from '@/components/ui/command'
 import { ChatPlatformIcon, CHAT_PLATFORM_LABELS } from '@/components/chat-platform-icon'
 import { CohostNudge } from '@/components/cohost-nudge'
 import { CommentRow, commentHighlightPresentationForMessage } from '@/components/comment-row'
@@ -105,6 +108,9 @@ export function ChatPane({
   sendOperation = null,
   sendFailures = [],
   onSend,
+  markerContext,
+  onMarker,
+  onUndoMarker,
   prefill = null,
   cohostNudge = false,
   onCohostNudgeTurnOn,
@@ -141,6 +147,9 @@ export function ChatPane({
   sendPending?: boolean
   sendOperation?: CommentsSendOperation | null
   sendFailures?: ChatSendFailure[]
+  markerContext?: MarkerContext | null
+  onMarker?: (label?: string) => Promise<SessionMarker>
+  onUndoMarker?: (marker: SessionMarker) => Promise<void>
   onSend?: (text: string, options?: ChatSendOptions) => void
   prefill?: ChatPrefill | null
   cohostNudge?: boolean
@@ -350,7 +359,7 @@ export function ChatPane({
     if (searchFocusSignal > 0) searchRef.current?.focus()
   }, [searchFocusSignal])
 
-  const composerVisible = Boolean(onSend) && live
+  const composerVisible = Boolean(onSend) && (live || Boolean(markerContext))
 
   return (
     <section
@@ -599,6 +608,9 @@ export function ChatPane({
 
       {composerVisible && onSend ? (
         <Composer
+          markerContext={markerContext}
+          onMarker={onMarker}
+          onUndoMarker={onUndoMarker}
           cohostNudge={cohostNudge}
           failures={sendFailures}
           operation={sendOperation}
@@ -614,7 +626,7 @@ export function ChatPane({
   )
 }
 
-function Composer({
+export function Composer({
   providers,
   pending,
   failures,
@@ -623,8 +635,14 @@ function Composer({
   cohostNudge,
   onCohostNudgeTurnOn,
   onCohostNudgeDismiss,
-  onSend
+  onSend,
+  markerContext,
+  onMarker,
+  onUndoMarker
 }: {
+  markerContext?: MarkerContext | null
+  onMarker?: (label?: string) => Promise<SessionMarker>
+  onUndoMarker?: (marker: SessionMarker) => Promise<void>
   providers: readonly LiveChatProviderState[]
   pending: boolean
   failures: ChatSendFailure[]
@@ -636,6 +654,31 @@ function Composer({
   onSend: (text: string, options?: ChatSendOptions) => void
 }): ReactElement {
   const [draft, setDraft] = useState('')
+  const draftRef = useRef(draft)
+  draftRef.current = draft
+  const [localPending, setLocalPending] = useState(false)
+  const localPendingRef = useRef(false)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [savedMarker, setSavedMarker] = useState<SessionMarker | null>(null)
+  const [completionDismissed, setCompletionDismissed] = useState(false)
+  const [completionIndex, setCompletionIndex] = useState(0)
+  const heardMarkerId = useRef<string | null>(null)
+  const heardMarkerRevision = useRef(0)
+  useEffect(() => {
+    const marker = markerContext?.lastMarker
+    if (
+      !marker ||
+      (marker.id === heardMarkerId.current && marker.revision === heardMarkerRevision.current)
+    )
+      return
+    heardMarkerId.current = marker.id
+    heardMarkerRevision.current = marker.revision
+    setSavedMarker(marker)
+    setNotice(
+      `Marker saved at ${markerTime(marker.atSeconds)} · ${marker.label ?? 'Untitled marker'}`
+    )
+  }, [markerContext?.lastMarker])
+
   const [replyToQuestionId, setReplyToQuestionId] = useState<string | null>(null)
   // null sends to every writable destination; a set is the streamer's pick.
   const [picked, setPicked] = useState<ReadonlySet<string> | null>(null)
@@ -646,7 +689,23 @@ function Composer({
   const targetPlatforms = [...new Set(targets.map((provider) => provider.platform))]
   // The draft must fit the STRICTEST destination it reaches (140 with X).
   const maxChars = chatDraftMaxChars(targetPlatforms)
-  const canSend = targets.length > 0 && !pending
+  const command = classifyComposerDraft(draft)
+  const local = command.kind !== 'chat'
+  const canSend = local
+    ? !localPending &&
+      (command.kind !== 'marker' ||
+        Boolean((markerContext?.available || markerContext?.retryAvailable) && onMarker))
+    : targets.length > 0 && !pending
+  const completions = ['/marker', '/help'].filter(
+    (value) =>
+      draft.startsWith('/') && !draft.includes(' ') && value.startsWith(draft.toLowerCase())
+  )
+  const showCompletions = completions.length > 0 && !completionDismissed
+  const complete = (value: string): void => {
+    setDraft(value + (value === '/marker' ? ' ' : ''))
+    setCompletionDismissed(true)
+    inputRef.current?.focus()
+  }
 
   useEffect(() => {
     if (!prefill || prefill.seq === appliedPrefillRef.current) return
@@ -657,7 +716,47 @@ function Composer({
   }, [prefill])
 
   const submit = (): void => {
-    const text = validateChatDraft(draft, maxChars)
+    if (localPendingRef.current) return
+    if (command.kind === 'error') {
+      setNotice(command.message)
+      return
+    }
+    if (command.kind === 'help') {
+      setNotice(
+        '/marker [title] saves a point on this recording or livestream. // sends a literal slash to chat. Markers are in Library → Session actions → Markers.'
+      )
+      return
+    }
+    if (command.kind === 'marker') {
+      if ((!markerContext?.available && !markerContext?.retryAvailable) || !onMarker) {
+        setNotice(markerContext?.reason ?? 'Start a recording or livestream to make a marker.')
+        return
+      }
+      setSavedMarker(null)
+      const submitted = draft
+      localPendingRef.current = true
+      setLocalPending(true)
+      setNotice('Saving marker…')
+      void onMarker(command.label)
+        .then((marker) => {
+          setSavedMarker(marker)
+          setNotice(
+            `Marker saved at ${markerTime(marker.atSeconds)} · ${marker.label ?? 'Untitled marker'}`
+          )
+          if (draftRef.current === submitted) setDraft('')
+        })
+        .catch((error) =>
+          setNotice(
+            error instanceof Error ? error.message : 'Could not save marker. Retry this command.'
+          )
+        )
+        .finally(() => {
+          localPendingRef.current = false
+          setLocalPending(false)
+        })
+      return
+    }
+    const text = validateChatDraft(command.text, maxChars)
     if (!text || !canSend) return
     onSend(text, {
       ...(replyToQuestionId ? { inReplyToQuestionId: replyToQuestionId } : {}),
@@ -678,7 +777,13 @@ function Composer({
     <div className="shrink-0 px-2 pt-1 pb-2" data-slot="chat-composer">
       <div className="flex flex-col rounded-panel border border-border bg-foreground/[0.04] p-2">
         <InputGroup>
-          {writable.length > 1 ? (
+          {local ? (
+            <InputGroupAddon>
+              <span className="text-[11px] text-muted-foreground">
+                {command.kind === 'marker' ? 'Local · current session' : 'Local'}
+              </span>
+            </InputGroupAddon>
+          ) : writable.length > 1 ? (
             <InputGroupAddon>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
@@ -730,16 +835,43 @@ function Composer({
           ) : null}
           <InputGroupInput
             ref={inputRef}
-            aria-label="Send a message to all writable destinations"
-            disabled={writable.length === 0}
-            maxLength={maxChars}
-            placeholder={writable.length > 0 ? 'Send a message…' : 'No writable destinations'}
+            aria-label="Message or local command"
+            placeholder={
+              writable.length > 0
+                ? 'Message or /marker [title]…'
+                : '/marker [title] · Local commands'
+            }
             value={draft}
             onChange={(event) => {
               setDraft(event.target.value)
+              setCompletionDismissed(false)
+              setCompletionIndex(0)
               if (event.target.value.trim().length === 0) setReplyToQuestionId(null)
             }}
             onKeyDown={(event) => {
+              if (event.nativeEvent.isComposing || event.keyCode === 229) return
+              if (event.key === 'Escape') {
+                setCompletionDismissed(true)
+                return
+              }
+              if (showCompletions && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+                event.preventDefault()
+                setCompletionIndex(
+                  (index) =>
+                    (index + (event.key === 'ArrowDown' ? 1 : completions.length - 1)) %
+                    completions.length
+                )
+                return
+              }
+              if (
+                showCompletions &&
+                (event.key === 'Tab' ||
+                  (event.key === 'Enter' && draft !== completions[completionIndex]))
+              ) {
+                event.preventDefault()
+                complete(completions[completionIndex] ?? completions[0])
+                return
+              }
               if (event.key === 'Enter') {
                 event.preventDefault()
                 submit()
@@ -751,16 +883,28 @@ function Composer({
               <span
                 className={cn(
                   'text-[11px] tabular-nums',
-                  draft.trim().length > maxChars ? 'text-destructive' : 'text-subtle'
+                  !local && draft.trim().length > maxChars ? 'text-destructive' : 'text-subtle'
                 )}
               >
-                {draft.trim().length}/{maxChars}
+                {local
+                  ? command.kind === 'marker'
+                    ? `${[...(command.label ?? '')].length}/120`
+                    : 'Local'
+                  : `${draft.trim().length}/${maxChars}`}
               </span>
             ) : null}
             <Kbd aria-label="Enter">↵</Kbd>
             <InputGroupButton
-              aria-label={pending ? 'Sending message' : 'Send message to all writable destinations'}
-              disabled={!canSend || !validateChatDraft(draft, maxChars)}
+              aria-label={
+                local
+                  ? 'Run local command'
+                  : pending
+                    ? 'Sending message'
+                    : 'Send message to all writable destinations'
+              }
+              disabled={
+                localPending || (!local && (!canSend || !validateChatDraft(command.text, maxChars)))
+              }
               size="icon-xs"
               onClick={submit}
             >
@@ -768,6 +912,64 @@ function Composer({
             </InputGroupButton>
           </InputGroupAddon>
         </InputGroup>
+        {showCompletions ? (
+          <Command
+            shouldFilter={false}
+            value={completions[completionIndex]}
+            className="mt-1"
+            aria-label="Local commands"
+          >
+            <CommandList>
+              {completions.map((value) => (
+                <CommandItem key={value} value={value} onSelect={() => complete(value)}>
+                  {value}
+                  {value === '/marker' ? ' [title] · Save a timeline point' : ' · Command help'}
+                </CommandItem>
+              ))}
+            </CommandList>
+          </Command>
+        ) : null}
+        {markerContext?.available ? (
+          <p className="mt-1 text-[11px] text-muted-foreground" data-slot="marker-voice-status">
+            {markerContext.voice?.state === 'on'
+              ? 'Orcle hears marker commands.'
+              : markerContext.voice?.state === 'starting'
+                ? 'Orcle is connecting to hear marker commands…'
+                : (markerContext.voice?.message ??
+                  'Typed /marker commands are available. Turn on Orcle listening for voice markers.')}
+          </p>
+        ) : null}
+        {notice ? (
+          <div role="status" className="mt-1 text-xs text-muted-foreground">
+            {notice}
+            {savedMarker && onUndoMarker ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={localPending}
+                onClick={() => {
+                  if (localPendingRef.current) return
+                  localPendingRef.current = true
+                  setLocalPending(true)
+                  void onUndoMarker(savedMarker)
+                    .then(() => {
+                      setSavedMarker(null)
+                      setNotice('Marker removed.')
+                    })
+                    .catch((error) =>
+                      setNotice(error instanceof Error ? error.message : 'Could not remove marker.')
+                    )
+                    .finally(() => {
+                      localPendingRef.current = false
+                      setLocalPending(false)
+                    })
+                }}
+              >
+                Undo
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
         {replyToQuestionId ? (
           <p className="mt-1 text-[11px] text-subtle">Orcle&apos;s draft. ↵ sends it.</p>
         ) : null}

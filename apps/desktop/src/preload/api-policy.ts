@@ -25,6 +25,9 @@ export const AUXILIARY_API_KEYS = {
     'sendChatFromCommentsWindow',
     'clearComments',
     // Mark clip from the Stream Manager (plan 068 D6): relayed, like clear.
+    'getMarkerContext',
+    'onMarkerContext',
+    'markerFromCommentsWindow',
     'markClipFromCommentsWindow',
     // Show who followed (plan 071, S2): main starts the Twitch reconnect.
     'showFollowNamesFromCommentsWindow',

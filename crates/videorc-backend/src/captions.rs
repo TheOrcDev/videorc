@@ -234,11 +234,25 @@ pub async fn inject_caption_contract_test_audio(duration_ms: u64) -> Result<u64>
     }
     produce_caption_contract_test_audio(duration_ms).await
 }
+#[cfg(debug_assertions)]
+pub async fn inject_caption_contract_test_quiet(duration_ms: u64) -> Result<u64> {
+    if !caption_contract_test_enabled() {
+        bail!("Caption contract test audio is disabled.")
+    }
+    produce_caption_contract_test_audio_at_peak(duration_ms, 0.0).await
+}
 
 // Kept separate from the RPC env guard so the maintained tests can exercise
 // the actual debug producer and installed tap without changing global env.
 #[cfg(debug_assertions)]
 async fn produce_caption_contract_test_audio(duration_ms: u64) -> Result<u64> {
+    produce_caption_contract_test_audio_at_peak(duration_ms, 0.12).await
+}
+#[cfg(debug_assertions)]
+async fn produce_caption_contract_test_audio_at_peak(
+    duration_ms: u64,
+    raw_peak: f32,
+) -> Result<u64> {
     // Capture the exact sender before awaiting serialization. A queued
     // request belongs to this tap, not whichever tap exists when it resumes.
     let sender = {
@@ -276,7 +290,7 @@ async fn produce_caption_contract_test_audio(duration_ms: u64) -> Result<u64> {
         for sample_index in 0..samples_per_channel {
             let absolute = frame_index as usize * samples_per_channel + sample_index;
             let phase = absolute as f32 * 440.0 * std::f32::consts::TAU / 48_000.0;
-            let sample = phase.sin() * 0.12;
+            let sample = phase.sin() * raw_peak;
             samples.extend_from_slice(&[sample, sample]);
         }
         // Native frames represent completed PCM buffers. Pace this debug
@@ -2981,6 +2995,10 @@ pub struct CaptionsCoordinator {
     speech_admitted: bool,
     speech_epoch: u64,
     speech_started_at: Option<std::time::Instant>,
+    marker_session_id: Option<String>,
+    marker_epoch: u64,
+    marker_started_at: Option<std::time::Instant>,
+    marker_listening: Option<crate::cohost::CohostListening>,
     language: Option<String>,
     /// Orders delayed capture auto-start against explicit stop/start, capture
     /// stop, sign-out, and shutdown. A queued task may commit only the exact
@@ -3506,17 +3524,237 @@ pub(crate) async fn grant_orcle_speech(state: &AppState) {
     }
 }
 
+pub(crate) async fn retire_marker_voice(state: &AppState) {
+    let mut coordinator = state.captions.lock().await;
+    coordinator.marker_started_at = None;
+    coordinator.marker_epoch = coordinator.marker_epoch.saturating_add(1);
+}
+
+pub(crate) async fn pause_marker_voice_for_service_flags(state: &AppState) {
+    let listening = crate::cohost::CohostListening::blocked(
+        "voice-disabled",
+        "Orcle voice commands are temporarily unavailable. Turn listening on again after the pause ends.",
+    );
+    {
+        let mut coordinator = state.captions.lock().await;
+        coordinator.marker_started_at = None;
+        coordinator.marker_epoch = coordinator.marker_epoch.saturating_add(1);
+        coordinator.marker_listening = Some(listening.clone());
+        if let Some(session_id) = coordinator.marker_session_id.as_ref() {
+            state.emit_event(
+                "session.marker.voice.status",
+                serde_json::json!({"sessionId":session_id,"listening":listening}),
+            );
+        }
+    }
+    if crate::cohost::cohost_status(state)
+        .await
+        .session_id
+        .is_none()
+    {
+        stop_listen(state).await;
+    }
+}
+
+/// Capture-owned voice scope: never starts live chat or its scheduler.
+/// Uses the existing shared provider, account gates and renderer-held AI consent.
+pub(crate) async fn configure_marker_voice(
+    state: &AppState,
+    session_id: &str,
+    consent: bool,
+) -> Result<crate::cohost::CohostListening> {
+    use crate::cohost::CohostListening;
+    let _delivery = state.live_chat_persistence.begin_delivery().await;
+    {
+        let recording = state.recording.lock().await;
+        if !recording
+            .as_ref()
+            .is_some_and(|r| r.session_id == session_id && !r.stop_requested)
+        {
+            bail!("The capture session has ended.")
+        }
+    }
+    let settings = crate::cohost::get_cohost_settings(state).await;
+    let blocked = if !consent {
+        Some(CohostListening::blocked(
+            "consent-required",
+            "Enable cloud AI consent to use voice markers.",
+        ))
+    } else if !settings.enabled || !settings.listen {
+        Some(CohostListening::off())
+    } else if !crate::cohost::premium_entitled() {
+        Some(CohostListening::blocked(
+            "premium-required",
+            "Orcle voice markers require Videorc Premium.",
+        ))
+    } else if crate::account::stored_session_token().is_none() {
+        Some(CohostListening::blocked(
+            "signed-out",
+            "Sign in to use Orcle voice markers.",
+        ))
+    } else if !crate::service_flags::orcle_voice_commands_enabled(state) {
+        Some(CohostListening::blocked(
+            "voice-disabled",
+            "Orcle voice commands are temporarily unavailable.",
+        ))
+    } else {
+        None
+    };
+    {
+        let mut coordinator = state.captions.lock().await;
+        if coordinator.privacy_teardown_in_progress || coordinator.privacy_teardown_failed {
+            bail!("Account privacy cleanup is in progress.")
+        }
+        if coordinator.marker_session_id.as_deref() != Some(session_id) || blocked.is_some() {
+            coordinator.marker_epoch = coordinator.marker_epoch.saturating_add(1);
+            coordinator.marker_started_at = None;
+        }
+        coordinator.marker_session_id = Some(session_id.into());
+        if blocked.is_none() && coordinator.marker_started_at.is_none() {
+            coordinator.marker_started_at = Some(std::time::Instant::now())
+        }
+    }
+    let listening = if let Some(blocked) = blocked {
+        // Consent/settings opt-out cancels queued marker audio even if explicit captions stay on.
+        if crate::cohost::cohost_status(state)
+            .await
+            .session_id
+            .is_none()
+        {
+            stop_listen(state).await
+        }
+        blocked
+    } else {
+        start_listen_for_cohost(state, session_id).await
+    };
+    let mut coordinator = state.captions.lock().await;
+    coordinator.marker_listening = Some(listening.clone());
+    state.emit_event(
+        "session.marker.voice.status",
+        serde_json::json!({"sessionId":session_id,"listening":listening}),
+    );
+    Ok(listening)
+}
+
+fn marker_audio_owned(
+    session: &CaptionSession,
+    admission: AdmittedOrcleAudio,
+    coordinator: &CaptionsCoordinator,
+    target: Option<&crate::clip_marks::MarkTarget>,
+) -> bool {
+    admission.owns_marker(coordinator, target.map(|target| target.session_id.as_str()))
+        && !session.stop.load(Ordering::Acquire)
+        && crate::cohost::premium_entitled()
+        && crate::account::stored_session_token().is_some()
+        && crate::service_flags::orcle_voice_commands_enabled(&session.state)
+}
+fn publish_marker_outcome(
+    session: &CaptionSession,
+    target: Option<&crate::clip_marks::MarkTarget>,
+    outcome: crate::marker_voice::UtteranceOutcome,
+) -> bool {
+    if let Some(message) = outcome.refusal {
+        session.state.emit_event(
+            "session.marker.voice.refused",
+            serde_json::json!({"message":message}),
+        );
+    }
+    if let Some(target) = target {
+        for marker in outcome.markers {
+            if let Err(error) = crate::session_markers::commit_voice(
+                &session.state,
+                crate::session_markers::CreateMarkerParams {
+                    operation_id: uuid::Uuid::new_v4().to_string(),
+                    session_id: target.session_id.clone(),
+                    label: marker.label,
+                },
+                marker.at_seconds,
+            ) {
+                session.state.emit_event(
+                    "session.marker.voice.refused",
+                    serde_json::json!({"message":error.to_string()}),
+                );
+            }
+        }
+    }
+    outcome.consumed
+}
+fn note_chunk_marker(
+    session: &CaptionSession,
+    chunk: &BufferedCaptionChunk,
+    text: &str,
+    segments: &[CaptionSegment],
+    coordinator: &CaptionsCoordinator,
+) -> bool {
+    let mut buffer_epoch = session
+        .marker_buffer_epoch
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut buffer = session
+        .marker_utterance
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let owned = marker_audio_owned(
+        session,
+        chunk.admission,
+        coordinator,
+        session.mark_target.as_ref(),
+    );
+    tracing::debug!(
+        seq = chunk.seq,
+        offset_seconds = chunk.offset_seconds,
+        marker_epoch = ?chunk.admission.marker_epoch,
+        scope_epoch = coordinator.marker_epoch,
+        owned,
+        "Marker chunk admission"
+    );
+    if !owned {
+        buffer.cancel();
+        return buffer.observe_cancelled(&chunk.samples, text);
+    }
+    if *buffer_epoch != chunk.admission.marker_epoch {
+        buffer.cancel();
+        *buffer_epoch = chunk.admission.marker_epoch;
+    }
+    let outcome = buffer.observe(
+        chunk.seq,
+        chunk.offset_seconds,
+        chunk.duration_seconds,
+        &chunk.samples,
+        text,
+        segments,
+    );
+    publish_marker_outcome(session, session.mark_target.as_ref(), outcome)
+}
+
 /// Two independent owners travel with input audio. A Listen setting change
 /// retires readiness without retiring speech admitted by the same consent.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct AdmittedOrcleAudio {
     speech_epoch: Option<u64>,
     listen_epoch: Option<u64>,
+    marker_epoch: Option<u64>,
 }
 
 impl AdmittedOrcleAudio {
+    fn owns_marker(
+        self,
+        coordinator: &CaptionsCoordinator,
+        target_session_id: Option<&str>,
+    ) -> bool {
+        target_session_id.is_some()
+            && target_session_id == coordinator.marker_session_id.as_deref()
+            && coordinator.marker_started_at.is_some()
+            && self.marker_epoch == Some(coordinator.marker_epoch)
+            && !coordinator.privacy_teardown_in_progress
+            && !coordinator.privacy_teardown_failed
+    }
+
     fn merge(self, other: Self) -> Self {
         Self {
+            marker_epoch: self
+                .marker_epoch
+                .filter(|epoch| Some(*epoch) == other.marker_epoch),
             speech_epoch: self
                 .speech_epoch
                 .filter(|epoch| Some(*epoch) == other.speech_epoch),
@@ -3533,9 +3771,57 @@ impl AdmittedOrcleAudio {
     #[cfg(test)]
     fn test_epoch(epoch: u64) -> Self {
         Self {
+            marker_epoch: None,
             speech_epoch: Some(epoch),
             listen_epoch: Some(epoch),
         }
+    }
+}
+
+#[cfg(test)]
+mod marker_ownership_tests {
+    use super::*;
+
+    #[test]
+    fn delayed_marker_audio_cannot_acquire_a_replacement_capture_or_consent_grant() {
+        let mut coordinator = CaptionsCoordinator {
+            marker_session_id: Some("capture-a".into()),
+            marker_epoch: 1,
+            marker_started_at: Some(std::time::Instant::now()),
+            ..Default::default()
+        };
+        let admitted = AdmittedOrcleAudio {
+            marker_epoch: Some(1),
+            ..Default::default()
+        };
+        assert!(admitted.owns_marker(&coordinator, Some("capture-a")));
+        // Graceful caption retirement alone doesn't move the immutable target.
+        coordinator.capture_epoch += 1;
+        assert!(admitted.owns_marker(&coordinator, Some("capture-a")));
+        coordinator.marker_session_id = Some("capture-b".into());
+        coordinator.marker_epoch += 1;
+        assert!(!admitted.owns_marker(&coordinator, Some("capture-a")));
+        assert!(!admitted.owns_marker(&coordinator, Some("capture-b")));
+        let fresh = AdmittedOrcleAudio {
+            marker_epoch: Some(2),
+            ..Default::default()
+        };
+        assert!(fresh.owns_marker(&coordinator, Some("capture-b")));
+        coordinator.marker_started_at = None;
+        coordinator.marker_epoch += 1;
+        assert!(!fresh.owns_marker(&coordinator, Some("capture-b")));
+        coordinator.marker_started_at = Some(std::time::Instant::now());
+        assert!(!fresh.owns_marker(&coordinator, Some("capture-b")));
+        let new_grant = AdmittedOrcleAudio {
+            marker_epoch: Some(3),
+            ..Default::default()
+        };
+        assert!(new_grant.owns_marker(&coordinator, Some("capture-b")));
+        coordinator.privacy_teardown_in_progress = true;
+        assert!(!new_grant.owns_marker(&coordinator, Some("capture-b")));
+        coordinator.privacy_teardown_in_progress = false;
+        coordinator.privacy_teardown_failed = true;
+        assert!(!new_grant.owns_marker(&coordinator, Some("capture-b")));
     }
 }
 
@@ -3555,6 +3841,21 @@ fn spawn_listening_publish(
     // a sign-out never overwrites the sign-out's `blocked`.
     let state = state.clone();
     tokio::spawn(async move {
+        {
+            let mut coordinator = state.captions.lock().await;
+            if coordinator.listen_epoch == listen_epoch
+                && coordinator.listen_wanted
+                && coordinator.marker_started_at.is_some()
+            {
+                if let Some(session_id) = coordinator.marker_session_id.as_ref() {
+                    state.emit_event(
+                        "session.marker.voice.status",
+                        serde_json::json!({"sessionId":session_id,"listening":listening}),
+                    );
+                }
+                coordinator.marker_listening = Some(listening.clone());
+            }
+        }
         crate::cohost::publish_listening_for_epoch(&state, listen_epoch, listening).await;
     });
 }
@@ -3883,6 +4184,8 @@ fn spawn_transcription_task(
         stop: task_stop,
         present,
         mark_target: start.mark_target,
+        marker_utterance: std::sync::Mutex::new(Default::default()),
+        marker_buffer_epoch: std::sync::Mutex::new(None),
     })));
     coordinator.stop = Some(stop);
     status
@@ -4153,6 +4456,9 @@ pub async fn stop_captions_for_sign_out(
         coordinator.listen_ready = false;
         // A listening publish queued before this line never lands after it.
         coordinator.listen_epoch = coordinator.listen_epoch.saturating_add(1);
+        coordinator.marker_started_at = None;
+        coordinator.marker_epoch = coordinator.marker_epoch.saturating_add(1);
+        coordinator.marker_session_id = None;
         coordinator.speech_admitted = false;
         coordinator.speech_epoch = coordinator.speech_epoch.saturating_add(1);
         coordinator.speech_started_at = None;
@@ -4560,6 +4866,8 @@ struct CaptionSession {
     /// clip mark lands on it even while the capture-end drain runs after the
     /// recording slot was retired.
     mark_target: Option<crate::clip_marks::MarkTarget>,
+    marker_utterance: std::sync::Mutex<crate::marker_voice::UtteranceBuffer>,
+    marker_buffer_epoch: std::sync::Mutex<Option<u64>>,
 }
 
 impl CaptionSession {
@@ -4578,6 +4886,9 @@ impl CaptionSession {
     async fn admitted_orcle_audio(&self) -> AdmittedOrcleAudio {
         let coordinator = self.state.captions.lock().await;
         AdmittedOrcleAudio {
+            marker_epoch: coordinator
+                .marker_started_at
+                .map(|_| coordinator.marker_epoch),
             speech_epoch: coordinator
                 .speech_admitted
                 .then_some(coordinator.speech_epoch),
@@ -4596,6 +4907,10 @@ impl CaptionSession {
             return AdmittedOrcleAudio::default();
         };
         AdmittedOrcleAudio {
+            marker_epoch: coordinator
+                .marker_started_at
+                .filter(|grant| earliest >= *grant)
+                .map(|_| coordinator.marker_epoch),
             speech_epoch: coordinator
                 .speech_started_at
                 .filter(|grant| coordinator.speech_admitted && earliest >= *grant)
@@ -4624,6 +4939,13 @@ impl CaptionSession {
                 return;
             }
             coordinator.listen_ready = true;
+            if let Some(session_id) = coordinator.marker_session_id.as_ref() {
+                self.state.emit_event(
+                    "session.marker.voice.status",
+                    serde_json::json!({"sessionId":session_id,"listening":listening}),
+                );
+            }
+            coordinator.marker_listening = Some(listening.clone());
         }
         spawn_listening_publish(&self.state, epoch, listening);
     }
@@ -6165,19 +6487,49 @@ async fn handle_realtime_event(
                 if presented {
                     session.state.emit_event("captions.update", update.clone());
                 }
+                let marker_consumed = crate::marker_voice::marker_candidate(&transcript);
+                if !item.clip_processed
+                    && marker_consumed
+                    && marker_audio_owned(
+                        session,
+                        item.admission,
+                        &coordinator,
+                        item.mark_target.as_ref(),
+                    )
+                {
+                    let mut outcome = crate::marker_voice::UtteranceOutcome {
+                        consumed: true,
+                        ..Default::default()
+                    };
+                    if duration_seconds > 10.0 {
+                        outcome.refusal = Some(
+                            "The marker command was too long. Please repeat a shorter command."
+                                .into(),
+                        )
+                    } else {
+                        match crate::marker_voice::parse_marker(&transcript, offset, &[]) {
+                            Ok(Some(marker)) => outcome.markers.push(marker),
+                            Err(message) => outcome.refusal = Some(message),
+                            _ => {}
+                        }
+                    }
+                    publish_marker_outcome(session, item.mark_target.as_ref(), outcome);
+                }
                 if !item.clip_processed {
                     items.get_mut(&item_id).unwrap().clip_processed = true;
-                    crate::clip_marks::note_transcript_final(
-                        &session.state,
-                        &transcript,
-                        &[],
-                        offset,
-                        item.mark_target.clone(),
-                    );
+                    if !marker_consumed {
+                        crate::clip_marks::note_transcript_final(
+                            &session.state,
+                            &transcript,
+                            &[],
+                            offset,
+                            item.mark_target.clone(),
+                        );
+                    }
                 }
                 // Orcle's consent check and append stay under the coordinator
                 // lock, independently of the recording-owned clip hook.
-                if current_capture {
+                if current_capture && !marker_consumed {
                     crate::cohost::note_transcript_final(
                         &session.state,
                         &update,
@@ -6630,6 +6982,11 @@ async fn commit_chunk_transcript(
 ) {
     let text = response.text.trim();
     if text.is_empty() {
+        // An empty successful final still owns its audio. It can include the
+        // quiet tail of a marker turn; skipping it invents a gap at the next
+        // chunk and loses a complete command. No caption/clip/chat is emitted.
+        let coordinator = session.state.captions.lock().await;
+        note_chunk_marker(session, chunk, "", &[], &coordinator);
         return;
     }
     let update = CaptionsUpdate {
@@ -6668,7 +7025,9 @@ async fn commit_chunk_transcript(
         }
         // Recording ownership is independent of current caption presentation
         // and Orcle consent. An old admitted chunk still marks its own file.
-        if first_final {
+        let marker_consumed = first_final
+            && note_chunk_marker(session, chunk, text, &response.segments, &coordinator);
+        if first_final && !marker_consumed {
             crate::clip_marks::note_transcript_final(
                 &session.state,
                 text,
@@ -6683,6 +7042,9 @@ async fn commit_chunk_transcript(
                 chunk.capture_epoch,
                 current_epoch,
             );
+            return;
+        }
+        if marker_consumed {
             return;
         }
         // Same tap as the realtime final (plan 068 S3).
@@ -6752,6 +7114,10 @@ async fn run_chunked_caption_session(
             // Silence is never uploaded or metered (plan 068 D4). The chunk
             // was stamped before this point, so the timeline stays exact.
             if !chunk_has_speech(&chunk.samples) {
+                {
+                    let coordinator = session.state.captions.lock().await;
+                    note_chunk_marker(session, &chunk, "", &[], &coordinator);
+                }
                 tracing::trace!(seq = chunk.seq, "Skipped a silent transcription chunk.");
                 // Quiet is not "still starting": a skipped chunk after real
                 // frames proves the path, so Orcle reads as listening.
@@ -6764,7 +7130,8 @@ async fn run_chunked_caption_session(
                 }
                 continue;
             }
-            if !session.presenting()
+            if receiver_open
+                && !session.presenting()
                 && (chunk.admission.listen_epoch.is_none()
                     || chunk.admission.listen_epoch != session.admitted_listen_epoch().await)
             {
@@ -6773,6 +7140,29 @@ async fn run_chunked_caption_session(
             in_flight = Some(begin_caption_chunk_upload(session, chunk));
         }
         if !receiver_open && in_flight.is_none() && buffer.is_empty() {
+            let coordinator = session.state.captions.lock().await;
+            let admission = AdmittedOrcleAudio {
+                marker_epoch: *session
+                    .marker_buffer_epoch
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+                ..Default::default()
+            };
+            // The buffer only contains callbacks admitted under this exact marker epoch.
+            // Consent retirement must discard it rather than granting old words a fresh owner.
+            if marker_audio_owned(
+                session,
+                admission,
+                &coordinator,
+                session.mark_target.as_ref(),
+            ) {
+                let outcome = session
+                    .marker_utterance
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .finish_at_capture_end();
+                publish_marker_outcome(session, session.mark_target.as_ref(), outcome);
+            }
             break;
         }
 
@@ -6817,6 +7207,7 @@ async fn run_chunked_caption_session(
                     // pending chunks are cross-session work and cannot be
                     // attributed to this recording.
                     buffer.clear();
+                    session.marker_utterance.lock().unwrap_or_else(|e| e.into_inner()).clear();
                     timeline.reset_capture();
                     sequence.reset();
                     let mut coordinator = session.state.captions.lock().await;
@@ -6945,6 +7336,7 @@ async fn run_chunked_caption_session(
                             wait: next_backoff,
                         } = transition.action
                         else {
+                            session.marker_utterance.lock().unwrap_or_else(|e| e.into_inner()).cancel();
                             tracing::warn!(
                                 "Final caption chunk upload failed; continuing with the remaining capture-end queue: {message}"
                             );
@@ -7035,6 +7427,14 @@ async fn surface_chunked_audio_drop(
     dropped_frames: u64,
     provider_confirmed: bool,
 ) {
+    if session
+        .marker_utterance
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .cancel()
+    {
+        session.state.emit_event("session.marker.voice.refused", serde_json::json!({"message":"Some audio was missed. Please repeat the complete marker command."}));
+    }
     if dropped_seconds > 0.0 {
         let dropped_ms = (dropped_seconds * 1_000.0).ceil() as u64;
         CAPTION_AUDIO_MILLIS_DROPPED.fetch_add(dropped_ms, Ordering::Relaxed);
@@ -7818,6 +8218,45 @@ mod tests {
             vec![AdmittedOrcleAudio::default(); 2],
         );
         assert!(!TAP_ACTIVE.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn service_pause_retires_marker_admission_and_publishes_the_blocked_reason() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        let mut events = state.events.subscribe();
+        {
+            let mut coordinator = state.captions.lock().await;
+            coordinator.marker_session_id = Some("capture-a".into());
+            coordinator.marker_epoch = 7;
+            coordinator.marker_started_at = Some(std::time::Instant::now());
+        }
+        pause_marker_voice_for_service_flags(&state).await;
+        let coordinator = state.captions.lock().await;
+        assert!(coordinator.marker_started_at.is_none());
+        assert_eq!(coordinator.marker_epoch, 8);
+        assert_eq!(
+            coordinator
+                .marker_listening
+                .as_ref()
+                .unwrap()
+                .reason_code
+                .as_deref(),
+            Some("voice-disabled")
+        );
+        assert!(
+            !AdmittedOrcleAudio {
+                marker_epoch: Some(7),
+                ..Default::default()
+            }
+            .owns_marker(&coordinator, Some("capture-a"))
+        );
+        assert!(
+            drain_events(&mut events)
+                .iter()
+                .any(|event| event.event == "session.marker.voice.status"
+                    && event.payload["listening"]["reasonCode"] == "voice-disabled")
+        );
     }
 
     #[tokio::test]
@@ -10656,6 +11095,8 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             present: Arc::new(AtomicBool::new(present)),
             mark_target: None,
+            marker_utterance: std::sync::Mutex::new(Default::default()),
+            marker_buffer_epoch: std::sync::Mutex::new(None),
         }
     }
 

@@ -42,10 +42,12 @@ export async function startFakeCaptionService({
     assistantResponses: 0,
     realtimePartialProgress: false,
     chunkRequests: 0,
+    chunkFinals: [],
     chunkFailureCode: null,
     chunkAudio: [],
     chunkPurposes: [],
     usageReports: 0,
+    commandRequests: 0,
     emittedFinals: []
   }
   let scriptedItemSeq = 0
@@ -63,6 +65,9 @@ export async function startFakeCaptionService({
   })
   let websocketUrl = ''
   const server = createServer(async (req, res) => {
+    // Count the fake service route separately from the dev smoke-command listener.
+    if (req.method === 'POST' && req.url === '/api/ai/cohost/' + 'command')
+      state.commandRequests += 1
     if (req.headers.authorization !== `Bearer ${smokeSessionToken}`) {
       await drain(req)
       return json(res, 401, { error: { code: 'unauthorized', message: 'Smoke auth failed.' } })
@@ -117,14 +122,15 @@ export async function startFakeCaptionService({
         })
       }
       const hasSpeech = !Number.isFinite(minSpeechPeak) || audio.peak >= Math.max(0, minSpeechPeak)
-      const text = hasSpeech ? chunkText : ''
+      const scripted = state.chunkFinals.shift()
+      const text = hasSpeech ? (scripted?.text ?? chunkText) : ''
       return json(res, 200, {
         chunkSeconds: 3,
         latencyMs: 5,
         model: 'smoke/chunk-transcription',
         monthlySecondsLimit: 3_600,
         remainingSeconds: 3_597,
-        segments: text ? [{ text, startSecond: 0, endSecond: 3 }] : [],
+        segments: text ? (scripted?.segments ?? [{ text, startSecond: 0, endSecond: 3 }]) : [],
         text
       })
     }
@@ -365,7 +371,9 @@ export const ORCLE_COMMAND_FINALS = Object.freeze({
   removeThisOne: Object.freeze(['This one is toxic. Remove it from our chat.']),
   confirm: Object.freeze(['Yes.']),
   cancel: Object.freeze(['No.']),
-  highlightThisOne: Object.freeze(['Orcle, put this one up.'])
+  highlightThisOne: Object.freeze(['Orcle, put this one up.']),
+  namedMarker: Object.freeze(['Orcle, make a marker here for Shadcn New Library.']),
+  negatedMarker: Object.freeze(["Orcle, don't make a marker for this topic."])
 })
 
 /**

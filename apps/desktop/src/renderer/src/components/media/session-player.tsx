@@ -10,6 +10,8 @@ import {
   type Ref
 } from 'react'
 
+import { MarkerPins } from './marker-pins'
+import type { SessionMarker } from '@/lib/backend'
 import { PauseIcon, PlayIcon } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
@@ -47,6 +49,7 @@ import { cn } from '@/lib/utils'
  */
 export type SessionPlayerProps = {
   sessionId: string
+  markers?: readonly SessionMarker[]
   /** Removed spans to jump over while playing, in any order; overlaps are merged. */
   skipRanges?: readonly SkipRange[]
   /** The playhead in ms, on every timeupdate and after each seek. */
@@ -73,6 +76,7 @@ export type SessionPlayerGrantState =
 
 export function SessionPlayer({
   sessionId,
+  markers,
   skipRanges,
   onTimeUpdate,
   seekToMs = null,
@@ -357,6 +361,13 @@ export function SessionPlayer({
         />
         <SessionPlayerStatus grant={grant} mediaError={mediaError} onRetry={retry} />
       </div>
+      {markers?.length ? (
+        <MarkerPins
+          markers={markers}
+          durationMs={durationMs}
+          onSelect={(marker) => seekTo(marker.atSeconds * 1000)}
+        />
+      ) : null}
       <SessionPlayerControls
         playing={playing}
         positionMs={scrubMs ?? positionMs}

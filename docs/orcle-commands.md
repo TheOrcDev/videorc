@@ -22,6 +22,7 @@ require the name, turn on **Commands need “Orcle” first**.
 | Clear     | "Orcle, take it down", "Orcle, clear the highlight", "Orcle, remove it from the screen"                                                   | Takes the comment off your stream. "From the screen" clears it; "from our chat" removes it. |
 | Remove    | "This one is toxic. Remove it from our chat.", "Orcle, delete the comment from coders X"                                                  | Shows you the comment first, and removes it from that platform's chat when you confirm.     |
 | Answer    | "Yes", "Do it", "Remove it" / "No", "Cancel", "Never mind"                                                                                | Confirms or stops a removal.                                                                |
+| Marker    | "Orcle, make a marker here for Shadcn New Library", "Orcle, mark this as Shadcn New Library"                                                | Saves a titled point on the active recording or livestream timeline.                        |
 
 The wake word also accepts close misses (orkle, orcel, orkel, orcl, orcal).
 "Oracle" and "orca" count only when a command verb follows within three words,
@@ -35,8 +36,13 @@ that only starts with "yes" is talk, not an answer. A "no", "cancel", "don't"
 or "not" anywhere in what you say cancels. A new "Orcle, …" command replaces
 the open card instead of answering it.
 
-Commands come from what Orcle already hears, so they need Orcle Live on and a
-live stream. With Orcle off or not listening, nothing happens.
+Chat commands come from what Orcle already hears, so they need Orcle Live on
+and a live stream. Named markers also work during a recording without live
+chat: enable Orcle, Listen and Cloud AI consent. Marker commands always require
+the name. Their confirmation and Undo appear locally, and the points are in
+Library → Session actions → Markers. `/marker [title]` in Stream Manager is the
+manual alternative and does not require Premium or Cloud AI. See
+[Session markers](session-markers.md) for timing, limits and stream-only behavior.
 
 ## How Orcle picks "this one"
 

@@ -3225,6 +3225,9 @@ export interface ClipMoment {
 }
 
 /** Who placed a clip mark: a spoken "clip that" or the Mark clip control. */
+import type { MarkerContext, MarkerRelayCommand, MarkerRelayResult } from './session-markers'
+export type * from './session-markers'
+
 export type ClipMarkSource = 'voice' | 'manual'
 
 /** One persisted clip mark at a recording-file time (plan 068 D6). */
@@ -4298,6 +4301,12 @@ export interface VideorcApi {
   /** Mark clip from the Stream Manager (plan 068 D6): the MAIN renderer owns
    * the backend socket and makes the `clip.mark` RPC; the reply says where the
    * mark landed and whether it was saved. */
+  getMarkerContext: () => Promise<MarkerContext | null>
+  pushMarkerContext: (context: MarkerContext | null) => Promise<boolean>
+  onMarkerContext: (callback: (context: MarkerContext | null) => void) => () => void
+  markerFromCommentsWindow: (command: MarkerRelayCommand) => Promise<MarkerRelayResult>
+  onMarkerRequest: (callback: (command: MarkerRelayCommand) => void) => () => void
+  pushMarkerResult: (resolution: CommentsCommandResolution<MarkerRelayResult>) => Promise<boolean>
   markClipFromCommentsWindow: (command: ClipMarkCommand) => Promise<ClipMarkedEvent>
   onClipMarkRequest: (callback: (command: ClipMarkCommand) => void) => () => void
   pushClipMarkResult: (resolution: CommentsCommandResolution<ClipMarkedEvent>) => Promise<boolean>

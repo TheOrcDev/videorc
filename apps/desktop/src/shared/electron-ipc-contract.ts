@@ -36,6 +36,13 @@ import type {
   VideorcApi,
   ViewerSample
 } from './backend'
+import type { MarkerContext, MarkerRelayCommand } from './session-markers'
+import {
+  markerContextSchema,
+  markerRelayCommandSchema,
+  markerRelayResolutionSchema,
+  markerRelayResultSchema
+} from './session-markers'
 import type { LiveDashboardState } from './live-dashboard'
 import { normalizeLiveDashboardState } from './live-dashboard'
 import { sessionChatTotalsSchema } from './session-chat-totals'
@@ -143,6 +150,10 @@ export const electronInvokeApiMethods = {
   'comments-window:send-result-push': 'pushChatSendResult',
   'comments-window:clear': 'clearComments',
   'comments-window:clear-result-push': 'pushCommentsClearResult',
+  'comments-window:marker-context-get': 'getMarkerContext',
+  'comments-window:marker-context-push': 'pushMarkerContext',
+  'comments-window:marker': 'markerFromCommentsWindow',
+  'comments-window:marker-result-push': 'pushMarkerResult',
   'comments-window:clip-mark': 'markClipFromCommentsWindow',
   'comments-window:clip-mark-result-push': 'pushClipMarkResult',
   'comments-window:follow-names': 'showFollowNamesFromCommentsWindow',
@@ -224,6 +235,8 @@ export interface ElectronIpcEventMap {
   'comments-window:highlight-state': CommentHighlightState
   'comments-window:send-request': CommentsSendCommand
   'comments-window:clear-request': CommentsClearCommand
+  'comments-window:marker-context': MarkerContext | null
+  'comments-window:marker-request': MarkerRelayCommand
   'comments-window:clip-mark-request': ClipMarkCommand
   'comments-window:moderation-request': CommentsModerationCommand
   'comments-window:viewers': ViewerSample | null
@@ -265,6 +278,8 @@ export const electronEventChannels = [
   'comments-window:highlight-state',
   'comments-window:send-request',
   'comments-window:clear-request',
+  'comments-window:marker-context',
+  'comments-window:marker-request',
   'comments-window:clip-mark-request',
   'comments-window:moderation-request',
   'comments-window:viewers',
@@ -1148,6 +1163,19 @@ const dashboardSchema = runtimeSchema<LiveDashboardState | null>(
   }
 )
 const specificRuntimeInvokeContracts = {
+  'comments-window:marker-context-get': invokeContract(noArgs, markerContextSchema),
+  'comments-window:marker-context-push': invokeContract(
+    tupleSchema([markerContextSchema]),
+    booleanSchema
+  ),
+  'comments-window:marker': invokeContract(
+    tupleSchema([markerRelayCommandSchema]),
+    markerRelayResultSchema
+  ),
+  'comments-window:marker-result-push': invokeContract(
+    tupleSchema([markerRelayResolutionSchema]),
+    booleanSchema
+  ),
   'comments-window:dashboard-push': invokeContract(tupleSchema([dashboardSchema])),
   'comments-window:dashboard-get': invokeContract(noArgs, dashboardSchema),
   'comments-window:push-snapshot': invokeContract(tupleSchema([commentsViewSchema])),
@@ -1406,6 +1434,8 @@ const backendConnectionSchema = objectSchema(
 )
 
 const specificRuntimeEventSchemas = {
+  'comments-window:marker-context': markerContextSchema,
+  'comments-window:marker-request': markerRelayCommandSchema,
   'comments-window:dashboard': dashboardSchema,
   'comments-window:snapshot': commentsViewSchema,
   'comments-window:delta': commentsDeltaSchema,

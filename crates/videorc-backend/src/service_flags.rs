@@ -459,7 +459,11 @@ pub async fn refresh_service_flags(state: &AppState) -> YouTubeServiceFlags {
             YouTubeServiceFlags::compiled(format!("fail-open: {why}"))
         }
     };
+    let voice_was_enabled = orcle_voice_commands_enabled(state);
     crate::youtube_quota::apply_service_flags(state, flags.clone());
+    if voice_was_enabled && !flags.orcle.voice_commands {
+        crate::captions::pause_marker_voice_for_service_flags(state).await;
+    }
     flags
 }
 

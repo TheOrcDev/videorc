@@ -5617,7 +5617,7 @@ impl Database {
         let conn = self.lock()?;
         let mut statement = conn.prepare(
             "SELECT id, session_id, at_seconds, source, phrase, created_at
-             FROM clip_marks WHERE session_id = ?1
+             FROM clip_marks WHERE session_id = ?1 AND mark_kind = 'clip'
              ORDER BY at_seconds ASC, created_at ASC, id ASC",
         )?;
         let rows = statement.query_map(params![session_id], |row| {
@@ -6721,6 +6721,11 @@ impl Database {
         std::env::temp_dir().join("videorc-screens")
     }
 
+    #[cfg(test)]
+    pub(crate) fn migrate_for_marker_test(&self) {
+        self.migrate().unwrap();
+    }
+
     fn migrate(&self) -> Result<()> {
         let conn = self.lock()?;
         conn.execute_batch(
@@ -7000,6 +7005,16 @@ impl Database {
             );
             ",
         )?;
+        // Named timeline markers share ownership and deletion with clip marks.
+        for (column, definition) in [
+            ("mark_kind", "mark_kind TEXT NOT NULL DEFAULT 'clip'"),
+            ("label", "label TEXT"),
+            ("create_payload_hash", "create_payload_hash TEXT"),
+            ("revision", "revision INTEGER NOT NULL DEFAULT 0"),
+            ("deleted_at", "deleted_at TEXT"),
+        ] {
+            ensure_column(&conn, "clip_marks", column, definition)?;
+        }
         ensure_column(&conn, "sessions", "container", "container TEXT")?;
         // Noise-cleanup derivatives used to store their literal mp4-family
         // extension as the container, which the session protocol enum rejects —
@@ -7364,7 +7379,7 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+    pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.conn
             .lock()
             .map_err(|_| anyhow::anyhow!("SQLite connection lock was poisoned"))

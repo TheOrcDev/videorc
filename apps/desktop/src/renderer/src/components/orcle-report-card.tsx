@@ -6,7 +6,7 @@ import {
   InfoIcon,
   MicrophoneIcon
 } from '@/components/icons'
-import { useMemo, useState, type ReactElement, type ReactNode } from 'react'
+import { useMemo, useState, lazy, Suspense, type ReactElement, type ReactNode } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
 import { GroupedList, ListRow } from '@/components/list-row'
@@ -42,6 +42,10 @@ import {
 } from '@/lib/orcle-report-view'
 import { cn } from '@/lib/utils'
 
+const SessionMarkersDialog = lazy(async () => ({
+  default: (await import('@/components/session-markers-dialog')).SessionMarkersDialog
+}))
+
 type ShownReport = Exclude<OrcleReportView, { kind: 'empty' }>
 
 // Which part of a one-line row gives way first. A question keeps its words
@@ -65,6 +69,7 @@ export function OrcleReportCard({
   onSessionChange: (sessionId: string | null) => void
 }): ReactElement {
   const { sessions, cohostSettings } = useStudioCore()
+  const [markersOpen, setMarkersOpen] = useState(false)
   const newestId = useMemo(() => newestStreamedSessionId(sessions), [sessions])
   const ask = sessionId ?? newestId
   const { payload, loading, error, reload } = useOrcleReport(ask)
@@ -111,7 +116,20 @@ export function OrcleReportCard({
           </Alert>
         ) : null}
         {shown ? (
-          <ReportBody key={shown.sessionId} view={shown} />
+          <>
+            {session ? (
+              <Button size="sm" variant="ghost" onClick={() => setMarkersOpen(true)}>
+                <ClipIcon />
+                Markers
+              </Button>
+            ) : null}
+            {markersOpen && session ? (
+              <Suspense fallback={null}>
+                <SessionMarkersDialog session={session} onClose={() => setMarkersOpen(false)} />
+              </Suspense>
+            ) : null}
+            <ReportBody key={shown.sessionId} view={shown} />
+          </>
         ) : error ? null : loading ? (
           <p className="text-xs text-muted-foreground">Loading the report…</p>
         ) : view.kind === 'empty' ? (

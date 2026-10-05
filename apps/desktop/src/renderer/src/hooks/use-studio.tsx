@@ -2573,6 +2573,46 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           })
         })
     })
+    const offMarkerCreated = client?.on('session.marker.created', (marker) => {
+      if (marker.source !== 'voice') return
+      setLastVoiceMarker(marker)
+      void import('../lib/marker-toast').then((module) => module.showMarkerToast(client, marker))
+    })
+    const offMarkerChanged = client?.on('session.marker.changed', (changed) => {
+      setLastVoiceMarker((previous) =>
+        previous?.id === changed.markerId && changed.revision >= previous.revision
+          ? changed.deleted
+            ? null
+            : (changed.marker ?? previous)
+          : previous
+      )
+    })
+    const offMarkerRefused = client?.on('session.marker.voice.refused', ({ message }) =>
+      toast.error(message)
+    )
+    const offMarker = window.videorc?.onMarkerRequest?.((command) => {
+      void (async () => {
+        if (!client) throw new Error('Backend socket is not connected.')
+        switch (command.action) {
+          case 'create':
+            return client.requestTyped('session.marker.create', command.params)
+          case 'get':
+            return client.requestTyped('session.marker.get', command.params)
+          case 'delete':
+            return client.requestTyped('session.marker.delete', command.params)
+        }
+      })()
+        .then((value) =>
+          window.videorc?.pushMarkerResult?.({ requestId: command.requestId, ok: true, value })
+        )
+        .catch((error) =>
+          window.videorc?.pushMarkerResult?.({
+            requestId: command.requestId,
+            ok: false,
+            error: error instanceof Error ? error.message : 'Could not save marker.'
+          })
+        )
+    })
     // Mark clip from the Stream Manager (plan 068 D6): the same relay shape
     // as clear, resolved with where the mark landed.
     const offClipMark = window.videorc?.onClipMarkRequest?.((command: ClipMarkCommand) => {
@@ -2603,8 +2643,40 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       offState?.()
       offClear?.()
       offClipMark?.()
+      offMarker?.()
+      offMarkerCreated?.()
+      offMarkerRefused?.()
+      offMarkerChanged?.()
     }
   }, [client])
+  const [lastVoiceMarker, setLastVoiceMarker] = useState<
+    import('@/lib/backend').SessionMarker | null
+  >(null)
+  const [markerVoice, setMarkerVoice] = useState<{
+    sessionId: string
+    listening: import('@/lib/backend').CohostListening
+  } | null>(null)
+  useEffect(() => client?.on('session.marker.voice.status', setMarkerVoice), [client])
+  useEffect(() => {
+    const available = Boolean(
+      client &&
+      recording.sessionId &&
+      (recording.state === 'recording' || recording.state === 'streaming')
+    )
+    void window.videorc?.pushMarkerContext?.({
+      sessionId: recording.sessionId,
+      available,
+      reason: available ? undefined : 'Start a recording or livestream to make a marker.',
+      lastMarker: lastVoiceMarker ?? undefined,
+      voice:
+        markerVoice && markerVoice.sessionId === recording.sessionId
+          ? markerVoice.listening
+          : undefined
+    })
+    return () => {
+      void window.videorc?.pushMarkerContext?.(null)
+    }
+  }, [client, recording.sessionId, recording.state, markerVoice, lastVoiceMarker])
   // Backend-authoritative comment highlight. The renderer owns only the
   // temporary rasterization phase; `On stream` comes from the backend state.
   const [commentHighlightState, setCommentHighlightState] = useState<CommentHighlightState>({
@@ -3944,6 +4016,49 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [client, commitCohostState, wsStatus])
 
+  useEffect(() => {
+    if (
+      !client ||
+      wsStatus !== 'connected' ||
+      !recording.sessionId ||
+      !['recording', 'streaming'].includes(recording.state)
+    )
+      return
+    let cancelled = false
+    const sessionId = recording.sessionId
+    void client
+      .requestTyped('session.marker.voice.configure', {
+        sessionId,
+        consent: aiConsent
+      })
+      .then((listening) => {
+        if (!cancelled) setMarkerVoice({ sessionId, listening })
+      })
+      .catch((error) => {
+        if (!cancelled)
+          setMarkerVoice({
+            sessionId,
+            listening: {
+              state: 'blocked',
+              reasonCode: 'configuration_failed',
+              message: error instanceof Error ? error.message : 'Could not enable voice markers.'
+            }
+          })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [
+    client,
+    wsStatus,
+    recording.sessionId,
+    recording.state,
+    aiConsent,
+    cohostEnabled,
+    cohostListen,
+    cohostGate.allowed,
+    cohostState?.status
+  ])
   // Start with the live-chat session, and re-assert on a consent flip.
   // The backend applies changed consent in place and returns its confirmed
   // state; unchanged consent is idempotent. It stops itself when chat ends.

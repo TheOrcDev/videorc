@@ -36,8 +36,14 @@ in [orcle-commands.md](orcle-commands.md).
 - **Off.** Saves `enabled: false`. Nothing runs, and your other settings stay
   as they are.
 
-Orcle only runs during a stream: it starts with the stream's live chat and
-stops with it. The status line under the switch says where it stands: Off;
+Orcle's chat producer starts with the stream's live chat and stops with it.
+With Orcle, Listen and Cloud AI consent enabled, addressed marker commands can
+also run during a recording without chat. Stream Manager shows that listening
+readiness separately. Say “Orcle, make a marker here for [title]” or use the
+free local `/marker [title]` command. Browse the saved points in Library; see
+[Session markers](session-markers.md).
+
+The status line under the switch says where the chat producer stands: Off;
 On, joins your next stream; Live now; or Needs attention, with a plain reason
 (sign in, Premium, Cloud AI off, or a pause or error from the Orcle server).
 
