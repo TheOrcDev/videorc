@@ -138,6 +138,9 @@ Colour
   destructive. Never chrome.
 - `--success`: healthy or connected. `--warning`: needs attention.
   `--info`: rare.
+- `--member`: a muted violet for paid membership (YouTube member, Twitch,
+  Kick or X subscriber). It paints only the member row tint in chat
+  (plan 154); never a chip tone, never text.
 - Use them through the tone utilities (`tone-success`, `tone-warning`,
   `tone-destructive`, `tone-live`, `tone-neutral`) and the chip utilities.
   Never as text colour on status copy.
@@ -252,6 +255,11 @@ made it chat first: one thin stats bar and fewer words.
 - **Chat keeps the big-text rows** (plan 055, decision 5), virtualized with
   `@tanstack/react-virtual`. While live, a row's time appears on hover.
   Filters are inline chips from 640 px and one Filters menu below it.
+  A row paints at most one background, lowest to highest: a member's own
+  message `bg-member/8` (plan 154), Orcle's "Talking about this"
+  `bg-accent`, a paid message `bg-warning/10` with its ring; an on-stream
+  row keeps its button fill. The Member chip stays on every tinted row and
+  text stays monochrome.
 - **Activity rows** lead with who: a row about one named person (a follow,
   sub, gift, tip or raid) shows their avatar circle, with initials until it
   loads (plan 071). Counts the platform never named, announcements and
