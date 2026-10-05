@@ -10,6 +10,8 @@ import { groupEmoteOverlays, type ChatMessagePiece } from '@/lib/chat-emotes'
 import {
   commentHighlightIdentity,
   fitHighlightName,
+  HIGHLIGHT_NAME_WEIGHT,
+  HIGHLIGHT_TEXT_WEIGHT,
   HIGHLIGHT_MAX_TEXT_LINES,
   highlightMetrics,
   type HighlightMetrics,
@@ -153,7 +155,7 @@ export function wrapHighlightTokens(
       measured.push({
         kind: 'word',
         text: token.text,
-        widthPx: measure(token.text, metrics.textFontPx)
+        widthPx: measure(token.text, metrics.textFontPx, HIGHLIGHT_TEXT_WEIGHT)
       })
       continue
     }
@@ -162,7 +164,7 @@ export function wrapHighlightTokens(
       measured.push({
         kind: 'word',
         text: token.name,
-        widthPx: measure(token.name, metrics.textFontPx)
+        widthPx: measure(token.name, metrics.textFontPx, HIGHLIGHT_TEXT_WEIGHT)
       })
       continue
     }
@@ -170,7 +172,7 @@ export function wrapHighlightTokens(
   }
   if (measured.length === 0) return []
 
-  const spacePx = measure(' ', metrics.textFontPx)
+  const spacePx = measure(' ', metrics.textFontPx, HIGHLIGHT_TEXT_WEIGHT)
   const maxWidthPx = metrics.maxTextWidthPx
   const lines: HighlightLine[] = []
   let current: HighlightLine = { items: [], widthPx: 0 }
@@ -210,13 +212,13 @@ function ellipsize(
   measure: HighlightTextMeasurer,
   spacePx: number
 ): HighlightLine {
-  const ellipsisPx = measure('…', metrics.textFontPx)
+  const ellipsisPx = measure('…', metrics.textFontPx, HIGHLIGHT_TEXT_WEIGHT)
   const items = [...line.items]
   while (items.length > 0) {
     const last = items[items.length - 1]!
     if (last.kind === 'word') {
       const text = `${last.text}…`
-      const widthPx = measure(text, metrics.textFontPx)
+      const widthPx = measure(text, metrics.textFontPx, HIGHLIGHT_TEXT_WEIGHT)
       if (last.xPx + widthPx <= metrics.maxTextWidthPx || items.length === 1) {
         items[items.length - 1] = { ...last, text, widthPx }
         return { items, widthPx: last.xPx + widthPx }
@@ -269,7 +271,10 @@ export function layoutCommentHighlightTokens(params: {
     metrics.maxNameWidthPx,
     params.measure
   )
-  const nameWidth = Math.min(params.measure(name, metrics.nameFontPx), metrics.maxNameWidthPx)
+  const nameWidth = Math.min(
+    params.measure(name, metrics.nameFontPx, HIGHLIGHT_NAME_WEIGHT),
+    metrics.maxNameWidthPx
+  )
   const identityRowWidth = metrics.avatarPx + metrics.identityGapPx + nameWidth
   const widestLine = lines.reduce((widest, line) => Math.max(widest, line.widthPx), 0)
   const contentWidth = Math.min(Math.max(identityRowWidth, widestLine), metrics.maxTextWidthPx)

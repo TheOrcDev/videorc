@@ -37,7 +37,18 @@ export function expireCommentHighlightState(
   return delay === 0 ? { generation: current.generation, phase: 'idle' } : current
 }
 
-export type HighlightTextMeasurer = (text: string, fontPx: number) => number
+/** The card's two weights: the name is semibold, the message regular. Each
+ * run is measured in the weight it is painted in; measuring the message
+ * semibold placed its emotes a gap past the regular-weight words. */
+export type HighlightFontWeight = 400 | 600
+export const HIGHLIGHT_NAME_WEIGHT: HighlightFontWeight = 600
+export const HIGHLIGHT_TEXT_WEIGHT: HighlightFontWeight = 400
+
+export type HighlightTextMeasurer = (
+  text: string,
+  fontPx: number,
+  weight: HighlightFontWeight
+) => number
 
 export interface HighlightMetrics {
   nameFontPx: number
@@ -101,7 +112,10 @@ export function wrapHighlightText(
   let current = ''
   for (const word of words) {
     const candidate = current ? `${current} ${word}` : word
-    if (current && measure(candidate, metrics.textFontPx) > metrics.maxTextWidthPx) {
+    if (
+      current &&
+      measure(candidate, metrics.textFontPx, HIGHLIGHT_TEXT_WEIGHT) > metrics.maxTextWidthPx
+    ) {
       lines.push(current)
       current = word
       if (lines.length === HIGHLIGHT_MAX_TEXT_LINES) {
@@ -171,9 +185,12 @@ export function fitHighlightName(
   maxWidthPx: number,
   measure: HighlightTextMeasurer
 ): string {
-  if (measure(name, fontPx) <= maxWidthPx) return name
+  if (measure(name, fontPx, HIGHLIGHT_NAME_WEIGHT) <= maxWidthPx) return name
   const chars = Array.from(name)
-  while (chars.length > 1 && measure(`${chars.join('')}…`, fontPx) > maxWidthPx) {
+  while (
+    chars.length > 1 &&
+    measure(`${chars.join('')}…`, fontPx, HIGHLIGHT_NAME_WEIGHT) > maxWidthPx
+  ) {
     chars.pop()
   }
   return `${chars.join('').trimEnd()}…`
@@ -198,10 +215,14 @@ export function layoutCommentHighlight(params: {
     metrics.maxNameWidthPx,
     params.measure
   )
-  const nameWidth = Math.min(params.measure(name, metrics.nameFontPx), metrics.maxNameWidthPx)
+  const nameWidth = Math.min(
+    params.measure(name, metrics.nameFontPx, HIGHLIGHT_NAME_WEIGHT),
+    metrics.maxNameWidthPx
+  )
   const identityRowWidth = metrics.avatarPx + metrics.identityGapPx + nameWidth
   const widestLine = textLines.reduce(
-    (widest, line) => Math.max(widest, params.measure(line, metrics.textFontPx)),
+    (widest, line) =>
+      Math.max(widest, params.measure(line, metrics.textFontPx, HIGHLIGHT_TEXT_WEIGHT)),
     0
   )
   const contentWidth = Math.min(Math.max(identityRowWidth, widestLine), metrics.maxTextWidthPx)

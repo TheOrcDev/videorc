@@ -3,7 +3,12 @@
 // Layout is pure (measurement injected) so wrapping/sizing is unit-testable;
 // the canvas painter is a thin shell over it.
 
-import { commentHighlightPlatformBadge } from '@/lib/comment-highlight'
+import {
+  commentHighlightPlatformBadge,
+  HIGHLIGHT_NAME_WEIGHT,
+  HIGHLIGHT_TEXT_WEIGHT,
+  type HighlightTextMeasurer
+} from '@/lib/comment-highlight'
 import {
   highlightEmoteImageUrl,
   highlightEmoteUrls,
@@ -348,7 +353,7 @@ function paintCaptionBar(
   context.restore()
 }
 
-function canvasFont(fontPx: number, weight: 600 | 700 = 600): string {
+function canvasFont(fontPx: number, weight: 400 | 600 | 700 = 600): string {
   return `${weight} ${fontPx}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`
 }
 
@@ -363,6 +368,21 @@ function canvasMeasurer(styleId: CaptionStyleId = 'glass'): { measure: TextMeasu
       probeContext.font = canvasFont(fontPx, captionStyleDefinition(styleId).fontWeight)
       return probeContext.measureText(text).width
     }
+  }
+}
+
+/** The highlight card's measurer: each run in the weight it is painted in
+ * (the name semibold, the message regular), so emotes sit one space from the
+ * words before them. */
+function highlightCanvasMeasurer(): HighlightTextMeasurer | null {
+  const probe = new OffscreenCanvas(1, 1)
+  const probeContext = probe.getContext('2d')
+  if (!probeContext) {
+    return null
+  }
+  return (text, fontPx, weight) => {
+    probeContext.font = canvasFont(fontPx, weight)
+    return probeContext.measureText(text).width
   }
 }
 
@@ -680,15 +700,15 @@ export async function renderCommentHighlightPng(params: {
   // the dynamic import here never split a chunk (Vite warned) — import it
   // statically like every other consumer.
   const { monogramInitials } = await import('@/lib/chat-avatar')
-  const measurer = canvasMeasurer()
-  if (!measurer) {
+  const measure = highlightCanvasMeasurer()
+  if (!measure) {
     return null
   }
   const emoteSize: HighlightEmoteSizer = (url) => {
     const bitmap = params.emotes?.get(url)
     return bitmap ? { width: bitmap.width, height: bitmap.height } : null
   }
-  const layout = layoutCommentHighlightTokens({ ...params, measure: measurer.measure, emoteSize })
+  const layout = layoutCommentHighlightTokens({ ...params, measure, emoteSize })
   if (!layout) {
     return null
   }
@@ -835,11 +855,11 @@ export async function renderCommentHighlightPng(params: {
   context.shadowOffsetY = Math.max(1, Math.round(metrics.textFontPx * 0.03))
   context.textAlign = 'left'
   context.textBaseline = 'middle'
-  context.font = canvasFont(metrics.nameFontPx)
+  context.font = canvasFont(metrics.nameFontPx, HIGHLIGHT_NAME_WEIGHT)
   context.fillStyle = '#F5F5F7'
   context.fillText(layout.name, nameX, avatarY + metrics.avatarPx / 2 + 1, metrics.maxNameWidthPx)
   context.textBaseline = 'top'
-  context.font = `400 ${metrics.textFontPx}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`
+  context.font = canvasFont(metrics.textFontPx, HIGHLIGHT_TEXT_WEIGHT)
   context.fillStyle = 'rgba(244, 244, 245, 0.92)'
   const textTop = avatarY + metrics.avatarPx + metrics.rowGapPx
   // With `textBaseline = 'top'` a line's glyphs centre about 0.58 em below
