@@ -28,6 +28,7 @@ import type {
   StreamPlatform
 } from '@/lib/backend'
 import { AvatarCircle } from '@/lib/chat-avatar'
+import { copyChatText } from '@/lib/chat-link-actions'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import {
   ACTIVITY_FILTERS,
@@ -197,9 +198,7 @@ export function activityRowActions(
       label: 'Copy',
       icon: CopyIcon,
       onSelect: () =>
-        void navigator.clipboard?.writeText(
-          [item.name, item.line, item.message].filter(Boolean).join(' · ')
-        )
+        void copyChatText([item.name, item.line, item.message].filter(Boolean).join(' · '))
     }
   ]
 }

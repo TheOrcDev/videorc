@@ -30,16 +30,18 @@ export type RendererWebPermissionRequest = {
 /**
  * Web-platform permissions are an independent authority boundary from preload
  * IPC and the OS camera/microphone status helpers. Keep the browser surface to
- * the two APIs the Studio actually uses: a visual-only audio meter and
- * sanitized clipboard writes from the main renderer.
+ * the two APIs the app actually uses: a visual-only audio meter in the main
+ * renderer, and sanitized clipboard writes from the main renderer and the
+ * Stream Manager (its Copy and Copy link). Clipboard reads stay denied.
  */
 export function rendererWebPermissionAllowed(
   registry: RendererSecurityRegistry,
   request: RendererWebPermissionRequest
 ): boolean {
+  const role = registry.role(request.senderId)
   if (
     !request.isMainFrame ||
-    registry.role(request.senderId) !== 'main' ||
+    (role !== 'main' && role !== 'comments') ||
     !registry.documentTrusted(request.senderId, request.frameUrl)
   ) {
     return false
@@ -48,7 +50,7 @@ export function rendererWebPermissionAllowed(
   if (request.permission === 'clipboard-sanitized-write') {
     return true
   }
-  if (request.permission !== 'media') {
+  if (role !== 'main' || request.permission !== 'media') {
     return false
   }
 

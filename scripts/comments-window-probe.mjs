@@ -698,6 +698,14 @@ async function probeLinksAndStreaks() {
     'links: Escape closes the link menu',
     JSON.stringify(dismissed)
   )
+  // Copy link once did nothing: the Stream Manager was refused clipboard writes.
+  await smokeCommand('comments-window-context-click-link', { messageId: LINK_MESSAGE_ID })
+  const copied = await smokeCommand('comments-window-context-click-link', { action: 'copy' })
+  assertProbe(
+    copied.copied === true && copied.text === 'https://videorc.com/download',
+    'links: Copy link puts the link on the clipboard',
+    JSON.stringify(copied)
+  )
   // Back to the snapshot the rest of the probe expects.
   await smokeCommand('comments-window-push-snapshot', { snapshot: nextLiveSessionSnapshot() })
   await waitFor(

@@ -35,7 +35,7 @@ import type {
 import { monogramInitials, useCachedAvatar } from '@/lib/chat-avatar'
 import { REMOVE_FROM_CHAT_LABEL, type RemovalStatusView } from '@/lib/chat-removal-view'
 import { groupEmoteOverlays } from '@/lib/chat-emotes'
-import { copyChatLink, openChatLink } from '@/lib/chat-link-actions'
+import { copyChatLink, copyChatText, openChatLink } from '@/lib/chat-link-actions'
 import { chatLinksIn, splitLinks, type ChatLinkPiece } from '@/lib/chat-links'
 import { noticeViewerWords } from '@/lib/chat-notice'
 import { cohostFlagActionLabel, cohostFlagChipLabel, cohostFlagDetail } from '@/lib/cohost-view'
@@ -363,7 +363,7 @@ function ChatLink({ link }: { link: ChatLinkPiece }): ReactElement {
           <ExternalLinkIcon aria-hidden />
           Open link
         </ContextMenuItem>
-        <ContextMenuItem onSelect={() => copyChatLink(link.href)}>
+        <ContextMenuItem onSelect={() => void copyChatLink(link.href)}>
           <CopyIcon aria-hidden />
           Copy link
         </ContextMenuItem>
@@ -584,7 +584,7 @@ function commentLinkMenuItems(message: LiveChatMessage): KebabMenuItem[] {
       id: `copy-link-${index}`,
       label: named ? `Copy ${link.host} link` : 'Copy link',
       icon: CopyIcon,
-      onSelect: () => copyChatLink(link.href)
+      onSelect: () => void copyChatLink(link.href)
     }
   ])
 }
@@ -633,8 +633,7 @@ export function commentRowMenu({
       id: 'copy',
       label: 'Copy',
       icon: CopyIcon,
-      onSelect: () =>
-        void navigator.clipboard?.writeText(`${message.authorName}: ${message.messageText}`)
+      onSelect: () => void copyChatText(`${message.authorName}: ${message.messageText}`)
     },
     ...(onRemoveFromChat
       ? [
