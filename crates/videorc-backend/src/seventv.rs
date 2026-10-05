@@ -897,13 +897,31 @@ fn split_text_run(
 /// Where the Settings switch is stored (`app_settings`).
 const CHAT_EMOTE_SETTINGS_KEY: &str = "chatEmoteSettings";
 
-/// Settings → General → "Show 7TV emotes in chat". On unless the streamer
-/// turned it off; off means Videorc never contacts 7TV.
+/// Settings → General → "GIFs in Twitch chat" (plan 154, D6): how a GIF a
+/// Tier 2/3 subscriber sent from Twitch's GIF Keyboard draws in the Stream
+/// Manager. The renderer applies it; `Off` means it never fetches the image
+/// and the row keeps the GIF's title. Mirrors `TwitchGifMode` in
+/// `apps/desktop/src/shared/chat-gif.ts`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum TwitchGifMode {
+    #[default]
+    Animated,
+    Still,
+    Off,
+}
+
+/// Settings → General → "Show 7TV emotes in chat" and "GIFs in Twitch
+/// chat". 7TV is on unless the streamer turned it off; off means Videorc
+/// never contacts 7TV. Rows persisted before plan 154 have no `twitchGifs`
+/// and read as Animated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ChatEmoteSettings {
     #[serde(default = "seven_tv_on_by_default")]
     pub seven_tv: bool,
+    #[serde(default)]
+    pub twitch_gifs: TwitchGifMode,
 }
 
 fn seven_tv_on_by_default() -> bool {
@@ -912,7 +930,10 @@ fn seven_tv_on_by_default() -> bool {
 
 impl Default for ChatEmoteSettings {
     fn default() -> Self {
-        Self { seven_tv: true }
+        Self {
+            seven_tv: true,
+            twitch_gifs: TwitchGifMode::Animated,
+        }
     }
 }
 
@@ -921,6 +942,8 @@ impl Default for ChatEmoteSettings {
 pub(crate) struct ChatEmoteSettingsPatch {
     #[serde(default)]
     pub seven_tv: Option<bool>,
+    #[serde(default)]
+    pub twitch_gifs: Option<TwitchGifMode>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -1001,6 +1024,7 @@ impl SevenTvStatus {
 pub(crate) struct ChatEmotesState {
     pub seven_tv: bool,
     pub seven_tv_status: SevenTvStatus,
+    pub twitch_gifs: TwitchGifMode,
 }
 
 pub(crate) fn load_settings(state: &AppState) -> ChatEmoteSettings {
@@ -1029,6 +1053,7 @@ pub(crate) async fn current_state(state: &AppState) -> ChatEmotesState {
     ChatEmotesState {
         seven_tv: settings.seven_tv,
         seven_tv_status,
+        twitch_gifs: settings.twitch_gifs,
     }
 }
 
@@ -1046,16 +1071,23 @@ pub(crate) async fn set_settings(
     patch: ChatEmoteSettingsPatch,
 ) -> anyhow::Result<ChatEmotesState> {
     let mut settings = load_settings(state);
+    let seven_tv_before = settings.seven_tv;
     if let Some(seven_tv) = patch.seven_tv {
         settings.seven_tv = seven_tv;
+    }
+    if let Some(twitch_gifs) = patch.twitch_gifs {
+        settings.twitch_gifs = twitch_gifs;
     }
     state
         .database
         .save_setting(CHAT_EMOTE_SETTINGS_KEY, &settings)?;
-    if settings.seven_tv {
-        crate::live_chat::ensure_seventv_for_current_session(state).await;
-    } else {
-        state.live_chat.lock().await.stop_seventv();
+    // The GIF mode is renderer-side; only the 7TV switch moves the loader.
+    if patch.seven_tv.is_some() || seven_tv_before != settings.seven_tv {
+        if settings.seven_tv {
+            crate::live_chat::ensure_seventv_for_current_session(state).await;
+        } else {
+            state.live_chat.lock().await.stop_seventv();
+        }
     }
     let snapshot = current_state(state).await;
     state.emit_event("liveChat.emotes", snapshot.clone());
@@ -2355,5 +2387,53 @@ mod tests {
             .await
             .expect("live 7TV poll");
         assert_eq!(versions.active_sets, load.versions.active_sets);
+    }
+
+    /// Plan 154, D6: the GIF mode rides the 7TV settings row. A row saved
+    /// before the field existed reads as Animated, the wire name is
+    /// camelCase, and the patch still refuses keys it does not know.
+    #[test]
+    fn twitch_gif_mode_defaults_to_animated_and_round_trips() {
+        let legacy: ChatEmoteSettings = serde_json::from_str(r#"{"sevenTv":false}"#).unwrap();
+        assert_eq!(
+            legacy,
+            ChatEmoteSettings {
+                seven_tv: false,
+                twitch_gifs: TwitchGifMode::Animated
+            }
+        );
+        assert_eq!(
+            ChatEmoteSettings::default().twitch_gifs,
+            TwitchGifMode::Animated
+        );
+
+        let saved = serde_json::to_value(ChatEmoteSettings {
+            seven_tv: true,
+            twitch_gifs: TwitchGifMode::Still,
+        })
+        .unwrap();
+        assert_eq!(saved, json!({ "sevenTv": true, "twitchGifs": "still" }));
+        let back: ChatEmoteSettings = serde_json::from_value(saved).unwrap();
+        assert_eq!(back.twitch_gifs, TwitchGifMode::Still);
+
+        let patch: ChatEmoteSettingsPatch =
+            serde_json::from_value(json!({ "twitchGifs": "off" })).unwrap();
+        assert_eq!(patch.seven_tv, None);
+        assert_eq!(patch.twitch_gifs, Some(TwitchGifMode::Off));
+        assert!(
+            serde_json::from_value::<ChatEmoteSettingsPatch>(json!({ "gifs": "off" })).is_err()
+        );
+        assert!(
+            serde_json::from_value::<ChatEmoteSettingsPatch>(json!({ "twitchGifs": "paused" }))
+                .is_err()
+        );
+
+        let snapshot = serde_json::to_value(ChatEmotesState {
+            seven_tv: true,
+            seven_tv_status: SevenTvStatus::of(SevenTvState::Idle),
+            twitch_gifs: TwitchGifMode::Off,
+        })
+        .unwrap();
+        assert_eq!(snapshot["twitchGifs"], "off");
     }
 }

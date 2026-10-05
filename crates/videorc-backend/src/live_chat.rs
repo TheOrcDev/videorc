@@ -3867,14 +3867,21 @@ mod tests {
     async fn the_settings_switch_stops_and_starts_7tv_mid_stream() {
         use crate::seventv::{ChatEmoteSettingsPatch, SevenTvState};
         let state = test_state();
-        let switch = |on: bool| ChatEmoteSettingsPatch { seven_tv: Some(on) };
+        let switch = |on: bool| ChatEmoteSettingsPatch {
+            seven_tv: Some(on),
+            twitch_gifs: None,
+        };
         // On by default, with nothing loaded yet in this app run.
         let initial = crate::seventv::current_state(&state).await;
         assert!(initial.seven_tv);
         assert_eq!(initial.seven_tv_status.state, SevenTvState::Idle);
         assert_eq!(
             serde_json::to_value(&initial).unwrap(),
-            serde_json::json!({ "sevenTv": true, "sevenTvStatus": { "state": "idle" } })
+            serde_json::json!({
+                "sevenTv": true,
+                "sevenTvStatus": { "state": "idle" },
+                "twitchGifs": "animated"
+            })
         );
 
         let generation = {
