@@ -517,3 +517,31 @@ export function commentCanHighlight(message: LiveChatMessage): boolean {
   }
   return true
 }
+
+/** The author holds a paid membership: YouTube member, Twitch or Kick
+ * subscriber, X subscriber. Every provider normalizes it to `member`. */
+export function commentAuthorIsMember(message: Pick<LiveChatMessage, 'authorRoles'>): boolean {
+  return message.authorRoles.includes('member')
+}
+
+export type CommentRowTint = 'paid' | 'spotlight' | 'member' | null
+
+/**
+ * The one background a chat row paints (plan 154, D3). Lowest to highest:
+ * a member's own message, Orcle's "Talking about this" pull-up, a paid
+ * message. An on-stream row paints none: its button fill says so.
+ */
+export function commentRowTint(
+  message: Pick<LiveChatMessage, 'authorRoles' | 'eventType' | 'amountText' | 'isDeleted'>,
+  { spotlight, onStream }: { spotlight: boolean; onStream: boolean }
+): CommentRowTint {
+  if (onStream) return null
+  if (message.amountText) return 'paid'
+  if (spotlight) return 'spotlight'
+  const viewerRow =
+    message.eventType === 'message' ||
+    message.eventType === 'paid' ||
+    message.eventType === 'membership'
+  if (viewerRow && !message.isDeleted && commentAuthorIsMember(message)) return 'member'
+  return null
+}

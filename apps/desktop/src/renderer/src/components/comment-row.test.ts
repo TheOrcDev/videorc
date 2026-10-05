@@ -208,6 +208,74 @@ describe('CommentRow: Talking about this', () => {
   })
 })
 
+describe('CommentRow: member tint (plan 154)', () => {
+  const member = (overrides: Partial<LiveChatMessage> = {}): LiveChatMessage =>
+    message({ authorRoles: ['member'], ...overrides })
+
+  it("tints a member's row under both shells and keeps the Member chip", () => {
+    for (const onHighlight of [() => undefined, undefined]) {
+      const markup = renderToStaticMarkup(
+        createElement(CommentRow, { message: member(), onHighlight })
+      )
+      expect(markup).toContain('bg-member/8')
+      expect(markup).toContain('data-member="true"')
+      expect(markup).toContain('data-row-tint="member"')
+      expect(markup).toContain('data-slot="comment-role"')
+      expect(markup).toContain('>Member<')
+      expect(markup).not.toContain('bg-accent')
+      expect(markup).not.toContain('bg-warning/10')
+    }
+  })
+
+  it('lets a paid message and the pull-up win over the member tint', () => {
+    const paid = renderToStaticMarkup(
+      createElement(CommentRow, {
+        message: member({ eventType: 'paid', amountText: '$5' }),
+        onHighlight: () => undefined
+      })
+    )
+    expect(paid).toContain('bg-warning/10 ring-1 ring-warning/30')
+    expect(paid).toContain('data-row-tint="paid"')
+    expect(paid).not.toContain('bg-member/8')
+    expect(paid).toContain('>Member<')
+
+    const spotlight = renderToStaticMarkup(
+      createElement(CommentRow, {
+        cohostSpotlight: true,
+        message: member(),
+        onHighlight: () => undefined
+      })
+    )
+    expect(spotlight).toContain('bg-accent')
+    expect(spotlight).toContain('data-row-tint="spotlight"')
+    expect(spotlight).not.toContain('bg-member/8')
+  })
+
+  it('paints no tint on stream, on a removed message, or without the role', () => {
+    const onStream = renderToStaticMarkup(
+      createElement(CommentRow, {
+        cohostSpotlight: true,
+        highlight: { phase: 'live' },
+        message: member(),
+        onHighlight: () => undefined
+      })
+    )
+    expect(onStream).not.toContain('bg-member/8')
+    expect(onStream).not.toContain('bg-accent')
+    expect(onStream).not.toContain('data-row-tint')
+
+    const removed = renderToStaticMarkup(
+      createElement(CommentRow, { message: member({ isDeleted: true }) })
+    )
+    expect(removed).not.toContain('bg-member/8')
+    expect(removed).not.toContain('data-member')
+
+    const viewer = renderToStaticMarkup(createElement(CommentRow, { message: message() }))
+    expect(viewer).not.toContain('data-member')
+    expect(viewer).not.toContain('data-row-tint')
+  })
+})
+
 describe('CommentRow: Remove from chat (plan 140, S6)', () => {
   const remove = (): void => undefined
   const reply = (): void => undefined

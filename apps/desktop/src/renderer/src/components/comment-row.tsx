@@ -1,6 +1,6 @@
 import { Fragment, type CSSProperties, type ReactElement, type ReactNode, type Ref } from 'react'
 
-import { commentCanHighlight } from '@/lib/live-chat-view'
+import { commentCanHighlight, commentRowTint, type CommentRowTint } from '@/lib/live-chat-view'
 export { commentCanHighlight } from '@/lib/live-chat-view'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
@@ -223,6 +223,17 @@ const ROLE_LABELS: Record<string, string> = {
   moderator: 'Mod',
   vip: 'VIP',
   member: 'Member'
+}
+
+/**
+ * Row backgrounds (plan 154, D2, D3): one tint per row, never two. A paid
+ * row is a fill and a hairline ring; a member's row is one notch quieter,
+ * a fill alone, so a member's Super Chat still reads louder.
+ */
+const ROW_TINT_CLASS: Record<Exclude<CommentRowTint, null>, string> = {
+  paid: 'bg-warning/10 ring-1 ring-warning/30',
+  spotlight: 'bg-accent',
+  member: 'bg-member/8'
 }
 
 /** Role tags (owner, moderator, VIP, member) as glass tag chips (plan 055, D3). */
@@ -697,6 +708,10 @@ export function CommentRow({
   // never once the comment is already on (or on its way to) the stream.
   const suggested = cohostSuggested && highlightable && highlight.phase === 'idle'
   const mentioned = commentMentions(message, mentionNames)
+  const tint = commentRowTint(message, {
+    spotlight: cohostSpotlight,
+    onStream: highlight.phase === 'live'
+  })
   const content = (
     <CommentContent
       density={density}
@@ -725,8 +740,10 @@ export function CommentRow({
       className={cn('group/comment', menu.length > 0 && 'flex items-start gap-0.5')}
       data-highlight-phase={highlight.phase}
       data-index={index}
+      data-member={tint === 'member' || undefined}
       data-mention={mentioned || undefined}
       data-message-id={message.id}
+      data-row-tint={tint ?? undefined}
       data-spotlight={cohostSpotlight || undefined}
       style={style}
     >
@@ -743,8 +760,7 @@ export function CommentRow({
           disabled={highlight.phase === 'applying'}
           className={cn(
             'h-auto w-full min-w-0 flex-1 items-start justify-start gap-2 whitespace-normal px-2 py-1.5',
-            cohostSpotlight && highlight.phase !== 'live' && 'bg-accent',
-            message.amountText && 'bg-warning/10 ring-1 ring-warning/30'
+            tint && ROW_TINT_CLASS[tint]
           )}
           title={highlight.phase === 'live' ? 'Take off stream' : 'Show this message on the stream'}
           type="button"
@@ -757,8 +773,7 @@ export function CommentRow({
         <div
           className={cn(
             'flex min-w-0 flex-1 items-start gap-2 rounded-row px-2 py-1.5',
-            cohostSpotlight && 'bg-accent',
-            message.amountText && 'bg-warning/10 ring-1 ring-warning/30'
+            tint && ROW_TINT_CLASS[tint]
           )}
         >
           {content}
