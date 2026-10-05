@@ -1740,6 +1740,11 @@ pub struct FakeChatConfig {
     /// on the card, plan 095).
     #[serde(default)]
     pub emote: Option<FakeChatEmote>,
+    /// After its messages, deliver one Twitch GIF Keyboard row (plan 154): a
+    /// `gif` fragment with this URL, from a Tier 2 subscriber. The URL is
+    /// taken as given; the real connector gates it in `twitch_chat.rs`.
+    #[serde(default)]
+    pub gif: Option<FakeChatGif>,
     /// Author names to rotate through (`authors[seq % len]`) instead of
     /// "Test Viewer N", so a smoke can say a name ("coders_x", plan 140 S9).
     #[serde(default)]
@@ -1767,6 +1772,15 @@ pub enum FakeChatDeleteBehavior {
 #[serde(rename_all = "camelCase")]
 pub struct FakeChatEmote {
     pub text: String,
+    pub image_url: String,
+}
+
+/// A fake Twitch GIF (plan 154). `title` is the GIPHY title as Twitch sends
+/// it in the fragment text, brackets included (`[Y A Y Yes GIF]`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FakeChatGif {
+    pub title: String,
     pub image_url: String,
 }
 
@@ -3476,6 +3490,11 @@ async fn run_fake_connector(
             .await;
         }
     }
+    if let Some(gif) = &config.gif {
+        sleep(interval).await;
+        let message = fake_gif_message(&session_id, platform, config.target_id.as_deref(), gif);
+        let _ = try_deliver_message(&state, session_generation, message).await;
+    }
     if config.events {
         for message in fake_events(&session_id, platform, config.target_id.as_deref()) {
             sleep(interval).await;
@@ -3685,6 +3704,38 @@ fn fake_events(
 }
 
 /// One scripted message for a fake lane, with its configured author.
+/// One Twitch GIF Keyboard row as the connector would normalize it (plan
+/// 154): a plain message whose only fragment is the GIF, text the bracketed
+/// title, from a Tier 2 subscriber.
+fn fake_gif_message(
+    session_id: &str,
+    platform: StreamPlatform,
+    target_id: Option<&str>,
+    gif: &FakeChatGif,
+) -> LiveChatMessage {
+    let mut message = fake_message(session_id, platform, target_id, 0);
+    message.provider_message_id = "fake-gif".to_string();
+    message.id = live_chat_message_id(
+        session_id,
+        platform,
+        target_id,
+        &message.provider_message_id,
+    );
+    message.author_id = Some("fake-gif-sender".to_string());
+    message.author_name = "Tier2Fan".to_string();
+    message.author_badges = vec!["subscriber".to_string()];
+    message.author_roles = vec!["member".to_string()];
+    message.message_text = gif.title.clone();
+    message.fragments = vec![LiveChatMessageFragment {
+        fragment_type: "gif".to_string(),
+        text: gif.title.clone(),
+        image_url: Some(gif.image_url.clone()),
+        zero_width: false,
+    }];
+    message.raw_provider_type = Some("channel.chat.message".to_string());
+    message
+}
+
 fn fake_message_for(config: &FakeChatConfig, session_id: &str, seq: u32) -> LiveChatMessage {
     let mut message = fake_message(
         session_id,
@@ -4075,6 +4126,39 @@ mod tests {
             in_reply_to_question_id: None,
             destination_ids: None,
         }
+    }
+
+    /// Plan 154: the fake connector's GIF row is shaped like the real one, so
+    /// the fake-providers smoke exercises the same renderer path.
+    #[test]
+    fn the_fake_twitch_gif_row_is_a_plain_message_with_one_gif_fragment() {
+        let gif = FakeChatGif {
+            title: "[Y A Y Yes GIF]".to_string(),
+            image_url: "https://media2.giphy.com/media/aUovxH8Vf9qDu/giphy.gif".to_string(),
+        };
+        let message = fake_gif_message("s1", StreamPlatform::Twitch, None, &gif);
+        assert_eq!(message.event_type, LiveChatEventType::Message);
+        assert_eq!(message.message_text, "[Y A Y Yes GIF]");
+        assert_eq!(message.fragments.len(), 1);
+        assert_eq!(message.fragments[0].fragment_type, "gif");
+        assert_eq!(
+            message.fragments[0].image_url.as_deref(),
+            Some(gif.image_url.as_str())
+        );
+        assert_eq!(message.author_roles, vec!["member".to_string()]);
+        assert_eq!(message.provider_message_id, "fake-gif");
+        assert_eq!(
+            message.id,
+            fake_gif_message("s1", StreamPlatform::Twitch, None, &gif).id
+        );
+        assert!(message.details.is_none());
+        // Deserialized from the smoke's JSON config, camelCase.
+        let config: FakeChatConfig = serde_json::from_value(serde_json::json!({
+            "platform": "twitch",
+            "gif": { "title": "[Y A Y Yes GIF]", "imageUrl": gif.image_url }
+        }))
+        .unwrap();
+        assert_eq!(config.gif.unwrap().title, "[Y A Y Yes GIF]");
     }
 
     #[test]

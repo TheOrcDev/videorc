@@ -417,7 +417,7 @@ fn warn_rejected_gif_assets(state: &AppState, fragments: &Value) {
         let mut warned = WARNED_HOSTS
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if warned.iter().any(|known| *known == host) {
+        if warned.contains(&host) {
             continue;
         }
         warned.push(host.clone());
