@@ -1,4 +1,14 @@
-import { Fragment, type CSSProperties, type ReactElement, type ReactNode, type Ref } from 'react'
+import {
+  Fragment,
+  useEffect,
+  useRef,
+  type CSSProperties,
+  type ReactElement,
+  type ReactNode,
+  type Ref
+} from 'react'
+
+import { gifTitle } from '../../../shared/chat-gif'
 
 import { commentCanHighlight } from '@/lib/live-chat-view'
 export { commentCanHighlight } from '@/lib/live-chat-view'
@@ -35,6 +45,7 @@ import type {
 import { monogramInitials, useCachedAvatar } from '@/lib/chat-avatar'
 import { REMOVE_FROM_CHAT_LABEL, type RemovalStatusView } from '@/lib/chat-removal-view'
 import { groupEmoteOverlays } from '@/lib/chat-emotes'
+import { isGifFragment, splitGifFragments, useChatGifMode } from '@/lib/chat-gifs'
 import { copyChatLink, copyChatText, openChatLink } from '@/lib/chat-link-actions'
 import { chatLinksIn, splitLinks, type ChatLinkPiece } from '@/lib/chat-links'
 import { noticeViewerWords } from '@/lib/chat-notice'
@@ -298,22 +309,132 @@ function Emote({
   )
 }
 
+/**
+ * A Twitch GIF Keyboard GIF (plan 154, D5): its own block under the text,
+ * at a fixed height so the virtualized list never re-measures when the image
+ * lands. Until main's cache resolves it (and whenever it refuses it) the
+ * block shows the GIF's title with a "GIF" tag; the row never changes
+ * height. Still draws the first frame only; Off never asks for the image.
+ */
+function ChatGif({
+  fragment,
+  density
+}: {
+  fragment: LiveChatMessageFragment
+  density: 'compact' | 'comfortable'
+}): ReactElement {
+  const mode = useChatGifMode()
+  const title = gifTitle(fragment.text)
+  const localUrl = useCachedAvatar(mode === 'off' ? null : fragment.imageUrl, 'gif')
+  const height = density === 'comfortable' ? 'h-24' : 'h-16'
+  const image =
+    localUrl && mode === 'animated' ? (
+      <img
+        alt={title}
+        className="h-full w-auto max-w-full rounded-md object-contain"
+        data-slot="comment-gif-image"
+        draggable={false}
+        src={localUrl}
+      />
+    ) : localUrl && mode === 'still' ? (
+      <StillFrame alt={title} src={localUrl} />
+    ) : null
+  return (
+    <span
+      className={cn('mt-1 flex items-center gap-1.5 text-left', height)}
+      data-gif-mode={mode}
+      data-slot="comment-gif"
+      title={title}
+    >
+      {image ?? (
+        <span
+          className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"
+          data-slot="comment-gif-title"
+        >
+          <Badge className="shrink-0" variant="outline">
+            GIF
+          </Badge>
+          <span className="truncate">{title}</span>
+        </span>
+      )}
+    </span>
+  )
+}
+
+/** One frame of an animated image: drawn to a canvas as soon as it loads,
+ * so the file's later frames never play (Still, or reduced motion). */
+function StillFrame({ alt, src }: { alt: string; src: string }): ReactElement {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    let cancelled = false
+    const image = new Image()
+    image.decoding = 'async'
+    image.onload = () => {
+      if (cancelled) return
+      canvas.width = image.naturalWidth
+      canvas.height = image.naturalHeight
+      canvas.getContext('2d')?.drawImage(image, 0, 0)
+    }
+    image.src = src
+    return () => {
+      cancelled = true
+      image.onload = null
+    }
+  }, [src])
+  return (
+    <canvas
+      aria-label={alt}
+      className="h-full w-auto max-w-full rounded-md object-contain"
+      data-slot="comment-gif-still"
+      ref={canvasRef}
+      role="img"
+    />
+  )
+}
+
 /** Text with emotes inline when the platform sent them (Twitch, Kick) or
  * the backend matched them (7TV), zero-width 7TV emotes stacked on the emote
- * before them. Without an emote it is `text` as is. */
+ * before them. A Twitch GIF (plan 154) is its own block after the text it
+ * came with. Without an emote or GIF it is `text` as is. */
 function FragmentText({
   text,
   fragments,
-  links
+  links,
+  density = 'compact'
 }: {
   text: string
   fragments: readonly LiveChatMessageFragment[]
   /** Viewer-written text: its links get Open link and Copy link. */
   links: boolean
+  density?: 'compact' | 'comfortable'
 }): ReactNode {
   if (!fragments.some((fragment) => fragment.imageUrl)) {
     return links ? <LinkedText text={text} /> : text
   }
+  if (fragments.some(isGifFragment)) {
+    return splitGifFragments(fragments).map((part, index) =>
+      part.kind === 'gif' ? (
+        <ChatGif density={density} fragment={part.fragment} key={index} />
+      ) : (
+        <Fragment key={index}>
+          <EmoteText fragments={part.fragments} links={links} />
+        </Fragment>
+      )
+    )
+  }
+  return <EmoteText fragments={fragments} links={links} />
+}
+
+/** A run of text and emotes, zero-width 7TV emotes stacked. */
+function EmoteText({
+  fragments,
+  links
+}: {
+  fragments: readonly LiveChatMessageFragment[]
+  links: boolean
+}): ReactNode {
   return groupEmoteOverlays(fragments).map((piece, index) => {
     if (piece.kind === 'text') {
       return <span key={index}>{links ? <LinkedText text={piece.text} /> : piece.text}</span>
@@ -402,14 +523,17 @@ export function commentLinkText(message: LiveChatMessage): string | undefined {
  * Twitch's sentence, then the viewer's own words below it (plan 151, D3). */
 function MessageBody({
   message,
-  noticeWords
+  noticeWords,
+  density
 }: {
   message: LiveChatMessage
   noticeWords: string | undefined
+  density: 'compact' | 'comfortable'
 }): ReactNode {
   if (!noticeWords) {
     return (
       <FragmentText
+        density={density}
         fragments={message.fragments}
         links={viewerWrote(message)}
         text={message.messageText}
@@ -554,7 +678,7 @@ function CommentContent({
             message.isDeleted && 'text-muted-foreground line-through'
           )}
         >
-          <MessageBody message={message} noticeWords={noticeWords} />
+          <MessageBody density={density} message={message} noticeWords={noticeWords} />
         </span>
       </span>
     </>

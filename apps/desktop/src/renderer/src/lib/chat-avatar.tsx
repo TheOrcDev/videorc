@@ -19,27 +19,40 @@ export function monogramInitials(name: string): string {
   return initials || '?'
 }
 
+/** Which of main's two cache kinds resolves a URL: avatars and emotes share
+ * one allowlist and cap; Twitch GIFs (plan 154) have their own. */
+export type CachedImageKind = 'avatar' | 'gif'
+
 // One in-flight/settled promise per remote URL for the whole renderer: a busy
 // chat repeats the same authors constantly.
 const avatarUrlCache = new Map<string, Promise<string | null>>()
 
-function resolveAvatar(remoteUrl: string): Promise<string | null> {
-  const cached = avatarUrlCache.get(remoteUrl)
+function resolveAvatar(remoteUrl: string, kind: CachedImageKind): Promise<string | null> {
+  const key = `${kind}:${remoteUrl}`
+  const cached = avatarUrlCache.get(key)
   if (cached) {
     return cached
   }
   const resolved = (async () => {
     try {
-      return (await window.videorc?.cacheChatAvatar?.(remoteUrl)) ?? null
+      const api = window.videorc
+      const local =
+        kind === 'gif'
+          ? await api?.cacheChatGif?.(remoteUrl)
+          : await api?.cacheChatAvatar?.(remoteUrl)
+      return local ?? null
     } catch {
       return null
     }
   })()
-  avatarUrlCache.set(remoteUrl, resolved)
+  avatarUrlCache.set(key, resolved)
   return resolved
 }
 
-export function useCachedAvatar(remoteUrl: string | undefined | null): string | null {
+export function useCachedAvatar(
+  remoteUrl: string | undefined | null,
+  kind: CachedImageKind = 'avatar'
+): string | null {
   const [localUrl, setLocalUrl] = useState<string | null>(null)
   useEffect(() => {
     if (!remoteUrl) {
@@ -47,7 +60,7 @@ export function useCachedAvatar(remoteUrl: string | undefined | null): string | 
       return
     }
     let cancelled = false
-    void resolveAvatar(remoteUrl).then((resolved) => {
+    void resolveAvatar(remoteUrl, kind).then((resolved) => {
       if (!cancelled) {
         setLocalUrl(resolved)
       }
@@ -55,7 +68,7 @@ export function useCachedAvatar(remoteUrl: string | undefined | null): string | 
     return () => {
       cancelled = true
     }
-  }, [remoteUrl])
+  }, [remoteUrl, kind])
   return localUrl
 }
 

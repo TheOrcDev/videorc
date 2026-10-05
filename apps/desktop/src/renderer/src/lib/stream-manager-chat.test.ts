@@ -3,7 +3,13 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
 import { CommentRow, commentMentions } from '@/components/comment-row'
-import type { LiveChatMessage, LiveChatProviderState, StreamPlatform } from '@/lib/backend'
+import type {
+  LiveChatMessage,
+  LiveChatProviderState,
+  StreamPlatform,
+  TwitchGifMode
+} from '@/lib/backend'
+import { ChatGifModeProvider } from '@/lib/chat-gifs'
 import { chatDraftMaxChars } from '@/lib/chat-send'
 
 import {
@@ -185,6 +191,73 @@ describe('Stream Manager chat pane', () => {
     expect(markup).toContain('title="catJAM RainTime"')
     expect(markup).toContain('>catJAM</span>')
     expect(markup).not.toContain('>RainTime<')
+  })
+
+  it('draws a Twitch GIF as its own fixed-height block with the title until cached (plan 154)', () => {
+    const gif = {
+      type: 'gif',
+      text: '[Y A Y Yes GIF]',
+      imageUrl: 'https://media2.giphy.com/media/aUovxH8Vf9qDu/giphy.gif'
+    }
+    const render = (density: 'compact' | 'comfortable', mode?: TwitchGifMode): string => {
+      const row = createElement(CommentRow, {
+        density,
+        message: message('11', 'twitch', '[Y A Y Yes GIF]', { fragments: [gif] })
+      })
+      return renderToStaticMarkup(
+        mode ? createElement(ChatGifModeProvider, { mode, children: row }) : row
+      )
+    }
+    const compact = render('compact')
+    // Not an emote: its own block, at the compact height, named by its title.
+    expect(compact).toContain('data-slot="comment-gif"')
+    expect(compact).toContain('data-gif-mode="animated"')
+    expect(compact).toContain('h-16')
+    expect(compact).toContain('data-slot="comment-gif-title"')
+    expect(compact).toContain('>GIF</span>')
+    expect(compact).toContain('Y A Y Yes')
+    expect(compact).not.toContain('[Y A Y Yes GIF]')
+    expect(compact).not.toContain('data-slot="comment-emote"')
+    // The CDN URL never reaches the DOM: the image comes from main's cache.
+    expect(compact).not.toContain('giphy.com')
+    expect(render('comfortable')).toContain('h-24')
+    // Off keeps the title block and never asks main for the image.
+    const off = render('compact', 'off')
+    expect(off).toContain('data-gif-mode="off"')
+    expect(off).toContain('data-slot="comment-gif-title"')
+    expect(render('compact', 'still')).toContain('data-gif-mode="still"')
+  })
+
+  it('keeps the words around a GIF, and a refused GIF as its title text (plan 154)', () => {
+    const markup = renderToStaticMarkup(
+      createElement(CommentRow, {
+        message: message('12', 'twitch', 'gg [Y A Y Yes GIF] wow', {
+          fragments: [
+            { type: 'text', text: 'gg ' },
+            {
+              type: 'gif',
+              text: '[Y A Y Yes GIF]',
+              imageUrl: 'https://media2.giphy.com/media/aUovxH8Vf9qDu/giphy.gif'
+            },
+            { type: 'text', text: ' wow' }
+          ]
+        })
+      })
+    )
+    expect(markup).toContain('gg ')
+    expect(markup).toContain(' wow')
+    expect(markup).toContain('data-slot="comment-gif"')
+    // The backend dropped the URL of a GIF off the asset allowlist: the row
+    // shows what was sent, as text, with no block.
+    const refused = renderToStaticMarkup(
+      createElement(CommentRow, {
+        message: message('13', 'twitch', '[Nope GIF]', {
+          fragments: [{ type: 'gif', text: '[Nope GIF]' }]
+        })
+      })
+    )
+    expect(refused).toContain('[Nope GIF]')
+    expect(refused).not.toContain('data-slot="comment-gif"')
   })
 
   it('shows the time on every row in History, and on hover while live', () => {
