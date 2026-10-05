@@ -116,7 +116,7 @@ describe('renderer security policy', () => {
     ).toBe(false)
   })
 
-  it('defaults web permissions closed and grants only main-frame audio and sanitized writes', () => {
+  it('defaults web permissions closed: main-frame audio, sanitized writes from main and the Stream Manager', () => {
     const registry = new RendererSecurityRegistry()
     const trustedMainUrl = 'file:///Applications/Videorc/resources/index.html'
     const trustedCommentsUrl = 'file:///Applications/Videorc/resources/comments.html'
@@ -124,6 +124,9 @@ describe('renderer security policy', () => {
     registry.trustDocument(1, trustedMainUrl)
     registry.register(2, 'comments')
     registry.trustDocument(2, trustedCommentsUrl)
+    const trustedNotesUrl = 'file:///Applications/Videorc/resources/notes.html'
+    registry.register(3, 'notes')
+    registry.trustDocument(3, trustedNotesUrl)
 
     const request = (overrides: Partial<Parameters<typeof rendererWebPermissionAllowed>[1]>) =>
       rendererWebPermissionAllowed(registry, {
@@ -152,7 +155,32 @@ describe('renderer security policy', () => {
     ]) {
       expect(request({ permission, mediaTypes: undefined })).toBe(false)
     }
-    expect(request({ senderId: 2, frameUrl: trustedCommentsUrl })).toBe(false)
+    // The Stream Manager may write the clipboard (Copy, Copy link) and
+    // nothing else: no microphone, no clipboard reads.
+    const comments = { senderId: 2, frameUrl: trustedCommentsUrl }
+    expect(request(comments)).toBe(false)
+    expect(
+      request({ ...comments, permission: 'clipboard-sanitized-write', mediaTypes: undefined })
+    ).toBe(true)
+    expect(request({ ...comments, permission: 'clipboard-read', mediaTypes: undefined })).toBe(
+      false
+    )
+    expect(
+      request({
+        ...comments,
+        frameUrl: 'https://attacker.example/',
+        permission: 'clipboard-sanitized-write',
+        mediaTypes: undefined
+      })
+    ).toBe(false)
+    expect(
+      request({
+        senderId: 3,
+        frameUrl: trustedNotesUrl,
+        permission: 'clipboard-sanitized-write',
+        mediaTypes: undefined
+      })
+    ).toBe(false)
     expect(request({ senderId: 99 })).toBe(false)
     expect(request({ frameUrl: 'https://attacker.example/' })).toBe(false)
     expect(request({ isMainFrame: false })).toBe(false)

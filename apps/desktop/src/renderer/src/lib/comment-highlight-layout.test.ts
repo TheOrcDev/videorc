@@ -3,9 +3,12 @@ import { describe, expect, it } from 'vitest'
 import type { LiveChatMessageFragment } from '@/lib/backend'
 import {
   HIGHLIGHT_MAX_TEXT_LINES,
+  HIGHLIGHT_NAME_WEIGHT,
+  HIGHLIGHT_TEXT_WEIGHT,
   highlightMetrics,
   layoutCommentHighlight,
-  wrapHighlightText
+  wrapHighlightText,
+  type HighlightTextMeasurer
 } from './comment-highlight'
 import {
   HIGHLIGHT_EMOTE_MAX_ASPECT,
@@ -257,6 +260,33 @@ describe('layoutCommentHighlightTokens', () => {
     expect(layout.cardHeightPx).toBe(
       Math.ceil(metrics.paddingPx * 2 + metrics.avatarPx + metrics.rowGapPx + metrics.lineHeightPx)
     )
+  })
+
+  it('places an emote one regular-weight space after the regular-weight words', () => {
+    // Semibold runs 10% wider: measuring the message at the name's weight put
+    // the emote a gap past the words the card paints regular.
+    const weighted: HighlightTextMeasurer = (value, fontPx, weight) =>
+      value.length * fontPx * (weight === HIGHLIGHT_NAME_WEIGHT ? 0.605 : 0.55)
+    const regular = (value: string): number =>
+      weighted(value, metrics.textFontPx, HIGHLIGHT_TEXT_WEIGHT)
+    const layout = layoutCommentHighlightTokens({
+      authorName: 'Orc',
+      text: 'you just have to get some rich viewers',
+      fragments: [text('you just have to get some rich viewers '), emote('Kappa')],
+      canvasWidth: 1920,
+      canvasHeight: 1080,
+      measure: weighted,
+      emoteSize: square
+    })!
+    const words = 'you just have to get some rich viewers'.split(' ')
+    const wordsPx =
+      words.reduce((sum, word) => sum + regular(word), 0) + (words.length - 1) * regular(' ')
+    const [line] = layout.lines
+    const placed = line!.items[line!.items.length - 1]!
+    expect(placed.kind).toBe('emote')
+    expect(placed.xPx).toBeCloseTo(wordsPx + regular(' '))
+    const lineWidth = wordsPx + regular(' ') + highlightEmoteBoxHeightPx(metrics)
+    expect(layout.cardWidthPx).toBe(Math.ceil(metrics.paddingPx * 2 + lineWidth))
   })
 
   it('keeps a portrait card inside its 0.78 width cap with emotes', () => {

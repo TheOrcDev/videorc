@@ -135,7 +135,14 @@ export function StreamManagerStatusBar({
     <StatusBar
       className="gap-2"
       leading={
-        <span className="flex min-w-0 items-center gap-3 overflow-hidden" data-slot="chat-states">
+        // The clip keeps chips that cannot shrink off the controls at narrow
+        // widths. The padding (cancelled by the negative margin) is the status
+        // dot's 2 px halo and 8 px glow, which paint outside its box: without
+        // it the last dot is cut flat on the right.
+        <span
+          className="-my-1 -mr-2 flex min-w-0 items-center gap-3 overflow-hidden py-1 pr-2"
+          data-slot="chat-states"
+        >
           {providers.map((provider) => {
             const label = providerCapabilityLabel(provider)
             const problem = providerProblem(provider)

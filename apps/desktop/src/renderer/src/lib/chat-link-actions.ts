@@ -16,6 +16,20 @@ export async function openChatLink(href: string): Promise<void> {
 }
 
 /** Copies the link. The menu closing is the confirmation, as with Copy. */
-export function copyChatLink(href: string): void {
-  void navigator.clipboard?.writeText(href)
+export function copyChatLink(href: string): Promise<void> {
+  return copyChatText(href, "Couldn't copy that link.")
+}
+
+/**
+ * Copies chat text (a link, a message, an activity line). Success is quiet;
+ * a refused write says so, because a silent no-op reads as a broken menu.
+ */
+export async function copyChatText(text: string, failure = "Couldn't copy that."): Promise<void> {
+  try {
+    if (!navigator.clipboard) throw new Error('clipboard unavailable')
+    await navigator.clipboard.writeText(text)
+  } catch (error) {
+    console.warn('[chat-link] copy failed', error)
+    toast.error(failure)
+  }
 }

@@ -17,6 +17,7 @@ import {
 import {
   app,
   BrowserWindow,
+  clipboard,
   contentTracing,
   desktopCapturer,
   dialog,
@@ -10782,6 +10783,45 @@ async function runSmokePreviewMotionCommand(
         true
       )
       return { closed: open === false }
+    }
+    // Choose Copy link in the open menu with a real click and read the
+    // clipboard back: the menu once listed it while the write was refused.
+    // The user's clipboard text is restored afterwards.
+    if (params.action === 'copy') {
+      const item = (await window.webContents.executeJavaScript(
+        `(() => {
+          const item = Array.from(document.querySelectorAll('[data-slot="comment-link-menu"] [data-slot="context-menu-item"]'))
+            .find((candidate) => candidate.textContent === 'Copy link');
+          if (!item) return null;
+          const box = item.getBoundingClientRect();
+          return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2) };
+        })()`,
+        true
+      )) as { x: number; y: number } | null
+      if (!item) return { copied: false, reason: 'Copy link is not in an open menu.' }
+      const previous = clipboard.readText()
+      const marker = `videorc-probe-${randomUUID()}`
+      clipboard.writeText(marker)
+      try {
+        window.focus()
+        for (const type of ['mouseDown', 'mouseUp'] as const) {
+          window.webContents.sendInputEvent({
+            type,
+            x: item.x,
+            y: item.y,
+            button: 'left',
+            clickCount: 1
+          })
+        }
+        let text = clipboard.readText()
+        for (let attempt = 0; attempt < 20 && text === marker; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 50))
+          text = clipboard.readText()
+        }
+        return { copied: text !== marker, text: text === marker ? null : text }
+      } finally {
+        clipboard.writeText(previous)
+      }
     }
     const messageId = typeof params.messageId === 'string' ? params.messageId : ''
     const target = (await window.webContents.executeJavaScript(
