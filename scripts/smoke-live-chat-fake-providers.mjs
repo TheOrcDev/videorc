@@ -545,7 +545,7 @@ try {
         }
       ]
     })
-    const rolledTotals = await waitForSessionTotals(ws, eventsSessionId, 6014, timeoutMs)
+    const rolledTotals = await waitForSessionTotals(ws, eventsSessionId, 6015, timeoutMs)
     if (
       rolledTotals.supporters !== eventTotals.supporters ||
       rolledTotals.bits !== eventTotals.bits ||
