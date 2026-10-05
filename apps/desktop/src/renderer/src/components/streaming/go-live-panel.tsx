@@ -1,3 +1,5 @@
+import { StreamQualityControl } from './stream-quality-control'
+import { withStreamQuality } from '@/lib/output-quality'
 import { AlertIcon, ChevronDownIcon, SuccessIcon, SyncIcon } from '@/components/icons'
 import { useMemo, useState, type ReactElement } from 'react'
 
@@ -54,6 +56,9 @@ export function GoLivePanel({
 }): ReactElement {
   const {
     captureConfig,
+    setCaptureConfig,
+    goLiveConfirmationPending,
+    goLivePartialSetup,
     health,
     isSessionActive,
     platformAccounts,
@@ -108,6 +113,22 @@ export function GoLivePanel({
           </Alert>
         </div>
       ) : null}
+      <PanelSection title="Output quality">
+        <StreamQualityControl
+          value={streaming.defaultOutputPreset}
+          disabled={isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)}
+          youtube={streaming.targets.some(
+            (target) => target.enabled && target.platform === 'youtube'
+          )}
+          onChange={(preset) => {
+            if (preset !== 'default')
+              setCaptureConfig((current) => ({
+                ...current,
+                streaming: withStreamQuality(current.streaming, preset)
+              }))
+          }}
+        />
+      </PanelSection>
       <ReadyToGoLive
         accountByPlatform={accountByPlatform}
         diagnosticStats={diagnosticStats}

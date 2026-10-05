@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   applyFinalizationEvent,
+  FinalizationSnapshotJournal,
   finalizationEventNeedsRefresh,
   finalizationFailed,
   finalizingBadgeLabel,
@@ -80,4 +81,24 @@ describe('session finalization helpers', () => {
     expect(finalizationEventNeedsRefresh([row({ id: 's-3' })], event)).toBe(false)
     expect(finalizationEventNeedsRefresh([row()], { ...event, state: 'finalizing' })).toBe(false)
   })
+})
+
+it('keeps completion and retry events newer than an in-flight Library snapshot', () => {
+  const journal = new FinalizationSnapshotJournal()
+  const before = journal.checkpoint()
+  journal.record({ sessionId: 's-1', state: 'finalized', mp4Path: '/tmp/a.mp4', updatedAt: 't' })
+  expect(journal.reconcile([row({ finalizationState: 'finalizing' })], before)[0]).toMatchObject({
+    finalizationState: 'finalized',
+    mp4Path: '/tmp/a.mp4'
+  })
+  const retry = journal.checkpoint()
+  journal.record({ sessionId: 's-1', state: 'finalizing', progressPercent: 0, updatedAt: 't2' })
+  expect(
+    journal.reconcile(
+      [row({ finalizationState: 'failed', finalizationError: 'disk full' })],
+      retry
+    )[0]
+  ).toMatchObject({ finalizationState: 'finalizing', finalizationError: undefined })
+  const fresh = [row({ finalizationState: 'finalized' })]
+  expect(journal.reconcile(fresh, journal.checkpoint())).toBe(fresh)
 })

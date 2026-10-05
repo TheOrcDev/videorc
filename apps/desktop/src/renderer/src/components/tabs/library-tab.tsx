@@ -975,7 +975,7 @@ function RowActions({
               onClick={() => filePath && void window.videorc?.revealSession?.(session.id)}
             >
               <FolderIcon />
-              {revealInFileManagerLabel()}
+              {finalizing ? 'Show original · MP4 is saving' : revealInFileManagerLabel()}
             </DropdownMenuItem>
             {cleanupView.menuLabel ? (
               <DropdownMenuItem

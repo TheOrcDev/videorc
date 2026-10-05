@@ -1,3 +1,5 @@
+import { StreamQualityControl } from './stream-quality-control'
+import { streamQualityOverride } from '@/lib/output-quality'
 import {
   AlertIcon,
   ChevronDownIcon,
@@ -311,6 +313,9 @@ export function DestinationCard({
                 <Badge variant="outline">9:16</Badge>
               ) : null}
               {badge ? <Badge variant={badge.tone}>{badge.label}</Badge> : null}
+              {target.outputPreset || target.outputBitrateKbps ? (
+                <Badge variant="outline">Quality override</Badge>
+              ) : null}
             </span>
           ) : undefined
         }
@@ -356,6 +361,13 @@ export function DestinationCard({
 
         {!expanded ? null : (
           <>
+            <StreamQualityControl
+              value={target.outputPreset ?? 'default'}
+              disabled={disabled}
+              youtube={target.platform === 'youtube'}
+              inherit
+              onChange={(preset) => onPatch(target.id, streamQualityOverride(preset))}
+            />
             {target.platform === 'custom' ? (
               <Field>
                 <FieldLabel>URL mode</FieldLabel>

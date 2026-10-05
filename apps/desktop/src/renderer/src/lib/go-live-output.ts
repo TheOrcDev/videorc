@@ -54,6 +54,12 @@ export function sharedEncodeFallbackVideo(
   if (!first || !targetVideos.every((video) => sameTopologyVideoProfile(video, first))) {
     return null
   }
+  // A requested 4K recording must not silently become HD on a shared encoder.
+  if (
+    Math.min(recording.width, recording.height) >= 2160 &&
+    Math.min(first.width, first.height) < Math.min(recording.width, recording.height)
+  )
+    return null
   const shared = resolveProviderStreamOutputPlan(recording, streaming, {
     ...options,
     separateEncodedOutputRoleAvailable: false
@@ -333,6 +339,15 @@ export async function settleGoLiveSessionOutput(
           encodeBackend: result.effectiveEncodeBackend,
           state: deps.performanceCheck
         })
+    if (
+      advice?.kind === 'step-down' &&
+      deps.captureConfig.recordEnabled &&
+      Math.min(deps.captureConfig.video.width, deps.captureConfig.video.height) >= 2160
+    ) {
+      return blocked(
+        'This computer cannot preserve the selected 4K recording while streaming. Choose Full HD recording or turn off streaming.'
+      )
+    }
     if (advice?.kind === 'step-down' && !steppedDown) {
       // One encode on the CPU: the recording shares the stepped profile.
       steppedDown = advice
@@ -340,10 +355,38 @@ export async function settleGoLiveSessionOutput(
       config = { ...config, video: advice.video, streaming }
       continue
     }
+    const video = request.sharedFallbackVideo ?? config.video
+    const plan = resolveProviderStreamOutputPlan(video, streaming, {
+      ...providerStreamOutputPlanOptions(config),
+      separateEncodedOutputRoleAvailable: request.params.outputRoles.includes('stream')
+    })
+    const resolved = new Map(plan.targets.map((output) => [output.target?.id, output.video]))
+    const needsOverrides = streaming.targets.some((target) => {
+      const effective = resolved.get(target.id)
+      return (
+        effective &&
+        !sameTopologyVideoProfile(streamOutputVideoForTarget(video, streaming, target), effective)
+      )
+    })
+    const effectiveStreaming = needsOverrides
+      ? {
+          ...streaming,
+          targets: streaming.targets.map((target) => {
+            const effective = resolved.get(target.id)
+            return effective
+              ? {
+                  ...target,
+                  outputPreset: effective.preset,
+                  outputBitrateKbps: effective.bitrateKbps
+                }
+              : target
+          })
+        }
+      : streaming
     return {
       reason: null,
-      video: request.sharedFallbackVideo ?? config.video,
-      streaming,
+      video,
+      streaming: effectiveStreaming,
       sharedFallbackVideo:
         !steppedDown && request.sharedFallbackVideo ? request.sharedFallbackVideo : null,
       steppedDown,

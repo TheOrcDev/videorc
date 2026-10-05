@@ -354,6 +354,7 @@ pub enum YouTubeEndpoint {
     LiveBroadcastsTransition,
     LiveStreamsList,
     LiveStreamsInsert,
+    LiveStreamsDelete,
     ThumbnailsSet,
 }
 
@@ -373,6 +374,7 @@ impl YouTubeEndpoint {
             Self::LiveBroadcastsTransition => "liveBroadcasts.transition",
             Self::LiveStreamsList => "liveStreams.list",
             Self::LiveStreamsInsert => "liveStreams.insert",
+            Self::LiveStreamsDelete => "liveStreams.delete",
             Self::ThumbnailsSet => "thumbnails.set",
         }
     }
@@ -393,6 +395,7 @@ impl YouTubeEndpoint {
             | Self::LiveBroadcastsBind
             | Self::LiveBroadcastsTransition
             | Self::LiveStreamsInsert
+            | Self::LiveStreamsDelete
             | Self::ThumbnailsSet => 50,
         }
     }

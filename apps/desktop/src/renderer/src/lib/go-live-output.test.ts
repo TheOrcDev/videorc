@@ -88,6 +88,38 @@ describe('settleGoLiveSessionOutput (plan 090)', () => {
     expect(output.streaming).toBe(config.streaming)
   })
 
+  it('materializes the shared effective profile before preparing mixed destinations', async () => {
+    const config = recordAndStreamConfig({
+      recordEnabled: false,
+      video: videoPresets['record-4k30']
+    })
+    config.streaming = {
+      ...config.streaming,
+      defaultOutputPreset: 'stream-youtube-4k30',
+      defaultBitrateKbps: 30000,
+      targets: config.streaming.targets.map((target) => ({
+        ...target,
+        enabled: target.id === 'youtube' || target.id === 'twitch'
+      }))
+    }
+    const output = await settleGoLiveSessionOutput(deps(config))
+    expect(output.reason).toBeNull()
+    for (const target of output.streaming.targets.filter((target) => target.enabled)) {
+      expect(target).toMatchObject({ outputPreset: 'stream-safe-1080p30', outputBitrateKbps: 6000 })
+    }
+    expect(
+      config.streaming.targets.find((target) => target.id === 'youtube')?.outputPreset
+    ).toBeUndefined()
+  })
+
+  it('refuses to silently downgrade a 4K recording when the split encoder is unavailable', async () => {
+    const config = recordAndStreamConfig({ video: videoPresets['record-4k30'] })
+    const output = await settleGoLiveSessionOutput(deps(config))
+    expect(output.reason).toBeTruthy()
+    expect(output.video).toEqual(videoPresets['record-4k30'])
+    expect(output.sharedFallbackVideo).toBeNull()
+  })
+
   it('stays blocked, in plain words, for live captions burned into the stream only', async () => {
     const config = recordAndStreamConfig()
     const captioned = {

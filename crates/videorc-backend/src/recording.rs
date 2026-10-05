@@ -9815,7 +9815,15 @@ async fn finalize_recording_media(
     }
     let mut finalization_recovery_path = None;
     let export_result = {
+        let queued = Instant::now();
         let _export_slot = state.recording_finalization.export_slot().await;
+        state.emit_log(
+            "info",
+            format!(
+                "MP4 finalization session={session_id} stage=queue elapsed_ms={}",
+                queued.elapsed().as_millis()
+            ),
+        );
         export_completed_recording_to_mp4_tracked(
             state,
             &session_id,
@@ -9933,6 +9941,7 @@ async fn finalize_recording_media(
         }
         None => finalization.with_finalization_state(FINALIZATION_STATE_FINALIZED, None),
     };
+    let commit_started = Instant::now();
     persist_finalization_or_recovery(state, &finalization, &mut finalization_recovery_path)
         .map_err(|message| {
             let _ = emit_health_event(
@@ -9945,6 +9954,13 @@ async fn finalize_recording_media(
             anyhow::anyhow!(message)
         })?;
     mark_stop_timeline(state, RecordingStopPhase::DbCommit);
+    state.emit_log(
+        "info",
+        format!(
+            "MP4 finalization session={session_id} stage=metadata elapsed_ms={}",
+            commit_started.elapsed().as_millis()
+        ),
+    );
     if let Some(error) = export_error {
         bail!("{error}");
     }
@@ -10105,6 +10121,40 @@ async fn export_completed_recording_to_mp4_tracked(
 /// the renderer.
 const FINALIZATION_PROGRESS_STEP_PERCENT: u8 = 5;
 
+// Drain concurrently: a full stderr pipe must never stall MP4 publication.
+// Keep only a bounded tail, even when FFmpeg emits one enormous line.
+async fn read_mp4_stderr_tail(mut reader: impl tokio::io::AsyncRead + Unpin) -> String {
+    const LIMIT: usize = 8192;
+    let mut tail = Vec::with_capacity(LIMIT);
+    let mut chunk = [0_u8; 2048];
+    let mut clipped = false;
+    while let Ok(count) = reader.read(&mut chunk).await {
+        if count == 0 {
+            break;
+        }
+        let excess = (tail.len() + count).saturating_sub(LIMIT);
+        clipped |= excess > 0;
+        tail.drain(..excess);
+        tail.extend_from_slice(&chunk[..count]);
+    }
+    // If truncation split a URL, discard that partial token before redacting.
+    let start = if clipped {
+        tail.iter()
+            .position(u8::is_ascii_whitespace)
+            .unwrap_or(tail.len())
+    } else {
+        0
+    };
+    let mut redacted = crate::state::redact_stream_urls(&String::from_utf8_lossy(&tail[start..]));
+    if redacted.len() > LIMIT {
+        let boundary = (redacted.len() - LIMIT..redacted.len())
+            .find(|index| redacted.is_char_boundary(*index))
+            .unwrap_or(redacted.len());
+        redacted = redacted.split_off(boundary);
+    }
+    redacted
+}
+
 async fn export_mp4_from_mkv_tracked(
     state: &AppState,
     session_id: &str,
@@ -10122,6 +10172,7 @@ async fn export_mp4_from_mkv_tracked(
             output.display()
         );
     }
+    let probe_started = Instant::now();
     let trim_seconds = mp4_export_trim_seconds(&ffprobe_path_for(ffmpeg_path), input).await;
     let total_seconds = match trim_seconds {
         Some(trim) => Some(trim),
@@ -10130,18 +10181,30 @@ async fn export_mp4_from_mkv_tracked(
             .map(|ms| ms as f64 / 1000.0),
     }
     .filter(|seconds| *seconds > 0.0);
+    state.emit_log(
+        "info",
+        format!(
+            "MP4 finalization session={session_id} stage=probe elapsed_ms={}",
+            probe_started.elapsed().as_millis()
+        ),
+    );
+    let export_started = Instant::now();
     let mut command = Command::new(ffmpeg_path);
     command
         .args(["-nostats", "-progress", "pipe:1"])
         .args(mp4_export_args(input, output, trim_seconds))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     let mut child = spawn_owned_tokio(&mut command)
         .with_context(|| format!("Could not start {ffmpeg_path} for MP4 export"))?;
     if let Some(pid) = child.id() {
         control.set_child_pid(pid);
     }
+    let stderr_reader = child
+        .stderr
+        .take()
+        .map(|stderr| tokio::spawn(read_mp4_stderr_tail(stderr)));
     if let Some(stdout) = child.stdout.take() {
         let mut lines = BufReader::new(stdout).lines();
         let mut last_reported = 0_u8;
@@ -10171,11 +10234,23 @@ async fn export_mp4_from_mkv_tracked(
         .await
         .with_context(|| format!("Could not wait for {ffmpeg_path} MP4 export"))?;
     control.set_child_pid(0);
+    let stderr = match stderr_reader {
+        Some(reader) => reader.await.unwrap_or_default(),
+        None => String::new(),
+    };
+    state.emit_log(
+        "info",
+        format!(
+            "MP4 finalization session={session_id} stage=ffmpeg elapsed_ms={} success={}",
+            export_started.elapsed().as_millis(),
+            status.success()
+        ),
+    );
     if control.is_cancelled() {
         bail!("MP4 export was cancelled");
     }
     if !status.success() {
-        bail!("FFmpeg MP4 export failed with {status}");
+        bail!("FFmpeg MP4 export failed with {status}: {stderr}");
     }
     Ok(())
 }
@@ -10893,7 +10968,17 @@ where
                 // trusting each exporter callback to open a Windows-flushable
                 // handle. That keeps production FFmpeg and crash-injection
                 // exporters under the same validation and identity contract.
-                sync_nonempty_staged_mp4_for_publication(staging.output_path.clone()).await
+                let sync_started = Instant::now();
+                let result =
+                    sync_nonempty_staged_mp4_for_publication(staging.output_path.clone()).await;
+                state.emit_log(
+                    "info",
+                    format!(
+                        "MP4 finalization session={session_id} stage=file-sync elapsed_ms={}",
+                        sync_started.elapsed().as_millis()
+                    ),
+                );
+                result
             }
             Err(error) => Err(error),
         },
@@ -10928,6 +11013,7 @@ where
     if fault.after_ffmpeg() {
         bail!("injected crash after FFmpeg completed private MP4 staging");
     }
+    let publication_started = Instant::now();
     let identity = capture_session_file_identity(&staging.output_path)?.with_context(|| {
         format!(
             "Staged MP4 {} disappeared before publication",
@@ -11015,6 +11101,13 @@ where
         published.context("Could not reserve a free MP4 filename after 10,000 attempts")?
     };
 
+    state.emit_log(
+        "info",
+        format!(
+            "MP4 finalization session={session_id} stage=publication elapsed_ms={}",
+            publication_started.elapsed().as_millis()
+        ),
+    );
     if fault.after_publication() {
         bail!("injected crash after MP4 publication");
     }
@@ -31258,6 +31351,18 @@ mod tests {
         assert!(is_ffmpeg_progress_report_boundary("progress=continue"));
         assert!(is_ffmpeg_progress_report_boundary("progress=end"));
         assert!(!is_ffmpeg_progress_report_boundary("out_time_us=2500123"));
+    }
+
+    #[tokio::test]
+    async fn mp4_stderr_tail_is_bounded_and_redacts_stream_credentials() {
+        let input = format!(
+            "{} failure rtmp://example.test/live/private-key",
+            "x".repeat(20000)
+        );
+        let tail = read_mp4_stderr_tail(input.as_bytes()).await;
+        assert!(tail.len() <= 8192);
+        assert!(tail.contains("failure"));
+        assert!(!tail.contains("private-key"));
     }
 
     #[tokio::test]

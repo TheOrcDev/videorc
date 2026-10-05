@@ -52,7 +52,7 @@ export function applyFinalizationEvent<T extends FinalizationRow & { id: string 
           : {}),
       ...(event.mp4Path ? { mp4Path: event.mp4Path } : {}),
       ...(event.outputPath ? { outputPath: event.outputPath } : {}),
-      ...(event.error !== undefined ? { finalizationError: event.error } : {})
+      finalizationError: event.error
     }
     const durationMs = event.durationMs
     const fileSizeBytes = event.fileSizeBytes
@@ -70,4 +70,28 @@ export function finalizationEventNeedsRefresh<T extends { id: string }>(
   event: RecordingFinalizationEvent
 ): boolean {
   return event.state === 'finalized' && !sessions.some((session) => session.id === event.sessionId)
+}
+
+/** Replays only events received after a list request began. A late snapshot
+ * must never turn a finished MP4 back into an MKV or undo a retry. */
+export class FinalizationSnapshotJournal {
+  private sequence = 0
+  private events = new Map<string, { sequence: number; event: RecordingFinalizationEvent }>()
+
+  checkpoint(): number {
+    return this.sequence
+  }
+
+  record(event: RecordingFinalizationEvent): void {
+    this.events.delete(event.sessionId)
+    this.events.set(event.sessionId, { sequence: ++this.sequence, event })
+  }
+
+  reconcile<T extends FinalizationRow & { id: string }>(rows: T[], since: number): T[] {
+    let result = rows
+    for (const entry of this.events.values()) {
+      if (entry.sequence > since) result = applyFinalizationEvent(result, entry.event)
+    }
+    return result
+  }
 }

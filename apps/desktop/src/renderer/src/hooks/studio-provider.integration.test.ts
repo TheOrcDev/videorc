@@ -15,6 +15,7 @@ const toastSpies = vi.hoisted(() => ({
   dismiss: vi.fn(),
   error: vi.fn(),
   info: vi.fn(),
+  loading: vi.fn(),
   success: vi.fn(),
   warning: vi.fn()
 }))
@@ -372,6 +373,7 @@ function compositorFor(scene: Scene, layout: LayoutSettings, revision: number): 
 const DEFAULT_OUTPUT = defaultCaptureConfig.video
 
 class StudioBackend {
+  hardwareStreamTopology = false
   scheduledConfirmation: {
     eventId: string
     fingerprint: string
@@ -678,9 +680,15 @@ class StudioBackend {
           streamProfile: params.streamProfile,
           ...(params.recordingProfile ? { recordingProfile: params.recordingProfile } : {}),
           outputRoles: params.outputRoles,
-          requestedBridgeOutput: 'raw-yuv420p',
-          effectiveBridgeOutput: 'raw-yuv420p',
-          effectiveEncodeBackend: 'software-open-h264',
+          requestedBridgeOutput: this.hardwareStreamTopology
+            ? 'videotoolbox-h264-mpegts'
+            : 'raw-yuv420p',
+          effectiveBridgeOutput: this.hardwareStreamTopology
+            ? 'videotoolbox-h264-mpegts'
+            : 'raw-yuv420p',
+          effectiveEncodeBackend: this.hardwareStreamTopology
+            ? 'hardware-videotoolbox'
+            : 'software-open-h264',
           probeState: 'not-required'
         }
       case 'diagnostics.stats':
@@ -6335,6 +6343,71 @@ describe('real StudioProvider lifecycle', () => {
     ).toHaveLength(2)
   })
 
+  it('keeps MP4 completion when an older Library refresh arrives afterward', async () => {
+    const backend = new StudioBackend()
+    backend.sessionSummaries = [
+      sessionSummary({ id: 'session-1', finalizationState: 'finalizing' })
+    ]
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = () => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () => latest()?.core.wsStatus === 'connected' && latest()?.core.sessions.length === 1
+    )
+    const release = backend.deferResponse('sessions.list', { items: backend.sessionSummaries })
+    const before = backend.sentCommands.filter(
+      (command) => command.method === 'sessions.list'
+    ).length
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'recording.status',
+          payload: { state: 'idle', message: 'Ready.' }
+        })
+      })
+    })
+    await vi.waitFor(() =>
+      expect(
+        backend.sentCommands.filter((command) => command.method === 'sessions.list').length
+      ).toBeGreaterThan(before)
+    )
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'recording.finalization',
+          payload: {
+            sessionId: 'session-1',
+            state: 'finalized',
+            mp4Path: '/tmp/final.mp4',
+            updatedAt: now
+          }
+        })
+      })
+    })
+    await waitForObservation(() => latest()?.core.sessions[0]?.finalizationState === 'finalized')
+    await act(async () => {
+      release()
+      await Promise.resolve()
+    })
+    expect(latest()?.core.sessions[0]).toMatchObject({
+      finalizationState: 'finalized',
+      mp4Path: '/tmp/final.mp4'
+    })
+  })
+
   it('ignores a stale load-more response after the first Library page refreshes', async () => {
     const backend = new StudioBackend()
     backend.sessionSummaries = [
@@ -11595,6 +11668,79 @@ describe('real StudioProvider lifecycle', () => {
       output: { recordEnabled: false, streamEnabled: true }
     })
   })
+
+  it.each([
+    { recordEnabled: true, streamPreset: 'stream-safe-1080p30' as const },
+    { recordEnabled: false, streamPreset: 'stream-safe-1080p30' as const },
+    { recordEnabled: true, streamPreset: 'stream-youtube-4k30' as const }
+  ])(
+    'prepares $streamPreset independently of a 4K recording profile (record: $recordEnabled)',
+    async ({ recordEnabled, streamPreset }) => {
+      const backend = new StudioBackend()
+      backend.hardwareStreamTopology = true
+      enableYouTubeOauthForTest(backend)
+      TestWebSocket.backend = backend
+      vi.stubGlobal('WebSocket', TestWebSocket)
+      const testDom = installProviderTestEnvironment(
+        createVideorcApi({
+          acknowledge: async () => true,
+          pending: async () => [],
+          acknowledgeProvider: async () => true,
+          pendingProvider: async () => []
+        })
+      )
+      restoreEnvironment = testDom.restore
+      const observations: StudioObservation[] = []
+      const latest = () => observations.at(-1)
+      root = await mountStudioProvider(testDom.container, (value) => {
+        observations.push(value)
+      })
+      await waitForObservation(
+        () =>
+          latest()?.core.wsStatus === 'connected' &&
+          latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+      )
+      await act(async () => {
+        latest()!.core.setCaptureConfig({
+          ...youtubeOauthStreamCaptureConfig(),
+          recordEnabled,
+          streaming: {
+            ...youtubeOauthStreamCaptureConfig().streaming,
+            defaultOutputPreset: streamPreset,
+            defaultBitrateKbps: videoPresets[streamPreset].bitrateKbps
+          },
+          video: videoPresets['record-4k30']
+        })
+      })
+      await waitForObservation(
+        () =>
+          latest()?.core.streamOutputTopologyPreflight.state === 'ready' &&
+          latest()?.core.startBlockedReason === null
+      )
+      await act(async () => {
+        await latest()!.core.startSession()
+      })
+      await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
+      await act(async () => {
+        await latest()!.core.confirmGoLive()
+      })
+      expect(
+        backend.sentCommands.find((c) => c.method === 'streamTargets.youtube.prepare')?.params
+      ).toMatchObject({
+        video: videoPresets[streamPreset]
+      })
+      if (recordEnabled) {
+        expect(
+          backend.sentCommands.find((c) => c.method === 'session.start')?.params
+        ).toMatchObject({
+          output: { recordEnabled: true, video: { width: 3840, height: 2160, bitrateKbps: 30000 } }
+        })
+      }
+      await act(async () => {
+        await latest()!.core.stopSession()
+      })
+    }
+  )
 
   it('goes live on one shared encode when the host rejects a separate stream encoder', async () => {
     // The fake backend answers every probe with the raw path, i.e. a host
