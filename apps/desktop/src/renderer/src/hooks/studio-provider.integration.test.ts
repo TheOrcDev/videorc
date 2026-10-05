@@ -11672,12 +11672,25 @@ describe('real StudioProvider lifecycle', () => {
   it.each([
     { recordEnabled: true, streamPreset: 'stream-safe-1080p30' as const },
     { recordEnabled: false, streamPreset: 'stream-safe-1080p30' as const },
-    { recordEnabled: true, streamPreset: 'stream-youtube-4k30' as const }
+    { recordEnabled: true, streamPreset: 'stream-youtube-4k30' as const },
+    { recordEnabled: true, streamPreset: 'stream-safe-1080p30' as const, vertical: true },
+    { recordEnabled: true, streamPreset: 'stream-safe-1080p30' as const, scheduled: true }
   ])(
     'prepares $streamPreset independently of a 4K recording profile (record: $recordEnabled)',
-    async ({ recordEnabled, streamPreset }) => {
+    async (scenario) => {
+      const { recordEnabled, streamPreset } = scenario
+      const vertical = 'vertical' in scenario && scenario.vertical
+      const scheduled = 'scheduled' in scenario && scenario.scheduled
       const backend = new StudioBackend()
       backend.hardwareStreamTopology = true
+      if (scheduled)
+        backend.scheduledConfirmation = {
+          eventId: '11111111-1111-4111-8111-111111111111',
+          fingerprint: 'private-v1',
+          title: 'Scheduled HD',
+          privacy: 'private',
+          startUtc: '2035-01-01T12:00:00Z'
+        }
       enableYouTubeOauthForTest(backend)
       TestWebSocket.backend = backend
       vi.stubGlobal('WebSocket', TestWebSocket)
@@ -11707,7 +11720,18 @@ describe('real StudioProvider lifecycle', () => {
           streaming: {
             ...youtubeOauthStreamCaptureConfig().streaming,
             defaultOutputPreset: streamPreset,
-            defaultBitrateKbps: videoPresets[streamPreset].bitrateKbps
+            defaultBitrateKbps: videoPresets[streamPreset].bitrateKbps,
+            targets: youtubeOauthStreamCaptureConfig().streaming.targets.map((target) =>
+              target.id === 'youtube'
+                ? {
+                    ...target,
+                    ...(vertical ? { outputOrientation: 'vertical' as const } : {}),
+                    ...(scheduled
+                      ? { scheduledEventId: backend.scheduledConfirmation!.eventId }
+                      : {})
+                  }
+                : target
+            )
           },
           video: videoPresets['record-4k30']
         })
@@ -11725,15 +11749,28 @@ describe('real StudioProvider lifecycle', () => {
         await latest()!.core.confirmGoLive()
       })
       expect(
-        backend.sentCommands.find((c) => c.method === 'streamTargets.youtube.prepare')?.params
+        backend.sentCommands.find(
+          (c) =>
+            c.method ===
+            (scheduled ? 'scheduledStreams.prepareForGoLive' : 'streamTargets.youtube.prepare')
+        )?.params
       ).toMatchObject({
-        video: videoPresets[streamPreset]
+        video: vertical
+          ? { width: 1080, height: 1920, fps: 30, bitrateKbps: 6000 }
+          : videoPresets[streamPreset]
       })
       if (recordEnabled) {
         expect(
           backend.sentCommands.find((c) => c.method === 'session.start')?.params
         ).toMatchObject({
           output: { recordEnabled: true, video: { width: 3840, height: 2160, bitrateKbps: 30000 } }
+        })
+      }
+      if (vertical) {
+        expect(
+          backend.sentCommands.find((c) => c.method === 'session.start')?.params
+        ).toMatchObject({
+          simulcast: { video: { width: 1080, height: 1920, fps: 30, bitrateKbps: 6000 } }
         })
       }
       await act(async () => {

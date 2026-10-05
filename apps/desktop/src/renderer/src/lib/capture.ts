@@ -249,8 +249,29 @@ export function buildSimulcastParams(config: CaptureConfig): SimulcastParams | u
   }
   return {
     layout: simulcastLegLayout(config),
-    video: coerceVideoToOrientation(config.video, 'vertical')
+    video: coerceVideoToOrientation(
+      simulcastStreamVideo(config.video, config.streaming),
+      'vertical'
+    )
   }
+}
+
+/** The single portrait encoder uses the common supported vertical target profile. */
+export function simulcastStreamVideo(
+  recording: VideoSettings,
+  streaming: StreamingSettings
+): VideoSettings {
+  const targets = streaming.targets.filter(
+    (target) => target.enabled && target.outputOrientation === 'vertical'
+  )
+  const youtubeOnly = targets.every((target) => target.platform === 'youtube')
+  const profiles = targets.map((target) => {
+    const video = streamOutputVideoForTarget(recording, streaming, target)
+    return youtubeOnly ? video : providerSafeSharedProfile(video)
+  })
+  return profiles.length
+    ? strictestSharedStreamProfile(profiles)
+    : streamOutputVideoSettings(recording, streaming)
 }
 
 /**
@@ -1807,10 +1828,23 @@ export function normalizeVideoSettings(video: unknown): VideoSettings {
     return { ...fallback }
   }
 
+  // Clamp the long and short sides, not fixed landscape axes. Otherwise a
+  // saved 2160×3840 recording becomes square when the app is reopened.
+  const portrait = (candidate.height ?? fallback.height) > (candidate.width ?? fallback.width)
   return {
     preset,
-    width: clampNumber(candidate.width, fallback.width, 640, 3840),
-    height: clampNumber(candidate.height, fallback.height, 360, 2160),
+    width: clampNumber(
+      candidate.width,
+      fallback.width,
+      portrait ? 360 : 640,
+      portrait ? 2160 : 3840
+    ),
+    height: clampNumber(
+      candidate.height,
+      fallback.height,
+      portrait ? 640 : 360,
+      portrait ? 3840 : 2160
+    ),
     fps: clampNumber(candidate.fps, fallback.fps, 24, 60),
     bitrateKbps: clampNumber(candidate.bitrateKbps, fallback.bitrateKbps, 1000, 50000)
   }

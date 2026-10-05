@@ -19,6 +19,7 @@ import {
   providerStreamOutputPlanOptions,
   resolveProviderStreamOutputPlan,
   simulcastArmed,
+  simulcastStreamVideo,
   streamOutputVideoForTarget,
   videoPresets,
   type CaptureConfig,
@@ -361,6 +362,22 @@ export async function settleGoLiveSessionOutput(
       separateEncodedOutputRoleAvailable: request.params.outputRoles.includes('stream')
     })
     const resolved = new Map(plan.targets.map((output) => [output.target?.id, output.video]))
+    if (simulcastArmed({ ...config, streaming })) {
+      const vertical = simulcastStreamVideo(video, streaming)
+      for (const target of streaming.targets) {
+        if (target.enabled && target.outputOrientation === 'vertical')
+          resolved.set(target.id, vertical)
+      }
+      if (
+        config.recordEnabled &&
+        plan.targets.length &&
+        !sameTopologyVideoProfile(video, plan.streamVideo)
+      ) {
+        return blocked(
+          'The recording and horizontal stream must use matching quality when also streaming vertically. Use one stream orientation or match their quality.'
+        )
+      }
+    }
     const needsOverrides = streaming.targets.some((target) => {
       const effective = resolved.get(target.id)
       return (

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { defaultCaptureConfig, normalizeStreamingSettings, videoPresets } from './capture'
+import {
+  defaultCaptureConfig,
+  normalizeStreamingSettings,
+  normalizeVideoSettings,
+  videoPresets
+} from './capture'
 import {
   recordingResolutionSettings,
   streamQualityOverride,
@@ -38,6 +43,14 @@ describe('independent output quality', () => {
         3840
       )
     ).toMatchObject({ width: 2160, height: 3840, bitrateKbps: 30000 })
+  })
+  it.each([
+    [2160, 3840],
+    [1440, 2560],
+    [360, 640]
+  ])('preserves portrait %sx%s recording dimensions on reload', (width, height) => {
+    const saved = { preset: 'custom' as const, width, height, fps: 30, bitrateKbps: 30000 }
+    expect(normalizeVideoSettings(saved)).toEqual(saved)
   })
   it('keeps an intentional custom recording bitrate', () => {
     expect(

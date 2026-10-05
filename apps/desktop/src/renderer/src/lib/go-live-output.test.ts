@@ -112,6 +112,32 @@ describe('settleGoLiveSessionOutput (plan 090)', () => {
     ).toBeUndefined()
   })
 
+  it('refuses a third distinct output before preparing any provider', async () => {
+    const config = recordAndStreamConfig({ video: videoPresets['record-4k30'] })
+    config.streaming = {
+      ...config.streaming,
+      enabledTargetIds: ['youtube', 'youtube-vertical'],
+      targets: config.streaming.targets.map((target) => ({
+        ...target,
+        enabled: target.id === 'youtube' || target.id === 'youtube-vertical'
+      }))
+    }
+    const output = await settleGoLiveSessionOutput(
+      deps(config, {
+        request: vi.fn(
+          async (params): Promise<StreamOutputTopologyProbeResult> => ({
+            ...softwareHost(params),
+            effectiveBridgeOutput: 'videotoolbox-h264-mpegts',
+            effectiveEncodeBackend: 'hardware-videotoolbox',
+            probeState: 'passed'
+          })
+        )
+      })
+    )
+    expect(output.reason).toContain('matching quality')
+    expect(output.video).toEqual(videoPresets['record-4k30'])
+  })
+
   it('refuses to silently downgrade a 4K recording when the split encoder is unavailable', async () => {
     const config = recordAndStreamConfig({ video: videoPresets['record-4k30'] })
     const output = await settleGoLiveSessionOutput(deps(config))

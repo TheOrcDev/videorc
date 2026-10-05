@@ -45,7 +45,8 @@ const basePort = Number(process.env.VIDEORC_SMOKE_RTMP_PORT ?? 12935)
 const streamMs = Number(process.env.VIDEORC_SMOKE_STREAM_MS ?? 60000)
 // Plan 153: exercise the actual two-encoder path, independently of the
 // existing 720p stress profile. The long gate passes 9,000,000ms (150min).
-const split4k = process.env.VIDEORC_SMOKE_SPLIT_4K === '1'
+const verticalSplit = process.env.VIDEORC_SMOKE_SPLIT_4K_VERTICAL === '1'
+const split4k = verticalSplit || process.env.VIDEORC_SMOKE_SPLIT_4K === '1'
 const recordingProfile = split4k
   ? { preset: 'record-4k30', width: 3840, height: 2160, fps: 30, bitrateKbps: 30000 }
   : { preset: 'custom', width: 1280, height: 720, fps: 30, bitrateKbps: 4000 }
@@ -66,7 +67,10 @@ const TARGETS = [
   { id: 'x', label: 'X (stalling)', stalled: true }
 ]
 
-const targets = TARGETS.map((platform, index) => {
+const activeTargets = verticalSplit
+  ? [{ id: 'youtube', label: 'YouTube Vertical (stalling)', stalled: true }]
+  : TARGETS
+const targets = activeTargets.map((platform, index) => {
   const listenPort = basePort + index
   const proxyPort = platform.stalled ? basePort + 100 + index : null
   const streamKey = `endurance${index}`
@@ -273,8 +277,11 @@ async function verifySessionA(outputPath) {
       console.log(`  ✓ ${target.label} (:${target.listenPort}) received ${size} bytes`)
       if (split4k) {
         const media = await probeMedia(target.recvPath)
-        if (media.video?.width !== 1920 || media.video?.height !== 1080) {
-          failures.push(`${target.label} did not receive 1920×1080 video`)
+        if (
+          media.video?.width !== (verticalSplit ? 1080 : 1920) ||
+          media.video?.height !== (verticalSplit ? 1920 : 1080)
+        ) {
+          failures.push(`${target.label} did not receive the selected HD stream dimensions`)
         }
       }
     } else if (target.stalled) {
@@ -489,6 +496,28 @@ function sessionParams(outputDirectoryCapability) {
       video: recordingProfile,
       rtmp: { preset: 'custom', serverUrl: targets[0].serverUrl, streamKey: targets[0].streamKey }
     },
+    ...(verticalSplit
+      ? {
+          simulcast: {
+            layout: {
+              layoutPreset: 'vertical-screen-only',
+              cameraTransformMode: 'preset',
+              cameraCorner: 'bottom-right',
+              cameraSize: 'medium',
+              cameraShape: 'rectangle',
+              cameraMargin: 32,
+              cameraFit: 'fill',
+              cameraMirror: false,
+              cameraZoom: 100,
+              cameraOffsetX: 0,
+              cameraOffsetY: 0,
+              sideBySideSplit: '70-30',
+              sideBySideCameraSide: 'right'
+            },
+            video: { preset: 'custom', width: 1080, height: 1920, fps: 30, bitrateKbps: 6000 }
+          }
+        }
+      : {}),
     streaming: {
       enabled: true,
       mode: 'multi',
@@ -497,6 +526,7 @@ function sessionParams(outputDirectoryCapability) {
         platform: target.id,
         label: target.label,
         enabled: true,
+        ...(verticalSplit ? { outputOrientation: 'vertical' } : {}),
         serverUrl: target.serverUrl,
         urlMode: 'server-and-key',
         streamKey: target.streamKey,

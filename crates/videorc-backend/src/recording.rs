@@ -20067,9 +20067,12 @@ fn validate_video_profile_policy(params: &StartSessionParams) -> Result<()> {
             );
         }
         let split_output_profiles = resolve_split_output_profiles(params)?;
-        let stream_video = split_output_profiles
-            .stream
+        let stream_video = params
+            .simulcast
             .as_ref()
+            .filter(|_| provider_plan.targets.is_empty())
+            .map(|simulcast| &simulcast.video)
+            .or(split_output_profiles.stream.as_ref())
             .unwrap_or(&params.output.video);
         if is_true_4k_stream_output(stream_video) {
             validate_true_4k_stream_profile(params, stream_video)?;
@@ -20946,7 +20949,14 @@ fn encoder_bridge_diagnostics_context(
 }
 
 fn resolve_stream_output_video(params: &StartSessionParams) -> Result<VideoSettings> {
-    let stream_video = resolve_provider_stream_output_plan(params)?.stream_video;
+    let plan = resolve_provider_stream_output_plan(params)?;
+    let stream_video = plan.stream_video;
+    // The primary is recording-only when every destination consumes the
+    // portrait auxiliary encoder. Keep its recording profile for bridge
+    // bookkeeping; provider restrictions apply to actual streaming outputs.
+    if plan.targets.is_empty() && params.simulcast.is_some() {
+        return Ok(stream_video);
+    }
 
     if is_true_4k_stream_output(&stream_video) {
         validate_true_4k_stream_profile(params, &stream_video)?;
@@ -35567,6 +35577,36 @@ mod tests {
             2,
             "every target stays an isolated fifo-muxer leg: {args:?}"
         );
+    }
+
+    #[test]
+    fn simulcast_vertical_hd_stream_preserves_4k_local_recording() {
+        use crate::streaming::StreamOutputOrientation as Orientation;
+        let (mut params, _) = simulcast_split_params(true);
+        params.output.video = VideoSettings {
+            preset: VideoPreset::Record4k30,
+            width: 3840,
+            height: 2160,
+            fps: 30,
+            bitrate_kbps: 30_000,
+        };
+        params
+            .streaming
+            .as_mut()
+            .unwrap()
+            .targets
+            .retain(|target| target.effective_output_orientation() == Orientation::Vertical);
+        validate_outputs(&params).unwrap();
+        let primary = resolve_stream_output_video(&params).unwrap();
+        assert_eq!(primary, params.output.video);
+        let auxiliary = recording_compositor_stream_output(
+            &params,
+            EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+        )
+        .unwrap()
+        .expect("vertical auxiliary output");
+        assert_eq!((auxiliary.width, auxiliary.height), (1080, 1920));
+        assert!(auxiliary.composes_simulcast_scene);
     }
 
     #[test]
