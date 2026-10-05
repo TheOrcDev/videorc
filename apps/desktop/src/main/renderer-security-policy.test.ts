@@ -342,6 +342,25 @@ describe('renderer security policy', () => {
     expect(roleCanInvokeChannel('comments', 'oauth:open-url')).toBe(false)
   })
 
+  it('lets only main and the Stream Manager cache a Twitch GIF (plan 154)', () => {
+    expect(roleCanInvokeChannel('main', 'chat-gifs:cache')).toBe(true)
+    expect(roleCanInvokeChannel('comments', 'chat-gifs:cache')).toBe(true)
+    expect(roleCanInvokeChannel('notes', 'chat-gifs:cache')).toBe(false)
+    expect(roleCanInvokeChannel('captions', 'chat-gifs:cache')).toBe(false)
+    expect(AUXILIARY_API_KEYS.comments).toContain('cacheChatGif')
+    expect(AUXILIARY_API_KEYS.notes).not.toContain('cacheChatGif')
+    expect(AUXILIARY_API_KEYS.captions).not.toContain('cacheChatGif')
+    // The display mode relay: only the main renderer (the backend socket's
+    // owner) pushes; the Stream Manager seeds and follows.
+    expect(roleCanInvokeChannel('main', 'chat-gifs:push-mode')).toBe(true)
+    expect(roleCanInvokeChannel('comments', 'chat-gifs:push-mode')).toBe(false)
+    expect(roleCanInvokeChannel('comments', 'chat-gifs:get-mode')).toBe(true)
+    expect(roleCanInvokeChannel('notes', 'chat-gifs:get-mode')).toBe(false)
+    expect(AUXILIARY_API_KEYS.comments).toContain('getChatGifMode')
+    expect(AUXILIARY_API_KEYS.comments).toContain('onChatGifMode')
+    expect(AUXILIARY_API_KEYS.comments).not.toContain('pushChatGifMode')
+  })
+
   it('lets only main and the Comments window read cached image bytes (plan 095)', () => {
     // The highlight card decodes avatars and emotes from bytes; the cache
     // directory stays main-owned and only its managed file names resolve.

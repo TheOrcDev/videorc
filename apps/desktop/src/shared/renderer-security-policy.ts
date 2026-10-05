@@ -55,6 +55,10 @@ export const IPC_INVOKE_ROLES = {
   'oauth:open-url': MAIN_ONLY,
   // Open link on a chat row (plan 151, D14). Main re-checks the URL.
   'chat:open-link': MAIN_AND_COMMENTS,
+  // Twitch GIF Keyboard assets through main's cache (plan 154).
+  'chat-gifs:cache': MAIN_AND_COMMENTS,
+  'chat-gifs:push-mode': MAIN_ONLY,
+  'chat-gifs:get-mode': MAIN_AND_COMMENTS,
   'oauth:callback-redirect-uri': MAIN_ONLY,
   'oauth:callbacks-list': MAIN_ONLY,
   'oauth:callback-ack': MAIN_ONLY,
