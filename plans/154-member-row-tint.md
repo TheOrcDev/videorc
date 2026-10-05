@@ -15,6 +15,15 @@
 
 ## Status
 
+- **Status: EXECUTED, in review, 2026-10-05.** The owner said: "execute the
+  entire plan and create a pr". Built on `cursor/member-row-tint-plan-bc7b`
+  (PR #618), one branch for the plan and the slices. Every decision stands
+  as written. Steps 1 to 5, 7 and 8 are done and green on Linux
+  (typecheck, lint, format, desktop unit tests). Step 6 is in place (the
+  `rowTints` reader-state field, the member fixture row and the `member:`
+  assertion) but `pnpm probe:comments-window` and the by-eye check need a
+  macOS host with the dev app; the agent environment is headless Linux.
+  `bg-member/8` is the untuned starting value until that check runs.
 - **Priority**: P2
 - **Effort**: S (one renderer component, one pure helper, one token, one
   probe fixture, docs)
