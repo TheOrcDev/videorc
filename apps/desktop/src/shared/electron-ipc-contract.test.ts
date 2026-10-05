@@ -34,16 +34,17 @@ import {
 describe('Electron IPC contract', () => {
   it('maps every renderer-facing invoke channel to a real async API method', () => {
     expectTypeOf<ElectronInvokeMappingInvariant>().toEqualTypeOf<true>()
-    // 117: plan 151 added chat:open-link. 116: plan 140 S6 part B added the
-    // Orcle command answer pair (part A
+    // 121: plan 152 adds marker request/reply and capture context get/push.
+    // 117: plan 151 added chat:open-link.
+    // 116: plan 140 S6 part B added the Orcle command answer pair (part A
     // the chat removal relay pair; S5 the Stream
     // Manager's reconnect-scopes channel; plan 119 the in-app player's
     // media:grant-session; plan 095 the highlight card's avatars:read; plan 071
     // the Stream Manager Show who followed channel; plan 068 the mark-clip
     // relay pair; plan 062 the shortcut recorder arm; plan 055 the dashboard
     // push and get; plan 050 retired glass:wallpaper:get).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(117)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(117)
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(121)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(121)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()

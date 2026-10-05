@@ -93,6 +93,26 @@ import type {
   VideorcAccountSnapshot,
   VideoSettings
 } from './backend'
+import type {
+  SessionMarker,
+  CreateMarkerParams,
+  MarkerParams,
+  RenameMarkerParams,
+  ListMarkersParams,
+  MarkerPage,
+  MarkerLookup,
+  MarkerChanged
+} from './session-markers'
+import {
+  createMarkerParamsSchema,
+  markerParamsSchema,
+  renameMarkerParamsSchema,
+  listMarkersParamsSchema,
+  sessionMarkerSchema,
+  markerPageSchema,
+  markerLookupSchema,
+  markerChangedSchema
+} from './session-markers'
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { sessionChatIdentifierSchema, sessionChatTotalsSchema } from './session-chat-totals'
 import { LAYOUT_PRESET_VALUES } from './backend'
@@ -305,6 +325,15 @@ export interface BackendRpcMethodMap {
     { sessionId: string },
     ModerationOperation[]
   >
+  'session.marker.voice.configure': BackendRpcDefinition<
+    { sessionId: string; consent: boolean },
+    import('./backend').CohostListening
+  >
+  'session.marker.create': BackendRpcDefinition<CreateMarkerParams, SessionMarker>
+  'session.markers.list': BackendRpcDefinition<ListMarkersParams, MarkerPage>
+  'session.marker.get': BackendRpcDefinition<MarkerParams, MarkerLookup>
+  'session.marker.rename': BackendRpcDefinition<RenameMarkerParams, SessionMarker>
+  'session.marker.delete': BackendRpcDefinition<MarkerParams, MarkerChanged>
   'clip.mark': BackendRpcDefinition<undefined, ClipMarkedEvent>
   'clip.marks.list': BackendRpcDefinition<{ sessionId: string }, ClipMark[]>
 }
@@ -337,6 +366,13 @@ export interface BackendEventMap {
   'diagnostics.stats': DiagnosticStats
   'cohost.state': CohostState
   'cohost.report.saved': CohostReportSavedEvent
+  'session.marker.voice.status': {
+    sessionId: string
+    listening: import('./backend').CohostListening
+  }
+  'session.marker.voice.refused': { message: string }
+  'session.marker.created': SessionMarker
+  'session.marker.changed': MarkerChanged
   'clip.marked': ClipMarkedEvent
   'performance.check.progress': PerformanceCheckProgress
   'performance.check.completed': PerformanceCheckState
@@ -3270,6 +3306,18 @@ const runtimeContracts = {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
     result: arraySchema(moderationOperationSchema, { maxLength: 200 })
   },
+  'session.marker.voice.configure': {
+    params: objectSchema(
+      { sessionId: boundedString, consent: booleanSchema },
+      { allowUnknown: false }
+    ),
+    result: cohostListeningSchema
+  },
+  'session.marker.create': { params: createMarkerParamsSchema, result: sessionMarkerSchema },
+  'session.markers.list': { params: listMarkersParamsSchema, result: markerPageSchema },
+  'session.marker.get': { params: markerParamsSchema, result: markerLookupSchema },
+  'session.marker.rename': { params: renameMarkerParamsSchema, result: sessionMarkerSchema },
+  'session.marker.delete': { params: markerParamsSchema, result: markerChangedSchema },
   'clip.mark': { params: undefinedSchema, result: clipMarkedEventSchema },
   'clip.marks.list': {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
@@ -3326,6 +3374,16 @@ const runtimeEventSchemas = {
   'diagnostics.stats': diagnosticStatsSchema,
   'cohost.state': cohostStateSchema,
   'cohost.report.saved': cohostReportSavedEventSchema,
+  'session.marker.voice.status': objectSchema(
+    { sessionId: boundedString, listening: cohostListeningSchema },
+    { allowUnknown: false }
+  ),
+  'session.marker.voice.refused': objectSchema(
+    { message: stringSchema({ maxLength: 2000 }) },
+    { allowUnknown: false }
+  ),
+  'session.marker.created': sessionMarkerSchema,
+  'session.marker.changed': markerChangedSchema,
   'clip.marked': clipMarkedEventSchema,
   'performance.check.progress': performanceCheckProgressSchema,
   'performance.check.completed': performanceCheckStateSchema,

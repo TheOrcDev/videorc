@@ -645,6 +645,7 @@ let notesWindowCloseFlushTimer: ReturnType<typeof setTimeout> | null = null
 let latestViewerSample: ViewerSample | null = null
 /** The Stream Manager's latest dashboard, history included (plan 055, S7). */
 let latestDashboardState: LiveDashboardState | null = null
+let markerContext: import('../shared/session-markers').MarkerContext | null = null
 let commentsWindow: BrowserWindow | null = null
 let commentsWindowLastFrame: Electron.Rectangle | null = null
 let commentsWindowAlwaysOnTop = false
@@ -10838,13 +10839,13 @@ async function runSmokePreviewMotionCommand(
     const text = typeof params.text === 'string' ? params.text : ''
     return window.webContents.executeJavaScript(
       `(async () => {
-        const input = document.querySelector('input[aria-label="Send a message to all writable destinations"]');
+        const input = document.querySelector('input[aria-label="Message or local command"]');
         if (!input) return { submitted: false, reason: 'Composer is not available.' };
         const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
         setter?.call(input, ${jsonForInlineScript(text)});
         input.dispatchEvent(new Event('input', { bubbles: true }));
         await new Promise((resolve) => requestAnimationFrame(() => resolve()));
-        const button = document.querySelector('button[aria-label="Send message to all writable destinations"]');
+        const button = document.querySelector('button[aria-label="Run local command"], button[aria-label="Send message to all writable destinations"]');
         if (!button || button.disabled) {
           return { submitted: false, reason: 'Send action is disabled.', value: input.value };
         }
@@ -11059,7 +11060,7 @@ async function runSmokePreviewMotionCommand(
         if (action === 'back' && viewport) { viewport.scrollTop = 0; viewport.dispatchEvent(new Event('scroll')); }
         if (action === 'latest') document.querySelector('button[aria-label^="Chat paused:"]')?.click();
         const rows = Array.from(document.querySelectorAll('[data-message-id]'));
-        const composer = document.querySelector('input[aria-label="Send a message to all writable destinations"]');
+        const composer = document.querySelector('input[aria-label="Message or local command"]');
         return {
           open: true,
           pausedChat: document.querySelector('button[aria-label^="Chat paused:"]')?.textContent ?? null,
@@ -14367,6 +14368,31 @@ app.whenReady().then(async () => {
       return accepted
     }
   )
+  secureIpcHandle('comments-window:marker-context-get', () => markerContext)
+  secureIpcHandle('comments-window:marker-context-push', (event, context) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    markerContext = context
+    if (commentsWindow && !commentsWindow.webContents.isDestroyed())
+      sendElectronEvent(commentsWindow.webContents, 'comments-window:marker-context', context)
+    return true
+  })
+  secureIpcHandle('comments-window:marker', (event, command) => {
+    if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id)
+      throw new Error('Only Stream Manager can request a marker here.')
+    // Capture admission is checked by the backend; get/delete must remain usable after Stop.
+    return commentsCommandBroker.request<import('../shared/session-markers').MarkerRelayResult>(
+      command.requestId,
+      () => {
+        if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+        sendElectronEvent(mainWindow.webContents, 'comments-window:marker-request', command)
+        return true
+      }
+    )
+  })
+  secureIpcHandle('comments-window:marker-result-push', (event, resolution) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+    return commentsCommandBroker.resolve(resolution)
+  })
   // Mark clip relay (plan 068 D6): the Stream Manager asks, the MAIN renderer
   // owns the `clip.mark` RPC, and the marked event comes back as the reply.
   secureIpcHandle(

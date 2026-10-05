@@ -603,7 +603,12 @@ enum Noun {
     Comment,
 }
 
-fn is_any_wake_word(text: &str) -> bool {
+pub(crate) fn is_command_negation(text: &str) -> bool {
+    let normalized = text.replace(['\'', '’'], "");
+    CANCEL_DECISIVE.contains(&normalized.as_str()) || NEGATIONS.contains(&normalized.as_str())
+}
+
+pub(crate) fn is_any_wake_word(text: &str) -> bool {
     WAKE_WORDS.contains(&text) || WEAK_WAKE_WORDS.contains(&text)
 }
 

@@ -20,7 +20,16 @@ import {
   VideoFileIcon,
   WaveformMutedIcon
 } from '@/components/icons'
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  lazy,
+  Suspense,
+  type ReactElement
+} from 'react'
 import { toast } from '@/lib/toast'
 
 import { PageHeader } from '@/components/page'
@@ -94,6 +103,10 @@ import {
 import { cn } from '@/lib/utils'
 import { openVideorcWebLink, VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
 
+const SessionMarkersDialog = lazy(async () => ({
+  default: (await import('@/components/session-markers-dialog')).SessionMarkersDialog
+}))
+
 // The Library as a recordings manager (Library rewrite L4): a table of every
 // session — poster, name, scene, quality, duration, size, format, actions —
 // with filter/sort/search on top and an honest storage footer below. All list
@@ -131,6 +144,7 @@ export function LibraryTab({
   const [selected, setSelected] = useState<string[]>([])
   const [freeBytes, setFreeBytes] = useState<number | null>(null)
   const [importing, setImporting] = useState(false)
+  const [markerSession, setMarkerSession] = useState<SessionSummary | null>(null)
   const [renaming, setRenaming] = useState<SessionSummary | null>(null)
   const [renameDraft, setRenameDraft] = useState('')
   const [deleting, setDeleting] = useState<SessionSummary[]>([])
@@ -392,6 +406,7 @@ export function LibraryTab({
                   onDelete={() => setDeleting([session])}
                   onOpenCleanCut={() => onOpenCleanCut(session.id)}
                   onOpenOrcleReport={() => onOpenOrcleReport(session.id)}
+                  onOpenMarkers={() => setMarkerSession(session)}
                   onRevealSession={focusLibrarySession}
                   onRename={() => {
                     setRenaming(session)
@@ -432,6 +447,11 @@ export function LibraryTab({
       )}
 
       {/* Rename dialog */}
+      {markerSession ? (
+        <Suspense fallback={null}>
+          <SessionMarkersDialog session={markerSession} onClose={() => setMarkerSession(null)} />
+        </Suspense>
+      ) : null}
       <Dialog open={renaming !== null} onOpenChange={(open) => !open && setRenaming(null)}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
@@ -515,6 +535,7 @@ function LibraryRow({
   onToggleSelected,
   onOpenCleanCut,
   onOpenOrcleReport,
+  onOpenMarkers,
   onRevealSession,
   onRename,
   onDelete
@@ -527,6 +548,7 @@ function LibraryRow({
   onToggleSelected: () => void
   onOpenCleanCut: () => void
   onOpenOrcleReport: () => void
+  onOpenMarkers: () => void
   onRevealSession: (sessionId: string) => void
   onRename: () => void
   onDelete: () => void
@@ -623,6 +645,7 @@ function LibraryRow({
         onDelete={onDelete}
         onOpenCleanCut={onOpenCleanCut}
         onOpenOrcleReport={onOpenOrcleReport}
+        onOpenMarkers={onOpenMarkers}
         onRevealSession={onRevealSession}
         onRename={onRename}
       />
@@ -699,6 +722,7 @@ function RowActions({
   session,
   onOpenCleanCut,
   onOpenOrcleReport,
+  onOpenMarkers,
   onRevealSession,
   onRename,
   onDelete
@@ -707,6 +731,7 @@ function RowActions({
   session: SessionSummary
   onOpenCleanCut: () => void
   onOpenOrcleReport: () => void
+  onOpenMarkers: () => void
   onRevealSession: (sessionId: string) => void
   onRename: () => void
   onDelete: () => void
@@ -941,6 +966,10 @@ function RowActions({
                 Clean cut
               </DropdownMenuItem>
             ) : null}
+            <DropdownMenuItem onClick={onOpenMarkers}>
+              <ClipIcon />
+              Markers
+            </DropdownMenuItem>
             <DropdownMenuItem
               disabled={!filePath}
               onClick={() => filePath && void window.videorc?.revealSession?.(session.id)}

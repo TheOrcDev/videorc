@@ -32,6 +32,13 @@ import {
   COHOST_NUDGE_STORAGE_KEY
 } from '@/lib/cohost-view'
 import { Toaster } from '@/components/ui/sonner'
+import {
+  createCommentsMarker,
+  markerCreateParams,
+  markerRetryAvailable,
+  MarkerRemovedError
+} from '@/lib/marker-command'
+import type { CreateMarkerParams, MarkerContext } from '../../shared/session-markers'
 import { clipMarkedToast } from '../../shared/clip-marks'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { chatSendFailures, pendingCommentsSendOperation } from '@/lib/chat-send'
@@ -76,6 +83,20 @@ function CommentsWindowApp(): ReactElement {
     mode: { kind: 'live' },
     snapshot: emptyLiveChatSnapshot(new Date().toISOString())
   }))
+  const [markerContext, setMarkerContext] = useState<MarkerContext | null>(null)
+  const markerRetry = useRef<CreateMarkerParams | null>(null)
+  const [markerRetrySessionId, setMarkerRetrySessionId] = useState<string | null>(null)
+  useEffect(() => {
+    let disposed = false
+    void window.videorc?.getMarkerContext?.().then((context) => {
+      if (!disposed) setMarkerContext(context)
+    })
+    const off = window.videorc?.onMarkerContext?.(setMarkerContext)
+    return () => {
+      disposed = true
+      off?.()
+    }
+  }, [])
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
   const [highlightAnchor, setHighlightAnchor] = useState<CommentHighlightAnchor>(
     DEFAULT_COMMENT_HIGHLIGHT_ANCHOR
@@ -584,6 +605,43 @@ function CommentsWindowApp(): ReactElement {
                 { id: 'reconnect-scopes' }
               )
             )
+        }}
+        markerContext={
+          markerContext
+            ? {
+                ...markerContext,
+                retryAvailable: markerRetryAvailable(markerRetrySessionId, markerContext)
+              }
+            : markerRetrySessionId
+              ? { available: false, retryAvailable: true }
+              : null
+        }
+        onMarker={async (label) => {
+          const api = window.videorc
+          if (!api) throw new Error('Stream Manager is disconnected.')
+          const params = markerCreateParams(markerRetry.current, markerContext, label)
+          markerRetry.current = params
+          setMarkerRetrySessionId(params.sessionId)
+          try {
+            const marker = await createCommentsMarker(api, params)
+            markerRetry.current = null
+            setMarkerRetrySessionId(null)
+            return marker
+          } catch (error) {
+            if (error instanceof MarkerRemovedError) {
+              markerRetry.current = null
+              setMarkerRetrySessionId(null)
+            }
+            throw error
+          }
+        }}
+        onUndoMarker={async (marker) => {
+          if (!window.videorc) throw new Error('Stream Manager is disconnected.')
+          await window.videorc.markerFromCommentsWindow({
+            requestId: crypto.randomUUID(),
+            action: 'delete',
+            params: { sessionId: marker.sessionId, markerId: marker.id }
+          })
         }}
         onSend={(text, options) => {
           if (!snapshot.sessionId) return

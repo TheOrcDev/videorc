@@ -145,7 +145,7 @@ async function main() {
     // stat says the window is off air.
     (s) =>
       s.text.includes('Off air') &&
-      s.composerCount === 0 &&
+      s.composerCount === 1 &&
       !s.text.includes('History-only replay comment'),
     5000
   )
@@ -155,16 +155,16 @@ async function main() {
     JSON.stringify(coldLive.last)
   )
 
-  // Idle is a distinct live-cache state: no transcript, no composer.
+  // Idle keeps local command help available without a chat provider.
   await smokeCommand('comments-window-push-snapshot', { snapshot: idleSnapshot() })
   const idle = await waitFor(
     () => smokeCommand('comments-window-reader-state'),
-    (s) => s.open && s.messageCount === 0 && s.composerCount === 0 && s.text.includes('Off air'),
+    (s) => s.open && s.messageCount === 0 && s.composerCount === 1 && s.text.includes('Off air'),
     8000
   )
   assertProbe(
     idle.ok,
-    'idle: empty live cache renders without a composer',
+    'idle: empty live cache keeps the local command composer',
     JSON.stringify(idle.last)
   )
   await captureState('idle', 'idle Chat window')
@@ -177,14 +177,14 @@ async function main() {
       !s.text.includes('Back to live') &&
       s.text.includes('All providers are temporarily unavailable') &&
       s.composerCount === 1 &&
-      s.composerDisabled === true &&
+      s.composerDisabled === false &&
       s.highlightActionCount === 1 &&
       s.destinationStatus.includes('No writable destinations'),
     5000
   )
   assertProbe(
     failedLive.ok,
-    'active failed providers: session stays Live with highlight action and disabled composer truth',
+    'active failed providers: highlight and local commands stay available while chat sending is unavailable',
     JSON.stringify(failedLive.last)
   )
 

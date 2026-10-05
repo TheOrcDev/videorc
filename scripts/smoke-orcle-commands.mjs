@@ -87,6 +87,7 @@ const router = await startFakeApiRouter({
   routes: [
     { prefix: COHOST_TICK_PATH, origin: fakeCohost.httpOrigin },
     { prefix: COHOST_SPOTLIGHT_PATH, origin: fakeCohost.httpOrigin },
+    { prefix: '/api/ai/cohost/' + 'command', origin: captionFake.httpOrigin },
     { prefix: '/api/ai/captions/', origin: captionFake.httpOrigin },
     { prefix: '/api/ai/capabilities', origin: capabilities.httpOrigin },
     { prefix: '/api/desktop/service-flags', origin: serviceFlags.httpOrigin }
@@ -216,6 +217,31 @@ async function runPremiumScenario(profile) {
       45_000
     )
     pass('A setup: chat from scripted authors, captions live, the tick flagged spam_bot')
+
+    // Named point commands have a capture owner. Without a recording they
+    // cannot become an Unknown moderation card or invoke the cloud parser.
+    phase('A0: named and negated markers remain outside chat commands')
+    const parserProbe = await fetch(router.httpOrigin + '/api/ai/cohost/' + 'command', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${smokeSessionToken}` },
+      body: '{}'
+    })
+    expect(parserProbe.status === 404, 'The command-parser observation probe hit the wrong fake')
+    const commandRequestsBeforeMarkers = captionFake.state.commandRequests
+    expect(commandRequestsBeforeMarkers > 0, 'The router did not expose command-parser requests')
+    await say(events, ORCLE_COMMAND_FINALS.namedMarker)
+    await say(events, ORCLE_COMMAND_FINALS.negatedMarker)
+    expect(
+      (await request(ws, timeoutMs, 'session.markers.list', { sessionId })).markers.length === 0,
+      'A chat session without capture saved a named marker'
+    )
+    const markerOnlyState = await request(ws, timeoutMs, 'cohost.status', {})
+    expect(!markerOnlyState.command, 'A marker command became a chat moderation card')
+    expect(
+      captionFake.state.commandRequests === commandRequestsBeforeMarkers,
+      'Named markers invoked a cloud command parser'
+    )
+    pass('A0 named markers: no capture write, moderation card or cloud parser request')
 
     // 1. Highlight by name, one command split across two finals.
     phase('A1: "Orcle, highlight the comment" | "from coders X."')
@@ -351,7 +377,10 @@ async function runPremiumScenario(profile) {
     const cancelCard = await waitForCommand(
       events,
       (command) =>
-        command.kind === 'remove' && command.status === 'confirm' && Boolean(command.operationId),
+        command.kind === 'remove' &&
+        command.status === 'confirm' &&
+        Boolean(command.operationId) &&
+        command.id !== card.command.id,
       'the second removal card',
       cancelSince
     )

@@ -226,6 +226,9 @@ export interface StreamManagerProps {
   onHighlight?: (message: LiveChatMessage) => void
   onClear?: () => void
   /** Mark the current moment for a clip (plan 068 D6); shown only on air. */
+  markerContext?: import('@/lib/backend').MarkerContext | null
+  onMarker?: (label?: string) => Promise<import('@/lib/backend').SessionMarker>
+  onUndoMarker?: (marker: import('@/lib/backend').SessionMarker) => Promise<void>
   onMarkClip?: () => void
   onOpenPreview?: () => void
   /** Show who followed (plan 071, S2): reconnect Twitch with its follow
@@ -307,6 +310,9 @@ export function StreamManager({
   onHighlight,
   onClear,
   onMarkClip,
+  markerContext,
+  onMarker,
+  onUndoMarker,
   onOpenPreview,
   onShowFollowNames,
   onReconnectScopes,
@@ -947,6 +953,9 @@ export function StreamManager({
             removalRequestIds={removalRequestIds}
             removals={removals}
             onRemoveFromChat={live ? onRemoveFromChat : undefined}
+            markerContext={inHistory ? null : markerContext}
+            onMarker={inHistory ? undefined : onMarker}
+            onUndoMarker={inHistory ? undefined : onUndoMarker}
             onSend={onSend}
           />
         </div>

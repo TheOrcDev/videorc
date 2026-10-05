@@ -10,6 +10,37 @@ All new serialized optional fields use
 `backend-rpc-contract.ts`. Code, wire and storage names keep `cohost`;
 user-facing copy says "Orcle".
 
+## Named session markers (desktop, plan 152)
+
+Named markers use `session.marker.create`, `session.markers.list`,
+`session.marker.get`, `session.marker.rename` and `session.marker.delete`.
+Their strict DTOs live in `shared/session-markers.ts`. Manual creation accepts
+only a canonical operation UUID, the expected active capture session ID and
+an optional single-line title of at most 120 Unicode code points. Time and
+source are backend-owned. Creation retries return the current saved revision;
+deleted-operation receipts refuse resurrection without retaining the title.
+
+`session.marker.created` and `session.marker.changed` project committed
+metadata. The detached Comments window receives a separate marker context and
+a bounded create/get/delete relay through Electron main and Studio. It gets
+no backend credential, arbitrary RPC method, media path or renderer-supplied
+timestamp. These methods and events are absent from remote-control and LAN
+allowlists.
+
+`session.marker.voice.configure` joins the existing caption provider for an
+exact active recording or livestream, independently of live chat. Frames
+carry an immutable capture target and a separate marker consent epoch.
+Captions presentation and chat speech admission cannot grant marker ownership.
+Revoke/regrant, account privacy cleanup and replacement captures fence delayed
+work. Chunked finals are assembled through a bounded acoustic turn before
+parsing; realtime item identity admits creation once. Marker commands are
+consumed before legacy clip and chat command parsers. Titles do not become
+moderation commands, Unknown cards or extra cloud command-parser requests.
+
+Named markers are original-timeline points. Legacy clip marks remain
+retrospective hints and report Moments remain ranges. See
+[Session markers](session-markers.md) for the user behavior.
+
 ## A. Chat moderation (desktop, S4)
 
 Moderation is a chat feature. Manual removal is free; voice-sourced removal is
