@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process'
 import { waitForOwnedTcpListener } from './lib/live-control-recycle-smoke.mjs'
 import { streamSessionParams } from './lib/cohost-caption-audio.mjs'
 import { randomUUID } from 'node:crypto'
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { launchDevApp, stopProcess } from './lib/app-launcher.mjs'
@@ -193,6 +193,7 @@ try {
   fake.state.chunkFinals.push(
     {
       text: 'Orcle make a marker here for Voice Shadcn',
+      delayMs: 3500,
       segments: [{ text: 'make', startSecond: 0.2, endSecond: 0.4 }]
     },
     { text: 'New Library', segments: [{ text: 'New Library', startSecond: 0, endSecond: 1 }] }
@@ -237,7 +238,13 @@ try {
     'Realtime caption provider did not connect'
   )
   await ask('captions.test.inject-audio', { durationMs: 1000 })
-  await fake.emitRealtimeFinal('Orcle make a marker here for Realtime topic')
+  const timingHold = fake.holdNextRealtimeFinal()
+  const timedFinal = fake.emitRealtimeFinal('Orcle make a marker here for Realtime topic')
+  await timingHold.arrived
+  // Deliberate transcription latency, after the provider stamped speech time.
+  await pause(3500)
+  timingHold.release()
+  await timedFinal
   const spoken = await waitFor(
     () => ask('session.markers.list', { sessionId }),
     (page) => page.markers.some((m) => m.label === 'Realtime topic'),
@@ -274,6 +281,26 @@ try {
     gates: { requireMotion: false }
   })
   assert.equal(analysis.verdict.pass, true, analysis.verdict.failures.join('; '))
+  const srt = readFileSync(completed.mp4Path.replace(/\.[^.]+$/, '.srt'), 'utf8')
+  for (const [label, transcript] of [
+    ['Voice Shadcn New Library', 'Orcle make a marker here for Voice Shadcn'],
+    ['Realtime topic', 'Orcle make a marker here for Realtime topic']
+  ]) {
+    // The caption artifact independently retains the seeded audio window
+    // and verb segment offset, even when transcription arrives seconds later.
+    const cue = srt.split(/\r?\n\r?\n/).find((block) => block.includes(transcript))
+    assert.ok(cue, `Missing timed speech evidence for ${label}`)
+    const stamp = cue.match(/(\d+):(\d+):(\d+),(\d+) -->/)
+    assert.ok(stamp, `Missing audio timestamp for ${label}`)
+    const expected =
+      Number(stamp[1]) * 3600 + Number(stamp[2]) * 60 + Number(stamp[3]) + Number(stamp[4]) / 1000
+    const marker = spoken.markers.find((entry) => entry.label === label)
+    assert.ok(
+      marker && Math.abs(marker.atSeconds - expected) <= 0.002,
+      `${label} must use speech time ${expected}, got ${marker?.atSeconds}`
+    )
+    console.log(`session markers: delayed ${label} matches audio offset ${expected}`)
+  }
   for (const marker of spoken.markers)
     assert.ok(
       marker.atSeconds <= analysis.metrics.durationSeconds + 0.1,

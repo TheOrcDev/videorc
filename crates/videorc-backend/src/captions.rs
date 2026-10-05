@@ -4939,13 +4939,15 @@ impl CaptionSession {
                 return;
             }
             coordinator.listen_ready = true;
-            if let Some(session_id) = coordinator.marker_session_id.as_ref() {
-                self.state.emit_event(
-                    "session.marker.voice.status",
-                    serde_json::json!({"sessionId":session_id,"listening":listening}),
-                );
+            if coordinator.marker_started_at.is_some() {
+                if let Some(session_id) = coordinator.marker_session_id.as_ref() {
+                    self.state.emit_event(
+                        "session.marker.voice.status",
+                        serde_json::json!({"sessionId":session_id,"listening":listening}),
+                    );
+                }
+                coordinator.marker_listening = Some(listening.clone());
             }
-            coordinator.marker_listening = Some(listening.clone());
         }
         spawn_listening_publish(&self.state, epoch, listening);
     }
@@ -13136,6 +13138,54 @@ mod tests {
 
     /// Finding 11: a listen intent that joins a task already proven ready
     /// reads `on` at once, not `starting`.
+    #[tokio::test]
+    async fn shared_provider_readiness_preserves_blocked_or_ended_marker_status() {
+        let state = test_caption_app_state();
+        let session = test_caption_session(&state, true);
+        let mut events = state.events.subscribe();
+        for blocked in [
+            crate::cohost::CohostListening::blocked("voice-disabled", "Paused"),
+            crate::cohost::CohostListening::blocked("consent-required", "Consent required"),
+            crate::cohost::CohostListening::off(),
+        ] {
+            {
+                let mut coordinator = state.captions.lock().await;
+                coordinator.listen_wanted = true;
+                coordinator.listen_epoch = 7;
+                coordinator.listen_ready = false;
+                coordinator.marker_session_id = Some("capture-a".into());
+                coordinator.marker_started_at = None;
+                coordinator.marker_listening = Some(blocked.clone());
+            }
+            session
+                .note_listen_ready(Some(7), crate::cohost::CohostListening::on(None))
+                .await;
+            tokio::task::yield_now().await;
+            let coordinator = state.captions.lock().await;
+            assert!(coordinator.listen_ready);
+            assert_eq!(coordinator.marker_listening.as_ref(), Some(&blocked));
+            drop(coordinator);
+            assert!(
+                drain_events(&mut events)
+                    .iter()
+                    .all(|event| event.event != "session.marker.voice.status")
+            );
+        }
+        state.captions.lock().await.marker_started_at = Some(std::time::Instant::now());
+        session
+            .note_listen_ready(Some(7), crate::cohost::CohostListening::on(None))
+            .await;
+        assert_eq!(
+            state.captions.lock().await.marker_listening,
+            Some(crate::cohost::CohostListening::on(None))
+        );
+        assert!(
+            drain_events(&mut events)
+                .iter()
+                .any(|event| event.event == "session.marker.voice.status")
+        );
+    }
+
     #[tokio::test]
     async fn listen_joining_a_ready_task_is_on_at_once() {
         let _caption_test_guard = caption_lifecycle_test_lock().lock().await;

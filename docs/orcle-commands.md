@@ -152,7 +152,7 @@ and not found. Counts only, never names or words.
 
 | You see                                          | Why                                                                                    | Fix                                                            |
 | ------------------------------------------------ | -------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| Nothing happens when you speak                   | Orcle Live is off, not listening, or you're not live.                                  | Turn on Orcle Live; check the listening dot in the Orcle pane. |
+| Nothing happens when you speak                   | Chat commands need Orcle Live and a live stream. Voice markers need an active recording or stream with authorized listening. | For chat commands, turn on Orcle Live. For markers, enable Orcle, Listen and Cloud AI consent; check the listening dot. |
 | "Orcle didn't catch that"                        | The words after "Orcle" were not a command.                                            | Use a phrase from the table.                                   |
 | "Hidden in Videorc"                              | The platform couldn't remove it (permission, quota, message too old, broadcast ended). | Hover the chip; reconnect the platform if it says so.          |
 | "Not removed" or "Unconfirmed"                   | The platform refused, or didn't answer in time.                                        | Hover for the reason; check the platform's chat.               |

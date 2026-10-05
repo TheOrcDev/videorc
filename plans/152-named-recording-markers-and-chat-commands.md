@@ -14,6 +14,17 @@ The PR was rebased onto `78d2a7b3` after watch streaks/chat links merged.
 The marker plan became 152 because the merged feature owns plan 151.
 Both IPC additions survive in the combined 121-method inventory.
 
+Final PR review revisions preserve a stopped capture's lost-reply recovery,
+but create a fresh operation when a new capture starts. Deleted receipts clear
+the pending retry. Unknown durations show a timestamp list without proportional
+pins. Shared provider readiness cannot replace a blocked or ended marker scope's
+status. Cancelled chunk turns retain only grammar ownership through the next
+500 ms pause, including split wake words, without retaining title text.
+The maintained smoke delays both speech transports by 3.5 seconds and compares
+markers with the audio/segment timestamps in the finished caption artifact.
+The Orcle regression also probes its router to prove command-parser requests
+reach the fake whose counter is asserted.
+
 - S1: additive marker storage, typed RPCs, immutable creation payloads, deleted
   operation receipts and stable pagination are implemented. Storage tests pass.
 - S2: local classification, completion/help, a strict detached-window relay,

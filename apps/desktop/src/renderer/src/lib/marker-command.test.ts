@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createCommentsMarker } from './marker-command'
+import {
+  createCommentsMarker,
+  markerCreateParams,
+  markerRetryAvailable,
+  MarkerRemovedError
+} from './marker-command'
 import type { MarkerRelayCommand, MarkerRelayResult, SessionMarker } from '@/lib/backend'
 const params = {
   sessionId: 'capture-a',
@@ -34,7 +39,7 @@ describe('marker outcome recovery', () => {
       return { status: 'deleted', revision: 3 }
     })
     await expect(createCommentsMarker({ markerFromCommentsWindow: relay }, params)).rejects.toThrow(
-      'removed'
+      MarkerRemovedError
     )
     expect(relay).toHaveBeenCalledTimes(2)
   })
@@ -46,5 +51,22 @@ describe('marker outcome recovery', () => {
     await expect(createCommentsMarker({ markerFromCommentsWindow: relay }, params)).rejects.toThrow(
       'Disk full'
     )
+  })
+  it('retries the same intent after Stop but starts a new intent in the next capture', () => {
+    expect(markerCreateParams(params, null, 'Topic')).toBe(params)
+    expect(markerRetryAvailable('capture-a', null)).toBe(true)
+    const context = { sessionId: 'capture-b', available: true }
+    expect(markerRetryAvailable('capture-a', context)).toBe(false)
+    const next = markerCreateParams(params, context, 'Topic')
+    expect(next.sessionId).toBe('capture-b')
+    expect(next.operationId).not.toBe(params.operationId)
+    expect(next.label).toBe('Topic')
+    expect(markerCreateParams(next, context, 'Topic')).toBe(next)
+  })
+  it('does not enable stale retries while a new capture is unavailable', () => {
+    const context = { sessionId: 'capture-b', available: false }
+    expect(() => markerCreateParams(params, context, 'Topic')).toThrow('No active capture')
+    expect(() => markerCreateParams(params, null, 'Another topic')).toThrow('No active capture')
+    expect(markerRetryAvailable(null, null)).toBe(false)
   })
 })

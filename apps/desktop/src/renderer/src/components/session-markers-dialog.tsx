@@ -124,8 +124,7 @@ export function SessionMarkersDialog({
       setPending(false)
     }
   }
-  const durationMs =
-    session.durationMs ?? Math.max(1, ...markers.map((marker) => marker.atSeconds * 1000))
+  const durationMs = session.durationMs
   return (
     <Dialog
       open
@@ -149,7 +148,9 @@ export function SessionMarkersDialog({
                 ? 'Capture is still running. Playback becomes available after the recording finishes.'
                 : 'This session has no local video. Marker times are still saved.'}
             </p>
-            <MarkerPins markers={markers} durationMs={durationMs} onSelect={select} />
+            {durationMs !== undefined && durationMs > 0 ? (
+              <MarkerPins markers={markers} durationMs={durationMs} onSelect={select} />
+            ) : null}
           </>
         )}
         {error ? (

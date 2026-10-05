@@ -36,6 +36,18 @@ fn tokens(text: &str) -> Vec<Token<'_>> {
 fn wake(word: &str) -> bool {
     crate::cohost_command::is_any_wake_word(word)
 }
+fn quiet_complete(seconds: f64) -> bool {
+    // PCM windows can sum to just below the exact 500 ms boundary.
+    seconds >= 0.5 - 1e-9
+}
+fn wake_only(text: &str) -> bool {
+    let words = tokens(text);
+    let Some(index) = words.iter().take(3).position(|t| wake(&t.word)) else {
+        return false;
+    };
+    words[..index].iter().all(|t| t.word == "please")
+        && words[index + 1..].iter().all(|t| t.word == "please")
+}
 
 pub fn marker_candidate(text: &str) -> bool {
     let words = tokens(text);
@@ -162,6 +174,7 @@ pub struct UtteranceBuffer {
     last_seq: Option<u64>,
     heard_voice: bool,
     suppress_until_boundary: bool,
+    cancelled_wake: bool,
 }
 #[derive(Default)]
 pub struct UtteranceOutcome {
@@ -174,20 +187,34 @@ impl UtteranceBuffer {
         *self = Self::default();
     }
     pub fn cancel(&mut self) -> bool {
-        let suppress = self.suppress_until_boundary || marker_candidate(&self.text);
+        let suppress =
+            self.suppress_until_boundary || marker_candidate(&self.text) || wake_only(&self.text);
+        let cancelled_wake = self.cancelled_wake;
+        let quiet_seconds = self.quiet_seconds;
         self.clear();
         self.suppress_until_boundary = suppress;
+        self.cancelled_wake = cancelled_wake;
+        self.quiet_seconds = quiet_seconds;
         suppress
     }
     pub fn observe_cancelled(&mut self, samples: &[i16], text: &str) -> bool {
-        let consumed = self.suppress_until_boundary || marker_candidate(text);
+        // Retain only grammar ownership after cancellation, never private words.
+        // A blocked wake-only chunk still reaches ordinary command handling;
+        // its following marker header reserves the rest of this speech turn.
+        self.suppress_until_boundary |= marker_candidate(text)
+            || (self.cancelled_wake && marker_candidate(&format!("Orcle {text}")));
+        if !text.trim().is_empty() {
+            self.cancelled_wake = !self.suppress_until_boundary && wake_only(text);
+        }
+        let consumed = self.suppress_until_boundary;
         for window in samples.chunks(800) {
             if crate::captions::pcm_has_voice(window) {
                 self.quiet_seconds = 0.0
             } else {
                 self.quiet_seconds += window.len() as f64 / 16_000.0;
-                if self.quiet_seconds >= 0.5 {
-                    self.suppress_until_boundary = false
+                if quiet_complete(self.quiet_seconds) {
+                    self.suppress_until_boundary = false;
+                    self.cancelled_wake = false;
                 }
             }
         }
@@ -203,7 +230,7 @@ impl UtteranceBuffer {
         text: &str,
         segments: &[CaptionSegment],
     ) -> UtteranceOutcome {
-        if self.suppress_until_boundary {
+        if self.suppress_until_boundary || self.cancelled_wake {
             return UtteranceOutcome {
                 consumed: self.observe_cancelled(samples, text),
                 ..Default::default()
@@ -240,7 +267,10 @@ impl UtteranceBuffer {
             } else {
                 let previous = self.quiet_seconds;
                 self.quiet_seconds += window.len() as f64 / 16_000.0;
-                if self.heard_voice && previous < 0.5 && self.quiet_seconds >= 0.5 {
+                if self.heard_voice
+                    && !quiet_complete(previous)
+                    && quiet_complete(self.quiet_seconds)
+                {
                     boundaries.push((index + 1) as f64 * 0.05)
                 }
             }
@@ -467,6 +497,49 @@ mod tests {
                 .markers
                 .is_empty()
         );
+    }
+    #[test]
+    fn blocked_marker_turns_reserve_continuations_without_stealing_other_commands() {
+        let voice = vec![1000; 48000];
+        let quiet = vec![0; 48000];
+        let mut blocked = UtteranceBuffer::default();
+        assert!(blocked.observe_cancelled(&voice, "Orcle make a marker here for"));
+        blocked.cancel();
+        assert!(blocked.observe_cancelled(&voice, "clip that and remove it from our chat"));
+        assert!(blocked.observe_cancelled(&quiet, ""));
+        assert!(!blocked.observe_cancelled(&voice, "clip that"));
+
+        let mut split_wake = UtteranceBuffer::default();
+        assert!(!split_wake.observe_cancelled(&voice, "Orcle"));
+        split_wake.cancel();
+        assert!(!split_wake.observe_cancelled(&voice, "highlight the last comment"));
+        assert!(!split_wake.observe_cancelled(&voice, "Orcle"));
+        split_wake.cancel();
+        assert!(split_wake.observe_cancelled(&voice, "make a marker here for"));
+        split_wake.cancel();
+        assert!(split_wake.observe_cancelled(&voice, "clip that"));
+
+        let mut regrant = UtteranceBuffer::default();
+        assert!(!regrant.observe_cancelled(&voice, "Orcle"));
+        regrant.cancel();
+        let outcome = regrant.observe(1, 0.0, 3.0, &voice, "make a marker for Private title", &[]);
+        assert!(outcome.consumed);
+        assert!(outcome.markers.is_empty());
+
+        let mut retired_wake = UtteranceBuffer::default();
+        retired_wake.observe(1, 0.0, 3.0, &voice, "Orcle", &[]);
+        assert!(retired_wake.cancel());
+        let outcome =
+            retired_wake.observe(2, 3.0, 3.0, &voice, "make a marker for Private title", &[]);
+        assert!(outcome.consumed);
+        assert!(outcome.markers.is_empty());
+
+        let mut split_quiet = UtteranceBuffer::default();
+        assert!(split_quiet.observe_cancelled(&voice, "Orcle make a marker for"));
+        assert!(split_quiet.observe_cancelled(&vec![0; 4800], ""));
+        split_quiet.cancel();
+        assert!(split_quiet.observe_cancelled(&vec![0; 3200], ""));
+        assert!(!split_quiet.observe_cancelled(&voice, "highlight the last comment"));
     }
     #[test]
     fn cancellation_forgets_private_words_and_consumes_label_commands_until_quiet() {

@@ -124,4 +124,10 @@ describe('saved marker timeline', () => {
     await act(async () => button('Try again').click())
     expect(document.body.textContent).toContain('Shadcn New Library')
   })
+  it('shows timestamps without proportional pins when the capture duration is unknown', async () => {
+    await mount({ ...session, mode: 'stream', mp4Path: undefined, durationMs: undefined })
+    expect(document.body.textContent).toContain('00:00:12')
+    expect(document.body.textContent).toContain('Shadcn New Library')
+    expect(document.querySelector('[data-slot="marker-timeline"]')).toBeNull()
+  })
 })

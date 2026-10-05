@@ -124,6 +124,8 @@ export async function startFakeCaptionService({
       const hasSpeech = !Number.isFinite(minSpeechPeak) || audio.peak >= Math.max(0, minSpeechPeak)
       const scripted = state.chunkFinals.shift()
       const text = hasSpeech ? (scripted?.text ?? chunkText) : ''
+      if (scripted?.delayMs > 0)
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, scripted.delayMs))
       return json(res, 200, {
         chunkSeconds: 3,
         latencyMs: 5,
