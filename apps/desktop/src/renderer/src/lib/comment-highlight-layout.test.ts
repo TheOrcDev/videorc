@@ -55,6 +55,34 @@ describe('highlightTokens', () => {
     expect(highlightTokens('hi', undefined)).toEqual([{ kind: 'word', text: 'hi' }])
   })
 
+  it('names a Twitch GIF by its title instead of painting it (plan 154, D8)', () => {
+    const gif = {
+      type: 'gif',
+      text: '[Y A Y Yes GIF]',
+      imageUrl: 'https://media2.giphy.com/media/aUovxH8Vf9qDu/giphy.gif'
+    }
+    expect(highlightTokens('[Y A Y Yes GIF]', [gif])).toEqual([
+      { kind: 'word', text: 'GIF:' },
+      { kind: 'word', text: 'Y' },
+      { kind: 'word', text: 'A' },
+      { kind: 'word', text: 'Y' },
+      { kind: 'word', text: 'Yes' }
+    ])
+    const tokens = highlightTokens('ignored', [text('gg '), gif, text(' '), emote('catJAM')])
+    expect(tokens.map((token) => (token.kind === 'word' ? token.text : token.name))).toEqual([
+      'gg',
+      'GIF:',
+      'Y',
+      'A',
+      'Y',
+      'Yes',
+      'catJAM'
+    ])
+    expect(tokens.some((token) => token.kind === 'emote' && token.url.includes('giphy'))).toBe(
+      false
+    )
+  })
+
   it('turns image fragments into emote tokens and stacks zero-width overlays', () => {
     const tokens = highlightTokens('ignored', [
       text('gg '),
