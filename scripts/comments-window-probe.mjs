@@ -27,6 +27,8 @@ const outputDirectory = join(tmpdir(), `videorc-comments-window-probe-${Date.now
 mkdirSync(outputDirectory, { recursive: true })
 const LIVE_SESSION_ID = 'comments-window-probe-live'
 const NEXT_LIVE_SESSION_ID = 'comments-window-probe-next-live'
+// Plan 151: the row whose link the probe right-clicks.
+const LINK_MESSAGE_ID = `${NEXT_LIVE_SESSION_ID}:twitch:probe-link`
 const HISTORY_SESSION_ID = 'comments-window-probe-history'
 const HISTORY_MODE = {
   kind: 'history',
@@ -575,6 +577,7 @@ async function main() {
     JSON.stringify(nextSessionReader.last)
   )
 
+  await probeLinksAndStreaks()
   await probeNarrowWidths()
 
   const closed = await smokeCommand('comments-window-toggle')
@@ -652,6 +655,56 @@ async function captureState(name, label, width = 420, height = 640) {
     JSON.stringify(capture)
   )
   return capture
+}
+
+// Plan 151: a viewer's link opens the Stream Manager's own menu (never the
+// native one as well), and a Twitch watch streak lands in Activity with the
+// viewer's words. Open link is never chosen here: it would launch a browser.
+async function probeLinksAndStreaks() {
+  await smokeCommand('comments-window-push-snapshot', { snapshot: linksAndStreakSnapshot() })
+  await layoutAt(1280)
+  const seen = await waitFor(
+    () => smokeCommand('comments-window-reader-state'),
+    (s) =>
+      s.text.includes('Streak · 20 streams') &&
+      s.text.includes('welcome back hands') &&
+      s.text.includes('https://videorc.com/download'),
+    5000
+  )
+  assertProbe(
+    seen.ok,
+    "streak: Activity lists the watch streak, and chat shows the viewer's words",
+    JSON.stringify(seen.last?.text?.slice(0, 1500))
+  )
+  const menu = await smokeCommand('comments-window-context-click-link', {
+    messageId: LINK_MESSAGE_ID
+  })
+  assertProbe(
+    menu.opened === true &&
+      menu.menu?.label === 'videorc.com' &&
+      JSON.stringify(menu.menu?.items) === JSON.stringify(['Open link', 'Copy link']),
+    'links: right-clicking a link offers its host, Open link and Copy link',
+    JSON.stringify(menu)
+  )
+  assertProbe(
+    menu.nativeMenuFired === false,
+    'links: the native context menu never fires on a link',
+    JSON.stringify(menu)
+  )
+  await captureState('links-menu-and-streak', 'Stream Manager link menu and streak', 1280, 720)
+  const dismissed = await smokeCommand('comments-window-context-click-link', { action: 'close' })
+  assertProbe(
+    dismissed.closed === true,
+    'links: Escape closes the link menu',
+    JSON.stringify(dismissed)
+  )
+  // Back to the snapshot the rest of the probe expects.
+  await smokeCommand('comments-window-push-snapshot', { snapshot: nextLiveSessionSnapshot() })
+  await waitFor(
+    () => smokeCommand('comments-window-reader-state'),
+    (s) => !s.text.includes('welcome back hands'),
+    5000
+  )
 }
 
 async function probeNarrowWidths() {
@@ -1157,6 +1210,40 @@ function nextLiveSessionSnapshot() {
     ],
     unreadCount: 1,
     updatedAt: '2026-07-10T10:00:02Z'
+  }
+}
+
+function linksAndStreakSnapshot() {
+  const snapshot = nextLiveSessionSnapshot()
+  return {
+    ...snapshot,
+    messages: [
+      ...snapshot.messages,
+      messageFixture({
+        id: LINK_MESSAGE_ID,
+        platform: 'twitch',
+        sessionId: NEXT_LIVE_SESSION_ID,
+        authorName: 'Link Viewer',
+        messageText: 'Grab it at https://videorc.com/download today',
+        at: '2026-07-10T10:00:03Z'
+      }),
+      {
+        ...messageFixture({
+          id: `${NEXT_LIVE_SESSION_ID}:twitch:probe-streak`,
+          platform: 'twitch',
+          sessionId: NEXT_LIVE_SESSION_ID,
+          authorName: 'Snowy77x',
+          messageText: 'Snowy77x watched 20 consecutive streams and sparked a watch streak!',
+          at: '2026-07-10T10:00:04Z'
+        }),
+        eventType: 'system',
+        rawProviderType: 'channel.chat.notification:watch_streak',
+        fragments: [{ type: 'text', text: 'welcome back hands <3' }],
+        details: { kind: 'watch-streak', streakCount: 20, channelPointsAwarded: 450 }
+      }
+    ],
+    unreadCount: 3,
+    updatedAt: '2026-07-10T10:00:05Z'
   }
 }
 

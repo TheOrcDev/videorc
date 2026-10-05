@@ -10762,6 +10762,74 @@ async function runSmokePreviewMotionCommand(
     )
   }
 
+  // Plan 151: right-click the first link in a row with real input events.
+  // Reports whether the Stream Manager's own link menu opened and whether
+  // Electron's native `context-menu` fired too (it must not: with text
+  // selected, that would stack the native Copy menu on the link menu).
+  if (command === 'comments-window-context-click-link') {
+    const window = commentsWindow
+    if (!commentsWindowIsOpen() || !window) {
+      return { opened: false, reason: 'Chat window is not open.' }
+    }
+    if (params.action === 'close') {
+      for (const type of ['keyDown', 'keyUp'] as const) {
+        window.webContents.sendInputEvent({ type, keyCode: 'Escape' })
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      const open = await window.webContents.executeJavaScript(
+        `Boolean(document.querySelector('[data-slot="comment-link-menu"]'))`,
+        true
+      )
+      return { closed: open === false }
+    }
+    const messageId = typeof params.messageId === 'string' ? params.messageId : ''
+    const target = (await window.webContents.executeJavaScript(
+      `(() => {
+        const messageId = ${jsonForInlineScript(messageId)};
+        const row = Array.from(document.querySelectorAll('[data-message-id]'))
+          .find((candidate) => candidate.getAttribute('data-message-id') === messageId);
+        const link = row?.querySelector('[data-slot="comment-link"]');
+        if (!link) return null;
+        link.scrollIntoView({ block: 'center' });
+        const box = link.getBoundingClientRect();
+        return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2), text: link.textContent };
+      })()`,
+      true
+    )) as { x: number; y: number; text: string } | null
+    if (!target) return { opened: false, reason: 'No link in that row.' }
+    let nativeMenuFired = false
+    const onNativeMenu = (): void => {
+      nativeMenuFired = true
+    }
+    window.webContents.on('context-menu', onNativeMenu)
+    try {
+      for (const type of ['mouseDown', 'mouseUp'] as const) {
+        window.webContents.sendInputEvent({
+          type,
+          x: target.x,
+          y: target.y,
+          button: 'right',
+          clickCount: 1
+        })
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400))
+    } finally {
+      window.webContents.off('context-menu', onNativeMenu)
+    }
+    const menu = (await window.webContents.executeJavaScript(
+      `(() => {
+        const menu = document.querySelector('[data-slot="comment-link-menu"]');
+        if (!menu) return null;
+        return {
+          label: menu.querySelector('[data-slot="context-menu-label"]')?.textContent ?? null,
+          items: Array.from(menu.querySelectorAll('[data-slot="context-menu-item"]')).map((item) => item.textContent)
+        };
+      })()`,
+      true
+    )) as { label: string | null; items: string[] } | null
+    return { opened: Boolean(menu), link: target.text, menu, nativeMenuFired }
+  }
+
   if (command === 'comments-window-submit-message') {
     const window = commentsWindow
     if (!commentsWindowIsOpen() || !window) {
