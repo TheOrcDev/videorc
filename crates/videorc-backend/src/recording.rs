@@ -35596,9 +35596,17 @@ mod tests {
             .unwrap()
             .targets
             .retain(|target| target.effective_output_orientation() == Orientation::Vertical);
-        validate_outputs(&params).unwrap();
         let primary = resolve_stream_output_video(&params).unwrap();
         assert_eq!(primary, params.output.video);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        validate_outputs(&params).unwrap();
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            // Profile resolution is portable; starting the split still needs
+            // an encoded bridge, which Linux does not currently provide.
+            let error = validate_outputs(&params).unwrap_err().to_string();
+            assert!(error.contains("requires encoded"), "{error}");
+        }
         let auxiliary = recording_compositor_stream_output(
             &params,
             EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,

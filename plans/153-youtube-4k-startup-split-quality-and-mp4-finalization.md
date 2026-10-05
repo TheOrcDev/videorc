@@ -3,7 +3,7 @@
 ## Status and execution baseline
 
 - **Priority:** P0 for YouTube startup; P1 for independent quality controls and finalization UX.
-- **Status:** IMPLEMENTED; acceptance in progress, 2026-10-05. No release performed. See [execution evidence](../docs/acceptance/2026-10-05-stream-quality-finalization.md).
+- **Status:** S0–S3 IMPLEMENTED; S4 partially verified, 2026-10-05. Draft PR [#616](https://github.com/TheOrcDev/videorc/pull/616). Release acceptance remains blocked by system-audio gate failures and the lack of a native 4K display for the long run. The owner requested local tests only, so real YouTube acceptance is deferred. No release performed. See [execution evidence](../docs/acceptance/2026-10-05-stream-quality-finalization.md).
 - **Numbering:** originally investigated as Plan 152; renumbered because current main already assigns 152 to named recording markers.
 - **Implementation baseline:** `5fb14b33` on isolated branch `fix/152-stream-quality-finalization`.
 - **Source inspected:** `origin/main` at `f9da9cbc3ccd7452a88e3f7531ffe114ce10b6a0`, release record for installed macOS **0.9.132**.
