@@ -167,14 +167,6 @@ describe('StatsBar (plan 057)', () => {
       description: '1.2k viewers, peak 1.4k'
     },
     {
-      id: 'health',
-      label: 'Stream health',
-      value: 'X failed',
-      tone: 'error',
-      details: [],
-      description: 'Stream health: X failed'
-    },
-    {
       id: 'followers',
       label: 'Followers',
       value: '61,942',
@@ -183,6 +175,15 @@ describe('StatsBar (plan 057)', () => {
       tone: 'neutral',
       details: [],
       description: '61,942 followers, +12 this stream'
+    },
+    {
+      id: 'chat',
+      label: 'Chat',
+      value: '14',
+      unit: 'msg/min',
+      tone: 'neutral',
+      details: [],
+      description: '14 messages a minute'
     }
   ]
 
@@ -192,15 +193,12 @@ describe('StatsBar (plan 057)', () => {
     expect(markup).not.toContain('stats-summary')
     expect(markup).toContain('>ON AIR<')
     const order = [...markup.matchAll(/data-stat="([a-z]+)"/g)].map((match) => match[1])
-    expect(order).toEqual(['session', 'viewers', 'health', 'followers'])
+    expect(order).toEqual(['session', 'viewers', 'followers', 'chat'])
     expect(markup.match(/data-group="main"/g)).toHaveLength(3)
     expect(markup).toContain('data-group="more"')
     // The viewer count is drawn once, at every width: never hidden while live.
     expect(markup.match(/>1\.2k</g)?.length).toBe(1)
-    // Health speaks only when something is wrong, and in the error tone.
-    expect(markup).toContain('X failed')
-    expect(markup).toContain('data-tone="error"')
-    expect(markup).toContain('aria-label="Stream health: X failed"')
     expect(markup).toContain('+12')
+    expect(markup).not.toContain('data-slot="status-dot"')
   })
 })
