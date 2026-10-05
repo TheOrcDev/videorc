@@ -1,6 +1,7 @@
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
 import { globalShortcutEntries, isGlobalShortcutAction } from '../shared/global-shortcuts'
 import { normalizeAccelerator } from '../shared/accelerator'
+import { openableChatLink } from '../shared/chat-link'
 import type {
   GlobalShortcutsConfig,
   GlobalShortcutsResult,
@@ -13883,6 +13884,13 @@ app.whenReady().then(async () => {
   secureIpcHandle('avatars:cache', (_event, url: unknown) => cacheChatAvatar(url))
   secureIpcHandle('avatars:read', (_event, localUrl: unknown) => readChatAvatar(localUrl))
   secureIpcHandle('oauth:open-url', (_event, authUrl: string) => openOAuthUrl(authUrl))
+  secureIpcHandle('chat:open-link', async (_event, url: unknown) => {
+    // The contract already refused anything else; check again where it opens.
+    const openable = openableChatLink(url)
+    if (!openable) return false
+    await shell.openExternal(openable)
+    return true
+  })
   secureIpcHandle('oauth:callback-redirect-uri', (_event, platform?: string) =>
     oauthCallbackRedirectUri(platform)
   )

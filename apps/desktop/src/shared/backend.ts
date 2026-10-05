@@ -4354,6 +4354,9 @@ export interface VideorcApi {
   getPendingOAuthCallbacks: () => Promise<OAuthCallbackEnvelope[]>
   acknowledgeOAuthCallback: (callbackId: string) => Promise<boolean>
   openOAuthUrl: (authUrl: string) => Promise<void>
+  /** Open a link from chat in the browser (plan 151): true when it opened,
+   * false when main refused it (not http(s), credentials, too long). */
+  openChatLink: (url: string) => Promise<boolean>
   getOAuthCallbackRedirectUri: (platform?: string) => Promise<string | null>
   getNativePreviewSurfaceMode: () => Promise<boolean>
   openPreviewWindow: () => Promise<PreviewWindowState>

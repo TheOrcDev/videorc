@@ -94,6 +94,7 @@ const api: VideorcApi = {
   getPendingOAuthCallbacks: () => invoke('oauth:callbacks-list'),
   acknowledgeOAuthCallback: (callbackId) => invoke('oauth:callback-ack', callbackId),
   openOAuthUrl: (authUrl) => invoke('oauth:open-url', authUrl),
+  openChatLink: (url) => invoke('chat:open-link', url),
   getOAuthCallbackRedirectUri: (platform) => invoke('oauth:callback-redirect-uri', platform),
   getNativePreviewSurfaceMode: () => invoke('preview-surface:mode'),
   setNativeTheme: (theme) => invoke('app:set-native-theme', theme),
