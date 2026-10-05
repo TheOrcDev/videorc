@@ -37,6 +37,7 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'comments-window-authority-probe',
   'comments-window-capture-page',
   'comments-window-click-message',
+  'comments-window-context-click-link',
   'comments-window-close',
   'comments-window-command-trace',
   'comments-window-layout-metrics',

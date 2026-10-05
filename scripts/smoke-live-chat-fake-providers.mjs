@@ -431,7 +431,8 @@ try {
       'super-chat',
       'super-sticker',
       'membership',
-      'kicks'
+      'kicks',
+      'watch-streak'
     ]
     const eventRows = await waitForFakeActivityReceipts({
       eventMessages,
@@ -476,6 +477,16 @@ try {
       kicks.amountText !== '500 KICKs'
     ) {
       throw new Error(`Kick KICKs row missing: ${JSON.stringify(eventRows)}`)
+    }
+    // Plan 151: a watch streak keeps its length and the viewer's own words.
+    const streak = eventRows.find((message) => message.details?.kind === 'watch-streak')
+    if (
+      streak?.platform !== 'twitch' ||
+      streak.details.streakCount !== 20 ||
+      streak.rawProviderType !== 'channel.chat.notification:watch_streak' ||
+      !streak.fragments?.some((fragment) => fragment.text.includes('welcome back'))
+    ) {
+      throw new Error(`Twitch watch streak row missing: ${JSON.stringify(eventRows)}`)
     }
     await waitFor(
       () =>
@@ -534,7 +545,7 @@ try {
         }
       ]
     })
-    const rolledTotals = await waitForSessionTotals(ws, eventsSessionId, 6014, timeoutMs)
+    const rolledTotals = await waitForSessionTotals(ws, eventsSessionId, 6015, timeoutMs)
     if (
       rolledTotals.supporters !== eventTotals.supporters ||
       rolledTotals.bits !== eventTotals.bits ||

@@ -34,15 +34,16 @@ import {
 describe('Electron IPC contract', () => {
   it('maps every renderer-facing invoke channel to a real async API method', () => {
     expectTypeOf<ElectronInvokeMappingInvariant>().toEqualTypeOf<true>()
-    // 116: plan 140 S6 part B added the Orcle command answer pair (part A
+    // 117: plan 151 added chat:open-link. 116: plan 140 S6 part B added the
+    // Orcle command answer pair (part A
     // the chat removal relay pair; S5 the Stream
     // Manager's reconnect-scopes channel; plan 119 the in-app player's
     // media:grant-session; plan 095 the highlight card's avatars:read; plan 071
     // the Stream Manager Show who followed channel; plan 068 the mark-clip
     // relay pair; plan 062 the shortcut recorder arm; plan 055 the dashboard
     // push and get; plan 050 retired glass:wallpaper:get).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(116)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(116)
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(117)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(117)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -151,6 +152,25 @@ describe('Electron IPC contract', () => {
     expect(() => validateElectronInvokeArgs('account:callback-ack', [''])).toThrow(
       'at least 1 characters'
     )
+  })
+
+  it('opens only http and https chat links, without credentials (plan 151)', () => {
+    expect(validateElectronInvokeArgs('chat:open-link', ['https://videorc.com/download'])).toEqual([
+      'https://videorc.com/download'
+    ])
+    expect(validateElectronInvokeArgs('chat:open-link', ['http://example.com'])).toEqual([
+      'http://example.com'
+    ])
+    for (const url of [
+      'javascript:alert(1)',
+      'file:///etc/passwd',
+      'https://user:pass@videorc.com',
+      `https://videorc.com/${'a'.repeat(3000)}`,
+      42
+    ]) {
+      expect(() => validateElectronInvokeArgs('chat:open-link', [url])).toThrow()
+    }
+    expect(() => validateElectronInvokeArgs('chat:open-link', [])).toThrow()
   })
 
   it('exactly validates provider OAuth callback queue results', () => {

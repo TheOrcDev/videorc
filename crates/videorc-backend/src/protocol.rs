@@ -6539,6 +6539,14 @@ mod tests {
                 gift_name: Some("Rage Quit".to_string()),
             })
         );
+        assert_eq!(messages[8].event_type, LiveChatEventType::System);
+        assert_eq!(
+            messages[8].details,
+            Some(LiveChatEventDetails::WatchStreak {
+                streak_count: 20,
+                channel_points_awarded: Some(450),
+            })
+        );
         assert!(messages[0].author_affiliation.is_none());
         assert_eq!(
             messages[7]

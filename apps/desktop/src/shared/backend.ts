@@ -4354,6 +4354,9 @@ export interface VideorcApi {
   getPendingOAuthCallbacks: () => Promise<OAuthCallbackEnvelope[]>
   acknowledgeOAuthCallback: (callbackId: string) => Promise<boolean>
   openOAuthUrl: (authUrl: string) => Promise<void>
+  /** Open a link from chat in the browser (plan 151): true when it opened,
+   * false when main refused it (not http(s), credentials, too long). */
+  openChatLink: (url: string) => Promise<boolean>
   getOAuthCallbackRedirectUri: (platform?: string) => Promise<string | null>
   getNativePreviewSurfaceMode: () => Promise<boolean>
   openPreviewWindow: () => Promise<PreviewWindowState>
@@ -4671,6 +4674,9 @@ export type LiveChatEventDetails =
   | { kind: 'announcement'; color?: string }
   /** `handle`: the @-mentionable login when the platform sent one (plan 071). */
   | { kind: 'follow'; handle?: string }
+  /** A Twitch watch streak (plan 151): `streakCount` streams in a row.
+   * `channelPointsAwarded` is what the viewer earned; kept, never shown. */
+  | { kind: 'watch-streak'; streakCount: number; channelPointsAwarded?: number }
 
 /** The message a chat message replies to, when the platform threads replies. */
 export interface LiveChatReply {

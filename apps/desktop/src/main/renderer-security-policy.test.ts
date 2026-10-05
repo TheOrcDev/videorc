@@ -302,6 +302,18 @@ describe('renderer security policy', () => {
     expect(AUXILIARY_API_KEYS.captions).not.toContain('cacheChatAvatar')
   })
 
+  it('lets only main and the Stream Manager open a chat link (plan 151)', () => {
+    expect(roleCanInvokeChannel('main', 'chat:open-link')).toBe(true)
+    expect(roleCanInvokeChannel('comments', 'chat:open-link')).toBe(true)
+    expect(roleCanInvokeChannel('notes', 'chat:open-link')).toBe(false)
+    expect(roleCanInvokeChannel('captions', 'chat:open-link')).toBe(false)
+    expect(AUXILIARY_API_KEYS.comments).toContain('openChatLink')
+    expect(AUXILIARY_API_KEYS.notes).not.toContain('openChatLink')
+    expect(AUXILIARY_API_KEYS.captions).not.toContain('openChatLink')
+    // OAuth stays main's alone.
+    expect(roleCanInvokeChannel('comments', 'oauth:open-url')).toBe(false)
+  })
+
   it('lets only main and the Comments window read cached image bytes (plan 095)', () => {
     // The highlight card decodes avatars and emotes from bytes; the cache
     // directory stays main-owned and only its managed file names resolve.

@@ -42,6 +42,7 @@ import { sessionChatTotalsSchema } from './session-chat-totals'
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { COMMENT_HIGHLIGHT_ANCHORS, DOCK_SLOTS, LAYOUT_PRESET_VALUES } from './backend'
 import { CHAT_AVATAR_MAX_BYTES, chatAvatarBytesWithinCap } from './chat-avatar-bytes'
+import { openableChatLink } from './chat-link'
 import { SCOPE_RECONNECT_PLATFORMS } from './platform-scopes'
 import { MAX_RELAYED_MODERATION_OPERATIONS, MODERATION_PHASES } from './chat-moderation'
 import {
@@ -91,6 +92,7 @@ export const electronInvokeApiMethods = {
   'account:callbacks-list': 'getPendingAccountCallbacks',
   'account:callback-ack': 'acknowledgeAccountCallback',
   'oauth:open-url': 'openOAuthUrl',
+  'chat:open-link': 'openChatLink',
   'oauth:callback-redirect-uri': 'getOAuthCallbackRedirectUri',
   'oauth:callbacks-list': 'getPendingOAuthCallbacks',
   'oauth:callback-ack': 'acknowledgeOAuthCallback',
@@ -470,6 +472,12 @@ const boundedUrl = runtimeSchema<string>('an allowed URL', (value, path) => {
     throw new Error(`${path} must be an allowed URL.`)
   }
   return input
+})
+
+/** A link from chat (plan 151): http or https, no credentials, bounded. */
+const chatLinkUrl = runtimeSchema<string>('an http or https chat link', (value, path) => {
+  if (!openableChatLink(value)) throw new Error(`${path} must be an http or https link.`)
+  return value as string
 })
 
 /** A session media grant URL (plan 119, S11): the scoped host plus a 128-bit hex id, nothing else. */
@@ -1156,6 +1164,9 @@ const specificRuntimeInvokeContracts = {
     arraySchema(oauthCallbackEnvelopeSchema, { maxLength: 32 })
   ),
   'oauth:open-url': invokeContract(tupleSchema([boundedUrl])),
+  // Plan 151, D14: a link a viewer posted, opened in the browser. Main checks
+  // it again before `shell.openExternal`.
+  'chat:open-link': invokeContract(tupleSchema([chatLinkUrl]), booleanSchema),
   'comments-window:set-highlight-anchor': invokeContract(
     tupleSchema([enumSchema(COMMENT_HIGHLIGHT_ANCHORS)])
   ),

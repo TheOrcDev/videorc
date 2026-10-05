@@ -439,6 +439,33 @@
         "eventType": "message",
         "isDeleted": false,
         "rawProviderType": "x-broadcast-chat"
+      },
+      {
+        "id": "session-fixture:twitch:watch-streak-1",
+        "providerMessageId": "watch-streak-1",
+        "platform": "twitch",
+        "sessionId": "session-fixture",
+        "authorId": "1009",
+        "authorName": "Snowy77x",
+        "authorBadges": [],
+        "authorRoles": [],
+        "publishedAt": "2026-09-24T10:07:00Z",
+        "receivedAt": "2026-09-24T10:07:00.040Z",
+        "messageText": "Snowy77x watched 20 consecutive streams and sparked a watch streak!",
+        "fragments": [
+          {
+            "type": "text",
+            "text": "welcome back hands <3"
+          }
+        ],
+        "eventType": "system",
+        "isDeleted": false,
+        "rawProviderType": "channel.chat.notification:watch_streak",
+        "details": {
+          "kind": "watch-streak",
+          "streakCount": 20,
+          "channelPointsAwarded": 450
+        }
       }
     ]
   },

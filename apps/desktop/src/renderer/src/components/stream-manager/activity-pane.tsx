@@ -40,7 +40,7 @@ import {
 import { cn } from '@/lib/utils'
 
 // The Activity pane (plan 055, D4): structured events, never chat text.
-// Follows, subs and gifts, tips, raids and announcements from the chat
+// Follows, subs and gifts, tips, raids, watch streaks and announcements from the chat
 // snapshot, and destination failures from the relayed dashboard. A row reads
 // at a glance (plan 057, D3): the name and the short fact on one line, the
 // viewer's own words below, the full sentence on hover. A row about one
@@ -56,6 +56,9 @@ const KIND_ICONS: Record<ActivityKind, AppIcon | null> = {
   'super-chat': TipIcon,
   'super-sticker': TipIcon,
   raid: RaidIcon,
+  // Always about one viewer, so the row shows their avatar and never a glyph
+  // (plan 151, D5): no licensed icon is spent on it.
+  'watch-streak': null,
   announcement: AnnouncementIcon,
   'destination-failed': null,
   'destination-recovered': null

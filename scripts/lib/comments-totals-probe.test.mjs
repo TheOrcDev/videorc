@@ -11,7 +11,7 @@ import {
 // ordered currency rows and every accounting value remain unchanged.
 function fakeActivityWireTotals() {
   return JSON.parse(
-    '{"bits":1500,"chatters":7,"follows":2,"messageCount":13,"raids":1,"status":"available","supporters":7,"tips":[{"amountMicros":5000000,"currency":"USD"},{"amountMicros":2000000,"currency":"EUR"}]}'
+    '{"bits":1500,"chatters":7,"follows":2,"messageCount":14,"raids":1,"status":"available","supporters":7,"tips":[{"amountMicros":5000000,"currency":"USD"},{"amountMicros":2000000,"currency":"EUR"}]}'
   )
 }
 
@@ -27,7 +27,7 @@ test('normalized fake activity accounting accepts the equivalent fixture propert
 
 for (const [field, value] of [
   ['status', 'legacy-unavailable'],
-  ['messageCount', 12],
+  ['messageCount', 13],
   ['supporters', 6],
   ['bits', 1499],
   ['follows', 1],
@@ -166,7 +166,8 @@ const activityKinds = [
   'super-chat',
   'super-sticker',
   'membership',
-  'kicks'
+  'kicks',
+  'watch-streak'
 ]
 
 function activityReceipts(sessionId = 'owned-activity') {
@@ -188,6 +189,7 @@ function activityReceipts(sessionId = 'owned-activity') {
     ['youtube', 'fake-event-super-chat', 'super-chat'],
     ['youtube', 'fake-event-super-sticker', 'super-sticker'],
     ['youtube', 'fake-event-membership', 'membership'],
+    ['twitch', 'fake-event-watch-streak', 'watch-streak'],
     ['twitch', 'fake-event-follow', 'follow']
   ].map(([platform, providerMessageId, kind]) => ({
     id: `${sessionId}:${platform}:${destinations[platform]}:${providerMessageId}`,
@@ -275,7 +277,7 @@ for (const substitute of [
 ]) {
   test(`fake activity receipts keep totals pending with the last follow ${substitute}`, async () => {
     const rows = activityReceipts()
-    const initial = rows.slice(0, 12)
+    const initial = rows.slice(0, 13)
     if (substitute === 'foreign-session') initial.push(activityReceipts('foreign-activity').at(-1))
     if (substitute === 'duplicate-id') initial.push({ ...initial[0] })
     if (substitute === 'missing-id') initial.push({ ...initial[0], id: undefined })
@@ -296,7 +298,7 @@ for (const substitute of [
       new Set(
         finished.rows.map((row) => row.id).filter((id) => typeof id === 'string' && id.length > 0)
       ).size,
-      13
+      14
     )
     assert.ok(finished.rows.every((row) => row.sessionId === 'owned-activity'))
     assert.equal(finished.admissions, 1)
@@ -343,7 +345,7 @@ test('incomplete activity deadline preserves the original rejection object witho
   assert.equal(finished.waitArguments.timeoutMs, 90_000)
 })
 
-test('thirteen distinct owned receipts still require every original activity kind', async () => {
+test('fourteen distinct owned receipts still require every original activity kind', async () => {
   const rows = activityReceipts().map((row) =>
     row.details?.kind === 'raid' ? { ...row, details: undefined } : row
   )
@@ -358,7 +360,7 @@ test('thirteen distinct owned receipts still require every original activity kin
     finished = await fixture.finish()
   }
   assert.equal(finished.producerJoined && finished.ownerJoined, true)
-  assert.equal(new Set(rows.map((row) => row.id)).size, 13)
+  assert.equal(new Set(rows.map((row) => row.id)).size, 14)
   assert.deepEqual(observed, { pending: true, admissions: 0 })
   assert.equal(finished.error, deadlineError)
   assert.equal(finished.admissions, 0)
@@ -375,9 +377,9 @@ test('complete activity receipts still reject incorrect settled accounting', asy
   }
   assert.equal(finished.producerJoined && finished.ownerJoined, true)
   assert.equal(finished.error, undefined)
-  assert.equal(finished.rows.length, 13)
+  assert.equal(finished.rows.length, 14)
   const incorrect = fakeActivityWireTotals()
-  incorrect.messageCount = 12
+  incorrect.messageCount = 13
   assert.throws(() => assertFakeActivityTotals(incorrect), /accounting disagreed/)
 })
 
@@ -400,6 +402,6 @@ test('additional owned receipts remain available to the strict over-count assert
   assert.deepEqual(observed, { pending: false, admissions: 1 })
   assert.deepEqual(finished.rows, rows)
   const incorrect = fakeActivityWireTotals()
-  incorrect.messageCount = 14
+  incorrect.messageCount = 15
   assert.throws(() => assertFakeActivityTotals(incorrect), /accounting disagreed/)
 })

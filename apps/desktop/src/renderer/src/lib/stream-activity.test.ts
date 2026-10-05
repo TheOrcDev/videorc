@@ -234,6 +234,7 @@ describe('stream activity', () => {
       support: 8,
       tips: 4,
       raids: 1,
+      streaks: 0,
       destinations: 0
     })
     expect(activityFilterCounts(filterActivity(items, 'all', 'youtube'))).toMatchObject({
@@ -495,4 +496,69 @@ it('retains a currency for active zero-amount tips and removes it only when its 
   })
   expect(activityTotals([zero]).tips).toEqual([{ currency: 'USD', amountMicros: 0 }])
   expect(activityTotals([{ ...zero, isDeleted: true }]).tips).toEqual([])
+})
+
+describe('watch streaks (plan 151)', () => {
+  // As twitch_chat.rs normalizes the watch-streak fixture: Twitch's sentence
+  // in the text, the viewer's own words in the fragments.
+  function streak(words: string | null, streakCount = 20): LiveChatMessage {
+    return {
+      ...row(
+        'twitch',
+        'Snowy77x',
+        'system',
+        { kind: 'watch-streak', streakCount, channelPointsAwarded: 450 },
+        'Snowy77x watched 20 consecutive streams and sparked a watch streak!'
+      ),
+      rawProviderType: 'channel.chat.notification:watch_streak',
+      fragments: words ? [{ type: 'text', text: words }] : []
+    }
+  }
+
+  it("lists a streak with its length and the viewer's own words", () => {
+    const [item] = activityItems([streak('welcome back hands <3')])
+    expect(item).toMatchObject({
+      kind: 'watch-streak',
+      filter: 'streaks',
+      name: 'Snowy77x',
+      line: 'Reached a 20-stream watch streak',
+      short: 'Streak · 20 streams',
+      message: 'welcome back hands <3',
+      streak: 20
+    })
+    expect(activityItems([streak(null)])[0].message).toBeUndefined()
+    expect(activityItems([streak(null, 1)])[0].short).toBe('Streak · 1 stream')
+  })
+
+  it('has its own chip and never counts as support', () => {
+    const items = activityItems([streak('hi'), fixtures.resub])
+    expect(activityFilterCounts(items)).toMatchObject({ streaks: 1, support: 1 })
+    expect(filterActivity(items, 'streaks').map((item) => item.kind)).toEqual(['watch-streak'])
+    expect(activityTotals([streak('hi')])).toEqual({
+      follows: 0,
+      supporters: 0,
+      bits: 0,
+      tips: [],
+      raids: 0
+    })
+  })
+
+  it('thanks the viewer for the streak by name', () => {
+    expect(thankYouDraft(activityItems([streak(null)])[0])).toBe(
+      'Thanks for watching 20 streams in a row, @Snowy77x!'
+    )
+  })
+
+  it("quotes a Twitch sub's own words too (D3)", () => {
+    const resub = {
+      ...fixtures.resub,
+      rawProviderType: 'channel.chat.notification:resub',
+      fragments: [{ type: 'text', text: 'Happy Wednesday' }]
+    }
+    expect(activityItems([resub])[0].message).toBe('Happy Wednesday')
+  })
+
+  it('drops a removed streak', () => {
+    expect(activityItems([{ ...streak('hi'), isDeleted: true }])).toEqual([])
+  })
 })

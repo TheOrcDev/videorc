@@ -859,7 +859,7 @@ describe('shared high-risk protocol fixture', () => {
   })
 
   it('loads chat rows with and without structured event details', () => {
-    const [plain, cheer, resub, raid, superChat, follow, kicks, affiliated] =
+    const [plain, cheer, resub, raid, superChat, follow, kicks, affiliated, streak] =
       fixtures.comments.eventMessages
     expect(
       'details' in plain ||
@@ -875,6 +875,11 @@ describe('shared high-risk protocol fixture', () => {
     expect(superChat.details).toMatchObject({ kind: 'super-chat', amountMicros: 5_000_000 })
     expect(follow.eventType).toBe('follow')
     expect(kicks.details).toEqual({ kind: 'kicks', amount: 500, giftName: 'Rage Quit' })
+    expect(streak.details).toEqual({
+      kind: 'watch-streak',
+      streakCount: 20,
+      channelPointsAwarded: 450
+    })
     expect(affiliated.authorAffiliation).toEqual({
       badgeUrl: 'https://pbs.twimg.com/profile_images/2/neon_normal.jpg',
       description: 'Neon',

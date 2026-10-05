@@ -17,6 +17,8 @@ export const AUXILIARY_API_KEYS = {
   comments: [
     'cacheChatAvatar',
     'readChatAvatar',
+    // Open link on a chat row (plan 151).
+    'openChatLink',
     'sendCommentHighlight',
     'getCommentHighlightState',
     'onCommentHighlightState',

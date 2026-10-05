@@ -335,3 +335,53 @@ describe('CommentRow: Remove from chat (plan 140, S6)', () => {
     expect(renderToStaticMarkup(createElement(RemovalStatus, { status: null }))).toBe('')
   })
 })
+
+describe("CommentRow: a Twitch notice's own words (plan 151, D3)", () => {
+  const streak = message({
+    platform: 'twitch',
+    authorName: 'Snowy77x',
+    eventType: 'system',
+    rawProviderType: 'channel.chat.notification:watch_streak',
+    messageText: 'Snowy77x watched 20 consecutive streams and sparked a watch streak!',
+    fragments: [{ type: 'text', text: 'welcome back hands <3' }],
+    details: { kind: 'watch-streak', streakCount: 20 }
+  })
+
+  it("shows Twitch's sentence, then the viewer's words below it", () => {
+    const html = renderToStaticMarkup(createElement(CommentRow, { message: streak }))
+    expect(html).toContain('data-slot="comment-notice"')
+    expect(html).toContain('watched 20 consecutive streams')
+    expect(html).toMatch(/data-slot="comment-notice-words"[^>]*>welcome back hands &lt;3/)
+  })
+
+  it('keeps emotes in the words and the sentence above them', () => {
+    const html = renderToStaticMarkup(
+      createElement(CommentRow, {
+        message: {
+          ...streak,
+          fragments: [
+            { type: 'text', text: 'see you ' },
+            { type: 'emote', text: 'Kappa', imageUrl: 'https://static-cdn.jtvnw.net/e/1' }
+          ]
+        }
+      })
+    )
+    expect(html).toContain('watched 20 consecutive streams')
+    // Before its image is cached an emote reads as its name, in the words.
+    expect(html).toMatch(
+      /data-slot="comment-notice-words"[^>]*><span>see you <\/span><span[^>]*>Kappa/
+    )
+  })
+
+  it('is the sentence alone when the viewer typed nothing', () => {
+    const html = renderToStaticMarkup(
+      createElement(CommentRow, { message: { ...streak, fragments: [] } })
+    )
+    expect(html).not.toContain('comment-notice')
+    expect(html).toContain('watched 20 consecutive streams')
+  })
+
+  it('goes on stream as an activity event', () => {
+    expect(commentCanHighlight(streak)).toBe(true)
+  })
+})

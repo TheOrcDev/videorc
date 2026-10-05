@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactElement, ReactNode, Ref } from 'react'
+import { Fragment, type CSSProperties, type ReactElement, type ReactNode, type Ref } from 'react'
 
 import { commentCanHighlight } from '@/lib/live-chat-view'
 export { commentCanHighlight } from '@/lib/live-chat-view'
@@ -7,6 +7,7 @@ import { ChatPlatformIcon } from '@/components/chat-platform-icon'
 import {
   CopyIcon,
   DeleteIcon,
+  ExternalLinkIcon,
   MicrophoneIcon,
   PreviewIcon,
   SendIcon,
@@ -17,6 +18,13 @@ import { KebabMenu, type KebabMenuItem } from '@/components/kebab-menu'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuLabel,
+  ContextMenuTrigger
+} from '@/components/ui/context-menu'
 import type {
   CohostFlag,
   CommentHighlightState,
@@ -27,6 +35,9 @@ import type {
 import { monogramInitials, useCachedAvatar } from '@/lib/chat-avatar'
 import { REMOVE_FROM_CHAT_LABEL, type RemovalStatusView } from '@/lib/chat-removal-view'
 import { groupEmoteOverlays } from '@/lib/chat-emotes'
+import { copyChatLink, openChatLink } from '@/lib/chat-link-actions'
+import { chatLinksIn, splitLinks, type ChatLinkPiece } from '@/lib/chat-links'
+import { noticeViewerWords } from '@/lib/chat-notice'
 import { cohostFlagActionLabel, cohostFlagChipLabel, cohostFlagDetail } from '@/lib/cohost-view'
 import { cn } from '@/lib/utils'
 
@@ -287,19 +298,26 @@ function Emote({
   )
 }
 
-/** The message body: emotes inline when the platform sent them (Twitch,
- * Kick) or the backend matched them (7TV), zero-width 7TV emotes stacked on
- * the emote before them. */
-function MessageBody({
-  message,
-  fragments
+/** Text with emotes inline when the platform sent them (Twitch, Kick) or
+ * the backend matched them (7TV), zero-width 7TV emotes stacked on the emote
+ * before them. Without an emote it is `text` as is. */
+function FragmentText({
+  text,
+  fragments,
+  links
 }: {
-  message: LiveChatMessage
+  text: string
   fragments: readonly LiveChatMessageFragment[]
+  /** Viewer-written text: its links get Open link and Copy link. */
+  links: boolean
 }): ReactNode {
-  if (!fragments.some((fragment) => fragment.imageUrl)) return message.messageText
+  if (!fragments.some((fragment) => fragment.imageUrl)) {
+    return links ? <LinkedText text={text} /> : text
+  }
   return groupEmoteOverlays(fragments).map((piece, index) => {
-    if (piece.kind === 'text') return <span key={index}>{piece.text}</span>
+    if (piece.kind === 'text') {
+      return <span key={index}>{links ? <LinkedText text={piece.text} /> : piece.text}</span>
+    }
     if (piece.overlays.length === 0) {
       return <Emote key={index} text={piece.emote.text} url={piece.emote.url} />
     }
@@ -317,6 +335,97 @@ function MessageBody({
       </span>
     )
   })
+}
+
+/**
+ * A link in a viewer's message (plan 151, D9–D11): underlined, never blue,
+ * and inert to a left click, which still belongs to the row (Show on
+ * stream). A right click offers Open link and Copy link under its host.
+ * A span, not an anchor: the row is a button, and nothing here navigates.
+ */
+function ChatLink({ link }: { link: ChatLinkPiece }): ReactElement {
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <span
+          className="underline decoration-muted-foreground/50 underline-offset-2"
+          data-slot="comment-link"
+          title={link.href}
+        >
+          {link.text}
+        </span>
+      </ContextMenuTrigger>
+      <ContextMenuContent className="w-56" data-slot="comment-link-menu">
+        <ContextMenuLabel className="truncate font-normal text-subtle">
+          {link.host}
+        </ContextMenuLabel>
+        <ContextMenuItem onSelect={() => void openChatLink(link.href)}>
+          <ExternalLinkIcon aria-hidden />
+          Open link
+        </ContextMenuItem>
+        <ContextMenuItem onSelect={() => copyChatLink(link.href)}>
+          <CopyIcon aria-hidden />
+          Copy link
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  )
+}
+
+function LinkedText({ text }: { text: string }): ReactNode {
+  const pieces = splitLinks(text)
+  if (!pieces.some((piece) => piece.kind === 'link')) return text
+  return pieces.map((piece, index) =>
+    piece.kind === 'link' ? (
+      <ChatLink key={index} link={piece} />
+    ) : (
+      <Fragment key={index}>{piece.text}</Fragment>
+    )
+  )
+}
+
+/** Whether a row's text is the viewer's own: only that gets links. Twitch's
+ * sentences, moderation rows and removed messages never do (plan 151, D8). */
+function viewerWrote(message: LiveChatMessage): boolean {
+  return !message.isDeleted && (message.eventType === 'message' || message.eventType === 'paid')
+}
+
+/** The viewer-written text of a row whose links Open and Copy can reach. */
+export function commentLinkText(message: LiveChatMessage): string | undefined {
+  if (message.isDeleted) return undefined
+  const noticeWords = noticeViewerWords(message)
+  if (noticeWords) return noticeWords
+  return viewerWrote(message) ? message.messageText : undefined
+}
+
+/** The message body. A Twitch notice the viewer wrote something with shows
+ * Twitch's sentence, then the viewer's own words below it (plan 151, D3). */
+function MessageBody({
+  message,
+  noticeWords
+}: {
+  message: LiveChatMessage
+  noticeWords: string | undefined
+}): ReactNode {
+  if (!noticeWords) {
+    return (
+      <FragmentText
+        fragments={message.fragments}
+        links={viewerWrote(message)}
+        text={message.messageText}
+      />
+    )
+  }
+  return (
+    <>
+      <span className="block italic text-muted-foreground" data-slot="comment-notice">
+        {message.messageText}
+      </span>
+      <span className="block" data-slot="comment-notice-words">
+        <FragmentText fragments={message.fragments} links={!message.isDeleted} text={noticeWords} />
+      </span>
+    </>
+  )
 }
 
 /** True when the message names one of the streamer's own accounts. */
@@ -371,6 +480,7 @@ function CommentContent({
 }): ReactElement {
   const avatarUrl = useCachedAvatar(message.authorAvatarUrl)
   const time = formatCommentTime(message.receivedAt)
+  const noticeWords = noticeViewerWords(message)
 
   return (
     <>
@@ -439,22 +549,51 @@ function CommentContent({
           className={cn(
             'text-left break-words text-foreground select-text',
             density === 'comfortable' ? 'text-[15px] leading-snug' : 'text-xs leading-relaxed',
-            message.eventType === 'system' && 'italic text-muted-foreground',
+            message.eventType === 'system' && !noticeWords && 'italic text-muted-foreground',
             message.eventType === 'moderation' && 'italic text-muted-foreground',
             message.isDeleted && 'text-muted-foreground line-through'
           )}
         >
-          <MessageBody fragments={message.fragments} message={message} />
+          <MessageBody message={message} noticeWords={noticeWords} />
         </span>
       </span>
     </>
   )
 }
 
+/** The most links one row's ⋯ menu offers (plan 151, D12). */
+const MAX_MENU_LINKS = 3
+
 /**
- * The row's ⋯ menu: show on (or take off) stream, reply, copy, and, for a row
- * that can be removed, "Remove from chat" (destructive: it sorts last, below
- * a separator, in the destructive tone). The stream toggle says "Take off
+ * The keyboard path to a row's links (plan 151, D12): the row button holds
+ * focus, not the link, so ⋯ offers Open and Copy too. One link reads "Open
+ * link"; several name their host.
+ */
+function commentLinkMenuItems(message: LiveChatMessage): KebabMenuItem[] {
+  const text = commentLinkText(message)
+  const links = text ? chatLinksIn(text).slice(0, MAX_MENU_LINKS) : []
+  const named = links.length > 1
+  return links.flatMap((link, index) => [
+    {
+      id: `open-link-${index}`,
+      label: named ? `Open ${link.host}` : 'Open link',
+      icon: ExternalLinkIcon,
+      onSelect: () => void openChatLink(link.href)
+    },
+    {
+      id: `copy-link-${index}`,
+      label: named ? `Copy ${link.host} link` : 'Copy link',
+      icon: CopyIcon,
+      onSelect: () => copyChatLink(link.href)
+    }
+  ])
+}
+
+/**
+ * The row's ⋯ menu: show on (or take off) stream, reply, a link's Open and
+ * Copy (plan 151), copy, and, for a row that can be removed, "Remove from
+ * chat" (destructive: it sorts last, below a separator, in the destructive
+ * tone). The stream toggle says "Take off
  * stream", never "Remove": only the irreversible item may say remove.
  * Empty without Reply or Remove from chat: a row outside a live session has
  * no menu.
@@ -489,6 +628,7 @@ export function commentRowMenu({
     ...(onReply && (message.eventType === 'message' || message.eventType === 'paid')
       ? [{ id: 'reply', label: 'Reply', icon: SendIcon, onSelect: () => onReply(message) }]
       : []),
+    ...commentLinkMenuItems(message),
     {
       id: 'copy',
       label: 'Copy',
