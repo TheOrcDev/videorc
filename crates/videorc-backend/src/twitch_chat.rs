@@ -713,6 +713,13 @@ fn notification_details(notice_type: &str, event: &Value) -> Option<LiveChatEven
         "raid" => event["raid"]["viewer_count"]
             .as_u64()
             .map(|viewer_count| LiveChatEventDetails::Raid { viewer_count }),
+        "watch_streak" => {
+            let body = &event["watch_streak"];
+            u32_field(&body["streak_count"]).map(|streak_count| LiveChatEventDetails::WatchStreak {
+                streak_count,
+                channel_points_awarded: body["channel_points_awarded"].as_u64(),
+            })
+        }
         "announcement" => Some(LiveChatEventDetails::Announcement {
             color: event["announcement"]["color"]
                 .as_str()
@@ -777,6 +784,22 @@ fn normalize_chat_notification(
     }
     message.message_text = text;
     message.fragments = parse_fragments(&event["message"]["fragments"]);
+    // The viewer's own words ride in the fragments, beside Twitch's system
+    // sentence in `message_text` (plan 151, S3): keep them when Twitch sent
+    // the text without fragments.
+    if message.fragments.is_empty() {
+        if let Some(words) = event["message"]["text"]
+            .as_str()
+            .filter(|words| !words.trim().is_empty())
+        {
+            message.fragments = vec![LiveChatMessageFragment {
+                fragment_type: "text".to_string(),
+                text: words.to_string(),
+                image_url: None,
+                zero_width: false,
+            }];
+        }
+    }
     message.event_type = notice_event_type(notice_type);
     message.details = notification_details(notice_type, event);
     message.raw_provider_type = Some(format!("channel.chat.notification:{notice_type}"));
@@ -2654,6 +2677,66 @@ mod tests {
                 color: Some("PURPLE".to_string())
             })
         );
+    }
+
+    #[test]
+    fn a_watch_streak_carries_its_count_and_the_viewers_words() {
+        let streak = notice(&fixture!("twitch-notification-watch-streak"));
+        assert_eq!(streak.event_type, LiveChatEventType::System);
+        assert_eq!(streak.author_name, "Snowy77x");
+        assert_eq!(
+            streak.raw_provider_type.as_deref(),
+            Some("channel.chat.notification:watch_streak")
+        );
+        assert_eq!(
+            streak.details,
+            Some(LiveChatEventDetails::WatchStreak {
+                streak_count: 20,
+                channel_points_awarded: Some(450),
+            })
+        );
+        assert_eq!(
+            streak.message_text,
+            "Snowy77x watched 20 consecutive streams and sparked a watch streak!"
+        );
+        let words: String = streak.fragments.iter().map(|f| f.text.as_str()).collect();
+        assert_eq!(words, "welcome back hands <3 hopefully everything is good");
+        let wire = serde_json::to_value(streak.details.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            wire,
+            json!({ "kind": "watch-streak", "streakCount": 20, "channelPointsAwarded": 450 })
+        );
+
+        // No points: the field is omitted, never `null`.
+        let mut no_points = fixture!("twitch-notification-watch-streak");
+        no_points["watch_streak"]["channel_points_awarded"] = Value::Null;
+        let wire = serde_json::to_value(notice(&no_points).details.unwrap()).unwrap();
+        assert_eq!(wire, json!({ "kind": "watch-streak", "streakCount": 20 }));
+
+        // A streak without its body stays a plain system row.
+        let mut malformed = fixture!("twitch-notification-watch-streak");
+        malformed["watch_streak"] = Value::Null;
+        let row = notice(&malformed);
+        assert_eq!(row.details, None);
+        assert_eq!(row.event_type, LiveChatEventType::System);
+    }
+
+    #[test]
+    fn a_notice_keeps_the_viewers_words_without_fragments() {
+        let mut resub = fixture!("twitch-notification-resub");
+        resub["message"]["fragments"] = json!([]);
+        let row = notice(&resub);
+        assert_eq!(
+            row.message_text,
+            "morgaesis subscribed at Tier 1. They've subscribed for 3 months!"
+        );
+        assert_eq!(row.fragments.len(), 1);
+        assert_eq!(row.fragments[0].fragment_type, "text");
+        assert_eq!(row.fragments[0].text, "Happy Wednesday");
+
+        // No words at all: no fragment is invented.
+        resub["message"]["text"] = json!("");
+        assert!(notice(&resub).fragments.is_empty());
     }
 
     #[test]

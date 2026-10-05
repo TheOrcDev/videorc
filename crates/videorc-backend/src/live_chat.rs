@@ -216,6 +216,15 @@ pub enum LiveChatEventDetails {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         color: Option<String>,
     },
+    /// A Twitch watch streak (plan 151): the viewer watched `streak_count`
+    /// streams in a row. `channel_points_awarded` is what Twitch gave them
+    /// for it; kept on the wire, not shown.
+    #[serde(rename_all = "camelCase")]
+    WatchStreak {
+        streak_count: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel_points_awarded: Option<u64>,
+    },
     /// A new follower. `handle` is the @-mentionable login (Twitch
     /// `user_login`, X and Kick `username`) when it differs from, or is
     /// missing from, the display name (plan 071, S5).
@@ -3567,6 +3576,35 @@ fn fake_events(
                 "234 raiders from raider42 have joined!",
                 None,
             ),
+            {
+                // Shaped as the real notice (plan 151): Twitch's sentence in
+                // the text, the viewer's own words in the fragments.
+                let mut streak = event(
+                    "channel.chat.notification:watch_streak",
+                    "loyal_lurker",
+                    LiveChatEventType::System,
+                    LiveChatEventDetails::WatchStreak {
+                        streak_count: 20,
+                        channel_points_awarded: Some(450),
+                    },
+                    "loyal_lurker watched 20 consecutive streams and sparked a watch streak!",
+                    None,
+                );
+                streak.provider_message_id = "fake-event-watch-streak".to_string();
+                streak.id = live_chat_message_id(
+                    session_id,
+                    platform,
+                    target_id,
+                    &streak.provider_message_id,
+                );
+                streak.fragments = vec![LiveChatMessageFragment {
+                    fragment_type: "text".to_string(),
+                    text: "welcome back! hope everything is good".to_string(),
+                    image_url: None,
+                    zero_width: false,
+                }];
+                streak
+            },
             event(
                 "follow",
                 "new_friend",
@@ -4654,14 +4692,14 @@ mod tests {
         let messages = completed
             .expect("all three exact fake provider end events must arrive")
             .expect("fixture events must not lag");
-        assert_eq!(messages.len(), 13);
+        assert_eq!(messages.len(), 14);
         assert_eq!(
             messages
                 .iter()
                 .filter_map(|message| message["id"].as_str())
                 .collect::<HashSet<_>>()
                 .len(),
-            13
+            14
         );
         assert!(response.ok);
         let wire = serde_json::to_string(&response).unwrap();
@@ -4676,7 +4714,7 @@ mod tests {
         assert_eq!(
             reduced,
             serde_json::json!({
-                "status": "available", "messageCount": 13, "chatters": 7,
+                "status": "available", "messageCount": 14, "chatters": 7,
                 "supporters": 7, "follows": 2, "raids": 1, "bits": 1500,
                 "tips": [{ "currency": "USD", "amountMicros": 5_000_000 },
                          { "currency": "EUR", "amountMicros": 2_000_000 }]
@@ -4719,7 +4757,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(value["messageCount"], 13);
+        assert_eq!(value["messageCount"], 14);
         assert_eq!(value["chatters"], 7);
         assert_eq!(value["supporters"], 7);
         assert_eq!(value["follows"], 2);

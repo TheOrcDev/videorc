@@ -26,7 +26,7 @@ export async function waitForFakeActivityReceipts({
         .map((message) => message.details.kind)
     )
   await waitFor(
-    () => distinctOwnedReceipts() >= 13 && expectedKinds.every((kind) => eventKinds().has(kind)),
+    () => distinctOwnedReceipts() >= 14 && expectedKinds.every((kind) => eventKinds().has(kind)),
     timeoutMs,
     `every activity kind (${expectedKinds.join(', ')})`
   )
@@ -36,7 +36,7 @@ export async function waitForFakeActivityReceipts({
 export function assertFakeActivityTotals(eventTotals) {
   if (
     eventTotals?.status !== 'available' ||
-    eventTotals.messageCount !== 13 ||
+    eventTotals.messageCount !== 14 ||
     eventTotals.supporters !== 7 ||
     eventTotals.bits !== 1500 ||
     eventTotals.follows !== 2 ||

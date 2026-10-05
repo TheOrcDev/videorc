@@ -1,0 +1,42 @@
+{
+  "broadcaster_user_id": "1971641",
+  "broadcaster_user_login": "streamer",
+  "broadcaster_user_name": "Streamer",
+  "chatter_user_id": "58120397",
+  "chatter_user_login": "snowy77x",
+  "chatter_user_name": "Snowy77x",
+  "chatter_is_anonymous": false,
+  "color": "#8A2BE2",
+  "badges": [],
+  "system_message": "Snowy77x watched 20 consecutive streams and sparked a watch streak!",
+  "message_id": "notice-watch-streak",
+  "message": {
+    "text": "welcome back hands <3 hopefully everything is good",
+    "fragments": [
+      {
+        "type": "text",
+        "text": "welcome back hands <3 hopefully everything is good",
+        "cheermote": null,
+        "emote": null,
+        "mention": null
+      }
+    ]
+  },
+  "notice_type": "watch_streak",
+  "sub": null,
+  "resub": null,
+  "sub_gift": null,
+  "community_sub_gift": null,
+  "gift_paid_upgrade": null,
+  "prime_paid_upgrade": null,
+  "raid": null,
+  "unraid": null,
+  "pay_it_forward": null,
+  "announcement": null,
+  "bits_badge_tier": null,
+  "charity_donation": null,
+  "watch_streak": {
+    "streak_count": 20,
+    "channel_points_awarded": 450
+  }
+}
