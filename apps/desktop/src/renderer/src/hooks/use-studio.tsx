@@ -391,6 +391,12 @@ import {
 } from '@/lib/entitlement-ui'
 import { commentCanHighlight, CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import {
+  enqueueAutoShow,
+  seedAutoShowQueue,
+  takeNextAutoShow,
+  type AutoShowQueue
+} from '@/lib/activity-auto-highlight'
+import {
   applyCohostState,
   cohostErrorToast,
   cohostHighlightMessageId,
@@ -1845,6 +1851,7 @@ const idleCommentsWindowState = (): CommentsWindowState => ({
   bounds: null,
   alwaysOnTop: false,
   highlightAnchor: DEFAULT_COMMENT_HIGHLIGHT_ANCHOR,
+  autoShowActivity: false,
   protected: false,
   enabled: false,
   message: 'Chat window is disabled by VIDEORC_COMMENTS_WINDOW=0.'
@@ -4330,6 +4337,66 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (cohostAutoHighlightGeneration === 0 || !cohostAutoHighlightMessageId) return
     executeCohostAutoHighlightRef.current(cohostAutoHighlightMessageId)
   }, [cohostAutoHighlightGeneration, cohostAutoHighlightMessageId])
+
+  // Plan 156: the Activity auto-show engine. Manual and Orcle cards always
+  // win — auto only fires into an idle slot with no apply in flight, never
+  // un-pins (always-set semantics), and a backlog or History view never
+  // replays: the queue reseeds on session change and on switch-on, so only
+  // what arrives from "now" is shown. Draining needs no timer — when the
+  // backend expires a card it pushes comments.highlight.status, the phase
+  // flips to idle, and this effect pops the next pending celebration.
+  // Failures stay quiet; the backend's status is the truth either way.
+  const autoShowActivityEnabled =
+    commentsWindow.autoShowActivity && Boolean(liveChatSnapshot.sessionId)
+  const activityAutoShowQueueRef = useRef<AutoShowQueue | null>(null)
+  const activityAutoShowSessionRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!autoShowActivityEnabled) {
+      // Off (or no live session): forget the queue so the next enable starts
+      // from "now" instead of replaying what arrived while it was off.
+      activityAutoShowQueueRef.current = null
+      activityAutoShowSessionRef.current = null
+      return
+    }
+    const sessionId = liveChatSnapshot.sessionId ?? null
+    const seeded = activityAutoShowQueueRef.current
+    if (!seeded || activityAutoShowSessionRef.current !== sessionId) {
+      activityAutoShowQueueRef.current = seedAutoShowQueue(liveChatSnapshot.messages)
+      activityAutoShowSessionRef.current = sessionId
+      return
+    }
+    const queue = enqueueAutoShow(seeded, liveChatSnapshot.messages)
+    activityAutoShowQueueRef.current = queue
+    if (commentHighlightState.phase !== 'idle' || commentHighlightApplyingId !== null) return
+    const next = takeNextAutoShow(queue, liveChatSnapshot.messages, Date.now())
+    activityAutoShowQueueRef.current = next.queue
+    const message = next.message
+    if (!message) return
+    const intent = ++commentHighlightIntentRef.current
+    void applyCommentHighlight(message, undefined, intent, { alwaysSet: true })
+      .then((state) => {
+        if (state && commentHighlightIntentRef.current === intent) {
+          publishCommentHighlightState(state)
+        }
+      })
+      .catch(async () => {
+        // The card stays where the backend says it is; never guess.
+        const authoritative = await client
+          ?.request<CommentHighlightState>('comments.highlight.status')
+          .catch(() => null)
+        if (authoritative && commentHighlightIntentRef.current === intent) {
+          publishCommentHighlightState(authoritative)
+        }
+      })
+  }, [
+    applyCommentHighlight,
+    autoShowActivityEnabled,
+    client,
+    commentHighlightApplyingId,
+    commentHighlightState.phase,
+    liveChatSnapshot,
+    publishCommentHighlightState
+  ])
 
   // One relayed value for the detached Comments window: the window never
   // re-derives Premium or consent, it renders what the main renderer resolved.
