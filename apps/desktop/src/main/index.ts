@@ -664,6 +664,7 @@ let commentsWindow: BrowserWindow | null = null
 let commentsWindowLastFrame: Electron.Rectangle | null = null
 let commentsWindowAlwaysOnTop = false
 let commentsHighlightAnchorValue: CommentHighlightAnchor | undefined
+let commentsAutoShowActivityValue: boolean | undefined
 let commentsWindowClosing = false
 let commentsWindowContentProtected = false
 let latestCommentHighlightState: CommentHighlightState = { generation: 0, phase: 'idle' }
@@ -2913,6 +2914,8 @@ type CommentsWindowPrefs = {
   frame?: Electron.Rectangle
   alwaysOnTop?: boolean
   highlightAnchor?: CommentHighlightAnchor
+  /** Auto-show Activity celebrations on stream (plan 156). Default off. */
+  autoShowActivity?: boolean
   alwaysOnTopPreferenceVersion?: number
   open?: boolean
   /** 2 once the frame moved off the old Chat default (plan 055, S8). */
@@ -2967,6 +2970,21 @@ function setCommentsWindowHighlightAnchor(anchor: unknown): CommentsWindowState 
   return commentsWindowState()
 }
 
+// The Activity auto-show switch (plan 156): like the anchor, it is read by
+// the Studio renderer with the window closed, so it loads lazily from prefs.
+// `=== true`, so a missing or forged value lands on OFF.
+function commentsAutoShowActivity(): boolean {
+  commentsAutoShowActivityValue ??= loadCommentsWindowPrefs().autoShowActivity === true
+  return commentsAutoShowActivityValue
+}
+
+function setCommentsWindowAutoShowActivity(on: unknown): CommentsWindowState {
+  commentsAutoShowActivityValue = on === true
+  saveCommentsWindowPrefs({ autoShowActivity: commentsAutoShowActivityValue })
+  emitCommentsWindowState()
+  return commentsWindowState()
+}
+
 function commentsWindowIsOpen(): boolean {
   return Boolean(commentsWindow && !commentsWindow.isDestroyed() && !commentsWindowClosing)
 }
@@ -2991,6 +3009,7 @@ function commentsWindowState(message?: string): CommentsWindowState {
     windowId: commentsWindowGlobalId(),
     alwaysOnTop: commentsWindowAlwaysOnTop,
     highlightAnchor: commentsHighlightAnchor(),
+    autoShowActivity: commentsAutoShowActivity(),
     protected: open ? commentsWindowContentProtected : false,
     captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(window),
     enabled: commentsWindowFeatureEnabled,
@@ -10585,6 +10604,11 @@ async function runSmokePreviewMotionCommand(
     return setCommentsWindowHighlightAnchor(params.anchor)
   }
 
+  if (command === 'comments-window-set-auto-show-activity') {
+    // Same path the Activity pane's switch takes (plan 156).
+    return setCommentsWindowAutoShowActivity(params.on)
+  }
+
   if (command === 'comments-window-set-bounds') {
     const window = commentsWindow
     if (!commentsWindowIsOpen() || !window) {
@@ -14163,6 +14187,9 @@ app.whenReady().then(async () => {
   )
   secureIpcHandle('comments-window:set-highlight-anchor', (_event, anchor: unknown) =>
     setCommentsWindowHighlightAnchor(anchor)
+  )
+  secureIpcHandle('comments-window:set-auto-show-activity', (_event, on: unknown) =>
+    setCommentsWindowAutoShowActivity(on)
   )
   // Relay (C3): the main renderer owns the single WS client and pushes each
   // live-chat snapshot through here to the window; the window's Clear routes

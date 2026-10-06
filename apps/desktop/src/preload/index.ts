@@ -146,6 +146,7 @@ const api: VideorcApi = {
     invoke('comments-window:set-always-on-top', alwaysOnTop),
   setCommentsWindowHighlightAnchor: (anchor) =>
     invoke('comments-window:set-highlight-anchor', anchor),
+  setCommentsWindowAutoShowActivity: (on) => invoke('comments-window:set-auto-show-activity', on),
   onCommentsWindowState: (callback) => subscribe('comments-window:state', callback),
   pushCommentsSnapshot: (view) => invoke('comments-window:push-snapshot', view),
   pushCommentsDelta: (delta) => invoke('comments-window:push-delta', delta),

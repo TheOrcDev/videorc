@@ -392,6 +392,14 @@ describe('renderer security policy', () => {
     expect(AUXILIARY_API_KEYS.comments).toContain('setCommentsWindowHighlightAnchor')
   })
 
+  it('lets only main and the Chat window flip Activity auto-show (plan 156)', () => {
+    expect(roleCanInvokeChannel('main', 'comments-window:set-auto-show-activity')).toBe(true)
+    expect(roleCanInvokeChannel('comments', 'comments-window:set-auto-show-activity')).toBe(true)
+    expect(roleCanInvokeChannel('notes', 'comments-window:set-auto-show-activity')).toBe(false)
+    expect(roleCanInvokeChannel('captions', 'comments-window:set-auto-show-activity')).toBe(false)
+    expect(AUXILIARY_API_KEYS.comments).toContain('setCommentsWindowAutoShowActivity')
+  })
+
   it('lets only the Chat window start a scope reconnect, checked by sender (plan 140)', () => {
     // Same policy as Show who followed: main and the Chat window by role, and
     // the handler itself refuses any sender but the Chat window.

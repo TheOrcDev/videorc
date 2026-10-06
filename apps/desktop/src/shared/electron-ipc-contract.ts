@@ -146,6 +146,7 @@ export const electronInvokeApiMethods = {
   'comments-window:get-state': 'getCommentsWindowState',
   'comments-window:set-always-on-top': 'setCommentsWindowAlwaysOnTop',
   'comments-window:set-highlight-anchor': 'setCommentsWindowHighlightAnchor',
+  'comments-window:set-auto-show-activity': 'setCommentsWindowAutoShowActivity',
   'comments-window:push-snapshot': 'pushCommentsSnapshot',
   'comments-window:push-delta': 'pushCommentsDelta',
   'comments-window:get-snapshot': 'getCommentsSnapshot',
@@ -1233,6 +1234,8 @@ const specificRuntimeInvokeContracts = {
   'comments-window:set-highlight-anchor': invokeContract(
     tupleSchema([enumSchema(COMMENT_HIGHLIGHT_ANCHORS)])
   ),
+  // Plan 156: the Activity auto-show switch is one boolean, nothing else.
+  'comments-window:set-auto-show-activity': invokeContract(tupleSchema([booleanSchema])),
   // Plan 140, S5: the window names a platform and nothing else. Main picks
   // the scopes, so a forged command can never widen what is requested.
   'comments-window:reconnect-scopes': invokeContract(

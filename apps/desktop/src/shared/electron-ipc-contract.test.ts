@@ -37,15 +37,16 @@ describe('Electron IPC contract', () => {
     // 124: plan 155 adds chat-gifs:cache and the GIF mode relay (push, get).
     // 121: plan 152 adds marker request/reply and capture context get/push.
     // 117: plan 151 added chat:open-link.
-    // 116: plan 140 S6 part B added the Orcle command answer pair (part A
+    // 125: plan 156 added the Activity auto-show switch channel (116: plan
+    // 140 S6 part B added the Orcle command answer pair; part A
     // the chat removal relay pair; S5 the Stream
     // Manager's reconnect-scopes channel; plan 119 the in-app player's
     // media:grant-session; plan 095 the highlight card's avatars:read; plan 071
     // the Stream Manager Show who followed channel; plan 068 the mark-clip
     // relay pair; plan 062 the shortcut recorder arm; plan 055 the dashboard
     // push and get; plan 050 retired glass:wallpaper:get).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(124)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(124)
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(125)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(125)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -331,6 +332,20 @@ describe('Electron IPC contract', () => {
     for (const stale of [undefined, null, 'top', 'TOP-LEFT', 3, {}]) {
       expect(normalizeCommentHighlightAnchor(stale)).toBe(DEFAULT_COMMENT_HIGHLIGHT_ANCHOR)
     }
+  })
+
+  it('accepts only a boolean for the Activity auto-show switch (plan 156)', () => {
+    for (const on of [true, false]) {
+      expect(validateElectronInvokeArgs('comments-window:set-auto-show-activity', [on])).toEqual([
+        on
+      ])
+    }
+    for (const forged of ['yes', 'true', 1, 0, null, {}]) {
+      expect(() =>
+        validateElectronInvokeArgs('comments-window:set-auto-show-activity', [forged])
+      ).toThrow()
+    }
+    expect(() => validateElectronInvokeArgs('comments-window:set-auto-show-activity', [])).toThrow()
   })
 
   it('lets the Stream Manager name a platform to reconnect, never the scopes (plan 140)', () => {

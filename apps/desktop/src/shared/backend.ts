@@ -4125,6 +4125,10 @@ export interface CommentsWindowState {
    * highlight fired with the window closed (shortcut, deck, co-host) still
    * honours the streamer's pick. */
   highlightAnchor: CommentHighlightAnchor
+  /** Auto-show Activity celebrations on stream (plan 156). Owned by main for
+   * the same reason as the anchor: the engine runs in the Studio renderer
+   * and must keep working with the window closed. Default OFF. */
+  autoShowActivity: boolean
   protected: boolean
   captureProtectionMarkerInstalled?: boolean
   enabled: boolean
@@ -4409,6 +4413,7 @@ export interface VideorcApi {
   getCommentsWindowState: () => Promise<CommentsWindowState>
   setCommentsWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<CommentsWindowState>
   setCommentsWindowHighlightAnchor: (anchor: CommentHighlightAnchor) => Promise<CommentsWindowState>
+  setCommentsWindowAutoShowActivity: (on: boolean) => Promise<CommentsWindowState>
   onCommentsWindowState: (callback: (state: CommentsWindowState) => void) => () => void
   pushCommentsSnapshot: (view: CommentsViewSnapshot) => Promise<void>
   pushCommentsDelta: (delta: CommentsSnapshotDelta) => Promise<void>
