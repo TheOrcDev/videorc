@@ -285,6 +285,35 @@ async function main() {
     JSON.stringify(normalised)
   )
 
+  // Activity auto-show (plan 156): the switch goes through the same
+  // main-process path the pane uses and must come back on window state.
+  assertProbe(
+    normalised.autoShowActivity === false,
+    'auto-show: the switch defaults off',
+    JSON.stringify(normalised)
+  )
+  const autoShowOn = await smokeCommand('comments-window-set-auto-show-activity', { on: true })
+  assertProbe(
+    autoShowOn.autoShowActivity === true,
+    'auto-show: main reports the switch on',
+    JSON.stringify(autoShowOn)
+  )
+  // Only the boolean true turns it on: a forged string lands on OFF.
+  const autoShowForged = await smokeCommand('comments-window-set-auto-show-activity', {
+    on: 'yes'
+  })
+  assertProbe(
+    autoShowForged.autoShowActivity === false,
+    'auto-show: a forged non-boolean lands on off',
+    JSON.stringify(autoShowForged)
+  )
+  const autoShowOff = await smokeCommand('comments-window-set-auto-show-activity', { on: false })
+  assertProbe(
+    autoShowOff.autoShowActivity === false,
+    'auto-show: the switch turns back off',
+    JSON.stringify(autoShowOff)
+  )
+
   // Delayed success makes the applying state observable, then proves the
   // matching broker acknowledgement owns the terminal on-stream state.
   await smokeCommand('comments-window-set-command-fixture', {

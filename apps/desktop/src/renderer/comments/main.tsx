@@ -103,6 +103,9 @@ function CommentsWindowApp(): ReactElement {
   const [highlightAnchor, setHighlightAnchor] = useState<CommentHighlightAnchor>(
     DEFAULT_COMMENT_HIGHLIGHT_ANCHOR
   )
+  // Auto-show Activity on stream (plan 156): main owns the value; the Studio
+  // renderer runs the engine. This window only renders and flips the switch.
+  const [autoShowActivity, setAutoShowActivity] = useState(false)
   const [highlightState, setHighlightState] = useState<CommentHighlightState>({
     generation: 0,
     phase: 'idle'
@@ -202,6 +205,7 @@ function CommentsWindowApp(): ReactElement {
         if (!state) return
         setAlwaysOnTop(state.alwaysOnTop)
         setHighlightAnchor(normalizeCommentHighlightAnchor(state.highlightAnchor))
+        setAutoShowActivity(state.autoShowActivity === true)
       })
       .catch(() => {})
     const offSnapshot = window.videorc?.onCommentsSnapshot?.((next) => applyView(next))
@@ -230,6 +234,7 @@ function CommentsWindowApp(): ReactElement {
     const offState = window.videorc?.onCommentsWindowState?.((state) => {
       setAlwaysOnTop(state.alwaysOnTop)
       setHighlightAnchor(normalizeCommentHighlightAnchor(state.highlightAnchor))
+      setAutoShowActivity(state.autoShowActivity === true)
     })
     // Which comment is on stream: seeded + followed via the main-process relay
     // (the main renderer owns the highlight lifecycle).
@@ -719,6 +724,12 @@ function CommentsWindowApp(): ReactElement {
             // Optimistic: main echoes the persisted value back on the state event.
             setHighlightAnchor(anchor)
             void window.videorc?.setCommentsWindowHighlightAnchor?.(anchor)
+          }}
+          autoShowActivity={autoShowActivity}
+          onAutoShowActivityChange={(on) => {
+            // Optimistic, like the anchor: main's state event is the truth.
+            setAutoShowActivity(on)
+            void window.videorc?.setCommentsWindowAutoShowActivity?.(on)
           }}
           onToggleAlwaysOnTop={() =>
             void window.videorc?.setCommentsWindowAlwaysOnTop?.(!alwaysOnTop)

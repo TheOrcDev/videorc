@@ -42,6 +42,7 @@ export const AUXILIARY_API_KEYS = {
     'getCommentsWindowState',
     'setCommentsWindowAlwaysOnTop',
     'setCommentsWindowHighlightAnchor',
+    'setCommentsWindowAutoShowActivity',
     'onCommentsWindowState',
     'getCommentsSnapshot',
     'setCommentsViewMode',
