@@ -23,6 +23,47 @@
 - **Category**: direction (feature)
 - **Planned at**: commit `2337a317`, 2026-10-06
 
+**EXECUTED 2026-10-06** on `cursor/auto-highlight-activity-46eb` (PR #626),
+one commit per slice. See "Execution record" below.
+
+## Execution record (2026-10-06)
+
+- **S1** `lib/activity-auto-highlight.ts` + 20 unit tests, as specified.
+- **S2** `autoShowActivity` through `CommentsWindowState`, comments-window
+  prefs (`=== true`, forged values land OFF), the
+  `comments-window:set-auto-show-activity` channel
+  (`tupleSchema([booleanSchema])`, `MAIN_AND_COMMENTS`), preload +
+  `AUXILIARY_API_KEYS.comments`, the
+  `comments-window-set-auto-show-activity` dev smoke command, and the pinned
+  channel count in `electron-ipc-contract.test.ts` bumped 124 → 125.
+- **S3** "Auto-show" `Switch` (size `sm`) in the Activity pane header,
+  `data-slot="activity-auto-show"`, threaded through `StreamManagerProps` and
+  wired optimistically in `comments/main.tsx` like the anchor. Deviation: the
+  label's `cursor-pointer` was removed — the plan 050 renderer style guard
+  (`renderer-style-guards.test.ts`) forbids it; desktop controls keep the
+  arrow cursor.
+- **S4** The engine effect in `use-studio.tsx` directly below the Orcle
+  auto-highlight executor, per D3/D7: reseed on session change and switch-on,
+  enqueue on snapshot change, fire only into an idle slot with no apply in
+  flight, always-set semantics, quiet failures reconciled from
+  `comments.highlight.status`; draining rides the backend's expiry status
+  event, no timer.
+- **S5** `scripts/comments-window-probe.mjs`: default-off assertion, on/off
+  round trips through the smoke command, and a forged `'yes'` landing OFF
+  (main's setter is `=== true`, stricter than the plan's `Boolean(on)`
+  sketch — the IPC contract already refuses non-booleans from renderers).
+
+**Gates run (headless Linux)**: `pnpm typecheck`, `pnpm lint` (only the
+pre-existing `use-studio.tsx` exhaustive-deps warning), `pnpm format:check`,
+`pnpm --filter @videorc/desktop test` (310 files, 3405 passed). `pnpm
+test:scripts` has 12 pre-existing `smoke-oauth*` launcher failures, identical
+with this change stashed — not introduced here.
+
+**Owed on a macOS host before merge**: `pnpm probe:comments-window`,
+`pnpm smoke:comment-highlight-stream`, `pnpm smoke:recording-studio`, and a
+by-eye check of the switch in both themes (this environment is headless
+Linux and cannot launch the Electron dev app).
+
 ## Why this matters
 
 The Stream Manager's Activity pane (plan 055, D4) lists every follow, sub,
