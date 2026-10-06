@@ -826,8 +826,14 @@ export function StreamManager({
 
   return (
     // No background: the window frame paints the content coat (plan 050).
+    // overflow-hidden: the window never scrolls, each pane scrolls itself. A
+    // hit area at the edge (the Auto-show switch's ::after) once gave it both
+    // scrollbars.
     <div
-      className={cn(STREAM_MANAGER_CONTAINER, 'relative flex h-screen flex-col text-foreground')}
+      className={cn(
+        STREAM_MANAGER_CONTAINER,
+        'relative flex h-screen flex-col overflow-hidden text-foreground'
+      )}
       data-slot="stream-manager"
     >
       {/* The title row: the title only (owner call, 2026-09-23). Fixed height:
