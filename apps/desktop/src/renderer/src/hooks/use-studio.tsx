@@ -241,6 +241,7 @@ import type {
   BackendHealth,
   BackendLifecycleEvent,
   BackendLogEvent,
+  ChatEmotesSettings,
   CommentsWindowState,
   CompositorFrameReady,
   CompositorStatus,
@@ -6530,6 +6531,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         void window.videorc?.pushViewerSample?.(payload as ViewerSample)
         feedDashboard('stream.viewers', payload)
       }),
+      // Twitch GIFs in chat (plan 155, D6): the Stream Manager window has no
+      // backend socket, so this renderer relays the setting through main.
+      nextClient.on('liveChat.emotes', (payload) => {
+        const settings = payload as ChatEmotesSettings
+        if (settings.twitchGifs) void window.videorc?.pushChatGifMode?.(settings.twitchGifs)
+      }),
       nextClient.on('stream.audience', (payload) => feedDashboard('stream.audience', payload)),
       nextClient.on('health.event', (payload) => {
         bootstrapGuard.mark('sessions')
@@ -7043,6 +7050,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           return
         }
         setWsStatus('connected')
+        // Seed the Stream Manager's GIF mode relay outside the bootstrap
+        // batch: nothing on startup waits for it, and a failure costs only
+        // the default (Animated) until the next liveChat.emotes event.
+        void nextClient
+          .request<ChatEmotesSettings>('liveChat.emotes.get')
+          .then((settings) => {
+            if (generationIsCurrent() && settings.twitchGifs)
+              void window.videorc?.pushChatGifMode?.(settings.twitchGifs)
+          })
+          .catch(() => undefined)
         const bootstrapSnapshot = bootstrapGuard.snapshot()
         const entitlementsRevisionAtBootstrapStart = entitlementsRevisionRef.current
         const accountBootstrapToken = accountSnapshotCoordinator.beginRefresh()

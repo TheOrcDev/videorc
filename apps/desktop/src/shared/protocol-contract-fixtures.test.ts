@@ -859,7 +859,7 @@ describe('shared high-risk protocol fixture', () => {
   })
 
   it('loads chat rows with and without structured event details', () => {
-    const [plain, cheer, resub, raid, superChat, follow, kicks, affiliated, streak] =
+    const [plain, cheer, resub, raid, superChat, follow, kicks, affiliated, streak, gif] =
       fixtures.comments.eventMessages
     expect(
       'details' in plain ||
@@ -885,6 +885,15 @@ describe('shared high-risk protocol fixture', () => {
       description: 'Neon',
       url: 'https://x.com/neondatabase'
     })
+    // Plan 155: a Twitch GIF is a plain message with one `gif` fragment.
+    expect(gif.eventType).toBe('message')
+    expect(gif.fragments).toEqual([
+      {
+        type: 'gif',
+        text: '[Y A Y Yes GIF]',
+        imageUrl: 'https://media2.giphy.com/media/aUovxH8Vf9qDu/giphy.gif'
+      }
+    ])
 
     const snapshot = fixtures.comments.eventMessages.reduce(
       (current, message) => applyCommentsSnapshotDelta(current, { kind: 'message', message }),

@@ -18,6 +18,13 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
+// The reference-shaped Twitch GIF (plan 155; scripts/fixtures/stream-manager/
+// twitch-chat-gif.json). The backend never fetches it; only the Stream
+// Manager window would, through main's allowlisted GIF cache.
+const SMOKE_TWITCH_GIF = {
+  title: '[Y A Y Yes GIF]',
+  imageUrl: 'https://media2.giphy.com/media/aUovxH8Vf9qDu/giphy.gif'
+}
 
 let appProcess
 let stopping = false
@@ -416,7 +423,9 @@ try {
         ...destination,
         count: 1,
         intervalMs: 60,
-        events: true
+        events: true,
+        // Plan 155: Twitch's fake also sends one GIF Keyboard row.
+        ...(destination.platform === 'twitch' ? { gif: SMOKE_TWITCH_GIF } : {})
       })),
       fakeAudience: [
         { platform: 'twitch', totals: [500, 512], intervalMs: 150 },
@@ -467,6 +476,36 @@ try {
     )
     if (kickFollow?.authorName !== 'kick_fan' || kickFollow.targetId !== 'smoke-kick-events') {
       throw new Error(`Kick follow row missing: ${JSON.stringify(eventRows)}`)
+    }
+    // Plan 155: the Twitch GIF row is a plain message with one `gif`
+    // fragment whose URL arrives exactly as sent (Twitch's unmodified rule).
+    await waitFor(
+      () =>
+        eventMessages.some(
+          (message) =>
+            message.sessionId === eventsSessionId &&
+            message.platform === 'twitch' &&
+            message.fragments?.some((fragment) => fragment.type === 'gif')
+        ),
+      timeoutMs,
+      'the fake Twitch GIF row'
+    )
+    const gifRow = eventMessages.find(
+      (message) =>
+        message.sessionId === eventsSessionId &&
+        message.platform === 'twitch' &&
+        message.fragments?.some((fragment) => fragment.type === 'gif')
+    )
+    const gifFragment = gifRow.fragments.find((fragment) => fragment.type === 'gif')
+    if (
+      gifRow.eventType !== 'message' ||
+      gifRow.messageText !== SMOKE_TWITCH_GIF.title ||
+      gifRow.fragments.length !== 1 ||
+      gifFragment.text !== SMOKE_TWITCH_GIF.title ||
+      gifFragment.imageUrl !== SMOKE_TWITCH_GIF.imageUrl ||
+      'details' in gifRow
+    ) {
+      throw new Error(`Twitch GIF row lost its shape: ${JSON.stringify(gifRow)}`)
     }
     // Plan 066: a KICKs gift keeps its amount and gift name end to end.
     const kicks = eventRows.find((message) => message.details?.kind === 'kicks')

@@ -2181,15 +2181,29 @@ describe('backend RPC contract', () => {
         emoteCount: 986,
         globalCount: 45,
         platforms: ['twitch', 'kick', 'youtube']
-      }
+      },
+      twitchGifs: 'animated'
     }
     expect(validateBackendRpcResult('liveChat.emotes.get', linked)).toEqual(linked)
     expect(validateBackendEventPayload('liveChat.emotes', linked)).toEqual(linked)
-    const off = { sevenTv: false, sevenTvStatus: { state: 'off' } }
+    const off = { sevenTv: false, sevenTvStatus: { state: 'off' }, twitchGifs: 'still' }
     expect(validateBackendRpcResult('liveChat.emotes.set', off)).toEqual(off)
     expect(validateBackendRpcParams('liveChat.emotes.set', { sevenTv: false })).toEqual({
       sevenTv: false
     })
+    // Plan 155: the GIF mode is one of three words, and always present.
+    expect(validateBackendRpcParams('liveChat.emotes.set', { twitchGifs: 'off' })).toEqual({
+      twitchGifs: 'off'
+    })
+    expect(() => validateBackendRpcParams('liveChat.emotes.set', { twitchGifs: 'paused' })).toThrow(
+      'liveChat.emotes.set'
+    )
+    expect(() =>
+      validateBackendRpcResult('liveChat.emotes.get', {
+        sevenTv: false,
+        sevenTvStatus: { state: 'off' }
+      })
+    ).toThrow('liveChat.emotes.get')
     // The backend never sends null or unknown keys; refuse them loudly.
     expect(() =>
       validateBackendRpcResult('liveChat.emotes.get', {

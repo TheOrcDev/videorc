@@ -34,6 +34,7 @@ import {
 describe('Electron IPC contract', () => {
   it('maps every renderer-facing invoke channel to a real async API method', () => {
     expectTypeOf<ElectronInvokeMappingInvariant>().toEqualTypeOf<true>()
+    // 124: plan 155 adds chat-gifs:cache and the GIF mode relay (push, get).
     // 121: plan 152 adds marker request/reply and capture context get/push.
     // 117: plan 151 added chat:open-link.
     // 116: plan 140 S6 part B added the Orcle command answer pair (part A
@@ -43,8 +44,8 @@ describe('Electron IPC contract', () => {
     // the Stream Manager Show who followed channel; plan 068 the mark-clip
     // relay pair; plan 062 the shortcut recorder arm; plan 055 the dashboard
     // push and get; plan 050 retired glass:wallpaper:get).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(121)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(121)
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(124)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(124)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -172,6 +173,43 @@ describe('Electron IPC contract', () => {
       expect(() => validateElectronInvokeArgs('chat:open-link', [url])).toThrow()
     }
     expect(() => validateElectronInvokeArgs('chat:open-link', [])).toThrow()
+  })
+
+  it('caches only https GIF assets from allowlisted hosts, unmodified (plan 155)', () => {
+    const url = 'https://media2.giphy.com/media/aUovxH8Vf9qDu/giphy.gif?cid=x'
+    expect(validateElectronInvokeArgs('chat-gifs:cache', [url])).toEqual([url])
+    for (const refused of [
+      'http://media2.giphy.com/media/a/giphy.gif',
+      'https://cdn.7tv.app/emote/x/2x.webp',
+      'https://giphy.com.evil.example/a.gif',
+      'https://user:pass@i.giphy.com/a.gif',
+      `https://i.giphy.com/${'a'.repeat(3000)}`,
+      42
+    ]) {
+      expect(() => validateElectronInvokeArgs('chat-gifs:cache', [refused])).toThrow()
+    }
+    expect(() => validateElectronInvokeArgs('chat-gifs:cache', [])).toThrow()
+    // The result is null or a managed cache URL, never a remote one.
+    expect(validateElectronInvokeResult('chat-gifs:cache', null)).toBeNull()
+    const local = `videorc-asset://avatar/${'0'.repeat(32)}.gif`
+    expect(validateElectronInvokeResult('chat-gifs:cache', local)).toBe(local)
+    expect(() => validateElectronInvokeResult('chat-gifs:cache', url)).toThrow()
+    expect(() =>
+      validateElectronInvokeResult('chat-gifs:cache', 'videorc-asset://avatar/../x.gif')
+    ).toThrow()
+  })
+
+  it('relays the GIF display mode as one of three words (plan 155, D6)', () => {
+    for (const mode of ['animated', 'still', 'off']) {
+      expect(validateElectronInvokeArgs('chat-gifs:push-mode', [mode])).toEqual([mode])
+      expect(validateElectronInvokeResult('chat-gifs:get-mode', mode)).toBe(mode)
+      expect(validateElectronEventPayload('chat-gifs:mode', mode)).toBe(mode)
+    }
+    expect(() => validateElectronInvokeArgs('chat-gifs:push-mode', ['paused'])).toThrow()
+    expect(() => validateElectronInvokeArgs('chat-gifs:push-mode', [true])).toThrow()
+    expect(() => validateElectronInvokeResult('chat-gifs:get-mode', null)).toThrow()
+    expect(() => validateElectronEventPayload('chat-gifs:mode', { mode: 'off' })).toThrow()
+    expect(validateElectronInvokeArgs('chat-gifs:get-mode', [])).toEqual([])
   })
 
   it('exactly validates provider OAuth callback queue results', () => {

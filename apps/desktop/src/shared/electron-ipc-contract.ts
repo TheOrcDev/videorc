@@ -48,7 +48,12 @@ import { normalizeLiveDashboardState } from './live-dashboard'
 import { sessionChatTotalsSchema } from './session-chat-totals'
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { COMMENT_HIGHLIGHT_ANCHORS, DOCK_SLOTS, LAYOUT_PRESET_VALUES } from './backend'
-import { CHAT_AVATAR_MAX_BYTES, chatAvatarBytesWithinCap } from './chat-avatar-bytes'
+import {
+  CHAT_AVATAR_MAX_BYTES,
+  chatAvatarBytesWithinCap,
+  managedAvatarFileName
+} from './chat-avatar-bytes'
+import { TWITCH_GIF_MODES, twitchGifAssetUrl, type TwitchGifMode } from './chat-gif'
 import { openableChatLink } from './chat-link'
 import { SCOPE_RECONNECT_PLATFORMS } from './platform-scopes'
 import { MAX_RELAYED_MODERATION_OPERATIONS, MODERATION_PHASES } from './chat-moderation'
@@ -100,6 +105,9 @@ export const electronInvokeApiMethods = {
   'account:callback-ack': 'acknowledgeAccountCallback',
   'oauth:open-url': 'openOAuthUrl',
   'chat:open-link': 'openChatLink',
+  'chat-gifs:cache': 'cacheChatGif',
+  'chat-gifs:push-mode': 'pushChatGifMode',
+  'chat-gifs:get-mode': 'getChatGifMode',
   'oauth:callback-redirect-uri': 'getOAuthCallbackRedirectUri',
   'oauth:callbacks-list': 'getPendingOAuthCallbacks',
   'oauth:callback-ack': 'acknowledgeOAuthCallback',
@@ -229,6 +237,7 @@ export interface ElectronIpcEventMap {
   'notes-window:document': NotesDocument
   'notes-window:flush-request': undefined
   'comments-window:state': CommentsWindowState
+  'chat-gifs:mode': TwitchGifMode
   'comments-window:snapshot': CommentsViewSnapshot
   'comments-window:delta': CommentsSnapshotDelta
   'comments-window:highlight-request': CommentHighlightCommand
@@ -272,6 +281,7 @@ export const electronEventChannels = [
   'notes-window:document',
   'notes-window:flush-request',
   'comments-window:state',
+  'chat-gifs:mode',
   'comments-window:snapshot',
   'comments-window:delta',
   'comments-window:highlight-request',
@@ -447,6 +457,18 @@ const chatAvatarBytesSchema = runtimeSchema<Uint8Array | null>(
     return value
   }
 )
+/** What the GIF cache hands back (plan 155): null, or the managed
+ * `videorc-asset://avatar/<file>` URL of the cached file, nothing else. */
+const chatImageLocalUrlSchema = runtimeSchema<string | null>(
+  'null or a managed videorc-asset://avatar/<file> URL',
+  (value, path) => {
+    if (value === null) return null
+    if (managedAvatarFileName(value) === null) {
+      throw new RuntimeSchemaError(path, 'null or a managed videorc-asset://avatar/<file> URL')
+    }
+    return value as string
+  }
+)
 const boundedIdentifier = stringSchema({ minLength: 1, maxLength: 1024 })
 const boundedStatusText = stringSchema({ maxLength: 16_384 })
 const nonNegativeSafeIntegerSchema = runtimeSchema<number>(
@@ -492,6 +514,16 @@ const boundedUrl = runtimeSchema<string>('an allowed URL', (value, path) => {
 /** A link from chat (plan 151): http or https, no credentials, bounded. */
 const chatLinkUrl = runtimeSchema<string>('an http or https chat link', (value, path) => {
   if (!openableChatLink(value)) throw new Error(`${path} must be an http or https link.`)
+  return value as string
+})
+
+/** A Twitch GIF Keyboard asset URL (plan 155): https, an allowlisted GIF
+ * host, no credentials, bounded; the string Twitch sent, unmodified. */
+const twitchGifModeSchema = enumSchema(TWITCH_GIF_MODES)
+const chatGifUrl = runtimeSchema<string>('an allowlisted https GIF asset URL', (value, path) => {
+  if (twitchGifAssetUrl(value) === null) {
+    throw new Error(`${path} must be an https URL on an allowlisted GIF asset host.`)
+  }
   return value as string
 })
 
@@ -1195,6 +1227,9 @@ const specificRuntimeInvokeContracts = {
   // Plan 151, D14: a link a viewer posted, opened in the browser. Main checks
   // it again before `shell.openExternal`.
   'chat:open-link': invokeContract(tupleSchema([chatLinkUrl]), booleanSchema),
+  'chat-gifs:cache': invokeContract(tupleSchema([chatGifUrl]), chatImageLocalUrlSchema),
+  'chat-gifs:push-mode': invokeContract(tupleSchema([twitchGifModeSchema])),
+  'chat-gifs:get-mode': invokeContract(noArgs, twitchGifModeSchema),
   'comments-window:set-highlight-anchor': invokeContract(
     tupleSchema([enumSchema(COMMENT_HIGHLIGHT_ANCHORS)])
   ),
@@ -1434,6 +1469,7 @@ const backendConnectionSchema = objectSchema(
 )
 
 const specificRuntimeEventSchemas = {
+  'chat-gifs:mode': twitchGifModeSchema,
   'comments-window:marker-context': markerContextSchema,
   'comments-window:marker-request': markerRelayCommandSchema,
   'comments-window:dashboard': dashboardSchema,

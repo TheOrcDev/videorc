@@ -116,6 +116,7 @@ import {
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { sessionChatIdentifierSchema, sessionChatTotalsSchema } from './session-chat-totals'
 import { LAYOUT_PRESET_VALUES } from './backend'
+import { TWITCH_GIF_MODES } from './chat-gif'
 import {
   arraySchema,
   boundedJsonValueSchema,
@@ -2196,12 +2197,14 @@ const sevenTvStatusSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+// Plan 155: the GIF mode rides the same row; the backend always sends it.
+const twitchGifModeSchema = enumSchema(TWITCH_GIF_MODES)
 const chatEmotesSettingsSchema = objectSchema(
-  { sevenTv: booleanSchema, sevenTvStatus: sevenTvStatusSchema },
+  { sevenTv: booleanSchema, sevenTvStatus: sevenTvStatusSchema, twitchGifs: twitchGifModeSchema },
   { allowUnknown: false }
 ) as RuntimeSchema<ChatEmotesSettings>
 const chatEmotesSettingsPatchSchema = objectSchema(
-  { sevenTv: optionalSchema(booleanSchema) },
+  { sevenTv: optionalSchema(booleanSchema), twitchGifs: optionalSchema(twitchGifModeSchema) },
   { allowUnknown: false }
 ) as RuntimeSchema<ChatEmotesSettingsPatch>
 // Plan 094: `pausedUntil` is absent, never null, when YouTube calls may run.

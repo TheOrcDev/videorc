@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { BackendClient } from '@/backendClient'
-import type { ChatEmotesSettings } from '@/lib/backend'
+import type { ChatEmotesSettings, ChatEmotesSettingsPatch, TwitchGifMode } from '@/lib/backend'
 
 export interface ChatEmoteSettingsState {
   /** `null` until the backend answers. */
@@ -9,14 +9,17 @@ export interface ChatEmoteSettingsState {
   /** Set when the setting could not be read or saved. */
   error: string | null
   setSevenTv: (on: boolean) => void
+  /** "GIFs in Twitch chat" (plan 155, D6). */
+  setTwitchGifs: (mode: TwitchGifMode) => void
 }
 
 /**
- * Settings → General → "Show 7TV emotes in chat" (plan 089). It opens its own
- * backend client while the panel is mounted, as Upcoming does, so the switch
- * adds nothing to the main window's startup bundle. `liveChat.emotes` keeps
- * the status line current while Settings is open, for example when a stream
- * that just went live finishes loading its emotes.
+ * Settings → General → "Show 7TV emotes in chat" (plan 089) and "GIFs in
+ * Twitch chat" (plan 155): one backend row, one client. It opens its own
+ * backend client while the panel is mounted, as Upcoming does, so the
+ * controls add nothing to the main window's startup bundle. `liveChat.emotes`
+ * keeps the status line current while Settings is open, for example when a
+ * stream that just went live finishes loading its emotes.
  */
 export function useChatEmoteSettings(): ChatEmoteSettingsState {
   const client = useRef<BackendClient | null>(null)
@@ -54,13 +57,13 @@ export function useChatEmoteSettings(): ChatEmoteSettingsState {
     }
   }, [])
 
-  const setSevenTv = useCallback((on: boolean) => {
+  const patch = useCallback((change: ChatEmotesSettingsPatch) => {
     const active = client.current
     if (!active) return
     setError(null)
-    setSettings((current) => current && { ...current, sevenTv: on })
+    setSettings((current) => current && { ...current, ...change })
     active
-      .request<ChatEmotesSettings>('liveChat.emotes.set', { sevenTv: on })
+      .request<ChatEmotesSettings>('liveChat.emotes.set', change)
       .then(setSettings)
       .catch(() => {
         setError("Couldn't save this setting. Try again.")
@@ -70,6 +73,8 @@ export function useChatEmoteSettings(): ChatEmoteSettingsState {
           .catch(() => undefined)
       })
   }, [])
+  const setSevenTv = useCallback((on: boolean) => patch({ sevenTv: on }), [patch])
+  const setTwitchGifs = useCallback((mode: TwitchGifMode) => patch({ twitchGifs: mode }), [patch])
 
-  return { settings, error, setSevenTv }
+  return { settings, error, setSevenTv, setTwitchGifs }
 }

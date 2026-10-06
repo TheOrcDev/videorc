@@ -276,19 +276,30 @@ import {
 import { InWindowProofSurface, type ProofSurfaceHost } from './in-window-proof-surface'
 import { backendIsolationEnv } from './backend-isolation'
 import {
-  AVATAR_CACHE_MAX_FILES,
+  AVATAR_FETCH_TIMEOUT_MS,
   AVATAR_MAX_BYTES,
   type AvatarCacheRejection,
+  type AvatarUrlDecision,
   avatarCacheFileName,
   avatarCacheRejectionKey,
   avatarCacheRejectionMessage,
   avatarPruneDelayMs,
+  avatarPrunePlan,
   avatarUrlDecision,
+  chatGifUrlDecision,
   httpStatusClass,
   redactAvatarFetchError,
   withAvatarFetchDeadline
 } from './avatar-cache'
 import { chatAvatarBytesWithinCap, managedAvatarFileName } from '../shared/chat-avatar-bytes'
+import {
+  CHAT_GIF_FETCH_TIMEOUT_MS,
+  CHAT_GIF_MAX_BYTES,
+  DEFAULT_TWITCH_GIF_MODE,
+  isTwitchGifMode,
+  sniffChatImage,
+  type TwitchGifMode
+} from '../shared/chat-gif'
 import { installContextMenu } from './context-menu'
 import {
   DARK_GLASS_COATS,
@@ -644,6 +655,8 @@ let notesWindowContentProtected = false
 let notesWindowCloseFlushReady = false
 let notesWindowCloseFlushTimer: ReturnType<typeof setTimeout> | null = null
 let latestViewerSample: ViewerSample | null = null
+/** Settings → "GIFs in Twitch chat" (plan 155), relayed by the main renderer. */
+let latestChatGifMode: TwitchGifMode = DEFAULT_TWITCH_GIF_MODE
 /** The Stream Manager's latest dashboard, history included (plan 055, S7). */
 let latestDashboardState: LiveDashboardState | null = null
 let markerContext: import('../shared/session-markers').MarkerContext | null = null
@@ -3209,6 +3222,17 @@ function emitCommentsViewerSample(sample: ViewerSample | null): void {
   latestViewerSample = sample
   if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
     sendElectronEvent(commentsWindow.webContents, 'comments-window:viewers', latestViewerSample)
+  }
+}
+
+// Twitch GIF display relay (plan 155, D6): the setting lives in the backend
+// beside 7TV; the main renderer owns that socket and pushes the mode here.
+// The Stream Manager window seeds from the cache and follows pushes, like the
+// viewer relay. Nothing is persisted here: the backend is the truth.
+function emitChatGifMode(mode: TwitchGifMode): void {
+  latestChatGifMode = mode
+  if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
+    sendElectronEvent(commentsWindow.webContents, 'chat-gifs:mode', latestChatGifMode)
   }
 }
 
@@ -13309,23 +13333,60 @@ const avatarFetchesInFlight = new Map<string, Promise<string | null>>()
 // carry per-user tokens).
 const avatarRejectionsLogged = new Set<string>()
 
-function rejectChatAvatar(rejection: AvatarCacheRejection): null {
-  const key = avatarCacheRejectionKey(rejection)
+/** The two things the cache holds: avatars and emotes on the avatar policy,
+ * and Twitch GIF Keyboard assets (plan 155) on their own gate, size cap and
+ * deadline. One directory, one file-name scheme, one prune. */
+interface ChatImagePolicy {
+  subject: 'Chat avatar' | 'Chat GIF'
+  decide: (rawUrl: unknown) => AvatarUrlDecision
+  maxBytes: number
+  timeoutMs: number
+  /** Whether the body must look like an image. The GIF hosts are wide
+   * enough (`giphy.com`) to also serve HTML; avatar CDNs are image-only. */
+  sniff: boolean
+}
+
+const CHAT_AVATAR_POLICY: ChatImagePolicy = {
+  subject: 'Chat avatar',
+  decide: avatarUrlDecision,
+  maxBytes: AVATAR_MAX_BYTES,
+  timeoutMs: AVATAR_FETCH_TIMEOUT_MS,
+  sniff: false
+}
+
+const CHAT_GIF_POLICY: ChatImagePolicy = {
+  subject: 'Chat GIF',
+  decide: chatGifUrlDecision,
+  maxBytes: CHAT_GIF_MAX_BYTES,
+  timeoutMs: CHAT_GIF_FETCH_TIMEOUT_MS,
+  sniff: true
+}
+
+function rejectChatImage(policy: ChatImagePolicy, rejection: AvatarCacheRejection): null {
+  const key = `${policy.subject}:${avatarCacheRejectionKey(rejection)}`
   if (!avatarRejectionsLogged.has(key)) {
     avatarRejectionsLogged.add(key)
-    logBackend('warn', avatarCacheRejectionMessage(rejection))
+    logBackend('warn', avatarCacheRejectionMessage(rejection, policy.subject))
   }
   return null
 }
 
-async function cacheChatAvatar(rawUrl: unknown): Promise<string | null> {
-  const decision = avatarUrlDecision(rawUrl)
+function cacheChatAvatar(rawUrl: unknown): Promise<string | null> {
+  return cacheChatImage(CHAT_AVATAR_POLICY, rawUrl)
+}
+
+function cacheChatGif(rawUrl: unknown): Promise<string | null> {
+  return cacheChatImage(CHAT_GIF_POLICY, rawUrl)
+}
+
+async function cacheChatImage(policy: ChatImagePolicy, rawUrl: unknown): Promise<string | null> {
+  const decision = policy.decide(rawUrl)
   if (!decision.allowed) {
-    return rejectChatAvatar(decision.rejection)
+    return rejectChatImage(policy, decision.rejection)
   }
   const { host } = decision
-  const avatarUrl = rawUrl as string
-  const fileName = avatarCacheFileName(avatarUrl)
+  const imageUrl = rawUrl as string
+  const fileName = avatarCacheFileName(imageUrl)
   const localUrl = `${MANAGED_ASSET_SCHEME}://avatar/${fileName}`
   const filePath = join(avatarCacheDirectory(), fileName)
   if (existsSync(filePath)) {
@@ -13338,7 +13399,7 @@ async function cacheChatAvatar(rawUrl: unknown): Promise<string | null> {
   const fetchPromise = (async () => {
     try {
       const result = await withAvatarFetchDeadline(async (signal) => {
-        const response = await net.fetch(avatarUrl, { signal })
+        const response = await net.fetch(imageUrl, { signal })
         if (!response.ok) {
           return { ok: false as const, status: response.status }
         }
@@ -13346,9 +13407,9 @@ async function cacheChatAvatar(rawUrl: unknown): Promise<string | null> {
           ok: true as const,
           bytes: Buffer.from(await response.arrayBuffer())
         }
-      })
+      }, policy.timeoutMs)
       if (!result.ok) {
-        return rejectChatAvatar({
+        return rejectChatImage(policy, {
           kind: 'http-status',
           host,
           statusClass: httpStatusClass(result.status)
@@ -13356,17 +13417,25 @@ async function cacheChatAvatar(rawUrl: unknown): Promise<string | null> {
       }
       const { bytes } = result
       if (bytes.length === 0) {
-        return rejectChatAvatar({ kind: 'empty-body', host })
+        return rejectChatImage(policy, { kind: 'empty-body', host })
       }
-      if (bytes.length > AVATAR_MAX_BYTES) {
-        return rejectChatAvatar({ kind: 'too-large', host, bytes: bytes.length })
+      if (bytes.length > policy.maxBytes) {
+        return rejectChatImage(policy, {
+          kind: 'too-large',
+          host,
+          bytes: bytes.length,
+          cap: policy.maxBytes
+        })
+      }
+      if (policy.sniff && sniffChatImage(bytes) === null) {
+        return rejectChatImage(policy, { kind: 'not-an-image', host })
       }
       mkdirSync(avatarCacheDirectory(), { recursive: true })
       writeFileSync(filePath, bytes)
       scheduleAvatarCachePrune()
       return localUrl
     } catch (error) {
-      return rejectChatAvatar({
+      return rejectChatImage(policy, {
         kind: 'fetch-error',
         host,
         message: redactAvatarFetchError(error)
@@ -13398,19 +13467,19 @@ function scheduleAvatarCachePrune(): void {
   avatarCachePruneTimer.unref?.()
 }
 
-// Oldest-by-mtime files past the cap are pruned; best-effort.
+// Oldest-by-mtime files past the file count or the byte budget are pruned
+// (`avatarPrunePlan`); best-effort.
 function pruneAvatarCache(): void {
   avatarCacheLastPruneAt = Date.now()
   try {
     const directory = avatarCacheDirectory()
-    const entries = readdirSync(directory)
-      .map((name) => {
-        const filePath = join(directory, name)
-        return { filePath, mtimeMs: statSync(filePath).mtimeMs }
-      })
-      .sort((left, right) => right.mtimeMs - left.mtimeMs)
-    for (const stale of entries.slice(AVATAR_CACHE_MAX_FILES)) {
-      rmSync(stale.filePath, { force: true })
+    const entries = readdirSync(directory).map((name) => {
+      const filePath = join(directory, name)
+      const stat = statSync(filePath)
+      return { filePath, mtimeMs: stat.mtimeMs, bytes: stat.size }
+    })
+    for (const stale of avatarPrunePlan(entries)) {
+      rmSync(stale, { force: true })
     }
   } catch {
     // Cache pruning is a convenience; never let it break chat.
@@ -13996,6 +14065,9 @@ app.whenReady().then(async () => {
   )
   secureIpcHandle('avatars:cache', (_event, url: unknown) => cacheChatAvatar(url))
   secureIpcHandle('avatars:read', (_event, localUrl: unknown) => readChatAvatar(localUrl))
+  // Twitch GIF Keyboard assets (plan 155): the contract already gates the URL;
+  // main gates it again and sniffs the body before it is written.
+  secureIpcHandle('chat-gifs:cache', (_event, url: unknown) => cacheChatGif(url))
   secureIpcHandle('oauth:open-url', (_event, authUrl: string) => openOAuthUrl(authUrl))
   secureIpcHandle('chat:open-link', async (_event, url: unknown) => {
     // The contract already refused anything else; check again where it opens.
@@ -14208,6 +14280,14 @@ app.whenReady().then(async () => {
     emitCommentsViewerSample(sample && typeof sample === 'object' ? (sample as ViewerSample) : null)
   })
   secureIpcHandle('comments-window:viewers-get', () => latestViewerSample)
+  secureIpcHandle('chat-gifs:push-mode', (event, mode: unknown) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
+      return undefined
+    }
+    if (!isTwitchGifMode(mode)) return undefined
+    emitChatGifMode(mode)
+  })
+  secureIpcHandle('chat-gifs:get-mode', () => latestChatGifMode)
   // Stream Manager dashboard relay (plan 055, S7): same shape as the viewer
   // relay. Only the main renderer pushes; the window seeds and follows.
   secureIpcHandle('comments-window:dashboard-push', (event, state: unknown) => {

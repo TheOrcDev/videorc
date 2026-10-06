@@ -10368,6 +10368,41 @@ mod tests {
     }
 
     #[test]
+    fn stored_twitch_gif_fragments_round_trip_with_their_url() {
+        // Plan 155: History replays a GIF Keyboard row with its image; a row
+        // stored before the plan (type `gif`, no URL) stays its title.
+        let database = test_database();
+        database
+            .create_session(&sample_session("session-1"))
+            .unwrap();
+        let mut with_url = sample_live_chat_message("session-1", 1);
+        with_url.platform = StreamPlatform::Twitch;
+        with_url.message_text = "[Y A Y Yes GIF]".to_string();
+        with_url.fragments = vec![LiveChatMessageFragment {
+            fragment_type: "gif".to_string(),
+            text: "[Y A Y Yes GIF]".to_string(),
+            image_url: Some("https://media2.giphy.com/media/a/giphy.gif".to_string()),
+            zero_width: false,
+        }];
+        database.save_live_chat_message(&with_url).unwrap();
+        let mut without_url = sample_live_chat_message("session-1", 2);
+        without_url.platform = StreamPlatform::Twitch;
+        without_url.message_text = "[Clap GIF]".to_string();
+        without_url.fragments = vec![LiveChatMessageFragment {
+            fragment_type: "gif".to_string(),
+            text: "[Clap GIF]".to_string(),
+            image_url: None,
+            zero_width: false,
+        }];
+        database.save_live_chat_message(&without_url).unwrap();
+
+        let messages = database.list_live_chat_messages("session-1").unwrap();
+        assert_eq!(messages[0].fragments, with_url.fragments);
+        assert_eq!(messages[1].fragments, without_url.fragments);
+        assert_eq!(messages[1].message_text, "[Clap GIF]");
+    }
+
+    #[test]
     fn live_chat_messages_round_trip_and_count_on_session_summary() {
         let database = test_database();
         database

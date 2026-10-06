@@ -1062,6 +1062,22 @@ mod tests {
     }
 
     #[test]
+    fn chat_projection_keeps_a_gif_as_its_title_text_only() {
+        // Plan 155: a Twitch GIF Keyboard fragment reaches the phone as
+        // `type` + `text`; the GIPHY URL never does.
+        let mut message = full_message();
+        message["fragments"] = serde_json::json!([
+            { "type": "gif", "text": "[Y A Y Yes GIF]", "imageUrl": "https://media2.giphy.com/media/a/giphy.gif" }
+        ]);
+        let projected = project_chat_message(&message).unwrap();
+        assert_eq!(
+            projected["fragments"],
+            serde_json::json!([{ "type": "gif", "text": "[Y A Y Yes GIF]" }])
+        );
+        assert!(!projected.to_string().contains("giphy"));
+    }
+
+    #[test]
     fn chat_projection_drops_follows_and_structured_details() {
         let mut message = full_message();
         message["details"] = serde_json::json!({ "kind": "super-chat", "amountMicros": 5_000_000 });

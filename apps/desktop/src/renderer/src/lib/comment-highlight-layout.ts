@@ -5,6 +5,7 @@
 // eager Studio bundle (`comment-highlight.ts` is imported eagerly by
 // use-studio and stays text-only).
 
+import { gifTitle } from '../../../shared/chat-gif'
 import type { LiveChatMessageFragment, StreamPlatform } from '@/lib/backend'
 import { groupEmoteOverlays, type ChatMessagePiece } from '@/lib/chat-emotes'
 import {
@@ -49,17 +50,26 @@ export type HighlightEmoteSizer = (url: string) => HighlightEmoteSize | null
  * (zero-width overlays folded onto the emote before them); every other
  * fragment and plain text splits into words. `text` is used when the
  * fragments carry no image, so activity prefixes and fragment-less messages
- * lay out exactly as before.
+ * lay out exactly as before. A Twitch GIF (plan 155, D8) is never painted
+ * on stream: the card says `GIF: <title>` in its place.
  */
 export function highlightTokens(
   text: string,
   fragments: readonly LiveChatMessageFragment[] | undefined
 ): HighlightToken[] {
-  if (!fragments?.some((fragment) => fragment.imageUrl)) {
-    return words(text)
+  const hasGif = fragments?.some((fragment) => fragment.type === 'gif') ?? false
+  const drawable = hasGif
+    ? fragments!.map((fragment) =>
+        fragment.type === 'gif'
+          ? { type: 'text', text: ` GIF: ${gifTitle(fragment.text)} ` }
+          : fragment
+      )
+    : fragments
+  if (!drawable?.some((fragment) => fragment.imageUrl)) {
+    return words(hasGif ? drawable!.map((fragment) => fragment.text).join('') : text)
   }
   const tokens: HighlightToken[] = []
-  for (const piece of groupEmoteOverlays(fragments)) {
+  for (const piece of groupEmoteOverlays(drawable)) {
     if (piece.kind === 'text') {
       tokens.push(...words(piece.text))
       continue

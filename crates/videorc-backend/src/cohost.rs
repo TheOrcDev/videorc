@@ -32,7 +32,7 @@ use crate::cohost_command::{
     CommandKind, CommandSession, CommandTarget, DetectContext, DetectedCommand, is_command_word,
 };
 use crate::comment_highlight::{CommentHighlightPhase, CommentHighlightState};
-use crate::live_chat::{LiveChatEventType, LiveChatMessage};
+use crate::live_chat::{LiveChatEventType, LiveChatMessage, LiveChatMessageFragment};
 use crate::live_chat_moderation::{
     ModerationOperation, ModerationOutcomeCode, ModerationPhase, ModerationRefusal,
     ModerationRequest, ModerationSource, RemoveConfirmMode,
@@ -50,6 +50,7 @@ use crate::protocol::{
 use crate::state::AppState;
 use crate::storage::Database;
 use crate::streaming::{StreamPlatform, stream_platform_label};
+use crate::twitch_chat::gif_title;
 use crate::videorc_api::{
     COHOST_COMMAND_MAX_CANDIDATES, COHOST_SPOTLIGHT_MAX_BODY_BYTES, CohostApiError,
     CohostApiErrorKind, CohostCommandCandidate, CohostCommandRequest, CohostCommandResponse,
@@ -5323,7 +5324,10 @@ pub(crate) fn tick_message_from_chat(message: &LiveChatMessage) -> Option<Cohost
     if message.platform == StreamPlatform::Custom {
         return None;
     }
-    let text = truncate_utf16(message.message_text.trim(), TICK_MESSAGE_TEXT_MAX_CHARS);
+    let text = truncate_utf16(
+        tick_text_with_gifs(&message.message_text, &message.fragments).trim(),
+        TICK_MESSAGE_TEXT_MAX_CHARS,
+    );
     if text.is_empty() {
         return None;
     }
@@ -5341,6 +5345,41 @@ pub(crate) fn tick_message_from_chat(message: &LiveChatMessage) -> Option<Cohost
         at: message.published_at.clone(),
         first_message: Some(message.first_message),
     })
+}
+
+/// What Orcle reads for a message with Twitch GIFs (plan 155, D7). The raw
+/// text is the GIPHY title in brackets (`[Y A Y Yes GIF]`), which reads as a
+/// viewer's words. A GIF alone becomes `sent a GIF: <title>`; a GIF among
+/// words becomes `(GIF: <title>)` in its place. Without a gif fragment the
+/// text is returned as is.
+pub(crate) fn tick_text_with_gifs(text: &str, fragments: &[LiveChatMessageFragment]) -> String {
+    if !fragments
+        .iter()
+        .any(|fragment| fragment.fragment_type == "gif")
+    {
+        return text.to_string();
+    }
+    let only_gifs = fragments
+        .iter()
+        .all(|fragment| fragment.fragment_type == "gif" || fragment.text.trim().is_empty());
+    if only_gifs {
+        let titles: Vec<String> = fragments
+            .iter()
+            .filter(|fragment| fragment.fragment_type == "gif")
+            .map(|fragment| gif_title(&fragment.text))
+            .collect();
+        return format!("sent a GIF: {}", titles.join(", "));
+    }
+    fragments
+        .iter()
+        .map(|fragment| {
+            if fragment.fragment_type == "gif" {
+                format!("(GIF: {})", gif_title(&fragment.text))
+            } else {
+                fragment.text.clone()
+            }
+        })
+        .collect::<String>()
 }
 
 /// Who counts as one viewer for alert corroboration: the platform account when
@@ -11032,6 +11071,52 @@ mod tests {
         for key in ["topic", "promises", "promiseReminder", "recap"] {
             assert!(json.get(key).is_none(), "{key} must be absent while empty");
         }
+    }
+
+    /// Plan 155, D7: Orcle hears a Twitch GIF as an action with its title,
+    /// never as the bracketed GIPHY title pretending to be the viewer's words.
+    #[test]
+    fn orcle_reads_a_twitch_gif_as_an_action_with_its_title() {
+        let gif = |text: &str| LiveChatMessageFragment {
+            fragment_type: "gif".into(),
+            text: text.into(),
+            image_url: Some("https://media2.giphy.com/media/aUovxH8Vf9qDu/giphy.gif".into()),
+            zero_width: false,
+        };
+        let words = |text: &str| LiveChatMessageFragment {
+            fragment_type: "text".into(),
+            text: text.into(),
+            image_url: None,
+            zero_width: false,
+        };
+        assert_eq!(
+            tick_text_with_gifs("[Y A Y Yes GIF]", &[gif("[Y A Y Yes GIF]")]),
+            "sent a GIF: Y A Y Yes"
+        );
+        assert_eq!(
+            tick_text_with_gifs(
+                "gg [Y A Y Yes GIF] wow",
+                &[words("gg "), gif("[Y A Y Yes GIF]"), words(" wow")]
+            ),
+            "gg (GIF: Y A Y Yes) wow"
+        );
+        // A refused GIF (no URL) still reads as a GIF, by its title.
+        let mut refused = gif("[Nope GIF]");
+        refused.image_url = None;
+        assert_eq!(
+            tick_text_with_gifs("[Nope GIF]", &[refused]),
+            "sent a GIF: Nope"
+        );
+        assert_eq!(tick_text_with_gifs("hello", &[words("hello")]), "hello");
+        assert_eq!(tick_text_with_gifs("hello", &[]), "hello");
+
+        let mut row = chat_message("session-1", 1, "2026-08-22T10:01:01Z");
+        row.message_text = "[Y A Y Yes GIF]".into();
+        row.fragments = vec![gif("[Y A Y Yes GIF]")];
+        assert_eq!(
+            tick_message_from_chat(&row).unwrap().text,
+            "sent a GIF: Y A Y Yes"
+        );
     }
 
     #[test]
