@@ -63,8 +63,7 @@ export type SessionMediaGrant = SessionMediaFileIdentity & {
 }
 
 export type SessionMediaInspection =
-  | { ok: true; file: SessionMediaFileIdentity }
-  | { ok: false; error: SessionMediaGrantRefusal }
+  { ok: true; file: SessionMediaFileIdentity } | { ok: false; error: SessionMediaGrantRefusal }
 
 export type SessionMediaIssuedGrant = { grantId: string; url: string; expiresAt: number }
 
@@ -305,9 +304,7 @@ export class SessionMediaGrantRegistry {
 export type ByteRange = { start: number; end: number }
 
 export type ByteRangeParse =
-  | { kind: 'none' }
-  | { kind: 'range'; range: ByteRange }
-  | { kind: 'unsatisfiable' }
+  { kind: 'none' } | { kind: 'range'; range: ByteRange } | { kind: 'unsatisfiable' }
 
 /**
  * Parses one `Range: bytes=` header against a file of `size` bytes (RFC 7233):

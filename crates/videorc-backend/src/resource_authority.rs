@@ -313,7 +313,7 @@ fn validate_thumbnail_content(asset_id: &str, path: &Path) -> Result<()> {
     let mut bytes = Vec::new();
     file.take(2 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
     crate::scheduled_youtube::validate_thumbnail(&bytes)?;
-    if format!("{:x}", Sha256::digest(&bytes)) != asset_id
+    if crate::digest_hex::lower_hex(Sha256::digest(&bytes)) != asset_id
         || path.file_stem().and_then(|stem| stem.to_str()) != Some(asset_id)
     {
         bail!("Managed thumbnail content identity is invalid.");
@@ -577,7 +577,7 @@ mod tests {
             .write_to(&mut bytes, image::ImageFormat::Png)
             .unwrap();
         let bytes = bytes.into_inner();
-        let id = format!("{:x}", Sha256::digest(&bytes));
+        let id = crate::digest_hex::lower_hex(Sha256::digest(&bytes));
         let path = root.join(format!("{id}.png"));
         std::fs::write(&path, &bytes).unwrap();
         assert!(

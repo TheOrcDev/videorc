@@ -1,8 +1,7 @@
 /** A refresh either ran or was deferred because capture is active. Deferral is
  * an expected answer, not a failure, so it resolves rather than rejects. */
 export type AccountRefreshOutcome<T> =
-  | { outcome: 'refreshed'; snapshot: T }
-  | { outcome: 'deferred' }
+  { outcome: 'refreshed'; snapshot: T } | { outcome: 'deferred' }
 
 /** Main-process ownership for periodic product-account maintenance. It keeps
  * refresh off the renderer's live-control WebSocket, coalesces focus/timer
@@ -21,9 +20,10 @@ export class AccountRefreshBroker<T> {
     }
     if (this.inFlight) return this.inFlight
 
-    const request = this.request().then(
-      (snapshot): AccountRefreshOutcome<T> => ({ outcome: 'refreshed', snapshot })
-    )
+    const request = this.request().then((snapshot): AccountRefreshOutcome<T> => ({
+      outcome: 'refreshed',
+      snapshot
+    }))
     this.inFlight = request
     const clear = (): void => {
       if (this.inFlight === request) this.inFlight = null

@@ -14737,7 +14737,10 @@ fn output_topology_capability_key(
         ));
     }
     let digest = Sha256::digest(material.as_bytes());
-    format!("{STREAM_OUTPUT_TOPOLOGY_CAPABILITY_KEY_VERSION}:{digest:x}")
+    format!(
+        "{STREAM_OUTPUT_TOPOLOGY_CAPABILITY_KEY_VERSION}:{}",
+        crate::digest_hex::lower_hex(digest)
+    )
 }
 
 fn select_windows_encoded_bridge_decision(

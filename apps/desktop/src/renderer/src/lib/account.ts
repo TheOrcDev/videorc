@@ -65,12 +65,7 @@ export function entitlementTierLabel(tier: EntitlementTier | null | undefined): 
 }
 
 export type AccountMenuItem =
-  | 'account'
-  | 'sign-in'
-  | 'sign-out'
-  | 'view-premium'
-  | 'health'
-  | 'settings'
+  'account' | 'sign-in' | 'sign-out' | 'view-premium' | 'health' | 'settings'
 
 // Product-account menu rows in order. No platform (YouTube/Twitch/X) accounts
 // ever appear here — this is the single Videorc product account.

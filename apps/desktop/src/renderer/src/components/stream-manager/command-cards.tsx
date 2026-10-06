@@ -26,9 +26,7 @@ const FOCUSED_CARD =
   '[data-slot="removal-card"], [data-slot="command-chooser"], [data-slot="command-confirm"]'
 
 export type CommandAnswer =
-  | { action: 'choose'; index: number }
-  | { action: 'confirm' }
-  | { action: 'cancel' }
+  { action: 'choose'; index: number } | { action: 'confirm' } | { action: 'cancel' }
 
 /** "Heard: “…”", then what Orcle did. Quiet statuses use secondary text. */
 export function CommandStrip({ view }: { view: CommandStripView | null }): ReactElement | null {

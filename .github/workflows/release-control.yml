@@ -49,7 +49,7 @@ jobs:
           node-version: 24.6.0
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
         with:
-          version: 11.0.9
+          version: 11.28.4
           run_install: false
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: node scripts/release-control.mjs submit
@@ -105,7 +105,7 @@ jobs:
           node-version: 24.6.0
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
         with:
-          version: 11.0.9
+          version: 11.28.4
           run_install: false
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Probe conditional storage semantics

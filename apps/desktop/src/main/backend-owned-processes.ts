@@ -26,9 +26,7 @@ export interface OwnedProcessRecord {
 }
 
 export type OwnedProcessProbeResult =
-  | { state: 'dead' }
-  | { state: 'live'; identity: OwnedProcessIdentity }
-  | { state: 'unprobeable' }
+  { state: 'dead' } | { state: 'live'; identity: OwnedProcessIdentity } | { state: 'unprobeable' }
 
 export type RecordedProcessOwnership = 'owned' | 'gone' | 'unconfirmed'
 export type RecordedProcessSignalResult = 'signalled' | 'gone' | 'unconfirmed'

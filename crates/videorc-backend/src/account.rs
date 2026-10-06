@@ -206,7 +206,7 @@ fn sign_in_replay_binding(code: &str, state: &str) -> String {
     digest.update(state.as_bytes());
     digest.update([0]);
     digest.update(code.as_bytes());
-    format!("{:x}", digest.finalize())
+    crate::digest_hex::lower_hex(digest.finalize())
 }
 
 fn signed_in_from_verified(verified: &VerifiedSession) -> VideorcAccountSnapshot {

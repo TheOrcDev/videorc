@@ -21,10 +21,7 @@ export interface NativePreviewPlacementOwnershipInput {
 }
 
 export type NativePreviewPresentFailureDisposition =
-  | 'presented'
-  | 'benign-skip'
-  | 'retain-native'
-  | 'disable-native'
+  'presented' | 'benign-skip' | 'retain-native' | 'disable-native'
 
 export type NativePreviewSupervisorDisposition = 'pending' | 'live' | 'fallback' | 'failed'
 

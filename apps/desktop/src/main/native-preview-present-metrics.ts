@@ -20,8 +20,7 @@ export class NativePreviewPresentMetrics {
   private presentIntervalsMs: number[] = []
   private inputLatenciesMs: number[] = []
   private cachedPercentiles:
-    | { computedAtMs: number; fields: NativePreviewPresentMetricSnapshot }
-    | undefined
+    { computedAtMs: number; fields: NativePreviewPresentMetricSnapshot } | undefined
   private refreshCount = 0
 
   constructor(

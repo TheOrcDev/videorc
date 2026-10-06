@@ -32,11 +32,7 @@ type CommandCategory = (typeof COMMANDS)[number] | 'other-command'
 type RendererGoneReason = (typeof RENDERER_GONE_REASONS)[number] | 'unknown'
 
 export type MainOwnerDisposition =
-  | 'absent'
-  | 'window-destroyed'
-  | 'contents-destroyed'
-  | 'ready'
-  | 'unknown'
+  'absent' | 'window-destroyed' | 'contents-destroyed' | 'ready' | 'unknown'
 
 export type MainOwnerEventKind =
   | 'created'

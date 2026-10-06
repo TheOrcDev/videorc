@@ -14,8 +14,7 @@ import { CLOUD_AI_KEEPS, CLOUD_AI_USES } from '@/lib/orcle-tab-view'
 
 /** What asked for consent: the "every recording" switch, or one cut. */
 export type CleanCutConsentAsk =
-  | { kind: 'auto' }
-  | { kind: 'start'; sessionId: string; mode: CleanCutMode; targetMinutes: number }
+  { kind: 'auto' } | { kind: 'start'; sessionId: string; mode: CleanCutMode; targetMinutes: number }
 
 export const CLEAN_CUT_CONSENT_DESCRIPTION =
   "Clean cut uploads your recording's audio, never the video, to Videorc's cloud AI."

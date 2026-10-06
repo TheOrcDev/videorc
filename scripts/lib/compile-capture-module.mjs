@@ -1,20 +1,13 @@
 import { readFile, mkdir, writeFile } from 'node:fs/promises'
-import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
-
-const require = createRequire(import.meta.url)
-const ts = require('../../apps/desktop/node_modules/typescript')
-
-const compilerOptions = {
-  module: ts.ModuleKind.CommonJS,
-  target: ts.ScriptTarget.ES2022,
-  esModuleInterop: true
-}
+import { transformSync } from 'esbuild'
 
 /**
  * Compile capture.ts and its runtime dependencies into a disposable tree.
  * The preserved source layout matters: capture.ts intentionally imports the
  * canonical layout-preset arrays from shared/backend at runtime.
+ * TypeScript 7 ships tsc without the JavaScript compiler API, so this uses
+ * esbuild's type-stripping transform and keeps the same CommonJS layout.
  */
 export async function compileCaptureModule(tempDir) {
   const modules = [
@@ -42,12 +35,14 @@ export async function compileCaptureModule(tempDir) {
 
   await Promise.all(
     modules.map(async ({ source, output }) => {
-      const transpiled = ts.transpileModule(await readFile(source, 'utf8'), {
-        compilerOptions,
-        fileName: source
+      const transpiled = transformSync(await readFile(source, 'utf8'), {
+        loader: 'ts',
+        format: 'cjs',
+        target: 'es2022',
+        sourcefile: source
       })
       await mkdir(dirname(output), { recursive: true })
-      await writeFile(output, transpiled.outputText)
+      await writeFile(output, transpiled.code)
     })
   )
 

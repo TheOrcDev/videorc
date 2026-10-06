@@ -610,8 +610,9 @@ export async function resolveBundledSevenZipPath({
     'builder-util package metadata',
     platform
   )
-  const builderUtilRequire = createRequireFrom(builderUtilPackage)
-  const sevenZipPackage = builderUtilRequire.resolve('7zip-bin/package.json')
+  // electron-builder 26 no longer depends on 7zip-bin. The NSIS extractor stays
+  // the same pinned 7zip-bin 5.2.0 binary, declared directly by the desktop app.
+  const sevenZipPackage = desktopRequire.resolve('7zip-bin/package.json')
   await assertContainedRegularFile(
     sevenZipPackage,
     canonicalDependencyRoot,

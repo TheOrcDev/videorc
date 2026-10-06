@@ -36,7 +36,7 @@ jobs:
       - name: Set up pnpm
         uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
         with:
-          version: 11.0.9
+          version: 11.28.4
           run_install: false
 
       - name: Set up Node

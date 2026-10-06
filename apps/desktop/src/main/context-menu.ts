@@ -33,12 +33,10 @@ export function contextMenuTemplate(
       const suggestions = facts.dictionarySuggestions.slice(0, MAX_SUGGESTIONS)
       template.push(
         ...(suggestions.length
-          ? suggestions.map(
-              (word): MenuItemConstructorOptions => ({
-                label: word,
-                click: () => replaceMisspelling(word)
-              })
-            )
+          ? suggestions.map((word): MenuItemConstructorOptions => ({
+              label: word,
+              click: () => replaceMisspelling(word)
+            }))
           : [{ label: 'No Guesses Found', enabled: false }]),
         { type: 'separator' }
       )
