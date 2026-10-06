@@ -1,7 +1,6 @@
 import { useState, type DragEvent, type ReactElement } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
-import { StatusDot, type StatusDotTone } from '@/components/status-dot'
 import { ViewersIcon } from '@/components/stream-manager/activity-icons'
 import { Sparkline } from '@/components/stream-manager/sparkline'
 import { Badge } from '@/components/ui/badge'
@@ -15,12 +14,7 @@ import {
   ContextMenuTrigger
 } from '@/components/ui/context-menu'
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/hover-card'
-import {
-  DEFAULT_STAT_ORDER,
-  type StatId,
-  type StatItemModel,
-  type StatTone
-} from '@/lib/stream-manager-stats'
+import { DEFAULT_STAT_ORDER, type StatId, type StatItemModel } from '@/lib/stream-manager-stats'
 import {
   arrangeStats,
   DEFAULT_STATS_LAYOUT,
@@ -32,11 +26,11 @@ import {
 import { cn } from '@/lib/utils'
 
 // The stats bar (plan 057, D1): one 32 px row at every width, flush under the
-// title row. The main slots (by default the clock, viewers and health) sit
+// title row. The main slots (by default the clock, viewers and followers) sit
 // together at the leading edge and are never clipped. The rest follow after a
 // hairline and wrap onto a clipped second line when they do not fit, so a
 // stat drops off the end whole and nothing measures the window. Numbers stay
-// monochrome and tabular; tone lives in the dot and the chip. Every detail is
+// monochrome and tabular; tone lives in the chip. Every detail is
 // one hover away. Drag a stat to move it; right-click the bar to show or
 // hide stats (plan 057, D2).
 
@@ -44,7 +38,6 @@ import { cn } from '@/lib/utils'
 const STAT_NAMES: Record<StatId, string> = {
   session: 'Clock',
   viewers: 'Viewers',
-  health: 'Stream health',
   followers: 'Followers',
   supporters: 'Subs and members',
   tips: 'Tips',
@@ -58,14 +51,6 @@ interface StatDrag {
   onDragOver: (event: DragEvent<HTMLElement>) => void
   onDrop: (event: DragEvent<HTMLElement>) => void
   onDragEnd: () => void
-}
-
-const HEALTH_DOTS: Record<StatTone, StatusDotTone> = {
-  good: 'good',
-  warning: 'warn',
-  error: 'error',
-  neutral: 'neutral',
-  subtle: 'neutral'
 }
 
 function SessionChip({ badge }: { badge: StatItemModel['badge'] }): ReactElement | null {
@@ -92,8 +77,6 @@ function StatLead({ item }: { item: StatItemModel }): ReactElement | null {
       return <SessionChip badge={item.badge} />
     case 'viewers':
       return <ViewersIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" />
-    case 'health':
-      return <StatusDot className="shrink-0" tone={HEALTH_DOTS[item.tone]} />
     default:
       return null
   }
@@ -112,10 +95,7 @@ function StatDetails({ item }: { item: StatItemModel }): ReactElement {
             {row.platform ? <ChatPlatformIcon decorative platform={row.platform} /> : null}
             <span className="min-w-0 flex-1 truncate text-muted-foreground">{row.label}</span>
             <span className="flex shrink-0 flex-col items-end">
-              <span className="flex items-center gap-1.5 font-medium text-foreground tabular-nums">
-                {row.dot ? <StatusDot tone={row.dot} /> : null}
-                {row.value}
-              </span>
+              <span className="font-medium text-foreground tabular-nums">{row.value}</span>
               {row.note ? (
                 <span className="max-w-40 truncate text-[11px] text-subtle" title={row.note}>
                   {row.note}
@@ -139,9 +119,10 @@ function StatCell({
   drag?: StatDrag
 }): ReactElement {
   const trouble = item.tone === 'warning' || item.tone === 'error'
-  // Health is the one main value that can grow ("YouTube Vertical failed"):
-  // it truncates rather than push the bar past a 320 px window.
-  const shrinks = main && item.id === 'health'
+  // The clock and viewers are short. Whatever holds the third main slot can
+  // grow ("61,942 followers +12"): it truncates rather than push the bar past
+  // a 320 px window.
+  const shrinks = main && !LOCKED_STATS.has(item.id)
   const cell = (
     <span
       aria-label={item.description}

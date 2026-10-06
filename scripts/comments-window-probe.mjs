@@ -791,7 +791,6 @@ async function probeNarrowWidths() {
       // a reset, and closes cleanly.
       assertProbe(
         [
-          'Stream health',
           'Followers',
           'Subs and members',
           'Tips',
@@ -929,7 +928,7 @@ function assertHeaderFits(metrics, tag) {
   )
 }
 
-// Plan 057: one thin bar at every width. The clock, viewers and health lead
+// Plan 057: one thin bar at every width. The clock, viewers and followers lead
 // it, whole and side by side; any other stat is either whole or wrapped out
 // of sight, never cut at the edge.
 function assertStatsBar(metrics, tag) {
@@ -946,10 +945,10 @@ function assertStatsBar(metrics, tag) {
   const main = (metrics.stats ?? []).filter((stat) => stat.group === 'main')
   const gaps = main.slice(1).map((stat, index) => stat.left - main[index].right)
   assertProbe(
-    main.map((stat) => stat.id).join(',') === 'session,viewers,health' &&
+    main.map((stat) => stat.id).join(',') === 'session,viewers,followers' &&
       main.every((stat) => stat.shown) &&
       gaps.every((gap) => gap <= STATS_MAIN_MAX_GAP),
-    `${tag}: the clock, viewers and health lead the bar, whole and together`,
+    `${tag}: the clock, viewers and followers lead the bar, whole and together`,
     JSON.stringify({ main, gaps })
   )
   const cut = (metrics.stats ?? []).filter((stat) => stat.straddles)
