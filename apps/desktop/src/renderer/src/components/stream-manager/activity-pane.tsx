@@ -20,6 +20,7 @@ import { StatusDot } from '@/components/status-dot'
 import { Button } from '@/components/ui/button'
 import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type {
   AudienceSnapshot,
@@ -310,7 +311,9 @@ export function ActivityPane({
   highlightFailure = null,
   onShowOnStream,
   onThank,
-  onShowFollowNames
+  onShowFollowNames,
+  autoShow = false,
+  onAutoShowChange
 }: {
   items: readonly ActivityItem[]
   audience?: AudienceSnapshot | null
@@ -326,6 +329,9 @@ export function ActivityPane({
   onThank?: (item: ActivityItem) => void
   /** Reconnect Twitch with its follow permission (plan 071, S2). */
   onShowFollowNames?: () => void
+  /** Auto-show celebrations on stream (plan 156): the one switch. */
+  autoShow?: boolean
+  onAutoShowChange?: (on: boolean) => void
 }): ReactElement {
   const [filter, setFilter] = useState<ActivityFilter | 'all'>('all')
   const [platform, setPlatform] = useState<StreamPlatform | 'all'>('all')
@@ -344,8 +350,8 @@ export function ActivityPane({
       className={cn('min-h-0 flex-1 flex-col', className)}
       data-slot="activity-pane"
     >
-      <div className="flex shrink-0 items-center border-b border-border px-2 py-1.5">
-        <div className="flex flex-wrap items-center gap-1">
+      <div className="flex shrink-0 items-center gap-2 border-b border-border px-2 py-1.5">
+        <div className="flex min-w-0 flex-wrap items-center gap-1">
           <ToggleGroup
             aria-label="Filter activity"
             className="flex-wrap justify-start"
@@ -395,6 +401,24 @@ export function ActivityPane({
             </ToggleGroup>
           ) : null}
         </div>
+        {/* Auto-show (plan 156): new follows, subs, gifts, tips, raids and
+            streaks pop onto the stream as the highlight card, hands-free.
+            Manual picks always win; the switch only feeds an idle slot. */}
+        {onAutoShowChange ? (
+          <label
+            className="ml-auto flex h-6 shrink-0 items-center gap-1.5 text-xs text-muted-foreground select-none"
+            title="Automatically show new follows, subs, gifts, tips, raids and streaks on stream for a few seconds"
+          >
+            Auto-show
+            <Switch
+              aria-label="Automatically show new follows, subs, gifts, tips, raids and streaks on stream"
+              checked={autoShow}
+              data-slot="activity-auto-show"
+              size="sm"
+              onCheckedChange={onAutoShowChange}
+            />
+          </label>
+        ) : null}
       </div>
       <ScrollArea className="min-h-0 flex-1" type="scroll">
         {shown.length ? (

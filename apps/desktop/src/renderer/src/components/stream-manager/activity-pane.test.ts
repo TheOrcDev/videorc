@@ -69,6 +69,32 @@ describe('ActivityPane', () => {
     expect(markup).not.toContain('Raids')
     expect(markup).not.toContain('Destinations')
   })
+
+  it('renders no Auto-show switch without a handler', () => {
+    expect(markup).not.toContain('data-slot="activity-auto-show"')
+  })
+})
+
+// Plan 156: the one switch that auto-shows celebrations on stream.
+describe('ActivityPane Auto-show switch', () => {
+  const render = (autoShow: boolean): string =>
+    renderToStaticMarkup(
+      createElement(ActivityPane, {
+        items,
+        providers: [provider('twitch')],
+        nowMs: Date.parse('2026-09-24T10:01:00Z'),
+        autoShow,
+        onAutoShowChange: () => {}
+      })
+    )
+
+  it('renders in the header and reflects the setting', () => {
+    const off = render(false)
+    expect(off).toContain('data-slot="activity-auto-show"')
+    expect(off).toContain('Auto-show')
+    expect(off).toContain('data-state="unchecked"')
+    expect(render(true)).toContain('data-state="checked"')
+  })
 })
 
 // Plan 071, S1: a row about one person shows that person.

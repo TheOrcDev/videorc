@@ -234,6 +234,10 @@ export interface StreamManagerProps {
   /** Show who followed (plan 071, S2): reconnect Twitch with its follow
    * permission, relayed to the main window. */
   onShowFollowNames?: () => void
+  /** Auto-show Activity celebrations on stream (plan 156): the one switch,
+   * owned by Electron main; the Studio renderer runs the engine. */
+  autoShowActivity?: boolean
+  onAutoShowActivityChange?: (on: boolean) => void
   /** Reconnect Twitch or Kick so Orcle can remove messages (plan 140, S5);
    * Electron main starts it. Rows show only while live. */
   onReconnectScopes?: (platform: ScopeReconnectPlatform) => void
@@ -315,6 +319,8 @@ export function StreamManager({
   onUndoMarker,
   onOpenPreview,
   onShowFollowNames,
+  autoShowActivity = false,
+  onAutoShowActivityChange,
   onReconnectScopes,
   moderationOperations = NO_MODERATION_OPERATIONS,
   removalRequestIds,
@@ -977,6 +983,8 @@ export function StreamManager({
             onShowOnStream={live && onHighlight ? showActivityOnStream : undefined}
             onThank={live && onSend ? thankInChat : undefined}
             onShowFollowNames={onShowFollowNames}
+            autoShow={autoShowActivity}
+            onAutoShowChange={onAutoShowActivityChange}
           />
         </div>
         {orclePane ? (
