@@ -946,6 +946,15 @@ async fn start_preview_camera_with_owner(
 ) -> PreviewCameraLayoutStart {
     #[cfg(test)]
     if params.sources.camera_id.as_deref() == Some("camera:iso-runtime") {
+        if preview_camera_frame_source(&state).await.is_none() {
+            test_install_live_camera_for_layout(
+                &state,
+                "camera:iso-runtime",
+                &params.layout,
+                &params.video,
+            )
+            .await;
+        }
         signal_camera_layout_admission(&mut admission_ready, None);
         return PreviewCameraLayoutStart::without_admission(preview_camera_status(&state).await);
     }

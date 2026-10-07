@@ -27,6 +27,7 @@ fn snapshot(kind: SceneSourceKind) -> CompositorSceneSnapshot {
     let mut layout = crate::protocol::default_layout_settings();
     layout.layout_preset = crate::protocol::LayoutPreset::ScreenOnly;
     CompositorSceneSnapshot {
+        selected_sources: None,
         revision: 1,
         scene: Some(scene),
         layout,
@@ -682,6 +683,7 @@ async fn source_iso_artifact_fixture() {
         .await;
         install_screen(&state, "screen:fixture", 1, 1, [0, 255, 0, 255]).await;
         let iso_stores = CompositorSourceIsoFrameStores {
+            batches: Arc::new(crate::compositor::source_iso_batch::SourceIsoBatchStore::default()),
             screen: Arc::new(StdMutex::new(FrameStore::new(2))),
             camera: Arc::new(StdMutex::new(FrameStore::new(2))),
         };
@@ -814,6 +816,13 @@ async fn source_iso_artifact_fixture() {
 fn source_edit_camera_none_round_trip_preserves_every_scene_field_on_both_legs() {
     use crate::live_source_switch::SourceKind;
     let mut primary = snapshot(SceneSourceKind::Camera);
+    primary.selected_sources = Some(crate::protocol::SourceSelection {
+        camera_id: Some("camera:A".into()),
+        screen_id: None,
+        window_id: None,
+        microphone_id: None,
+        test_pattern: false,
+    });
     primary.scene.as_mut().unwrap().sources[0].device_id = Some("camera:A".into());
     primary.scene.as_mut().unwrap().sources[0]
         .transform

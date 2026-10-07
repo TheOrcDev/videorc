@@ -19,11 +19,20 @@ takes for later NLE work.
     Its production lifecycle and artifact gates supersede the original
     fixture-only acceptance below; acceptance remains in progress until
     that plan records the final results.
+    Three simultaneous 4K30 outputs fail the unchanged artifact gate on
+    the current M4 host; independent hardware controls sustain about
+    21 fps per output. This remains an acceptance limitation, with no
+    resolution/fps downgrade or relaxed gate.
   - ISO video is a second and third compositor output
     (`CompositorSourceIsoOutput`, `source_iso_snapshot` in `compositor.rs`):
     one source forced visible and full-frame on the recording canvas, no
     bubble mask, chroma key or background; mirror preserved. Each leg has its
     own VideoToolbox encoder bridge and FFmpeg MKV muxer (`source_iso.rs`).
+    Confirmed capture selection supplies ISO source identity even when a
+    composed layout omits that source. A committed Off ends only its role.
+    Local writers share a start epoch, completed compositor-batch selection
+    and a Stop content boundary; native target retention remains bounded by
+    the existing ring caps. ISO-off and stream transport behavior are retained.
   - ISO audio comes from the bus ingredients (`source_audio_tap.rs`): the
     processed microphone chunk feeds the Camera tap, the gained system
     contribution feeds the Screen tap (silence while system audio is off).

@@ -125,6 +125,9 @@ pub type PreviewScreenSlot = Arc<tokio::sync::Mutex<PreviewScreenRuntime>>;
 #[derive(Debug)]
 pub struct PreviewScreenRuntime {
     pub status: PreviewScreenStatus,
+    // Native source retirement must not erase the exclusions needed when an
+    // armed ISO reacquires a selected source omitted from the idle layout.
+    protected_overlay_window_ids: Vec<u32>,
     /// Source-level ownership keeps surface-backed frames observable while a
     /// capture session replaces its per-session `FrameStore`.
     surface_backing_tracker: SurfaceBackingTrackerHandle,
@@ -853,6 +856,7 @@ fn log_screen_generation(
 pub fn initial_preview_screen_state() -> PreviewScreenRuntime {
     PreviewScreenRuntime {
         status: idle_status(Some("Native screen preview is not running.".to_string())),
+        protected_overlay_window_ids: Vec::new(),
         surface_backing_tracker: SurfaceBackingTrackerHandle::default(),
         run_id: None,
         source_key: None,
@@ -915,8 +919,24 @@ async fn start_preview_screen_with_restart_signal(
             .screen_id
             .as_deref()
             .or(params.sources.window_id.as_deref()),
-        Some("screen:iso-runtime" | "window:iso-runtime")
+        Some("screen:screencapturekit:4294967294" | "window:screencapturekit:4294967293")
     ) {
+        if preview_screen_frame_source(&state).await.is_none() {
+            let generation = state
+                .preview_screen
+                .lock()
+                .await
+                .start_generation
+                .wrapping_add(1);
+            let selected = params
+                .sources
+                .window_id
+                .as_deref()
+                .or(params.sources.screen_id.as_deref())
+                .unwrap();
+            test_install_live_screen_generation(&state, selected, generation, 1, &params.video)
+                .await;
+        }
         signal_screen_restart_ready(&mut restart_ready);
         signal_screen_layout_admission(&mut admission_ready, None);
         return PreviewScreenLayoutStart::without_admission(preview_screen_status(&state).await);
@@ -2706,6 +2726,15 @@ fn queue_supervised_screen_stop(
     completion_rx
 }
 
+pub(crate) async fn source_iso_protected_overlay_window_ids(state: &AppState) -> Vec<u32> {
+    state
+        .preview_screen
+        .lock()
+        .await
+        .protected_overlay_window_ids
+        .clone()
+}
+
 pub async fn preview_screen_status(state: &AppState) -> PreviewScreenStatus {
     let (shared, target_fps) = {
         let slot = state.preview_screen.lock().await;
@@ -2837,7 +2866,7 @@ pub(crate) async fn test_install_live_screen_generation(
 ) {
     let source = SelectedScreenSource {
         source_id: source_id.to_string(),
-        source_kind: if source_id == "window:iso-runtime" {
+        source_kind: if source_id.starts_with("window:") {
             PreviewScreenSourceKind::Window
         } else {
             PreviewScreenSourceKind::Screen
@@ -2868,7 +2897,7 @@ pub(crate) async fn test_install_live_screen_generation(
     slot.starting_layout_intent_id = None;
     slot.status.state = PreviewScreenState::Live;
     slot.status.source_id = Some(source_id.to_string());
-    slot.status.source_kind = Some(PreviewScreenSourceKind::Screen);
+    slot.status.source_kind = Some(source.source_kind.clone());
     slot.status.target_fps = video.fps;
     slot.status.width = Some(video.width);
     slot.status.height = Some(video.height);
@@ -3638,6 +3667,7 @@ async fn begin_screen_start(
     if layout_intent_id.is_some_and(|intent_id| intent_id < state.latest_layout_intent_id()) {
         return PreviewScreenStartRegistration::RejectedSuperseded(slot.status.clone());
     }
+    slot.protected_overlay_window_ids = start_key.protected_overlay_window_ids.clone();
     if let Some(reused) = reuse_current_screen_source_locked(&mut slot, &start_key) {
         registry.acquire(start_key.source_key.clone(), SourceConsumerReason::Preview);
         registry.set_status(start_key.source_key.clone(), SourceLifecycleStatus::Live);
@@ -6399,6 +6429,37 @@ mod tests {
             updated_at: Utc::now().to_rfc3339(),
             message: Some("Starting native screen preview.".to_string()),
         }
+    }
+
+    #[tokio::test]
+    async fn source_iso_screen_retirement_preserves_admitted_overlay_exclusions() {
+        let state = test_state();
+        let video = test_video();
+        test_install_live_screen_generation(
+            &state,
+            "screen:screencapturekit:4294967294",
+            1,
+            1,
+            &video,
+        )
+        .await;
+        let mut key = test_screen_start_key(
+            SourceKey::screen("screen:screencapturekit:4294967294"),
+            &video,
+        );
+        key.ffmpeg_path = resolve_ffmpeg_path(None);
+        key.protected_overlay_window_ids = vec![17, 42];
+        let status = preview_screen_status(&state).await;
+        let admission = begin_screen_start(&state, key, status, None).await;
+        assert!(matches!(
+            admission,
+            PreviewScreenStartRegistration::Reused(_)
+        ));
+        stop_preview_screen(&state).await;
+        assert_eq!(
+            source_iso_protected_overlay_window_ids(&state).await,
+            vec![17, 42]
+        );
     }
 
     fn test_screen_start_key(

@@ -3,7 +3,7 @@
 ## Status and execution baseline
 
 - **Status:** IN PROGRESS, 2026-10-07. Owner authorized full execution and pushing the fixes to [PR #632](https://github.com/TheOrcDev/videorc/pull/632).
-- **Acceptance limitation:** Three simultaneous 4K30 hardware outputs fail the unchanged artifact gate on this Mac16,1 / M4 host. Sustained independent encoder controls reach about 21 fps per output. Remaining runtime, app/device and Windows stability verification is in progress; this plan is not fully accepted.
+- **Acceptance limitation:** Three simultaneous 4K30 hardware outputs fail the unchanged artifact gate on this Mac16,1 / M4 host. Sustained independent encoder controls reach about 21 fps per output. Remaining runtime and app/device verification is in progress; Windows source/audio stability passed on pushed `35b6f71d`. This plan is not fully accepted.
 - **Priority:** P1 overall; the test handshake and metadata gate are P2.
 - **Effort / implementation risk:** L / HIGH. Changes cross capture clocks, native encoder ownership, process teardown and durable recording metadata.
 - **Source inspected / planned at:** `b9ee699c82ddc58c4220d5ae32b5a1b8341fa713`, branch `feat/separate-source-recordings`; PR base `cdd2f9421bbd055a36973bcfe222b6c44db87bec`.
@@ -118,13 +118,13 @@ Use owned PIDs only. Never hold the recording/compositor mutex across child wait
 
 | Slice | Deliverable                                                     | Depends on | Effort | Status                                                                     |
 | ----- | --------------------------------------------------------------- | ---------- | ------ | -------------------------------------------------------------------------- |
-| S0    | Deterministic tap regression and lifecycle test seams           | —          | S      | Implemented; Windows repetitions pending                                   |
-| S1    | Cancellation-safe writer ownership through final commit         | S0         | M      | Implemented; Unix collision regression passed, Windows repetitions pending |
+| S0    | Deterministic tap regression and lifecycle test seams           | —          | S      | Implemented; Windows 25-pass stability verified on 35b6f71d                |
+| S1    | Cancellation-safe writer ownership through final commit         | S0         | M      | Implemented; Unix and Windows ownership regressions verified               |
 | S2    | Per-role terminal verdicts preserve encoder/audio/muxer failure | S1         | M      | Implemented; full runtime acceptance pending                               |
 | S3    | Durable role registration and idempotent crash recovery         | S2         | M      | Implemented; final acceptance pending                                      |
-| S4    | Shared production start barrier and timeline                    | S1–S3      | L      | Implemented; full timing matrix pending                                    |
+| S4    | Shared production start barrier and timeline                    | S1–S3      | L      | Implemented; native-latency and coordinated terminal output qualified     |
 | S5    | Residual audio sync offsets on both ISO muxers                  | S4         | M      | Implemented; full offset matrix pending                                    |
-| S6    | Confirmed source removal closes one role explicitly             | S2–S5      | M      | Implemented; full lifecycle matrix pending                                 |
+| S6    | Confirmed source removal closes one role explicitly             | S2–S5      | M      | Implemented; 19 lifecycle cases pass, final rollback regression pending    |
 | S7    | Production metadata and real-take gate agree                    | S3, S5, S6 | S      | Implemented; healthy controlled MKV/MP4 verified                           |
 | S8    | Production runtime smoke, failure matrix and final acceptance   | S0–S7      | L      | Implemented; final gates in progress                                       |
 
@@ -168,6 +168,14 @@ Execute in this order under one implementation owner because most slices share r
 3. Extend startup reconciliation/resumption to include interrupted ISO rows and existing export recovery records. Distinguish missing/empty media, recoverable MKV, already finalized MP4 and interrupted staging output. Only adopt artifacts through the existing validated ownership/recovery rules; never scan and claim arbitrary files by suffix.
 4. Make startup rollback explicit: untouched reservations can be retired according to existing session policy; written artifacts remain visible as failed/recoverable unless the still-uncommitted owner safely removes its own partial files. A failed metadata write must use durable recovery reporting rather than a log-only orphan.
 5. Keep export permits and registry entries established before reporting capture idle. Repeated recovery must not create duplicate siblings, double-export a completed MP4 or clear a recorded failure. Library should show real role states using existing fields.
+6. Bound buffering on ISO-enabled local MKV outputs so an interrupted take
+   contains decodable clusters during capture. Declare output packet
+   flushing and a 500 ms cluster time limit at each local MKV boundary;
+   preserve streaming destinations and ISO-off graphs. A header alone is
+   insufficient. Verify real backend interruption and successful manual
+   remux of all owned written roles. The crash fixture must establish
+   actual decodable media with a bounded readiness check before killing
+   its owned processes, rather than assume a fixed sleep proves durability.
 
 **Regressions:** reopen a database after interruption before spawn, during recording, after role stop, after MKV close, during MP4 export and after MP4 publication but before DB commit. Check one row per role, correct `take_id`, artifact ownership, explicit partial failure and repeatable replay. Include one failed Camera with usable Combined+Screen, missing paths, existing-file collisions and one database-write fault.
 
@@ -181,6 +189,50 @@ Execute in this order under one implementation owner because most slices share r
 4. Preserve discontinuities and duration on overload using existing bridge policy. Transport-specific rebasing must not erase offsets from the shared origin. ISO-off must continue on its existing optimized start path.
 5. Add a time-varying source fixture whose visual frame identity and audio impulses share a known capture clock. Hold each participant at a deterministic preparation gate in turn, including a delay longer than the former expected startup skew, then release it. Test both first content and late-session events.
 6. Distinguish temporary native target-ring exhaustion from other GPU failures. For a VideoToolbox recording consumer, keep the previous usable native frame during that bounded busy condition and preserve explicit diagnostics; do not replace it with CPU-only fallback or republish stale content as fresh. Keep the ring cap and failure/stall contracts, retain normal behavior for other consumers, and prove resumed composition after target release. The 4K artifact gate must still reject unacceptable held frames.
+
+7. Keep ISO-enabled bridge frame selection anchored to the shared content epoch at every CFR tick. A sequence change alone must not make an older content timestamp acceptable after a held compositor tick. Wait for suitable content only inside the remaining CFR interval and existing encoder headroom; on expiry retain the honest held/latest frame, without resetting origin or compressing time. Preserve ISO-off selection, capture-latency calibration, held-screen normalization and overdue/Stop bounds. Prove rejection of a newer-but-stale frame, re-alignment after publication, 72 ms capture latency and bounded stalled-source fallback with deterministic tests.
+
+8. Commit one ISO-enabled global Stop instant before requesting audio or
+   video teardown. Share it with Combined and both role supervisors, with
+   earlier committed source removal retaining precedence. Graceful video
+   Stop must submit the bounded remaining CFR interval through that
+   content-time boundary before draining its existing encoded/FIFO work;
+   otherwise native capture latency becomes a missing audio tail under
+   `-shortest`. Only pre-Stop eligible content or an explicitly held eligible
+   final frame may cover that tail. Keep immediate cancellation for startup
+   aborts, failures and uncommitted Drop, preserve ISO-off behavior, and
+   retain the existing teardown and latency budgets. Reaping must not
+   accidentally replace a graceful request with immediate cancellation.
+   Add deterministic boundary/count/deadline tests and a 72 ms native-latency
+   active-tone Stop artifact at 30/60 fps. Do not move the analyzer boundary
+   to match an already shortened recording.
+
+9. Coordinate ISO-enabled local selection by completed compositor batch
+   and CFR index. The compositor already samples sources once per tick,
+   but sequential publication lets independent readers choose opposite
+   sides of an update. Publish a completed batch only after Combined and
+   active ISO legs finish that tick; preserve every role's capture and
+   presentation metadata. The first local reader latches a batch for its
+   CFR index under the existing content floor and deadline, and the other
+   local readers use that same batch. Dedicated stream output is excluded.
+   Bound ownership to two indexed latches plus one latest completed batch:
+   no more than three distinct pinned native slots per role within the
+   unchanged five-slot-per-role/fifteen-slot global ring limits. Use actual
+   native in-flight leases, not merely frame `Arc`s, and account them in
+   existing retention diagnostics. A reader beyond bounded history must
+   report terminal lag rather than retain unbounded frames. Retiring a role
+   removes its membership; failures/removal cannot stall survivors. Busy
+   native rings may retain honest prior content but must not publish it as
+   fresh. Release cached leases during teardown. Verify readers straddling
+   publication, role retirement, eviction, exact lease release, 60 fps
+   artifacts and native pressure; do not widen timing or stop budgets.
+   The three-slot coordinator bound does not itself prove native headroom:
+   include startup, selected writer and older callback-held targets in the
+   distinct retained-target accounting. Exercise three coordinator-held
+   plus two encoder-held targets, then prove callback release permits
+   progress without growing the ring. Frame zero must use one completed
+   batch too. Keep leases continuous through submission, avoid waits under
+   coordinator locks, and fence publication after membership retirement.
 
 **Acceptance:** at 30 and 60 fps, decoded event alignment between role files and against expected audio timing differs by no more than one output frame plus 10 ms of bus chunk granularity. This is an explicit new content-alignment criterion, separate from existing container A/V and stop-tail gates. AAC encoder delay must be accounted for from decoded timing, not hidden by relaxing the tolerance. Test an intentionally shifted leg to prove detection.
 
@@ -238,6 +290,37 @@ well as Combined, since comparing two equally truncated files can pass.
 3. Send the role owner a stop cause and boundary time, stop further publication/encoding for it, close only its tap, drain and finalize it exactly once, and persist a clear “ended because source was removed” outcome. Do not wait for the global Stop. Combined, the other ISO and streams continue.
 4. Re-adding the source does not silently append/restart a new segment in the same file. Keep the ended state visible until the next session. Starting another segment is a separate product feature.
 5. Extend take expectations with persisted role start/end/outcome where necessary. Healthy, uninterrupted takes still require all armed roles and bounded duration spread. Intentional early completion is validated against its recorded end; unexplained truncation cannot pass as source removal. Without such explicit expectations, keep the real-take CLI strict.
+6. Build ISO scenes from confirmed selected-source authority independently
+   of the Combined layout. CameraOnly omits the Screen node and ScreenOnly
+   omits Camera entirely; absence from that composition is not source Off.
+   Keep the hidden selected source publishing until committed removal,
+   retain its canonical identity and orientation, and exercise real preset
+   scene construction in both directions. Coordinated batch membership must
+   not confuse layout omission with role retirement.
+7. Include active ISO demand in source retirement and capture-health
+   consumption, not only the visible primary/auxiliary scenes. Recheck
+   confirmed demand at actual stop admission, including delayed camera
+   retirement, so a layout cleanup cannot stop a newly armed ISO producer.
+   Explicit Off, retired roles and ISO-off retain ordinary cleanup behavior.
+   Keep lock ordering and source-transition ownership intact. Regress
+   hidden Screen and Camera through real layout commits and continued
+   publication, plus cleanup after ISO Stop.
+8. Apply the same demand union to startup. Hidden-layout ISO starts are
+   eligible by selected source IDs, but scene-node-only startup requirements
+   can miss an idle-retired selected source. Restore required ISO sources
+   through the existing native admission/readiness helpers before releasing
+   the shared barrier. Keep ISO-off behavior and explicit startup failures.
+   Regress CameraOnly with Screen initially stopped and ScreenOnly with
+   Camera initially stopped; a fixture that preinstalls both producers is
+   insufficient startup evidence.
+9. Reconcile physical source consumers after global ISO Stop or role failure.
+   Existing cleanup runs only on layout/source commits; preserving a hidden
+   ISO producer must not leave it running indefinitely afterward. Retire
+   terminal batch demand first, then use fresh primary/aux/preview and
+   current ISO demand under existing startup/source admission. Stop has
+   invalidated the old layout intent, so do not reuse its retirement token.
+   Protect new recordings, pending visible layouts and active streams.
+   Regress actual terminal hooks rather than manually invoking cleanup only.
 
 **Regressions:** remove camera, remove screen/window, remove while Stop is pending, remove during source replacement, source re-added afterward, hidden-but-selected camera, ordinary scene transition and physical capture failure after its existing recovery budget. Verify remaining output frames advance, removed role stops at its boundary, durations reflect actual media, and its explanation survives restart.
 
@@ -248,15 +331,34 @@ well as Combined, since comparing two equally truncated files can pass.
 1. When ISO is enabled, stamp Combined's real audio track with both `title=Mix` and `handler_name=Mix` at the output metadata boundary. Keep its internal microphone/mix identity and ISO-off metadata contract unchanged. Cover ordinary, split-output and simulcast muxer argument paths that can carry the Combined file.
 2. Retain `System audio` and `Microphone` for the two ISO roles. Verify those values after ordinary MKV-to-MP4 finalization; do not fix the problem by accepting Combined's `Microphone` tag as interchangeable with Camera.
 3. Add a real production-argument/remux metadata test. Keep title checks distinct from decoded-source checks: correct labels alone never establish correct routing. Remove the fixture's ability to mask a production metadata discrepancy by supplying its own authoritative expected tags.
-4. Ensure the CLI supports S6's explicit interrupted-role expectations without relaxing default healthy-take validation. Preserve cross-platform sibling-path handling and `--` passthrough.
+4. Explicitly declare the configured nominal video rate on ISO-enabled local MKV stream-copy outputs. Short MPEG-TS probing must not make Matroska infer its default frame duration from a transport-clock tick when native H.264 omits VUI timing. Preserve encoded packet payloads and PTS/DTS, configured profile, stream destinations and ISO-off behavior; cover Combined, sibling and shared/split argument placement. Verify actual 30/60 fps MKV/MP4 metadata without weakening analyzer checks.
+5. Ensure the CLI supports S6's explicit interrupted-role expectations without relaxing default healthy-take validation. Preserve cross-platform sibling-path handling and `--` passthrough.
 
 **Verify:** `node --test scripts/lib/separate-source-take-gates.test.mjs`, `cargo test -p videorc-backend source_iso`, and `pnpm --filter @videorc/desktop test -- src/renderer/src/lib/separate-source-recordings.test.ts src/renderer/src/lib/session-params.test.ts src/shared/backend-rpc-contract.test.ts` pass. `pnpm smoke:separate-source-take -- <actual-combined-file>` passes on both production MKV and finalized MP4 siblings; swapped labels and swapped content remain failing cases.
 
 ### S8: Close the production lifecycle and device acceptance gaps
 
 1. Keep the existing CPU/Metal pixel and audio-bus fixture as a focused check. Make its source frames vary by tick so a frozen first frame cannot satisfy its assertions. The routing-only audio fixture must coordinate producer delivery and render admission explicitly, under `cfg(test)`, rather than rely on a wall-clock playout margin. Install readiness before render starts; wait without shared locks, bound both waits and producer lookahead, allow packet/chunk overlap, and release on Stop. Retain amplitude, exact summed samples, stereo routing and zero-drop assertions; preserve independent real-time capture tests.
+   - Keep the controlled source's sample cursor, visual marker and captured timestamp on one scheduled capture clock. Record delivery/publication separately; delayed timer callbacks must not relabel older samples as newly captured. Preserve queued PCM and the explicit video capture-latency offset.
+   - Decode the wrapping blue content marker from an identified screen region in Combined, rather than averaging different sources across a counter wrap. Preserve the existing whole-frame pulse/composition checks and protect the fixture-layout assumption.
+   - Treat 10 ms tone measurements as intervals in the envelope check. Exclude only windows intersecting the unchanged transition tolerance; keep the strict ordered-event timing gate. Add 30/60 fps partial-window regressions, out-of-budget shifted-event negatives and retain encoded truncated-audio negatives. Do not increase the frame-plus-10-ms timing budget.
+   - Refine coarse audio-edge candidates from decoded samples before strict
+     ordered-event comparison. A window's left edge is not the actual tone
+     transition. Refinement must use audio evidence alone, distinguish
+     frequencies in offset mixed tracks and account for AAC artifacts;
+     never snap candidates to video times or expected offsets. Verify
+     arbitrary sub-window phases, mixed tones, encoded AAC and early/late
+     changes just outside the unchanged 30/60 fps budgets.
+     Keep every measurement-confidence diagnostic. The ordered-event gate
+     applies confidence over exactly the audio interval it already consumes:
+     first/last checked shifted video edges plus/minus its unchanged tolerance.
+     A failed candidate whose possible audio-only edge interval intersects
+     that interval remains fatal; global measurement failures remain fatal.
+     This applicability check must not change the estimator, snap an edge,
+     discard measured events, or weaken startup envelope, Stop coverage,
+     active-tone or tail checks. Add crossing-uncertainty negative controls.
 2. Add a maintained no-device runtime smoke, exposed as **new** `pnpm smoke:separate-source-runtime`, that feeds deterministic changing sources and timed audio through the production session orchestration, bridges, muxer args, Stop and finalization. Controlled capture adapters are acceptable; offline encoding of dumped frames cannot replace the production writer path. Wire it into recording-studio gates and test the command wiring.
-3. Exercise healthy start/stop, delayed preparation per role, negative/positive sync offsets, startup cancellation, failed bridge with muxer exit zero, source removal and process interruption/restart against a temporary database/output directory. For process interruption, kill only the smoke-owned backend, clean up its known children and check recovered role rows/artifacts. Persist a small JSON manifest of expected role intervals, terminal causes, event times and measured verdicts beside the evidence.
+3. Exercise healthy start/stop, delayed preparation per role, negative/positive sync offsets, startup cancellation, failed bridge with muxer exit zero, source removal and process interruption/restart against a temporary database/output directory. Provide an explicit diagnostic collect-failures mode for independent cases: retain owned-process cleanup, persist each failure, continue remaining cases, and return failure if any case failed; default fail-fast behavior and all acceptance thresholds remain unchanged. For process interruption, kill only the smoke-owned backend, clean up its known children and check recovered role rows/artifacts. Persist a small JSON manifest of expected role intervals, terminal causes, event times and measured verdicts beside the evidence.
 4. Validate 1080p30, 1080p60 and 4K30 runtime takes, plus an ISO-on dual-orientation stream to local test receivers. Analyze each file independently and verify Combined/stream composition remains composed. Keep the full shipping-profile recording-matrix gate unchanged.
 5. Extend record-latency coverage with ISO-on startup and Stop using the maintained fixture or a permission-enabled packaged app. Existing budgets remain the decision point: warm start p95 350 ms, cold start 1000 ms, Stop-to-idle p95 300 ms, short-clip background finalization p95 5000 ms. Verify completion of every armed export; the first role finishing is not whole-take finalization. Read current constants before implementation and do not raise them to make a regression pass.
 6. Run the aggregate gates below and record build SHA, host, commands, durations, verdicts and evidence locations. Finish with a permission-enabled packaged camera+screen/window+mic+system take, import the files into an editor, and confirm content alignment. Device permission blocks leave device acceptance explicitly open; a green fixture cannot close it.
@@ -598,5 +700,379 @@ The exact-source full Rust suite passed 80 helper, 3,178 backend and one
 wire test, with 14 ignored (backend 37.64 s), recorded in
 `/tmp/videorc-pr632-rust-followup-final.log`. Remaining runtime/app gates and
 new Windows stability CI are pending.
+
+The complete runtime diagnostic on pushed `35b6f71d` stopped after seven
+successful MKV/MP4 take verdicts at the system-audio-off case. Camera video
+fell one frame behind after a held tick; Camera and Combined microphone
+samples agreed, and capture/encoder diagnostics showed no re-anchor or
+queue pressure. A 1.767 s video event corresponded to audio near 1.721 s,
+exceeding the unchanged one-frame-plus-10-ms criterion. Freshness-only
+bridge selection accepts a newer sequence even when its content remains
+behind the shared CFR tick. S4 now includes bounded content-time selection
+and deterministic held-tick re-alignment regressions. This acceptance
+failure is open; the diagnostic run did not reach its expected partial exit.
+Evidence: `/tmp/videorc-pr632-runtime-remaining-final.log`, runtime `zxEmx7`.
+
+The follow-up was pushed as `35b6f71d` after the full Rust pass and a
+Shadscan score of 37 (baseline/floor 37). Its JS CI passed; Rust/Linux/
+Windows CI was still running. The required shipping-profile recording
+matrix passed 17/18 cases: all normal profiles, 1080p60 and 4K30 hard
+content, and 4K30 transient FIFO pressure. Its final 1080p30 shared-pressure
+case failed before recording because the app did not establish backend and
+preview readiness within 90 seconds. That case requires a focused rerun;
+the aggregate is not marked passed. Evidence:
+`/tmp/videorc-pr632-recording-matrix-final.log`, report directory
+`videorc-recording-matrix-1791385081628`.
+
+The S4 selector correction now requires content suitable for the shared
+CFR tick on ISO-enabled bridges. It uses stored presentation time for
+held-screen normalization, retains calibrated capture latency, bounds waits
+by the existing next-tick deadline minus encoder headroom, and adds no wait
+when catching up. Initial-frame and ISO-off paths are unchanged. Deadline
+misses are logged separately at teardown. Independent review found no
+remaining defect; strict Clippy passed and three deterministic tests passed
+for 30/60 fps re-alignment, delayed/held content and bounded Stop/deadline
+fallback. Three system-audio-off real takes passed both MKV/MP4 with unchanged
+artifact criteria (runtime `Ie0DTX`, `kTiuOc`, `iODaMb`). Evidence logs are
+`/tmp/videorc-pr632-content-clock-system-off-{1,2,3}.log`. These are partial
+quick selections; full runtime acceptance remains pending. The full Rust
+suite on this exact source passed 80 helper, 3,181 backend and one wire
+test, with 14 ignored (backend 37.13 s), recorded in
+`/tmp/videorc-pr632-rust-content-clock-final.log`.
+
+The next broad runtime passed the audio-event check that previously
+failed, but stopped at one Combined/Screen marker mismatch at 3.367 s in
+the system-audio-off take. All nine decoded pulse edges aligned across
+roles. The fixture encodes marker time from a 10 ms timer iteration count,
+while the timer's Burst behavior can advance that counter faster than wall
+time after a delay. Bounded, test-only source/publication/selection timing
+evidence is required to distinguish an invalid counter-time assumption
+from a genuine early/late frame. Further production policy changes are
+not justified yet. Strict content and timing criteria remain unchanged.
+Evidence: `/tmp/videorc-pr632-runtime-content-clock-final.log`, runtime
+`T2z5DV`.
+
+The first three remaining maintained app gates passed on the selector
+source: freeform editor (98 trusted gestures, landscape/portrait native
+preview cadence and final recording artifact), captions transport contract,
+and live caption mute/gain plus recording/RTMP artifacts and finalization.
+Logs and exact commands are in `/tmp/videorc-pr632-studio-app-final/first-three.json`.
+The full studio aggregate remains incomplete; these passes do not close the
+separate-source timing or device acceptance gaps.
+
+The first timestamp-traced take (`runtime-rqu4OZ`) reproduced an envelope
+failure despite passing ordered events. Exact PCM starts at 1.528083333 s
+and 3.328083333 s; matching video edges are 1.567/3.367 s, a 38.9167 ms
+difference within the unchanged 43.3333 ms limit. Treating a partial 10 ms
+tone window as a point at its start incorrectly reported 47 ms. S8 now
+requires interval-aware envelope measurement plus unchanged strict event
+and negative controls. The same trace shows 7.11–11.96 ms delivery spacing
+for nominal 10 ms source-counter steps, confirming the need for one
+scheduled capture clock. No additional production selection change is
+supported by this evidence. Source-isolated blue-marker extraction is a
+separate measurement correction; the earlier frame101 outlier persisted in
+a screen-only pixel, so averaging alone was not its cause.
+
+The coherent-clock 30 fps take passed both containers and all unchanged
+gates (`runtime-SyZcgw`). Capture steps are exactly 10 ms despite delivery
+lag up to 4.658 ms. The next 60 fps take exposed a real MKV metadata defect:
+Combined and Screen reported `avg_frame_rate=30000/1`, although all three
+files decode 242 frames with correct alternating 16/17 ms PTS gaps and
+`r_frame_rate=60/1`. Their final MP4s report 60 fps. Native SPS timing-info
+is absent for all three roles; level 4.2 and BT.709 remain correct.
+Bad MKVs use an 11,111 ns default duration (one 90 kHz transport tick),
+while Camera uses 16,666,666 ns. Remuxing with output-only `-r:v 60` fixes
+that metadata and preserves all 242 packet PTS, DTS and SHA256 payload
+hashes exactly. S7 therefore includes an explicit nominal-rate declaration
+for ISO-enabled local MKV stream-copy outputs. No native timing or analyzer
+tolerance change is justified. Evidence: `runtime-VFwMV4`,
+`/tmp/videorc-pr632-coherent-system-off-60.log`.
+
+The nominal-rate correction passed actual 60 fps MKV metadata checks for all
+three outputs (`runtime-SRkNtp`). The unchanged marker check then found one
+Camera frame 40 ms behind Combined/Screen during a publication transition;
+the previous permanent phase debt is gone, but this transient mismatch
+remains open. The native-latency 60 fps take (`runtime-JkmLyu`) passed
+metadata, markers and ordered events, then failed terminal coverage: media
+ends near 4.033 s against a committed Stop boundary of 4.093597 s. The bridge
+paces from barrier release while audio uses the earlier content epoch.
+Immediate video Stop therefore leaves an unsubmitted terminal interval,
+and `-shortest` clips audio to that video endpoint. Preserve the committed
+boundary and existing budgets; bounded terminal video submission plus a
+native-latency active-tone Stop regression is required. Rebasing the
+analyzer to the shorter output is not an acceptable fix.
+
+The diagnostic runner now supports explicit
+`VIDEORC_SOURCE_ISO_RUNTIME_COLLECT_FAILURES=1`: independent profile,
+lifecycle, crash and latency cases continue after owned-child cleanup,
+with per-case and aggregate failure evidence. Any collected failure forces
+exit 1, taking precedence over partial-coverage exit 3. Default fail-fast
+behavior remains unchanged. Review caught and corrected swallowed
+interruptions and timeout-over-interrupt precedence; interruptions remain
+fatal. The complete Node suite passed 1,969 tests and format checks passed
+before those narrow interruption corrections; focused verification follows.
+Evidence: `/tmp/videorc-pr632-scripts-collector-final.log` and
+`/tmp/videorc-pr632-format-collector-final.log`.
+
+The corrected nominal-rate argument regression passed for record-only,
+shared and split graphs. The real Shared 60 fps take passed both MKV/MP4
+and received-stream content checks (`runtime-p1Nn6T`). Its received FLV
+reports 60/1 nominal rates, High 4.2 and 242 packets spanning 0.021–4.038 s
+(59.995 measured fps). Evidence: `/tmp/videorc-pr632-nominal-rate-shared-60.log`.
+Full Rust verification on this source passed 80 helper, 3,183 backend and
+one wire test, with 14 ignored (backend 37.58 s), recorded in
+`/tmp/videorc-pr632-rust-nominal-final.log`. This precedes the terminal
+coverage and completed-batch selection fixes. Post-interruption-correction
+Node tests passed all 16 focused cases and targeted formatting passed.
+
+On pushed `35b6f71d`, JS, Linux, macOS Rust and Windows installer CI passed.
+Windows source/audio 25-pass stability and three full Rust-suite repetitions
+passed on this pushed commit. The complete source/audio CI job subsequently
+passed, including the remaining advisory and TypeScript checks. Incident
+diagnostics failed again: controlled and independent FFmpeg-tone cases
+report receiver tails, repeated frames/freezes and an interior-silence
+failure. Evidence: `/tmp/videorc-pr632-windows-followup-incident.log`.
+This remains a failed, out-of-scope gate, not a waiver or proof of an ISO
+regression. These CI results do not cover the uncommitted follow-up.
+
+The first complete collected runtime finished with 57 successful take
+verdicts and ten failed cases (`runtime-f9NQCx`). The failures cover native
+terminal coverage, delayed-start frame selection, a coarse audio-edge
+measurement, five hidden/removal Screen cases and process interruption.
+Cold/warm coordinator start p95 was 363.58/146.49 ms, Stop p95 246.44 ms,
+and finalization p95 764.99 ms; latency passed. Exact decoded PCM proves
+the native 60 fps interior edge differences are 24.979–25.000 ms, within
+the unchanged 26.667 ms criterion; labeling a 10 ms window by its start
+produced false 27 ms differences. The five Screen cases share a production
+bug: CameraOnly removes Screen from the scene, although it remains selected.
+Screen ISO then repeats one frame while its audio and Camera advance.
+
+Process interruption recovered the durable rows and ownership but found
+all three MKVs empty at the two-second crash point. A live observation
+shows the first write occurs about 286 ms after that readiness receipt,
+in 262,144-byte chunks (`/tmp/videorc-pr632-crash-live-3tunu8ed`). Independent
+FFmpeg controls killed after three seconds distinguish the mux behavior:
+default output remains empty; packet flushing alone writes a header but
+no readable media; flushing plus a 500 ms cluster limit yields readable
+video/audio after SIGKILL. Evidence:
+`/tmp/videorc-pr632-mkv-flush-7a50_afk` and
+`/tmp/videorc-pr632-mkv-cluster-jjvv2atx`. S3 now includes scoped local
+durability options and actual decodable-media crash readiness. These
+observations precede implementation and are not final acceptance passes.
+
+The follow-up source now passes `cargo check --tests` and strict production
+Clippy. Read-only review found no concrete blocker in completed-batch
+selection, native lease ownership, shared terminal Stop, hidden selected
+sources or local crash durability. These checks do not replace the pending
+real recording rerun. Coordinator storage holds at most two indexed batches
+plus the latest complete batch; writer, candidate and VideoToolbox leases
+also count against the unchanged five-slot native ring.
+
+Precise audio-only tone-edge measurement passed all 22 focused helper tests
+and the full 1,975-test Node suite. Maintained real AAC controls passed
+subwindow mixed-tone edges and separate edges only 4.708 ms apart, at both
+30 and 60 fps. Controls accept offsets one millisecond inside the existing
+budget and reject offsets one millisecond outside it in both directions.
+No video timestamps, expected offsets or increased tolerance enter the
+audio estimator. Evidence:
+`/tmp/videorc-pr632-scripts-refined-final.log` and
+`/tmp/videorc-pr632-refined-aac-subwindow-controls.log`.
+
+After final runtime integration, the full Node suite again passed all 1,975
+tests and formatting passed with 2,122 tracked text files checked.
+Evidence: `/tmp/videorc-pr632-scripts-batch-final.log` and
+`/tmp/videorc-pr632-format-batch-final.log`. These results precede a narrow
+cleanup correction found in final review: signal cancellation must remain
+active across manually owned crash-child readiness and receiver-listener
+waits, rather than only while `run()` owns an FFmpeg/ffprobe subprocess.
+
+The frozen Rust follow-up passed 50 focused tests (one ignored), including
+completed-batch interleaving/history, native ring occupancy and real guard
+release, hidden selected-source snapshots, terminal Stop boundaries,
+ownership/recovery and the real audio artifact fixture. Evidence:
+`/tmp/videorc-pr632-batch-terminal-focused-final.log`. Signal cleanup now
+covers complete manual-child transactions, waits for all parallel probes
+to retire, and observes crash-backend close from spawn. Real native-latency
+and collected runtime artifact verification is now running.
+
+The first follow-up native72 active-tone takes reach their committed Stop
+boundaries: at 30 fps, all three videos and decoded audio reach 3.600 s
+against Stop 3.596648 s; Stop-to-idle is 269.1 ms and finalization 957.4 ms.
+At 60 fps all three MKV analyzers also pass. Both full case verdicts remain
+failed at this point: the new estimator rejects startup or terminal edge
+candidates outside the existing interior ordered-event domain. Saved PCM
+contains an actual 21.333–30.000 ms startup zero interval, not merely AAC
+ringing. The fixture explicitly attaches its controlled system source after
+`start_session` returns; startup provenance and all diagnostics stay visible.
+Qualify confidence over the existing consumed interior interval rather than
+silently accepting an unmeasurable edge or changing a timing budget.
+Evidence: `/tmp/videorc-pr632-native72-terminal-30.log` and
+`/tmp/videorc-pr632-native72-terminal-60.log`.
+
+After gate-specific confidence qualification, the native72 active-tone
+30 fps rerun passed both MKV and MP4 decoded content, ordered timing,
+envelope, routing, real Stop-tail checks and deliberate encoded negatives.
+This is a successful focused take, explicitly partial matrix coverage,
+not whole-plan acceptance. Evidence:
+`/tmp/videorc-pr632-native72-terminal-30-qualified.log`.
+
+The first full Rust run on this production source passed 3,191 backend
+tests but failed the existing Camera None-to-A round-trip fixture because
+its initial snapshot lacked confirmed source authority. The actual scene,
+layout and revision remained identical. Initialize the fixture's selected
+camera authority before the round trip; preserve whole-snapshot equality.
+The final linked suite must be rerun before reporting a full Rust pass.
+Evidence: `/tmp/videorc-pr632-batch-terminal-rust-full.log`.
+
+Native72 active-tone 60 fps also passed both MKV and MP4 strict decoded
+and negative-control verdicts after confidence qualification. Evidence:
+`/tmp/videorc-pr632-native72-terminal-60-qualified.log`.
+
+The maintained crash-only case passed with explicit partial exit 3:
+all three live MKVs became decodable 794 ms after ownership receipt,
+each exposing 16 video and 50 audio frames. Deliberate backend SIGKILL
+followed by real restart recovery passed (`runtime-JvOfs3`). Interruption
+at the explicit owned-backend spawn boundary, before the PID receipt,
+also produced fatal AbortError and left no owned process group. This
+used readiness evidence rather than a sleep or broad process scan.
+Evidence: `/tmp/videorc-pr632-live-cluster-crash-final.log` and
+`/tmp/videorc-pr632-crash-interrupt-owned-final.log`.
+
+The complete remaining collected runtime is now running on frozen
+production source, with the confirmed 4K host limit explicitly omitted.
+Its executable precedes only the round-trip fixture initialization fix;
+all production code matches the frozen tree. Any remaining case failure
+must produce exit 1; an otherwise successful omitted-4K run produces
+partial exit 3. Evidence:
+`/tmp/videorc-pr632-batch-terminal-runtime-collected.log`.
+
+The collected run finished with exit 1: 68 take-analyzer verdicts and
+seven failed cases (`runtime-hBLyxF`). All selected profile timing, offset,
+preparation and native72 cases passed; crash recovery passed. Remaining
+failures are dual-stream Camera Off timeout, frozen Screen envelopes in
+Screen Off/re-add/Window Off/negative-offset cases, hidden Screen freeze,
+and hidden Camera fixture admission. No partial-pass claim applies to this
+failed run.
+
+Read-only diagnosis found the hidden-source production cause:
+`live_layout::retire_unused_sources_after_commit` unions visible scene
+needs only and stops Screen capture when CameraOnly omits it. The selected
+ISO snapshot cannot fetch a producer that layout cleanup stopped. Hidden
+Screen traces retain compositor sequence 12 in all three bridges; Screen
+Off retains Screen sequence 10 until retirement frees the batch. S6 now
+includes retirement and health demand for active ISO consumers, including
+the delayed Camera cleanup boundary. The hidden Camera fixture separately
+uses a fake screen ID rejected by ScreenOnly's native-source validation;
+correct its canonical fixture identity rather than weakening admission.
+The dual-stream timeout still needs separate diagnosis.
+
+S6 retirement/health implementation now checks confirmed selection and
+live batch membership, takes the existing session-start source-transition
+admission fence, and rechecks demand before stopping a producer. The
+delayed Camera path rechecks after its grace. Pure demand, real-layout
+continued-publication/retirement and startup-fence race regressions were
+added. Strict Clippy passes; focused relinking is in progress.
+The full Node suite passes 1,978 tests and formatting passes, recorded in
+`/tmp/videorc-pr632-scripts-retirement-final.log` and
+`/tmp/videorc-pr632-format-retirement-final.log`.
+
+Read-only startup review identified a related gap: both renderer and
+backend eligibility allow hidden-layout ISO by selected IDs, while native
+startup requirements still derive only from scene nodes. An idle-retired
+selected ISO producer therefore needs explicit reacquisition through the
+existing startup readiness path. This is S6 step 8, not a new refusal or
+fallback policy. Production cleanup when ISO demand disappears must also
+be checked independently of tests that manually invoke retirement.
+
+That terminal cleanup check confirms a production gap: neither ISO
+membership retirement nor finalization triggers physical source retirement.
+Preview reconciliation owns compositor runs, and the renderer delegates
+omitted preset sources to backend retirement. Global Stop invalidates the
+previous layout intent, so S6 step 9 needs fresh fenced consumer
+reconciliation. Explicit source Off already reaches its cleanup path.
+
+The S6 follow-up now reacquires idle-retired selected producers before ISO
+startup readiness, reuses matching live generations, and unions selected
+roles into the capture cadence requirements. Failed/cancelled startup
+retires only its own batch and schedules fresh consumer reconciliation
+after startup admission unwinds. Role and global terminal paths invoke
+the same reconciliation. Reacquisition also preserves the last admitted
+protected-window exclusions. Compiler checking passes in 42.28 seconds
+and strict Clippy passes in 22.94 seconds on this follow-up;
+focused relinking, lifecycle recordings and final full Rust verification
+remain pending. The previous focused relink was killed by SIGKILL before
+tests ran and is not a test verdict. Read-only review found no blocker in
+the runner's partial-mode, timeout or owned-process interruption handling.
+The independent lifecycle review likewise found no additional blocker in
+the startup guard, cadence union or terminal reconciliation hooks.
+
+A subsequent cancellation audit found one late-start edge: the native
+command can return `Starting` at its bounded reply deadline while its
+process-owned transition continues. Immediate rollback reconciliation
+skips that generation, so it must first await a transition-fence snapshot
+captured synchronously at guard Drop. The wait holds no startup admission
+and excludes newer tickets; reconciliation then checks fresh consumers.
+That narrow fix and its regression remain pending on the current linked
+candidate. Formatting and runtime runner syntax checks pass.
+
+The pre-late-start-fix candidate passes all 58 focused ISO tests, with one
+ignored maintained runtime fixture, in 4.37 seconds. Its focused
+`dual-stream-camera-off` recording completes source Off, Stop and terminal
+idle and passes the maintained artifact gates: one take verdict, no failed
+case, explicitly partial coverage. Evidence:
+`/tmp/videorc-pr632-startup-retirement-focused.log` and
+`/tmp/videorc-pr632-dual-off-retirement.log`. Both MKV/MP4 and both RTMP
+receivers pass, including survivor motion after removal. The earlier
+timeout did not reproduce; its cause remains unproven. The remaining
+lifecycle sweep and final exact-source relink
+are still required.
+
+The first lifecycle sweep qualifies 14 cases and reports five runner
+cleanup failures from transient `EPERM` on the post-exit group zero-signal
+probe. No backend/artifact failure was observed. Screen Off/re-add, Window
+Off, hidden Screen/Camera and terminal physical-source retirement pass;
+idle-hidden startup also produces healthy artifacts. The corrected poll
+keeps the original three-second bound and accepts only `ESRCH` as absence;
+real termination errors remain fatal. All 19 cases are being rerun before
+final exact-source Rust verification. Evidence:
+`/tmp/videorc-pr632-lifecycle-retirement-final.log` and
+`/tmp/videorc-pr632-lifecycle-reap-final.log`.
+
+The corrected lifecycle sweep now passes all 19 cases with zero failures,
+covering both containers, hidden/idle-hidden startup, terminal physical
+cleanup, Off/re-add/Window removal and negative-limit boundaries. Three
+dual-stream Camera Off runs complete across the focused run and sweeps;
+the earlier intermittent timeout remains causally unproven. Evidence is
+`videorc-separate-source-runtime-5a5o5V`; exit 3 explicitly records
+lifecycle-only coverage. This binary predates only the captured-transition
+late-start rollback fix. Final compiler/lint and exact-source full Rust
+verification are in progress before commit/push.
+
+The final source now includes captured-transition late-start rollback
+cleanup and its readiness-channel regression. `cargo check --tests`
+passes in 45.09 seconds; `cargo fmt --check` passes. On frozen final JS,
+all 1,978 Node tests pass in 19.57 seconds, with no skipped/cancelled tests,
+and formatting/text integrity passes for 2,122 tracked files. Evidence:
+`/tmp/videorc-pr632-scripts-exact-final.log` and
+`/tmp/videorc-pr632-format-exact-final.log`. Final strict Clippy passes in
+26.05 seconds (`/tmp/videorc-pr632-late-start-clippy.log`). Exact-source
+full Rust remains the pre-push gate.
+
+The exact-source full Rust compile was killed by SIGKILL after roughly
+14 minutes with two build jobs; it emitted no Rust error and ran no tests.
+This is not a suite verdict. A narrowly scoped kernel-log query produced
+no matching kill/memorystatus diagnostics, so the cause remains unproven.
+The exact gate is retrying with the previously successful single-job
+setting, with optimization/debug/source unchanged. Evidence:
+`/tmp/videorc-pr632-rust-lifecycle-final.log` and
+`/tmp/videorc-pr632-rust-lifecycle-serial-final.log`.
+
+The serial retry passes the exact-source full Rust gate: 80 helper tests,
+3,201 backend tests and one wire test pass, with 14 ignored tests.
+Compilation takes 21 minutes 20 seconds; backend tests take 38.90 seconds.
+The late-start rollback regression and full-scene round-trip fixture both
+pass. The qualified source is frozen for commit/push. Final collected
+runtime, app/device gates and new-head Windows stability remain pending;
+the measured three-output 4K30 hardware block is unchanged.
 
 Future writer additions must join the same origin and ownership protocol. Future source switching must preserve the distinction between committed removal and temporary unavailability. Future audio processing must retain the split between bus delays and whole-track correction. Future finalization/recovery changes must preserve per-role outcomes across crashes and retries. A test that only checks filenames, container durations or metadata is insufficient evidence for source routing, lip sync or complete output.

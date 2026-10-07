@@ -279,7 +279,49 @@ pub(crate) fn iso_muxer_ffmpeg_args(
         "matroska".to_string(),
         crate::recording::ffmpeg_file_path(output_mkv),
     ]);
+    configure_iso_local_muxer(&mut args, output_mkv, fps)?;
     Ok(args)
+}
+
+/// Native H264 may omit SPS VUI timing. A bounded MPEG-TS probe can then
+/// mistake its 90kHz timestamp timebase for the Matroska DefaultDuration.
+/// Output -r with stream copy declares the known nominal cadence without
+/// changing encoded access units or their PTS/DTS. Target the literal local
+/// file boundary: encoded Shared/split graphs use separate FLV outputs, not
+/// tee, so destination stream parameters remain untouched. Flush packets and
+/// close a cluster at least every500ms: a crash must preserve decodable media,
+/// not merely an unwritten AVIO buffer or a header without a complete cluster.
+pub(crate) fn configure_iso_local_muxer(
+    args: &mut Vec<String>,
+    output: &Path,
+    fps: u32,
+) -> Result<()> {
+    anyhow::ensure!(fps > 0, "Separate recording frame rate must be positive");
+    let output = crate::recording::ffmpeg_file_path(output);
+    let index = args
+        .iter()
+        .position(|arg| arg == &output)
+        .context("Separate recording local output is missing from the muxer graph")?;
+    anyhow::ensure!(
+        args[..index]
+            .windows(2)
+            .rev()
+            .find(|pair| pair[0] == "-c:v")
+            .is_some_and(|pair| pair[1] == "copy"),
+        "Separate recording nominal frame rate requires a stream-copy output"
+    );
+    args.splice(
+        index..index,
+        [
+            "-r:v".to_string(),
+            fps.to_string(),
+            "-flush_packets".into(),
+            "1".into(),
+            "-cluster_time_limit".into(),
+            "500".into(),
+        ],
+    );
+    Ok(())
 }
 
 /// The bus already applies source gain/mute/delay. Only its common residual
@@ -366,6 +408,7 @@ pub struct SourceIsoRuntime {
     epoch: Arc<std::sync::OnceLock<Instant>>,
     keep_original_media: bool,
     stop: Arc<std::sync::atomic::AtomicBool>,
+    stop_at: Arc<std::sync::OnceLock<Instant>>,
     supervisors: Vec<(RecordingRole, tokio::task::JoinHandle<()>)>,
     #[cfg(test)]
     abort_done: Option<tokio::sync::oneshot::Sender<bool>>,
@@ -482,6 +525,10 @@ pub fn start_source_iso_writers(
             epoch: video_epoch.clone(),
             keep_original_media,
             stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            stop_at: start_barrier.as_ref().map_or_else(
+                || Arc::new(std::sync::OnceLock::new()),
+                |barrier| barrier.stop_boundary(),
+            ),
             supervisors: Vec::new(),
             #[cfg(test)]
             abort_done: None,
@@ -709,6 +756,12 @@ impl SourceIsoRuntime {
         }
     }
 
+    pub(crate) fn request_stop_at(&self, boundary: Instant) -> Instant {
+        let boundary = *self.stop_at.get_or_init(|| boundary);
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        boundary
+    }
+
     /// Synchronous part of a partial-start abort: muxers get SIGKILL now so
     /// a dropped guard never leaks a writing FFmpeg, bridges are asked to
     /// stop, taps stop, and the partial files/FIFOs go. Bridge reaping
@@ -827,6 +880,7 @@ impl SourceIsoRuntime {
             }
         }
         self.cleanup_fifos();
+        crate::live_layout::reconcile_source_iso_capture_demand(state).await;
         // Role supervisors persist and register exports before completing.
         Vec::new()
     }
@@ -845,6 +899,7 @@ impl SourceIsoRuntime {
             let state = state.clone();
             let taps = self.taps.clone();
             let stop = self.stop.clone();
+            let stop_at = self.stop_at.clone();
             let epoch = self.epoch.clone();
             let session_id = self.session_id.clone();
             let ffmpeg_path = self.ffmpeg_path.clone();
@@ -860,6 +915,7 @@ impl SourceIsoRuntime {
                         &session_id,
                         taps,
                         stop,
+                        stop_at,
                         epoch,
                         fps,
                         track_shift_ms,
@@ -867,6 +923,7 @@ impl SourceIsoRuntime {
                     )
                     .await;
                     let ended_at = chrono::Utc::now().to_rfc3339();
+                    crate::live_layout::reconcile_source_iso_capture_demand(&state).await;
                     commit_finished_source_iso_roles(
                         &state,
                         &session_id,
@@ -928,6 +985,7 @@ async fn supervise_role(
     session_id: &str,
     taps: Arc<SourceAudioTaps>,
     stop: Arc<std::sync::atomic::AtomicBool>,
+    stop_at: Arc<std::sync::OnceLock<Instant>>,
     epoch: Arc<std::sync::OnceLock<Instant>>,
     fps: u32,
     track_shift_ms: i32,
@@ -1050,7 +1108,9 @@ async fn supervise_role(
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .source_removed_at(session_id, writer.role == RecordingRole::Camera);
-        if let Some(boundary) = removed {
+        if let Some(boundary) =
+            removed.filter(|removed_at| stop_at.get().is_none_or(|stop_at| removed_at <= stop_at))
+        {
             ended_at = Some(boundary);
             end_reason = Some(format!(
                 "{} recording ended because its selected source was removed.",
@@ -1061,6 +1121,7 @@ async fn supervise_role(
         // A committed removal keeps its earlier boundary even when Stop was
         // requested before this supervisor's next observation.
         if stop.load(std::sync::atomic::Ordering::Acquire) {
+            ended_at = stop_at.get().copied();
             break;
         }
     }
@@ -1080,7 +1141,13 @@ async fn supervise_role(
             .as_millis() as i64
     });
     if let Some(bridge) = writer.bridge.as_ref() {
-        bridge.stop();
+        if failure.is_none()
+            && let Some(boundary) = ended_at
+        {
+            bridge.stop_at(boundary);
+        } else {
+            bridge.stop();
+        }
     }
     // The bus intentionally trails capture by its playout delay. Keep this
     // role's tap open until the real samples covering its video boundary have
@@ -1692,6 +1759,9 @@ mod tests {
                     video: &params.output.video,
                     video_output: EncoderBridgeVideoOutput::RawYuv420p,
                     frame_stores: CompositorSourceIsoFrameStores {
+                        batches: Arc::new(
+                            crate::compositor::source_iso_batch::SourceIsoBatchStore::default(),
+                        ),
                         screen: Arc::new(std::sync::Mutex::new(
                             crate::frame_store::FrameStore::new(2),
                         )),
@@ -1830,6 +1900,7 @@ mod tests {
             epoch: Arc::new(Default::default()),
             keep_original_media: true,
             stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            stop_at: Arc::new(std::sync::OnceLock::new()),
             supervisors: Vec::new(),
             abort_done: Some(done),
             owned_pids: Vec::new(),
@@ -2114,7 +2185,7 @@ mod tests {
             "{joined}"
         );
         assert!(
-            joined.ends_with("-shortest -f matroska /tmp/out-camera.mkv"),
+            joined.ends_with("-shortest -f matroska -r:v 60 -flush_packets 1 -cluster_time_limit 500 /tmp/out-camera.mkv"),
             "{joined}"
         );
         assert!(

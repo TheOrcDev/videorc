@@ -1504,8 +1504,12 @@ impl SessionAudio {
     }
 
     pub fn request_stop(&self) {
+        self.request_stop_at(Instant::now());
+    }
+
+    pub(crate) fn request_stop_at(&self, boundary: Instant) {
         // The instant first, so a bus that sees the flag drains to it.
-        let _ = self.handle.stop_requested_at.set(Instant::now());
+        let _ = self.handle.stop_requested_at.set(boundary);
         self.handle.stop.store(true, Ordering::Release);
         let stats = self.stats();
         stats.mark_stopped();
