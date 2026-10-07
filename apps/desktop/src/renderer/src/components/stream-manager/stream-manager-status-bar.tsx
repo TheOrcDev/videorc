@@ -101,6 +101,11 @@ export function providerCapabilityTitle(
       'Follow alerts and the sub count need one more Twitch permission: Reconnect Twitch in Livestream → Setup.'
     )
   }
+  if (provider.platform === 'twitch' && entry?.bitsPointsScopes === false) {
+    lines.push(
+      'Power-ups and channel points need one more Twitch permission: Reconnect Twitch in Livestream → Setup.'
+    )
+  }
   return lines.filter(Boolean).join('\n')
 }
 

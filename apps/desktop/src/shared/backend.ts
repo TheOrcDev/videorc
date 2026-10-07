@@ -4661,6 +4661,8 @@ export type LiveChatRedemptionKind =
   | 'random-emote-unlock'
   | 'chosen-emote-unlock'
   | 'modified-emote-unlock'
+  /** An automatic reward Twitch added after this build. */
+  | 'other'
 
 export type LiveChatMembershipKind = 'new' | 'upgrade' | 'milestone' | 'gift' | 'gift-received'
 
@@ -5895,6 +5897,9 @@ export interface PlatformAudience {
   subscriberPoints?: number
   /** Twitch only: false when follow alerts and the sub count need a reconnect. */
   audienceScopes?: boolean
+  /** Twitch only: false when Power-ups and channel point redemptions need a
+   * reconnect (plan 162). */
+  bitsPointsScopes?: boolean
   /** Followers gained this stream, one per read that set a new high, oldest first. */
   followerGains?: FollowerGain[]
   /** Since when a follow event subscription names each new follower (plan

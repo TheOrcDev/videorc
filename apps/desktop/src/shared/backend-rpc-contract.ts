@@ -765,6 +765,7 @@ const audienceSnapshotSchema = objectSchema(
           subscribers: optionalSchema(numberSchema({ integer: true, min: 0 })),
           subscriberPoints: optionalSchema(numberSchema({ integer: true, min: 0 })),
           audienceScopes: optionalSchema(booleanSchema),
+          bitsPointsScopes: optionalSchema(booleanSchema),
           namedFollowsSince: optionalSchema(nullableSchema(boundedString)),
           namedFollowsUntil: optionalSchema(nullableSchema(boundedString)),
           followerGains: optionalSchema(

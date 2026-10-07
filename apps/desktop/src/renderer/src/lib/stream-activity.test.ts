@@ -233,6 +233,7 @@ describe('stream activity', () => {
       follows: 1,
       support: 8,
       tips: 4,
+      rewards: 0,
       raids: 1,
       streaks: 0,
       destinations: 0
@@ -560,5 +561,93 @@ describe('watch streaks (plan 151)', () => {
 
   it('drops a removed streak', () => {
     expect(activityItems([{ ...streak('hi'), isDeleted: true }])).toEqual([])
+  })
+})
+
+describe('Power-ups and channel point redemptions (plan 162)', () => {
+  const celebration = row(
+    'twitch',
+    'GVASTE',
+    'power-up',
+    { kind: 'power-up', bits: 300, powerUp: 'celebration' },
+    'GVASTE used a Celebration'
+  )
+  const gigantify = row(
+    'twitch',
+    'maddada',
+    'power-up',
+    { kind: 'power-up', bits: 50, powerUp: 'gigantify-an-emote', emoteName: 'orcdevBONK' },
+    'maddada gigantified orcdevBONK'
+  )
+  const hydrate = {
+    ...row(
+      'twitch',
+      'Von6',
+      'redemption',
+      { kind: 'redemption', reward: 'custom', channelPoints: 500, title: 'Hydrate' },
+      'Von6 redeemed Hydrate'
+    ),
+    fragments: [{ type: 'text', text: 'drink water orc' }]
+  }
+  const unlock = row(
+    'twitch',
+    'Lark__',
+    'redemption',
+    {
+      kind: 'redemption',
+      reward: 'chosen-emote-unlock',
+      channelPoints: 2000,
+      emoteName: 'orcdevLURK'
+    },
+    'Lark__ unlocked orcdevLURK'
+  )
+  const cheer = row('twitch', 'cheerful', 'paid', { kind: 'cheer', bits: 100 }, 'Cheer100 hi')
+
+  it('lists a Power-up under Tips with its bits', () => {
+    const [item] = activityItems([celebration])
+    expect(item).toMatchObject({
+      kind: 'power-up',
+      filter: 'tips',
+      name: 'GVASTE',
+      line: 'Used a Celebration · 300 bits',
+      short: 'Celebration · 300 bits'
+    })
+    expect(item.message).toBeUndefined()
+    expect(activityItems([gigantify])[0]).toMatchObject({
+      line: 'Gigantified orcdevBONK · 50 bits',
+      short: 'Gigantified orcdevBONK · 50 bits'
+    })
+  })
+
+  it("lists a redemption under Rewards with the viewer's words", () => {
+    expect(activityItems([hydrate])[0]).toMatchObject({
+      kind: 'redemption',
+      filter: 'rewards',
+      line: 'Redeemed Hydrate · 500 points',
+      short: 'Hydrate',
+      message: 'drink water orc'
+    })
+    expect(activityItems([unlock])[0]).toMatchObject({
+      line: 'Unlocked orcdevLURK · 2,000 points',
+      short: 'Unlocked orcdevLURK'
+    })
+  })
+
+  it('counts Power-up bits with cheers and never sums points (D3)', () => {
+    const totals = activityTotals([celebration, gigantify, cheer, hydrate, unlock])
+    expect(totals.bits).toBe(450)
+    expect(totals.supporters).toBe(0)
+    expect(activityFilterCounts(activityItems([celebration, cheer, hydrate, unlock]))).toMatchObject(
+      { tips: 2, rewards: 2 }
+    )
+  })
+
+  it('thanks the viewer by name', () => {
+    expect(thankYouDraft(activityItems([celebration])[0])).toBe('Thank you so much, @GVASTE!')
+    expect(thankYouDraft(activityItems([hydrate])[0])).toBe('Thanks for redeeming, @Von6!')
+  })
+
+  it('drops a removed redemption', () => {
+    expect(activityItems([{ ...hydrate, isDeleted: true }])).toEqual([])
   })
 })
