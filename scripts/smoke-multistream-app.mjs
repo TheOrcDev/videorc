@@ -343,8 +343,10 @@ async function verifyResults(outputPath, targetSnapshots, diagnosticSamples) {
     console.log('  ✓ Record+stream bridge reported no duplicate capture diagnostics')
   }
 
-  // M5 failure-handling: the offline leg must be reported failed while the healthy
-  // legs report live in the latest per-target snapshot.
+  // M5 failure-handling: the offline leg must be reported down while the healthy
+  // legs report live in the latest per-target snapshot. Since plan 161 the fifo
+  // keeps retrying an unreachable leg, which is `reconnecting`; `failed` is
+  // still an honest answer for a leg that cannot come back.
   if (badTarget) {
     const latest = targetSnapshots.at(-1)
     if (!latest) {
@@ -352,15 +354,15 @@ async function verifyResults(outputPath, targetSnapshots, diagnosticSamples) {
       failures.push('no stream.targets snapshot emitted')
     } else {
       const badRuntime = latest.find((entry) => entry.targetId === badTarget.id)
-      if (badRuntime?.state === 'failed') {
+      if (badRuntime?.state === 'reconnecting' || badRuntime?.state === 'failed') {
         console.log(
-          `  ✓ ${badTarget.label} reported "failed" — dead leg dropped, others kept streaming`
+          `  ✓ ${badTarget.label} reported "${badRuntime.state}" — dead leg isolated, others kept streaming`
         )
       } else {
         console.log(
-          `  ✗ ${badTarget.label} should report failed, got ${badRuntime?.state ?? 'absent'}`
+          `  ✗ ${badTarget.label} should report reconnecting, got ${badRuntime?.state ?? 'absent'}`
         )
-        failures.push(`offline target not reported failed (${badRuntime?.state ?? 'absent'})`)
+        failures.push(`offline target not reported down (${badRuntime?.state ?? 'absent'})`)
       }
       for (const good of targets) {
         const runtime = latest.find((entry) => entry.targetId === good.id)
