@@ -4811,6 +4811,7 @@ async fn start_session_with_timeline(
             // remains testable so future in-place restarts cannot inherit counters.
             let process_generation = 0_u64;
             let mut stream_legs = StreamLegMonitor::new(stream_url_positions);
+            let mut ffmpeg_repeats = FfmpegRepeatThrottle::default();
             let mut reconnecting_since = std::collections::HashMap::new();
             let mut stream_health_accumulator =
                 StreamHealthAccumulator::new(&log_session_id, process_generation);
@@ -4924,7 +4925,12 @@ async fn start_session_with_timeline(
                 // Progress/stat spam must not reach the bounded log ring —
                 // it evicted every useful entry within ~60s during the
                 // 2026-07-08 X incident. Stats still feed stream health.
-                if is_ffmpeg_progress_noise(trimmed) {
+                // Plan 161: a leg retrying every two seconds repeats the
+                // same tcp/rtmp/fifo error lines; the first is news, the
+                // same line again within a minute is not.
+                let repeat_admitted = is_ffmpeg_progress_noise(trimmed)
+                    || ffmpeg_repeats.admit(trimmed, Instant::now());
+                if is_ffmpeg_progress_noise(trimmed) || !repeat_admitted {
                     tracing::debug!("{trimmed}");
                 } else {
                     log_state.emit_log("warn", trimmed);
@@ -4950,7 +4956,7 @@ async fn start_session_with_timeline(
                 {
                     last_stream_health_published_at = Instant::now();
                 }
-                if looks_like_ffmpeg_health_event(trimmed) {
+                if repeat_admitted && looks_like_ffmpeg_health_event(trimmed) {
                     publish_ffmpeg_health_event_if_active(&log_state, &log_session_id, trimmed)
                         .await;
                 }
@@ -22300,6 +22306,47 @@ impl StreamLegMonitor {
     }
 }
 
+/// Keeps a line FFmpeg repeats in a loop out of the log ring and the persisted
+/// health log (plan 161). A fifo leg retrying every two seconds prints the
+/// same tcp, rtmp and fifo errors each time; the first is news, the same line
+/// within [`FFMPEG_REPEAT_WINDOW`] is not. Log-context pointers are ignored so
+/// a fresh `[rtmp @ 0x…]` per attempt still counts as the same line.
+#[derive(Debug, Default)]
+struct FfmpegRepeatThrottle {
+    last_admitted: std::collections::HashMap<String, Instant>,
+}
+
+const FFMPEG_REPEAT_WINDOW: Duration = Duration::from_secs(60);
+const FFMPEG_REPEAT_KEYS: usize = 512;
+
+impl FfmpegRepeatThrottle {
+    fn admit(&mut self, line: &str, now: Instant) -> bool {
+        let key = ffmpeg_repeat_key(line);
+        if let Some(at) = self.last_admitted.get(&key)
+            && now.saturating_duration_since(*at) < FFMPEG_REPEAT_WINDOW
+        {
+            return false;
+        }
+        if self.last_admitted.len() >= FFMPEG_REPEAT_KEYS {
+            self.last_admitted.clear();
+        }
+        self.last_admitted.insert(key, now);
+        true
+    }
+}
+
+/// The line with every `0x…` pointer reduced to `0x`.
+fn ffmpeg_repeat_key(line: &str) -> String {
+    let mut key = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(start) = rest.find("0x") {
+        key.push_str(&rest[..start + 2]);
+        rest = rest[start + 2..].trim_start_matches(|c: char| c.is_ascii_hexdigit());
+    }
+    key.push_str(rest);
+    key
+}
+
 fn stream_leg_reason(reason: String) -> String {
     if reason.is_empty() {
         "Stream connection failed".to_string()
@@ -29019,6 +29066,30 @@ mod tests {
         assert_eq!(
             platform_observation_transition(StreamTargetState::NotConfigured, &ended),
             None
+        );
+    }
+
+    #[test]
+    fn a_retry_loop_is_news_once_a_minute() {
+        let mut throttle = FfmpegRepeatThrottle::default();
+        let start = Instant::now();
+        let first =
+            "[rtmp @ 0xac4c20700] Cannot open connection tcp://127.0.0.1:19361?tcp_nodelay=0";
+        let again =
+            "[rtmp @ 0xac4c20980] Cannot open connection tcp://127.0.0.1:19361?tcp_nodelay=0";
+        assert!(throttle.admit(first, start));
+        assert!(
+            !throttle.admit(again, start + Duration::from_secs(2)),
+            "a fresh context pointer is the same line"
+        );
+        assert!(throttle.admit(
+            "[fifo @ 0x1] Error opening rtmp://127.0.0.1:19361/live/k: Connection refused",
+            start + Duration::from_secs(2)
+        ));
+        assert!(throttle.admit(again, start + FFMPEG_REPEAT_WINDOW));
+        assert_eq!(
+            ffmpeg_repeat_key("[tcp @ 0xac4c446e0] x 0x12 y"),
+            "[tcp @ 0x] x 0x y"
         );
     }
 
