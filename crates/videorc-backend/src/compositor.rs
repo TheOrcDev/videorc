@@ -5044,6 +5044,7 @@ async fn run_synthetic_compositor_loop(
     let mut next_live_source_refresh_at = Instant::now() + COMPOSITOR_LIVE_SOURCE_REFRESH_INTERVAL;
 
     let mut frames_rendered = 0_u64;
+    let mut latest_published_sequence = 0_u64;
     let mut frames_in_window = 0_u64;
     let mut repeated_frames = 0_u64;
     let mut dropped_frames = 0_u64;
@@ -5192,7 +5193,6 @@ async fn run_synthetic_compositor_loop(
 
                 let render_started_at = Instant::now();
                 frames_rendered = frames_rendered.saturating_add(1);
-                frames_in_window = frames_in_window.saturating_add(1);
                 // Preview bounds can change without restarting the compositor
                 // (including portrait <-> landscape). Re-read every tick so
                 // the next published frame and Metal target adopt the new
@@ -5260,11 +5260,22 @@ async fn run_synthetic_compositor_loop(
                     delivery_stats.screen_fresh_serves,
                 );
                 let fallback_frame_age_ms = published.fallback_frame_age_ms;
-                cpu_frame_counts.record(published.compositor_backend);
-                if is_repeated_compositor_frame(previous_fingerprint, published.fingerprint) {
+                if published.primary_published {
+                    latest_published_sequence = frames_rendered;
+                    frames_in_window = frames_in_window.saturating_add(1);
+                }
+                if published.primary_published {
+                    cpu_frame_counts.record(published.compositor_backend);
+                }
+                let fingerprint = if published.primary_published {
+                    published.fingerprint
+                } else {
+                    previous_fingerprint.unwrap_or(published.fingerprint)
+                };
+                if !published.primary_published || is_repeated_compositor_frame(previous_fingerprint, fingerprint) {
                     repeated_frames = repeated_frames.saturating_add(1);
                 }
-                previous_fingerprint = Some(published.fingerprint);
+                previous_fingerprint = Some(fingerprint);
                 frame_times_ms.push(render_started_at.elapsed().as_secs_f64() * 1000.0);
                 source_fetch_times_ms.push(published.timings.source_fetch_ms);
                 scene_snapshot_times_ms.push(published.timings.scene_snapshot_ms);
@@ -5294,7 +5305,10 @@ async fn run_synthetic_compositor_loop(
                 frame_store_publish_times_ms.push(published.timings.frame_store_publish_ms);
 
                 let surface_progress_started_at = Instant::now();
-                let surface_status = match try_update_preview_surface_frames(&state, frames_rendered) {
+                let surface_sequence = if published.primary_published { frames_rendered } else {
+                    latest_surface_status.as_ref().map_or(0, |status| status.frames_rendered)
+                };
+                let surface_status = match try_update_preview_surface_frames(&state, surface_sequence) {
                     Ok(Some(status)) => {
                         preview_surface_active = status.transport.is_surface();
                         latest_surface_status = Some(status.clone());
@@ -5314,7 +5328,7 @@ async fn run_synthetic_compositor_loop(
                 preview_surface_progress_times_ms
                     .push(surface_progress_started_at.elapsed().as_secs_f64() * 1000.0);
 
-                if preview_surface_active
+                if published.primary_published && preview_surface_active
                     && should_emit_preview_surface_compositor_progress(latest_surface_status.as_ref())
                 {
                     let status_progress_started_at = Instant::now();
@@ -5616,16 +5630,17 @@ async fn run_synthetic_compositor_loop(
                         latest_source_statuses = sources;
                     }
                     let sources = latest_source_statuses.clone();
-                    let frame_age_ms = compositor_frame_age_ms(
-                        &sources,
-                        fallback_frame_age_ms,
-                    );
+                    let frame_age_ms = if published.primary_published {
+                        compositor_frame_age_ms(&sources, fallback_frame_age_ms)
+                    } else {
+                        fallback_frame_age_ms
+                    };
                     let status = match try_update_compositor_status(
                         &state,
                         &run_id,
                         CompositorMetrics {
                             render_fps: measured_fps,
-                            frames_rendered,
+                            frames_rendered: latest_published_sequence,
                             repeated_frames,
                             dropped_frames,
                             frame_age_ms,
@@ -5790,6 +5805,7 @@ impl SourceFrameFingerprint {
 /// The result of compositing and publishing one frame: how stale the frame was, plus
 /// the fingerprint of the real source frames that fed it.
 struct CompositorPublishResult {
+    primary_published: bool,
     fallback_frame_age_ms: u64,
     fingerprint: SourceFrameFingerprint,
     compositor_backend: CompositorBackend,
@@ -6152,6 +6168,52 @@ fn push_caption_overlay_gpu_source<'a>(
     });
 }
 
+#[derive(Debug)]
+enum GpuComposeFailure {
+    #[cfg(target_os = "macos")]
+    TargetRingBusy,
+    Unavailable(String),
+}
+
+impl From<&str> for GpuComposeFailure {
+    fn from(reason: &str) -> Self {
+        Self::Unavailable(reason.to_owned())
+    }
+}
+
+impl From<String> for GpuComposeFailure {
+    fn from(reason: String) -> Self {
+        Self::Unavailable(reason)
+    }
+}
+
+impl std::fmt::Display for GpuComposeFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            #[cfg(target_os = "macos")]
+            Self::TargetRingBusy => {
+                formatter.write_str("Metal target ring busy; retaining previous native frame")
+            }
+            Self::Unavailable(reason) => formatter.write_str(reason),
+        }
+    }
+}
+
+impl GpuComposeFailure {
+    fn retains_native_frame(&self, consumer: CompositorFrameConsumer) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            matches!(self, Self::TargetRingBusy)
+                && matches!(consumer, CompositorFrameConsumer::VideoToolboxEncoder)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = consumer;
+            false
+        }
+    }
+}
+
 /// Compose the scene on the GPU for the cases the GPU path reproduces exactly:
 /// Screen/Window/Camera/TestPattern sources with transform crop, cover/contain fitting,
 /// camera mirror, and camera circle masks. Uploaded-image sources still fall back to the
@@ -6162,7 +6224,7 @@ fn try_gpu_compose(
     gpu: Option<&mut GpuCompositor>,
     inputs: &CompositorRenderInputs<'_>,
     publish_yuv_frame: bool,
-) -> Result<GpuCompositorFrame, String> {
+) -> Result<GpuCompositorFrame, GpuComposeFailure> {
     try_gpu_compose_with_chrome(gpu, inputs, publish_yuv_frame, &[])
 }
 
@@ -6254,7 +6316,7 @@ fn try_gpu_compose_with_chrome(
     inputs: &CompositorRenderInputs<'_>,
     publish_yuv_frame: bool,
     editor_chrome: &[ChromeQuad],
-) -> Result<GpuCompositorFrame, String> {
+) -> Result<GpuCompositorFrame, GpuComposeFailure> {
     let gpu = gpu.ok_or_else(|| {
         if metal_compositor_enabled() {
             "Metal compositor unavailable"
@@ -6753,7 +6815,13 @@ fn try_gpu_compose_with_chrome(
         &sources,
         publish_yuv_frame,
     )
-    .ok_or("Metal compositor failed to render scene")?;
+    .ok_or_else(|| {
+        if gpu.target_ring_busy() {
+            GpuComposeFailure::TargetRingBusy
+        } else {
+            GpuComposeFailure::from("Metal compositor failed to render scene")
+        }
+    })?;
     Ok(gpu_compositor_frame(gpu, output, prepare_ms))
 }
 
@@ -7334,8 +7402,8 @@ fn try_gpu_compose(
     _gpu: Option<&mut GpuCompositor>,
     _inputs: &CompositorRenderInputs<'_>,
     _publish_yuv_frame: bool,
-) -> Result<GpuCompositorFrame, String> {
-    Err("Metal compositor unavailable on this OS".to_string())
+) -> Result<GpuCompositorFrame, GpuComposeFailure> {
+    Err("Metal compositor unavailable on this OS".into())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -7344,7 +7412,7 @@ fn try_gpu_compose_with_chrome(
     inputs: &CompositorRenderInputs<'_>,
     publish_yuv_frame: bool,
     _editor_chrome: &[ChromeQuad],
-) -> Result<GpuCompositorFrame, String> {
+) -> Result<GpuCompositorFrame, GpuComposeFailure> {
     try_gpu_compose(gpu, inputs, publish_yuv_frame)
 }
 
@@ -7518,6 +7586,7 @@ async fn publish_compositor_frame(
         .filter(|output| output.composes_simulcast_scene)
         .and_then(|_| crate::captions::current_caption_overlay(&state.simulcast_highlight_overlay));
     let mut bytes;
+    let mut retain_previous_native_frame = false;
     {
         let inputs = CompositorRenderInputs {
             sequence,
@@ -7558,6 +7627,7 @@ async fn publish_compositor_frame(
                 compositor_backend = CompositorBackend::Metal;
             }
             Err(reason) => {
+                retain_previous_native_frame = reason.retains_native_frame(frame_consumer);
                 let gpu_available = gpu.is_some();
                 let failed_gpu_timings = take_failed_gpu_timings(gpu);
                 timings.merge_gpu(failed_gpu_timings);
@@ -7573,11 +7643,13 @@ async fn publish_compositor_frame(
                     compositor_fallback_reason = None;
                     let _ = reason;
                 } else if cfg!(target_os = "macos") {
-                    compositor_fallback_reason = Some(reason);
+                    compositor_fallback_reason = Some(reason.to_string());
                 } else {
                     let _ = reason;
                 }
-                if frame_consumer.composes_cpu_pixels(gpu_available) {
+                if !retain_previous_native_frame
+                    && frame_consumer.composes_cpu_pixels(gpu_available)
+                {
                     bytes = {
                         let mut store = frame_store
                             .lock()
@@ -7594,16 +7666,27 @@ async fn publish_compositor_frame(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let publish_started_at = Instant::now();
-        metal_target_handoff = export_handle.metal_target_handoff();
-        store.publish_with_metadata(
-            sequence,
-            width,
-            height,
-            pixel_format,
-            export_handle.with_presentation_time(published_at),
-            captured_at,
-            bytes,
-        );
+        metal_target_handoff = if retain_previous_native_frame {
+            store
+                .latest()
+                .and_then(|frame| frame.metadata.metal_target_handoff())
+        } else {
+            export_handle.metal_target_handoff()
+        };
+        if retain_previous_native_frame && metal_target_handoff.is_some() {
+            compositor_backend = CompositorBackend::Metal;
+        }
+        if !retain_previous_native_frame {
+            store.publish_with_metadata(
+                sequence,
+                width,
+                height,
+                pixel_format,
+                export_handle.with_presentation_time(published_at),
+                captured_at,
+                bytes,
+            );
+        }
         timings.frame_store_publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
     }
     let primary_published = frame_store
@@ -7771,7 +7854,8 @@ async fn publish_compositor_frame(
         has_image_source,
         published_at,
     };
-    if let Ok(mut compositor) = state.compositor.try_lock()
+    if primary_published
+        && let Ok(mut compositor) = state.compositor.try_lock()
         && set_latest_frame_evidence_if_current_run(&mut compositor, run_id, evidence)
         && let Some(receipt) = compositor.source_edit_receipt.as_ref()
         && compositor
@@ -7832,8 +7916,32 @@ async fn publish_compositor_frame(
             }
         }
     }
+    let (fallback_frame_age_ms, fingerprint) = if retain_previous_native_frame {
+        let age = frame_store
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .latest()
+            .map_or(0, |frame| frame.captured_at.elapsed().as_millis() as u64);
+        let previous = state
+            .compositor
+            .try_lock()
+            .ok()
+            .and_then(|runtime| runtime.frame_evidence.back().copied());
+        (
+            age,
+            previous.map_or_else(SourceFrameFingerprint::default, |evidence| {
+                SourceFrameFingerprint {
+                    camera: evidence.camera_sequence,
+                    screen: evidence.screen_sequence,
+                }
+            }),
+        )
+    } else {
+        (captured_at.elapsed().as_millis() as u64, fingerprint)
+    };
     CompositorPublishResult {
-        fallback_frame_age_ms: captured_at.elapsed().as_millis() as u64,
+        primary_published,
+        fallback_frame_age_ms,
         fingerprint,
         compositor_backend,
         compositor_fallback_reason,
@@ -7887,6 +7995,10 @@ fn publish_auxiliary_compositor_frame(
             pixel_format = frame.pixel_format;
             export_handle = frame.export_handle;
             (frame.yuv, Some(frame.timings))
+        }
+        Err(reason) if reason.retains_native_frame(frame_consumer) => {
+            tracing::debug!(%reason, sequence, "Auxiliary compositor retained its previous native frame");
+            return Some(take_failed_gpu_timings(gpu));
         }
         Err(_) if frame_consumer.requires_cpu_fallback() => {
             let mut bytes = {
@@ -11067,6 +11179,190 @@ mod tests {
 
         assert!(frame.pixel_format.has_metal_iosurface_target());
         assert!(frame.export_handle.has_metal_iosurface_target());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn source_iso_busy_target_ring_preserves_native_frame_and_resumes() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            return;
+        };
+        let state = test_state();
+        state.compositor.lock().await.run_id = Some("ring-busy-test".into());
+        let mut live_sources = CompositorLiveSources::default();
+        let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+        let store = compositor_frame_store(&state).await;
+        let mut held = Vec::new();
+        for sequence in 1..=6 {
+            let result = publish_compositor_frame(
+                &state,
+                "ring-busy-test",
+                sequence,
+                8,
+                4,
+                &mut live_sources,
+                &mut cache,
+                Some(&mut gpu),
+                CompositorFrameConsumer::VideoToolboxEncoder,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                false,
+                false,
+                false,
+            )
+            .await;
+            let frame = store.lock().unwrap().latest().expect("native frame");
+            assert!(frame.metadata.has_metal_iosurface_target());
+            assert_eq!(
+                compositor_latest_frame_evidence(&state)
+                    .await
+                    .unwrap()
+                    .sequence,
+                sequence.min(5)
+            );
+            assert_eq!(result.primary_published, sequence <= 5);
+            assert_eq!(
+                result
+                    .metal_target_handoff
+                    .as_ref()
+                    .map(|handoff| handoff.iosurface_id),
+                frame.metadata.metal_target_iosurface_id()
+            );
+            if sequence <= 5 {
+                assert_eq!(frame.sequence, sequence);
+                held.push(
+                    frame
+                        .metadata
+                        .metal_target_pixel_buffer()
+                        .unwrap()
+                        .begin_in_flight(),
+                );
+            } else {
+                assert_eq!(
+                    frame.sequence, 5,
+                    "busy must not republish old content as fresh"
+                );
+                assert!(
+                    result
+                        .compositor_fallback_reason
+                        .as_deref()
+                        .unwrap()
+                        .contains("target ring busy")
+                );
+            }
+        }
+        held.pop();
+        let resumed = publish_compositor_frame(
+            &state,
+            "ring-busy-test",
+            7,
+            8,
+            4,
+            &mut live_sources,
+            &mut cache,
+            Some(&mut gpu),
+            CompositorFrameConsumer::VideoToolboxEncoder,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+        )
+        .await;
+        assert_eq!(resumed.compositor_backend, CompositorBackend::Metal);
+        assert_eq!(store.lock().unwrap().latest().unwrap().sequence, 7);
+        assert_eq!(
+            compositor_latest_frame_evidence(&state)
+                .await
+                .unwrap()
+                .sequence,
+            7
+        );
+        assert!(
+            !GpuComposeFailure::from("device unavailable")
+                .retains_native_frame(CompositorFrameConsumer::VideoToolboxEncoder)
+        );
+        assert!(
+            !GpuComposeFailure::TargetRingBusy
+                .retains_native_frame(CompositorFrameConsumer::RawYuvEncoder)
+        );
+
+        // The ISO auxiliary publisher follows the same hold/resume contract.
+        let auxiliary = Arc::new(std::sync::Mutex::new(FrameStore::new(2)));
+        let inputs = |sequence| CompositorRenderInputs {
+            sequence,
+            width: 8,
+            height: 4,
+            snapshot: None,
+            active_image_source: None,
+            background_image_source: None,
+            camera_frame: None,
+            screen_frame: None,
+            caption_overlay: None,
+            highlight_overlay: None,
+        };
+        drop(held);
+        publish_auxiliary_compositor_frame(
+            8,
+            Instant::now(),
+            Instant::now(),
+            auxiliary.clone(),
+            inputs(8),
+            Some(&mut gpu),
+            CompositorFrameConsumer::VideoToolboxEncoder,
+        );
+        let mut held = Vec::new();
+        for sequence in 9..=13 {
+            publish_auxiliary_compositor_frame(
+                sequence,
+                Instant::now(),
+                Instant::now(),
+                auxiliary.clone(),
+                inputs(sequence),
+                Some(&mut gpu),
+                CompositorFrameConsumer::VideoToolboxEncoder,
+            );
+            held.push(
+                auxiliary
+                    .lock()
+                    .unwrap()
+                    .latest()
+                    .unwrap()
+                    .metadata
+                    .metal_target_pixel_buffer()
+                    .unwrap()
+                    .begin_in_flight(),
+            );
+        }
+        publish_auxiliary_compositor_frame(
+            14,
+            Instant::now(),
+            Instant::now(),
+            auxiliary.clone(),
+            inputs(14),
+            Some(&mut gpu),
+            CompositorFrameConsumer::VideoToolboxEncoder,
+        );
+        assert_eq!(auxiliary.lock().unwrap().latest().unwrap().sequence, 13);
+        held.pop();
+        publish_auxiliary_compositor_frame(
+            15,
+            Instant::now(),
+            Instant::now(),
+            auxiliary.clone(),
+            inputs(15),
+            Some(&mut gpu),
+            CompositorFrameConsumer::VideoToolboxEncoder,
+        );
+        assert_eq!(auxiliary.lock().unwrap().latest().unwrap().sequence, 15);
     }
 
     #[cfg(target_os = "macos")]

@@ -257,6 +257,7 @@ pub(crate) fn iso_muxer_ffmpeg_args(
     if let Some(audio_input_index) = audio_input_index {
         let filter = iso_audio_timing_filter(track_shift_ms)
             .map_or_else(|| "apad".into(), |filter| format!("{filter},apad"));
+        let filter = format!("{filter},{ISO_PCM_PACKET_FILTER}");
         args.extend(["-af".to_string(), filter]);
         args.extend([
             "-map".to_string(),
@@ -291,6 +292,24 @@ fn iso_audio_timing_filter(track_shift_ms: i32) -> Option<String> {
         )),
         std::cmp::Ordering::Greater => Some(format!("adelay={track_shift_ms}:all=1")),
         std::cmp::Ordering::Equal => None,
+    }
+}
+
+/// PCM frames from the FIFO can contain 4096 samples (85ms). FFmpeg's
+/// shortest queue discards a whole frame crossing video EOF. Split after all
+/// timing/processing/padding so the loss is bounded to 10ms at 48kHz without
+/// changing samples, gain, or timestamps. AAC stream outputs are untouched.
+pub(crate) const ISO_PCM_PACKET_FILTER: &str = "asetnsamples=n=480:p=0";
+
+pub(crate) fn bound_combined_iso_pcm_packets(args: &mut [String]) {
+    for codec in 0..args.len().saturating_sub(1) {
+        if args[codec] == "-c:a"
+            && args[codec + 1] == "pcm_s16le"
+            && let Some(filter) = (0..codec).rev().find(|&index| args[index] == "-af")
+        {
+            args[filter + 1].push(',');
+            args[filter + 1].push_str(ISO_PCM_PACKET_FILTER);
+        }
     }
 }
 
@@ -1855,6 +1874,27 @@ mod tests {
     }
 
     #[test]
+    fn source_iso_pcm_packet_bound_preserves_shift_and_aac_stream_filters() {
+        let filter = "atrim=start=0.120,asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,apad";
+        let mut args = [
+            "-af",
+            filter,
+            "-c:a",
+            "pcm_s16le",
+            "out.mkv",
+            "-af",
+            filter,
+            "-c:a",
+            "aac",
+            "rtmp://stream",
+        ]
+        .map(String::from);
+        bound_combined_iso_pcm_packets(&mut args);
+        assert_eq!(args[1], format!("{filter},{ISO_PCM_PACKET_FILTER}"));
+        assert_eq!(args[6], filter);
+    }
+
+    #[test]
     fn combined_output_metadata_keeps_internal_audio_identity() {
         let mut args = vec![
             "-metadata:s:a:0".into(),
@@ -2078,7 +2118,7 @@ mod tests {
             "{joined}"
         );
         assert!(
-            joined.contains("-af apad"),
+            joined.contains("-af apad,asetnsamples=n=480:p=0"),
             "video EOF owns the silent audio tail"
         );
     }

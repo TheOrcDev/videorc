@@ -1124,6 +1124,25 @@ fn encoder_bridge_output_queue_policy(
     }
 }
 
+impl EncoderBridgeOutputQueuePolicy {
+    fn with_iso_audio_advance(mut self, fps: u32, advance_ms: u32) -> Self {
+        if matches!(
+            self.role,
+            EncoderBridgeOutputRole::Recording | EncoderBridgeOutputRole::Shared
+        ) {
+            // A negative residual audio offset requires future audio samples.
+            // FFmpeg therefore consumes video about this far behind capture.
+            // Retain the corresponding encoded access units, plus the normal
+            // pressure allowance. This does not retain raw/Metal frames or
+            // change stream coalescing and no-progress failure deadlines.
+            let lookahead_frames =
+                (u64::from(fps) * u64::from(advance_ms.min(1000))).div_ceil(1000);
+            self.max_frames += lookahead_frames as usize;
+        }
+        self
+    }
+}
+
 fn encoder_bridge_pre_encode_admission(
     policy: EncoderBridgeOutputQueuePolicy,
     queue_depth: u64,
@@ -2719,6 +2738,7 @@ pub struct RecordingStartBarrier {
     participants: usize,
     origin_store: Option<CompositorFrameStore>,
     fps: u32,
+    audio_advance_ms: u32,
     state: StdMutex<RecordingStartBarrierState>,
     changed: std::sync::Condvar,
 }
@@ -2735,11 +2755,13 @@ impl RecordingStartBarrier {
         participants: usize,
         origin_store: Option<CompositorFrameStore>,
         fps: u32,
+        track_shift_ms: i32,
     ) -> Arc<Self> {
         Arc::new(Self {
             participants,
             origin_store,
             fps,
+            audio_advance_ms: track_shift_ms.saturating_neg().clamp(0, 1000) as u32,
             state: StdMutex::new(Default::default()),
             changed: std::sync::Condvar::new(),
         })
@@ -3188,7 +3210,13 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let direct_d3d11_enabled = direct_d3d11_source.is_some();
     #[cfg(not(target_os = "windows"))]
     let direct_d3d11_enabled = false;
-    let output_queue_policy = encoder_bridge_output_queue_policy(diagnostics_context);
+    let mut output_queue_policy = encoder_bridge_output_queue_policy(diagnostics_context);
+    if video_output.uses_video_toolbox()
+        && let Some(barrier) = start_barrier.as_ref()
+    {
+        output_queue_policy =
+            output_queue_policy.with_iso_audio_advance(target_fps, barrier.audio_advance_ms);
+    }
     // Only the recording leg (or the shared leg) feeds the session's frame
     // accounting; a dedicated stream writer must not double-count it.
     let accounts_session_frames = output_queue_policy.role != EncoderBridgeOutputRole::Stream;
@@ -9241,6 +9269,66 @@ mod tests {
     }
 
     #[test]
+    fn source_iso_encoded_queue_covers_only_the_configured_audio_lookahead() {
+        for fps in [30, 60] {
+            let base = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+                role: EncoderBridgeOutputRole::Recording,
+                ..Default::default()
+            });
+            assert_eq!(base.with_iso_audio_advance(fps, 0), base);
+            let policy = base.with_iso_audio_advance(fps, 1000);
+            assert_eq!(policy.max_frames, 16 + fps as usize);
+            assert_eq!(policy.max_age, base.max_age);
+            let shared = EncoderBridgeOutputQueuePolicy {
+                role: EncoderBridgeOutputRole::Shared,
+                ..base
+            };
+            assert_eq!(
+                shared.with_iso_audio_advance(fps, 1000).max_frames,
+                policy.max_frames
+            );
+            assert_eq!(shared.coalesce_at_frames, None);
+            assert_eq!(
+                encoder_bridge_progress_aware_pre_encode_admission(
+                    policy,
+                    policy.max_frames as u64 - 1,
+                    None,
+                    Duration::ZERO,
+                    Duration::from_secs(2)
+                ),
+                EncoderBridgePreEncodeAdmission::Submit
+            );
+            assert_eq!(
+                encoder_bridge_progress_aware_pre_encode_admission(
+                    policy,
+                    policy.max_frames as u64,
+                    None,
+                    Duration::ZERO,
+                    Duration::from_secs(2)
+                ),
+                EncoderBridgePreEncodeAdmission::PauseRecordingFrame
+            );
+            assert_eq!(
+                encoder_bridge_progress_aware_pre_encode_admission(
+                    policy,
+                    policy.max_frames as u64,
+                    None,
+                    Duration::from_secs(2),
+                    Duration::from_secs(2)
+                ),
+                EncoderBridgePreEncodeAdmission::FailOutput
+            );
+            for role in [EncoderBridgeOutputRole::Stream] {
+                let policy = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+                    role,
+                    ..Default::default()
+                });
+                assert_eq!(policy.with_iso_audio_advance(fps, 1000), policy);
+            }
+        }
+    }
+
+    #[test]
     fn record_only_shared_diagnostics_use_recording_role_and_label() {
         let context = EncoderBridgeDiagnosticsContext {
             role: EncoderBridgeOutputRole::Shared,
@@ -11084,7 +11172,7 @@ mod tests {
                 vec![42; 24],
             );
         }
-        let barrier = RecordingStartBarrier::new(2, Some(primary.clone()), 30);
+        let barrier = RecordingStartBarrier::new(2, Some(primary.clone()), 30, 0);
         let epoch = Arc::new(OnceLock::new());
         let stop = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = std_mpsc::channel();

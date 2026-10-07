@@ -1124,6 +1124,8 @@ struct AudioShared {
     cancellation_input: Option<(u64, fn(&mut AudioTimeline))>,
     #[cfg(test)]
     mix_observation: Option<Arc<std::sync::Mutex<MixTestObservation>>>,
+    #[cfg(test)]
+    mix_fixture_gate: Option<Arc<MixFixtureGate>>,
     #[cfg(debug_assertions)]
     caption_injector: Option<crate::audio::CaptionContractTestAudioInjector>,
 }
@@ -1885,6 +1887,8 @@ pub fn attach_prepared_with(
         cancellation_input: None,
         #[cfg(test)]
         mix_observation: None,
+        #[cfg(test)]
+        mix_fixture_gate: None,
         #[cfg(debug_assertions)]
         caption_injector: source.as_ref().and_then(|source| source.caption_injector()),
     }));
@@ -2745,6 +2749,110 @@ impl MixWindowTrace {
     }
 }
 
+/// Opt-in routing-fixture coordination. Real producers and real-time loss
+/// tests retain their autonomous clock. This fixture waits for post-send
+/// source readiness and bounds producer lookahead before rendering a chunk.
+#[cfg(test)]
+#[derive(Default)]
+struct MixFixtureGate {
+    state: std::sync::Mutex<MixFixtureGateState>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct MixFixtureGateState {
+    armed: bool,
+    rendered: u64,
+    delivered: [u64; 2],
+    failure: Option<String>,
+}
+
+#[cfg(test)]
+impl MixFixtureGate {
+    fn arm(&self) {
+        self.state.lock().unwrap_or_else(|p| p.into_inner()).armed = true;
+        self.changed.notify_all();
+    }
+
+    fn wait_for(
+        &self,
+        stop: &AtomicBool,
+        draining: Option<&AtomicBool>,
+        ready: impl Fn(&MixFixtureGateState) -> bool,
+    ) -> io::Result<bool> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        loop {
+            if stop.load(Ordering::Acquire)
+                || draining.is_some_and(|flag| flag.load(Ordering::Acquire))
+            {
+                return Ok(false);
+            }
+            if let Some(error) = &state.failure {
+                return Err(io::Error::other(error.clone()));
+            }
+            if ready(&state) {
+                return Ok(true);
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                let error = format!(
+                    "routing fixture readiness deadline: rendered={} delivered={:?}",
+                    state.rendered, state.delivered
+                );
+                state.failure = Some(error.clone());
+                self.changed.notify_all();
+                return Err(io::Error::new(io::ErrorKind::TimedOut, error));
+            };
+            // The condvar is the readiness signal. This bounded cancellation
+            // poll also releases shutdown when an owner stops without sending.
+            state = self
+                .changed
+                .wait_timeout(state, remaining.min(Duration::from_millis(20)))
+                .unwrap_or_else(|p| p.into_inner())
+                .0;
+        }
+    }
+
+    fn permit_packet(&self, end: u64, stop: &AtomicBool) -> io::Result<bool> {
+        // More than the next complete 480-frame chunk plus either fixture's
+        // 512/960-frame packet, but far below the production one-second cap.
+        self.wait_for(stop, None, |state| {
+            state.armed && end <= state.rendered + 4096
+        })
+    }
+
+    fn delivered(&self, role: SourceRole, end: u64) {
+        let index = if role == SourceRole::Microphone { 0 } else { 1 };
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .delivered[index] = end;
+        self.changed.notify_all();
+    }
+
+    fn before_ingest(
+        &self,
+        cursor: u64,
+        stop: &AtomicBool,
+        draining: &AtomicBool,
+    ) -> io::Result<()> {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .rendered = cursor;
+        self.changed.notify_all();
+        self.wait_for(stop, Some(draining), |state| {
+            state.armed
+                && state
+                    .delivered
+                    .iter()
+                    .all(|end| *end >= cursor + CHUNK_FRAMES as u64)
+        })?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 struct MixTestObservation {
     epoch: Instant,
@@ -2763,6 +2871,7 @@ struct MixTestObservation {
     omitted_boundaries: u64,
     delivery: [MixDeliveryObservation; 2],
     trace: Option<MixWindowTrace>,
+    fixture_gate: Option<Arc<MixFixtureGate>>,
 }
 
 #[cfg(test)]
@@ -2785,6 +2894,7 @@ impl MixTestObservation {
             omitted_boundaries: 0,
             delivery: Default::default(),
             trace: None,
+            fixture_gate: None,
         }
     }
 
@@ -4502,6 +4612,20 @@ fn run_bus_owned(
         },
         None => Instant::now(),
     };
+    // Fixture producers may publish only after the bus has left the loop
+    // that discards pre-epoch packets. Publishing the epoch alone does not
+    // acknowledge that transition to a concurrently scheduled producer.
+    #[cfg(test)]
+    {
+        let gate = shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .mix_fixture_gate
+            .clone();
+        if let Some(gate) = gate {
+            gate.arm();
+        }
+    }
     let totals = shared
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -4608,6 +4732,17 @@ fn run_bus_owned(
             timeline.counters.dropped_frames += new_drops;
             timeline.losses.producer_queue_full += new_drops;
             previous_producer_drops = drops;
+        }
+        #[cfg(test)]
+        {
+            let gate = shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .mix_fixture_gate
+                .clone();
+            if let Some(gate) = gate {
+                gate.before_ingest(timeline.cursor(), stop, draining)?;
+            }
         }
         let placement = Placement {
             epoch,
@@ -7906,6 +8041,13 @@ mod mix_tests {
         let (sender, receiver) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
+        let fixture = observation.as_ref().and_then(|observation| {
+            let observation = observation.lock().unwrap();
+            observation
+                .fixture_gate
+                .clone()
+                .map(|gate| (gate, observation.epoch))
+        });
         let worker = thread::spawn(move || {
             for packet in packets {
                 loop {
@@ -7916,6 +8058,21 @@ mod mix_tests {
                         Some(remaining) => thread::sleep(remaining.min(Duration::from_millis(5))),
                         None => break,
                     }
+                }
+                let fixture_end = fixture.as_ref().map(|(_, epoch)| {
+                    (packet
+                        .captured_at
+                        .saturating_duration_since(*epoch)
+                        .as_secs_f64()
+                        * 48_000.0)
+                        .round() as u64
+                });
+                if let Some((gate, _)) = &fixture
+                    && !gate
+                        .permit_packet(fixture_end.unwrap(), &worker_stop)
+                        .unwrap_or(false)
+                {
+                    return;
                 }
                 let delivery = observation.as_ref().map(|_| {
                     (
@@ -7937,6 +8094,9 @@ mod mix_tests {
                         device_timestamp_us,
                         sent,
                     );
+                }
+                if let Some((gate, _)) = &fixture {
+                    gate.delivered(role, fixture_end.unwrap());
                 }
             }
             while !worker_stop.load(Ordering::Acquire) {
@@ -8484,12 +8644,17 @@ mod mix_tests {
             crate::audio::native_audio_fifo_path(&format!("mix-bus-{}", uuid::Uuid::new_v4()));
         crate::audio::create_native_audio_fifo(&path).unwrap();
         let (reader, progress) = spawn_fifo_reader_with_stall(path.clone(), reader_stall);
+        let fixture_gate = observation
+            .as_ref()
+            .and_then(|observation| observation.lock().unwrap().fixture_gate.clone());
         let video_epoch = Arc::new(OnceLock::new());
-        video_epoch.set(epoch).unwrap();
+        if fixture_gate.is_none() {
+            video_epoch.set(epoch).unwrap();
+        }
         let session = attach_prepared_with(
             source,
             path,
-            Some(video_epoch),
+            Some(video_epoch.clone()),
             settings,
             crate::audio::NATIVE_AUDIO_SOURCE_STALL_TIMEOUT,
             options,
@@ -8497,6 +8662,10 @@ mod mix_tests {
         if let Some(observation) = &observation {
             observation.lock().unwrap().reader = Some(progress.clone());
             session.handle.shared.lock().unwrap().mix_observation = Some(observation.clone());
+        }
+        if let Some(gate) = fixture_gate {
+            session.handle.shared.lock().unwrap().mix_fixture_gate = Some(gate.clone());
+            video_epoch.set(epoch).unwrap();
         }
         Bus {
             session,
@@ -9300,6 +9469,68 @@ mod mix_tests {
         2.0 * power.max(0.0).sqrt() / (samples.len() / 2) as f64
     }
 
+    #[test]
+    fn source_iso_fixture_gate_coordinates_unequal_packets_before_render() {
+        let gate = Arc::new(MixFixtureGate::default());
+        gate.arm();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (done_tx, done_rx) = mpsc::channel();
+        let workers = [
+            (SourceRole::Microphone, 512_u64),
+            (SourceRole::System, 960_u64),
+        ]
+        .map(|(role, packet)| {
+            let gate = gate.clone();
+            let stop = stop.clone();
+            let done = done_tx.clone();
+            thread::spawn(move || {
+                let result: io::Result<()> = (|| {
+                    for end in (1..=48_000_u64.div_ceil(packet)).map(|index| index * packet) {
+                        if !gate.permit_packet(end, &stop)? {
+                            break;
+                        }
+                        gate.delivered(role, end);
+                    }
+                    Ok(())
+                })();
+                let _ = done.send(result);
+            })
+        });
+        let mut result = Ok(());
+        let draining = AtomicBool::new(false);
+        for cursor in (0..48_000).step_by(CHUNK_FRAMES) {
+            result = gate.before_ingest(cursor, &stop, &draining);
+            if result.is_err() {
+                break;
+            }
+            let state = gate.state.lock().unwrap_or_else(|p| p.into_inner());
+            if !state
+                .delivered
+                .iter()
+                .all(|end| *end >= cursor + CHUNK_FRAMES as u64 && *end <= cursor + 4096)
+            {
+                result = Err(io::Error::other(
+                    "fixture readiness or producer bound violated",
+                ));
+                break;
+            }
+        }
+        stop.store(true, Ordering::Release);
+        gate.changed.notify_all();
+        let completed = (0..2)
+            .map(|_| done_rx.recv_timeout(Duration::from_secs(3)))
+            .collect::<Vec<_>>();
+        // Readiness waits observe Stop and have their own absolute deadline;
+        // finish both owned workers before reporting any assertion failure.
+        for worker in workers {
+            worker.join().expect("fixture producer reaped");
+        }
+        result.unwrap();
+        for completion in completed {
+            completion.unwrap().unwrap();
+        }
+    }
+
     /// Plan 157. Also consumed by smoke:separate-source-fixture. The real bus
     /// mixes a 440 Hz microphone with a 1 kHz system source while the
     /// production tap wiring (`prepare_source_audio_taps`, `role_audio_fifo`)
@@ -9329,7 +9560,12 @@ mod mix_tests {
             (amplitude * (std::f64::consts::TAU * hz * phase).sin()) as f32
         };
         let epoch = Instant::now() + Duration::from_millis(500);
-        let bus = start_bus(
+        let mut observation = MixTestObservation::new(epoch, system_options().playout_delay);
+        observation.trace = Some(MixWindowTrace::new(WINDOW.start as u64, WINDOW.end as u64));
+        observation.window = Some((WINDOW.start as u64, WINDOW.end as u64));
+        observation.fixture_gate = Some(Arc::new(MixFixtureGate::default()));
+        let evidence = Arc::new(std::sync::Mutex::new(observation));
+        let bus = start_bus_observed(
             epoch,
             Some(signal_packets(epoch, 0, FRAMES + 48_000, 512, |position| {
                 let sample = tone(MICROPHONE_HZ, MICROPHONE_AMPLITUDE, position);
@@ -9337,6 +9573,8 @@ mod mix_tests {
             })),
             AudioProcessingSettings::default(),
             system_options(),
+            None,
+            Some(evidence.clone()),
         )
         .await;
         let plan =
@@ -9373,7 +9611,7 @@ mod mix_tests {
         .await;
         bus.session.attach_system(producer).await.unwrap();
         bus.wait_for_frames(FRAMES).await;
-        let (combined, _) = bus.finish();
+        let (combined, status) = bus.finish();
         let (microphone_report, system_report) = taps.close_all();
         let [(screen_path, screen), (camera_path, camera)] =
             readers.map(|(path, reader)| (path, reader.join().unwrap()));
@@ -9392,6 +9630,49 @@ mod mix_tests {
             }
         }
         let (combined, screen, camera) = (decode(&combined), decode(&screen), decode(&camera));
+        struct FailureTrace<'a> {
+            observation: &'a Arc<std::sync::Mutex<MixTestObservation>>,
+            combined: &'a [f32],
+        }
+        impl Drop for FailureTrace<'_> {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    let observation = self.observation.lock().unwrap_or_else(|p| p.into_inner());
+                    eprintln!(
+                        "source-iso-audio-failure-trace: {}",
+                        serde_json::json!({
+                            "observation": observation.value(),
+                            "windowTrace": observation.trace.as_ref().map(|trace| trace.value(self.combined))
+                        })
+                    );
+                }
+            }
+        }
+        let _failure_trace = FailureTrace {
+            observation: &evidence,
+            combined: &combined,
+        };
+        {
+            let observation = evidence.lock().unwrap();
+            let summary = observation.value();
+            eprintln!("source-iso-audio-status: {status:?}");
+            eprintln!(
+                "source-iso-audio-summary: {}",
+                serde_json::json!({
+                    "delivery": summary["delivery"],
+                    "windowLossDelta": summary["windowLossDelta"],
+                    "completeWindowWriteCoverage": summary["completeWindowWriteCoverage"],
+                })
+            );
+            if let Some(directory) =
+                std::env::var_os("VIDEORC_SOURCE_ISO_ARTIFACT_DIR").map(PathBuf::from)
+            {
+                std::fs::write(directory.join("audio-observation.json"), serde_json::to_vec_pretty(&serde_json::json!({
+                    "observation": summary,
+                    "windowTrace": observation.trace.as_ref().map(|trace| trace.value(&combined))
+                })).unwrap()).unwrap();
+            }
+        }
         assert_eq!(
             microphone_report.map(|report| report.dropped_chunks),
             Some(0)

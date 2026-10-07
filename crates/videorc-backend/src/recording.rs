@@ -4626,6 +4626,7 @@ async fn start_session_with_timeline(
     };
     if source_iso_plan.is_some() {
         crate::source_iso::stamp_combined_audio_metadata(&mut args);
+        crate::source_iso::bound_combined_iso_pcm_packets(&mut args);
     }
     let ffmpeg_live_audio_filter_count = ffmpeg_live_microphone_filter_count(&args);
     #[cfg(debug_assertions)]
@@ -5076,11 +5077,19 @@ async fn start_session_with_timeline(
     let windows_d3d11_auxiliary_input = windows_d3d11_media
         .as_ref()
         .and_then(WindowsD3d11SessionPump::auxiliary_encoder_source);
+    let source_iso_track_shift_ms = session_audio_sync(
+        &params.audio,
+        crate::system_audio_session::system_audio_capable(),
+    )
+    .map_or(params.audio.microphone_sync_offset_ms, |split| {
+        split.track_shift_ms
+    });
     let source_iso_start_barrier = source_iso_plan.as_ref().map(|_| {
         crate::encoder_bridge::RecordingStartBarrier::new(
             3 + usize::from(encoder_bridge_stream_profile.is_some()),
             encoder_bridge_frame_store.clone(),
             params.output.video.fps,
+            source_iso_track_shift_ms,
         )
     });
     // Construct ISO writers under cancellation ownership before Combined
@@ -5112,13 +5121,7 @@ async fn start_session_with_timeline(
                         bitrate_kbps: encoder_bridge_recording_bitrate_kbps,
                         keep_original_media: params.output.keep_original_mkv,
                         start_barrier: source_iso_start_barrier.clone(),
-                        track_shift_ms: session_audio_sync(
-                            &params.audio,
-                            crate::system_audio_session::system_audio_capable(),
-                        )
-                        .map_or(params.audio.microphone_sync_offset_ms, |split| {
-                            split.track_shift_ms
-                        }),
+                        track_shift_ms: source_iso_track_shift_ms,
                     },
                     taps,
                 )
@@ -17767,9 +17770,18 @@ fn append_bridge_recording_input_args(
             // its output muxer; the 2026-08-29 failure delivered 61 valid access
             // units and still left a zero-byte MKV. Record-only therefore uses
             // the proven 4 KiB split-FIFO bound, while shared streaming preserves
-            // its established 64 KiB posture. Do not add `-fflags nobuffer`: on
+            // its established 64 KiB posture when ISO is off. An ISO-on shared
+            // graph must open promptly too: waiting for 64 KiB of easy content
+            // stalls the common audio bus and both sibling muxers for seconds.
+            // Do not add `-fflags nobuffer`: on
             // a non-seekable FIFO it discards the first keyframe during probing.
-            let probe_bytes = if params.output.stream_enabled {
+            let probe_bytes = if params.output.stream_enabled
+                && !params
+                    .output
+                    .separate_source_recordings
+                    .as_ref()
+                    .is_some_and(|iso| iso.enabled)
+            {
                 SHARED_STREAM_ENCODED_MPEGTS_INPUT_PROBE_BYTES
             } else {
                 MINIMAL_ENCODED_MPEGTS_INPUT_PROBE_BYTES
@@ -18853,6 +18865,9 @@ fn unique_arg_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
 
 #[cfg(debug_assertions)]
 fn source_switch_filter_shift_ms(filter: &str) -> Option<i32> {
+    let filter = filter
+        .strip_suffix(",asetnsamples=n=480:p=0")
+        .unwrap_or(filter);
     let prefix = filter.strip_suffix("aresample=async=1:first_pts=0,apad")?;
     if prefix.is_empty() {
         return Some(0);
@@ -26064,6 +26079,12 @@ mod tests {
         } else {
             base_params(true, false)
         };
+        let shared_stream = test_force_shared_encoder_output_from_env();
+        if shared_stream {
+            assert!(stream_port.is_some());
+            params.streaming.as_mut().unwrap().targets.truncate(1);
+            params.simulcast = None;
+        }
         if let Some(port) = stream_port {
             for (index, target) in params
                 .streaming
@@ -26134,6 +26155,22 @@ mod tests {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
+        if shared_stream {
+            let plan = resolve_provider_stream_output_plan(&params).unwrap();
+            assert!(
+                !plan.separate_encoded_output_role,
+                "forced shared topology must be exercised"
+            );
+            assert!(
+                recording_compositor_stream_output_with_plan(
+                    &params,
+                    EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+                    Some(&plan)
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
         crate::preview_camera::test_install_live_camera_for_layout(
             &state,
             "camera:iso-runtime",
@@ -26394,8 +26431,11 @@ mod tests {
                 }).await.expect("source re-add commits without restarting ended ISO");
             }
         }
+        let runtime_duration_ms = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_DURATION_MS")
+            .ok().map(|value| value.parse::<u64>().expect("integer runtime duration")).unwrap_or(4000);
+        assert!((3000..=10000).contains(&runtime_duration_ms), "runtime duration outside 3-10s");
         if std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_STOP_AFTER_REMOVE").is_none() {
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::time::sleep(Duration::from_millis(runtime_duration_ms - 2000)).await;
         }
         let mut terminal_events = state.events.subscribe();
         let stop_boundary_seconds = active_capture_elapsed_seconds(&state).await.unwrap();
@@ -26458,6 +26498,8 @@ mod tests {
 
             "orchestration": "start_session/stop_recording", "deviceAdapters": "controlled-frame-stores",
             "stopBoundarySeconds": stop_boundary_seconds,
+            "runtimeDurationMs": runtime_duration_ms,
+            "sharedStream": shared_stream,
         })).unwrap()).unwrap();
         }).catch_unwind().await;
         let _ = producer_stop.send(());
@@ -36242,6 +36284,36 @@ mod tests {
         params.simulcast = Some(simulcast_leg());
         let targets = stream_targets_from_streaming(&streaming).unwrap();
         (params, targets)
+    }
+
+    #[test]
+    fn source_iso_shared_input_uses_bounded_probe_without_changing_iso_off_streams() {
+        for (streaming, iso, expected) in [
+            (false, false, "4096"),
+            (true, false, "65536"),
+            (true, true, "4096"),
+        ] {
+            let mut params = base_params(true, streaming);
+            params.output.separate_source_recordings =
+                Some(crate::protocol::SeparateSourceRecordingsSettings {
+                    enabled: iso,
+                    keep_combined: true,
+                });
+            let mut args = Vec::new();
+            append_bridge_recording_input_args(
+                &mut args,
+                &CaptureInputs {
+                    video: VideoInput::TestPattern,
+                    camera_index: None,
+                    microphone: None,
+                },
+                &params,
+                Path::new("/tmp/owned-test-video"),
+                EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+            );
+            let index = args.iter().position(|arg| arg == "-probesize").unwrap();
+            assert_eq!(args[index + 1], expected);
+        }
     }
 
     #[test]

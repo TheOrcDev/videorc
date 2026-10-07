@@ -30,62 +30,91 @@ const root = resolve(import.meta.dirname, '..')
 const directory = mkdtempSync(join(tmpdir(), 'videorc-separate-source-runtime-'))
 const ffmpeg = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobe = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
-const profiles =
-  process.env.VIDEORC_SOURCE_ISO_RUNTIME_QUICK === '1'
-    ? [[1920, 30, 0]]
-    : [
-        [1920, 30, 0],
-        ...['no-microphone', 'muted', 'system-off', 'gains', 'stereo'].map((name) => [
-          1920,
-          30,
-          0,
-          name,
-          { VIDEORC_SOURCE_ISO_RUNTIME_AUDIO: name }
-        ]),
-        [
-          1920,
-          30,
-          0,
-          'silent',
-          {
-            VIDEORC_SOURCE_ISO_RUNTIME_AUDIO: 'system-off',
-            VIDEORC_SOURCE_ISO_RUNTIME_CANCEL: 'writers'
-          }
-        ],
-        [1920, 30, -120],
-        [1920, 30, 120],
-        [1920, 30, -1000],
-        [1920, 30, 1000],
-        [1920, 30, 0, 'native-latency', { VIDEORC_SOURCE_ISO_RUNTIME_CAPTURE_LATENCY_MS: '72' }],
-        [1920, 60, 0],
-        [3840, 30, 0],
-        [1920, 30, 0, 'dual-stream'],
-        ...['combined', 'screen'].map((role) => [
-          1920,
-          30,
-          0,
-          `prep-delay-${role}`,
-          {
-            VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_MS: '300',
-            VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_ROLE: role
-          }
-        ]),
-        [1920, 30, 0, 'prep-delay', { VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_MS: '300' }],
-        [1920, 30, 0, 'reader-delay', { VIDEORC_SOURCE_ISO_RUNTIME_READER_DELAY_MS: '300' }],
-        ...['combined', 'screen', 'camera'].map((role) => [
-          1920,
-          60,
-          0,
-          `prep-delay-${role}`,
-          {
-            VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_MS: '300',
-            VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_ROLE: role
-          }
-        ]),
-        [1920, 60, 0, 'reader-delay', { VIDEORC_SOURCE_ISO_RUNTIME_READER_DELAY_MS: '300' }],
-        [1920, 60, 0, 'native-latency', { VIDEORC_SOURCE_ISO_RUNTIME_CAPTURE_LATENCY_MS: '72' }]
-      ]
+const quick = process.env.VIDEORC_SOURCE_ISO_RUNTIME_QUICK === '1'
+const quickOffset = Number(process.env.VIDEORC_SOURCE_ISO_RUNTIME_OFFSET ?? 0)
+if (quick && (!Number.isInteger(quickOffset) || Math.abs(quickOffset) > 1000))
+  throw new Error('Quick runtime offset must be an integer between -1000 and 1000ms')
+const quickWidth = Number(process.env.VIDEORC_SOURCE_ISO_RUNTIME_WIDTH ?? 1920)
+const quickVariant = process.env.VIDEORC_SOURCE_ISO_RUNTIME_VARIANT ?? 'normal'
+if (
+  quick &&
+  (![1920, 3840].includes(quickWidth) || !['normal', 'shared-stream'].includes(quickVariant))
+)
+  throw new Error('Quick runtime requires 1920/3840 width and normal/shared-stream variant')
+const skip4K = process.env.VIDEORC_SOURCE_ISO_RUNTIME_SKIP_4K === '1'
+const allProfiles = quick
+  ? [[quickWidth, 30, quickOffset, quickVariant]]
+  : [
+      [1920, 30, 0],
+      ...['no-microphone', 'muted', 'system-off', 'gains', 'stereo'].map((name) => [
+        1920,
+        30,
+        0,
+        name,
+        { VIDEORC_SOURCE_ISO_RUNTIME_AUDIO: name }
+      ]),
+      [
+        1920,
+        30,
+        0,
+        'silent',
+        {
+          VIDEORC_SOURCE_ISO_RUNTIME_AUDIO: 'system-off',
+          VIDEORC_SOURCE_ISO_RUNTIME_CANCEL: 'writers'
+        }
+      ],
+      [1920, 30, -120],
+      [1920, 30, -120, 'active-stop', { VIDEORC_SOURCE_ISO_RUNTIME_DURATION_MS: '3500' }],
+      [1920, 30, 120],
+      [1920, 30, -1000],
+      [1920, 30, 1000],
+      [1920, 30, 0, 'native-latency', { VIDEORC_SOURCE_ISO_RUNTIME_CAPTURE_LATENCY_MS: '72' }],
+      [1920, 60, 0],
+      [1920, 60, -1000],
+      [1920, 60, 1000],
+      [3840, 30, 0],
+      [1920, 30, 0, 'dual-stream'],
+      [1920, 30, -1000, 'shared-stream'],
+      ...['combined', 'screen'].map((role) => [
+        1920,
+        30,
+        0,
+        `prep-delay-${role}`,
+        {
+          VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_MS: '300',
+          VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_ROLE: role
+        }
+      ]),
+      [1920, 30, 0, 'prep-delay', { VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_MS: '300' }],
+      [1920, 30, 0, 'reader-delay', { VIDEORC_SOURCE_ISO_RUNTIME_READER_DELAY_MS: '300' }],
+      ...['combined', 'screen', 'camera'].map((role) => [
+        1920,
+        60,
+        0,
+        `prep-delay-${role}`,
+        {
+          VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_MS: '300',
+          VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_ROLE: role
+        }
+      ]),
+      [1920, 60, 0, 'reader-delay', { VIDEORC_SOURCE_ISO_RUNTIME_READER_DELAY_MS: '300' }],
+      [1920, 60, 0, 'native-latency', { VIDEORC_SOURCE_ISO_RUNTIME_CAPTURE_LATENCY_MS: '72' }]
+    ]
+const profiles = allProfiles.filter(([width]) => !skip4K || width < 3840)
+if (profiles.length === 0) throw new Error('Runtime selection omitted every requested profile')
+const coverage = {
+  partial: quick || skip4K,
+  quick,
+  omittedProfiles: skip4K ? ['3840x2160-30-0-normal'] : []
+}
+writeFileSync(join(directory, 'coverage.json'), JSON.stringify(coverage, null, 2))
+if (skip4K)
+  console.log('PARTIAL runtime: 4K explicitly omitted; full matrix acceptance remains pending')
 console.log(`Production separate-source evidence: ${directory}`)
+if (quick)
+  console.log(
+    `PARTIAL quick runtime: ${quickWidth}x${(quickWidth * 9) / 16}@30 ${quickVariant}, offset ${quickOffset}ms; full matrix not run`
+  )
 const results = []
 const latency = []
 const suppliedExecutable = process.env.VIDEORC_SOURCE_ISO_RUNTIME_EXECUTABLE
@@ -117,9 +146,12 @@ const executable =
         message.reason === 'compiler-artifact' && message.profile?.test && message.executable
     )?.executable
 if (!executable) throw new Error('Cargo did not report the owned runtime test executable')
+await verifyPcmShortestPacketBoundary()
 for (const [width, fps, offset, variant = 'normal', overrides = {}] of profiles) {
   const evidence = join(directory, `${width}x${(width * 9) / 16}-${fps}-${offset}-${variant}`)
-  const receivers = variant === 'dual-stream' ? await startReceivers(evidence) : null
+  const receivers = ['dual-stream', 'shared-stream'].includes(variant)
+    ? await startReceivers(evidence, variant === 'shared-stream' ? 1 : 2)
+    : null
   try {
     await run(
       executable,
@@ -131,6 +163,9 @@ for (const [width, fps, offset, variant = 'normal', overrides = {}] of profiles)
         VIDEORC_SOURCE_ISO_RUNTIME_FPS: String(fps),
         VIDEORC_SOURCE_ISO_RUNTIME_OFFSET: String(offset),
         ...overrides,
+        ...(variant === 'shared-stream'
+          ? { VIDEORC_TEST_FORCE_SHARED_ENCODER_OUTPUT: '1', VIDEORC_ENABLE_SMOKE_RPC: '1' }
+          : {}),
         ...(receivers ? { VIDEORC_SOURCE_ISO_RUNTIME_STREAM_PORT: String(receivers.port) } : {})
       }
     )
@@ -140,6 +175,8 @@ for (const [width, fps, offset, variant = 'normal', overrides = {}] of profiles)
   const manifest = JSON.parse(readFileSync(join(evidence, 'runtime-take.json'), 'utf8'))
   // Sampled from the capture epoch immediately before the real Stop request.
   // A held final CFR frame can extend beyond this source-clock boundary.
+  if (variant === 'shared-stream' && manifest.sharedStream !== true)
+    throw new Error('Shared-stream case did not select the shared encoder topology')
   const stopBoundarySeconds = manifest.stopBoundarySeconds
   if (!Number.isFinite(stopBoundarySeconds) || stopBoundarySeconds <= 0)
     throw new Error('Runtime manifest is missing its source-clock Stop-request boundary')
@@ -315,6 +352,17 @@ for (const [width, fps, offset, variant = 'normal', overrides = {}] of profiles)
         manifest.systemAudio === false
           ? 0
           : monoGain * 0.2 * 10 ** (manifest.audio.systemAudioGainDb / 20)
+    }
+    if (manifest.runtimeDurationMs === 3500 && expectedLevels.system > 0) {
+      for (const role of ['combined', 'screen']) {
+        const endWindow = tones[role].system.findLast(
+          (window) => window.time <= stopBoundarySeconds - 0.03
+        )
+        if (!endWindow || endWindow.time < stopBoundarySeconds - 0.05 || endWindow.amplitude < 0.04)
+          throw new Error(
+            `${role}: active-stop fixture must retain audible system tone through Stop`
+          )
+      }
     }
     const routing = evaluateRoleAudioSources(levels, expectedLevels)
     if (!routing.pass) throw new Error(routing.failures.join('; '))
@@ -681,7 +729,11 @@ if (process.env.VIDEORC_SOURCE_ISO_RUNTIME_QUICK !== '1') {
   if (!verdict.pass) throw new Error(`ISO coordinator latency: ${verdict.failures.join('; ')}`)
 }
 writeFileSync(join(directory, 'verdicts.json'), JSON.stringify(results, null, 2))
-console.log(`separate-source-runtime: PASS (${results.length} artifact take verdicts)`)
+console.log(
+  `separate-source-runtime: ${coverage.partial ? 'PARTIAL PASS' : 'PASS'} (${results.length} artifact take verdicts)`
+)
+// An aggregate must not mistake a deliberately omitted shipping profile for a full pass.
+if (skip4K) process.exitCode = 3
 
 function run(command, args, env = process.env, capture = false) {
   return new Promise((resolveRun, reject) => {
@@ -748,12 +800,12 @@ async function retireChild(child) {
   }
 }
 
-async function startReceivers(evidence) {
+async function startReceivers(evidence, count = 2) {
   mkdirSync(evidence, { recursive: true })
   const port = 20000 + Math.floor(Math.random() * 20000)
   const receivers = { port, children: [], files: [] }
   try {
-    for (let index = 0; index < 2; index++) {
+    for (let index = 0; index < count; index++) {
       const file = join(evidence, `stream-${index}.flv`)
       const child = spawn(
         ffmpeg,
@@ -1078,4 +1130,130 @@ async function verifyRoleAudioBoundary(file, role, offsetMs, endSeconds, fps) {
   if (!verdict.pass)
     throw new Error(`${role} committed removal audio: ${verdict.failures.join('; ')}`)
   return { endSeconds, offsetMs, verdict, tones }
+}
+
+// Original shortest packet rounding is scheduling-dependent, so preserve its
+// outcome as diagnostic evidence. Bounded packets must retain the audible tail;
+// a separately encoded 76ms truncation must fail with the video left unchanged.
+async function verifyPcmShortestPacketBoundary() {
+  for (const fps of [30, 60]) {
+    for (const bounded of [false, true]) {
+      const file = join(directory, `pcm-shortest-${fps}-${bounded ? 'bounded' : 'original'}.mkv`)
+      await run(ffmpeg, [
+        '-v',
+        'error',
+        '-y',
+        '-f',
+        'lavfi',
+        '-i',
+        `color=c=green:size=64x64:rate=${fps}:duration=1.1`,
+        '-f',
+        'lavfi',
+        '-i',
+        'sine=frequency=997:sample_rate=48000:samples_per_frame=4096:duration=1.2',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'ultrafast',
+        '-bf',
+        '0',
+        '-c:a',
+        'pcm_s16le',
+        '-ac',
+        '2',
+        '-af',
+        bounded ? 'apad,asetnsamples=n=480:p=0' : 'apad',
+        '-shortest',
+        file
+      ])
+      const bytes = await run(
+        ffmpeg,
+        ['-v', 'error', '-i', file, '-map', '0:a:0', '-ac', '1', '-f', 'f32le', 'pipe:1'],
+        process.env,
+        true
+      )
+      const pcm = new Float32Array(
+        bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+      )
+      const audio = audioToneWindows(pcm, { frequency: 997 })
+      const video = Array.from({ length: Math.round(1.1 * fps) }, (_, index) => ({
+        time: index / fps,
+        hot: true
+      }))
+      const verdict = evaluateSourceEnvelope(video, audio, { fps, endSeconds: 1.1 })
+      writeFileSync(
+        `${file}.json`,
+        JSON.stringify({ fps, bounded, audioEnd: pcm.length / 48000, verdict }, null, 2)
+      )
+      if (bounded && !verdict.pass) throw new Error(`PCM shortest ${fps}fps fix lost audible tail`)
+      if (bounded) {
+        const truncated = join(directory, `pcm-shortest-${fps}-truncated.mkv`)
+        await run(ffmpeg, [
+          '-v',
+          'error',
+          '-y',
+          '-i',
+          file,
+          '-map',
+          '0:v:0',
+          '-map',
+          '0:a:0',
+          '-c:v',
+          'copy',
+          '-c:a',
+          'pcm_s16le',
+          '-af',
+          'atrim=end=1.024',
+          truncated
+        ])
+        const truncatedBytes = await run(
+          ffmpeg,
+          ['-v', 'error', '-i', truncated, '-map', '0:a:0', '-ac', '1', '-f', 'f32le', 'pipe:1'],
+          process.env,
+          true
+        )
+        const truncatedPcm = new Float32Array(
+          truncatedBytes.buffer.slice(
+            truncatedBytes.byteOffset,
+            truncatedBytes.byteOffset + truncatedBytes.byteLength
+          )
+        )
+        const probe = JSON.parse(
+          await run(
+            ffprobe,
+            [
+              '-v',
+              'error',
+              '-select_streams',
+              'v:0',
+              '-show_frames',
+              '-show_entries',
+              'frame=best_effort_timestamp_time',
+              '-of',
+              'json',
+              truncated
+            ],
+            process.env,
+            true
+          )
+        )
+        if (
+          probe.frames.length !== video.length ||
+          Math.abs(Number(probe.frames.at(-1).best_effort_timestamp_time) + 1 / fps - 1.1) > 0.001
+        )
+          throw new Error('Encoded negative control changed the video boundary')
+        const negative = evaluateSourceEnvelope(
+          video,
+          audioToneWindows(truncatedPcm, { frequency: 997 }),
+          { fps, endSeconds: 1.1 }
+        )
+        writeFileSync(
+          `${truncated}.json`,
+          JSON.stringify({ fps, audioEnd: truncatedPcm.length / 48000, verdict: negative }, null, 2)
+        )
+        if (negative.pass)
+          throw new Error(`Encoded ${fps}fps truncated-audio negative unexpectedly passed`)
+      }
+    }
+  }
 }

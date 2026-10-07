@@ -3598,21 +3598,25 @@ pub(crate) async fn test_publish_camera_pixels(
     pixel: [u8; 4],
     captured_at: Instant,
 ) {
-    let (width, height) = {
+    let (width, height, shared, fixture_camera) = {
         let slot = state.preview_camera.lock().await;
         let Some(active) = slot.active.as_ref() else {
             return;
         };
         let video = &active.video;
-        (video.width, video.height)
+        (
+            video.width,
+            video.height,
+            Arc::clone(&active.shared),
+            active.camera_id == "camera:iso-runtime",
+        )
     };
     let bytes = pixel.repeat((width * height) as usize);
-    let slot = state.preview_camera.lock().await;
-    let Some(active) = slot.active.as_ref() else {
-        return;
-    };
-    let mut shared = active.shared.lock().unwrap();
-    if active.camera_id == "camera:iso-runtime" {
+    // Native callbacks own this generation's shared store and never retain
+    // the admission authority while publishing. A replaced generation may
+    // finish its callback, but cannot publish into the replacement's store.
+    let mut shared = shared.lock().unwrap();
+    if fixture_camera {
         shared.capture_timings.record_callback_at(captured_at);
         shared
             .capture_timings
@@ -3621,8 +3625,8 @@ pub(crate) async fn test_publish_camera_pixels(
     }
     shared.frame_store.publish(
         sequence,
-        active.video.width,
-        active.video.height,
+        width,
+        height,
         PreviewCameraPixelFormat::Bgra8,
         captured_at,
         bytes,

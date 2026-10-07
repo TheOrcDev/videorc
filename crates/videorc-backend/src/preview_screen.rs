@@ -2900,19 +2900,21 @@ pub(crate) async fn test_publish_screen_pixels(
     pixel: [u8; 4],
     captured_at: Instant,
 ) {
-    let (width, height) = {
+    let (width, height, shared) = {
         let slot = state.preview_screen.lock().await;
         let Some(active) = slot.active.as_ref() else {
             return;
         };
-        (active.video.width, active.video.height)
+        (
+            active.video.width,
+            active.video.height,
+            Arc::clone(&active.shared),
+        )
     };
     let pixels = pixel.repeat((width * height) as usize);
-    let slot = state.preview_screen.lock().await;
-    let Some(active) = slot.active.as_ref() else {
-        return;
-    };
-    let mut shared = active.shared.lock().unwrap();
+    // Match native callbacks: publishing owns a generation's shared store,
+    // independently of the source admission authority.
+    let mut shared = shared.lock().unwrap();
     shared.frame_store.publish(
         sequence,
         width,
