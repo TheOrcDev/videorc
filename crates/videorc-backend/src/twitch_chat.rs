@@ -3214,6 +3214,8 @@ mod tests {
                 api_base_url: Some(api_base_url),
                 token_source: Default::default(),
                 follow_events: false,
+                bits_events: false,
+                redemption_events: false,
             },
         ));
 
@@ -3283,6 +3285,8 @@ mod tests {
                 api_base_url: Some(api_base_url),
                 token_source: Default::default(),
                 follow_events: false,
+                bits_events: false,
+                redemption_events: false,
             },
         ));
 
@@ -3352,6 +3356,8 @@ mod tests {
                 api_base_url: Some(api_base_url),
                 token_source: Default::default(),
                 follow_events: false,
+                bits_events: false,
+                redemption_events: false,
             },
         ));
 

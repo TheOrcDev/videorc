@@ -3687,6 +3687,41 @@ fn fake_events(
                 "new_friend followed",
                 None,
             ),
+            // Plan 162: Activity-only rows, shaped as the connector makes them.
+            event(
+                "channel.bits.use:power_up",
+                "party_starter",
+                LiveChatEventType::PowerUp,
+                LiveChatEventDetails::PowerUp {
+                    bits: 300,
+                    power_up: PowerUpKind::Celebration,
+                    emote_name: None,
+                },
+                "party_starter used a Celebration",
+                None,
+            ),
+            {
+                let mut redemption = event(
+                    "channel.channel_points_custom_reward_redemption.add",
+                    "hydration_hero",
+                    LiveChatEventType::Redemption,
+                    LiveChatEventDetails::Redemption {
+                        reward: RedemptionKind::Custom,
+                        channel_points: 500,
+                        title: Some("Hydrate".to_string()),
+                        emote_name: None,
+                    },
+                    "hydration_hero redeemed Hydrate",
+                    None,
+                );
+                redemption.fragments = vec![LiveChatMessageFragment {
+                    fragment_type: "text".to_string(),
+                    text: "drink some water!".to_string(),
+                    image_url: None,
+                    zero_width: false,
+                }];
+                redemption
+            },
         ],
         StreamPlatform::Kick => vec![
             event(
@@ -4836,14 +4871,14 @@ mod tests {
         let messages = completed
             .expect("all three exact fake provider end events must arrive")
             .expect("fixture events must not lag");
-        assert_eq!(messages.len(), 14);
+        assert_eq!(messages.len(), 16);
         assert_eq!(
             messages
                 .iter()
                 .filter_map(|message| message["id"].as_str())
                 .collect::<HashSet<_>>()
                 .len(),
-            14
+            16
         );
         assert!(response.ok);
         let wire = serde_json::to_string(&response).unwrap();
@@ -4858,8 +4893,8 @@ mod tests {
         assert_eq!(
             reduced,
             serde_json::json!({
-                "status": "available", "messageCount": 14, "chatters": 7,
-                "supporters": 7, "follows": 2, "raids": 1, "bits": 1500,
+                "status": "available", "messageCount": 16, "chatters": 7,
+                "supporters": 7, "follows": 2, "raids": 1, "bits": 1800,
                 "tips": [{ "currency": "USD", "amountMicros": 5_000_000 },
                          { "currency": "EUR", "amountMicros": 2_000_000 }]
             })
@@ -4901,12 +4936,13 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(value["messageCount"], 14);
+        assert_eq!(value["messageCount"], 16);
         assert_eq!(value["chatters"], 7);
         assert_eq!(value["supporters"], 7);
         assert_eq!(value["follows"], 2);
         assert_eq!(value["raids"], 1);
-        assert_eq!(value["bits"], 1500);
+        // Plan 162: the fake Celebration's 300 bits count; Hydrate's points do not.
+        assert_eq!(value["bits"], 1800);
         assert_eq!(
             value["tips"],
             serde_json::json!([{ "currency":"USD", "amountMicros":5_000_000 }, { "currency":"EUR", "amountMicros":2_000_000 }])
