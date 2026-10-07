@@ -64,6 +64,11 @@ export function buildRecordingStudioGateSteps({
       label: 'scene switch recording and stream pixel artifacts',
       command: 'pnpm',
       args: ['smoke:scene-switch-pixels']
+    },
+    {
+      label: 'separate source recordings fixture take',
+      command: 'pnpm',
+      args: ['smoke:separate-source-fixture']
     }
   ]
 

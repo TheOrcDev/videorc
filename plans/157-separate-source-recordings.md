@@ -34,6 +34,14 @@ takes for later NLE work.
     `handler_name` (Mix / System audio / Microphone) so the role survives the
     MP4 export; `scripts/smoke-separate-source-take.mjs` hard-fails a swapped
     pairing, a missing role file, off-canvas video or duration drift.
+  - Slice 3/6 proof without a camera device: the backend fixture
+    `compositor::scene_switch_tests::source_iso_artifact_fixture` renders a
+    camera-in-screen scene with the ISO legs armed (CPU + Metal) and asserts
+    per tick that the Screen leg has no camera inset and the Camera leg is the
+    camera alone; `pnpm smoke:separate-source-fixture` (in
+    `smoke:recording-studio`) encodes those legs into a real three-file take
+    and runs the take gate, frame-exact comparison and the recording analyzer
+    on each file, then proves a swapped pairing is rejected.
   - The renderer only sends `separateSourceRecordings` when the toggle is on
     AND the scene is eligible, so a stale toggle never blocks Record; the
     Recording tab shows the exact ineligibility reason.

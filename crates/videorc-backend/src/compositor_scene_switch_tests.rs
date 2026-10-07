@@ -629,6 +629,159 @@ async fn scene_switch_artifact_fixture() {
     }
 }
 
+/// Plan 157. Also consumed by smoke:separate-source-fixture. A camera-in-screen
+/// scene renders the primary leg plus both ISO legs through the CPU and Metal
+/// publishers; every tick proves the Screen ISO carries no camera inset, the
+/// Camera ISO is the camera alone, and the primary still has both. The smoke
+/// encodes the dumped frames into a three-file take and gates it.
+#[tokio::test]
+async fn source_iso_artifact_fixture() {
+    use std::io::Write;
+    const WIDTH: u32 = 64;
+    const HEIGHT: u32 = 36;
+    let directory =
+        std::env::var_os("VIDEORC_SOURCE_ISO_ARTIFACT_DIR").map(std::path::PathBuf::from);
+    for metal in [false, true] {
+        if metal && !cfg!(target_os = "macos") {
+            continue;
+        }
+        let mut gpus = if metal {
+            (0..3)
+                .map(|_| new_gpu_compositor(false))
+                .collect::<Vec<_>>()
+        } else {
+            vec![None, None, None]
+        };
+        if metal && gpus.iter().any(Option::is_none) {
+            assert!(
+                directory.is_none(),
+                "Metal is required for this artifact smoke"
+            );
+            eprintln!("SKIP: Metal fixture unavailable");
+            continue;
+        }
+        let state = state();
+        // Combined: the screen full-frame with the camera inset top-right.
+        let mut combined = snapshot(SceneSourceKind::Screen);
+        combined.layout.layout_preset = crate::protocol::LayoutPreset::ScreenCamera;
+        let mut camera_source = snapshot(SceneSourceKind::Camera).scene.unwrap().sources[0].clone();
+        camera_source.id = "source:camera".into();
+        camera_source.device_id = Some("camera:fixture".into());
+        camera_source.transform.x = 0.7;
+        camera_source.transform.y = 0.0;
+        camera_source.transform.width = 0.3;
+        camera_source.transform.height = 0.3;
+        camera_source.default_transform = camera_source.transform.clone();
+        combined.scene.as_mut().unwrap().sources.push(camera_source);
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            "camera:fixture",
+            &combined.layout,
+            &video(),
+        )
+        .await;
+        install_screen(&state, "screen:fixture", 1, 1, [0, 255, 0, 255]).await;
+        let iso_stores = CompositorSourceIsoFrameStores {
+            screen: Arc::new(StdMutex::new(FrameStore::new(2))),
+            camera: Arc::new(StdMutex::new(FrameStore::new(2))),
+        };
+        {
+            let mut compositor = state.compositor.lock().await;
+            compositor.source_iso_frame_stores = Some(iso_stores.clone());
+            compositor.scene = Some(combined.clone());
+        }
+        let mut sources = CompositorLiveSources::default();
+        let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+        let mode = if metal { "metal" } else { "cpu" };
+        let mut files = directory.as_ref().map(|dir| {
+            std::fs::create_dir_all(dir).unwrap();
+            [
+                std::fs::File::create(dir.join(format!("{mode}-combined.yuv"))).unwrap(),
+                std::fs::File::create(dir.join(format!("{mode}-screen.yuv"))).unwrap(),
+                std::fs::File::create(dir.join(format!("{mode}-camera.yuv"))).unwrap(),
+            ]
+        });
+        let luma_at = |bytes: &[u8], x: u32, y: u32| bytes[(y * WIDTH + x) as usize];
+        let (inset_x, inset_y) = (55, 3);
+        let (screen_x, screen_y) = (10, 30);
+        for tick in 0..90_u64 {
+            crate::preview_camera::test_publish_camera_pixels(
+                &state,
+                tick + 1,
+                [0, 0, 255, 255],
+                Instant::now(),
+            )
+            .await;
+            let [gpu, iso_screen_gpu, iso_camera_gpu] = gpus.as_mut_slice() else {
+                unreachable!()
+            };
+            let result = publish_compositor_frame(
+                &state,
+                "source-iso-test",
+                tick + 1,
+                WIDTH,
+                HEIGHT,
+                &mut sources,
+                &mut cache,
+                gpu.as_mut(),
+                CompositorFrameConsumer::RawYuvEncoder,
+                None,
+                None,
+                Some(CompositorSourceIsoOutput {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+                }),
+                iso_screen_gpu.as_mut(),
+                iso_camera_gpu.as_mut(),
+                false,
+                false,
+                false,
+                false,
+            )
+            .await;
+            if metal {
+                assert_eq!(result.compositor_backend, CompositorBackend::Metal);
+            }
+            let primary = latest_bytes(&state).await;
+            let latest = |store: &CompositorFrameStore| {
+                store.lock().unwrap().latest().unwrap().bytes.to_vec()
+            };
+            let screen_iso = latest(&iso_stores.screen);
+            let camera_iso = latest(&iso_stores.camera);
+            assert_eq!(primary.len(), raw_yuv420p_len(WIDTH, HEIGHT));
+            assert_eq!(screen_iso.len(), raw_yuv420p_len(WIDTH, HEIGHT));
+            assert_eq!(camera_iso.len(), raw_yuv420p_len(WIDTH, HEIGHT));
+            let screen_luma = luma_at(&primary, screen_x, screen_y);
+            let camera_luma = luma_at(&primary, inset_x, inset_y);
+            assert!(
+                screen_luma.abs_diff(camera_luma) > 40,
+                "{mode} tick {tick}: the fixture colors must be distinguishable (screen {screen_luma}, camera {camera_luma})"
+            );
+            // Screen ISO: the screen everywhere, including where the inset sat.
+            assert!(
+                luma_at(&screen_iso, inset_x, inset_y).abs_diff(screen_luma) <= 2,
+                "{mode} tick {tick}: the Screen ISO carried the camera inset"
+            );
+            assert!(
+                luma_at(&screen_iso, screen_x, screen_y).abs_diff(screen_luma) <= 2,
+                "{mode} tick {tick}: the Screen ISO lost the screen"
+            );
+            // Camera ISO: the camera alone, full frame (same aspect as the canvas).
+            assert!(
+                luma_at(&camera_iso, inset_x, inset_y).abs_diff(camera_luma) <= 2
+                    && luma_at(&camera_iso, screen_x, screen_y).abs_diff(camera_luma) <= 2,
+                "{mode} tick {tick}: the Camera ISO is not the camera full-frame"
+            );
+            if let Some([combined_file, screen_file, camera_file]) = files.as_mut() {
+                combined_file.write_all(&primary).unwrap();
+                screen_file.write_all(&screen_iso).unwrap();
+                camera_file.write_all(&camera_iso).unwrap();
+            }
+        }
+    }
+}
+
 #[test]
 fn source_edit_camera_none_round_trip_preserves_every_scene_field_on_both_legs() {
     use crate::live_source_switch::SourceKind;
