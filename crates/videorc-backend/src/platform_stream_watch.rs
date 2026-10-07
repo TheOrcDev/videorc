@@ -137,8 +137,7 @@ pub fn youtube_broadcast_answer(body: &Value) -> (Option<String>, PlatformAnswer
             "YouTube ended this broadcast. Stop and go live again to start a new one".to_string(),
         ),
         Some("revoked") => PlatformAnswer::Ended(
-            "YouTube revoked this broadcast. Stop and go live again to start a new one"
-                .to_string(),
+            "YouTube revoked this broadcast. Stop and go live again to start a new one".to_string(),
         ),
         _ => PlatformAnswer::Unknown,
     };
@@ -177,7 +176,11 @@ async fn youtube_read(
         let access_token = if attempt == 0 {
             token.ensure_fresh(state, client).await.to_string()
         } else {
-            token.renew_after_refusal(state, client).await.ok()?.to_string()
+            token
+                .renew_after_refusal(state, client)
+                .await
+                .ok()?
+                .to_string()
         };
         let response = crate::youtube_quota::send_attempt(
             state,
@@ -265,8 +268,13 @@ pub async fn run_youtube_ingest_watch(
                         stream_id = bound;
                     }
                     if let Some(observation) = liveness.observe(answer) {
-                        apply(&state, &session_id, config.target_id.as_deref(), observation)
-                            .await;
+                        apply(
+                            &state,
+                            &session_id,
+                            config.target_id.as_deref(),
+                            observation,
+                        )
+                        .await;
                     }
                 }
             }
@@ -285,7 +293,13 @@ pub async fn run_youtube_ingest_watch(
                     None => PlatformAnswer::Unknown,
                 };
                 if let Some(observation) = liveness.observe(answer) {
-                    apply(&state, &session_id, config.target_id.as_deref(), observation).await;
+                    apply(
+                        &state,
+                        &session_id,
+                        config.target_id.as_deref(),
+                        observation,
+                    )
+                    .await;
                 }
             }
             poll = poll.wrapping_add(1);
@@ -359,7 +373,10 @@ mod tests {
             "status":{"lifeCycleStatus":"complete"},
             "contentDetails":{"boundStreamId":"stream-1"}}]}));
         assert!(matches!(answer, PlatformAnswer::Ended(_)));
-        assert_eq!(youtube_broadcast_answer(&json!({})), (None, PlatformAnswer::Unknown));
+        assert_eq!(
+            youtube_broadcast_answer(&json!({})),
+            (None, PlatformAnswer::Unknown)
+        );
     }
 
     #[test]
@@ -367,12 +384,20 @@ mod tests {
         let not_receiving = || PlatformAnswer::NotReceiving("no data".to_string());
         let mut liveness = PlatformLiveness::default();
         assert_eq!(liveness.observe(not_receiving()), None, "not live yet");
-        assert_eq!(liveness.observe(not_receiving()), None, "still not live yet");
+        assert_eq!(
+            liveness.observe(not_receiving()),
+            None,
+            "still not live yet"
+        );
         assert_eq!(
             liveness.observe(PlatformAnswer::Receiving),
             Some(PlatformStreamObservation::Receiving)
         );
-        assert_eq!(liveness.observe(not_receiving()), None, "one answer can be a cache");
+        assert_eq!(
+            liveness.observe(not_receiving()),
+            None,
+            "one answer can be a cache"
+        );
         assert_eq!(liveness.observe(PlatformAnswer::Unknown), None);
         assert_eq!(
             liveness.observe(not_receiving()),
@@ -392,7 +417,11 @@ mod tests {
             liveness.observe(PlatformAnswer::Receiving),
             Some(PlatformStreamObservation::Receiving)
         );
-        assert_eq!(liveness.observe(not_receiving()), None, "a new streak starts over");
+        assert_eq!(
+            liveness.observe(not_receiving()),
+            None,
+            "a new streak starts over"
+        );
     }
 
     #[test]

@@ -503,9 +503,7 @@ fn twitch_platform_answer(
     outcome: Option<CountFetch>,
 ) -> crate::platform_stream_watch::PlatformAnswer {
     match outcome {
-        Some(CountFetch::Count(Some(_))) => {
-            crate::platform_stream_watch::PlatformAnswer::Receiving
-        }
+        Some(CountFetch::Count(Some(_))) => crate::platform_stream_watch::PlatformAnswer::Receiving,
         Some(CountFetch::Offline) => crate::platform_stream_watch::PlatformAnswer::NotReceiving(
             "Twitch shows the channel offline".to_string(),
         ),
@@ -799,7 +797,9 @@ mod tests {
     #[test]
     fn twitch_empty_data_is_an_offline_answer_not_a_missing_count() {
         assert!(twitch_reports_offline(&json!({"data": []})));
-        assert!(!twitch_reports_offline(&json!({"data": [{"viewer_count": 0}]})));
+        assert!(!twitch_reports_offline(
+            &json!({"data": [{"viewer_count": 0}]})
+        ));
         assert!(!twitch_reports_offline(&json!({"error": "nope"})));
         use crate::platform_stream_watch::PlatformAnswer;
         assert_eq!(

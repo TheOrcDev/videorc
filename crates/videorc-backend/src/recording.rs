@@ -21724,7 +21724,9 @@ async fn publish_stream_leg_update(
             let Some((label, _, snapshot)) = transition else {
                 return;
             };
-            reconnecting_since.entry(position).or_insert_with(Instant::now);
+            reconnecting_since
+                .entry(position)
+                .or_insert_with(Instant::now);
             with_active_session(state, session_id, || {
                 let _ = emit_health_event(
                     state,
@@ -21828,9 +21830,10 @@ fn platform_observation_transition(
         (PlatformStreamObservation::Receiving, StreamTargetState::Warning) => {
             Some((StreamTargetState::Live, None))
         }
-        (PlatformStreamObservation::NotReceiving { detail }, StreamTargetState::Live) => {
-            Some((StreamTargetState::Warning, Some(format!("Not receiving: {detail}"))))
-        }
+        (PlatformStreamObservation::NotReceiving { detail }, StreamTargetState::Live) => Some((
+            StreamTargetState::Warning,
+            Some(format!("Not receiving: {detail}")),
+        )),
         (
             PlatformStreamObservation::Ended { detail },
             StreamTargetState::Live
@@ -28852,9 +28855,7 @@ mod tests {
                 reason: String::new()
             })
         );
-        assert!(
-            parse_ffmpeg_output_mux_failure("[flv @ 0x1] Failed to update header").is_none()
-        );
+        assert!(parse_ffmpeg_output_mux_failure("[flv @ 0x1] Failed to update header").is_none());
         assert!(parse_ffmpeg_output_mux_failure("Error muxing a packet").is_none());
     }
 
@@ -28890,7 +28891,8 @@ mod tests {
         );
         // The success line can trail a `\r` stats segment.
         assert_eq!(
-            monitor.observe("frame=  1 fps=30 speed=1x    \r[fifo @ 0xac4c1c500] Recovery successful"),
+            monitor
+                .observe("frame=  1 fps=30 speed=1x    \r[fifo @ 0xac4c1c500] Recovery successful"),
             Some(StreamLegUpdate::Resumed { position: 0 })
         );
         assert_eq!(
@@ -28933,7 +28935,9 @@ mod tests {
             Some(StreamLegUpdate::UnattributedResumed)
         );
         assert_eq!(
-            monitor.observe("[fifo @ 0xeee] Error opening rtmp://elsewhere/app/key: Connection refused"),
+            monitor.observe(
+                "[fifo @ 0xeee] Error opening rtmp://elsewhere/app/key: Connection refused"
+            ),
             None,
             "a URL that is not a destination of this session"
         );
