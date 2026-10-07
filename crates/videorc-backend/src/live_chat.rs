@@ -293,6 +293,8 @@ pub enum RedemptionKind {
     RandomEmoteUnlock,
     ChosenEmoteUnlock,
     ModifiedEmoteUnlock,
+    /// An automatic reward Twitch added after this build.
+    Other,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
