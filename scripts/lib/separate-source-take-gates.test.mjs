@@ -49,6 +49,12 @@ describe('takeSiblingPaths', () => {
     assert.equal(paths.screen, '/rec/videorc-session-20261006-120000-abc-screen.mkv')
     assert.equal(paths.camera, '/rec/videorc-session-20261006-120000-abc-camera.mkv')
     assert.equal(takeSiblingPaths('/rec/take.mp4').camera, '/rec/take-camera.mp4')
+    assert.equal(
+      takeSiblingPaths('C:\\Videos\\take.mkv').screen,
+      'C:\\Videos\\take-screen.mkv',
+      'Windows separators are preserved as given'
+    )
+    assert.equal(takeSiblingPaths('take').camera, 'take-camera')
   })
 })
 

@@ -9,7 +9,7 @@
 // The pure evaluators take ffprobe JSON that has already been read; the
 // smoke script (`scripts/smoke-separate-source-take.mjs`) does the I/O.
 
-import { basename, dirname, extname, join } from 'node:path'
+import { extname } from 'node:path'
 
 export const TAKE_ROLES = Object.freeze(['combined', 'screen', 'camera'])
 
@@ -38,12 +38,14 @@ export const DEFAULT_TAKE_GATES = Object.freeze({
  */
 export function takeSiblingPaths(combinedPath) {
   const extension = extname(combinedPath)
-  const stem = basename(combinedPath, extension)
-  const directory = dirname(combinedPath)
+  // Splice the role in before the extension; the directory and separators
+  // are left exactly as given (POSIX or Windows), so the result sits beside
+  // the Combined file on either platform.
+  const stem = extension ? combinedPath.slice(0, -extension.length) : combinedPath
   return {
     combined: combinedPath,
-    screen: join(directory, `${stem}-screen${extension}`),
-    camera: join(directory, `${stem}-camera${extension}`)
+    screen: `${stem}-screen${extension}`,
+    camera: `${stem}-camera${extension}`
   }
 }
 
