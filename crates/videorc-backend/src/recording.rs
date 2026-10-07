@@ -1180,7 +1180,15 @@ fn stop_term_grace_decision(
 
 #[derive(Debug)]
 enum FfmpegStderrEvent {
+    /// A line FFmpeg printed at warning level or above, a stats/progress line,
+    /// or an untagged `fprintf` (command replies and prompts). Exactly what the
+    /// pre-161 `-loglevel warning` stream carried, with level tags removed.
     Line(String),
+    /// An informational `av_log` line (`-loglevel level+info`): the startup
+    /// stream dump, fifo recovery progress, the end-of-run summary. Only the
+    /// stream-leg monitor reads these (plan 161); they never reach the stderr
+    /// tail, the fatal classifier or the bounded log ring.
+    Info(String),
     ReadFailed,
     Eof,
 }
@@ -1248,7 +1256,20 @@ async fn relay_ffmpeg_stderr<R>(
 {
     loop {
         match read_bounded_ffmpeg_line(&mut reader).await {
-            Ok(Some(line)) => {
+            Ok(Some(raw_line)) => {
+                // Plan 161: bridge FFmpeg runs with `-loglevel level+info` so
+                // fifo reconnects are visible. Informational chatter goes to
+                // its own event; every existing reader below sees the same
+                // untagged text the warning-level stream used to carry.
+                let (line, level) = strip_ffmpeg_log_levels(&raw_line);
+                if level.is_some_and(FfmpegLogLevel::is_informational)
+                    && !is_ffmpeg_progress_noise(&line)
+                {
+                    if sender.send(FfmpegStderrEvent::Info(line)).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
                 progress
                     .evidence
                     .lock()
@@ -4789,13 +4810,16 @@ async fn start_session_with_timeline(
             // process creates a fresh monitor/accumulator, while the explicit generation
             // remains testable so future in-place restarts cannot inherit counters.
             let process_generation = 0_u64;
+            let mut stream_legs = StreamLegMonitor::new(stream_url_positions);
+            let mut reconnecting_since = std::collections::HashMap::new();
             let mut stream_health_accumulator =
                 StreamHealthAccumulator::new(&log_session_id, process_generation);
             let mut pending_stream_health = ParsedStreamHealthDelta::default();
             let mut last_stream_health_published_at = Instant::now();
             let stderr_reached_eof = loop {
-                let line = match stderr_events.recv().await {
-                    Some(FfmpegStderrEvent::Line(line)) => line,
+                let (line, informational) = match stderr_events.recv().await {
+                    Some(FfmpegStderrEvent::Line(line)) => (line, false),
+                    Some(FfmpegStderrEvent::Info(line)) => (line, true),
                     Some(FfmpegStderrEvent::Eof) | None => break true,
                     Some(FfmpegStderrEvent::ReadFailed) => {
                         let _ = emit_session_log(
@@ -4811,6 +4835,27 @@ async fn start_session_with_timeline(
                 };
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
+                    continue;
+                }
+
+                // Plan 161: per-leg reconnects and deaths, attributed exactly.
+                if let Some(update) = stream_legs.observe(trimmed) {
+                    publish_stream_leg_update(
+                        &log_state,
+                        &log_session_id,
+                        &stream_targets_snapshot,
+                        &mut reconnecting_since,
+                        update,
+                    )
+                    .await;
+                }
+                if informational {
+                    // The startup dump quotes every output URL (the stream
+                    // key); keep only a URL-free trace.
+                    tracing::debug!(
+                        "{}",
+                        sanitized_ffmpeg_diagnostic_line(trimmed, FFMPEG_STDERR_TAIL_LINE_CHARS)
+                    );
                     continue;
                 }
 
@@ -4912,27 +4957,7 @@ async fn start_session_with_timeline(
                 // A `tee` slave dropping mid-session (onfail=ignore keeps the rest
                 // running) — attribute it to the specific target and re-emit the
                 // per-target snapshot so the UI can flag exactly which platform fell.
-                // Per-target fifo-muxer legs (plan 023): attribute by URL.
-                if let Some(failure) = parse_fifo_output_failure(trimmed)
-                    && let Some(position) = stream_url_positions
-                        .iter()
-                        .find(|(url, _)| *url == failure.url)
-                        .map(|(_, position)| *position)
-                {
-                    let reason = if failure.reason.is_empty() {
-                        "Stream connection failed".to_string()
-                    } else {
-                        failure.reason.clone()
-                    };
-                    publish_stream_target_failure_if_active(
-                        &log_state,
-                        &log_session_id,
-                        &stream_targets_snapshot,
-                        position,
-                        reason,
-                    )
-                    .await;
-                }
+                // Per-target fifo-muxer legs (plan 023) are `stream_legs` above.
                 if let Some(failure) = parse_tee_slave_failure(trimmed)
                     && let Some(Some(position)) = slave_positions.get(failure.slave_index).copied()
                 {
@@ -17412,7 +17437,11 @@ fn bridge_ffmpeg_base_args() -> Vec<String> {
         "-n".to_string(),
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
-        "warning".to_string(),
+        // `level+info` (plan 161): fifo legs log their reconnects ("Recovery
+        // failed", "Recovery successful") and the startup dump maps output
+        // indexes to destinations, all at INFO. Every line carries its level,
+        // and `relay_ffmpeg_stderr` keeps INFO out of the warning-level paths.
+        BRIDGE_FFMPEG_LOGLEVEL.to_string(),
         "-stats".to_string(),
         "-stats_period".to_string(),
         FFMPEG_PROGRESS_REPORT_PERIOD.as_secs_f64().to_string(),
@@ -21604,6 +21633,302 @@ async fn publish_stream_target_failure_if_active(
     }
 }
 
+/// Moves one destination to `next` (plan 161). Returns its label, the state it
+/// left and the replacement snapshot only when the STATE changed. A new reason
+/// for the same state is stored silently: a leg retrying every two seconds
+/// must not flood the renderer or the health log. Skipped destinations never
+/// change.
+fn transition_stream_target(
+    shared: &SharedStreamTargetsSnapshot,
+    position: usize,
+    next: StreamTargetState,
+    message: Option<String>,
+) -> Option<(String, StreamTargetState, StreamTargetsSnapshot)> {
+    let mut snapshot = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = snapshot.targets.get_mut(position)?;
+    if entry.state == StreamTargetState::NotConfigured {
+        return None;
+    }
+    if entry.state == next {
+        entry.message = message;
+        return None;
+    }
+    let previous = entry.state;
+    entry.state = next;
+    entry.message = message;
+    let label = entry.label.clone();
+    Some((label, previous, snapshot.clone()))
+}
+
+/// How long the stderr consumer waits for the recording slot before it gives
+/// up on one broadcast. The stop path holds that slot while it joins this
+/// consumer with a bounded abort, so the wait must stay short and bounded.
+const STREAM_TARGET_PUBLISH_ATTEMPTS: u32 = 10;
+const STREAM_TARGET_PUBLISH_RETRY: Duration = Duration::from_millis(50);
+
+/// Runs `publish` while this exact session owns the recording slot. A retired
+/// consumer can never publish into a replacement session. Unlike a single
+/// `try_lock`, a briefly busy slot does not lose a reconnect notice.
+async fn with_active_session<F>(state: &AppState, session_id: &str, publish: F)
+where
+    F: FnOnce(),
+{
+    for attempt in 0..STREAM_TARGET_PUBLISH_ATTEMPTS {
+        if let Ok(recording) = state.recording.try_lock() {
+            if recording
+                .as_ref()
+                .is_some_and(|active| active.session_id == session_id)
+            {
+                publish();
+            }
+            return;
+        }
+        if attempt + 1 < STREAM_TARGET_PUBLISH_ATTEMPTS {
+            sleep(STREAM_TARGET_PUBLISH_RETRY).await;
+        }
+    }
+}
+
+/// Health event and snapshot broadcast for one FFmpeg-reported leg change
+/// (plan 161). `reconnecting_since` remembers when each leg went down so the
+/// resume notice can say for how long.
+async fn publish_stream_leg_update(
+    state: &AppState,
+    session_id: &str,
+    targets: &SharedStreamTargetsSnapshot,
+    reconnecting_since: &mut std::collections::HashMap<usize, Instant>,
+    update: StreamLegUpdate,
+) {
+    // A failed destination is terminal: a dead tee slave, a finished output,
+    // or a broadcast the platform ended. FFmpeg reconnecting the socket
+    // underneath cannot bring the broadcast back, so it never revives one.
+    if let StreamLegUpdate::Reconnecting { position, .. } | StreamLegUpdate::Resumed { position } =
+        &update
+        && stream_targets_snapshot_value(targets)
+            .targets
+            .get(*position)
+            .is_some_and(|target| target.state == StreamTargetState::Failed)
+    {
+        return;
+    }
+    match update {
+        StreamLegUpdate::Reconnecting { position, reason } => {
+            let transition = transition_stream_target(
+                targets,
+                position,
+                StreamTargetState::Reconnecting,
+                Some(format!("Reconnecting: {reason}")),
+            );
+            let Some((label, _, snapshot)) = transition else {
+                return;
+            };
+            reconnecting_since.entry(position).or_insert_with(Instant::now);
+            with_active_session(state, session_id, || {
+                let _ = emit_health_event(
+                    state,
+                    Some(session_id),
+                    HealthLevel::Warn,
+                    STREAM_TARGET_RECONNECTING_CODE,
+                    &format!(
+                        "Streaming to {label} is reconnecting: {reason}. Until it is back, viewers there see nothing; the other destinations keep streaming."
+                    ),
+                );
+                state.emit_event("stream.targets", snapshot);
+            })
+            .await;
+        }
+        StreamLegUpdate::Resumed { position } => {
+            let down_for = reconnecting_since
+                .remove(&position)
+                .map(|since| since.elapsed());
+            let transition =
+                transition_stream_target(targets, position, StreamTargetState::Live, None);
+            let Some((label, _, snapshot)) = transition else {
+                return;
+            };
+            let message = match down_for {
+                Some(down_for) => format!(
+                    "Streaming to {label} resumed after {} of reconnecting.",
+                    format_stream_leg_outage(down_for)
+                ),
+                None => format!("Streaming to {label} resumed."),
+            };
+            with_active_session(state, session_id, || {
+                let _ = emit_health_event(
+                    state,
+                    Some(session_id),
+                    HealthLevel::Info,
+                    STREAM_TARGET_RESUMED_CODE,
+                    &message,
+                );
+                state.emit_event("stream.targets", snapshot);
+            })
+            .await;
+        }
+        StreamLegUpdate::Failed { position, reason } => {
+            reconnecting_since.remove(&position);
+            publish_stream_target_failure_if_active(state, session_id, targets, position, reason)
+                .await;
+        }
+        StreamLegUpdate::UnattributedReconnecting { reason } => {
+            with_active_session(state, session_id, || {
+                let _ = emit_health_event(
+                    state,
+                    Some(session_id),
+                    HealthLevel::Warn,
+                    STREAM_TARGET_RECONNECTING_CODE,
+                    &format!(
+                        "A live destination is reconnecting: {reason}. The other destinations keep streaming."
+                    ),
+                );
+            })
+            .await;
+        }
+        StreamLegUpdate::UnattributedResumed => {
+            with_active_session(state, session_id, || {
+                let _ = emit_health_event(
+                    state,
+                    Some(session_id),
+                    HealthLevel::Info,
+                    STREAM_TARGET_RECONNECTED_CODE,
+                    "A live destination dropped its connection and reconnected by itself. Viewers there saw a short interruption.",
+                );
+            })
+            .await;
+        }
+    }
+}
+
+/// What a platform's own API says about the stream it should be receiving
+/// (plan 161, S4; `platform_stream_watch`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PlatformStreamObservation {
+    Receiving,
+    /// The platform says it is not receiving the stream, in its own words.
+    NotReceiving {
+        detail: String,
+    },
+    /// The platform ended the broadcast; reconnecting cannot bring it back.
+    Ended {
+        detail: String,
+    },
+}
+
+/// The destination state a platform observation leads to, if any. FFmpeg's
+/// view wins while it is reconnecting a leg: the platform can only demote a
+/// destination FFmpeg believes is live, and it only clears the warning it
+/// raised itself (nothing else sets `Warning` on a live destination).
+fn platform_observation_transition(
+    current: StreamTargetState,
+    observation: &PlatformStreamObservation,
+) -> Option<(StreamTargetState, Option<String>)> {
+    match (observation, current) {
+        (PlatformStreamObservation::Receiving, StreamTargetState::Warning) => {
+            Some((StreamTargetState::Live, None))
+        }
+        (PlatformStreamObservation::NotReceiving { detail }, StreamTargetState::Live) => {
+            Some((StreamTargetState::Warning, Some(format!("Not receiving: {detail}"))))
+        }
+        (
+            PlatformStreamObservation::Ended { detail },
+            StreamTargetState::Live
+            | StreamTargetState::Warning
+            | StreamTargetState::Reconnecting
+            | StreamTargetState::Connecting,
+        ) => Some((StreamTargetState::Failed, Some(detail.clone()))),
+        _ => None,
+    }
+}
+
+/// Applies a platform observation to this session's destinations on that
+/// platform. `target_id` narrows it when the poller knows its destination;
+/// when it matches nothing, every destination on the platform is meant.
+pub(crate) async fn observe_platform_stream(
+    state: &AppState,
+    session_id: &str,
+    platform: crate::streaming::StreamPlatform,
+    target_id: Option<&str>,
+    observation: PlatformStreamObservation,
+) {
+    let recording = state.recording.lock().await;
+    let Some(active) = recording
+        .as_ref()
+        .filter(|active| active.session_id == session_id)
+    else {
+        return;
+    };
+    let shared = &active.stream_targets_snapshot;
+    let candidates: Vec<(usize, StreamTargetState)> = {
+        let snapshot = shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let on_platform = || {
+            snapshot
+                .targets
+                .iter()
+                .enumerate()
+                .filter(|(_, target)| target.platform == platform)
+        };
+        let exact: Vec<_> = on_platform()
+            .filter(|(_, target)| target_id.is_some_and(|id| target.target_id == id))
+            .map(|(position, target)| (position, target.state))
+            .collect();
+        if exact.is_empty() {
+            on_platform()
+                .map(|(position, target)| (position, target.state))
+                .collect()
+        } else {
+            exact
+        }
+    };
+    for (position, current) in candidates {
+        let Some((next, message)) = platform_observation_transition(current, &observation) else {
+            continue;
+        };
+        let Some((label, _, snapshot)) = transition_stream_target(shared, position, next, message)
+        else {
+            continue;
+        };
+        let (level, code, text) = match &observation {
+            PlatformStreamObservation::Receiving => (
+                HealthLevel::Info,
+                STREAM_TARGET_RESUMED_CODE,
+                format!("{label} is receiving the stream again."),
+            ),
+            PlatformStreamObservation::NotReceiving { detail } => (
+                HealthLevel::Warn,
+                STREAM_TARGET_NOT_RECEIVING_CODE,
+                format!(
+                    "{label} isn't receiving the stream ({detail}), although Videorc is still sending it. Viewers there may see nothing."
+                ),
+            ),
+            PlatformStreamObservation::Ended { detail } => (
+                HealthLevel::Warn,
+                "stream-target-failed",
+                format!("Streaming to {label} stopped: {detail}."),
+            ),
+        };
+        let _ = emit_health_event(state, Some(session_id), level, code, &text);
+        state.emit_event("stream.targets", snapshot);
+    }
+}
+
+pub(crate) const STREAM_TARGET_NOT_RECEIVING_CODE: &str = "stream-target-not-receiving";
+pub(crate) const STREAM_TARGET_RECONNECTING_CODE: &str = "stream-target-reconnecting";
+pub(crate) const STREAM_TARGET_RESUMED_CODE: &str = "stream-target-resumed";
+pub(crate) const STREAM_TARGET_RECONNECTED_CODE: &str = "stream-target-reconnected";
+
+fn format_stream_leg_outage(duration: Duration) -> String {
+    let seconds = duration.as_secs().max(1);
+    if seconds < 60 {
+        format!("{seconds} s")
+    } else {
+        format!("{} min {} s", seconds / 60, seconds % 60)
+    }
+}
+
 pub(crate) const STREAM_OUTPUT_FAILED_CODE: &str = "stream-output-failed";
 
 fn stream_output_failed_message(stream_error: &str) -> String {
@@ -21777,28 +22102,207 @@ fn parse_tee_slave_failure(line: &str) -> Option<TeeSlaveFailure> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FifoOutputFailure {
+    /// The fifo muxer's log context (`fifo @ 0x…`). It is stable for the
+    /// leg's whole life, so it attributes the later recovery lines, which
+    /// never name the URL (plan 161).
+    context: String,
     url: String,
     reason: String,
+}
+
+/// Splits a `[fifo @ 0x…] message` line into the fifo's log context and its
+/// message. The fifo line can follow a `\r`-terminated stats segment, so it is
+/// found anywhere in the line.
+fn fifo_log_message(line: &str) -> Option<(&str, &str)> {
+    let start = line.find("[fifo @ ")?;
+    let rest = &line[start + 1..];
+    let close = rest.find("] ")?;
+    Some((&rest[..close], rest[close + 2..].trim_end()))
 }
 
 /// Parses an FFmpeg `fifo` muxer failure line, e.g.
 /// `[fifo @ 0x..] Error opening rtmp://host/app/key: Connection refused`.
 /// Stream targets ride per-target fifo-muxer outputs (plan 023 L1), so a
-/// failing leg is attributed by URL instead of a tee slave index.
+/// failing leg is attributed by URL instead of a tee slave index. With
+/// recovery on, the fifo prints this line on EVERY failed reconnect attempt.
 fn parse_fifo_output_failure(line: &str) -> Option<FifoOutputFailure> {
-    let tag = line.find("[fifo @")?;
-    let rest = &line[tag..];
-    let marker = "Error opening ";
-    let start = rest.find(marker)? + marker.len();
-    let (url, reason) = rest[start..].rsplit_once(": ")?;
+    let (context, message) = fifo_log_message(line)?;
+    let rest = message.strip_prefix("Error opening ")?;
+    let (url, reason) = rest.rsplit_once(": ")?;
     let url = url.trim();
     if url.is_empty() {
         return None;
     }
     Some(FifoOutputFailure {
+        context: context.to_string(),
         url: url.to_string(),
         reason: reason.trim().trim_end_matches('.').to_string(),
     })
+}
+
+/// Parses FFmpeg's startup dump header for one output,
+/// `Output #1, fifo, to 'rtmp://host/app/key':`, into the output index and
+/// its URL. Printed at INFO, so it arrives as an `Info` stderr event.
+fn parse_ffmpeg_output_header(line: &str) -> Option<(usize, &str)> {
+    let rest = line.trim().strip_prefix("Output #")?;
+    let (index, rest) = rest.split_once(", ")?;
+    let index = index.parse::<usize>().ok()?;
+    let start = rest.find(" to '")? + " to '".len();
+    let url = rest[start..].strip_suffix("':")?;
+    (!url.is_empty()).then_some((index, url))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputMuxFailure {
+    output_index: usize,
+    reason: String,
+}
+
+/// Parses FFmpeg's per-output mux failure, which names the output by index
+/// and never by URL:
+/// `[aost#1:1/aac @ 0x…] Error submitting a packet to the muxer: End of file`
+/// (the 2026-10-07 YouTube leg) or `[out#1/fifo @ 0x…] Error muxing a packet`.
+/// FFmpeg finishes only that output, so the process, the other legs and the
+/// progress clock carry on: nothing else ever reports it (plan 161).
+fn parse_ffmpeg_output_mux_failure(line: &str) -> Option<OutputMuxFailure> {
+    const SUBMIT: &str = "Error submitting a packet to the muxer";
+    const MUXING: &str = "Error muxing a packet";
+    let (message_start, reason) = if let Some(start) = line.find(SUBMIT) {
+        let reason = line[start + SUBMIT.len()..]
+            .trim_start_matches(':')
+            .trim()
+            .trim_end_matches('.')
+            .to_string();
+        (start, reason)
+    } else {
+        (line.find(MUXING)?, String::new())
+    };
+    let prefix = line[..message_start].trim_end();
+    let context_start = prefix.rfind('[')?;
+    let context = prefix[context_start + 1..].strip_suffix(']')?;
+    let context = context.split(" @ ").next()?;
+    let digits = if let Some(rest) = context.strip_prefix("out#") {
+        rest.split('/').next()?
+    } else {
+        let (_, rest) = context.split_once("ost#")?;
+        rest.split(':').next()?
+    };
+    Some(OutputMuxFailure {
+        output_index: digits.parse().ok()?,
+        reason,
+    })
+}
+
+/// What happened to one stream leg, from FFmpeg's own words (plan 161).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StreamLegUpdate {
+    /// The leg's connection is down and the fifo is retrying it.
+    Reconnecting { position: usize, reason: String },
+    /// The fifo reconnected the leg.
+    Resumed { position: usize },
+    /// The leg will not come back by itself.
+    Failed { position: usize, reason: String },
+    /// A fifo we cannot attribute is retrying (it reconnected before it ever
+    /// printed its URL). Reported once per leg until it recovers.
+    UnattributedReconnecting { reason: String },
+    /// A fifo we cannot attribute dropped and reconnected immediately.
+    UnattributedResumed,
+}
+
+/// One session's stream legs as FFmpeg reports them. Pure: stripped stderr
+/// lines in, per-destination updates out (plan 161).
+///
+/// Attribution is exact, never guessed: a fifo prints its URL only on
+/// `Error opening <url>`, which teaches the monitor that fifo's context; its
+/// later `Recovery failed` / `Recovery successful` lines carry the context
+/// alone. The startup dump (`Output #N, fifo, to '<url>'`) maps FFmpeg's
+/// output index for the per-output mux failure.
+#[derive(Debug, Default)]
+struct StreamLegMonitor {
+    url_positions: Vec<(String, usize)>,
+    fifo_contexts: std::collections::HashMap<String, usize>,
+    output_positions: std::collections::HashMap<usize, usize>,
+    unattributed_reconnecting: std::collections::HashSet<String>,
+}
+
+impl StreamLegMonitor {
+    fn new(url_positions: Vec<(String, usize)>) -> Self {
+        Self {
+            url_positions,
+            ..Self::default()
+        }
+    }
+
+    fn position_for_url(&self, url: &str) -> Option<usize> {
+        self.url_positions
+            .iter()
+            .find(|(candidate, _)| candidate == url)
+            .map(|(_, position)| *position)
+    }
+
+    fn observe(&mut self, line: &str) -> Option<StreamLegUpdate> {
+        if let Some((output_index, url)) = parse_ffmpeg_output_header(line) {
+            if let Some(position) = self.position_for_url(url) {
+                self.output_positions.insert(output_index, position);
+            }
+            return None;
+        }
+        if let Some(failure) = parse_fifo_output_failure(line) {
+            let position = self.position_for_url(&failure.url)?;
+            self.fifo_contexts.insert(failure.context, position);
+            return Some(StreamLegUpdate::Reconnecting {
+                position,
+                reason: stream_leg_reason(failure.reason),
+            });
+        }
+        if let Some((context, message)) = fifo_log_message(line) {
+            let position = self.fifo_contexts.get(context).copied();
+            if let Some(reason) = message.strip_prefix("Recovery failed:") {
+                let reason = stream_leg_reason(reason.trim().trim_end_matches('.').to_string());
+                return match position {
+                    Some(position) => Some(StreamLegUpdate::Reconnecting { position, reason }),
+                    None => self
+                        .unattributed_reconnecting
+                        .insert(context.to_string())
+                        .then_some(StreamLegUpdate::UnattributedReconnecting { reason }),
+                };
+            }
+            if message == "Recovery successful" {
+                return Some(match position {
+                    Some(position) => StreamLegUpdate::Resumed { position },
+                    None => {
+                        self.unattributed_reconnecting.remove(context);
+                        StreamLegUpdate::UnattributedResumed
+                    }
+                });
+            }
+            if message.starts_with("Maximal number of") {
+                return Some(StreamLegUpdate::Failed {
+                    position: position?,
+                    reason: "Videorc stopped reconnecting".to_string(),
+                });
+            }
+            return None;
+        }
+        let failure = parse_ffmpeg_output_mux_failure(line)?;
+        let position = *self.output_positions.get(&failure.output_index)?;
+        Some(StreamLegUpdate::Failed {
+            position,
+            reason: if failure.reason.is_empty() {
+                "The connection closed".to_string()
+            } else {
+                format!("The connection closed ({})", failure.reason)
+            },
+        })
+    }
+}
+
+fn stream_leg_reason(reason: String) -> String {
+    if reason.is_empty() {
+        "Stream connection failed".to_string()
+    } else {
+        reason
+    }
 }
 
 fn output_mode(record_enabled: bool, stream_enabled: bool) -> &'static str {
@@ -22136,6 +22640,90 @@ fn emit_session_log(
     Ok(())
 }
 
+/// The bridge FFmpeg's log level: every `av_log` line tagged with its level.
+const BRIDGE_FFMPEG_LOGLEVEL: &str = "level+info";
+
+/// An `av_log` level as printed by `-loglevel level+…` (`get_level_str` in
+/// libavutil/log.c), least to most severe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FfmpegLogLevel {
+    Trace,
+    Debug,
+    Verbose,
+    Info,
+    Warning,
+    Error,
+    Fatal,
+    Panic,
+}
+
+impl FfmpegLogLevel {
+    fn from_tag(tag: &str) -> Option<Self> {
+        Some(match tag {
+            "trace" => Self::Trace,
+            "debug" => Self::Debug,
+            "verbose" => Self::Verbose,
+            "info" => Self::Info,
+            "warning" => Self::Warning,
+            "error" => Self::Error,
+            "fatal" => Self::Fatal,
+            "panic" => Self::Panic,
+            _ => return None,
+        })
+    }
+
+    fn is_informational(self) -> bool {
+        self <= Self::Info
+    }
+}
+
+/// Removes `-loglevel level+…` tags from one stderr line and returns the most
+/// severe level it carried (`None` for an untagged line: `-progress` output,
+/// command replies and prompts are plain `fprintf`/avio writes).
+///
+/// FFmpeg prints the tag AFTER the context prefixes
+/// (`[fifo @ 0x1] [info] Recovery successful`, `[info] frame= …`), and the
+/// stats line ends in `\r`, so one `\n` line can hold several tagged
+/// segments (`[info] frame= …\r[flv @ 0x2] [warning] Failed to update …`).
+/// Each `\r` segment is stripped on its own and the separators are kept.
+fn strip_ffmpeg_log_levels(line: &str) -> (String, Option<FfmpegLogLevel>) {
+    if !line.contains("] ") {
+        return (line.to_string(), None);
+    }
+    let mut level: Option<FfmpegLogLevel> = None;
+    let stripped = line
+        .split('\r')
+        .map(|segment| {
+            let mut cursor = 0;
+            // At most a parent context, a context and the level tag.
+            for _ in 0..3 {
+                let rest = &segment[cursor..];
+                if !rest.starts_with('[') {
+                    break;
+                }
+                let Some(close) = rest.find("] ") else {
+                    break;
+                };
+                let inner = &rest[1..close];
+                if let Some(tagged) = FfmpegLogLevel::from_tag(inner) {
+                    level = Some(level.map_or(tagged, |current| current.max(tagged)));
+                    let mut owned = String::with_capacity(segment.len());
+                    owned.push_str(&segment[..cursor]);
+                    owned.push_str(&rest[close + 2..]);
+                    return owned;
+                }
+                if !inner.contains(" @ ") {
+                    break;
+                }
+                cursor += close + 2;
+            }
+            segment.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\r");
+    (stripped, level)
+}
+
 /// FFmpeg `-progress`/stats output: either the combined `frame= ... speed=`
 /// status line or a single `key=value` counter. These arrive multiple times
 /// per second and must stay out of the bounded log ring buffer.
@@ -22172,6 +22760,10 @@ fn looks_like_ffmpeg_health_event(line: &str) -> bool {
         || normalized.contains("permission")
         || normalized.contains("failed")
         || normalized.contains("connection")
+        // Plan 161: the only words FFmpeg says when one output dies.
+        || normalized.contains("end of file")
+        || normalized.contains("error submitting")
+        || normalized.contains("error muxing")
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -28069,6 +28661,421 @@ mod tests {
 
         assert!(parse_fifo_output_failure("[flv @ 0x1] Error opening rtmp://x: nope").is_none());
         assert!(parse_fifo_output_failure("[fifo @ 0x1] something else").is_none());
+    }
+
+    // Plan 161: lines captured from the bundled FFmpeg 8.1.1 publishing to a
+    // local RTMP listener that was killed mid-stream and then restarted.
+    const YOUTUBE_URL: &str = "rtmp://a.rtmp.youtube.com/live2/abcd-efgh";
+    const TWITCH_URL: &str = "rtmp://live.twitch.tv/app/live_123";
+
+    fn two_leg_monitor() -> StreamLegMonitor {
+        StreamLegMonitor::new(vec![
+            (YOUTUBE_URL.to_string(), 0),
+            (TWITCH_URL.to_string(), 1),
+        ])
+    }
+
+    #[test]
+    fn ffmpeg_level_tags_are_stripped_after_the_context() {
+        assert_eq!(
+            strip_ffmpeg_log_levels(
+                "[fifo @ 0xac4c1c500] [info] Recovery failed: Connection refused"
+            ),
+            (
+                "[fifo @ 0xac4c1c500] Recovery failed: Connection refused".to_string(),
+                Some(FfmpegLogLevel::Info)
+            )
+        );
+        assert_eq!(
+            strip_ffmpeg_log_levels(
+                "[aost#1:1/aac @ 0x703488900] [error] Error submitting a packet to the muxer: End of file"
+            ),
+            (
+                "[aost#1:1/aac @ 0x703488900] Error submitting a packet to the muxer: End of file"
+                    .to_string(),
+                Some(FfmpegLogLevel::Error)
+            )
+        );
+        assert_eq!(
+            strip_ffmpeg_log_levels("[a @ 0x1] [b @ 0x2] [warning] nested"),
+            (
+                "[a @ 0x1] [b @ 0x2] nested".to_string(),
+                Some(FfmpegLogLevel::Warning)
+            )
+        );
+        assert_eq!(
+            strip_ffmpeg_log_levels("[info] Press [q] to stop, [?] for help"),
+            (
+                "Press [q] to stop, [?] for help".to_string(),
+                Some(FfmpegLogLevel::Info)
+            )
+        );
+    }
+
+    #[test]
+    fn untagged_ffmpeg_lines_pass_through_unchanged() {
+        for line in [
+            "out_time_us=1500000",
+            "progress=continue",
+            "Command reply for stream 0: ret:0 res:",
+            "Enter command: <target>|all <time>|-1 <command>[ <argument>]",
+            "[fifo @ 0x7ef042a80] Error opening rtmp://127.0.0.1:11937/live/x: Connection refused",
+            "[tee @ 0x10] Slave muxer #2 failed: Connection refused, continuing with 2/3 slaves.",
+        ] {
+            assert_eq!(strip_ffmpeg_log_levels(line), (line.to_string(), None));
+        }
+    }
+
+    #[test]
+    fn a_stats_line_keeps_its_carriage_returns_and_most_severe_level() {
+        let (line, level) = strip_ffmpeg_log_levels(
+            "[info] frame=  360 fps=30 q=2.0 size=N/A time=00:00:12.00 bitrate=N/A speed=1.01x    \rframe=361",
+        );
+        assert_eq!(
+            line,
+            "frame=  360 fps=30 q=2.0 size=N/A time=00:00:12.00 bitrate=N/A speed=1.01x    \rframe=361"
+        );
+        assert_eq!(level, Some(FfmpegLogLevel::Info));
+        assert!(
+            is_ffmpeg_progress_noise(&line),
+            "stats stay progress noise after the tag is gone"
+        );
+        let stats = parse_ffmpeg_stream_health(&line).expect("stats still parse");
+        assert_eq!(stats.fps, Some(30.0));
+        assert_eq!(stats.speed, Some(1.01));
+
+        let (line, level) = strip_ffmpeg_log_levels(
+            "[info] frame=  1 fps=30 speed=1x    \r[flv @ 0xac4c1f200] [warning] Failed to update header with correct duration.",
+        );
+        assert_eq!(
+            line,
+            "frame=  1 fps=30 speed=1x    \r[flv @ 0xac4c1f200] Failed to update header with correct duration."
+        );
+        assert_eq!(level, Some(FfmpegLogLevel::Warning));
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_stderr_relay_routes_info_away_from_warning_readers() {
+        let (event_sender, mut events) = mpsc::channel(256);
+        let input = format!(
+            "[info] Output #1, fifo, to '{YOUTUBE_URL}':\n\
+             [fifo @ 0x1] [error] Error opening {YOUTUBE_URL}: Connection refused\n\
+             [fifo @ 0x1] [info] Recovery failed: Connection refused\n\
+             [info] frame=  1 fps=30 speed=1x    \rframe=2\n\
+             Command reply for stream 0: ret:0 res:\n"
+        );
+        let progress = FfmpegProgressBeacon::default();
+        relay_ffmpeg_stderr(
+            BufReader::new(input.as_bytes()),
+            event_sender,
+            None,
+            progress.clone(),
+        )
+        .await;
+
+        let mut received = Vec::new();
+        while let Some(event) = events.recv().await {
+            received.push(match event {
+                FfmpegStderrEvent::Line(line) => format!("line:{line}"),
+                FfmpegStderrEvent::Info(line) => format!("info:{line}"),
+                FfmpegStderrEvent::Eof => "eof".to_string(),
+                FfmpegStderrEvent::ReadFailed => "read-failed".to_string(),
+            });
+        }
+        assert_eq!(
+            received,
+            vec![
+                format!("info:Output #1, fifo, to '{YOUTUBE_URL}':"),
+                format!("line:[fifo @ 0x1] Error opening {YOUTUBE_URL}: Connection refused"),
+                "info:[fifo @ 0x1] Recovery failed: Connection refused".to_string(),
+                "line:frame=  1 fps=30 speed=1x    \rframe=2".to_string(),
+                "line:Command reply for stream 0: ret:0 res:".to_string(),
+                "eof".to_string(),
+            ]
+        );
+        let evidence = progress
+            .evidence
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tail = evidence.tail.summary().unwrap_or_default();
+        assert!(
+            !tail.contains("Output #1") && !tail.contains("Recovery failed"),
+            "INFO lines must never reach the persisted stderr tail: {tail}"
+        );
+    }
+
+    #[test]
+    fn bridge_ffmpeg_tags_every_log_line_with_its_level() {
+        let args = bridge_ffmpeg_base_args();
+        assert_eq!(arg_value(&args, "-loglevel"), Some("level+info"));
+    }
+
+    #[test]
+    fn output_headers_map_ffmpeg_output_indexes_to_urls() {
+        assert_eq!(
+            parse_ffmpeg_output_header(&format!("Output #1, fifo, to '{YOUTUBE_URL}':")),
+            Some((1, YOUTUBE_URL))
+        );
+        assert_eq!(
+            parse_ffmpeg_output_header("Output #0, matroska, to '/tmp/session.mkv':"),
+            Some((0, "/tmp/session.mkv"))
+        );
+        assert!(parse_ffmpeg_output_header("Input #0, lavfi, from 'testsrc':").is_none());
+        assert!(parse_ffmpeg_output_header("  Stream #0:0 -> #1:0 (copy)").is_none());
+    }
+
+    #[test]
+    fn output_mux_failures_name_the_output_index() {
+        // The 2026-10-07 incident line (output #1 was YouTube).
+        assert_eq!(
+            parse_ffmpeg_output_mux_failure(
+                "[aost#1:1/aac @ 0x703488900] Error submitting a packet to the muxer: End of file"
+            ),
+            Some(OutputMuxFailure {
+                output_index: 1,
+                reason: "End of file".to_string()
+            })
+        );
+        assert_eq!(
+            parse_ffmpeg_output_mux_failure(
+                "[vost#3:0/copy @ 0x1] Error submitting a packet to the muxer: Broken pipe"
+            ),
+            Some(OutputMuxFailure {
+                output_index: 3,
+                reason: "Broken pipe".to_string()
+            })
+        );
+        assert_eq!(
+            parse_ffmpeg_output_mux_failure("[out#2/fifo @ 0x1] Error muxing a packet"),
+            Some(OutputMuxFailure {
+                output_index: 2,
+                reason: String::new()
+            })
+        );
+        assert!(
+            parse_ffmpeg_output_mux_failure("[flv @ 0x1] Failed to update header").is_none()
+        );
+        assert!(parse_ffmpeg_output_mux_failure("Error muxing a packet").is_none());
+    }
+
+    #[test]
+    fn a_dropped_leg_reconnects_and_resumes_on_its_own_target() {
+        let mut monitor = two_leg_monitor();
+        assert_eq!(
+            monitor.observe(&format!("Output #1, fifo, to '{YOUTUBE_URL}':")),
+            None
+        );
+        for noise in [
+            "[flv @ 0xac4c1f200] Failed to update header with correct duration.",
+            "[tcp @ 0xac4c446e0] Connection to tcp://a.rtmp.youtube.com:1935?tcp_nodelay=0 failed: Connection refused",
+            "[rtmp @ 0xac4c20700] Cannot open connection tcp://a.rtmp.youtube.com:1935?tcp_nodelay=0",
+        ] {
+            assert_eq!(monitor.observe(noise), None, "{noise}");
+        }
+        assert_eq!(
+            monitor.observe(&format!(
+                "[fifo @ 0xac4c1c500] Error opening {YOUTUBE_URL}: Connection refused"
+            )),
+            Some(StreamLegUpdate::Reconnecting {
+                position: 0,
+                reason: "Connection refused".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0xac4c1c500] Recovery failed: Connection refused"),
+            Some(StreamLegUpdate::Reconnecting {
+                position: 0,
+                reason: "Connection refused".to_string()
+            })
+        );
+        // The success line can trail a `\r` stats segment.
+        assert_eq!(
+            monitor.observe("frame=  1 fps=30 speed=1x    \r[fifo @ 0xac4c1c500] Recovery successful"),
+            Some(StreamLegUpdate::Resumed { position: 0 })
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0xac4c1c500] Maximal number of 3 recovery attempts reached."),
+            Some(StreamLegUpdate::Failed {
+                position: 0,
+                reason: "Videorc stopped reconnecting".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn an_unknown_fifo_is_reported_without_guessing_a_destination() {
+        let mut monitor = two_leg_monitor();
+        assert_eq!(
+            monitor.observe("[fifo @ 0xccc] Recovery failed: Broken pipe"),
+            Some(StreamLegUpdate::UnattributedReconnecting {
+                reason: "Broken pipe".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0xccc] Recovery failed: Broken pipe"),
+            None,
+            "one notice per outage"
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0xccc] Recovery successful"),
+            Some(StreamLegUpdate::UnattributedResumed)
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0xccc] Recovery failed: Broken pipe"),
+            Some(StreamLegUpdate::UnattributedReconnecting {
+                reason: "Broken pipe".to_string()
+            }),
+            "a later outage is a new notice"
+        );
+        // An immediate reconnect (the ingest dropped, the first retry worked).
+        assert_eq!(
+            monitor.observe("[fifo @ 0xddd] Recovery successful"),
+            Some(StreamLegUpdate::UnattributedResumed)
+        );
+        assert_eq!(
+            monitor.observe("[fifo @ 0xeee] Error opening rtmp://elsewhere/app/key: Connection refused"),
+            None,
+            "a URL that is not a destination of this session"
+        );
+    }
+
+    #[test]
+    fn a_mux_failure_fails_only_the_mapped_destination() {
+        let mut monitor = two_leg_monitor();
+        monitor.observe("Output #0, matroska, to '/tmp/session.mkv':");
+        monitor.observe(&format!("Output #1, fifo, to '{YOUTUBE_URL}':"));
+        monitor.observe(&format!("Output #2, fifo, to '{TWITCH_URL}':"));
+        assert_eq!(
+            monitor.observe(
+                "[aost#1:1/aac @ 0x703488900] Error submitting a packet to the muxer: End of file"
+            ),
+            Some(StreamLegUpdate::Failed {
+                position: 0,
+                reason: "The connection closed (End of file)".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe("[out#2/fifo @ 0x1] Error muxing a packet"),
+            Some(StreamLegUpdate::Failed {
+                position: 1,
+                reason: "The connection closed".to_string()
+            })
+        );
+        assert_eq!(
+            monitor.observe(
+                "[aost#0:1/aac @ 0x1] Error submitting a packet to the muxer: End of file"
+            ),
+            None,
+            "output #0 is the local recording, not a destination"
+        );
+    }
+
+    #[test]
+    fn a_platform_only_demotes_a_live_leg_and_clears_its_own_warning() {
+        let not_receiving = PlatformStreamObservation::NotReceiving {
+            detail: "YouTube reports no data".to_string(),
+        };
+        assert_eq!(
+            platform_observation_transition(StreamTargetState::Live, &not_receiving),
+            Some((
+                StreamTargetState::Warning,
+                Some("Not receiving: YouTube reports no data".to_string())
+            ))
+        );
+        assert_eq!(
+            platform_observation_transition(StreamTargetState::Reconnecting, &not_receiving),
+            None,
+            "FFmpeg already says this leg is down"
+        );
+        assert_eq!(
+            platform_observation_transition(
+                StreamTargetState::Warning,
+                &PlatformStreamObservation::Receiving
+            ),
+            Some((StreamTargetState::Live, None))
+        );
+        assert_eq!(
+            platform_observation_transition(
+                StreamTargetState::Reconnecting,
+                &PlatformStreamObservation::Receiving
+            ),
+            None,
+            "only FFmpeg's own recovery clears a reconnect"
+        );
+        let ended = PlatformStreamObservation::Ended {
+            detail: "YouTube ended this broadcast".to_string(),
+        };
+        assert_eq!(
+            platform_observation_transition(StreamTargetState::Reconnecting, &ended),
+            Some((
+                StreamTargetState::Failed,
+                Some("YouTube ended this broadcast".to_string())
+            ))
+        );
+        assert_eq!(
+            platform_observation_transition(StreamTargetState::NotConfigured, &ended),
+            None
+        );
+    }
+
+    #[test]
+    fn stream_target_transitions_broadcast_state_changes_only() {
+        let shared = Arc::new(StdMutex::new(StreamTargetsSnapshot {
+            session_id: "s".to_string(),
+            targets: vec![
+                StreamTargetRuntime {
+                    target_id: "youtube".to_string(),
+                    platform: StreamPlatform::Youtube,
+                    label: "YouTube".to_string(),
+                    state: StreamTargetState::Live,
+                    message: None,
+                    redacted_url: None,
+                },
+                StreamTargetRuntime {
+                    target_id: "kick".to_string(),
+                    platform: StreamPlatform::Kick,
+                    label: "Kick".to_string(),
+                    state: StreamTargetState::NotConfigured,
+                    message: Some("No key".to_string()),
+                    redacted_url: None,
+                },
+            ],
+        }));
+        let (label, previous, snapshot) = transition_stream_target(
+            &shared,
+            0,
+            StreamTargetState::Reconnecting,
+            Some("Reconnecting: Connection refused".to_string()),
+        )
+        .expect("live to reconnecting is a change");
+        assert_eq!(label, "YouTube");
+        assert_eq!(previous, StreamTargetState::Live);
+        assert_eq!(snapshot.targets[0].state, StreamTargetState::Reconnecting);
+        assert!(
+            transition_stream_target(
+                &shared,
+                0,
+                StreamTargetState::Reconnecting,
+                Some("Reconnecting: Broken pipe".to_string()),
+            )
+            .is_none(),
+            "a retry with a new reason is not a broadcast"
+        );
+        assert_eq!(
+            stream_targets_snapshot_value(&shared).targets[0]
+                .message
+                .as_deref(),
+            Some("Reconnecting: Broken pipe"),
+            "but the authoritative snapshot keeps the latest reason"
+        );
+        assert!(
+            transition_stream_target(&shared, 1, StreamTargetState::Live, None).is_none(),
+            "a skipped destination never goes live"
+        );
+        let (_, previous, snapshot) =
+            transition_stream_target(&shared, 0, StreamTargetState::Live, None).unwrap();
+        assert_eq!(previous, StreamTargetState::Reconnecting);
+        assert_eq!(snapshot.targets[0].message, None);
     }
 
     #[test]
