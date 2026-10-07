@@ -3,7 +3,7 @@
 ## Status and execution baseline
 
 - **Status:** IN PROGRESS, 2026-10-07. Owner authorized full execution and pushing the fixes to [PR #632](https://github.com/TheOrcDev/videorc/pull/632).
-- **Acceptance limitation:** Three simultaneous 4K30 hardware outputs fail the unchanged artifact gate on this Mac16,1 / M4 host. Sustained independent encoder controls reach about 21 fps per output. Remaining runtime and app/device verification is in progress; Windows source/audio stability passed on pushed `35b6f71d`. This plan is not fully accepted.
+- **Acceptance limitations:** The exact-source runtime sweep on pushed `366721f0` fails six recording cases and the Stop→Idle latency gate. The demonstrated PCM-tail correction passes its focused regression; final full Rust verification is in progress. That runtime overlaps the owner's active installed-app media session, so the remaining timing/performance cases need quiet-host qualification. Three simultaneous 4K30 hardware outputs also fail the unchanged artifact gate on this Mac16,1 / M4 host; sustained independent encoder controls reach about 21 fps per output. App/device verification and corrective-head macOS/Windows CI remain pending. This plan is not fully accepted.
 - **Priority:** P1 overall; the test handshake and metadata gate are P2.
 - **Effort / implementation risk:** L / HIGH. Changes cross capture clocks, native encoder ownership, process teardown and durable recording metadata.
 - **Source inspected / planned at:** `b9ee699c82ddc58c4220d5ae32b5a1b8341fa713`, branch `feat/separate-source-recordings`; PR base `cdd2f9421bbd055a36973bcfe222b6c44db87bec`.
@@ -116,17 +116,17 @@ Use owned PIDs only. Never hold the recording/compositor mutex across child wait
 
 ## Ordered slices
 
-| Slice | Deliverable                                                     | Depends on | Effort | Status                                                                     |
-| ----- | --------------------------------------------------------------- | ---------- | ------ | -------------------------------------------------------------------------- |
-| S0    | Deterministic tap regression and lifecycle test seams           | —          | S      | Implemented; Windows 25-pass stability verified on 35b6f71d                |
-| S1    | Cancellation-safe writer ownership through final commit         | S0         | M      | Implemented; Unix and Windows ownership regressions verified               |
-| S2    | Per-role terminal verdicts preserve encoder/audio/muxer failure | S1         | M      | Implemented; full runtime acceptance pending                               |
-| S3    | Durable role registration and idempotent crash recovery         | S2         | M      | Implemented; final acceptance pending                                      |
-| S4    | Shared production start barrier and timeline                    | S1–S3      | L      | Implemented; native-latency and coordinated terminal output qualified     |
-| S5    | Residual audio sync offsets on both ISO muxers                  | S4         | M      | Implemented; full offset matrix pending                                    |
-| S6    | Confirmed source removal closes one role explicitly             | S2–S5      | M      | Implemented; 19 lifecycle cases pass, final rollback regression pending    |
-| S7    | Production metadata and real-take gate agree                    | S3, S5, S6 | S      | Implemented; healthy controlled MKV/MP4 verified                           |
-| S8    | Production runtime smoke, failure matrix and final acceptance   | S0–S7      | L      | Implemented; final gates in progress                                       |
+| Slice | Deliverable                                                     | Depends on | Effort | Status                                                             |
+| ----- | --------------------------------------------------------------- | ---------- | ------ | ------------------------------------------------------------------ |
+| S0    | Deterministic tap regression and lifecycle test seams           | —          | S      | Implemented; Windows 25-pass stability verified on 35b6f71d        |
+| S1    | Cancellation-safe writer ownership through final commit         | S0         | M      | Implemented; Unix and Windows ownership regressions verified       |
+| S2    | Per-role terminal verdicts preserve encoder/audio/muxer failure | S1         | M      | Implemented; full runtime acceptance pending                       |
+| S3    | Durable role registration and idempotent crash recovery         | S2         | M      | Implemented; final acceptance pending                              |
+| S4    | Shared production start barrier and timeline                    | S1–S3      | L      | Implemented; full-runtime ordered A/V failures under diagnosis     |
+| S5    | Residual audio sync offsets on both ISO muxers                  | S4         | M      | Implemented; PCM-tail regression passes, artifact qualification pending |
+| S6    | Confirmed source removal closes one role explicitly             | S2–S5      | M      | Implemented; final lifecycle cases and rollback regression pass    |
+| S7    | Production metadata and real-take gate agree                    | S3, S5, S6 | S      | Implemented; healthy controlled MKV/MP4 verified                   |
+| S8    | Production runtime smoke, failure matrix and final acceptance   | S0–S7      | L      | Implemented; runtime/latency fail, app/device verification pending |
 
 Execute in this order under one implementation owner because most slices share recording and ISO lifecycle code. Each slice should leave normal ISO-off recording operational. Tests establishing a defect should fail before its fix and pass afterward; do not retain deliberately failing tests between completed slices.
 
@@ -1074,5 +1074,120 @@ The late-start rollback regression and full-scene round-trip fixture both
 pass. The qualified source is frozen for commit/push. Final collected
 runtime, app/device gates and new-head Windows stability remain pending;
 the measured three-output 4K30 hardware block is unchanged.
+
+The exact-source collected runtime on pushed `366721f0` finishes with
+exit 1: 65 complete artifact take verdicts and seven failed cases. All
+lifecycle and live-cluster crash/restart cases pass. The failures are the
+negative-120-ms active Stop audio tail; isolated ordered A/V misses in
+native-latency 30 fps, normal 60 fps, delayed Screen preparation 60 fps,
+and native-latency 60 fps; a severe cadence gap during delayed Combined
+preparation 60 fps; and Stop→Idle p95 385.740 ms against the unchanged
+300 ms limit. Evidence: `/tmp/videorc-pr632-runtime-366721f-final.log`
+and `videorc-separate-source-runtime-XuoWDb/failures.json`.
+
+Diagnosis finds that the ISO supervisor closes each audio tap after
+coverage one video frame short of the committed sample boundary. The
+fix must await the full boundary using sample-accurate integer duration,
+with the existing bounded drain. The other cases require separate
+evidence: steady producer delivery at the normal 60 fps failed edge,
+possible redundant consumed-batch native leases, and 165–458 ms stalls
+inside synthetic frame publication in the severe preparation case.
+Those are distinct hypotheses, not yet demonstrated fixes. Preserve
+native target caps, output resolution/fps and all artifact/latency budgets.
+Latest-head JS CI and Linux Rust CI pass; latest macOS/Windows gates and
+app/device smokes remain incomplete.
+
+A subsequent read-only host inventory establishes an acceptance confound:
+the owner's installed Videorc app/backend (PIDs 79996/80100) started at
+17:49:18 UTC, and its current FFmpeg child (PID 49342) started at
+18:49:40 UTC. The child is processing two MPEG-TS inputs and four FIFO
+outputs, overlapping the entire 19:15–19:30 collected runtime. No process
+was signalled, no stream credentials were displayed, and this session
+belongs to the owner. Remaining performance recordings must establish
+a quiet host or be explicitly labelled contention diagnostics. The
+sample-tail defect remains independently demonstrated by source and PCM.
+These current PID start times do not establish contention during the
+earlier 14:xx 4K encoder controls; those measurements retain their actual
+evidence and host-scope limitation.
+
+Latest-head Windows source CI on `366721f0` fails the first ownership
+repetition in `windows_live_scene_mapping_keeps_slots_auxiliary_geometry_and_takeover`.
+The fixture starts with unknown selected-source authority (`None`),
+whereas the production Camera B→Off round trip records explicit all-Off
+authority. Geometry returns unchanged but full snapshot equality correctly
+distinguishes the authority. Correct only the Windows fixture to seed its
+intended confirmed all-Off selection; retain full equality and stale-camera
+assertions. Preview bounds pass 25/25; first-pass tap/source-ISO/session-audio
+filters pass 6/56/81 tests. The ownership 25× and full Windows suite 3×
+requirements are not fulfilled; the latter was skipped after this failure.
+Evidence: Actions run `37672967796`, source job `112969196393`.
+
+Latest-head macOS CI also fails the pre-existing
+`intermittent_pipe_pressure_does_not_throttle_a_full_hd_raw_frame` test:
+3,200 backend tests pass, one fails and 14 are ignored; 80 helper tests
+pass. Its fake sink alternates backpressure with 8 KiB progress, so the
+existing retry loop yields hundreds of times without entering its
+consecutive-stall sleep branch. The loop and 500 ms unit bound predate
+this PR and are unchanged between the second and third fix commits.
+The CI failure is retained, not waived. Replace the wall-scheduler
+dependency with deterministic timing at the actual write-loop seam,
+prove intermittent pressure causes no sleep and persistent pressure
+still backs off and times out, and retain all production deadlines and
+existing hard-limit/cancellation checks. Add the affected FIFO controls
+to the Windows 25-pass list and rerun full Rust gates. Evidence: Actions
+run `37672967154`, macOS Rust job `112969140072`.
+
+The sample-tail correction and bounded diagnostic candidate passes 46
+focused `source_iso_` tests with one ignored runtime fixture in 4.34 seconds,
+after an 18 minute 38 second serial compile. The final-chunk/cutoff
+regression passes. Evidence:
+`/tmp/videorc-pr632-runtime-diagnosis-focused.log`. Windows fixture and
+deterministic FIFO corrections are subsequent source changes and need
+their own final verification before the next push.
+
+The combined corrective candidate now passes `cargo check --tests` in
+1 minute 40 seconds, strict Clippy in 43.27 seconds, `cargo fmt --check`
+and `pnpm format:check` (2,122 tracked text files and all matched code).
+Both independent read-only reviews find no concrete blocker. Source is
+frozen for the full serial Rust gate, with recording captures held while
+the owner's media session is active. No cache acknowledgment, native
+pool expansion, frame-rate reduction or finalization scheduling change
+is included. Evidence: `/tmp/videorc-pr632-tail-ci-full-rust.log` and
+`/tmp/videorc-pr632-format-tail-final.log`.
+
+The final full Rust run is interrupted by SIGTERM (exit 143) at roughly
+30 minutes, before any tests run. Its log contains only the observed
+test-helper warnings and no Rust error. An earlier narrow process check
+confirmed active compilation; neither executor nor coordinator sent a
+signal. The lifetime suggests a command-session limit, but the cause is
+not established. Retry through an explicitly owned detached supervisor
+with recorded supervisor/cargo PIDs, a private log and atomic exit-status
+receipt. Keep the same single-job, non-incremental, optimized/debug build
+and source; do not delete completed artifacts or loosen gates. Evidence:
+`/tmp/videorc-pr632-tail-ci-full-rust.log`. Full Rust and subsequent FIFO
+25-pass repetitions still have no verdict.
+
+The unchanged retry runs under an owned detached supervisor in
+`/tmp/videorc-pr632-rust-supervisor-0gfpovbq`, with Cargo PID/PGID 47383
+and an atomic `exit.json` receipt. A three-second read-only sample of
+owned rustc 47405 confirms active ThinLTO machine-code generation and
+debug-information work; no Cargo/file lock is observed. After roughly
+47 minutes it is still compiling, with no test verdict. Adjust verification
+sequencing to push the reviewed frozen correction after required pre-commit
+checks, allowing corrective-head CI to run alongside the local full suite.
+This changes execution order only: full Rust, the affected FIFO 25-pass
+repetitions, Windows 25×/3× and recording/device acceptance remain required.
+The PR remains IN PROGRESS and no completed handoff is claimed.
+
+All `366721f0` CI lanes are now terminal. JS, Linux Rust and the Windows
+installer pass. The Windows incident diagnostic job fails separately:
+43/48 controlled-audio cases and 13/48 independent FFmpeg-control cases
+pass. Failures include frame freezes/repeats, an interior-silence breach,
+and independent-control A/V tails of 117–267 ms against 100 ms. Both
+incident matrices also failed on the preceding head. Preserve those
+failed verdicts and their evidence without conflating them with the
+specific Windows selection fixture or macOS FIFO test corrections.
+Evidence: Actions run `37672967796`, incident job `112969196142`, artifacts
+`11508655415` and `11507968478`. Corrective-head CI is still required.
 
 Future writer additions must join the same origin and ownership protocol. Future source switching must preserve the distinction between committed removal and temporary unavailability. Future audio processing must retain the split between bus delays and whole-track correction. Future finalization/recovery changes must preserve per-role outcomes across crashes and retries. A test that only checks filenames, container durations or metadata is insufficient evidence for source routing, lip sync or complete output.

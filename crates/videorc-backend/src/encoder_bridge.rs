@@ -6786,18 +6786,81 @@ impl VideoToolboxH264PipeWriter {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FifoWriteWait {
+    Yield,
+    Sleep(Duration),
+}
+
+trait FifoWriteTiming {
+    fn now(&self) -> Instant;
+    fn wait(&mut self, action: FifoWriteWait);
+}
+
+struct SystemFifoWriteTiming;
+
+impl FifoWriteTiming for SystemFifoWriteTiming {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn wait(&mut self, action: FifoWriteWait) {
+        match action {
+            FifoWriteWait::Yield => thread::yield_now(),
+            FifoWriteWait::Sleep(duration) => thread::sleep(duration),
+        }
+    }
+}
+
+struct FifoWriteBudget {
+    deadline: Instant,
+    progress_timeout: Duration,
+    hard_timeout: Duration,
+    cancel_on_stop: bool,
+}
+
 fn write_all_until<W: StdWrite>(
     sink: &mut W,
-    mut bytes: &[u8],
+    bytes: &[u8],
     stop: &AtomicBool,
-    mut deadline: Instant,
+    deadline: Instant,
     progress_timeout: Duration,
     hard_timeout: Duration,
     cancel_on_stop: bool,
 ) -> io::Result<()> {
-    let hard_deadline = Instant::now()
+    write_all_until_with_timing(
+        sink,
+        bytes,
+        stop,
+        FifoWriteBudget {
+            deadline,
+            progress_timeout,
+            hard_timeout,
+            cancel_on_stop,
+        },
+        &mut SystemFifoWriteTiming,
+    )
+}
+
+// Production and deterministic pressure tests execute the same byte-delivery
+// loop. Only the monotonic clock and OS retry wait are replaceable.
+fn write_all_until_with_timing<W: StdWrite>(
+    sink: &mut W,
+    mut bytes: &[u8],
+    stop: &AtomicBool,
+    budget: FifoWriteBudget,
+    timing: &mut impl FifoWriteTiming,
+) -> io::Result<()> {
+    let FifoWriteBudget {
+        mut deadline,
+        progress_timeout,
+        hard_timeout,
+        cancel_on_stop,
+    } = budget;
+    let hard_deadline = timing
+        .now()
         .checked_add(hard_timeout)
-        .unwrap_or_else(Instant::now);
+        .unwrap_or_else(|| timing.now());
     let mut consecutive_no_progress = 0_u32;
     while !bytes.is_empty() {
         if cancel_on_stop && stop.load(Ordering::Relaxed) {
@@ -6806,7 +6869,7 @@ fn write_all_until<W: StdWrite>(
                 "Encoder FIFO writer stopped during a bounded write",
             ));
         }
-        if Instant::now() >= deadline || Instant::now() >= hard_deadline {
+        if timing.now() >= deadline || timing.now() >= hard_deadline {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "Encoder FIFO write exceeded the complete-frame delivery budget",
@@ -6815,7 +6878,11 @@ fn write_all_until<W: StdWrite>(
         match sink.write(bytes) {
             Ok(0) => {
                 consecutive_no_progress = consecutive_no_progress.saturating_add(1);
-                wait_for_fifo_write_progress(consecutive_no_progress, deadline.min(hard_deadline));
+                wait_for_fifo_write_progress(
+                    consecutive_no_progress,
+                    deadline.min(hard_deadline),
+                    timing,
+                );
             }
             Ok(written) => {
                 bytes = &bytes[written..];
@@ -6826,16 +6893,21 @@ fn write_all_until<W: StdWrite>(
                 // byte progress proves the reader is alive, so use a sliding
                 // no-progress deadline until this frame is complete.
                 if !bytes.is_empty() {
-                    deadline = Instant::now()
+                    deadline = timing
+                        .now()
                         .checked_add(progress_timeout)
-                        .unwrap_or_else(Instant::now)
+                        .unwrap_or_else(|| timing.now())
                         .min(hard_deadline);
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 consecutive_no_progress = consecutive_no_progress.saturating_add(1);
-                wait_for_fifo_write_progress(consecutive_no_progress, deadline.min(hard_deadline));
+                wait_for_fifo_write_progress(
+                    consecutive_no_progress,
+                    deadline.min(hard_deadline),
+                    timing,
+                );
             }
             Err(error) => return Err(error),
         }
@@ -7387,7 +7459,11 @@ fn write_media_foundation_frames<W: StdWrite>(
     Ok(())
 }
 
-fn wait_for_fifo_write_progress(consecutive_no_progress: u32, deadline: Instant) {
+fn wait_for_fifo_write_progress(
+    consecutive_no_progress: u32,
+    deadline: Instant,
+    timing: &mut impl FifoWriteTiming,
+) {
     // A 1080p YUV420 frame is 3.11 MiB, while Unix FIFOs commonly accept only
     // a few KiB per nonblocking write. Sleeping milliseconds after every full
     // pipe therefore turns one frame into hundreds of sleeps (~800ms in the
@@ -7395,12 +7471,14 @@ fn wait_for_fifo_write_progress(consecutive_no_progress: u32, deadline: Instant)
     // so it can run and retry immediately. Only back off once repeated attempts
     // show that no progress is being made; the caller's deadlines stay binding.
     if consecutive_no_progress <= FIFO_WRITE_PROGRESS_YIELD_BUDGET {
-        thread::yield_now();
+        timing.wait(FifoWriteWait::Yield);
         return;
     }
-    let remaining = deadline.saturating_duration_since(Instant::now());
+    let remaining = deadline.saturating_duration_since(timing.now());
     if !remaining.is_zero() {
-        thread::sleep(remaining.min(FIFO_WRITE_STALL_BACKOFF));
+        timing.wait(FifoWriteWait::Sleep(
+            remaining.min(FIFO_WRITE_STALL_BACKOFF),
+        ));
     }
 }
 
@@ -11175,6 +11253,25 @@ mod tests {
         ));
     }
 
+    struct VirtualFifoWriteTiming {
+        now: Instant,
+        waits: Vec<FifoWriteWait>,
+    }
+
+    impl FifoWriteTiming for VirtualFifoWriteTiming {
+        fn now(&self) -> Instant {
+            self.now
+        }
+
+        fn wait(&mut self, action: FifoWriteWait) {
+            self.waits.push(action);
+            self.now += match action {
+                FifoWriteWait::Yield => Duration::from_micros(1),
+                FifoWriteWait::Sleep(duration) => duration,
+            };
+        }
+    }
+
     #[test]
     fn intermittent_pipe_pressure_does_not_throttle_a_full_hd_raw_frame() {
         for pressure in [PipePressure::WouldBlock, PipePressure::ZeroWrite] {
@@ -11186,21 +11283,102 @@ mod tests {
             };
             let stop = AtomicBool::new(false);
             let bytes = vec![7; raw_yuv420p_len(1920, 1080).expect("1080p frame size")];
-            let deadline = Instant::now() + Duration::from_millis(500);
+            let mut timing = VirtualFifoWriteTiming {
+                now: Instant::now(),
+                waits: Vec::new(),
+            };
+            let deadline = timing.now() + Duration::from_millis(500);
 
-            write_all_until(
+            write_all_until_with_timing(
                 &mut sink,
                 &bytes,
                 &stop,
-                deadline,
-                Duration::from_millis(500),
-                Duration::from_millis(500),
-                false,
+                FifoWriteBudget {
+                    deadline,
+                    progress_timeout: Duration::from_millis(500),
+                    hard_timeout: Duration::from_millis(500),
+                    cancel_on_stop: false,
+                },
+                &mut timing,
             )
             .expect("active FIFO draining must not pay a millisecond sleep per pipe-sized chunk");
 
             assert_eq!(sink.written, bytes.len());
+            assert_eq!(timing.waits.len(), bytes.len().div_ceil(8 * 1024));
+            assert!(
+                timing
+                    .waits
+                    .iter()
+                    .all(|action| *action == FifoWriteWait::Yield),
+                "each successful partial write must reset backoff; scheduler wall pauses do not model pipe stalls"
+            );
         }
+    }
+
+    #[test]
+    fn fifo_write_virtual_stall_backs_off_and_obeys_hard_deadline() {
+        let began = Instant::now();
+        let mut timing = VirtualFifoWriteTiming {
+            now: began,
+            waits: Vec::new(),
+        };
+        let hard_timeout = Duration::from_millis(10);
+        let error = write_all_until_with_timing(
+            &mut AlwaysWouldBlockSink,
+            &[7],
+            &AtomicBool::new(false),
+            FifoWriteBudget {
+                deadline: began + Duration::from_secs(1),
+                progress_timeout: Duration::from_secs(1),
+                hard_timeout,
+                cancel_on_stop: false,
+            },
+            &mut timing,
+        )
+        .expect_err("persistent pressure must still terminate");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(timing.now.duration_since(began), hard_timeout);
+        assert!(
+            timing.waits[..FIFO_WRITE_PROGRESS_YIELD_BUDGET as usize]
+                .iter()
+                .all(|action| *action == FifoWriteWait::Yield)
+        );
+        assert!(matches!(
+            timing.waits[FIFO_WRITE_PROGRESS_YIELD_BUDGET as usize],
+            FifoWriteWait::Sleep(_)
+        ));
+        assert!(timing.waits.iter().all(|action| match action {
+            FifoWriteWait::Yield => true,
+            FifoWriteWait::Sleep(duration) =>
+                !duration.is_zero() && *duration <= FIFO_WRITE_STALL_BACKOFF,
+        }));
+    }
+
+    #[test]
+    fn fifo_write_virtual_cancellation_prevents_delivery_and_waits() {
+        let began = Instant::now();
+        let mut timing = VirtualFifoWriteTiming {
+            now: began,
+            waits: Vec::new(),
+        };
+        let mut sink = Vec::new();
+        let error = write_all_until_with_timing(
+            &mut sink,
+            &[7],
+            &AtomicBool::new(true),
+            FifoWriteBudget {
+                deadline: began + Duration::from_millis(500),
+                progress_timeout: Duration::from_millis(500),
+                hard_timeout: Duration::from_millis(500),
+                cancel_on_stop: true,
+            },
+            &mut timing,
+        )
+        .expect_err("cancellation stays authoritative");
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(sink.is_empty());
+        assert!(timing.waits.is_empty());
+        assert_eq!(timing.now, began);
     }
 
     #[test]

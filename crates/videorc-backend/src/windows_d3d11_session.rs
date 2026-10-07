@@ -2672,23 +2672,25 @@ mod runtime {
         });
         let mut layout = crate::protocol::default_layout_settings();
         layout.camera_fit = crate::protocol::CameraFit::Fill;
+        let confirmed = SourceSelection {
+            screen_id: None,
+            window_id: None,
+            camera_id: None,
+            microphone_id: None,
+            test_pattern: false,
+        };
         let edit = crate::compositor::CompositorSourceEdit::test_from_scenes(
             scene.clone(),
             Some(scene),
             layout.clone(),
+            confirmed.clone(),
         );
         let mut current = WindowsLiveSnapshot {
             render_edit: edit.clone(),
             edit,
             camera: None,
             capture: None,
-            confirmed: SourceSelection {
-                screen_id: None,
-                window_id: None,
-                camera_id: None,
-                microphone_id: None,
-                test_pattern: false,
-            },
+            confirmed,
             source_revision: 1,
             takeover: None,
             takeover_active: false,

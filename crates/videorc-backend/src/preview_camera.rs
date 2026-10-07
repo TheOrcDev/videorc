@@ -3606,11 +3606,12 @@ pub(crate) async fn test_publish_camera_pixels(
     sequence: u64,
     pixel: [u8; 4],
     captured_at: Instant,
-) {
+) -> [u64; 4] {
+    let began = Instant::now();
     let (width, height, shared, fixture_camera) = {
         let slot = state.preview_camera.lock().await;
         let Some(active) = slot.active.as_ref() else {
-            return;
+            return [0; 4];
         };
         let video = &active.video;
         (
@@ -3620,11 +3621,14 @@ pub(crate) async fn test_publish_camera_pixels(
             active.camera_id == "camera:iso-runtime",
         )
     };
+    let admitted = Instant::now();
     let bytes = pixel.repeat((width * height) as usize);
     // Native callbacks own this generation's shared store and never retain
     // the admission authority while publishing. A replaced generation may
     // finish its callback, but cannot publish into the replacement's store.
+    let allocated = Instant::now();
     let mut shared = shared.lock().unwrap();
+    let locked = Instant::now();
     if fixture_camera {
         shared.capture_timings.record_callback_at(captured_at);
         shared
@@ -3640,6 +3644,13 @@ pub(crate) async fn test_publish_camera_pixels(
         captured_at,
         bytes,
     );
+    let published = Instant::now();
+    [
+        admitted.duration_since(began).as_micros() as u64,
+        allocated.duration_since(admitted).as_micros() as u64,
+        locked.duration_since(allocated).as_micros() as u64,
+        published.duration_since(locked).as_micros() as u64,
+    ]
 }
 
 /// Test-only: register a fully identified Starting generation without touching

@@ -47,6 +47,49 @@ pub const HEALTH_ROLE_FAILED: &str = "separate-source-recordings-role-failed";
 const ISO_MUXER_EXIT_GRACE: Duration = Duration::from_secs(20);
 const ISO_BRIDGE_TEARDOWN_GRACE: Duration = Duration::from_secs(3);
 
+#[cfg(test)]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SourceIsoTeardownTiming {
+    session_id: String,
+    role: RecordingRole,
+    phase: &'static str,
+    at_ms: f64,
+}
+
+#[cfg(test)]
+static SOURCE_ISO_TEARDOWN_TRACE: std::sync::Mutex<Vec<SourceIsoTeardownTiming>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn test_trace_teardown(session_id: &str, role: RecordingRole, phase: &'static str) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_DIR").is_some()) {
+        return;
+    }
+    let at_ms = crate::encoder_bridge::test_source_iso_trace_ms(Instant::now());
+    let mut trace = SOURCE_ISO_TEARDOWN_TRACE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if trace.len() < 128 {
+        trace.push(SourceIsoTeardownTiming {
+            session_id: session_id.into(),
+            role,
+            phase,
+            at_ms,
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_take_source_iso_teardown_trace() -> Vec<SourceIsoTeardownTiming> {
+    std::mem::take(
+        &mut *SOURCE_ISO_TEARDOWN_TRACE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()),
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RecordingRole {
@@ -924,6 +967,10 @@ impl SourceIsoRuntime {
                     .await;
                     let ended_at = chrono::Utc::now().to_rfc3339();
                     crate::live_layout::reconcile_source_iso_capture_demand(&state).await;
+                    #[cfg(test)]
+                    test_trace_teardown(&session_id, role.role, "capture-reconciled");
+                    #[cfg(test)]
+                    let traced_role = role.role;
                     commit_finished_source_iso_roles(
                         &state,
                         &session_id,
@@ -933,6 +980,8 @@ impl SourceIsoRuntime {
                         None,
                         keep_original_media,
                     );
+                    #[cfg(test)]
+                    test_trace_teardown(&session_id, traced_role, "role-committed");
                 }),
             ));
         }
@@ -976,6 +1025,42 @@ fn role_audio_tap(taps: &SourceAudioTaps, role: RecordingRole) -> Option<&Source
         RecordingRole::Screen => taps.system.as_ref(),
         RecordingRole::Combined => None,
     }
+}
+
+pub(crate) fn source_iso_audio_boundary_frames(
+    role: RecordingRole,
+    elapsed: Duration,
+    track_shift_ms: i32,
+) -> u64 {
+    let buffered_delay = if role == RecordingRole::Screen {
+        Duration::from_millis(track_shift_ms.saturating_neg().max(0) as u64)
+    } else {
+        Duration::ZERO
+    };
+    // Match the bus's sample-end boundary exactly, including its partial last
+    // sample. Video cadence is not an allowance for discarding captured PCM.
+    ((elapsed + buffered_delay).as_nanos() * 48_000).div_ceil(1_000_000_000) as u64
+}
+
+pub(crate) async fn wait_for_source_iso_audio_boundary(
+    tap: &SourceAudioTap,
+    required_frames: u64,
+) -> std::result::Result<(), String> {
+    tap.end_at_frame(required_frames);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut readiness = tokio::time::interval(Duration::from_millis(5));
+        while tap.offered_frames() < required_frames {
+            if let Some(error) = tap.terminal_failure() {
+                return Err(error);
+            }
+            readiness.tick().await;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err("Audio bus ended before the role's required stop samples arrived".into())
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1134,12 +1219,14 @@ async fn supervise_role(
             reason,
         );
     }
-    let duration_ms = epoch.get().map(|epoch| {
+    #[cfg(test)]
+    test_trace_teardown(session_id, writer.role, "boundary-observed");
+    let elapsed = epoch.get().map(|epoch| {
         ended_at
             .unwrap_or_else(Instant::now)
             .saturating_duration_since(*epoch)
-            .as_millis() as i64
     });
+    let duration_ms = elapsed.map(|elapsed| elapsed.as_millis() as i64);
     if let Some(bridge) = writer.bridge.as_ref() {
         if failure.is_none()
             && let Some(boundary) = ended_at
@@ -1150,43 +1237,19 @@ async fn supervise_role(
         }
     }
     // The bus intentionally trails capture by its playout delay. Keep this
-    // role's tap open until the real samples covering its video boundary have
+    // role's tap open until the real samples covering its source boundary have
     // arrived; closing at Stop would replace the last ~150ms with apad silence.
     if failure.is_none()
-        && let (Some(tap), Some(duration_ms)) = (role_audio_tap(&taps, writer.role), duration_ms)
+        && let (Some(tap), Some(elapsed)) = (role_audio_tap(&taps, writer.role), elapsed)
     {
-        let buffered_delay_ms = if writer.role == RecordingRole::Screen {
-            track_shift_ms.saturating_neg().max(0)
-        } else {
-            0
-        };
-        let source_boundary_frames =
-            ((duration_ms as f64 + f64::from(buffered_delay_ms)) / 1000.0 * 48_000.0) as u64;
-        tap.end_at_frame(source_boundary_frames);
-        let required_frames = source_boundary_frames.saturating_sub(48_000 / u64::from(fps.max(1)));
-        let covered = tokio::time::timeout(Duration::from_secs(2), async {
-            let mut readiness = tokio::time::interval(Duration::from_millis(5));
-            while tap.offered_frames() < required_frames {
-                if let Some(error) = tap.terminal_failure() {
-                    return Err(error);
-                }
-                readiness.tick().await;
-            }
-            Ok(())
-        })
-        .await;
-        match covered {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                failure.get_or_insert(error);
-            }
-            Err(_) => {
-                failure.get_or_insert(
-                    "Audio bus ended before the role's required stop samples arrived".into(),
-                );
-            }
+        let required_frames =
+            source_iso_audio_boundary_frames(writer.role, elapsed, track_shift_ms);
+        if let Err(error) = wait_for_source_iso_audio_boundary(tap, required_frames).await {
+            failure.get_or_insert(error);
         }
     }
+    #[cfg(test)]
+    test_trace_teardown(session_id, writer.role, "after-audio-coverage");
     let role = writer.role;
     let closing_taps = taps.clone();
     let tap_close = tokio::task::spawn_blocking(move || match role {
@@ -1213,6 +1276,8 @@ async fn supervise_role(
             }
         }
     }
+    #[cfg(test)]
+    test_trace_teardown(session_id, role, "after-bridge-reap");
     if let Err(error) = tap_close.await {
         failure.get_or_insert(format!("Audio teardown failed: {error}"));
     }
@@ -1221,6 +1286,8 @@ async fn supervise_role(
     {
         failure.get_or_insert(error);
     }
+    #[cfg(test)]
+    test_trace_teardown(session_id, role, "after-audio-close");
     let mut muxer_exit_code = None;
     if let Some(child) = writer.child.as_mut() {
         match tokio::time::timeout(ISO_MUXER_EXIT_GRACE, child.wait()).await {
@@ -1250,6 +1317,8 @@ async fn supervise_role(
             }
         }
     }
+    #[cfg(test)]
+    test_trace_teardown(session_id, role, "after-muxer-reap");
     if let Some(task) = writer.stderr_task.take() {
         task.abort();
     }
@@ -1283,6 +1352,8 @@ async fn supervise_role(
             }
         }
     }
+    #[cfg(test)]
+    test_trace_teardown(session_id, role, "after-duration-probe");
     // Bind closed content before any publication-path change. A crash between
     // no-replace rename publication and DB commit still has the same durable object.
     if let Err(error) = state
@@ -1294,6 +1365,8 @@ async fn supervise_role(
             role.title_suffix()
         ));
     }
+    #[cfg(test)]
+    test_trace_teardown(session_id, role, "after-ownership-bind");
     // Publish without replacement, then bind the exact created object to its
     // durable row. Failed media stays at its private capture path for recovery.
     if failure.is_none() {
@@ -1333,6 +1406,8 @@ async fn supervise_role(
             }
         }
     }
+    #[cfg(test)]
+    test_trace_teardown(session_id, role, "after-publication");
     if let Some(reason) = end_reason.as_ref() {
         let _ = crate::recording::emit_health_event(
             state,

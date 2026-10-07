@@ -342,8 +342,7 @@ mod tests {
     use super::*;
     use std::io::Read;
 
-    #[test]
-    fn source_iso_tap_clips_at_exact_stereo_frame_and_closed_offers_never_claim_coverage() {
+    fn queued_test_tap() -> (SourceAudioTap, mpsc::Receiver<TapChunk>) {
         let (sender, receiver) = mpsc::sync_channel(4);
         let tap = SourceAudioTap {
             path: PathBuf::from("unused-cutoff-test"),
@@ -357,6 +356,53 @@ mod tests {
             writer: Mutex::new(None),
             failure: Arc::new(Mutex::new(None)),
         };
+        (tap, receiver)
+    }
+
+    #[tokio::test]
+    async fn source_iso_supervisor_waits_for_final_chunk_and_clips_exact_stop_sample() {
+        use crate::source_iso::RecordingRole;
+        for role in [RecordingRole::Camera, RecordingRole::Screen] {
+            let (tap, receiver) = queued_test_tap();
+            let elapsed = Duration::from_nanos(3_543_602_083);
+            let required = crate::source_iso::source_iso_audio_boundary_frames(role, elapsed, -120);
+            // Camera's negative advance cannot consume post-Stop microphone;
+            // Screen still owes its delayed, already captured system samples.
+            let expected = 170_093
+                + if role == RecordingRole::Screen {
+                    5_760
+                } else {
+                    0
+                };
+            assert_eq!(required, expected);
+            tap.offer(&vec![0.25; (required as usize - 480) * 2]);
+            let mut wait = std::pin::pin!(crate::source_iso::wait_for_source_iso_audio_boundary(
+                &tap, required
+            ));
+            assert!(
+                futures_util::poll!(wait.as_mut()).is_pending(),
+                "the final 10ms chunk is required even though it is less than one video frame"
+            );
+            tap.offer(&vec![0.5; 960 * 2]);
+            tokio::time::timeout(Duration::from_secs(1), wait)
+                .await
+                .expect("coverage must wake after the final offer")
+                .expect("queued PCM covers the committed boundary");
+            tap.close();
+            assert_eq!(
+                receiver.recv().unwrap().samples.len(),
+                (required as usize - 480) * 2
+            );
+            let final_chunk = receiver.recv().unwrap().samples;
+            assert!(final_chunk[..480 * 2].iter().all(|sample| *sample == 0.5));
+            assert!(final_chunk[480 * 2..].iter().all(|sample| *sample == 0.0));
+            assert!(receiver.recv().is_err());
+        }
+    }
+
+    #[test]
+    fn source_iso_tap_clips_at_exact_stereo_frame_and_closed_offers_never_claim_coverage() {
+        let (tap, receiver) = queued_test_tap();
         tap.end_at_frame(3);
         tap.offer(&[0.1, 0.2, 0.3, 0.4]);
         tap.offer(&[0.5, 0.6, 0.7, 0.8]);

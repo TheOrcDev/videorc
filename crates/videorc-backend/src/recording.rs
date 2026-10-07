@@ -26480,6 +26480,8 @@ mod tests {
             video_captured_ms: f64,
             camera_published_ms: f64,
             screen_published_ms: f64,
+            camera_publish_stage_us: [u64; 4],
+            screen_publish_stage_us: [u64; 4],
         }
         crate::encoder_bridge::test_source_iso_trace_ms(Instant::now());
         let producer = tokio::spawn(async move {
@@ -26565,7 +26567,7 @@ mod tests {
                 let video_sequence = source_tick.video_sequence;
                 let video_pulse = pulse_at(video_sequence);
                 let video_captured_at = source_tick.video_captured_at;
-                crate::preview_camera::test_publish_camera_pixels(
+                let camera_publish_stage_us = crate::preview_camera::test_publish_camera_pixels(
                     &producer_state,
                     sequence,
                     [(video_sequence % 32 * 6) as u8, 0, video_pulse, 255],
@@ -26573,7 +26575,7 @@ mod tests {
                 )
                 .await;
                 let camera_published_at = Instant::now();
-                crate::preview_screen::test_publish_screen_pixels(
+                let screen_publish_stage_us = crate::preview_screen::test_publish_screen_pixels(
                     &producer_state,
                     sequence,
                     [(video_sequence % 32 * 6) as u8, video_pulse, 0, 255],
@@ -26584,6 +26586,8 @@ mod tests {
                     timing_trace.push(ProducerTiming {
                         sequence,
                         video_sequence,
+                        camera_publish_stage_us,
+                        screen_publish_stage_us,
                         captured_ms: crate::encoder_bridge::test_source_iso_trace_ms(captured_at),
                         delivered_ms: crate::encoder_bridge::test_source_iso_trace_ms(delivered_at),
                         video_captured_ms: crate::encoder_bridge::test_source_iso_trace_ms(
@@ -26845,6 +26849,18 @@ mod tests {
             crate::compositor::shutdown_compositor(&state).await,
             "runtime compositor retires"
         );
+        std::fs::write(
+            directory.join("compositor-timing.json"),
+            serde_json::to_vec_pretty(&crate::compositor::test_take_source_iso_composition_trace())
+                .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("iso-teardown-timing.json"),
+            serde_json::to_vec_pretty(&crate::source_iso::test_take_source_iso_teardown_trace())
+                .unwrap(),
+        )
+        .unwrap();
         let producer_timing = producer_result.expect("controlled producers retired");
         std::fs::write(
             directory.join("producer-timing.json"),

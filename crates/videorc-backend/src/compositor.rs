@@ -4170,9 +4170,10 @@ impl CompositorSourceEdit {
         primary: Scene,
         auxiliary: Option<Scene>,
         layout: LayoutSettings,
+        selected_sources: crate::protocol::SourceSelection,
     ) -> Self {
         let snapshot = |scene| CompositorSceneSnapshot {
-            selected_sources: None,
+            selected_sources: Some(selected_sources.clone()),
             revision: 1,
             scene: Some(scene),
             layout: layout.clone(),
@@ -6263,6 +6264,79 @@ enum GpuComposeFailure {
     Unavailable(String),
 }
 
+#[cfg(test)]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SourceIsoCompositionTiming {
+    role: usize,
+    sequence: u64,
+    began_ms: f64,
+    completed_ms: f64,
+    outcome: &'static str,
+    target_refs: u64,
+    source_texture_ms: Option<f64>,
+    command_wait_ms: Option<f64>,
+}
+
+#[cfg(test)]
+static SOURCE_ISO_COMPOSITION_TRACE: std::sync::Mutex<Vec<SourceIsoCompositionTiming>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn test_trace_source_iso_composition(
+    role: usize,
+    sequence: u64,
+    began: Instant,
+    result: &Result<GpuCompositorFrame, GpuComposeFailure>,
+) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_DIR").is_some()) {
+        return;
+    }
+    let completed = Instant::now();
+    let outcome = match result {
+        Ok(_) => "native",
+        #[cfg(target_os = "macos")]
+        Err(GpuComposeFailure::TargetRingBusy) => "ring-busy",
+        Err(_) => "gpu-error",
+    };
+    #[cfg(target_os = "macos")]
+    let target_refs = crate::metal_compositor::metal_retention_snapshot()
+        .encoder_in_flight_target_refs_live_count;
+    #[cfg(not(target_os = "macos"))]
+    let target_refs = 0;
+    let mut trace = SOURCE_ISO_COMPOSITION_TRACE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if trace.len() < 4096 {
+        trace.push(SourceIsoCompositionTiming {
+            role,
+            sequence,
+            began_ms: crate::encoder_bridge::test_source_iso_trace_ms(began),
+            completed_ms: crate::encoder_bridge::test_source_iso_trace_ms(completed),
+            outcome,
+            target_refs,
+            source_texture_ms: result
+                .as_ref()
+                .ok()
+                .map(|frame| frame.timings.source_texture_ms),
+            command_wait_ms: result
+                .as_ref()
+                .ok()
+                .map(|frame| frame.timings.command_wait_ms),
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_take_source_iso_composition_trace() -> Vec<SourceIsoCompositionTiming> {
+    std::mem::take(
+        &mut *SOURCE_ISO_COMPOSITION_TRACE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()),
+    )
+}
+
 impl From<&str> for GpuComposeFailure {
     fn from(reason: &str) -> Self {
         Self::Unavailable(reason.to_owned())
@@ -7698,12 +7772,17 @@ async fn publish_compositor_frame(
             },
         };
         // GPU path for the cases it reproduces exactly; otherwise the CPU compositor.
-        match try_gpu_compose_with_chrome(
+        #[cfg(test)]
+        let compose_began = Instant::now();
+        let composed = try_gpu_compose_with_chrome(
             gpu.as_deref_mut(),
             &inputs,
             frame_consumer.publishes_cpu_yuv(),
             &editor_chrome,
-        ) {
+        );
+        #[cfg(test)]
+        test_trace_source_iso_composition(0, sequence, compose_began, &composed);
+        match composed {
             Ok(frame) => {
                 bytes = frame.yuv;
                 pixel_format = frame.pixel_format;
@@ -7838,6 +7917,8 @@ async fn publish_compositor_frame(
             inputs,
             stream_gpu,
             stream_output.frame_consumer,
+            #[cfg(test)]
+            3,
         ) {
             timings.merge_gpu(aux_timings);
         }
@@ -7879,13 +7960,18 @@ async fn publish_compositor_frame(
                 image_source: None,
             },
         ];
-        for SourceIsoLeg {
-            snapshot: leg_snapshot,
-            store,
-            gpu,
-            image_source,
-        } in legs
+        for (
+            leg_index,
+            SourceIsoLeg {
+                snapshot: leg_snapshot,
+                store,
+                gpu,
+                image_source,
+            },
+        ) in legs.into_iter().enumerate()
         {
+            #[cfg(not(test))]
+            let _ = leg_index;
             if leg_snapshot.is_none() {
                 continue;
             }
@@ -7926,6 +8012,8 @@ async fn publish_compositor_frame(
                 caption_overlay: None,
                 highlight_overlay: None,
             };
+            #[cfg(test)]
+            let trace_role = leg_index + 1;
             if let Some(iso_timings) = publish_auxiliary_compositor_frame(
                 sequence,
                 leg_captured_at,
@@ -7934,6 +8022,8 @@ async fn publish_compositor_frame(
                 inputs,
                 gpu,
                 iso_output.frame_consumer,
+                #[cfg(test)]
+                trace_role,
             ) {
                 timings.merge_gpu(iso_timings);
             }
@@ -8088,16 +8178,22 @@ fn publish_auxiliary_compositor_frame(
     inputs: CompositorRenderInputs<'_>,
     mut gpu: Option<&mut GpuCompositor>,
     frame_consumer: CompositorFrameConsumer,
+    #[cfg(test)] trace_role: usize,
 ) -> Option<GpuCompositorTimings> {
     let width = inputs.width;
     let height = inputs.height;
     let mut pixel_format = CompositorPixelFormat::yuv420p_cpu_buffer();
     let mut export_handle = CompositorFrameExportHandle::default();
-    let (bytes, gpu_timings) = match try_gpu_compose(
+    #[cfg(test)]
+    let compose_began = Instant::now();
+    let composed = try_gpu_compose(
         gpu.as_deref_mut(),
         &inputs,
         frame_consumer.publishes_cpu_yuv(),
-    ) {
+    );
+    #[cfg(test)]
+    test_trace_source_iso_composition(trace_role, sequence, compose_began, &composed);
+    let (bytes, gpu_timings) = match composed {
         Ok(frame) => {
             pixel_format = frame.pixel_format;
             export_handle = frame.export_handle;
@@ -11709,6 +11805,7 @@ mod tests {
             inputs(8),
             Some(&mut gpu),
             CompositorFrameConsumer::VideoToolboxEncoder,
+            1,
         );
         let mut held = Vec::new();
         for sequence in 9..=13 {
@@ -11720,6 +11817,7 @@ mod tests {
                 inputs(sequence),
                 Some(&mut gpu),
                 CompositorFrameConsumer::VideoToolboxEncoder,
+                1,
             );
             held.push(
                 auxiliary
@@ -11741,6 +11839,7 @@ mod tests {
             inputs(14),
             Some(&mut gpu),
             CompositorFrameConsumer::VideoToolboxEncoder,
+            1,
         );
         assert_eq!(auxiliary.lock().unwrap().latest().unwrap().sequence, 13);
         held.pop();
@@ -11752,6 +11851,7 @@ mod tests {
             inputs(15),
             Some(&mut gpu),
             CompositorFrameConsumer::VideoToolboxEncoder,
+            1,
         );
         assert_eq!(auxiliary.lock().unwrap().latest().unwrap().sequence, 15);
     }

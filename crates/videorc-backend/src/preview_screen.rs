@@ -2928,11 +2928,12 @@ pub(crate) async fn test_publish_screen_pixels(
     sequence: u64,
     pixel: [u8; 4],
     captured_at: Instant,
-) {
+) -> [u64; 4] {
+    let began = Instant::now();
     let (width, height, shared) = {
         let slot = state.preview_screen.lock().await;
         let Some(active) = slot.active.as_ref() else {
-            return;
+            return [0; 4];
         };
         (
             active.video.width,
@@ -2940,10 +2941,13 @@ pub(crate) async fn test_publish_screen_pixels(
             Arc::clone(&active.shared),
         )
     };
+    let admitted = Instant::now();
     let pixels = pixel.repeat((width * height) as usize);
     // Match native callbacks: publishing owns a generation's shared store,
     // independently of the source admission authority.
+    let allocated = Instant::now();
     let mut shared = shared.lock().unwrap();
+    let locked = Instant::now();
     shared.frame_store.publish(
         sequence,
         width,
@@ -2952,6 +2956,13 @@ pub(crate) async fn test_publish_screen_pixels(
         captured_at,
         pixels,
     );
+    let published = Instant::now();
+    [
+        admitted.duration_since(began).as_micros() as u64,
+        allocated.duration_since(admitted).as_micros() as u64,
+        locked.duration_since(allocated).as_micros() as u64,
+        published.duration_since(locked).as_micros() as u64,
+    ]
 }
 
 #[cfg(test)]
