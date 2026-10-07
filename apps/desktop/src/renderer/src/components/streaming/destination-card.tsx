@@ -70,7 +70,8 @@ import {
   platformConnectOptions,
   removeMessagesReadiness,
   removeMessagesReconnectCopy,
-  TWITCH_AUDIENCE_SCOPES
+  TWITCH_AUDIENCE_SCOPES,
+  TWITCH_BITS_POINTS_SCOPES
 } from '../../../../shared/platform-scopes'
 
 // One destination (plan 080 S5/S6). The owner's brief: "make it good and
@@ -774,30 +775,43 @@ export function accountStatus(
  * The signed-in account's one permission row (plan 140, S5): what a reconnect
  * would add, or null when nothing is missing. One row and one button, since
  * its reconnect asks for all of a platform's optional permissions. Removing
- * messages leads; Twitch's follow alerts ride along when they are missing too.
+ * messages leads; Twitch's Activity permissions (follow alerts, the sub count,
+ * Power-ups and channel points, plan 162) ride along when they are missing.
  */
 export function missingPermissionsRow(
   platform: StreamPlatform,
   account: Pick<PlatformAccount, 'scopes' | 'status'>
 ): { message: string; action: string } | null {
-  const audienceMissing =
-    platform === 'twitch' &&
-    !TWITCH_AUDIENCE_SCOPES.every((scope) => account.scopes.includes(scope))
+  const lacks = (scopes: readonly string[]): boolean =>
+    platform === 'twitch' && !scopes.every((scope) => account.scopes.includes(scope))
+  const audienceMissing = lacks(TWITCH_AUDIENCE_SCOPES)
+  const bitsPointsMissing = lacks(TWITCH_BITS_POINTS_SCOPES)
+  const activityMissing = audienceMissing || bitsPointsMissing
   if (
     isScopeReconnectPlatform(platform) &&
     removeMessagesReadiness(platform, account) === 'missing-scope'
   ) {
     const removeMessages = removeMessagesReconnectCopy(platform)
+    const alongside =
+      audienceMissing && bitsPointsMissing
+        ? 'Follow alerts, the sub count, Power-ups and channel points'
+        : audienceMissing
+          ? 'Follow alerts and the sub count'
+          : 'Power-ups and channel points'
     return {
-      message: audienceMissing
-        ? `${removeMessages} Follow alerts and the sub count need it too.`
-        : removeMessages,
+      message: activityMissing ? `${removeMessages} ${alongside} need it too.` : removeMessages,
       action: 'Reconnect'
     }
   }
-  if (audienceMissing) {
+  if (activityMissing) {
+    const what =
+      audienceMissing && bitsPointsMissing
+        ? 'Follow alerts, sub count, Power-ups and channel points'
+        : audienceMissing
+          ? 'Follow alerts and sub count'
+          : 'Power-ups and channel points'
     return {
-      message: 'Follow alerts and sub count need one more Twitch permission.',
+      message: `${what} need one more Twitch permission.`,
       action: 'Reconnect Twitch'
     }
   }
