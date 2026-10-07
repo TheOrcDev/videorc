@@ -17631,6 +17631,16 @@ fn append_bridge_copy_flv_output(
     // carry mpegts inputs to flv slaves — it forwards the mpegts codec tag
     // [27], which the FLV muxer rejects; standalone outputs negotiate tags
     // correctly — plan 023 L1).
+    //
+    // Reconnect after ANY error, on a keyframe (plan 161). An ingest that
+    // closes the connection mid-stream surfaces as AVERROR_EOF, which the fifo
+    // refuses to retry by default (`is_recoverable` in libavformat/fifo.c): the
+    // leg then closed for good while FFmpeg finished that one output quietly
+    // and the session stayed "On air" (YouTube, 2026-10-07). Retries are
+    // unlimited (FFmpeg's `max_recovery_attempts` default of 0) and every
+    // failed attempt logs `[fifo @ …] Error opening <url>`, which attributes
+    // the leg; `restart_with_keyframe` (honoured only with
+    // `drop_pkts_on_overflow`) resumes on a clean picture.
     args.extend([
         "-f".to_string(),
         "fifo".to_string(),
@@ -17641,6 +17651,10 @@ fn append_bridge_copy_flv_output(
         "-drop_pkts_on_overflow".to_string(),
         "1".to_string(),
         "-attempt_recovery".to_string(),
+        "1".to_string(),
+        "-recover_any_error".to_string(),
+        "1".to_string(),
+        "-restart_with_keyframe".to_string(),
         "1".to_string(),
         "-recovery_wait_time".to_string(),
         "2".to_string(),
@@ -18552,6 +18566,8 @@ fn source_switch_output_options_are_known(options: &[String]) -> bool {
             "-queue_size",
             "-drop_pkts_on_overflow",
             "-attempt_recovery",
+            "-recover_any_error",
+            "-restart_with_keyframe",
             "-recovery_wait_time",
             "-flvflags",
             "-colorspace",
@@ -29731,6 +29747,13 @@ mod tests {
                 "single RTMP target must be fifo-muxer wrapped: {args:?}"
             );
             assert_eq!(arg_value(&args, "-fifo_format"), Some("flv"));
+            // Plan 161: an ingest that closes the connection (EOF) reconnects
+            // on a keyframe instead of closing the leg for good.
+            assert_eq!(arg_value(&args, "-attempt_recovery"), Some("1"));
+            assert_eq!(arg_value(&args, "-recover_any_error"), Some("1"));
+            assert_eq!(arg_value(&args, "-restart_with_keyframe"), Some("1"));
+            assert_eq!(arg_value(&args, "-drop_pkts_on_overflow"), Some("1"));
+            assert_eq!(arg_value(&args, "-max_recovery_attempts"), None);
             assert_eq!(
                 input_arg_value(&args, &fifo_path.display().to_string(), "-f"),
                 Some("mpegts")
