@@ -7583,7 +7583,8 @@ fn chat_contribution(
                 _ => 1,
             };
         }
-        Some(LiveChatEventDetails::Cheer { bits }) => next.bits = chat_fact(*bits)?,
+        Some(LiveChatEventDetails::Cheer { bits })
+        | Some(LiveChatEventDetails::PowerUp { bits, .. }) => next.bits = chat_fact(*bits)?,
         Some(LiveChatEventDetails::SuperChat {
             amount_micros,
             currency,
@@ -10467,6 +10468,40 @@ mod tests {
         assert_eq!(messages[1].reply, None);
         assert!(!messages[1].first_message);
         assert_eq!(messages[1].author_affiliation, None);
+    }
+
+    #[test]
+    fn power_ups_and_redemptions_round_trip_and_only_power_ups_count_as_bits() {
+        use crate::live_chat::{PowerUpKind, RedemptionKind};
+        let database = test_database();
+        database
+            .create_session(&sample_session("session-plan-162"))
+            .unwrap();
+        let mut power_up = sample_live_chat_message("session-plan-162", 1);
+        power_up.event_type = LiveChatEventType::PowerUp;
+        power_up.details = Some(LiveChatEventDetails::PowerUp {
+            bits: 300,
+            power_up: PowerUpKind::Celebration,
+            emote_name: None,
+        });
+        let mut redemption = sample_live_chat_message("session-plan-162", 2);
+        redemption.event_type = LiveChatEventType::Redemption;
+        redemption.details = Some(LiveChatEventDetails::Redemption {
+            reward: RedemptionKind::Custom,
+            channel_points: 500,
+            title: Some("Hydrate".to_string()),
+            emote_name: None,
+        });
+        database.save_live_chat_message(&power_up).unwrap();
+        database.save_live_chat_message(&redemption).unwrap();
+
+        let messages = database.list_live_chat_messages("session-plan-162").unwrap();
+        assert_eq!(messages, vec![power_up, redemption]);
+        let totals = chat_totals_value(&database, "session-plan-162");
+        // Power-ups are bits; points are loyalty, never summed (plan 162, D3).
+        assert_eq!(totals["bits"], 300);
+        // Activity-only rows are not chat: neither counts as a chatter.
+        assert_eq!(totals["chatters"], 0);
     }
 
     #[test]

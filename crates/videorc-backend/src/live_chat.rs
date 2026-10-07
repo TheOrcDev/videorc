@@ -91,6 +91,12 @@ pub enum LiveChatEventType {
     /// A new follower (Twitch `channel.follow`, only with the opt-in scope).
     /// The Stream Manager lists it under Activity and never in chat.
     Follow,
+    /// A Twitch Power-up paid with bits (`channel.bits.use`, plan 162).
+    /// Activity only, like a follow: a gigantified emote's own chat message
+    /// stays an ordinary chat row.
+    PowerUp,
+    /// A Twitch channel point redemption (plan 162). Activity only.
+    Redemption,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -225,6 +231,27 @@ pub enum LiveChatEventDetails {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         channel_points_awarded: Option<u64>,
     },
+    /// A Twitch Power-up paid with bits (plan 162). `emote_name` is the
+    /// gigantified emote, when there is one.
+    #[serde(rename_all = "camelCase")]
+    PowerUp {
+        bits: u64,
+        power_up: PowerUpKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        emote_name: Option<String>,
+    },
+    /// A Twitch channel point redemption (plan 162). `title` is a custom
+    /// reward's title; automatic rewards have none and the window names them.
+    /// `emote_name` is the emote an automatic reward unlocked.
+    #[serde(rename_all = "camelCase")]
+    Redemption {
+        reward: RedemptionKind,
+        channel_points: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        emote_name: Option<String>,
+    },
     /// A new follower. `handle` is the @-mentionable login (Twitch
     /// `user_login`, X and Kick `username`) when it differs from, or is
     /// missing from, the display name (plan 071, S5).
@@ -242,6 +269,30 @@ pub enum MembershipKind {
     Milestone,
     Gift,
     GiftReceived,
+}
+
+/// Which Twitch Power-up a viewer paid bits for (`channel.bits.use`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PowerUpKind {
+    Celebration,
+    GigantifyAnEmote,
+    MessageEffect,
+    /// A Power-up the channel made itself (`custom_power_up`).
+    Custom,
+}
+
+/// Which channel point reward a viewer redeemed: the channel's own custom
+/// reward, or one of Twitch's automatic rewards.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RedemptionKind {
+    Custom,
+    HighlightedMessage,
+    SubOnlyMessage,
+    RandomEmoteUnlock,
+    ChosenEmoteUnlock,
+    ModifiedEmoteUnlock,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
