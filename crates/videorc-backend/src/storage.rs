@@ -10495,7 +10495,9 @@ mod tests {
         database.save_live_chat_message(&power_up).unwrap();
         database.save_live_chat_message(&redemption).unwrap();
 
-        let messages = database.list_live_chat_messages("session-plan-162").unwrap();
+        let messages = database
+            .list_live_chat_messages("session-plan-162")
+            .unwrap();
         assert_eq!(messages, vec![power_up, redemption]);
         let totals = chat_totals_value(&database, "session-plan-162");
         // Power-ups are bits; points are loyalty, never summed (plan 162, D3).

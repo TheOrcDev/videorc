@@ -372,3 +372,24 @@ against its mock WebSocket server, with `eventsub_ws_url` pointed at it.
    a Hype Train's golden Kappa)? The plan assumes channel points.
 2. Should redemptions auto-show on stream when Activity auto-show is on?
    The default in this plan is no.
+
+## Execution notes (2026-10-07, branch `plan-162-twitch-bits-points`)
+
+S1 to S6 are built. S7's automated gates ran; owner acceptance on a live
+Twitch stream is still owed. Deviations from the plan text:
+
+- `Redemption.title` is optional: custom rewards carry it, automatic rewards
+  have none, and the window names them. `RedemptionKind` gained `other` for
+  automatic rewards Twitch adds after this build.
+- The reconnect hint is a one-line bar above the Activity rows, not only in
+  the empty state, because Power-ups and redemptions have no row to carry the
+  ask. The destination card's permission row and the status-bar tooltip name
+  Power-ups and channel points too.
+- A refused Power-up or redemption subscription is not retried on the same
+  socket, so a channel without bits or points does not hit Helix every 30 s.
+  Follows keep retrying as before.
+- Thank in chat: Power-ups use the tip line ("Thank you so much, @name!"),
+  and redemptions use "Thanks for redeeming, @name!".
+- The fake cheer-through-`channel.bits.use` check lives in the Rust unit test
+  (`bits_use_power_ups_become_activity_rows_and_cheers_are_skipped`). The fake
+  provider emits normalized rows, not EventSub frames.

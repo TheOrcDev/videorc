@@ -26,7 +26,8 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::live_chat::{
     LiveChatEventDetails, LiveChatEventType, LiveChatMessage, LiveChatMessageFragment,
     LiveChatProviderConnectionState, LiveChatReply, PowerUpKind, ProviderSendReceipt,
-    RedemptionKind, SubscriptionKind, live_chat_message_id, set_provider_and_emit, try_deliver_message,
+    RedemptionKind, SubscriptionKind, live_chat_message_id, set_provider_and_emit,
+    try_deliver_message,
 };
 use crate::state::AppState;
 use crate::streaming::StreamPlatform;
@@ -1499,12 +1500,7 @@ async fn create_extra_subscriptions(
             client,
             config,
             access_token,
-            &broadcaster_subscription_body(
-                AUTOMATIC_REDEMPTION_TYPE,
-                "2",
-                broadcaster,
-                session_id,
-            ),
+            &broadcaster_subscription_body(AUTOMATIC_REDEMPTION_TYPE, "2", broadcaster, session_id),
         )
         .await;
         live.redemptions = custom && automatic;
@@ -1556,7 +1552,13 @@ fn extra_events_held(state: &AppState, config: &TwitchChatConfig) -> ExtraEvents
         return held;
     };
     if let Ok(credential) = crate::twitch_account_credentials(state, account_id.as_deref()) {
-        let holds = |wanted: &str| credential.account.scopes.iter().any(|scope| scope == wanted);
+        let holds = |wanted: &str| {
+            credential
+                .account
+                .scopes
+                .iter()
+                .any(|scope| scope == wanted)
+        };
         held.follows |= holds(crate::oauth::TWITCH_FOLLOWERS_SCOPE);
         held.bits |= holds(crate::oauth::TWITCH_BITS_SCOPE);
         held.redemptions |= holds(crate::oauth::TWITCH_REDEMPTIONS_SCOPE);
