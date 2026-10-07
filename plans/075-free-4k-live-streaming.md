@@ -21,8 +21,9 @@
 - **Depends on**: nothing in-repo; W-slices need videorc-web access
 - **Category**: direction, product boundary, docs
 - **Planned at**: commit `febb5ca8`, 2026-09-28
-- **Status**: IMPLEMENTED (desktop D1–D3) 2026-09-28; D4/D5 macOS smokes and
-  W1–W3 (videorc-web) outstanding — see the ledger
+- **Status**: IMPLEMENTED (desktop D1–D3) 2026-09-28; W1–W3 (videorc-web)
+  DONE 2026-10-07 via [Plan 159](159-web-stops-selling-4k-streaming.md);
+  D4/D5 macOS smokes outstanding — see the ledger
 
 ## Owner decision being implemented
 
@@ -344,6 +345,6 @@ acceptable, no server coordination needed.
 | D3    | PARTIAL     | `docs/distribution.md` matrix + enforcement bullet, README bullet, Plan 016 addendum done. Public `changelog/` entry is release-time (entries land in the release bump commit); owed to the next release.                                                                                         |
 | D4    | BLOCKED     | This host is a headless Linux VM: the dev-app smokes cannot run. Substituted Rust session-start proof (`entitlement_guard_allows_true_4k_streaming_on_basic`, `youtube_1080p_provider_rates_pass_on_every_tier`); the `VIDEORC_PREMIUM_FEATURES=0` dev-app run is owed on a macOS host.           |
 | D5    | BLOCKED     | `smoke:recording-matrix` / `smoke:multistream` need macOS; ran the full Linux-runnable gate set instead (cargo fmt/clippy/test, desktop unit, typecheck, lint, format, test:scripts).                                                                                                               |
-| W1    | BLOCKED     | videorc-web repo is not accessible from this environment (token is scoped to TheOrcDev/videorc); contract in this plan stands.                                                                                                                                                                     |
-| W2    | BLOCKED     | Same access blocker as W1.                                                                                                                                                                                                                                                                         |
-| W3    | BLOCKED     | Same access blocker as W1; the changelog flows automatically once the release entry (D3 remainder) ships.                                                                                                                                                                                          |
+| W1    | DONE        | 2026-10-07 via Plan 159 S1–S4 + S6 (videorcweb `641c6e9c`..`b339c1fb`): pricing, homepage, `/premium`, account, Terms, and metadata stop selling streaming quality; Basic and Premium web limits are unified. |
+| W2    | DONE        | 2026-10-07 via Plan 159: blog, FAQ, `llms.txt`, and JSON-LD audited; `tests/premium-copy.test.ts` guards it. The Creem description check is owed by the owner. |
+| W3    | DONE        | 2026-10-07: production `/changelog` renders the 0.9.122 "4K and 1080p60 streaming are free on every plan" entry. |
