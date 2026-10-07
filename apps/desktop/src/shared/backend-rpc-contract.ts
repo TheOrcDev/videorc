@@ -1701,7 +1701,10 @@ const sessionSummarySchema = boundedSemanticValue(
       cleanCutMode: optionalSchema(enumSchema(['clean', 'condensed'])),
       finalizationState: optionalSchema(recordingFinalizationStateSchema),
       finalizationProgressPercent: optionalSchema(numberSchema({ min: 0, max: 100 })),
-      finalizationError: optionalSchema(stringSchema({ maxLength: 16_384 }))
+      finalizationError: optionalSchema(stringSchema({ maxLength: 16_384 })),
+      // Plan 157: separate-source take membership.
+      takeId: optionalSchema(boundedString),
+      recordingRole: optionalSchema(enumSchema(['combined', 'screen', 'camera']))
     },
     { allowUnknown: false }
   )
@@ -2061,6 +2064,12 @@ const sessionStartParamsSchema = objectSchema(
         streamEnabled: booleanSchema,
         outputDirectoryCapability: optionalSchema(boundedString),
         keepOriginalMkv: optionalSchema(booleanSchema),
+        separateSourceRecordings: optionalSchema(
+          objectSchema(
+            { enabled: booleanSchema, keepCombined: booleanSchema },
+            { allowUnknown: false }
+          )
+        ),
         video: boundedBackendParamValueSchema,
         rtmp: boundedBackendParamValueSchema
       },

@@ -1113,6 +1113,9 @@ struct AudioShared {
     system_stats: Arc<AudioCaptureStats>,
     mix_clipped_samples: u64,
     levels: BusLevelWindows,
+    /// Plan 157: per-source PCM taps (microphone → Camera file, system →
+    /// Screen file). `None` on every session without separate recordings.
+    source_taps: Option<Arc<crate::source_audio_tap::SourceAudioTaps>>,
     #[cfg(test)]
     caption_observer: Option<CaptionObserver>,
     #[cfg(test)]
@@ -1485,6 +1488,17 @@ impl SessionAudio {
     /// video owner closes FFmpeg. This transition is irreversible for a session.
     pub fn request_silent_drain(&self) -> bool {
         self.handle.request_silent_drain()
+    }
+
+    /// Plan 157: arms the per-source PCM taps. Call before the bus writes its
+    /// first chunk (it waits for the video epoch, so right after attach is
+    /// early enough). Replaces any previous taps.
+    pub fn set_source_taps(&self, taps: Arc<crate::source_audio_tap::SourceAudioTaps>) {
+        self.handle
+            .shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .source_taps = Some(taps);
     }
 
     pub fn request_stop(&self) {
@@ -1862,6 +1876,7 @@ pub fn attach_prepared_with(
         system_stats: Arc::new(AudioCaptureStats::default()),
         mix_clipped_samples: 0,
         levels: BusLevelWindows::default(),
+        source_taps: None,
         #[cfg(test)]
         caption_observer: None,
         #[cfg(test)]
@@ -5055,6 +5070,21 @@ fn run_bus_owned(
                 )
             }
         };
+        // Plan 157: the ISO files get the SAME written ingredients the Combined
+        // sum was built from — a stale or draining suffix is zeros in both.
+        if let Some(taps) = shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .source_taps
+            .clone()
+        {
+            taps.offer_chunk(
+                &microphone_samples,
+                mixed
+                    .as_ref()
+                    .map(|(system_samples, _)| system_samples.as_slice()),
+            );
+        }
         let microphone_levels = ChunkLevels::of(&microphone_samples);
         let system_levels = mixed
             .as_ref()

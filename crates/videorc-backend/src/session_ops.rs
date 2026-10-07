@@ -494,6 +494,7 @@ pub async fn import_recording(
             output_directory: Some(output_directory.trim().to_string()),
             ffmpeg_path: None,
             keep_original_mkv: false,
+            separate_source_recordings: None,
             video: crate::protocol::VideoSettings {
                 preset: crate::protocol::VideoPreset::Tutorial1080p30,
                 width: 1920,

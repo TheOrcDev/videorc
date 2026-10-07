@@ -1684,6 +1684,7 @@ impl Database {
                 output_directory: None,
                 ffmpeg_path: None,
                 keep_original_mkv: false,
+                separate_source_recordings: None,
                 video: crate::protocol::VideoSettings {
                     preset: crate::protocol::VideoPreset::StreamSafe1080p30,
                     width: 1920,
@@ -2400,6 +2401,84 @@ impl Database {
             "UPDATE sessions SET finalization_state = ?2, finalization_error = ?3 WHERE id = ?1",
             params![session_id, state, error],
         )?;
+        Ok(())
+    }
+
+    /// Plan 157: tags a row as one file of a take.
+    pub fn set_session_take_role(
+        &self,
+        session_id: &str,
+        take_id: &str,
+        recording_role: &str,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE sessions SET take_id = ?2, recording_role = ?3 WHERE id = ?1",
+            params![session_id, take_id, recording_role],
+        )?;
+        Ok(())
+    }
+
+    /// Plan 157: inserts one ISO sibling row beside the Combined row, copying
+    /// the take's mode, sources, layout and output settings from it. The row
+    /// is born terminal (`completed`/`failed`) because its muxer has already
+    /// exited; the MP4 export then runs as an ordinary finalization job.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_source_iso_session(
+        &self,
+        combined_session_id: &str,
+        iso_session_id: &str,
+        recording_role: &str,
+        title_suffix: &str,
+        output_path: &str,
+        ended_at: &str,
+        duration_ms: Option<i64>,
+        status: &str,
+        finalization_state: &str,
+        finalization_error: Option<&str>,
+    ) -> Result<()> {
+        let file_size_bytes = std::fs::metadata(output_path)
+            .ok()
+            .map(|metadata| metadata.len() as i64);
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let inserted = transaction.execute(
+            "INSERT INTO sessions
+                (id, title, started_at, ended_at, status, mode, output_path, mp4_path,
+                 stream_preset, container, duration_ms, sources_json, layout_json, output_json,
+                 diagnostics_json, file_size_bytes, finalization_state, finalization_error,
+                 take_id, recording_role)
+             SELECT ?2, title || ': ' || ?4, started_at, ?6, ?8, mode, ?5, NULL,
+                    NULL, 'mkv', COALESCE(?7, duration_ms), sources_json, layout_json, output_json,
+                    NULL, ?11, ?9, ?10, ?1, ?3
+             FROM sessions WHERE id = ?1",
+            params![
+                combined_session_id,
+                iso_session_id,
+                recording_role,
+                title_suffix,
+                output_path,
+                ended_at,
+                duration_ms,
+                status,
+                finalization_state,
+                finalization_error,
+                file_size_bytes,
+            ],
+        )?;
+        if inserted != 1 {
+            bail!(
+                "Combined session {combined_session_id} was not found for its {recording_role} row"
+            );
+        }
+        transaction.execute(
+            "INSERT OR IGNORE INTO session_chat_totals (session_id, totals_json) VALUES (?1, ?2)",
+            params![
+                iso_session_id,
+                serde_json::to_string(&SessionChatTotals::empty(iso_session_id))?
+            ],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -4397,7 +4476,7 @@ impl Database {
                     SELECT id, title, started_at, ended_at, status, mode, output_path, mp4_path,
                            stream_preset, container, duration_ms, layout_json, file_size_bytes,
                            derived_from_session_id, source_title, processing_kind,
-                           finalization_state, finalization_error
+                           finalization_state, finalization_error, take_id, recording_role
                     FROM sessions
                     WHERE library_hidden = 0
                       AND (
@@ -4549,7 +4628,8 @@ impl Database {
                     COALESCE(artifact_summaries.count, 0), artifact_summaries.ready_kinds,
                     COALESCE(comment_counts.count, 0),
                     page_sessions.finalization_state, page_sessions.finalization_error,
-                    clean_cut_outputs.source_session_id, clean_cut_outputs.mode
+                    clean_cut_outputs.source_session_id, clean_cut_outputs.mode,
+                    page_sessions.take_id, page_sessions.recording_role
              FROM page_sessions
              LEFT JOIN health_counts ON health_counts.session_id = page_sessions.id
              LEFT JOIN log_counts ON log_counts.session_id = page_sessions.id
@@ -4617,6 +4697,8 @@ impl Database {
                         ),
                     finalization_progress_percent: None,
                     finalization_error: row.get(23)?,
+                    take_id: row.get(26)?,
+                    recording_role: row.get(27)?,
                 })
             })?;
         let mut items = rows.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -7114,6 +7196,15 @@ impl Database {
             "sessions",
             "finalization_error",
             "finalization_error TEXT",
+        )?;
+        // Plan 157: separate source recordings. Every file of one take shares
+        // `take_id` (the Combined session's id); `recording_role` names the
+        // file (`combined`, `screen`, `camera`). Both NULL on ordinary rows.
+        ensure_column(&conn, "sessions", "take_id", "take_id TEXT")?;
+        ensure_column(&conn, "sessions", "recording_role", "recording_role TEXT")?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_take_id ON sessions(take_id)",
+            [],
         )?;
         ensure_column(
             &conn,
@@ -9774,6 +9865,100 @@ mod tests {
         assert!(database.list_clip_marks("s-2").unwrap().is_empty());
     }
 
+    #[test]
+    fn source_iso_sibling_rows_copy_the_take_and_list_their_role() {
+        // Plan 157: the ISO rows are born beside the Combined row, inherit its
+        // sources/layout/output, and the page query surfaces take + role so
+        // the Library can group the three files.
+        let database = test_database();
+        database.create_session(&sample_session("take-1")).unwrap();
+        database
+            .set_session_take_role("take-1", "take-1", "combined")
+            .unwrap();
+        database
+            .create_source_iso_session(
+                "take-1",
+                "take-1-screen",
+                "screen",
+                "Screen",
+                "/tmp/videorc-test-screen.mkv",
+                "2026-05-31T00:10:00Z",
+                Some(600_000),
+                "completed",
+                "finalizing",
+                None,
+            )
+            .unwrap();
+        database
+            .create_source_iso_session(
+                "take-1",
+                "take-1-camera",
+                "camera",
+                "Camera",
+                "/tmp/videorc-test-camera.mkv",
+                "2026-05-31T00:10:00Z",
+                Some(600_000),
+                "failed",
+                "failed",
+                Some("muxer exited 1"),
+            )
+            .unwrap();
+        assert!(
+            database
+                .create_source_iso_session(
+                    "missing",
+                    "missing-screen",
+                    "screen",
+                    "Screen",
+                    "/tmp/none.mkv",
+                    "2026-05-31T00:10:00Z",
+                    None,
+                    "completed",
+                    "finalizing",
+                    None,
+                )
+                .is_err(),
+            "an ISO row without its Combined row is a bug, not a silent orphan"
+        );
+
+        let page = database.list_session_items_page(None, 10).unwrap();
+        assert_eq!(page.items.len(), 3);
+        let by_id = |id: &str| {
+            page.items
+                .iter()
+                .find(|item| item.id == id)
+                .unwrap_or_else(|| panic!("{id} must list"))
+        };
+        let combined = by_id("take-1");
+        assert_eq!(combined.take_id.as_deref(), Some("take-1"));
+        assert_eq!(combined.recording_role.as_deref(), Some("combined"));
+        let screen = by_id("take-1-screen");
+        assert_eq!(screen.take_id.as_deref(), Some("take-1"));
+        assert_eq!(screen.recording_role.as_deref(), Some("screen"));
+        assert_eq!(screen.title, "Test session: Screen");
+        assert_eq!(screen.mode, combined.mode);
+        assert_eq!(screen.started_at, combined.started_at);
+        assert_eq!(screen.ended_at.as_deref(), Some("2026-05-31T00:10:00Z"));
+        assert_eq!(screen.duration_ms, Some(600_000));
+        assert_eq!(
+            screen.output_path.as_deref(),
+            Some("/tmp/videorc-test-screen.mkv")
+        );
+        assert_eq!(screen.container.as_deref(), Some("mkv"));
+        assert_eq!(screen.status, "completed");
+        let camera = by_id("take-1-camera");
+        assert_eq!(camera.recording_role.as_deref(), Some("camera"));
+        assert_eq!(camera.status, "failed");
+        assert_eq!(camera.finalization_error.as_deref(), Some("muxer exited 1"));
+        assert!(
+            database
+                .session_chat_totals("take-1-screen")
+                .unwrap()
+                .is_some(),
+            "every row owns a chat-totals record"
+        );
+    }
+
     fn sample_session(id: &str) -> NewSession {
         NewSession {
             id: id.to_string(),
@@ -9819,6 +10004,7 @@ mod tests {
             },
             output: OutputSettings {
                 keep_original_mkv: false,
+                separate_source_recordings: None,
                 record_enabled: true,
                 stream_enabled: false,
                 output_directory: None,
@@ -9958,6 +10144,7 @@ mod tests {
         };
         let output = OutputSettings {
             keep_original_mkv: false,
+            separate_source_recordings: None,
             record_enabled: true,
             stream_enabled: true,
             output_directory: None,

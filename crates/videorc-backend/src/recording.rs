@@ -180,7 +180,7 @@ const TRANSIENT_FIFO_TEST_PAUSE_MS_ENV: &str = "VIDEORC_TEST_VT_FIFO_PAUSE_MS";
 /// incidents showed ~50ms FIFO writes only on the record-only path that lacked
 /// this demux thread, while the live auxiliary input keeps its smaller
 /// latency-first queue.
-const ENCODED_RECORDING_INPUT_THREAD_QUEUE_PACKETS: usize = 64;
+pub(crate) const ENCODED_RECORDING_INPUT_THREAD_QUEUE_PACKETS: usize = 64;
 const SPLIT_STREAM_INPUT_THREAD_QUEUE_PACKETS: usize = 8;
 /// FFmpeg starts per-input demux threads only after `avformat_find_stream_info`.
 /// Its default multi-megabyte MPEG-TS probe can therefore hold an entire short
@@ -1961,6 +1961,8 @@ pub struct ActiveRecording {
     pub screen_overlay: Option<ScreenOverlaySession>,
     pub encoder_bridge: Option<EncoderBridgeRecordingSession>,
     pub encoder_bridge_stream: Option<EncoderBridgeRecordingSession>,
+    /// Plan 157: the Screen/Camera ISO writers of a separate-source take.
+    source_iso: Option<crate::source_iso::SourceIsoRuntime>,
     /// Owns monitor cancellation and task lifetime. It is declared before the
     /// pump so an unexpected `ActiveRecording` drop aborts the monitor before
     /// releasing the generation-scoped media authority.
@@ -2101,6 +2103,7 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         screen_overlay: None,
         encoder_bridge: None,
         encoder_bridge_stream: None,
+        source_iso: None,
         #[cfg(target_os = "windows")]
         windows_d3d11_monitor: None,
         #[cfg(target_os = "windows")]
@@ -3117,6 +3120,9 @@ async fn start_session_with_timeline(
         .output
         .record_enabled
         .then(|| recording_output_path(&output_dir, &started_at, &session_id));
+    // Plan 157: separate source recordings. Validated above; `Some` means the
+    // session must carry Screen + Camera ISO legs or fail to start.
+    let source_iso_plan = crate::source_iso::armed_plan(&params.output);
     let stream_resolution = if params.output.stream_enabled {
         match params
             .streaming
@@ -3495,6 +3501,27 @@ async fn start_session_with_timeline(
         Some(fifo_path)
     } else {
         None
+    };
+    // Plan 157: the PCM taps exist before the audio bus so it can be handed
+    // them at attach; their writers wait for the ISO muxers to open.
+    let source_iso_taps = match source_iso_plan.as_ref() {
+        Some(plan) => {
+            if !use_encoder_bridge {
+                bail!(
+                    "{}: Separate source recordings need the compositor encoder bridge; this session's capture path cannot carry them.",
+                    crate::source_iso::HEALTH_UNAVAILABLE
+                );
+            }
+            let taps = crate::source_iso::prepare_source_audio_taps(&session_id, plan)?;
+            if let Some(tap) = taps.microphone.as_ref() {
+                startup_resources.track_fifo(tap.path());
+            }
+            if let Some(tap) = taps.system.as_ref() {
+                startup_resources.track_fifo(tap.path());
+            }
+            Some(Arc::new(taps))
+        }
+        None => None,
     };
     let requested_encoder_bridge_video_output = if use_encoder_bridge {
         recording_encoder_bridge_video_output(
@@ -4216,12 +4243,12 @@ async fn start_session_with_timeline(
     let mut startup_barrier_result: Option<CompositorStartupBarrierResult> = None;
     let mut recording_startup_scene: Option<RecordingStartupSceneLease> = None;
     let mut compositor_capture_lease: Option<CompositorCaptureLeaseGuard> = None;
-    let (encoder_bridge_frame_store, encoder_bridge_stream_frame_store) =
+    let (encoder_bridge_frame_store, encoder_bridge_stream_frame_store, source_iso_frame_stores) =
         if direct_d3d11_recording_source.is_some() {
             // The direct path owns the retained WGC source and schedules it on
             // the bridge clock. Starting the CPU compositor here would retain
             // the full-frame BGRA -> I420 cost even though its output is unused.
-            (None, None)
+            (None, None, None)
         } else if use_encoder_bridge && !use_windows_d3d11_media {
             let target_fps = recording_compositor_target_fps(&state, &params.output.video)
                 .await
@@ -4251,6 +4278,7 @@ async fn start_session_with_timeline(
             // Record button is never a dead click.
             let armed_in_place = if cfg!(target_os = "macos")
                 && encoder_bridge_stream_output.is_none()
+                && source_iso_plan.is_none()
                 && compositor_frame_consumer == CompositorFrameConsumer::VideoToolboxEncoder
                 && !recording_compositor_arm_disabled()
             {
@@ -4318,6 +4346,13 @@ async fn start_session_with_timeline(
                         height: params.output.video.height,
                         frame_consumer: compositor_frame_consumer,
                         stream_output: encoder_bridge_stream_output,
+                        source_iso_output: source_iso_plan.as_ref().map(|_| {
+                            crate::compositor::CompositorSourceIsoOutput {
+                                width: params.output.video.width,
+                                height: params.output.video.height,
+                                frame_consumer: compositor_frame_consumer,
+                            }
+                        }),
                         // Per-leg overlay plan (R1): primary is the clean source
                         // recording (or the stream when stream-only); aux is the
                         // captioned stream leg for combined sessions.
@@ -4491,13 +4526,22 @@ async fn start_session_with_timeline(
             } else {
                 None
             };
-            (recording_store, stream_store)
+            let iso_stores = if source_iso_plan.is_some() {
+                Some(
+                    crate::compositor::compositor_source_iso_frame_stores(&state)
+                        .await
+                        .context("Separate source recording frame stores were not prepared")?,
+                )
+            } else {
+                None
+            };
+            (recording_store, stream_store, iso_stores)
         } else {
             // A live Windows D3D11 pump owns capture, composition, preview
             // surfaces, and both NV12 outputs. Starting the synthetic CPU
             // compositor here would duplicate capture/GPU work even though
             // the bridge writer consumes only D3D11 tickets.
-            (None, None)
+            (None, None, None)
         };
     let args = if use_encoder_bridge {
         let fifo_path = encoder_bridge_fifo
@@ -4717,6 +4761,9 @@ async fn start_session_with_timeline(
                 )
             })
         });
+    if let (Some(audio), Some(taps)) = (attached_native_audio.as_ref(), source_iso_taps.as_ref()) {
+        audio.set_source_taps(taps.clone());
+    }
     // The System audio switch (plan 069 S4). It opens nothing here: an On
     // setting is requested only after the session is published, so capture
     // never delays Record (decision 12).
@@ -5175,6 +5222,82 @@ async fn start_session_with_timeline(
         }
         None => Ok(()),
     };
+    // Plan 157: the ISO writers start once the Combined bridges are ready, so
+    // a Combined-only failure never masquerades as an ISO failure. Any ISO
+    // start failure fails the session: an armed take must not silently
+    // degrade to Combined-only.
+    let source_iso_runtime = match (source_iso_plan.clone(), source_iso_taps.clone()) {
+        (Some(plan), Some(taps)) => {
+            let iso_start: Result<crate::source_iso::SourceIsoRuntime> = async {
+                let frame_stores = source_iso_frame_stores.clone().with_context(|| {
+                    format!(
+                        "{}: Separate source recordings need the compositor encoder bridge; this session's capture path cannot carry them.",
+                        crate::source_iso::HEALTH_UNAVAILABLE
+                    )
+                })?;
+                let combined_mkv_path = output_path
+                    .as_deref()
+                    .context("Separate source recordings need a local recording path")?;
+                crate::source_iso::start_source_iso_writers(
+                    crate::source_iso::SourceIsoStartParams {
+                        state: &state,
+                        session_id: &session_id,
+                        plan,
+                        combined_mkv_path,
+                        ffmpeg_path: &ffmpeg_path,
+                        video: &params.output.video,
+                        video_output: encoder_bridge_video_output,
+                        frame_stores,
+                        video_epoch: video_epoch.clone(),
+                        bitrate_kbps: encoder_bridge_recording_bitrate_kbps,
+                    },
+                    taps,
+                )
+                .await
+            }
+            .await;
+            match iso_start {
+                Ok(runtime) => {
+                    let _ = emit_health_event(
+                        &state,
+                        Some(&session_id),
+                        HealthLevel::Info,
+                        crate::source_iso::HEALTH_STARTED,
+                        "Separate source recordings armed: Screen and Camera files record beside the Combined recording.",
+                    );
+                    Some(runtime)
+                }
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    uncommitted_capture_process
+                        .set_failure(PublishedSessionStartFailureOrigin::EncoderBridge, &message);
+                    let _ = emit_health_event(
+                        &state,
+                        Some(&session_id),
+                        HealthLevel::Error,
+                        crate::source_iso::HEALTH_UNAVAILABLE,
+                        &message,
+                    );
+                    let batch = begin_recording_encoder_bridge_teardown(
+                        &mut encoder_bridge,
+                        &mut encoder_bridge_stream,
+                        ENCODER_BRIDGE_TEARDOWN_GRACE,
+                    );
+                    uncommitted_capture_process
+                        .terminate_and_reap_before_fifo_writer_join()
+                        .await;
+                    let _ = finish_recording_encoder_bridge_teardown(
+                        &state,
+                        batch,
+                        "source-iso-start-failure",
+                    )
+                    .await;
+                    return Err(error);
+                }
+            }
+        }
+        _ => None,
+    };
     let encoder_bridge_terminal_failure = encoder_bridge
         .as_ref()
         .and_then(EncoderBridgeRecordingSession::terminal_failure)
@@ -5321,6 +5444,7 @@ async fn start_session_with_timeline(
         screen_overlay,
         encoder_bridge,
         encoder_bridge_stream,
+        source_iso: source_iso_runtime,
         #[cfg(target_os = "windows")]
         windows_d3d11_monitor,
         #[cfg(target_os = "windows")]
@@ -6086,6 +6210,9 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
         if let Some(encoder_bridge_stream) = &active.encoder_bridge_stream {
             encoder_bridge_stream.stop();
         }
+        if let Some(source_iso) = active.source_iso.as_ref() {
+            source_iso.request_stop();
+        }
         encoder_bridge.stop();
     } else if let Some(stdin) = active.stdin.take() {
         legacy_ffmpeg_stdin = Some(stdin);
@@ -6766,6 +6893,7 @@ pub async fn create_preview_snapshot(
             output_directory: None,
             ffmpeg_path: Some(ffmpeg_path.clone()),
             keep_original_mkv: false,
+            separate_source_recordings: None,
             video: default_video_settings(),
             rtmp: RtmpSettings {
                 preset: RtmpPreset::Custom,
@@ -7055,7 +7183,7 @@ fn begin_recording_encoder_bridge_teardown(
     begin_encoder_bridge_shutdown(take_all_encoder_bridge_sessions(recording, stream), grace)
 }
 
-async fn finish_recording_encoder_bridge_teardown(
+pub(crate) async fn finish_recording_encoder_bridge_teardown(
     state: &AppState,
     batch: Option<EncoderBridgeShutdownBatch>,
     origin: &'static str,
@@ -7358,6 +7486,7 @@ fn live_preview_session_params(
             output_directory: None,
             ffmpeg_path: Some(ffmpeg_path),
             keep_original_mkv: false,
+            separate_source_recordings: None,
             video,
             rtmp: RtmpSettings {
                 preset: RtmpPreset::Custom,
@@ -8828,6 +8957,9 @@ async fn monitor_session(
     let mut encoder_bridge_lifecycle = EncoderBridgeLifecycleSnapshot::default();
     let mut encoder_bridge_teardown_duration_ms = 0_u64;
     let mut encoder_bridge_detached_writers = 0_usize;
+    // Plan 157: per-role outcomes of the ISO writers, committed as Library
+    // rows below whatever the Combined leg's verdict is (the files are real).
+    let mut source_iso_finished: Option<Vec<crate::source_iso::FinishedSourceIsoRole>> = None;
 
     #[cfg(target_os = "windows")]
     if let Some(mut active) = retired_active {
@@ -8891,6 +9023,9 @@ async fn monitor_session(
         if let Some(pump) = active.windows_d3d11_media.as_ref() {
             let _ = pump.destroy_preview();
         }
+        if let Some(source_iso) = active.source_iso.take() {
+            source_iso_finished = Some(source_iso.finish(&state).await);
+        }
         teardown_current_windows_d3d11_presenter(&state, "windows-d3d11-recording-process-exited")
             .await;
         // The pump must release the D3D generation before the suspended CPU
@@ -8920,6 +9055,7 @@ async fn monitor_session(
             ENCODER_BRIDGE_TEARDOWN_GRACE,
         );
         let compositor_capture_lease = active.compositor_capture_lease.take();
+        let source_iso = active.source_iso.take();
         drop(active);
         let teardown_report = finish_recording_encoder_bridge_teardown(
             &state,
@@ -8927,6 +9063,9 @@ async fn monitor_session(
             "recording-process-exit",
         )
         .await;
+        if let Some(source_iso) = source_iso {
+            source_iso_finished = Some(source_iso.finish(&state).await);
+        }
         // The bridge writer no longer reads the frame store: hand the armed
         // preview compositor back (or stop it when no surface is live).
         if let Some(lease) = compositor_capture_lease {
@@ -9159,6 +9298,21 @@ async fn monitor_session(
     // terminal status is published.
     let mut pending_finalization_job: Option<PendingRecordingFinalizationJob> = None;
     let performance_check_session = monitored_recording.performance_check;
+    // Plan 157: ISO rows + their finalization jobs are registered BEFORE the
+    // terminal status so the quit/updater gates never see an idle gap.
+    if let Some(finished) = source_iso_finished.take()
+        && !performance_check_session
+    {
+        crate::source_iso::commit_finished_source_iso_roles(
+            &state,
+            &session_id,
+            finished,
+            &monitored_recording.ffmpeg_path,
+            &ended_at,
+            duration_ms,
+            monitored_recording.keep_original_media,
+        );
+    }
     let terminal_status = match status {
         Ok(exit_status)
             if should_finalize_recording_session(
@@ -17407,7 +17561,7 @@ fn bridge_compositor_split_output_ffmpeg_args(
     Ok(args)
 }
 
-fn bridge_ffmpeg_base_args() -> Vec<String> {
+pub(crate) fn bridge_ffmpeg_base_args() -> Vec<String> {
     vec![
         "-n".to_string(),
         "-hide_banner".to_string(),
@@ -17542,7 +17696,7 @@ fn append_bridge_recording_input_args(
     }
 }
 
-fn append_bridge_encoded_video_input_args(
+pub(crate) fn append_bridge_encoded_video_input_args(
     args: &mut Vec<String>,
     next_input_index: &mut usize,
     fifo_path: &Path,
@@ -19893,6 +20047,7 @@ fn validate_outputs(params: &StartSessionParams) -> Result<()> {
     validate_simulcast_targets(params)?;
     validate_caption_output_policy(params)?;
     validate_video_profile_policy(params)?;
+    crate::source_iso::validate_separate_source_recordings(params)?;
 
     Ok(())
 }
@@ -20904,7 +21059,7 @@ fn encoder_bridge_output_profile(video: &VideoSettings) -> EncoderBridgeOutputPr
     }
 }
 
-fn encoder_bridge_diagnostics_context(
+pub(crate) fn encoder_bridge_diagnostics_context(
     role: EncoderBridgeOutputRole,
     recording_output: Option<&VideoSettings>,
     stream_output: Option<&VideoSettings>,
@@ -21254,7 +21409,7 @@ fn redact_stream_url(url: &str) -> String {
 /// Windows file APIs use the `\\?\` namespace for long-path safety, but FFmpeg's
 /// tee muxer treats that prefix as an invalid slave filename. Keep verbatim paths
 /// internally and remove the namespace only at the subprocess boundary.
-fn ffmpeg_file_path(path: &Path) -> String {
+pub(crate) fn ffmpeg_file_path(path: &Path) -> String {
     let path = path.display().to_string();
     #[cfg(target_os = "windows")]
     {
@@ -25703,6 +25858,7 @@ mod tests {
             scene: None,
             output: OutputSettings {
                 keep_original_mkv: false,
+                separate_source_recordings: None,
                 record_enabled,
                 stream_enabled,
                 output_directory: None,
@@ -26418,6 +26574,7 @@ mod tests {
             screen_overlay: None,
             encoder_bridge: None,
             encoder_bridge_stream: None,
+            source_iso: None,
             #[cfg(target_os = "windows")]
             windows_d3d11_monitor: None,
             #[cfg(target_os = "windows")]
@@ -30886,6 +31043,7 @@ mod tests {
                     layout: crate::protocol::default_layout_settings(),
                     output: OutputSettings {
                         keep_original_mkv: false,
+                        separate_source_recordings: None,
                         record_enabled: true,
                         stream_enabled: false,
                         output_directory: None,
@@ -32719,6 +32877,7 @@ mod tests {
             screen_overlay: None,
             encoder_bridge: None,
             encoder_bridge_stream: None,
+            source_iso: None,
             #[cfg(target_os = "windows")]
             windows_d3d11_monitor: None,
             #[cfg(target_os = "windows")]

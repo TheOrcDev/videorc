@@ -15,6 +15,8 @@ import type { VideoPreset } from '@/lib/backend'
 import {
   layoutPresetOrientation,
   resolutionOptionsForOrientation,
+  separateSourceRecordingsIneligibility,
+  separateSourceRecordingsIneligibilityCopy,
   videoProfileCompatibility
 } from '@/lib/capture'
 import { videoProfileEntitlementGate } from '@/lib/entitlement-ui'
@@ -44,6 +46,11 @@ export function RecordingTab(): ReactElement {
   const resolutionPresets = resolutionOptionsForOrientation(orientation)
   const compatibility = videoProfileCompatibility(captureConfig)
   const compatibilityMessage = compatibility.blockingReason ?? compatibility.warning
+  // Plan 157: the switch stays available; when the current selection cannot
+  // produce both files the copy says so and the session records Combined only.
+  const separateIneligibility = captureConfig.separateSourceRecordings.enabled
+    ? separateSourceRecordingsIneligibility(captureConfig)
+    : null
   const profileGate = videoProfileEntitlementGate({ entitlements, kind: 'recording', video })
   const profileEntitlementMessage = profileGate.allowed ? null : profileGate.reason
   const checkLine = performanceCheckLine({
@@ -223,6 +230,42 @@ export function RecordingTab(): ReactElement {
               onChange={(bitrateKbps) => patchVideo({ bitrateKbps })}
             />
           </div>
+
+          <Field>
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex min-w-0 flex-col gap-0.5">
+                <FieldLabel htmlFor="separate-source-recordings">
+                  Separate source recordings
+                </FieldLabel>
+                <p className="text-xs text-muted-foreground">
+                  Also saves a Screen file (system audio) and a Camera file (microphone) beside the
+                  Combined recording, at this recording size. Streams and preview stay composed.
+                </p>
+              </div>
+              <Switch
+                checked={captureConfig.separateSourceRecordings.enabled}
+                disabled={
+                  isSessionActive || goLiveConfirmationPending || Boolean(goLivePartialSetup)
+                }
+                id="separate-source-recordings"
+                onCheckedChange={(checked) =>
+                  setCaptureConfig((current) => ({
+                    ...current,
+                    separateSourceRecordings: {
+                      ...current.separateSourceRecordings,
+                      enabled: checked
+                    }
+                  }))
+                }
+              />
+            </div>
+            {separateIneligibility ? (
+              <p className="flex items-center gap-1.5 text-xs text-warning">
+                <AlertIcon className="size-3.5 shrink-0" />
+                {separateSourceRecordingsIneligibilityCopy(separateIneligibility)}
+              </p>
+            ) : null}
+          </Field>
         </FieldGroup>
       </PanelSection>
     </div>

@@ -1773,6 +1773,7 @@ mod tests {
             layout: default_layout_settings(),
             output: OutputSettings {
                 keep_original_mkv: false,
+                separate_source_recordings: None,
                 record_enabled: true,
                 stream_enabled: false,
                 output_directory: path.parent().map(|path| path.display().to_string()),
@@ -3121,6 +3122,7 @@ mod tests {
             layout: default_layout_settings(),
             output: OutputSettings {
                 keep_original_mkv: false,
+                separate_source_recordings: None,
                 record_enabled: true,
                 stream_enabled: false,
                 output_directory: None,

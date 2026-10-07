@@ -1553,9 +1553,25 @@ export interface OutputSettings {
   ffmpegPath?: string
   /** Keep the capture MKV (lossless audio) next to the exported MP4. */
   keepOriginalMkv?: boolean
+  /**
+   * Separate source recordings (Plan 157): write clean Screen (+ system audio)
+   * and Camera (+ microphone) takes beside the composed Combined recording.
+   * Absent/`enabled: false` keeps today's single-file recording.
+   */
+  separateSourceRecordings?: SeparateSourceRecordingsSettings
   video: VideoSettings
   rtmp: RtmpSettings
 }
+
+/** Opt-in ISO takes from one Record session. */
+export interface SeparateSourceRecordingsSettings {
+  enabled: boolean
+  /** Keep the composed Combined master too (default true). */
+  keepCombined: boolean
+}
+
+/** Which file of a take a Library row is. Absent = legacy single recording. */
+export type RecordingRole = 'combined' | 'screen' | 'camera'
 
 export interface StartSessionParams {
   sources: SourceSelection
@@ -3536,6 +3552,11 @@ export interface SessionListItem {
   /** Live export progress from the backend registry (only while finalizing). */
   finalizationProgressPercent?: number
   finalizationError?: string
+  /** Plan 157: every file of one separate-source take shares the Combined
+   * session's id here; absent on ordinary rows. */
+  takeId?: string
+  /** Which file of the take this row is (plan 157); absent on ordinary rows. */
+  recordingRole?: RecordingRole
 }
 
 /** Progress of a background recording finalization job (`recording.finalization`). */

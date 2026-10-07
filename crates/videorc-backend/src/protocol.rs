@@ -1008,8 +1008,32 @@ pub struct OutputSettings {
     /// instead of removing it after a committed export. Off by default.
     #[serde(default)]
     pub keep_original_mkv: bool,
+    /// Optional separate Screen (+ system audio) and Camera (+ mic) local
+    /// recordings beside the composed Combined take (Plan 157).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separate_source_recordings: Option<SeparateSourceRecordingsSettings>,
     pub video: VideoSettings,
     pub rtmp: RtmpSettings,
+}
+
+/// Opt-in ISO takes from one Record session. Defaults keep Combined on.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SeparateSourceRecordingsSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    /// When true (default), also keep the composed Combined master.
+    #[serde(default = "default_true")]
+    pub keep_combined: bool,
+}
+
+impl Default for SeparateSourceRecordingsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            keep_combined: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3967,6 +3991,13 @@ pub struct SessionListItem {
     pub finalization_progress_percent: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finalization_error: Option<String>,
+    /// Plan 157: every file of one separate-source take shares the Combined
+    /// session's id here; absent on ordinary rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub take_id: Option<String>,
+    /// `combined`, `screen` or `camera` (plan 157); absent on ordinary rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_role: Option<String>,
 }
 
 /// Progress of a background recording finalization job.
