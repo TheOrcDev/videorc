@@ -218,7 +218,7 @@ new scopes.
    decoration (`seventv.rs`), and first-time-chatter marking (find with
    `git grep -n "LiveChatEventType::Follow" crates/`).
 
-**Done when**: `cargo test -p videorc-backend live_chat storage protocol seventv live_chat_moderation`
+**Done when**: `cargo test -p videorc-backend -- live_chat storage protocol seventv live_chat_moderation`
 passes, along with `pnpm typecheck` and the contract fixtures test. No new
 field serializes `null` (the existing null-scan test covers fixtures. Extend
 it with the new kinds).
@@ -318,7 +318,7 @@ Per the owner's "gates at the end" rule: commit S1–S6 first, then run:
 ```
 cargo fmt --check --all
 cargo clippy -p videorc-backend -- -D warnings
-cargo test -p videorc-backend twitch_chat live_chat storage protocol oauth seventv live_chat_moderation
+cargo test -p videorc-backend -- twitch_chat live_chat storage protocol oauth seventv live_chat_moderation
 cargo build --release -p videorc-backend   # cfg/serde gap guard
 pnpm typecheck && pnpm lint && pnpm format:check
 pnpm --filter @videorc/desktop test
@@ -375,8 +375,13 @@ against its mock WebSocket server, with `eventsub_ws_url` pointed at it.
 
 ## Execution notes (2026-10-07, branch `plan-162-twitch-bits-points`)
 
-S1 to S6 are built. S7's automated gates ran; owner acceptance on a live
-Twitch stream is still owed. Deviations from the plan text:
+S1 to S6 are built. S7 gates that passed locally: `cargo fmt --check`,
+clippy with `-D warnings`, the targeted `cargo test -- …` filters (476 tests),
+typecheck, lint, format, the desktop unit suite, `test:scripts`, `pnpm build`
+and the renderer asset budget. Not run locally: `cargo build --release` (no
+`cfg` edits; CI builds release) and the fake-providers app smoke. Owner
+acceptance on a live Twitch stream is still owed. Deviations from the plan
+text:
 
 - `Redemption.title` is optional: custom rewards carry it, automatic rewards
   have none, and the window names them. `RedemptionKind` gained `other` for
@@ -388,6 +393,9 @@ Twitch stream is still owed. Deviations from the plan text:
 - A refused Power-up or redemption subscription is not retried on the same
   socket, so a channel without bits or points does not hit Helix every 30 s.
   Follows keep retrying as before.
+- The mid-stream scope recheck runs after every EventSub frame (at most every
+  30 s), not only on keepalives: Twitch sends keepalives only while a socket
+  is quiet, so a busy chat would never have rechecked (CodeRabbit on #636).
 - Thank in chat: Power-ups use the tip line ("Thank you so much, @name!"),
   and redemptions use "Thanks for redeeming, @name!".
 - The fake cheer-through-`channel.bits.use` check lives in the Rust unit test

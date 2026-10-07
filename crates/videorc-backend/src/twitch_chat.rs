@@ -1790,53 +1790,8 @@ async fn run_eventsub_session(
                             .to_string(),
                     );
                 }
-                EventSubFrame::Keepalive => {
-                    // A scope can arrive mid-stream (Show who followed, the
-                    // Activity reconnect): add its events to this socket
-                    // without a new Go Live.
-                    if let Some(socket_session) = socket_session_id.as_deref()
-                        && extra_scopes_checked_at.elapsed() >= EXTRA_SCOPE_RECHECK
-                    {
-                        extra_scopes_checked_at = std::time::Instant::now();
-                        let held = extra_events_held(state, config);
-                        let wanted = ExtraEvents {
-                            follows: held.follows,
-                            bits: held.bits && !extras_attempted.bits,
-                            redemptions: held.redemptions && !extras_attempted.redemptions,
-                        };
-                        if wanted.any_missing_from(*extras_live) {
-                            let access_token = token.ensure_fresh(state, client).await.to_string();
-                            if let Ok(live) = create_extra_subscriptions(
-                                client,
-                                config,
-                                &access_token,
-                                socket_session,
-                                wanted,
-                                *extras_live,
-                            )
-                            .await
-                            {
-                                let newly = ExtraEvents {
-                                    follows: false,
-                                    bits: wanted.bits && !extras_live.bits,
-                                    redemptions: wanted.redemptions && !extras_live.redemptions,
-                                };
-                                log_refused_extras(state, newly, live);
-                                if live.follows && !extras_live.follows {
-                                    crate::audience::set_named_follows(
-                                        state,
-                                        session_id,
-                                        StreamPlatform::Twitch,
-                                        true,
-                                    );
-                                }
-                                *extras_live = live;
-                                extras_attempted.bits |= held.bits;
-                                extras_attempted.redemptions |= held.redemptions;
-                            }
-                        }
-                    }
-                }
+                // Keepalives only pace the scope recheck below.
+                EventSubFrame::Keepalive => {}
                 EventSubFrame::Unknown => {}
             },
             Message::Ping(payload) => {
@@ -1844,6 +1799,52 @@ async fn run_eventsub_session(
             }
             Message::Close(_) => return SessionOutcome::Reconnect(None),
             _ => {}
+        }
+        // A scope can arrive mid-stream (Show who followed, the Activity
+        // reconnect): add its events to this socket without a new Go Live.
+        // Checked after every frame, not only keepalives: Twitch sends those
+        // only while the socket is quiet, so a busy chat would never recheck.
+        if let Some(socket_session) = socket_session_id.as_deref()
+            && extra_scopes_checked_at.elapsed() >= EXTRA_SCOPE_RECHECK
+        {
+            extra_scopes_checked_at = std::time::Instant::now();
+            let held = extra_events_held(state, config);
+            let wanted = ExtraEvents {
+                follows: held.follows,
+                bits: held.bits && !extras_attempted.bits,
+                redemptions: held.redemptions && !extras_attempted.redemptions,
+            };
+            if wanted.any_missing_from(*extras_live) {
+                let access_token = token.ensure_fresh(state, client).await.to_string();
+                if let Ok(live) = create_extra_subscriptions(
+                    client,
+                    config,
+                    &access_token,
+                    socket_session,
+                    wanted,
+                    *extras_live,
+                )
+                .await
+                {
+                    let newly = ExtraEvents {
+                        follows: false,
+                        bits: wanted.bits && !extras_live.bits,
+                        redemptions: wanted.redemptions && !extras_live.redemptions,
+                    };
+                    log_refused_extras(state, newly, live);
+                    if live.follows && !extras_live.follows {
+                        crate::audience::set_named_follows(
+                            state,
+                            session_id,
+                            StreamPlatform::Twitch,
+                            true,
+                        );
+                    }
+                    *extras_live = live;
+                    extras_attempted.bits |= held.bits;
+                    extras_attempted.redemptions |= held.redemptions;
+                }
+            }
         }
     }
     SessionOutcome::Reconnect(None)
