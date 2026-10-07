@@ -184,7 +184,7 @@ fn send_async_annex_b_frame(
 ) {
     // This channel must not block a VideoToolbox callback: complete_pending_frames
     // can wait for the callback on the same bridge thread. It is logically
-    // bounded by the bridge's submitted-frame admission ceiling (16), so an
+    // bounded by the bridge's configured submitted-frame admission ceiling, so an
     // unbounded mpsc transport removes callback overflow without permitting an
     // unbounded media backlog.
     let _ = sender.send(frame);

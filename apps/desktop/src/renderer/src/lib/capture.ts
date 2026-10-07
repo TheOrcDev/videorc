@@ -12,6 +12,7 @@ import type {
   LayoutSettings,
   RtmpPreset,
   SceneConfigParams,
+  SeparateSourceRecordingsSettings,
   SideBySideSplit,
   SimulcastParams,
   StreamOutputOrientation,
@@ -124,12 +125,87 @@ export type CaptureConfig = {
    */
   simulcastFollowsProgram: boolean
   recordEnabled: boolean
+  /**
+   * Separate source recordings (Plan 157): also save a clean Screen (+ system
+   * audio) take and a Camera (+ microphone) take. Needs recordEnabled plus a
+   * camera and a screen/window; the backend refuses otherwise.
+   */
+  separateSourceRecordings: SeparateSourceRecordingsSettings
   streamEnabled: boolean
   rtmpPreset: RtmpPreset
   rtmpServerUrl: string
   streamKey: string
   streaming: StreamingSettings
   captions: CaptionsCaptureSettings
+}
+
+export function defaultSeparateSourceRecordings(): SeparateSourceRecordingsSettings {
+  return { enabled: false, keepCombined: true }
+}
+
+/**
+ * `keepCombined` is a reserved setting: this release has no control for it and
+ * the backend refuses `false`, so a stored `false` (a future build, a hand
+ * edit) is normalized back to `true` instead of turning Record into a refusal
+ * the Recording tab cannot explain.
+ */
+export function normalizeSeparateSourceRecordings(
+  loaded: Partial<SeparateSourceRecordingsSettings> | undefined
+): SeparateSourceRecordingsSettings {
+  const defaults = defaultSeparateSourceRecordings()
+  return {
+    enabled: loaded?.enabled === true,
+    keepCombined: defaults.keepCombined
+  }
+}
+
+/** Stable reasons mirrored from `crates/videorc-backend/src/source_iso.rs`. */
+export type SeparateSourceRecordingsIneligibility =
+  | 'record-disabled'
+  | 'missing-camera'
+  | 'missing-screen'
+
+/**
+ * Why Separate source recordings cannot arm for this config, or null when it
+ * can. Pure mirror of the backend start-session validation so the Recording
+ * tab can explain the refusal before Record is pressed.
+ */
+export function separateSourceRecordingsIneligibility(
+  config: Pick<CaptureConfig, 'recordEnabled' | 'sources'>
+): SeparateSourceRecordingsIneligibility | null {
+  if (!config.recordEnabled) return 'record-disabled'
+  if (!config.sources.cameraId?.trim()) return 'missing-camera'
+  if (!config.sources.screenId?.trim() && !config.sources.windowId?.trim()) {
+    return 'missing-screen'
+  }
+  return null
+}
+
+/** Recording-tab copy for an ineligible selection; the next session records Combined only. */
+export function separateSourceRecordingsIneligibilityCopy(
+  reason: SeparateSourceRecordingsIneligibility
+): string {
+  switch (reason) {
+    case 'record-disabled':
+      return 'Turn on local recording to save separate source files.'
+    case 'missing-camera':
+      return 'Needs a camera source. Without one the next session records the Combined file only.'
+    case 'missing-screen':
+      return 'Needs a screen or window source. Without one the next session records the Combined file only.'
+  }
+}
+
+/**
+ * The settings the start request carries: present only when the switch is on
+ * AND the selection can produce both files, so a stale switch never blocks
+ * Record (the Recording tab shows the exact reason instead).
+ */
+export function separateSourceRecordingsForSession(
+  config: Pick<CaptureConfig, 'recordEnabled' | 'sources' | 'separateSourceRecordings'>
+): SeparateSourceRecordingsSettings | undefined {
+  if (!config.separateSourceRecordings.enabled) return undefined
+  if (separateSourceRecordingsIneligibility(config)) return undefined
+  return config.separateSourceRecordings
 }
 
 /** The vertical simulcast leg's user-facing settings. */
@@ -1278,6 +1354,7 @@ export const defaultCaptureConfig: CaptureConfig = {
   // 1440p default sent an Intel UHD 600 into a 0.28x software encode.
   video: videoPresets['tutorial-1080p30'],
   recordEnabled: true,
+  separateSourceRecordings: { enabled: false, keepCombined: true },
   streamEnabled: false,
   rtmpPreset: 'youtube',
   rtmpServerUrl: rtmpDefaults.youtube,
@@ -1396,6 +1473,7 @@ export function loadCaptureConfig(): CaptureConfig {
       typeof loaded.recordEnabled === 'boolean'
         ? loaded.recordEnabled
         : defaultCaptureConfig.recordEnabled,
+    separateSourceRecordings: normalizeSeparateSourceRecordings(loaded.separateSourceRecordings),
     streamEnabled:
       typeof loaded.streamEnabled === 'boolean'
         ? loaded.streamEnabled

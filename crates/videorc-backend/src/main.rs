@@ -98,6 +98,8 @@ mod session_markers;
 mod session_ops;
 mod session_token;
 mod seventv;
+mod source_audio_tap;
+mod source_iso;
 mod source_mask;
 mod source_registry;
 mod source_status;
@@ -19043,6 +19045,7 @@ mod tests {
                 height: 36,
                 frame_consumer: compositor::CompositorFrameConsumer::NativePreview,
                 stream_output: None,
+                source_iso_output: None,
                 caption_overlay_on_primary: false,
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,

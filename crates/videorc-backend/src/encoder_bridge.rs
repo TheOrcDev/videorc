@@ -19,7 +19,11 @@ use uuid::Uuid;
 
 #[cfg(target_os = "windows")]
 use crate::compositor::render_camera_overlay_bgra;
-use crate::compositor::{CompositorFrameExportHandle, CompositorFrameStore, CompositorPixelFormat};
+use crate::compositor::source_iso_batch::{self, SourceIsoBatchStore, SourceIsoLeasedFrame};
+use crate::compositor::{
+    CompositorFrameExportHandle, CompositorFrameStore, CompositorPixelFormat,
+    CompositorSourceIsoFrameStores,
+};
 use crate::compositor_synthetic::{SyntheticCompositorFrame, SyntheticMovingSource};
 use crate::diagnostics::{
     EncoderBridgeDiagnosticSnapshot, apply_encoder_bridge_stats,
@@ -1124,6 +1128,25 @@ fn encoder_bridge_output_queue_policy(
     }
 }
 
+impl EncoderBridgeOutputQueuePolicy {
+    fn with_iso_audio_advance(mut self, fps: u32, advance_ms: u32) -> Self {
+        if matches!(
+            self.role,
+            EncoderBridgeOutputRole::Recording | EncoderBridgeOutputRole::Shared
+        ) {
+            // A negative residual audio offset requires future audio samples.
+            // FFmpeg therefore consumes video about this far behind capture.
+            // Retain the corresponding encoded access units, plus the normal
+            // pressure allowance. This does not retain raw/Metal frames or
+            // change stream coalescing and no-progress failure deadlines.
+            let lookahead_frames =
+                (u64::from(fps) * u64::from(advance_ms.min(1000))).div_ceil(1000);
+            self.max_frames += lookahead_frames as usize;
+        }
+        self
+    }
+}
+
 fn encoder_bridge_pre_encode_admission(
     policy: EncoderBridgeOutputQueuePolicy,
     queue_depth: u64,
@@ -1984,9 +2007,39 @@ fn merge_encoder_bridge_role_process_diagnostics(
     }
 }
 
+#[cfg(test)]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceIsoSelectionTiming {
+    index: u64,
+    compositor_sequence: u64,
+    pts_seconds: f64,
+    captured_ms: f64,
+    presented_ms: Option<f64>,
+    epoch_ms: Option<f64>,
+    selected_ms: f64,
+    content_clock_met: Option<bool>,
+    content_target_ms: Option<f64>,
+}
+
+// A common monotonic origin lets maintained runtime artifacts correlate the
+// controlled capture callbacks with actual bridge selections. Never compiled
+// into production and never written from a hot capture/encoding callback.
+#[cfg(test)]
+pub(crate) fn test_source_iso_trace_ms(at: Instant) -> f64 {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    let origin = *ORIGIN.get_or_init(Instant::now);
+    if at >= origin {
+        at.duration_since(origin).as_secs_f64() * 1000.0
+    } else {
+        -origin.duration_since(at).as_secs_f64() * 1000.0
+    }
+}
+
 /// A compositor frame fed into the encoder FIFO on one tick.
 #[derive(Clone)]
 struct FedCompositorFrame {
+    iso_lease: Option<Arc<SourceIsoLeasedFrame>>,
     /// Retains the compositor's immutable allocation through FIFO delivery. Raw
     /// output writes these bytes directly instead of copying them into a second
     /// full-frame bridge buffer.
@@ -1998,6 +2051,135 @@ struct FedCompositorFrame {
     has_metal_export_handle: bool,
     #[cfg(target_os = "macos")]
     metal_target: Option<Arc<crate::metal_compositor::MetalCompositorTargetPixelBuffer>>,
+}
+
+#[derive(Debug)]
+struct IsoVideoStopBoundary {
+    local: StdMutex<Option<IsoLocalVideoStop>>,
+    global: Arc<OnceLock<Instant>>,
+}
+
+#[derive(Debug)]
+struct IsoLocalVideoStop {
+    at: Instant,
+    retained: Option<Arc<SourceIsoLeasedFrame>>,
+}
+
+impl IsoVideoStopBoundary {
+    fn boundary(&self) -> Option<Instant> {
+        let local = self.local.lock().unwrap_or_else(|p| p.into_inner());
+        local
+            .as_ref()
+            .map(|local| local.at)
+            .into_iter()
+            .chain(self.global.get().copied())
+            .min()
+    }
+
+    fn request(&self, boundary: Instant, member: Option<&IsoBatchMember>) {
+        let mut local = self.local.lock().unwrap_or_else(|p| p.into_inner());
+        if local.as_ref().is_some_and(|local| local.at <= boundary) {
+            return;
+        }
+        let retained = if self.global.get().is_none_or(|global| boundary < *global) {
+            member.and_then(|member| member.store.retire(member.role, Some(boundary)))
+        } else {
+            None
+        };
+        *local = Some(IsoLocalVideoStop {
+            at: boundary,
+            retained,
+        });
+    }
+
+    fn retained(&self) -> Option<FedCompositorFrame> {
+        self.local
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .and_then(|local| local.retained.clone())
+            .map(fed_iso_frame)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct IsoBatchMember {
+    store: Arc<SourceIsoBatchStore>,
+    role: usize,
+}
+impl IsoBatchMember {
+    fn active(&self) -> bool {
+        self.store.membership().active[self.role]
+    }
+    fn retire(&self) {
+        self.store.retire(self.role, None);
+    }
+}
+struct IsoBatchWriterGuard(Option<IsoBatchMember>);
+impl Drop for IsoBatchWriterGuard {
+    fn drop(&mut self) {
+        if let Some(member) = self.0.as_ref() {
+            member.retire();
+        }
+    }
+}
+
+// Match the existing audio Stop drain ceiling (150ms playout +100ms margin).
+// This is part of the current Stop budget, never an extra teardown grace.
+const ISO_TERMINAL_VIDEO_DRAIN: Duration = Duration::from_millis(250);
+
+#[derive(Debug, PartialEq, Eq)]
+enum IsoTerminalVideoTick {
+    Continue,
+    Complete,
+    TimedOut,
+    MissingFinalFrame,
+}
+
+fn iso_terminal_video_tick(
+    boundary: Instant,
+    epoch: Instant,
+    fps: u32,
+    attempted: u64,
+    submitted: u64,
+    now: Instant,
+) -> IsoTerminalVideoTick {
+    let frames = (boundary.saturating_duration_since(epoch).as_nanos() * u128::from(fps.max(1)))
+        .div_ceil(1_000_000_000);
+    if u128::from(submitted) >= frames {
+        IsoTerminalVideoTick::Complete
+    } else if u128::from(attempted) >= frames {
+        IsoTerminalVideoTick::MissingFinalFrame
+    } else if now >= boundary + ISO_TERMINAL_VIDEO_DRAIN {
+        IsoTerminalVideoTick::TimedOut
+    } else {
+        IsoTerminalVideoTick::Continue
+    }
+}
+
+struct HeldIsoCompositorFrame {
+    frame: FedCompositorFrame,
+    #[cfg(target_os = "macos")]
+    _native_lease: Option<crate::metal_compositor::MetalTargetInFlightGuard>,
+}
+
+impl HeldIsoCompositorFrame {
+    fn new(frame: FedCompositorFrame) -> Self {
+        Self {
+            #[cfg(target_os = "macos")]
+            _native_lease: frame
+                .iso_lease
+                .is_none()
+                .then(|| {
+                    frame
+                        .metal_target
+                        .as_ref()
+                        .map(|target| target.begin_in_flight())
+                })
+                .flatten(),
+            frame,
+        }
+    }
 }
 
 /// How one encoder-bridge tick consumed a compositor frame.
@@ -2203,8 +2385,11 @@ fn signal_encoder_bridge_startup(
 #[derive(Debug)]
 pub struct EncoderBridgeRecordingSession {
     stop: Arc<AtomicBool>,
+    graceful_stop_at: Option<Arc<IsoVideoStopBoundary>>,
+    iso_member: Option<IsoBatchMember>,
     terminal_failure: Arc<StdMutex<Option<String>>>,
     startup_ready: Option<oneshot::Receiver<std::result::Result<(), String>>>,
+    bootstrap_reader: StdMutex<Option<std::fs::File>>,
     fifo_path: PathBuf,
     writer: Option<thread::JoinHandle<()>>,
     diagnostics_task: Option<TokioJoinHandle<()>>,
@@ -2215,9 +2400,33 @@ pub struct EncoderBridgeRecordingSession {
 
 impl EncoderBridgeRecordingSession {
     pub fn stop(&self) {
+        self.bootstrap_reader
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
         self.stop.store(true, Ordering::Relaxed);
+        if let Some(member) = self.iso_member.as_ref() {
+            member.retire();
+        }
         if let Some(lifecycle) = self.lifecycle.as_ref() {
             lifecycle.stop_signalled();
+        }
+    }
+
+    /// ISO local output closes on the shared content-clock boundary. Abort and
+    /// Drop still use stop(), which immediately cancels this bounded drain.
+    pub(crate) fn stop_at(&self, boundary: Instant) {
+        if let Some(stop_at) = self.graceful_stop_at.as_ref() {
+            self.bootstrap_reader
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take();
+            stop_at.request(boundary, self.iso_member.as_ref());
+            if let Some(lifecycle) = self.lifecycle.as_ref() {
+                lifecycle.stop_signalled();
+            }
+        } else {
+            self.stop();
         }
     }
 
@@ -2231,7 +2440,13 @@ impl EncoderBridgeRecordingSession {
 
     pub fn stop_and_reap_until(mut self, deadline_at: Instant) -> EncoderBridgeShutdownReport {
         let started_at = Instant::now();
-        self.stop();
+        if self
+            .graceful_stop_at
+            .as_ref()
+            .is_none_or(|at| at.boundary().is_none())
+        {
+            self.stop();
+        }
         let outer_reaped = self.reap_writer_until(deadline_at);
         if let Some(task) = self.diagnostics_task.take() {
             task.abort();
@@ -2269,6 +2484,7 @@ impl EncoderBridgeRecordingSession {
                 // Dropping the JoinHandle detaches the thread. The lifecycle
                 // registry retains ownership until the actual outer/FIFO
                 // guards leave, so the next recording still fails admission.
+                self.stop();
                 drop(writer);
                 if let Some(lifecycle) = self.lifecycle.as_ref() {
                     lifecycle.mark_detached();
@@ -2294,6 +2510,11 @@ impl EncoderBridgeRecordingSession {
     /// FFmpeg can exit successfully after the bridge closes its FIFO at a
     /// complete raw-video frame boundary. Recording finalization must inspect
     /// this signal so that a shortened file is not published as successful.
+    #[cfg(test)]
+    pub(crate) fn test_terminal_failure(&self, message: &str) {
+        record_encoder_bridge_terminal_failure(&self.terminal_failure, message);
+    }
+
     pub fn terminal_failure(&self) -> Option<String> {
         read_encoder_bridge_terminal_failure(&self.terminal_failure)
     }
@@ -2333,8 +2554,11 @@ impl EncoderBridgeRecordingSession {
         (
             Self {
                 stop: stop.clone(),
+                graceful_stop_at: None,
+                iso_member: None,
                 terminal_failure: Arc::new(StdMutex::new(None)),
                 startup_ready: None,
+                bootstrap_reader: StdMutex::new(None),
                 fifo_path: PathBuf::from("/nonexistent-test-fifo"),
                 writer: Some(writer),
                 diagnostics_task: None,
@@ -2701,6 +2925,153 @@ pub async fn run_synthetic_encoder_bridge(
     })
 }
 
+/// ISO-enabled encoders rendezvous after preparation, before consuming their
+/// first retained compositor frame. FIFO bootstrap readers break FFmpeg's
+/// audio-first probing dependency without starting an audio epoch early.
+pub struct RecordingStartBarrier {
+    participants: usize,
+    origin_store: Option<CompositorFrameStore>,
+    fps: u32,
+    audio_advance_ms: u32,
+    stop_at: Arc<OnceLock<Instant>>,
+    iso_stores: Option<CompositorSourceIsoFrameStores>,
+    state: StdMutex<RecordingStartBarrierState>,
+    changed: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct RecordingStartBarrierState {
+    stores: Vec<Option<CompositorFrameStore>>,
+    frames: Vec<Option<FedCompositorFrame>>,
+    released_at: Option<Instant>,
+}
+
+impl RecordingStartBarrier {
+    pub fn new(
+        participants: usize,
+        origin_store: Option<CompositorFrameStore>,
+        fps: u32,
+        track_shift_ms: i32,
+        iso_stores: Option<CompositorSourceIsoFrameStores>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            participants,
+            origin_store,
+            fps,
+            audio_advance_ms: track_shift_ms.saturating_neg().clamp(0, 1000) as u32,
+            stop_at: Arc::new(OnceLock::new()),
+            iso_stores,
+            state: StdMutex::new(Default::default()),
+            changed: std::sync::Condvar::new(),
+        })
+    }
+
+    fn member_for(&self, store: Option<&CompositorFrameStore>) -> Option<IsoBatchMember> {
+        let store = store?;
+        let iso = self.iso_stores.as_ref()?;
+        let role = if self
+            .origin_store
+            .as_ref()
+            .is_some_and(|origin| Arc::ptr_eq(origin, store))
+        {
+            source_iso_batch::COMBINED
+        } else if Arc::ptr_eq(store, &iso.screen) {
+            source_iso_batch::SCREEN
+        } else if Arc::ptr_eq(store, &iso.camera) {
+            source_iso_batch::CAMERA
+        } else {
+            return None;
+        }; // Dedicated stream encoder is not a local ISO member.
+        Some(IsoBatchMember {
+            store: iso.batches.clone(),
+            role,
+        })
+    }
+
+    pub(crate) fn stop_boundary(&self) -> Arc<OnceLock<Instant>> {
+        self.stop_at.clone()
+    }
+
+    fn prepared(
+        &self,
+        store: Option<CompositorFrameStore>,
+        epoch: &OnceLock<Instant>,
+        stop: &AtomicBool,
+    ) -> Result<(Instant, Option<FedCompositorFrame>)> {
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let index = state.stores.len();
+        state.stores.push(store);
+        if state.stores.len() == self.participants {
+            state.frames = state
+                .stores
+                .iter()
+                .map(|store| {
+                    if let Some(member) = self.member_for(store.as_ref()) {
+                        member
+                            .store
+                            .select(0, member.role, |_| true)
+                            .ok()
+                            .flatten()
+                            .map(fed_iso_frame)
+                    } else {
+                        latest_compositor_frame(store.as_ref())
+                    }
+                })
+                .collect();
+            anyhow::ensure!(
+                state.frames.iter().all(Option::is_some),
+                "A separate recording encoder has no initial compositor frame"
+            );
+            let released_at = Instant::now();
+            // Retained content comes from the most recent compositor tick.
+            // Every leg uses this same audio origin, even a delayed muxer.
+            let primary = self
+                .origin_store
+                .as_ref()
+                .and_then(|origin| {
+                    state.stores.iter().position(|store| {
+                        store
+                            .as_ref()
+                            .is_some_and(|store| Arc::ptr_eq(store, origin))
+                    })
+                })
+                .and_then(|index| state.frames[index].as_ref());
+            let origin = primary.map_or(released_at, |frame| {
+                recording_epoch(
+                    frame.captured_at,
+                    frame
+                        .frame
+                        .metadata
+                        .presentation_at()
+                        .unwrap_or(released_at),
+                    Duration::from_secs_f64(1.0 / f64::from(self.fps.max(1))),
+                )
+            });
+            let _ = epoch.set(origin);
+            state.released_at = Some(released_at);
+            self.changed.notify_all();
+        }
+        loop {
+            if let Some(at) = state.released_at {
+                return Ok((at, state.frames[index].take()));
+            }
+            anyhow::ensure!(
+                !stop.load(Ordering::Acquire),
+                "Recording start barrier was cancelled"
+            );
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "Recording encoder preparation barrier timed out"
+            );
+            (state, _) = self
+                .changed
+                .wait_timeout(state, Duration::from_millis(20))
+                .unwrap_or_else(|p| p.into_inner());
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn start_synthetic_recording_bridge(
     state: AppState,
@@ -2726,14 +3097,45 @@ pub fn start_synthetic_recording_bridge(
     // Set once at the bridge's first delivered frame: the shared session epoch the
     // audio FIFO writer aligns to (Studio Shell And Live Control Plan, slice A2).
     video_epoch: Arc<OnceLock<Instant>>,
+    start_barrier: Option<Arc<RecordingStartBarrier>>,
 ) -> Result<EncoderBridgeRecordingSession> {
     let byte_len = raw_yuv420p_len(width, height)?;
+    #[cfg(unix)]
+    let bootstrap_reader = if start_barrier.is_some() {
+        use std::os::unix::fs::OpenOptionsExt;
+        Some(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&fifo_path)?,
+        )
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    let bootstrap_reader: Option<std::fs::File> = None;
     let lifecycle = EncoderBridgeWriterLifecycle::register(
         state.clone(),
         session_id.clone(),
         effective_encoder_bridge_output_role(diagnostics_context),
     );
     let stop = Arc::new(AtomicBool::new(false));
+    let graceful_stop_at = (start_barrier.is_some()
+        && video_output.uses_video_toolbox()
+        && effective_encoder_bridge_output_role(diagnostics_context)
+            != EncoderBridgeOutputRole::Stream)
+        .then(|| {
+            Arc::new(IsoVideoStopBoundary {
+                local: StdMutex::new(None),
+                global: start_barrier.as_ref().unwrap().stop_boundary(),
+            })
+        });
+    let writer_graceful_stop_at = graceful_stop_at.clone();
+    let iso_member = start_barrier
+        .as_ref()
+        .and_then(|barrier| barrier.member_for(frame_store.as_ref()));
+    let writer_iso_member = iso_member.clone();
     let terminal_failure = Arc::new(StdMutex::new(None));
     let (startup_ready_tx, startup_ready_rx) = oneshot::channel();
     let writer_stop = stop.clone();
@@ -2784,10 +3186,13 @@ pub fn start_synthetic_recording_bridge(
                 low_latency,
                 diagnostics_context,
                 stop: writer_stop,
+                graceful_stop_at: writer_graceful_stop_at,
+                iso_member: writer_iso_member,
                 terminal_failure: writer_terminal_failure,
                 startup_ready_tx: Some(startup_ready_tx),
                 diagnostics_tx,
                 video_epoch,
+                start_barrier,
                 lifecycle: writer_lifecycle,
             };
             write_synthetic_recording_frames(params);
@@ -2802,7 +3207,10 @@ pub fn start_synthetic_recording_bridge(
 
     Ok(EncoderBridgeRecordingSession {
         stop,
+        graceful_stop_at,
+        iso_member,
         terminal_failure,
+        bootstrap_reader: StdMutex::new(bootstrap_reader),
         startup_ready: Some(startup_ready_rx),
         fifo_path,
         writer: Some(writer),
@@ -2983,6 +3391,8 @@ struct SyntheticRecordingWriterParams {
     height: u32,
     byte_len: usize,
     stop: Arc<AtomicBool>,
+    graceful_stop_at: Option<Arc<IsoVideoStopBoundary>>,
+    iso_member: Option<IsoBatchMember>,
     terminal_failure: Arc<StdMutex<Option<String>>>,
     startup_ready_tx: Option<oneshot::Sender<std::result::Result<(), String>>>,
     fifo_path: PathBuf,
@@ -3001,6 +3411,7 @@ struct SyntheticRecordingWriterParams {
     diagnostics_tx: watch::Sender<Option<EncoderBridgeWriterEvent>>,
     diagnostics_context: EncoderBridgeDiagnosticsContext,
     video_epoch: Arc<OnceLock<Instant>>,
+    start_barrier: Option<Arc<RecordingStartBarrier>>,
     lifecycle: EncoderBridgeWriterLifecycle,
 }
 
@@ -3021,6 +3432,8 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         height,
         byte_len,
         stop,
+        graceful_stop_at,
+        iso_member,
         terminal_failure,
         mut startup_ready_tx,
         fifo_path,
@@ -3043,8 +3456,10 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         diagnostics_tx,
         diagnostics_context,
         video_epoch,
+        start_barrier,
         lifecycle,
     } = params;
+    let _iso_membership_guard = IsoBatchWriterGuard(iso_member.clone());
     // Declared after destructuring and before every writer-owned resource so
     // the registry cannot release admission until the outer thread has
     // dropped its encoder/FIFO state.
@@ -3055,7 +3470,13 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let direct_d3d11_enabled = direct_d3d11_source.is_some();
     #[cfg(not(target_os = "windows"))]
     let direct_d3d11_enabled = false;
-    let output_queue_policy = encoder_bridge_output_queue_policy(diagnostics_context);
+    let mut output_queue_policy = encoder_bridge_output_queue_policy(diagnostics_context);
+    if video_output.uses_video_toolbox()
+        && let Some(barrier) = start_barrier.as_ref()
+    {
+        output_queue_policy =
+            output_queue_policy.with_iso_audio_advance(target_fps, barrier.audio_advance_ms);
+    }
     // Only the recording leg (or the shared leg) feeds the session's frame
     // accounting; a dedicated stream writer must not double-count it.
     let accounts_session_frames = output_queue_policy.role != EncoderBridgeOutputRole::Stream;
@@ -3385,12 +3806,54 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     // the absolute CFR clock only after that one-time setup; otherwise the
     // first loop tries to catch up the setup delay by immediately re-feeding
     // one compositor frame, creating a visible startup freeze.
-    let mut window_started_at = Instant::now();
-    let mut next_frame_at = Instant::now();
+    #[cfg(test)]
+    if start_barrier.is_some() && {
+        let role = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_ROLE")
+            .unwrap_or_else(|_| "camera".into());
+        let path = fifo_path.to_string_lossy();
+        match role.as_str() {
+            "screen" => path.contains("iso-screen-"),
+            "combined" => !path.contains("iso-"),
+            _ => path.contains("iso-camera-"),
+        }
+    } {
+        if let Ok(delay) = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_MS") {
+            // Deliberate fault injection, not a readiness handshake.
+            if let Ok(delay) = delay.parse::<u64>() {
+                thread::sleep(Duration::from_millis(delay.min(1000)));
+            }
+        }
+    }
+    let (clock_start, mut initial_frame) = if let Some(barrier) = start_barrier.as_ref() {
+        match barrier.prepared(frame_store.clone(), &video_epoch, &stop) {
+            Ok(start) => start,
+            Err(error) => {
+                let error =
+                    record_encoder_bridge_terminal_failure(&terminal_failure, error.to_string());
+                signal_encoder_bridge_startup(&mut startup_ready_tx, Err(error));
+                return;
+            }
+        }
+    } else {
+        (Instant::now(), None)
+    };
+    let mut window_started_at = clock_start;
+    let mut next_frame_at = clock_start;
     let mut last_fed_sequence: Option<u64> = None;
+    let mut last_iso_frame: Option<HeldIsoCompositorFrame> = None;
+    #[allow(unused_mut)]
+    let mut last_submitted_video_end = 0_u64;
     let mut first_frame_wait_sequence =
         initial_bridge_wait_sequence(video_output, frame_store.as_ref());
     let mut consecutive_repeated_frames = 0_u64;
+    let mut iso_content_clock_missed_ticks = 0_u64;
+    #[cfg(test)]
+    let trace_directory = start_barrier
+        .as_ref()
+        .and_then(|_| std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_DIR"))
+        .map(PathBuf::from);
+    #[cfg(test)]
+    let mut selection_trace = Vec::with_capacity(if trace_directory.is_some() { 512 } else { 0 });
     let mut terminal_writer_error = None;
     let mut drain_state = EncoderBridgeDrainState::default();
 
@@ -3610,9 +4073,36 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     // encoder", not merely "the writer thread exists".
 
     while !stop.load(Ordering::Relaxed) {
+        if let Some(boundary) = graceful_stop_at.as_ref().and_then(|at| at.boundary())
+            && let Some(epoch) = video_epoch.get().copied()
+        {
+            match iso_terminal_video_tick(
+                boundary,
+                epoch,
+                target_fps,
+                sequence,
+                last_submitted_video_end,
+                Instant::now(),
+            ) {
+                IsoTerminalVideoTick::Complete => break,
+                IsoTerminalVideoTick::Continue => {}
+                IsoTerminalVideoTick::TimedOut | IsoTerminalVideoTick::MissingFinalFrame => {
+                    let error = record_encoder_bridge_terminal_failure(
+                        &terminal_failure,
+                        "ISO video did not reach the committed source-clock Stop boundary within its drain deadline",
+                    );
+                    terminal_writer_error.get_or_insert(error);
+                    break;
+                }
+            }
+        }
         let loop_started_at = Instant::now();
         let now = Instant::now();
-        let tick_lag = now.saturating_duration_since(next_frame_at);
+        let tick_lag = if initial_frame.is_some() {
+            Duration::ZERO
+        } else {
+            now.saturating_duration_since(next_frame_at)
+        };
         if now > next_frame_at && tick_lag >= ENCODER_BRIDGE_DEADLINE_LAG_THRESHOLD {
             let lag_ms = tick_lag.as_secs_f64() * 1000.0;
             deadline_lag_times_ms.push(lag_ms);
@@ -3892,6 +4382,18 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             compositor_frame_wait_budget(video_output, consecutive_repeated_frames, frame_interval)
         };
         let previous_sequence = last_fed_sequence.or(startup_wait_sequence);
+        let iso_content_clock = start_barrier.as_ref().and_then(|_| {
+            video_epoch.get().map(|epoch| {
+                IsoCompositorContentClock::for_tick(
+                    *epoch,
+                    sequence,
+                    target_fps,
+                    next_frame_at,
+                    tick_plan.skip_fresh_wait,
+                    Instant::now(),
+                )
+            })
+        });
         let compositor_wait_started_at = Instant::now();
         #[cfg(target_os = "windows")]
         let direct_d3d11_frame = direct_d3d11_source
@@ -3902,7 +4404,9 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             .as_ref()
             .and_then(|overlay| overlay.source.latest_frame_blocking())
             .map(|(frame, _layout)| frame);
-        let fed = if direct_d3d11_enabled {
+        let mut fed = if initial_frame.is_some() {
+            initial_frame.take()
+        } else if direct_d3d11_enabled {
             None
         } else {
             match video_output {
@@ -3915,10 +4419,145 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
                 | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
                 | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
-                    next_compositor_frame(frame_store.as_ref(), previous_sequence, wait_budget)
+                    if let Some(clock) = iso_content_clock {
+                        let selected = if let Some(member) = iso_member.as_ref() {
+                            match poll_iso_completed_batch(
+                                member,
+                                sequence.saturating_sub(1),
+                                clock,
+                                &stop,
+                                |wait| {
+                                    if !wait.is_zero() {
+                                        thread::sleep(wait);
+                                    }
+                                    Instant::now()
+                                },
+                            ) {
+                                Ok(frame) => frame,
+                                Err(_) if stop.load(Ordering::Acquire) => break,
+                                Err(_)
+                                    if !member.active()
+                                        && graceful_stop_at
+                                            .as_ref()
+                                            .and_then(|at| at.boundary())
+                                            .is_some() =>
+                                {
+                                    graceful_stop_at
+                                        .as_ref()
+                                        .and_then(|at| at.retained())
+                                        .or_else(|| {
+                                            last_iso_frame.as_ref().map(|held| held.frame.clone())
+                                        })
+                                }
+                                Err(error) => {
+                                    let error = record_encoder_bridge_terminal_failure(
+                                        &terminal_failure,
+                                        error,
+                                    );
+                                    terminal_writer_error.get_or_insert(error);
+                                    break;
+                                }
+                            }
+                        } else {
+                            poll_iso_compositor_frame(clock, &stop, |wait| {
+                                if !wait.is_zero() {
+                                    thread::sleep(wait);
+                                }
+                                (
+                                    Instant::now(),
+                                    latest_compositor_frame(frame_store.as_ref()),
+                                )
+                            })
+                        };
+                        if !selected.as_ref().is_some_and(|frame| clock.accepts(frame)) {
+                            iso_content_clock_missed_ticks =
+                                iso_content_clock_missed_ticks.saturating_add(1);
+                        }
+                        selected
+                    } else {
+                        next_compositor_frame(frame_store.as_ref(), previous_sequence, wait_budget)
+                    }
                 }
             }
         };
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
+        if graceful_stop_at.is_some() {
+            let boundary = graceful_stop_at.as_ref().and_then(|at| at.boundary());
+            if let (Some(boundary), Some(epoch)) = (boundary, video_epoch.get().copied()) {
+                // Stop can arrive while this tick sleeps or waits for a frame.
+                // Do not encode a new tick after successful terminal coverage.
+                match iso_terminal_video_tick(
+                    boundary,
+                    epoch,
+                    target_fps,
+                    sequence.saturating_sub(1),
+                    last_submitted_video_end,
+                    Instant::now(),
+                ) {
+                    IsoTerminalVideoTick::Complete => break,
+                    IsoTerminalVideoTick::Continue => {}
+                    IsoTerminalVideoTick::TimedOut | IsoTerminalVideoTick::MissingFinalFrame => {
+                        let error = record_encoder_bridge_terminal_failure(
+                            &terminal_failure,
+                            "ISO video did not reach the committed source-clock Stop boundary within its drain deadline",
+                        );
+                        terminal_writer_error.get_or_insert(error);
+                        break;
+                    }
+                }
+            }
+            if fed
+                .as_ref()
+                .is_some_and(|frame| boundary.is_none_or(|at| frame.captured_at <= at))
+            {
+                last_iso_frame = fed.clone().map(HeldIsoCompositorFrame::new);
+            } else if boundary.is_some() {
+                // No future capture may enter the terminal interval. Retain an
+                // explicitly held pre-Stop frame, including its native lease.
+                fed = graceful_stop_at
+                    .as_ref()
+                    .and_then(|at| at.retained())
+                    .filter(|frame| boundary.is_some_and(|at| frame.captured_at <= at))
+                    .or_else(|| {
+                        last_iso_frame
+                            .as_ref()
+                            .filter(|held| boundary.is_some_and(|at| held.frame.captured_at <= at))
+                            .map(|held| held.frame.clone())
+                    });
+                if fed.is_none() {
+                    let error = record_encoder_bridge_terminal_failure(
+                        &terminal_failure,
+                        "ISO terminal video has no retained pre-Stop frame",
+                    );
+                    terminal_writer_error.get_or_insert(error);
+                    break;
+                }
+            }
+        }
+        #[cfg(test)]
+        if trace_directory.is_some()
+            && selection_trace.len() < 4096
+            && let Some(frame) = fed.as_ref()
+        {
+            selection_trace.push(SourceIsoSelectionTiming {
+                index: sequence.saturating_sub(1),
+                compositor_sequence: frame.sequence,
+                pts_seconds: sequence.saturating_sub(1) as f64 / f64::from(target_fps.max(1)),
+                captured_ms: test_source_iso_trace_ms(frame.captured_at),
+                presented_ms: frame
+                    .frame
+                    .metadata
+                    .presentation_at()
+                    .map(test_source_iso_trace_ms),
+                epoch_ms: video_epoch.get().copied().map(test_source_iso_trace_ms),
+                selected_ms: test_source_iso_trace_ms(Instant::now()),
+                content_clock_met: iso_content_clock.map(|clock| clock.accepts(frame)),
+                content_target_ms: iso_content_clock
+                    .map(|clock| test_source_iso_trace_ms(clock.content_at)),
+            });
+        }
         compositor_wait_times_ms.push(compositor_wait_started_at.elapsed().as_secs_f64() * 1000.0);
         #[cfg(target_os = "windows")]
         let direct_sequence = direct_d3d11_frame.as_ref().map(|frame| frame.sequence);
@@ -4166,6 +4805,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                                     .submit_output_frame(frame, sequence.saturating_sub(1))
                                 {
                                     VideoToolboxProbeOutcome::Submitted => {
+                                        last_submitted_video_end = sequence;
                                         let encode_ms =
                                             encode_started_at.elapsed().as_millis() as u64;
                                         video_toolbox_submit_times_ms.push(
@@ -4676,6 +5316,25 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             source_to_encode_age_times_ms.clear();
             repeated_frame_age_times_ms.clear();
         }
+    }
+
+    #[cfg(test)]
+    if let Some(directory) = trace_directory {
+        let name = fifo_path.file_name().unwrap_or_default().to_string_lossy();
+        if let Err(error) = std::fs::write(
+            directory.join(format!("bridge-timing-{name}.json")),
+            serde_json::to_vec_pretty(&selection_trace).unwrap(),
+        ) {
+            tracing::warn!(%error, "could not persist source ISO runtime timing evidence");
+        }
+    }
+    if iso_content_clock_missed_ticks > 0 {
+        tracing::warn!(
+            session_id,
+            fifo = %fifo_path.display(),
+            missed_ticks = iso_content_clock_missed_ticks,
+            "ISO content clock deadlines used held frames without shifting the output timeline"
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -6127,18 +6786,81 @@ impl VideoToolboxH264PipeWriter {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FifoWriteWait {
+    Yield,
+    Sleep(Duration),
+}
+
+trait FifoWriteTiming {
+    fn now(&self) -> Instant;
+    fn wait(&mut self, action: FifoWriteWait);
+}
+
+struct SystemFifoWriteTiming;
+
+impl FifoWriteTiming for SystemFifoWriteTiming {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn wait(&mut self, action: FifoWriteWait) {
+        match action {
+            FifoWriteWait::Yield => thread::yield_now(),
+            FifoWriteWait::Sleep(duration) => thread::sleep(duration),
+        }
+    }
+}
+
+struct FifoWriteBudget {
+    deadline: Instant,
+    progress_timeout: Duration,
+    hard_timeout: Duration,
+    cancel_on_stop: bool,
+}
+
 fn write_all_until<W: StdWrite>(
     sink: &mut W,
-    mut bytes: &[u8],
+    bytes: &[u8],
     stop: &AtomicBool,
-    mut deadline: Instant,
+    deadline: Instant,
     progress_timeout: Duration,
     hard_timeout: Duration,
     cancel_on_stop: bool,
 ) -> io::Result<()> {
-    let hard_deadline = Instant::now()
+    write_all_until_with_timing(
+        sink,
+        bytes,
+        stop,
+        FifoWriteBudget {
+            deadline,
+            progress_timeout,
+            hard_timeout,
+            cancel_on_stop,
+        },
+        &mut SystemFifoWriteTiming,
+    )
+}
+
+// Production and deterministic pressure tests execute the same byte-delivery
+// loop. Only the monotonic clock and OS retry wait are replaceable.
+fn write_all_until_with_timing<W: StdWrite>(
+    sink: &mut W,
+    mut bytes: &[u8],
+    stop: &AtomicBool,
+    budget: FifoWriteBudget,
+    timing: &mut impl FifoWriteTiming,
+) -> io::Result<()> {
+    let FifoWriteBudget {
+        mut deadline,
+        progress_timeout,
+        hard_timeout,
+        cancel_on_stop,
+    } = budget;
+    let hard_deadline = timing
+        .now()
         .checked_add(hard_timeout)
-        .unwrap_or_else(Instant::now);
+        .unwrap_or_else(|| timing.now());
     let mut consecutive_no_progress = 0_u32;
     while !bytes.is_empty() {
         if cancel_on_stop && stop.load(Ordering::Relaxed) {
@@ -6147,7 +6869,7 @@ fn write_all_until<W: StdWrite>(
                 "Encoder FIFO writer stopped during a bounded write",
             ));
         }
-        if Instant::now() >= deadline || Instant::now() >= hard_deadline {
+        if timing.now() >= deadline || timing.now() >= hard_deadline {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "Encoder FIFO write exceeded the complete-frame delivery budget",
@@ -6156,7 +6878,11 @@ fn write_all_until<W: StdWrite>(
         match sink.write(bytes) {
             Ok(0) => {
                 consecutive_no_progress = consecutive_no_progress.saturating_add(1);
-                wait_for_fifo_write_progress(consecutive_no_progress, deadline.min(hard_deadline));
+                wait_for_fifo_write_progress(
+                    consecutive_no_progress,
+                    deadline.min(hard_deadline),
+                    timing,
+                );
             }
             Ok(written) => {
                 bytes = &bytes[written..];
@@ -6167,16 +6893,21 @@ fn write_all_until<W: StdWrite>(
                 // byte progress proves the reader is alive, so use a sliding
                 // no-progress deadline until this frame is complete.
                 if !bytes.is_empty() {
-                    deadline = Instant::now()
+                    deadline = timing
+                        .now()
                         .checked_add(progress_timeout)
-                        .unwrap_or_else(Instant::now)
+                        .unwrap_or_else(|| timing.now())
                         .min(hard_deadline);
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 consecutive_no_progress = consecutive_no_progress.saturating_add(1);
-                wait_for_fifo_write_progress(consecutive_no_progress, deadline.min(hard_deadline));
+                wait_for_fifo_write_progress(
+                    consecutive_no_progress,
+                    deadline.min(hard_deadline),
+                    timing,
+                );
             }
             Err(error) => return Err(error),
         }
@@ -6728,7 +7459,11 @@ fn write_media_foundation_frames<W: StdWrite>(
     Ok(())
 }
 
-fn wait_for_fifo_write_progress(consecutive_no_progress: u32, deadline: Instant) {
+fn wait_for_fifo_write_progress(
+    consecutive_no_progress: u32,
+    deadline: Instant,
+    timing: &mut impl FifoWriteTiming,
+) {
     // A 1080p YUV420 frame is 3.11 MiB, while Unix FIFOs commonly accept only
     // a few KiB per nonblocking write. Sleeping milliseconds after every full
     // pipe therefore turns one frame into hundreds of sleeps (~800ms in the
@@ -6736,12 +7471,14 @@ fn wait_for_fifo_write_progress(consecutive_no_progress: u32, deadline: Instant)
     // so it can run and retry immediately. Only back off once repeated attempts
     // show that no progress is being made; the caller's deadlines stay binding.
     if consecutive_no_progress <= FIFO_WRITE_PROGRESS_YIELD_BUDGET {
-        thread::yield_now();
+        timing.wait(FifoWriteWait::Yield);
         return;
     }
-    let remaining = deadline.saturating_duration_since(Instant::now());
+    let remaining = deadline.saturating_duration_since(timing.now());
     if !remaining.is_zero() {
-        thread::sleep(remaining.min(FIFO_WRITE_STALL_BACKOFF));
+        timing.wait(FifoWriteWait::Sleep(
+            remaining.min(FIFO_WRITE_STALL_BACKOFF),
+        ));
     }
 }
 
@@ -6984,9 +7721,21 @@ fn latest_compositor_frame(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .latest()?;
+    Some(fed_compositor_frame(frame, None))
+}
+
+fn fed_iso_frame(lease: Arc<SourceIsoLeasedFrame>) -> FedCompositorFrame {
+    fed_compositor_frame(lease.frame.clone(), Some(lease))
+}
+
+fn fed_compositor_frame(
+    frame: CompositorFrameHandle,
+    iso_lease: Option<Arc<SourceIsoLeasedFrame>>,
+) -> FedCompositorFrame {
     #[cfg(target_os = "macos")]
     let metal_target = frame.metadata.metal_target_pixel_buffer();
-    Some(FedCompositorFrame {
+    FedCompositorFrame {
+        iso_lease,
         frame: frame.clone(),
         sequence: frame.sequence,
         captured_at: frame.captured_at,
@@ -6995,7 +7744,7 @@ fn latest_compositor_frame(
         has_metal_export_handle: frame.metadata.has_metal_iosurface_target(),
         #[cfg(target_os = "macos")]
         metal_target,
-    })
+    }
 }
 
 fn initial_bridge_wait_sequence(
@@ -7029,6 +7778,115 @@ fn next_compositor_frame(
         }
         let remaining = wait_budget.saturating_sub(started_at.elapsed());
         thread::sleep(remaining.min(Duration::from_millis(2)));
+    }
+}
+
+#[derive(Clone, Copy)]
+struct IsoCompositorContentClock {
+    content_at: Instant,
+    frame_interval: Duration,
+    wait_until: Instant,
+}
+
+impl IsoCompositorContentClock {
+    fn for_tick(
+        epoch: Instant,
+        sequence: u64,
+        fps: u32,
+        next_frame_at: Instant,
+        skip_fresh_wait: bool,
+        now: Instant,
+    ) -> Self {
+        Self {
+            // The writer increments sequence before selection; its PTS index
+            // is sequence-1, including explicit pathological-stall gaps.
+            content_at: epoch
+                + Duration::from_secs_f64(
+                    sequence.saturating_sub(1) as f64 / f64::from(fps.max(1)),
+                ),
+            frame_interval: Duration::from_secs_f64(1.0 / f64::from(fps.max(1))),
+            wait_until: if skip_fresh_wait {
+                now
+            } else {
+                next_frame_at
+                    .checked_sub(VIDEOTOOLBOX_FRESH_FRAME_HEADROOM)
+                    .unwrap_or(next_frame_at)
+            },
+        }
+    }
+
+    fn accepts(self, frame: &FedCompositorFrame) -> bool {
+        let presented_at = frame
+            .frame
+            .metadata
+            .presentation_at()
+            .unwrap_or(frame.captured_at);
+        self.accepts_times(frame.captured_at, presented_at)
+    }
+
+    fn accepts_times(self, captured_at: Instant, presented_at: Instant) -> bool {
+        let minimum_content_at = self
+            .content_at
+            .checked_sub(Duration::from_millis(10))
+            .unwrap_or(self.content_at);
+        recording_epoch(captured_at, presented_at, self.frame_interval) >= minimum_content_at
+    }
+}
+
+// A source event can land anywhere within a CFR frame; permit the additional
+// 10ms source-clock granularity without admitting an entire stale tick merely
+// because its sequence advanced. The absolute deadline reserves the existing
+// encoding headroom and never re-anchors the output clock.
+fn poll_iso_compositor_frame(
+    clock: IsoCompositorContentClock,
+    stop: &AtomicBool,
+    mut poll: impl FnMut(Duration) -> (Instant, Option<FedCompositorFrame>),
+) -> Option<FedCompositorFrame> {
+    let mut wait = Duration::ZERO;
+    loop {
+        let (now, frame) = poll(wait);
+        let current = frame.as_ref().is_some_and(|frame| clock.accepts(frame));
+        if current || now >= clock.wait_until || stop.load(Ordering::Acquire) {
+            // A stalled source remains an honest held frame. In particular,
+            // never rejuvenate it using the time of this read.
+            return frame;
+        }
+        wait = clock
+            .wait_until
+            .duration_since(now)
+            .min(Duration::from_millis(2));
+    }
+}
+
+fn poll_iso_completed_batch(
+    member: &IsoBatchMember,
+    index: u64,
+    clock: IsoCompositorContentClock,
+    stop: &AtomicBool,
+    mut wait: impl FnMut(Duration) -> Instant,
+) -> Result<Option<FedCompositorFrame>, &'static str> {
+    let mut pause = Duration::ZERO;
+    loop {
+        let now = wait(pause);
+        if stop.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        if let Some(frame) = member.store.select(index, member.role, |timings| {
+            now >= clock.wait_until
+                || timings
+                    .into_iter()
+                    .flatten()
+                    .all(|timing| clock.accepts_times(timing.captured_at, timing.presented_at))
+        })? {
+            return Ok(Some(fed_iso_frame(frame)));
+        }
+        if now >= clock.wait_until {
+            return Err("ISO output has no completed compositor batch");
+        }
+        pause = clock
+            .wait_until
+            .saturating_duration_since(now)
+            .min(Duration::from_millis(2));
     }
 }
 
@@ -8068,8 +8926,11 @@ mod tests {
     ) -> EncoderBridgeRecordingSession {
         EncoderBridgeRecordingSession {
             stop,
+            graceful_stop_at: None,
+            iso_member: None,
             terminal_failure: Arc::new(StdMutex::new(None)),
             startup_ready: None,
+            bootstrap_reader: StdMutex::new(None),
             fifo_path: PathBuf::from("/nonexistent-test-fifo"),
             writer: Some(writer),
             diagnostics_task: None,
@@ -8228,8 +9089,11 @@ mod tests {
 
         let session = EncoderBridgeRecordingSession {
             stop,
+            graceful_stop_at: None,
+            iso_member: None,
             terminal_failure,
             startup_ready: None,
+            bootstrap_reader: StdMutex::new(None),
             fifo_path: PathBuf::from("/nonexistent-test-fifo"),
             writer: None,
             diagnostics_task: None,
@@ -8440,8 +9304,11 @@ mod tests {
         });
         let session = EncoderBridgeRecordingSession {
             stop,
+            graceful_stop_at: None,
+            iso_member: None,
             terminal_failure,
             startup_ready: None,
+            bootstrap_reader: StdMutex::new(None),
             fifo_path: PathBuf::from("/nonexistent-test-fifo"),
             writer: Some(writer),
             diagnostics_task: None,
@@ -9065,6 +9932,66 @@ mod tests {
             encoder_bridge_pre_encode_admission(policy, 4, None),
             EncoderBridgePreEncodeAdmission::CoalesceLatestStreamFrame
         );
+    }
+
+    #[test]
+    fn source_iso_encoded_queue_covers_only_the_configured_audio_lookahead() {
+        for fps in [30, 60] {
+            let base = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+                role: EncoderBridgeOutputRole::Recording,
+                ..Default::default()
+            });
+            assert_eq!(base.with_iso_audio_advance(fps, 0), base);
+            let policy = base.with_iso_audio_advance(fps, 1000);
+            assert_eq!(policy.max_frames, 16 + fps as usize);
+            assert_eq!(policy.max_age, base.max_age);
+            let shared = EncoderBridgeOutputQueuePolicy {
+                role: EncoderBridgeOutputRole::Shared,
+                ..base
+            };
+            assert_eq!(
+                shared.with_iso_audio_advance(fps, 1000).max_frames,
+                policy.max_frames
+            );
+            assert_eq!(shared.coalesce_at_frames, None);
+            assert_eq!(
+                encoder_bridge_progress_aware_pre_encode_admission(
+                    policy,
+                    policy.max_frames as u64 - 1,
+                    None,
+                    Duration::ZERO,
+                    Duration::from_secs(2)
+                ),
+                EncoderBridgePreEncodeAdmission::Submit
+            );
+            assert_eq!(
+                encoder_bridge_progress_aware_pre_encode_admission(
+                    policy,
+                    policy.max_frames as u64,
+                    None,
+                    Duration::ZERO,
+                    Duration::from_secs(2)
+                ),
+                EncoderBridgePreEncodeAdmission::PauseRecordingFrame
+            );
+            assert_eq!(
+                encoder_bridge_progress_aware_pre_encode_admission(
+                    policy,
+                    policy.max_frames as u64,
+                    None,
+                    Duration::from_secs(2),
+                    Duration::from_secs(2)
+                ),
+                EncoderBridgePreEncodeAdmission::FailOutput
+            );
+            for role in [EncoderBridgeOutputRole::Stream] {
+                let policy = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+                    role,
+                    ..Default::default()
+                });
+                assert_eq!(policy.with_iso_audio_advance(fps, 1000), policy);
+            }
+        }
     }
 
     #[test]
@@ -9956,12 +10883,85 @@ mod tests {
     }
 
     #[test]
+    fn source_iso_terminal_video_covers_the_committed_content_boundary() {
+        let epoch = Instant::now();
+        for fps in [30, 60] {
+            let boundary = epoch + Duration::from_millis(4072);
+            let required = (4072_u64 * u64::from(fps)).div_ceil(1000);
+            let before = required - 1;
+            assert_eq!(
+                iso_terminal_video_tick(boundary, epoch, fps, before, before, boundary),
+                IsoTerminalVideoTick::Continue
+            );
+            assert_eq!(
+                iso_terminal_video_tick(boundary, epoch, fps, required, required, boundary),
+                IsoTerminalVideoTick::Complete
+            );
+            // Admission pressure at the final attempted tick cannot pretend
+            // that its unsubmitted PTS reached the muxer's terminal boundary.
+            assert_eq!(
+                iso_terminal_video_tick(boundary, epoch, fps, required, before, boundary),
+                IsoTerminalVideoTick::MissingFinalFrame
+            );
+            assert_eq!(
+                iso_terminal_video_tick(
+                    boundary,
+                    epoch,
+                    fps,
+                    before,
+                    before,
+                    boundary + ISO_TERMINAL_VIDEO_DRAIN
+                ),
+                IsoTerminalVideoTick::TimedOut
+            );
+            let exact = epoch + Duration::from_secs(4);
+            assert_eq!(
+                iso_terminal_video_tick(
+                    exact,
+                    epoch,
+                    fps,
+                    u64::from(fps) * 4,
+                    u64::from(fps) * 4,
+                    exact
+                ),
+                IsoTerminalVideoTick::Complete
+            );
+        }
+    }
+
+    #[test]
+    fn source_iso_stop_boundary_is_shared_and_preserves_earlier_removal() {
+        let global = Arc::new(OnceLock::new());
+        let first = IsoVideoStopBoundary {
+            local: StdMutex::new(None),
+            global: global.clone(),
+        };
+        let second = IsoVideoStopBoundary {
+            local: StdMutex::new(None),
+            global: global.clone(),
+        };
+        let removed = Instant::now();
+        let stopped = removed + Duration::from_millis(9);
+        global.set(stopped).unwrap();
+        assert_eq!(first.boundary(), Some(stopped));
+        assert_eq!(second.boundary(), Some(stopped));
+        first.request(removed, None);
+        assert_eq!(first.boundary(), Some(removed));
+        assert_eq!(second.boundary(), Some(stopped));
+        assert!(global.set(stopped + Duration::from_secs(1)).is_err());
+        assert_eq!(second.boundary(), Some(stopped));
+    }
+
+    #[test]
     fn recording_session_exposes_the_first_terminal_bridge_failure() {
         let terminal_failure = Arc::new(StdMutex::new(None));
         let session = EncoderBridgeRecordingSession {
             stop: Arc::new(AtomicBool::new(false)),
+            graceful_stop_at: None,
+            iso_member: None,
             terminal_failure: terminal_failure.clone(),
             startup_ready: None,
+            bootstrap_reader: StdMutex::new(None),
             fifo_path: std::env::temp_dir().join(format!(
                 "videorc-missing-terminal-signal-test-{}",
                 Uuid::new_v4()
@@ -10253,6 +11253,25 @@ mod tests {
         ));
     }
 
+    struct VirtualFifoWriteTiming {
+        now: Instant,
+        waits: Vec<FifoWriteWait>,
+    }
+
+    impl FifoWriteTiming for VirtualFifoWriteTiming {
+        fn now(&self) -> Instant {
+            self.now
+        }
+
+        fn wait(&mut self, action: FifoWriteWait) {
+            self.waits.push(action);
+            self.now += match action {
+                FifoWriteWait::Yield => Duration::from_micros(1),
+                FifoWriteWait::Sleep(duration) => duration,
+            };
+        }
+    }
+
     #[test]
     fn intermittent_pipe_pressure_does_not_throttle_a_full_hd_raw_frame() {
         for pressure in [PipePressure::WouldBlock, PipePressure::ZeroWrite] {
@@ -10264,21 +11283,102 @@ mod tests {
             };
             let stop = AtomicBool::new(false);
             let bytes = vec![7; raw_yuv420p_len(1920, 1080).expect("1080p frame size")];
-            let deadline = Instant::now() + Duration::from_millis(500);
+            let mut timing = VirtualFifoWriteTiming {
+                now: Instant::now(),
+                waits: Vec::new(),
+            };
+            let deadline = timing.now() + Duration::from_millis(500);
 
-            write_all_until(
+            write_all_until_with_timing(
                 &mut sink,
                 &bytes,
                 &stop,
-                deadline,
-                Duration::from_millis(500),
-                Duration::from_millis(500),
-                false,
+                FifoWriteBudget {
+                    deadline,
+                    progress_timeout: Duration::from_millis(500),
+                    hard_timeout: Duration::from_millis(500),
+                    cancel_on_stop: false,
+                },
+                &mut timing,
             )
             .expect("active FIFO draining must not pay a millisecond sleep per pipe-sized chunk");
 
             assert_eq!(sink.written, bytes.len());
+            assert_eq!(timing.waits.len(), bytes.len().div_ceil(8 * 1024));
+            assert!(
+                timing
+                    .waits
+                    .iter()
+                    .all(|action| *action == FifoWriteWait::Yield),
+                "each successful partial write must reset backoff; scheduler wall pauses do not model pipe stalls"
+            );
         }
+    }
+
+    #[test]
+    fn fifo_write_virtual_stall_backs_off_and_obeys_hard_deadline() {
+        let began = Instant::now();
+        let mut timing = VirtualFifoWriteTiming {
+            now: began,
+            waits: Vec::new(),
+        };
+        let hard_timeout = Duration::from_millis(10);
+        let error = write_all_until_with_timing(
+            &mut AlwaysWouldBlockSink,
+            &[7],
+            &AtomicBool::new(false),
+            FifoWriteBudget {
+                deadline: began + Duration::from_secs(1),
+                progress_timeout: Duration::from_secs(1),
+                hard_timeout,
+                cancel_on_stop: false,
+            },
+            &mut timing,
+        )
+        .expect_err("persistent pressure must still terminate");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(timing.now.duration_since(began), hard_timeout);
+        assert!(
+            timing.waits[..FIFO_WRITE_PROGRESS_YIELD_BUDGET as usize]
+                .iter()
+                .all(|action| *action == FifoWriteWait::Yield)
+        );
+        assert!(matches!(
+            timing.waits[FIFO_WRITE_PROGRESS_YIELD_BUDGET as usize],
+            FifoWriteWait::Sleep(_)
+        ));
+        assert!(timing.waits.iter().all(|action| match action {
+            FifoWriteWait::Yield => true,
+            FifoWriteWait::Sleep(duration) =>
+                !duration.is_zero() && *duration <= FIFO_WRITE_STALL_BACKOFF,
+        }));
+    }
+
+    #[test]
+    fn fifo_write_virtual_cancellation_prevents_delivery_and_waits() {
+        let began = Instant::now();
+        let mut timing = VirtualFifoWriteTiming {
+            now: began,
+            waits: Vec::new(),
+        };
+        let mut sink = Vec::new();
+        let error = write_all_until_with_timing(
+            &mut sink,
+            &[7],
+            &AtomicBool::new(true),
+            FifoWriteBudget {
+                deadline: began + Duration::from_millis(500),
+                progress_timeout: Duration::from_millis(500),
+                hard_timeout: Duration::from_millis(500),
+                cancel_on_stop: true,
+            },
+            &mut timing,
+        )
+        .expect_err("cancellation stays authoritative");
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(sink.is_empty());
+        assert!(timing.waits.is_empty());
+        assert_eq!(timing.now, began);
     }
 
     #[test]
@@ -10892,6 +11992,48 @@ mod tests {
     }
 
     #[test]
+    fn source_iso_barrier_retains_content_and_native_capture_epoch() {
+        let make_store = || Arc::new(StdMutex::new(crate::frame_store::FrameStore::new(2)));
+        let primary = make_store();
+        let camera = make_store();
+        let presented = Instant::now();
+        let captured = presented - Duration::from_millis(72);
+        for store in [&primary, &camera] {
+            store.lock().unwrap().publish_with_metadata(
+                7,
+                4,
+                4,
+                CompositorPixelFormat::yuv420p_cpu_buffer(),
+                crate::compositor::CompositorFrameExportHandle::default()
+                    .with_presentation_time(presented),
+                captured,
+                vec![42; 24],
+            );
+        }
+        let barrier = RecordingStartBarrier::new(2, Some(primary.clone()), 30, 0, None);
+        let epoch = Arc::new(OnceLock::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready_rx) = std_mpsc::channel();
+        let worker_barrier = barrier.clone();
+        let worker_epoch = epoch.clone();
+        let worker_stop = stop.clone();
+        let worker = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            worker_barrier.prepared(Some(primary), &worker_epoch, &worker_stop)
+        });
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let camera_result = barrier.prepared(Some(camera.clone()), &epoch, &stop);
+        let primary_result = worker.join().unwrap();
+        let (camera_at, camera_frame) = camera_result.unwrap();
+        let (primary_at, primary_frame) = primary_result.unwrap();
+        assert_eq!(camera_at, primary_at);
+        assert_eq!(epoch.get(), Some(&captured));
+        publish_test_compositor_frame(&camera, 8, 4, 4, &[99; 24]);
+        assert_eq!(camera_frame.unwrap().sequence, 7);
+        assert_eq!(primary_frame.unwrap().sequence, 7);
+    }
+
+    #[test]
     fn compositor_presentation_time_survives_encoder_frame_handoff() {
         let store = Arc::new(std::sync::Mutex::new(crate::frame_store::FrameStore::new(
             2,
@@ -10912,6 +12054,176 @@ mod tests {
         assert_eq!(fed.captured_at, content);
         assert!(fed.age_ms >= 30_000);
         assert_eq!(fed.frame.metadata.presentation_at(), Some(presentation));
+    }
+
+    fn iso_clock_test_frame(
+        sequence: u64,
+        captured_at: Instant,
+        presented_at: Instant,
+    ) -> FedCompositorFrame {
+        let store = Arc::new(std::sync::Mutex::new(crate::frame_store::FrameStore::new(
+            2,
+        )));
+        store.lock().unwrap().publish_with_metadata(
+            sequence,
+            4,
+            4,
+            CompositorPixelFormat::yuv420p_cpu_buffer(),
+            crate::compositor::CompositorFrameExportHandle::default()
+                .with_presentation_time(presented_at),
+            captured_at,
+            vec![0; 24],
+        );
+        latest_compositor_frame(Some(&store)).unwrap()
+    }
+
+    #[test]
+    fn source_iso_content_clock_realigns_after_a_newer_but_held_tick() {
+        for fps in [30, 60] {
+            let epoch = Instant::now();
+            let interval = Duration::from_secs_f64(1.0 / f64::from(fps));
+            let desired = epoch + Duration::from_secs_f64(3.0 / f64::from(fps));
+            let clock = IsoCompositorContentClock::for_tick(
+                epoch,
+                4,
+                fps,
+                desired + interval,
+                false,
+                desired,
+            );
+            assert_eq!(
+                clock.content_at, desired,
+                "incremented sequence4 represents PTS index3"
+            );
+            assert_eq!(
+                clock.wait_until,
+                desired + interval - VIDEOTOOLBOX_FRESH_FRAME_HEADROOM
+            );
+            // Seq4 is newer than previously encoded seq3, but content is one
+            // tick late. Sequence-only selection would immediately accept it.
+            let stale = iso_clock_test_frame(4, desired - interval, desired - interval);
+            let current = iso_clock_test_frame(5, desired, desired);
+            let mut polls = 0;
+            let selected = poll_iso_compositor_frame(clock, &AtomicBool::new(false), |wait| {
+                assert_eq!(
+                    wait,
+                    if polls == 0 {
+                        Duration::ZERO
+                    } else {
+                        Duration::from_millis(2)
+                    }
+                );
+                polls += 1;
+                (
+                    desired + Duration::from_millis((polls - 1) * 2),
+                    Some(if polls < 3 {
+                        stale.clone()
+                    } else {
+                        current.clone()
+                    }),
+                )
+            })
+            .unwrap();
+            assert_eq!(polls, 3);
+            assert_eq!(selected.sequence, 5);
+            // The next CFR index uses the original origin, not late arrival.
+            let next = IsoCompositorContentClock::for_tick(
+                epoch,
+                5,
+                fps,
+                desired + interval * 2,
+                false,
+                desired + interval,
+            );
+            assert_eq!(
+                next.content_at,
+                epoch + Duration::from_secs_f64(4.0 / f64::from(fps))
+            );
+            let selected = poll_iso_compositor_frame(next, &AtomicBool::new(false), |wait| {
+                assert!(wait.is_zero());
+                (
+                    next.content_at,
+                    Some(iso_clock_test_frame(6, next.content_at, next.content_at)),
+                )
+            })
+            .unwrap();
+            assert_eq!(selected.sequence, 6);
+            let first =
+                IsoCompositorContentClock::for_tick(epoch, 1, fps, epoch + interval, false, epoch);
+            assert_eq!(first.content_at, epoch);
+            let late = IsoCompositorContentClock::for_tick(
+                epoch,
+                4,
+                fps,
+                desired + interval,
+                true,
+                desired,
+            );
+            assert_eq!(
+                late.wait_until, desired,
+                "late ticks keep zero fresh-frame wait"
+            );
+        }
+    }
+
+    #[test]
+    fn source_iso_content_clock_preserves_native_latency_and_held_presentation() {
+        let content = Instant::now();
+        let interval = Duration::from_secs_f64(1.0 / 30.0);
+        let clock = IsoCompositorContentClock {
+            content_at: content,
+            frame_interval: interval,
+            wait_until: content + Duration::from_millis(100),
+        };
+        for frame in [
+            iso_clock_test_frame(1, content, content + Duration::from_millis(72)),
+            iso_clock_test_frame(2, content - Duration::from_secs(30), content + interval / 2),
+        ] {
+            let selected = poll_iso_compositor_frame(clock, &AtomicBool::new(false), |wait| {
+                assert!(
+                    wait.is_zero(),
+                    "calibrated current content needs no extra wait"
+                );
+                (content + Duration::from_millis(72), Some(frame.clone()))
+            })
+            .unwrap();
+            assert_eq!(selected.sequence, frame.sequence);
+        }
+    }
+
+    #[test]
+    fn source_iso_content_clock_bounds_stalls_and_stop_without_rejuvenating_frames() {
+        let now = Instant::now();
+        let clock = IsoCompositorContentClock {
+            content_at: now,
+            frame_interval: Duration::from_secs_f64(1.0 / 60.0),
+            wait_until: now + Duration::from_millis(5),
+        };
+        let held = iso_clock_test_frame(
+            1,
+            now - Duration::from_secs(30),
+            now - Duration::from_secs(1),
+        );
+        let mut elapsed = Duration::ZERO;
+        let mut polls = 0;
+        let selected = poll_iso_compositor_frame(clock, &AtomicBool::new(false), |wait| {
+            elapsed += wait;
+            polls += 1;
+            (now + elapsed, Some(held.clone()))
+        })
+        .unwrap();
+        assert_eq!(elapsed, Duration::from_millis(5));
+        assert_eq!(polls, 4);
+        assert_eq!(selected.captured_at, held.captured_at);
+        for (stop, at) in [(true, now), (false, clock.wait_until)] {
+            let mut polls = 0;
+            poll_iso_compositor_frame(clock, &AtomicBool::new(stop), |wait| {
+                assert!(wait.is_zero());
+                polls += 1;
+                (at, Some(held.clone()))
+            });
+            assert_eq!(polls, 1, "Stop and an overdue tick must never add a wait");
+        }
     }
 
     #[test]

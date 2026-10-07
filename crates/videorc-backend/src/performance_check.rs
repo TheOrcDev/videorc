@@ -634,6 +634,7 @@ fn benchmark_session_params(video: &VideoSettings, directory: &Path) -> StartSes
             output_directory: Some(directory.display().to_string()),
             ffmpeg_path: None,
             keep_original_mkv: false,
+            separate_source_recordings: None,
             video: video.clone(),
             rtmp: RtmpSettings {
                 preset: RtmpPreset::Custom,

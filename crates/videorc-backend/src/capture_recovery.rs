@@ -1125,6 +1125,27 @@ impl Default for CaptureRecoveryCoordinator {
 }
 
 impl CaptureRecoveryCoordinator {
+    /// True only after the scoped recovery coordinator has exhausted automatic
+    /// repair. A transient preview Failed state during an attempt is not terminal.
+    pub(crate) fn source_failed_after_recovery(&self, source: &SourceKey) -> bool {
+        self.phase == CaptureRecoveryPhase::Failed
+            && self.automatic_attempts_operator_latched
+            && self
+                .restarted_scope
+                .as_ref()
+                .or(self.scope.as_ref())
+                .is_some_and(|scope| &scope.source_key == source)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_camera_recovery_failed(&mut self, id: &str, exhausted: bool) {
+        self.scope = Some(CaptureRecoveryScope::camera(SourceKey::camera(id), 1));
+        self.retry_scope = self.scope.clone();
+        self.phase = CaptureRecoveryPhase::Failed;
+        self.attempts = if exhausted { MAX_AUTOMATIC_ATTEMPTS } else { 1 };
+        self.automatic_attempts_operator_latched = exhausted;
+    }
+
     pub(crate) fn status(&self) -> CaptureRecoveryStatus {
         let current_scope = self.restarted_scope.as_ref().or(self.scope.as_ref());
         CaptureRecoveryStatus {
@@ -3676,6 +3697,26 @@ mod tests {
 
     use super::*;
     use crate::storage::Database;
+
+    #[test]
+    fn source_iso_waits_for_scoped_terminal_recovery() {
+        let mut recovery = CaptureRecoveryCoordinator::default();
+        let key = SourceKey::camera("camera:one");
+        recovery.scope = Some(camera_scope("camera:one", 1));
+        recovery.phase = CaptureRecoveryPhase::Restarting;
+        recovery.attempts = 1;
+        assert!(!recovery.source_failed_after_recovery(&key));
+        recovery.phase = CaptureRecoveryPhase::Failed;
+        recovery.retry_scope = recovery.scope.clone();
+        assert!(!recovery.source_failed_after_recovery(&key));
+        recovery.attempts = MAX_AUTOMATIC_ATTEMPTS;
+        recovery.automatic_attempts_operator_latched = true;
+        assert!(recovery.source_failed_after_recovery(&key));
+        assert!(!recovery.source_failed_after_recovery(&SourceKey::camera("camera:other")));
+        assert!(!recovery.source_failed_after_recovery(&SourceKey::screen("camera:one")));
+        recovery.phase = CaptureRecoveryPhase::Recovered;
+        assert!(!recovery.source_failed_after_recovery(&key));
+    }
 
     fn camera_scope(id: &str, generation: u64) -> CaptureRecoveryScope {
         CaptureRecoveryScope::camera(SourceKey::camera(id), generation)

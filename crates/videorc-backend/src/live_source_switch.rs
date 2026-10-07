@@ -198,6 +198,8 @@ pub struct SourceSwitchCoordinator {
     pending_request: Option<SourceSwitchParams>,
     completed: VecDeque<(SourceSwitchParams, SourceSwitchOperation)>,
     stopping: bool,
+    camera_removed_at: Option<Instant>,
+    capture_removed_at: Option<Instant>,
     deadline: Option<Instant>,
     cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// `(live producer ID, confirmed ID)` when session start opened the picked
@@ -409,6 +411,17 @@ impl SourceSwitchCoordinator {
             }
             SourceKind::Microphone => return Err(SwitchError::InvalidRequest),
         }
+        if request.device_id.is_none() {
+            match request.kind {
+                SourceKind::Camera => {
+                    self.camera_removed_at.get_or_insert_with(Instant::now);
+                }
+                SourceKind::Capture => {
+                    self.capture_removed_at.get_or_insert_with(Instant::now);
+                }
+                SourceKind::Microphone => {}
+            }
+        }
         snapshot.source_revision = snapshot.source_revision.saturating_add(1);
         self.finish(request, SwitchStage::Applied, None)
     }
@@ -466,9 +479,30 @@ impl SourceSwitchCoordinator {
         if snapshot.confirmed == confirmed {
             return None;
         }
+        if snapshot.confirmed.camera_id.is_some() && confirmed.camera_id.is_none() {
+            self.camera_removed_at.get_or_insert_with(Instant::now);
+        }
+        if (snapshot.confirmed.screen_id.is_some() || snapshot.confirmed.window_id.is_some())
+            && confirmed.screen_id.is_none()
+            && confirmed.window_id.is_none()
+        {
+            self.capture_removed_at.get_or_insert_with(Instant::now);
+        }
         snapshot.confirmed = confirmed;
         snapshot.source_revision = snapshot.source_revision.saturating_add(1);
         Some(snapshot.clone())
+    }
+
+    /// Sticky for this session: re-adding a source cannot append to an ended ISO.
+    pub(crate) fn source_removed_at(&self, session_id: &str, camera: bool) -> Option<Instant> {
+        self.snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.session_id == session_id)?;
+        if camera {
+            self.camera_removed_at
+        } else {
+            self.capture_removed_at
+        }
     }
 
     pub fn stop(&mut self, session_id: &str) {
@@ -996,6 +1030,25 @@ mod tests {
             device_id: Some("microphone:coreaudio:7".into()),
             protected_overlay_window_ids: vec![],
         }
+    }
+
+    #[test]
+    fn source_iso_removal_is_sticky_across_reselection_but_not_visibility() {
+        let mut owner = coordinator();
+        let mut selected = owner.snapshot("session").unwrap().confirmed;
+        selected.camera_id = Some("camera:iso".into());
+        owner.commit_visual_selection("session", &selected);
+        assert!(owner.source_removed_at("session", true).is_none());
+        // Recommitting a hidden-but-still-selected source is not removal.
+        owner.commit_visual_selection("session", &selected);
+        assert!(owner.source_removed_at("session", true).is_none());
+        selected.camera_id = None;
+        owner.commit_visual_selection("session", &selected);
+        let removed = owner.source_removed_at("session", true).unwrap();
+        selected.camera_id = Some("camera:iso".into());
+        owner.commit_visual_selection("session", &selected);
+        assert_eq!(owner.source_removed_at("session", true), Some(removed));
+        assert!(owner.source_removed_at("different-session", true).is_none());
     }
 
     #[test]

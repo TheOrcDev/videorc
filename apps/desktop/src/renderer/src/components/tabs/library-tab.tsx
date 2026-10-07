@@ -76,6 +76,7 @@ import {
 import { dayLabel, durationMsLabel, formatBytes, isActiveRecordingState } from '@/lib/format'
 import { cleanCutModeLabel, isCleanCutEligible, type CleanCutSession } from '@/lib/clean-cut-view'
 import { revealInFileManagerLabel } from '@/lib/platform'
+import { recordingRoleLabel, recordingRoleRowNote } from '@/lib/separate-source-recordings-view'
 import {
   LIBRARY_FILTERS,
   filterLibrarySessions,
@@ -597,11 +598,16 @@ function LibraryRow({
               ? ` · cleaned from ${session.sourceTitle}`
               : ''}
             {cleanCutMode && session.sourceTitle ? ` · cut from ${session.sourceTitle}` : ''}
+            {session.recordingRole ? ` · ${recordingRoleRowNote(session.recordingRole)}` : ''}
           </p>
         </div>
       </div>
       <div className="min-w-0">
-        {session.processingKind === 'noise-cleanup' ? (
+        {session.recordingRole ? (
+          <Badge data-recording-role={session.recordingRole} variant="outline">
+            {recordingRoleLabel(session.recordingRole)}
+          </Badge>
+        ) : session.processingKind === 'noise-cleanup' ? (
           <Badge variant="outline">Noise cleaned</Badge>
         ) : cleanCutMode ? (
           <Badge data-clean-cut={cleanCutMode} variant="outline">
