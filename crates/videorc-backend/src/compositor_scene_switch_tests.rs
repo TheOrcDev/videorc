@@ -704,11 +704,20 @@ async fn source_iso_artifact_fixture() {
         let luma_at = |bytes: &[u8], x: u32, y: u32| bytes[(y * WIDTH + x) as usize];
         let (inset_x, inset_y) = (55, 3);
         let (screen_x, screen_y) = (10, 30);
+        let mut observed_source_luma = std::collections::HashSet::new();
+        install_screen(&state, "screen:fixture", 1, 1, [0, 220, 0, 255]).await;
         for tick in 0..90_u64 {
+            crate::preview_screen::test_publish_screen_pixels(
+                &state,
+                tick + 1,
+                [0, 220 + (tick % 35) as u8, 0, 255],
+                Instant::now(),
+            )
+            .await;
             crate::preview_camera::test_publish_camera_pixels(
                 &state,
                 tick + 1,
-                [0, 0, 255, 255],
+                [0, 0, 100 + (tick % 120) as u8, 255],
                 Instant::now(),
             )
             .await;
@@ -754,6 +763,7 @@ async fn source_iso_artifact_fixture() {
             assert_eq!(camera_iso.len(), raw_yuv420p_len(WIDTH, HEIGHT));
             let screen_luma = luma_at(&primary, screen_x, screen_y);
             let camera_luma = luma_at(&primary, inset_x, inset_y);
+            observed_source_luma.insert((screen_luma, camera_luma));
             assert!(
                 screen_luma.abs_diff(camera_luma) > 40,
                 "{mode} tick {tick}: the fixture colors must be distinguishable (screen {screen_luma}, camera {camera_luma})"
@@ -779,6 +789,24 @@ async fn source_iso_artifact_fixture() {
                 camera_file.write_all(&camera_iso).unwrap();
             }
         }
+        assert!(
+            observed_source_luma
+                .iter()
+                .map(|(screen, _)| *screen)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                > 10,
+            "{mode}: screen publisher must advance changing content"
+        );
+        assert!(
+            observed_source_luma
+                .iter()
+                .map(|(_, camera)| *camera)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                > 10,
+            "{mode}: camera publisher must advance changing content"
+        );
     }
 }
 

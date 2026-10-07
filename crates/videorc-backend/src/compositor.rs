@@ -7683,9 +7683,9 @@ async fn publish_compositor_frame(
     }
     if let (Some(iso_output), Some(iso_stores)) = (source_iso_output, source_iso_frame_stores) {
         // Screen leg: the Screen/Window source alone (image stand-ins apply,
-        // they are screen-like). Camera leg: the camera alone. A role whose
-        // source is gone this tick still publishes (black) so its bridge
-        // keeps cadence and the file stays continuous.
+        // they are screen-like). Camera leg: the camera alone. A committed
+        // source removal is handled by the role supervisor; never publish
+        // black filler as if its selected source were still present.
         let legs: [SourceIsoLeg<'_>; 2] = [
             SourceIsoLeg {
                 snapshot: iso_screen_snapshot.as_ref(),
@@ -7707,6 +7707,9 @@ async fn publish_compositor_frame(
             image_source,
         } in legs
         {
+            if leg_snapshot.is_none() {
+                continue;
+            }
             let leg_camera_frame = camera_frame
                 .as_ref()
                 .filter(|_| scene_accepts_source(leg_snapshot, camera_key))
@@ -7714,6 +7717,16 @@ async fn publish_compositor_frame(
             let leg_screen_frame = screen_frame
                 .as_ref()
                 .filter(|_| scene_accepts_source(leg_snapshot, screen_key));
+            // A contended capture authority cannot prove current source pixels.
+            // Keep the last published ISO frame instead of encoding a black
+            // frame; the supervisor owns committed removal/terminal failure.
+            if (scene_needs_live_camera_frame(leg_snapshot, image_source)
+                && leg_camera_frame.is_none())
+                || (scene_needs_live_screen_frame(leg_snapshot, image_source)
+                    && leg_screen_frame.is_none())
+            {
+                continue;
+            }
             // Each ISO frame is stamped with ITS source's capture time (the
             // bridge seeds the shared recording epoch from it); a leg with no
             // live frame this tick is a continuity frame dated at publish.

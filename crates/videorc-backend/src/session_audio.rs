@@ -4280,6 +4280,16 @@ impl StopDrain {
     }
 }
 
+// Stereo PCM after this source-clock boundary would be future capture, not
+// buffered pre-Stop content. Keep the corrected tail truthful while flushing.
+fn silence_after_source_boundary(samples: &mut [f32], start: u64, end: u64) {
+    let keep = end
+        .saturating_sub(start)
+        .saturating_mul(2)
+        .min(samples.len() as u64) as usize;
+    samples[keep..].fill(0.0);
+}
+
 #[derive(Debug, Clone, Copy)]
 struct BusTiming {
     playout_delay: Duration,
@@ -4527,8 +4537,21 @@ fn run_bus_owned(
     let mut drain: Option<StopDrain> = None;
     loop {
         if stop.load(Ordering::Acquire) {
-            let drain =
-                drain.get_or_insert_with(|| StopDrain::at(stop_requested_at, epoch, playout_delay));
+            let drain = drain.get_or_insert_with(|| {
+                let mut drain = StopDrain::at(stop_requested_at, epoch, playout_delay);
+                // ISO muxers trim the common negative track shift. Flush the
+                // already captured system samples delayed by that same shift;
+                // the existing unpaced bounded drain does not await new audio.
+                if shared
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .source_taps
+                    .is_some()
+                {
+                    drain.target = drain.target.saturating_add(timing.system_delay_frames);
+                }
+                drain
+            });
             if drain.done(timeline.cursor(), Instant::now()) {
                 break;
             }
@@ -4948,10 +4971,31 @@ fn run_bus_owned(
         if ramp_in {
             ramp_through_zero(&mut raw.samples, true);
         }
-        let system_raw = system.as_mut().map(|slot| {
+        let mut system_raw = system.as_mut().map(|slot| {
             debug_assert_eq!(slot.timeline.cursor(), start, "sources render in lockstep");
             slot.render()
         });
+        if drain.is_some()
+            && shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .source_taps
+                .is_some()
+        {
+            let source_end = StopDrain::at(stop_requested_at, epoch, playout_delay).target;
+            silence_after_source_boundary(
+                &mut raw.samples,
+                start,
+                source_end.saturating_add(timing.microphone_delay_frames),
+            );
+            if let Some(system_raw) = system_raw.as_mut() {
+                silence_after_source_boundary(
+                    &mut system_raw.samples,
+                    start,
+                    source_end.saturating_add(timing.system_delay_frames),
+                );
+            }
+        }
         let mixing = system_raw.is_some() || !limiter.idle();
         let write_started = Instant::now();
         let mut deferred_health = Vec::new();
@@ -9837,6 +9881,51 @@ mod mix_tests {
                 "{playout_delay:?}: the drain is bounded ({drained:?})"
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn source_iso_stop_flushes_delayed_system_without_future_microphone() {
+        let epoch = Instant::now() + Duration::from_millis(100);
+        let bus = start_bus(
+            epoch,
+            Some(signal_packets(epoch, 0, 480_000, 480, |_| (0.2, 0.2))),
+            AudioProcessingSettings::default(),
+            SessionAudioOptions {
+                system_delay_frames: 48_000,
+                system_gain_db: 0.0,
+                echo_guard: false,
+                ..system_options()
+            },
+        )
+        .await;
+        bus.session
+            .set_source_taps(Arc::new(crate::source_audio_tap::SourceAudioTaps::default()));
+        let system = bus.session.system_audio();
+        let source = prepare_system(
+            &system,
+            signal_packets(epoch, 0, 480_000, 480, |_| (0.3, 0.3)),
+            quiet_failure(),
+        )
+        .await;
+        bus.session.attach_system(source).await.unwrap();
+        bus.wait_for_frames(72_000).await;
+        let stopped = Instant::now();
+        let source_end = (stopped.duration_since(epoch).as_secs_f64() * 48_000.0) as usize;
+        let (bytes, _) = bus.finish();
+        assert!(
+            stopped.elapsed() < Duration::from_millis(500),
+            "buffered tail flush must not await one second of future capture"
+        );
+        let samples = decode(&bytes);
+        assert!(
+            samples.len() / 2 >= source_end + 48_000,
+            "residual trim requires another second of raw bus samples"
+        );
+        let tail = &samples[(source_end + 960) * 2..(source_end + 48_000 - 960) * 2];
+        assert!(
+            tail.iter().all(|sample| (*sample - 0.3).abs() < 0.0001),
+            "already captured delayed system survives, post-Stop microphone stays silent"
+        );
     }
 
     #[test]

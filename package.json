@@ -148,6 +148,7 @@
     "smoke:record-latency": "node scripts/smoke-record-latency-app.mjs",
     "smoke:record-latency:gate": "node scripts/smoke-record-latency-app.mjs --enforce",
     "smoke:separate-source-fixture": "node scripts/smoke-separate-source-fixture.mjs",
+    "smoke:separate-source-runtime": "node scripts/smoke-separate-source-runtime.mjs",
     "smoke:separate-source-take": "node scripts/smoke-separate-source-take.mjs",
     "smoke:system-audio": "node scripts/smoke-system-audio-app.mjs",
     "smoke:output-stall": "node scripts/smoke-output-stall-app.mjs",

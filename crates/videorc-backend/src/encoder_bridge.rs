@@ -2205,6 +2205,7 @@ pub struct EncoderBridgeRecordingSession {
     stop: Arc<AtomicBool>,
     terminal_failure: Arc<StdMutex<Option<String>>>,
     startup_ready: Option<oneshot::Receiver<std::result::Result<(), String>>>,
+    bootstrap_reader: StdMutex<Option<std::fs::File>>,
     fifo_path: PathBuf,
     writer: Option<thread::JoinHandle<()>>,
     diagnostics_task: Option<TokioJoinHandle<()>>,
@@ -2215,6 +2216,10 @@ pub struct EncoderBridgeRecordingSession {
 
 impl EncoderBridgeRecordingSession {
     pub fn stop(&self) {
+        self.bootstrap_reader
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
         self.stop.store(true, Ordering::Relaxed);
         if let Some(lifecycle) = self.lifecycle.as_ref() {
             lifecycle.stop_signalled();
@@ -2294,6 +2299,11 @@ impl EncoderBridgeRecordingSession {
     /// FFmpeg can exit successfully after the bridge closes its FIFO at a
     /// complete raw-video frame boundary. Recording finalization must inspect
     /// this signal so that a shortened file is not published as successful.
+    #[cfg(test)]
+    pub(crate) fn test_terminal_failure(&self, message: &str) {
+        record_encoder_bridge_terminal_failure(&self.terminal_failure, message);
+    }
+
     pub fn terminal_failure(&self) -> Option<String> {
         read_encoder_bridge_terminal_failure(&self.terminal_failure)
     }
@@ -2335,6 +2345,7 @@ impl EncoderBridgeRecordingSession {
                 stop: stop.clone(),
                 terminal_failure: Arc::new(StdMutex::new(None)),
                 startup_ready: None,
+                bootstrap_reader: StdMutex::new(None),
                 fifo_path: PathBuf::from("/nonexistent-test-fifo"),
                 writer: Some(writer),
                 diagnostics_task: None,
@@ -2701,6 +2712,108 @@ pub async fn run_synthetic_encoder_bridge(
     })
 }
 
+/// ISO-enabled encoders rendezvous after preparation, before consuming their
+/// first retained compositor frame. FIFO bootstrap readers break FFmpeg's
+/// audio-first probing dependency without starting an audio epoch early.
+pub struct RecordingStartBarrier {
+    participants: usize,
+    origin_store: Option<CompositorFrameStore>,
+    fps: u32,
+    state: StdMutex<RecordingStartBarrierState>,
+    changed: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct RecordingStartBarrierState {
+    stores: Vec<Option<CompositorFrameStore>>,
+    frames: Vec<Option<FedCompositorFrame>>,
+    released_at: Option<Instant>,
+}
+
+impl RecordingStartBarrier {
+    pub fn new(
+        participants: usize,
+        origin_store: Option<CompositorFrameStore>,
+        fps: u32,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            participants,
+            origin_store,
+            fps,
+            state: StdMutex::new(Default::default()),
+            changed: std::sync::Condvar::new(),
+        })
+    }
+
+    fn prepared(
+        &self,
+        store: Option<CompositorFrameStore>,
+        epoch: &OnceLock<Instant>,
+        stop: &AtomicBool,
+    ) -> Result<(Instant, Option<FedCompositorFrame>)> {
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let index = state.stores.len();
+        state.stores.push(store);
+        if state.stores.len() == self.participants {
+            state.frames = state
+                .stores
+                .iter()
+                .map(|store| latest_compositor_frame(store.as_ref()))
+                .collect();
+            anyhow::ensure!(
+                state.frames.iter().all(Option::is_some),
+                "A separate recording encoder has no initial compositor frame"
+            );
+            let released_at = Instant::now();
+            // Retained content comes from the most recent compositor tick.
+            // Every leg uses this same audio origin, even a delayed muxer.
+            let primary = self
+                .origin_store
+                .as_ref()
+                .and_then(|origin| {
+                    state.stores.iter().position(|store| {
+                        store
+                            .as_ref()
+                            .is_some_and(|store| Arc::ptr_eq(store, origin))
+                    })
+                })
+                .and_then(|index| state.frames[index].as_ref());
+            let origin = primary.map_or(released_at, |frame| {
+                recording_epoch(
+                    frame.captured_at,
+                    frame
+                        .frame
+                        .metadata
+                        .presentation_at()
+                        .unwrap_or(released_at),
+                    Duration::from_secs_f64(1.0 / f64::from(self.fps.max(1))),
+                )
+            });
+            let _ = epoch.set(origin);
+            state.released_at = Some(released_at);
+            self.changed.notify_all();
+        }
+        loop {
+            if let Some(at) = state.released_at {
+                return Ok((at, state.frames[index].take()));
+            }
+            anyhow::ensure!(
+                !stop.load(Ordering::Acquire),
+                "Recording start barrier was cancelled"
+            );
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "Recording encoder preparation barrier timed out"
+            );
+            (state, _) = self
+                .changed
+                .wait_timeout(state, Duration::from_millis(20))
+                .unwrap_or_else(|p| p.into_inner());
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn start_synthetic_recording_bridge(
     state: AppState,
@@ -2726,8 +2839,24 @@ pub fn start_synthetic_recording_bridge(
     // Set once at the bridge's first delivered frame: the shared session epoch the
     // audio FIFO writer aligns to (Studio Shell And Live Control Plan, slice A2).
     video_epoch: Arc<OnceLock<Instant>>,
+    start_barrier: Option<Arc<RecordingStartBarrier>>,
 ) -> Result<EncoderBridgeRecordingSession> {
     let byte_len = raw_yuv420p_len(width, height)?;
+    #[cfg(unix)]
+    let bootstrap_reader = if start_barrier.is_some() {
+        use std::os::unix::fs::OpenOptionsExt;
+        Some(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&fifo_path)?,
+        )
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    let bootstrap_reader: Option<std::fs::File> = None;
     let lifecycle = EncoderBridgeWriterLifecycle::register(
         state.clone(),
         session_id.clone(),
@@ -2788,6 +2917,7 @@ pub fn start_synthetic_recording_bridge(
                 startup_ready_tx: Some(startup_ready_tx),
                 diagnostics_tx,
                 video_epoch,
+                start_barrier,
                 lifecycle: writer_lifecycle,
             };
             write_synthetic_recording_frames(params);
@@ -2803,6 +2933,7 @@ pub fn start_synthetic_recording_bridge(
     Ok(EncoderBridgeRecordingSession {
         stop,
         terminal_failure,
+        bootstrap_reader: StdMutex::new(bootstrap_reader),
         startup_ready: Some(startup_ready_rx),
         fifo_path,
         writer: Some(writer),
@@ -3001,6 +3132,7 @@ struct SyntheticRecordingWriterParams {
     diagnostics_tx: watch::Sender<Option<EncoderBridgeWriterEvent>>,
     diagnostics_context: EncoderBridgeDiagnosticsContext,
     video_epoch: Arc<OnceLock<Instant>>,
+    start_barrier: Option<Arc<RecordingStartBarrier>>,
     lifecycle: EncoderBridgeWriterLifecycle,
 }
 
@@ -3043,6 +3175,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         diagnostics_tx,
         diagnostics_context,
         video_epoch,
+        start_barrier,
         lifecycle,
     } = params;
     // Declared after destructuring and before every writer-owned resource so
@@ -3385,8 +3518,39 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     // the absolute CFR clock only after that one-time setup; otherwise the
     // first loop tries to catch up the setup delay by immediately re-feeding
     // one compositor frame, creating a visible startup freeze.
-    let mut window_started_at = Instant::now();
-    let mut next_frame_at = Instant::now();
+    #[cfg(test)]
+    if start_barrier.is_some() && {
+        let role = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_ROLE")
+            .unwrap_or_else(|_| "camera".into());
+        let path = fifo_path.to_string_lossy();
+        match role.as_str() {
+            "screen" => path.contains("iso-screen-"),
+            "combined" => !path.contains("iso-"),
+            _ => path.contains("iso-camera-"),
+        }
+    } {
+        if let Ok(delay) = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_PREP_DELAY_MS") {
+            // Deliberate fault injection, not a readiness handshake.
+            if let Ok(delay) = delay.parse::<u64>() {
+                thread::sleep(Duration::from_millis(delay.min(1000)));
+            }
+        }
+    }
+    let (clock_start, mut initial_frame) = if let Some(barrier) = start_barrier.as_ref() {
+        match barrier.prepared(frame_store.clone(), &video_epoch, &stop) {
+            Ok(start) => start,
+            Err(error) => {
+                let error =
+                    record_encoder_bridge_terminal_failure(&terminal_failure, error.to_string());
+                signal_encoder_bridge_startup(&mut startup_ready_tx, Err(error));
+                return;
+            }
+        }
+    } else {
+        (Instant::now(), None)
+    };
+    let mut window_started_at = clock_start;
+    let mut next_frame_at = clock_start;
     let mut last_fed_sequence: Option<u64> = None;
     let mut first_frame_wait_sequence =
         initial_bridge_wait_sequence(video_output, frame_store.as_ref());
@@ -3612,7 +3776,11 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     while !stop.load(Ordering::Relaxed) {
         let loop_started_at = Instant::now();
         let now = Instant::now();
-        let tick_lag = now.saturating_duration_since(next_frame_at);
+        let tick_lag = if initial_frame.is_some() {
+            Duration::ZERO
+        } else {
+            now.saturating_duration_since(next_frame_at)
+        };
         if now > next_frame_at && tick_lag >= ENCODER_BRIDGE_DEADLINE_LAG_THRESHOLD {
             let lag_ms = tick_lag.as_secs_f64() * 1000.0;
             deadline_lag_times_ms.push(lag_ms);
@@ -3902,7 +4070,9 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             .as_ref()
             .and_then(|overlay| overlay.source.latest_frame_blocking())
             .map(|(frame, _layout)| frame);
-        let fed = if direct_d3d11_enabled {
+        let fed = if initial_frame.is_some() {
+            initial_frame.take()
+        } else if direct_d3d11_enabled {
             None
         } else {
             match video_output {
@@ -8070,6 +8240,7 @@ mod tests {
             stop,
             terminal_failure: Arc::new(StdMutex::new(None)),
             startup_ready: None,
+            bootstrap_reader: StdMutex::new(None),
             fifo_path: PathBuf::from("/nonexistent-test-fifo"),
             writer: Some(writer),
             diagnostics_task: None,
@@ -8230,6 +8401,7 @@ mod tests {
             stop,
             terminal_failure,
             startup_ready: None,
+            bootstrap_reader: StdMutex::new(None),
             fifo_path: PathBuf::from("/nonexistent-test-fifo"),
             writer: None,
             diagnostics_task: None,
@@ -8442,6 +8614,7 @@ mod tests {
             stop,
             terminal_failure,
             startup_ready: None,
+            bootstrap_reader: StdMutex::new(None),
             fifo_path: PathBuf::from("/nonexistent-test-fifo"),
             writer: Some(writer),
             diagnostics_task: None,
@@ -9962,6 +10135,7 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             terminal_failure: terminal_failure.clone(),
             startup_ready: None,
+            bootstrap_reader: StdMutex::new(None),
             fifo_path: std::env::temp_dir().join(format!(
                 "videorc-missing-terminal-signal-test-{}",
                 Uuid::new_v4()
@@ -10889,6 +11063,48 @@ mod tests {
             classify_bridge_frame(Some(21), Some(fed.sequence)),
             BridgeFrameSource::Repeated
         );
+    }
+
+    #[test]
+    fn source_iso_barrier_retains_content_and_native_capture_epoch() {
+        let make_store = || Arc::new(StdMutex::new(crate::frame_store::FrameStore::new(2)));
+        let primary = make_store();
+        let camera = make_store();
+        let presented = Instant::now();
+        let captured = presented - Duration::from_millis(72);
+        for store in [&primary, &camera] {
+            store.lock().unwrap().publish_with_metadata(
+                7,
+                4,
+                4,
+                CompositorPixelFormat::yuv420p_cpu_buffer(),
+                crate::compositor::CompositorFrameExportHandle::default()
+                    .with_presentation_time(presented),
+                captured,
+                vec![42; 24],
+            );
+        }
+        let barrier = RecordingStartBarrier::new(2, Some(primary.clone()), 30);
+        let epoch = Arc::new(OnceLock::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready_rx) = std_mpsc::channel();
+        let worker_barrier = barrier.clone();
+        let worker_epoch = epoch.clone();
+        let worker_stop = stop.clone();
+        let worker = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            worker_barrier.prepared(Some(primary), &worker_epoch, &worker_stop)
+        });
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let camera_result = barrier.prepared(Some(camera.clone()), &epoch, &stop);
+        let primary_result = worker.join().unwrap();
+        let (camera_at, camera_frame) = camera_result.unwrap();
+        let (primary_at, primary_frame) = primary_result.unwrap();
+        assert_eq!(camera_at, primary_at);
+        assert_eq!(epoch.get(), Some(&captured));
+        publish_test_compositor_frame(&camera, 8, 4, 4, &[99; 24]);
+        assert_eq!(camera_frame.unwrap().sequence, 7);
+        assert_eq!(primary_frame.unwrap().sequence, 7);
     }
 
     #[test]

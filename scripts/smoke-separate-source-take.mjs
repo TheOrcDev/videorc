@@ -16,6 +16,7 @@
 //                        The recording canvas every file must match. Defaults
 //                        to the Combined file's own video stream.
 //   --roles <a,b,c>      Roles the session armed (default combined,screen,camera).
+//   --expectations file  JSON with committed source-removal intervals; default duration matching stays strict.
 //   --no-analyze         Skip the per-file analyzer passes (probe-only gates).
 //   --no-motion          Analyzer: treat freezes as warnings (static desktops).
 //   --max-spread-seconds <n>
@@ -27,7 +28,7 @@
 // the packaged app; run this against that recording as device acceptance.
 
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 
 import { analyzeRecording } from './lib/recording-analyzer.mjs'
 import {
@@ -53,6 +54,9 @@ function parseArgs(argv) {
         break
       case '--fps':
         args.fps = Number(next())
+        break
+      case '--expectations':
+        args.expectations = JSON.parse(readFileSync(next(), 'utf8'))
         break
       case '--roles':
         args.roles = String(next())
@@ -128,7 +132,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (args.help || !args.combinedPath) {
     console.log(
-      'usage: node scripts/smoke-separate-source-take.mjs <combined-file> [--width n --height n --fps n] [--roles a,b] [--no-analyze] [--no-motion]'
+      'usage: node scripts/smoke-separate-source-take.mjs <combined-file> [--width n --height n --fps n] [--roles a,b] [--expectations file] [--no-analyze] [--no-motion]'
     )
     process.exit(args.help ? 0 : 2)
   }
@@ -157,7 +161,7 @@ async function main() {
 
   const verdict = evaluateTake(
     summaries,
-    { roles: args.roles, video },
+    { roles: args.roles, video, intervals: args.expectations?.intervals },
     { ...DEFAULT_TAKE_GATES, ...args.gates }
   )
   const failures = [...verdict.failures]

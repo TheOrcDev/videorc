@@ -14,7 +14,11 @@ takes for later NLE work.
   Slices 1-6 are implemented; Slice 7's packaged-app camera take and
   `pnpm smoke:separate-source-take` on it stay with the owner because the dev
   app has no camera TCC grant.
-- **Implementation notes (what shipped vs. the spec below):**
+- **Implementation notes (PR behavior versus the specification below):**
+  - PR #632 hardening is tracked in [Plan 158](158-harden-separate-source-recordings.md).
+    Its production lifecycle and artifact gates supersede the original
+    fixture-only acceptance below; acceptance remains in progress until
+    that plan records the final results.
   - ISO video is a second and third compositor output
     (`CompositorSourceIsoOutput`, `source_iso_snapshot` in `compositor.rs`):
     one source forced visible and full-frame on the recording canvas, no
@@ -28,9 +32,11 @@ takes for later NLE work.
     (`REFUSAL_DROP_COMBINED`), never a silent single-file fallback. The
     Combined file keeps its legacy name; ISO files insert `-screen` /
     `-camera` before `.mkv`.
-  - Library rows: `take_id` + `recording_role` columns; ISO rows are inserted
-    beside the Combined row when its muxers exit and run the ordinary
-    MKV → MP4 finalization job. Audio tracks carry `title` and
+  - Library rows use `take_id` + `recording_role` columns. Plan 158 reserves
+    both ISO rows before capture and updates each role independently when
+    it ends. Private capture paths and bound file identities support crash
+    recovery and publication without replacing another file. Healthy roles
+    run the ordinary MKV → MP4 finalization job. Audio tracks carry `title` and
     `handler_name` (Mix / System audio / Microphone) so the role survives the
     MP4 export; `scripts/smoke-separate-source-take.mjs` hard-fails a swapped
     pairing, a missing role file, off-canvas video or duration drift.

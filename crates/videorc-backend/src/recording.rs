@@ -587,6 +587,10 @@ impl PostSpawnRejectedStartCleanup {
     }
 
     async fn run(self) {
+        let _ = self
+            .state
+            .database
+            .fail_uncommitted_source_iso_sessions(&self.session_id);
         let Some(output_path) = self.output_path.as_deref() else {
             return;
         };
@@ -3181,6 +3185,29 @@ async fn start_session_with_timeline(
         layout: params.layout.clone(),
         output: params.output.clone(),
     })?;
+    if let (Some(plan), Some(path)) = (source_iso_plan.as_ref(), output_path.as_deref()) {
+        let roles = plan
+            .iso_roles()
+            .map(|role| {
+                (
+                    role.as_str(),
+                    role.title_suffix(),
+                    crate::source_iso::recording_role_mkv_path(path, role)
+                        .display()
+                        .to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (_, _, path) in &roles {
+            anyhow::ensure!(
+                !Path::new(path).exists(),
+                "Separate recording path already exists: {path}"
+            );
+        }
+        state
+            .database
+            .reserve_source_iso_sessions(&session_id, &roles)?;
+    }
     if params.purpose.is_performance_check() {
         // Benchmark rows never reach the Library and must not replace the
         // user's remembered capture; the performance check deletes them.
@@ -3539,6 +3566,12 @@ async fn start_session_with_timeline(
     )
     .await?;
     let encoder_bridge_video_output = windows_encoded_bridge_decision.effective;
+    if source_iso_plan.is_some() {
+        anyhow::ensure!(
+            encoder_bridge_video_output == EncoderBridgeVideoOutput::VideoToolboxH264MpegTs,
+            "Separate source recordings require the timestamped MPEG-TS recording transport"
+        );
+    }
     // Intel iGPU MFTs that reject the requested CBR at probe time are only kept
     // alive if every MF leg encodes at the bitrate the probe validated; encode
     // config must match the probe or the MFT fails mid-session with
@@ -4543,7 +4576,7 @@ async fn start_session_with_timeline(
             // the bridge writer consumes only D3D11 tickets.
             (None, None, None)
         };
-    let args = if use_encoder_bridge {
+    let mut args = if use_encoder_bridge {
         let fifo_path = encoder_bridge_fifo
             .as_deref()
             .context("Encoder bridge FIFO path was not prepared")?;
@@ -4591,6 +4624,9 @@ async fn start_session_with_timeline(
             &windows_encoded_bridge_decision.fallback_ffmpeg_encoder,
         )?
     };
+    if source_iso_plan.is_some() {
+        crate::source_iso::stamp_combined_audio_metadata(&mut args);
+    }
     let ffmpeg_live_audio_filter_count = ffmpeg_live_microphone_filter_count(&args);
     #[cfg(debug_assertions)]
     let source_switch_output_audio_timing = inspect_source_switch_output_audio_timing(
@@ -4731,7 +4767,7 @@ async fn start_session_with_timeline(
     // Rust therefore drops the process guard first on cancellation at either
     // await between construction and publication, synchronously signalling
     // FFmpeg before this active value joins its native-audio FIFO writer.
-    let pending_active: ActiveRecording;
+    let mut pending_active: ActiveRecording;
     // Plan 069: on a system-audio platform every bus runs at the system-audio
     // playout delay with the decision 8 offset split, matching the FFmpeg
     // track shift in `ffmpeg_session_params`; elsewhere the defaults.
@@ -5040,6 +5076,91 @@ async fn start_session_with_timeline(
     let windows_d3d11_auxiliary_input = windows_d3d11_media
         .as_ref()
         .and_then(WindowsD3d11SessionPump::auxiliary_encoder_source);
+    let source_iso_start_barrier = source_iso_plan.as_ref().map(|_| {
+        crate::encoder_bridge::RecordingStartBarrier::new(
+            3 + usize::from(encoder_bridge_stream_profile.is_some()),
+            encoder_bridge_frame_store.clone(),
+            params.output.video.fps,
+        )
+    });
+    // Construct ISO writers under cancellation ownership before Combined
+    // joins their shared startup barrier. Any known armed-role startup failure
+    // rejects the entire take before ownership transfers to ActiveRecording.
+    let mut source_iso_runtime = match (source_iso_plan.clone(), source_iso_taps.clone()) {
+        (Some(plan), Some(taps)) => {
+            let iso_start: Result<crate::source_iso::SourceIsoStartGuard> = (|| {
+                let frame_stores = source_iso_frame_stores.clone().with_context(|| {
+                    format!(
+                        "{}: Separate source recordings need the compositor encoder bridge; this session's capture path cannot carry them.",
+                        crate::source_iso::HEALTH_UNAVAILABLE
+                    )
+                })?;
+                let combined_mkv_path = output_path
+                    .as_deref()
+                    .context("Separate source recordings need a local recording path")?;
+                crate::source_iso::start_source_iso_writers(
+                    crate::source_iso::SourceIsoStartParams {
+                        state: &state,
+                        session_id: &session_id,
+                        plan,
+                        combined_mkv_path,
+                        ffmpeg_path: &ffmpeg_path,
+                        video: &params.output.video,
+                        video_output: encoder_bridge_video_output,
+                        frame_stores,
+                        video_epoch: video_epoch.clone(),
+                        bitrate_kbps: encoder_bridge_recording_bitrate_kbps,
+                        keep_original_media: params.output.keep_original_mkv,
+                        start_barrier: source_iso_start_barrier.clone(),
+                        track_shift_ms: session_audio_sync(
+                            &params.audio,
+                            crate::system_audio_session::system_audio_capable(),
+                        )
+                        .map_or(params.audio.microphone_sync_offset_ms, |split| {
+                            split.track_shift_ms
+                        }),
+                    },
+                    taps,
+                )
+            })();
+            match iso_start {
+                Ok(runtime) => {
+                    let _ = emit_health_event(
+                        &state,
+                        Some(&session_id),
+                        HealthLevel::Info,
+                        crate::source_iso::HEALTH_STARTED,
+                        "Separate source recordings armed: Screen and Camera files record beside the Combined recording.",
+                    );
+                    // Cleanup-owned until `pending_active` takes it: the
+                    // startup-failure and overlay-failure returns below, and
+                    // cancellation of this future, abort the writers from Drop.
+                    Some(runtime)
+                }
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    uncommitted_capture_process
+                        .set_failure(PublishedSessionStartFailureOrigin::EncoderBridge, &message);
+                    let _ = emit_health_event(
+                        &state,
+                        Some(&session_id),
+                        HealthLevel::Error,
+                        crate::source_iso::HEALTH_UNAVAILABLE,
+                        &message,
+                    );
+                    uncommitted_capture_process
+                        .terminate_and_reap_before_fifo_writer_join()
+                        .await;
+                    return Err(error);
+                }
+            }
+        }
+        _ => None,
+    };
+    #[cfg(test)]
+    if let Some(iso) = source_iso_runtime.as_mut() {
+        iso.test_pause("writers", pid).await;
+    }
     let (mut encoder_bridge, mut encoder_bridge_stream) = if use_encoder_bridge {
         let bridge_fifo_path = match encoder_bridge_fifo
             .clone()
@@ -5094,6 +5215,7 @@ async fn start_session_with_timeline(
             params.output.stream_enabled && encoder_bridge_stream_profile.is_none(),
             recording_diagnostics_context,
             video_epoch.clone(),
+            source_iso_start_barrier.clone(),
         ) {
             Ok(bridge) => Some(bridge),
             Err(error) => {
@@ -5158,6 +5280,7 @@ async fn start_session_with_timeline(
                         true,
                         stream_diagnostics_context,
                         video_epoch.clone(),
+                        source_iso_start_barrier.clone(),
                     )?)
                 }
                 _ => None,
@@ -5173,6 +5296,7 @@ async fn start_session_with_timeline(
             } else {
                 recording_bridge.wait_until_ready().await?;
             }
+            if let Some(iso) = source_iso_runtime.as_mut() { iso.wait_until_ready().await?; }
             Ok(())
         }
         .await;
@@ -5221,85 +5345,6 @@ async fn start_session_with_timeline(
             wait_for_ffmpeg_output_startup(receiver, ffmpeg_output_startup_started_at).await
         }
         None => Ok(()),
-    };
-    // Plan 157: the ISO writers start once the Combined bridges are ready, so
-    // a Combined-only failure never masquerades as an ISO failure. Any ISO
-    // start failure fails the session: an armed take must not silently
-    // degrade to Combined-only.
-    let source_iso_runtime = match (source_iso_plan.clone(), source_iso_taps.clone()) {
-        (Some(plan), Some(taps)) => {
-            let iso_start: Result<crate::source_iso::SourceIsoRuntime> = async {
-                let frame_stores = source_iso_frame_stores.clone().with_context(|| {
-                    format!(
-                        "{}: Separate source recordings need the compositor encoder bridge; this session's capture path cannot carry them.",
-                        crate::source_iso::HEALTH_UNAVAILABLE
-                    )
-                })?;
-                let combined_mkv_path = output_path
-                    .as_deref()
-                    .context("Separate source recordings need a local recording path")?;
-                crate::source_iso::start_source_iso_writers(
-                    crate::source_iso::SourceIsoStartParams {
-                        state: &state,
-                        session_id: &session_id,
-                        plan,
-                        combined_mkv_path,
-                        ffmpeg_path: &ffmpeg_path,
-                        video: &params.output.video,
-                        video_output: encoder_bridge_video_output,
-                        frame_stores,
-                        video_epoch: video_epoch.clone(),
-                        bitrate_kbps: encoder_bridge_recording_bitrate_kbps,
-                    },
-                    taps,
-                )
-                .await
-            }
-            .await;
-            match iso_start {
-                Ok(runtime) => {
-                    let _ = emit_health_event(
-                        &state,
-                        Some(&session_id),
-                        HealthLevel::Info,
-                        crate::source_iso::HEALTH_STARTED,
-                        "Separate source recordings armed: Screen and Camera files record beside the Combined recording.",
-                    );
-                    // Cleanup-owned until `pending_active` takes it: the
-                    // startup-failure and overlay-failure returns below, and
-                    // cancellation of this future, abort the writers from Drop.
-                    Some(crate::source_iso::SourceIsoStartGuard::new(runtime, &state))
-                }
-                Err(error) => {
-                    let message = format!("{error:#}");
-                    uncommitted_capture_process
-                        .set_failure(PublishedSessionStartFailureOrigin::EncoderBridge, &message);
-                    let _ = emit_health_event(
-                        &state,
-                        Some(&session_id),
-                        HealthLevel::Error,
-                        crate::source_iso::HEALTH_UNAVAILABLE,
-                        &message,
-                    );
-                    let batch = begin_recording_encoder_bridge_teardown(
-                        &mut encoder_bridge,
-                        &mut encoder_bridge_stream,
-                        ENCODER_BRIDGE_TEARDOWN_GRACE,
-                    );
-                    uncommitted_capture_process
-                        .terminate_and_reap_before_fifo_writer_join()
-                        .await;
-                    let _ = finish_recording_encoder_bridge_teardown(
-                        &state,
-                        batch,
-                        "source-iso-start-failure",
-                    )
-                    .await;
-                    return Err(error);
-                }
-            }
-        }
-        _ => None,
     };
     let encoder_bridge_terminal_failure = encoder_bridge
         .as_ref()
@@ -5447,7 +5492,7 @@ async fn start_session_with_timeline(
         screen_overlay,
         encoder_bridge,
         encoder_bridge_stream,
-        source_iso: source_iso_runtime.map(crate::source_iso::SourceIsoStartGuard::commit),
+        source_iso: None,
         #[cfg(target_os = "windows")]
         windows_d3d11_monitor,
         #[cfg(target_os = "windows")]
@@ -5498,11 +5543,19 @@ async fn start_session_with_timeline(
     let running_status =
         pending_active.status(running_state, Some(format!("Running {mode} session.")));
 
+    #[cfg(test)]
+    if let Some(iso) = source_iso_runtime.as_mut() {
+        iso.test_pause("precommit", pid).await;
+    }
+
     // Acquire the final owner slot while the uncommitted child guard is still
     // armed. From `commit` through monitor spawn there are no await points, so
     // cancellation can leave neither an orphan FFmpeg child nor an active
     // recording without its reaper.
     let mut recording = state.recording.lock().await;
+    if let Some(iso) = source_iso_runtime.as_mut() {
+        iso.validate_health()?;
+    }
     let mut confirmed_sources = params.sources.clone();
     let live_microphone_id = match capture.microphone.as_ref() {
         Some(MicrophoneInput::AvFoundationUid { uid_hex }) => {
@@ -5586,6 +5639,8 @@ async fn start_session_with_timeline(
     }
     let (child, session_start_admission, ffmpeg_stderr_monitor) =
         uncommitted_capture_process.commit();
+    pending_active.source_iso =
+        source_iso_runtime.map(crate::source_iso::SourceIsoStartGuard::commit);
     let watchdog_pid = pending_active.pid;
     *recording = Some(pending_active);
     session_start_admission.commit();
@@ -5952,6 +6007,9 @@ impl Drop for SessionStartRowGuard {
             None,
             None,
         );
+        let _ = self
+            .database
+            .fail_uncommitted_source_iso_sessions(&self.session_id);
         let _ = self.database.add_session_log(
             &self.session_id,
             HealthLevel::Error,
@@ -6471,6 +6529,15 @@ where
     base_finalization.status = "completed".to_string();
     base_finalization.mp4_path = Some(preferred_output.display().to_string());
     let output_ownership = capture_session_file_bound_identity(&input)?;
+    if let Some(expected) = state
+        .database
+        .source_iso_recovery_ownership(&params.session_id)?
+    {
+        anyhow::ensure!(
+            expected.is_some() && output_ownership == expected,
+            "ISO capture ownership could not be verified; refusing to adopt its current path"
+        );
+    }
     let mut recovery_path = None;
     let published = export_recording_to_mp4_with_exporter(
         &state,
@@ -8196,8 +8263,8 @@ async fn wait_for_process_exit(pid: u32, wait: Duration) -> bool {
 /// the session's intended fps and whether an audio source was selected.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PostRecordingGate {
-    intended_fps: Option<f64>,
-    expect_audio: bool,
+    pub(crate) intended_fps: Option<f64>,
+    pub(crate) expect_audio: bool,
 }
 
 struct SessionMonitorContext {
@@ -8651,7 +8718,7 @@ fn persist_terminal_session_or_recovery(
     persist_finalization_or_recovery(state, &finalization, &mut None)
 }
 
-fn persist_finalization_or_recovery(
+pub(crate) fn persist_finalization_or_recovery(
     state: &AppState,
     finalization: &SessionFinalization,
     recovery_path: &mut Option<PathBuf>,
@@ -10198,6 +10265,34 @@ pub fn resume_pending_recording_finalizations(state: &AppState) {
         let output_ownership = capture_session_file_bound_identity(&input_mkv)
             .ok()
             .flatten();
+        let iso_ownership = state.database.source_iso_recovery_ownership(&session_id);
+        if let Ok(Some(expected)) = &iso_ownership {
+            let matches = expected
+                .as_ref()
+                .zip(output_ownership.as_ref())
+                .is_some_and(|(expected, actual)| expected == actual);
+            if !matches {
+                let _ = state.database.set_session_finalization_state(&session_id, FINALIZATION_STATE_FAILED,
+                    Some("Interrupted separate recording ownership could not be verified; the current file was not adopted."));
+                continue;
+            }
+        } else if iso_ownership.is_err() {
+            continue;
+        }
+        let iso_gate = if matches!(iso_ownership, Ok(Some(_))) {
+            let Ok((intended_fps, expect_audio)) = state
+                .database
+                .source_iso_recording_expectations(&session_id)
+            else {
+                continue;
+            };
+            Some(PostRecordingGate {
+                intended_fps,
+                expect_audio,
+            })
+        } else {
+            None
+        };
         state.emit_log(
             "info",
             format!("Resuming the interrupted MP4 export for session {session_id}."),
@@ -10218,7 +10313,7 @@ pub fn resume_pending_recording_finalizations(state: &AppState) {
                     final_diagnostics,
                     finalized_caption_artifact: None,
                     captioned_copy_requested: false,
-                    post_recording_gate: None,
+                    post_recording_gate: iso_gate,
                     pipeline_reported_freezes: false,
                 },
                 control,
@@ -11470,6 +11565,21 @@ struct PreparedNativeAudioSource {
 }
 
 async fn resolve_capture_inputs(ffmpeg_path: &str, params: &StartSessionParams) -> CaptureInputs {
+    #[cfg(test)]
+    if matches!(
+        params
+            .sources
+            .screen_id
+            .as_deref()
+            .or(params.sources.window_id.as_deref()),
+        Some("screen:iso-runtime" | "window:iso-runtime")
+    ) {
+        return CaptureInputs {
+            video: VideoInput::TestPattern,
+            camera_index: None,
+            microphone: resolve_microphone_input(params.sources.microphone_id.as_deref()),
+        };
+    }
     let microphone = resolve_microphone_input(params.sources.microphone_id.as_deref());
 
     // Camera-only makes the camera the primary input. No screen is enumerated or
@@ -25895,6 +26005,472 @@ mod tests {
             },
             "t0".to_string(),
         )
+    }
+
+    /// Real session coordinator, compositor, native encoders, muxers and Stop.
+    /// Only device producers are replaced by controlled frame stores.
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "maintained runtime smoke; produces real encoded artifacts"]
+    async fn source_iso_runtime_artifacts() {
+        let directory = std::path::PathBuf::from(
+            std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_DIR").expect("runtime evidence directory"),
+        );
+        std::fs::create_dir_all(&directory).unwrap();
+        let state = test_state_with_file_database(&directory);
+        if std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_RECOVER").is_some() {
+            let reconciled = state.database.reconcile_orphaned_sessions().unwrap();
+            assert_eq!(
+                reconciled, 3,
+                "every durable member recovered after process interruption"
+            );
+            assert_eq!(state.database.reconcile_orphaned_sessions().unwrap(), 0);
+            let rows = state.database.list_session_items_page(None, 20).unwrap();
+            assert_eq!(rows.items.len(), 3);
+            for row in &rows.items {
+                if row.recording_role.as_deref() != Some("combined") {
+                    assert_eq!(
+                        row.finalization_state,
+                        Some(crate::protocol::RecordingFinalizationState::Failed)
+                    );
+                    let path = state
+                        .database
+                        .session_recording_path(&row.id)
+                        .unwrap()
+                        .unwrap();
+                    state
+                        .database
+                        .verify_source_iso_capture_ownership(&row.id, Path::new(&path))
+                        .unwrap();
+                    remux_session(
+                        state.clone(),
+                        RemuxSessionParams {
+                            session_id: row.id.clone(),
+                            ffmpeg_path: Some("ffmpeg".into()),
+                        },
+                    )
+                    .await
+                    .expect("owned interrupted role media remains recoverable");
+                }
+            }
+            std::fs::write(directory.join("recovery.json"), serde_json::to_vec_pretty(&serde_json::json!({"reconciled": reconciled, "secondReconcile": 0, "roles": rows.items})).unwrap()).unwrap();
+            return;
+        }
+        let stream_port = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_STREAM_PORT")
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok());
+        let mut params = if stream_port.is_some() {
+            simulcast_split_params(true).0
+        } else {
+            base_params(true, false)
+        };
+        if let Some(port) = stream_port {
+            for (index, target) in params
+                .streaming
+                .as_mut()
+                .unwrap()
+                .targets
+                .iter_mut()
+                .enumerate()
+            {
+                target.server_url = format!("rtmp://127.0.0.1:{}/live", port + index as u16);
+                target.stream_key = format!("iso-{index}");
+                target.platform = crate::streaming::StreamPlatform::Custom;
+            }
+        }
+
+        let screen_fixture_id = if std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_WINDOW").is_some() {
+            "window:iso-runtime"
+        } else {
+            "screen:iso-runtime"
+        };
+        if screen_fixture_id.starts_with("window:") {
+            params.sources.screen_id = None;
+            params.sources.window_id = Some(screen_fixture_id.into());
+        } else {
+            params.sources.screen_id = Some(screen_fixture_id.into());
+            params.sources.window_id = None;
+        }
+        params.sources.camera_id = Some("camera:iso-runtime".into());
+        params.sources.microphone_id = Some("microphone:coreaudio:42".into());
+        let cancellation = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_CANCEL").ok();
+        let startup_failure =
+            std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_START_FAILURE").is_some();
+        let audio_case = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_AUDIO").unwrap_or_default();
+        if cancellation.is_some() || startup_failure || audio_case == "no-microphone" {
+            params.sources.microphone_id = None;
+        }
+        params.audio.microphone_muted = audio_case == "muted";
+        if audio_case == "gains" {
+            params.audio.microphone_gain_db = -6.0;
+            params.audio.system_audio_gain_db = 3.0;
+        }
+        let system_enabled = audio_case != "system-off";
+        let (microphone, microphone_tx, microphone_stats) =
+            crate::audio::test_controlled_native_audio_source();
+        state.warm_microphone.install(
+            42,
+            crate::session_audio::InitialAudioSource::warm(microphone),
+        );
+        params.output.ffmpeg_path =
+            Some(std::env::var("VIDEORC_SMOKE_FFMPEG_PATH").unwrap_or_else(|_| "ffmpeg".into()));
+        params.output.output_directory = Some(directory.display().to_string());
+        params.output.keep_original_mkv = true;
+        params.output.separate_source_recordings =
+            Some(crate::protocol::SeparateSourceRecordingsSettings {
+                enabled: true,
+                keep_combined: true,
+            });
+        params.output.video.width = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_WIDTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1920);
+        params.output.video.height = params.output.video.width * 9 / 16;
+        params.output.video.fps = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_FPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
+        params.audio.microphone_sync_offset_ms = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_OFFSET")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            "camera:iso-runtime",
+            &params.layout,
+            &params.output.video,
+        )
+        .await;
+        crate::preview_screen::test_install_live_screen_generation(
+            &state,
+            screen_fixture_id,
+            1,
+            1,
+            &params.output.video,
+        )
+        .await;
+        let (system_tx, system_rx) = std::sync::mpsc::sync_channel(512);
+        let system_stats = Arc::new(crate::audio::AudioCaptureStats::default());
+        let producer_system_stats = system_stats.clone();
+        let system_sender = Arc::new(std::sync::Mutex::new(system_tx));
+        let producer_system_sender = system_sender.clone();
+        let capture_latency_ms = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_CAPTURE_LATENCY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        let producer_state = state.clone();
+        let (producer_stop, mut producer_stopping) = tokio::sync::oneshot::channel();
+        let stereo_right_gain = if audio_case == "stereo" { 0.5_f32 } else { 1.0 };
+        let live_controls = audio_case == "live-controls";
+        let producer = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(10));
+            let mut sequence = 1_u64;
+            loop {
+                tokio::select! { _ = &mut producer_stopping => break, _ = tick.tick() => {} }
+                sequence += 1;
+                let captured_at = Instant::now();
+                let pulse_at = |sequence: u64| {
+                    if matches!(sequence % 290, 0..=49 | 80..=119 | 190..=209 | 250..=289) {
+                        255
+                    } else {
+                        100
+                    }
+                };
+                let pulse = if live_controls {
+                    255
+                } else {
+                    pulse_at(sequence)
+                };
+                let samples = (0..480)
+                    .flat_map(|index| {
+                        let time = ((sequence - 1) * 480 + index) as f64 / 48_000.0;
+                        let value = if pulse == 255 {
+                            (time * 997.0 * std::f64::consts::TAU).sin() as f32 * 0.25
+                        } else {
+                            0.0
+                        };
+                        [value, value * stereo_right_gain]
+                    })
+                    .collect();
+                let system_samples = (0..480)
+                    .flat_map(|index| {
+                        let time = ((sequence - 1) * 480 + index) as f64 / 48_000.0;
+                        let value = if pulse == 255 {
+                            (time * 317.0 * std::f64::consts::TAU).sin() as f32 * 0.2
+                        } else {
+                            0.0
+                        };
+                        [value, value * stereo_right_gain]
+                    })
+                    .collect();
+                if producer_system_sender
+                    .lock()
+                    .unwrap()
+                    .try_send(crate::audio::AudioFrame {
+                        timestamp_micros: (sequence - 1) * 10_000,
+                        captured_at,
+                        sample_rate: 48_000,
+                        channels: 2,
+                        samples: system_samples,
+                    })
+                    .is_ok()
+                {
+                    producer_system_stats.record_captured_frames(480);
+                }
+                let frame = crate::audio::AudioFrame {
+                    timestamp_micros: (sequence - 1) * 10_000,
+                    captured_at,
+                    sample_rate: 48_000,
+                    channels: 2,
+                    samples,
+                };
+                if microphone_tx.try_send(frame).is_ok() {
+                    microphone_stats.record_captured_frames(480);
+                }
+
+                let video_sequence = sequence.saturating_sub(capture_latency_ms / 10);
+                let video_pulse = pulse_at(video_sequence);
+                let video_captured_at = captured_at - Duration::from_millis(capture_latency_ms);
+                crate::preview_camera::test_publish_camera_pixels(
+                    &producer_state,
+                    sequence,
+                    [(video_sequence % 32 * 6) as u8, 0, video_pulse, 255],
+                    video_captured_at,
+                )
+                .await;
+                crate::preview_screen::test_publish_screen_pixels(
+                    &producer_state,
+                    sequence,
+                    [(video_sequence % 32 * 6) as u8, video_pulse, 0, 255],
+                    video_captured_at,
+                )
+                .await;
+            }
+        });
+        use futures_util::FutureExt;
+        let outcome = std::panic::AssertUnwindSafe(async {
+        if let Some(point) = if startup_failure { Some("precommit-failure") } else { cancellation.as_deref() } {
+            let receipt = crate::source_iso::test_pause_next_source_iso_start(point);
+            let start_state = state.clone();
+            let start_params = params.clone();
+            let start = tokio::spawn(async move { start_session(start_state, start_params).await });
+            let receipt = tokio::time::timeout(Duration::from_secs(15), receipt).await;
+            if startup_failure {
+                let failed = tokio::time::timeout(Duration::from_secs(8), start).await.unwrap().unwrap();
+                assert!(failed.is_err(), "known ISO failure must reject whole startup");
+            } else {
+                start.abort();
+                let _ = start.await;
+            }
+            let receipt = receipt.expect("production startup reaches cancellation boundary").unwrap();
+            assert!(tokio::time::timeout(Duration::from_secs(8), receipt.reaped).await.unwrap().unwrap(), "ISO children reaped");
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if receipt.pids.iter().all(|pid| unsafe { libc::kill(*pid as i32, 0) } != 0) { break; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("all owned Combined and ISO muxers reaped");
+            assert!(receipt.fifos.iter().all(|path| !path.exists()), "every ISO FIFO retired");
+            let page = state.database.list_session_items_page(None, 20).unwrap();
+            assert_eq!(page.items.len(), 3);
+            for item in page.items.iter().filter(|item| item.recording_role.as_deref() != Some("combined")) {
+                assert_eq!(item.finalization_state, Some(crate::protocol::RecordingFinalizationState::Failed));
+            }
+            std::fs::write(directory.join("cancellation.json"), serde_json::to_vec_pretty(&serde_json::json!({
+                "point": point, "ownedPids": receipt.pids, "fifos": receipt.fifos, "reaped": true
+            })).unwrap()).unwrap();
+            // The same capture producers must admit a subsequent real Start.
+        }
+        state.live_source_switch.lock().unwrap().observe_devices(&[
+            crate::protocol::Device { id: "camera:iso-runtime".into(), name: "Controlled camera".into(), kind: crate::protocol::DeviceKind::Camera, status: crate::protocol::DeviceStatus::Available, detail: None, width: None, height: None },
+            crate::protocol::Device { id: screen_fixture_id.into(), name: "Controlled capture".into(), kind: if screen_fixture_id.starts_with("window:") { crate::protocol::DeviceKind::Window } else { crate::protocol::DeviceKind::Screen }, status: crate::protocol::DeviceStatus::Available, detail: None, width: None, height: None },
+        ]);
+        let start_click = Instant::now();
+        let start = start_session(state.clone(), params.clone()).await;
+        let start_ms = start_click.elapsed().as_secs_f64() * 1000.0;
+        if let Err(error) = &start { panic!("production ISO startup: {error:#}"); }
+        let status = start.unwrap();
+        let session_id = status.session_id.as_deref().unwrap();
+        let system = state.recording.lock().await.as_ref().unwrap().native_audio.as_ref().unwrap().system_audio();
+        system.set_echo_guard(false);
+        if system_enabled {
+        let system_stats = system_stats.clone();
+        let source = system.prepare(move || Ok(crate::session_audio::ProducerSource::system(
+            "system:iso-runtime".into(), "Controlled system audio".into(), system_rx,
+            system_stats, Arc::new(std::sync::Mutex::new(None)), Box::new(()),
+        )), Arc::new(std::sync::atomic::AtomicBool::new(false))).await.unwrap();
+        system.attach(source).await.expect("real system audio slot accepts controlled capture");
+        }
+
+        if std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_CRASH").is_some() {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let recording = state.recording.lock().await;
+            let active = recording.as_ref().unwrap();
+            let mut pids = vec![active.pid];
+            pids.extend_from_slice(active.source_iso.as_ref().unwrap().test_owned_pids());
+            println!("ISO_CRASH_READY {}", serde_json::json!({"sessionId": session_id, "pids": pids}));
+            use std::io::Write;
+            std::io::stdout().flush().unwrap();
+            drop(recording);
+            std::future::pending::<()>().await;
+        }
+        let mut control_intervals = Vec::new();
+        if live_controls {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            system.detach().await.expect("live system Off acknowledged");
+            let changed = update_active_audio_processing(&state, AudioProcessingUpdateParams {
+                session_id: session_id.into(), microphone_gain_db: -6.0, microphone_muted: false,
+                system_audio_enabled: None, system_audio_gain_db: None, system_audio_echo_guard: None,
+            }).await;
+            assert!(changed.applied);
+            let off_at = active_capture_elapsed_seconds(&state).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            control_intervals.push(serde_json::json!({"start": off_at + 0.2, "duration": 0.4, "microphone": 0.25 * 10_f64.powf(-6.0 / 20.0), "system": 0.0}));
+            let (sender, receiver) = std::sync::mpsc::sync_channel(512);
+            *system_sender.lock().unwrap() = sender;
+            let source = system.prepare(move || Ok(crate::session_audio::ProducerSource::system(
+                "system:iso-runtime-readded".into(), "Controlled system audio".into(), receiver,
+                system_stats, Arc::new(std::sync::Mutex::new(None)), Box::new(()),
+            )), Arc::new(std::sync::atomic::AtomicBool::new(false))).await.unwrap();
+            system.attach(source).await.expect("live system On acknowledged");
+            let changed = update_active_audio_processing(&state, AudioProcessingUpdateParams {
+                session_id: session_id.into(), microphone_gain_db: 0.0, microphone_muted: true,
+                system_audio_enabled: None, system_audio_gain_db: None, system_audio_echo_guard: None,
+            }).await;
+            assert!(changed.applied);
+            let mute_at = active_capture_elapsed_seconds(&state).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            control_intervals.push(serde_json::json!({"start": mute_at + 0.2, "duration": 0.4, "microphone": 0.0, "system": 0.2 * 10_f64.powf(f64::from(params.audio.system_audio_gain_db) / 20.0)}));
+            let changed = update_active_audio_processing(&state, AudioProcessingUpdateParams {
+                session_id: session_id.into(), microphone_gain_db: 0.0, microphone_muted: false,
+                system_audio_enabled: None, system_audio_gain_db: None, system_audio_echo_guard: None,
+            }).await;
+            assert!(changed.applied);
+        }
+        let failure_case = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_FAILURE").ok();
+        if failure_case.as_deref() == Some("capture-recovery") {
+            state.capture_recovery.lock().await.test_camera_recovery_failed("camera:iso-runtime", false);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(state.database.session_finalization_snapshot(&format!("{session_id}-camera")).unwrap().status, "running", "retryable capture failure must not end ISO");
+            state.capture_recovery.lock().await.test_camera_recovery_failed("camera:iso-runtime", true);
+        }
+        let remove_role = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_REMOVE").ok();
+        let hidden = std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_HIDE").is_some();
+        if remove_role.as_deref() == Some("screen") || hidden {
+            let mut layout = params.layout.clone();
+            layout.layout_preset = crate::protocol::LayoutPreset::CameraOnly;
+            let applied = crate::live_layout::apply_layout_live(&state, crate::protocol::SceneLayoutApplyParams {
+                intent_id: None, simulcast_leg: false,
+                config: crate::protocol::SceneConfigParams { sources: params.sources.clone(), layout,
+                    video: Some(params.output.video.clone()), background: None,
+                    protected_overlay_window_ids: vec![], transition_ms: Some(100),
+                },
+            }).await.expect("real layout hides selected screen");
+            assert!(applied.applied);
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        if hidden {
+            assert_eq!(state.database.session_finalization_snapshot(&format!("{session_id}-screen")).unwrap().status, "running", "hidden selected source keeps its ISO");
+        }
+        if let Some(role) = remove_role.as_deref() {
+            let sources = crate::live_source_switch::get(&state, session_id).await.unwrap();
+            crate::live_source_switch::switch(&state, crate::live_source_switch::SourceSwitchParams {
+                session_id: session_id.into(), request_id: format!("runtime-{role}-off"),
+                expected_source_revision: sources.source_revision,
+                kind: if role == "camera" { crate::live_source_switch::SourceKind::Camera } else { crate::live_source_switch::SourceKind::Capture }, device_id: None,
+                protected_overlay_window_ids: vec![],
+            }).await.expect("authoritative source Off commits");
+            if std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_READD").is_some() {
+                if role == "camera" {
+                    crate::preview_camera::test_install_live_camera_for_layout(&state, "camera:iso-runtime", &params.layout, &params.output.video).await;
+                } else {
+                    crate::preview_screen::test_install_live_screen_generation(&state, screen_fixture_id, 2, 1, &params.output.video).await;
+                }
+                let sources = crate::live_source_switch::get(&state, session_id).await.unwrap();
+                crate::live_source_switch::switch(&state, crate::live_source_switch::SourceSwitchParams {
+                    session_id: session_id.into(), request_id: format!("runtime-{role}-readd"), expected_source_revision: sources.source_revision,
+                    kind: if role == "camera" { crate::live_source_switch::SourceKind::Camera } else { crate::live_source_switch::SourceKind::Capture },
+                    device_id: Some(if role == "camera" { "camera:iso-runtime" } else { screen_fixture_id }.into()), protected_overlay_window_ids: vec![],
+                }).await.expect("source re-add commits without restarting ended ISO");
+            }
+        }
+        if std::env::var_os("VIDEORC_SOURCE_ISO_RUNTIME_STOP_AFTER_REMOVE").is_none() {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        let mut terminal_events = state.events.subscribe();
+        let stop_boundary_seconds = active_capture_elapsed_seconds(&state).await.unwrap();
+        let stop_click = Instant::now();
+        let stop = stop_recording(state.clone()).await;
+        stop.expect("real Stop");
+        let terminal = wait_for_final_recording_status(&mut terminal_events, session_id)
+            .await.expect("Stop publishes its terminal authority after ISO teardown");
+        assert!(matches!(terminal.state, RecordingState::Idle), "{terminal:?}");
+        let idle_at = Instant::now();
+        let stop_ms = stop_click.elapsed().as_secs_f64() * 1000.0;
+        tokio::time::timeout(Duration::from_secs(45), async {
+            loop {
+                let page = state.database.list_session_items_page(None, 20).unwrap();
+                let take = page
+                    .items
+                    .iter()
+                    .filter(|item| item.take_id.as_deref() == Some(session_id))
+                    .collect::<Vec<_>>();
+                if take.len() == 3
+                    && take.iter().all(|item| {
+                        item.finalization_state == Some(if failure_case.is_some() && item.recording_role.as_deref() == Some("camera") {
+                            crate::protocol::RecordingFinalizationState::Failed
+                        } else { crate::protocol::RecordingFinalizationState::Finalized })
+                    })
+                {
+                    break;
+                }
+                if take.iter().any(|item| {
+                    !(failure_case.is_some() && item.recording_role.as_deref() == Some("camera")) && item.finalization_state
+                        == Some(crate::protocol::RecordingFinalizationState::Failed)
+                }) {
+                    panic!("runtime take failed: {take:?}");
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("all three exports finish");
+        let camera_final = state.database.session_finalization_snapshot(&format!("{session_id}-camera")).unwrap();
+        let camera_diagnostics: serde_json::Value = serde_json::from_str(&camera_final.diagnostics_json).unwrap();
+        if failure_case.as_deref() == Some("bridge") {
+            assert_eq!(camera_diagnostics["sourceIsoMuxerExitCode"], 0, "a failed encoder with clean muxer EOF stays failed");
+        }
+        let intervals = if let Some(role) = remove_role.as_deref() {
+            let row = state.database.session_finalization_snapshot(&format!("{session_id}-{role}")).unwrap();
+            let diagnostics: serde_json::Value = serde_json::from_str(&row.diagnostics_json).unwrap();
+            assert_eq!(diagnostics["sourceIsoOutcome"], "source-removed");
+            serde_json::json!({role: {"outcome": "source-removed", "startSeconds": 0,
+                "endSeconds": diagnostics["sourceIsoEndOffsetMs"].as_f64().unwrap() / 1000.0}})
+        } else { serde_json::json!({}) };
+        std::fs::write(directory.join("runtime-take.json"), serde_json::to_vec_pretty(&serde_json::json!({
+            "combinedPath": status.output_path, "sessionId": session_id,
+            "video": params.output.video, "audio": params.audio, "offsetMs": params.audio.microphone_sync_offset_ms,
+            "intervals": intervals, "failureCase": failure_case, "systemAudio": system_enabled,
+            "microphoneSelected": params.sources.microphone_id.is_some(), "audioCase": audio_case, "stereoRightGain": stereo_right_gain, "controlIntervals": control_intervals,
+            "latency": {"cold": cancellation.is_none(), "clickToRecordingMs": start_ms,
+                "stopClickToIdleMs": stop_ms, "idleToFinalizedMs": idle_at.elapsed().as_secs_f64() * 1000.0,
+                "surface": "backend-session-coordinator"},
+
+            "orchestration": "start_session/stop_recording", "deviceAdapters": "controlled-frame-stores",
+            "stopBoundarySeconds": stop_boundary_seconds,
+        })).unwrap()).unwrap();
+        }).catch_unwind().await;
+        let _ = producer_stop.send(());
+        let producer_result = producer.await;
+        shutdown_capture_processes(state.clone()).await;
+        assert!(
+            crate::compositor::shutdown_compositor(&state).await,
+            "runtime compositor retires"
+        );
+        producer_result.expect("controlled producers retired");
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     fn test_state() -> AppState {

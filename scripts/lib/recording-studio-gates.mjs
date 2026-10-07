@@ -69,6 +69,11 @@ export function buildRecordingStudioGateSteps({
       label: 'separate source recordings fixture take',
       command: 'pnpm',
       args: ['smoke:separate-source-fixture']
+    },
+    {
+      label: 'separate source production session runtime',
+      command: 'pnpm',
+      args: ['smoke:separate-source-runtime']
     }
   ]
 

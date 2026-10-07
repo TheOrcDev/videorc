@@ -75,6 +75,26 @@ describe('audioStreamTitle', () => {
 })
 
 describe('evaluateTake', () => {
+  it('requires explicit source removal intervals for shorter files and rejects truncation', () => {
+    const shorter = take({ camera: { duration: 3 } })
+    assert.equal(evaluateTake(shorter, { video: canvas }).pass, false)
+    const interval = { outcome: 'source-removed', startSeconds: 0, endSeconds: 3 }
+    assert.equal(
+      evaluateTake(shorter, { video: canvas, intervals: { camera: interval } }).pass,
+      true
+    )
+    for (const changed of [
+      { ...interval, outcome: 'completed' },
+      { ...interval, startSeconds: 1 },
+      { ...interval, endSeconds: 0 },
+      { ...interval, endSeconds: 5 }
+    ])
+      assert.equal(
+        evaluateTake(shorter, { video: canvas, intervals: { camera: changed } }).pass,
+        false
+      )
+  })
+
   it('passes a healthy three-role take', () => {
     const result = evaluateTake(take(), { video: canvas })
     assert.deepEqual(result, { pass: true, failures: [], warnings: [] })

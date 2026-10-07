@@ -944,6 +944,11 @@ async fn start_preview_camera_with_owner(
     mut admission_ready: Option<oneshot::Sender<Option<PreviewCameraStartingIdentity>>>,
     wait: PreviewCameraStartWait,
 ) -> PreviewCameraLayoutStart {
+    #[cfg(test)]
+    if params.sources.camera_id.as_deref() == Some("camera:iso-runtime") {
+        signal_camera_layout_admission(&mut admission_ready, None);
+        return PreviewCameraLayoutStart::without_admission(preview_camera_status(&state).await);
+    }
     if state.process_shutdown_requested() {
         let status = camera_start_rejected_for_shutdown(preview_camera_status(&state).await);
         signal_camera_layout_admission(&mut admission_ready, None);
@@ -3593,16 +3598,34 @@ pub(crate) async fn test_publish_camera_pixels(
     pixel: [u8; 4],
     captured_at: Instant,
 ) {
+    let (width, height) = {
+        let slot = state.preview_camera.lock().await;
+        let Some(active) = slot.active.as_ref() else {
+            return;
+        };
+        let video = &active.video;
+        (video.width, video.height)
+    };
+    let bytes = pixel.repeat((width * height) as usize);
     let slot = state.preview_camera.lock().await;
-    let active = slot.active.as_ref().expect("installed camera fixture");
+    let Some(active) = slot.active.as_ref() else {
+        return;
+    };
     let mut shared = active.shared.lock().unwrap();
+    if active.camera_id == "camera:iso-runtime" {
+        shared.capture_timings.record_callback_at(captured_at);
+        shared
+            .capture_timings
+            .record_sample_pts(Some(sequence as f64 / 100.0));
+        shared.source_fps = Some(100.0);
+    }
     shared.frame_store.publish(
         sequence,
         active.video.width,
         active.video.height,
         PreviewCameraPixelFormat::Bgra8,
         captured_at,
-        pixel.repeat((active.video.width * active.video.height) as usize),
+        bytes,
     );
 }
 

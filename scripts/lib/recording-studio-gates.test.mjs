@@ -23,6 +23,7 @@ describe('buildRecordingStudioGateSteps', () => {
       'backend noise cleanup tests',
       'scene switch recording and stream pixel artifacts',
       'separate source recordings fixture take',
+      'separate source production session runtime',
       'freeform editor pointer continuity smoke',
       'live captions transport contract smoke',
       'live captions mute/gain and record+stream artifact smoke',

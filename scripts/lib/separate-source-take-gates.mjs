@@ -154,12 +154,28 @@ export function evaluateTake(summaries, expectations = {}, gates = DEFAULT_TAKE_
         failures.push(`${role} video is ${summary.fps.toFixed(2)} fps (expected ${canvas.fps})`)
       }
     }
+    const interval = expectations.intervals?.[role]
+    if (interval) {
+      if (
+        interval.outcome !== 'source-removed' ||
+        !(interval.endSeconds > 0) ||
+        interval.startSeconds !== 0
+      ) {
+        failures.push(`${role} has invalid explicit source-removal expectations`)
+      } else if (
+        Math.abs(summary.durationSeconds - interval.endSeconds) >
+        0.25 + 1 / (canvas?.fps || 30)
+      ) {
+        failures.push(`${role} duration does not match its persisted source-removal boundary`)
+      }
+    }
     if (!(summary.durationSeconds > 0)) {
       failures.push(`${role} file reports no positive duration`)
     }
   }
 
   const durations = roles
+    .filter((role) => !expectations.intervals?.[role])
     .map((role) => summaries[role]?.durationSeconds)
     .filter((seconds) => Number.isFinite(seconds) && seconds > 0)
   if (durations.length > 1) {
@@ -233,7 +249,9 @@ export function evaluateRoleAudioSources(levels, expected, gates = {}) {
     const foreign = []
     for (const source of ['microphone', 'system']) {
       const amplitude = level[source]
-      if (wanted.includes(source)) {
+      if (expected[source] === 0) {
+        if (!(amplitude <= 0.005)) foreign.push(source)
+      } else if (wanted.includes(source)) {
         if (!(Math.abs(amplitude - expected[source]) <= expected[source] * tolerance)) {
           missing.push(source)
         }

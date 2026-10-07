@@ -677,7 +677,7 @@ pub struct SessionFileObjectIdentity {
     created_unix_nanos: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SessionFileBoundIdentity {
     pub content_identity: SessionFileIdentity,
     pub object_identity: SessionFileObjectIdentity,
@@ -1753,7 +1753,8 @@ impl Database {
                      ELSE COALESCE(?4, mp4_path)
                  END,
                  duration_ms = COALESCE(?5, duration_ms),
-                 diagnostics_json = ?6,
+                 diagnostics_json = CASE WHEN recording_role IN ('screen', 'camera')
+                    THEN json_patch(COALESCE(diagnostics_json, '{}'), ?6) ELSE ?6 END,
                  finalization_state = COALESCE(?8, finalization_state),
                  finalization_error = CASE WHEN ?8 IS NULL THEN finalization_error ELSE ?9 END
              WHERE id = ?1",
@@ -2360,11 +2361,73 @@ impl Database {
     /// pipeline (F-014/F-017). Flip them to failed so the Library stops
     /// claiming a recording is in flight.
     pub fn reconcile_orphaned_sessions(&self) -> Result<usize> {
+        // A crashed capture is failed, but its partial media remains usable.
+        // Only a persisted private directory identity authorizes binding a
+        // growing capture file; never infer ownership from a filename suffix.
+        let captures = {
+            let conn = self.lock()?;
+            let mut statement = conn.prepare("SELECT id, output_path, output_json FROM sessions WHERE (status IN ('running', 'failed') OR finalization_state IN ('finalizing', 'failed')) AND recording_role IN ('screen', 'camera')")?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (id, path, json) in captures {
+            let recovery = (|| -> Result<()> {
+                let json: serde_json::Value = serde_json::from_str(&json)?;
+                let mut path = path.map(PathBuf::from);
+                if path.as_ref().is_some_and(|path| !path.exists())
+                    && let Some(destination) = json
+                        .get("sourceIsoPublicationPath")
+                        .and_then(serde_json::Value::as_str)
+                    && let Some(identity) = json.get("sourceIsoOwnership").cloned()
+                {
+                    let expected: SessionFileBoundIdentity = serde_json::from_value(identity)?;
+                    let destination = Path::new(destination);
+                    if capture_session_file_bound_identity(destination)?.as_ref() == Some(&expected)
+                    {
+                        self.set_source_iso_capture_path(&id, destination)?;
+                        path = Some(destination.to_path_buf());
+                    }
+                }
+                let directory = json
+                    .get("sourceIsoCaptureDirectory")
+                    .and_then(serde_json::Value::as_str)
+                    .map(PathBuf::from);
+                let expected: Option<SessionFileObjectIdentity> = json
+                    .get("sourceIsoCaptureDirectoryIdentity")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()?;
+                if let (Some(path), Some(directory), Some(expected)) = (path, directory, expected)
+                    && path.parent() == Some(directory.as_path())
+                    && capture_session_directory_object_identity(&directory)?.as_ref()
+                        == Some(&expected)
+                    && path.is_file()
+                    && json.get("sourceIsoOwnership").is_none()
+                {
+                    self.bind_source_iso_capture(&id, &path)?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = recovery {
+                tracing::warn!(session_id = %id, %error, "Could not verify interrupted ISO capture; retaining failed reservation");
+            }
+        }
         let conn = self.lock()?;
         let updated = conn.execute(
             "UPDATE sessions
              SET status = 'failed',
-                 ended_at = COALESCE(ended_at, ?1)
+                 ended_at = COALESCE(ended_at, ?1),
+                 finalization_state = CASE WHEN recording_role IN ('screen', 'camera') THEN 'failed' ELSE finalization_state END,
+                 finalization_error = CASE WHEN recording_role IN ('screen', 'camera')
+                    THEN COALESCE(finalization_error, 'Recording was interrupted; partial media is available for recovery.')
+                    ELSE finalization_error END
              WHERE status = 'running'",
             params![Utc::now().to_rfc3339()],
         )?;
@@ -2419,10 +2482,155 @@ impl Database {
         Ok(())
     }
 
+    pub(crate) fn set_source_iso_capture_path(&self, session_id: &str, path: &Path) -> Result<()> {
+        let parent = path.parent().context("ISO capture directory")?;
+        let private_capture = parent
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(".videorc-iso-"));
+        let identity = private_capture
+            .then(|| capture_session_directory_object_identity(parent))
+            .transpose()?
+            .flatten();
+        let updated = self.lock()?.execute(
+            "UPDATE sessions SET output_path = ?2, output_json = CASE WHEN ?3 IS NOT NULL
+                THEN json_set(output_json, '$.sourceIsoCaptureDirectory', ?3, '$.sourceIsoCaptureDirectoryIdentity', json(?4))
+                ELSE output_json END
+             WHERE id = ?1 AND recording_role IN ('screen', 'camera')",
+            params![session_id, path.display().to_string(), private_capture.then(|| parent.display().to_string()),
+                identity.map(|identity| serde_json::to_string(&identity)).transpose()?],
+        )?;
+        anyhow::ensure!(updated == 1, "Missing ISO reservation {session_id}");
+        Ok(())
+    }
+
+    pub(crate) fn bind_source_iso_capture(&self, session_id: &str, path: &Path) -> Result<()> {
+        let ownership =
+            capture_session_file_bound_identity(path)?.context("ISO capture file is missing")?;
+        self.lock()?.execute(
+            "UPDATE sessions SET output_json = json_set(output_json, '$.sourceIsoOwnership', json(?2)) WHERE id = ?1",
+            params![session_id, serde_json::to_string(&ownership)?],
+        )?;
+        Ok(())
+    }
+
+    /// `Some(None)` is an ISO lacking validated ownership, never permission to
+    /// adopt a file currently occupying its path. Non-ISO rows return `None`.
+    pub(crate) fn source_iso_recovery_ownership(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<Option<SessionFileBoundIdentity>>> {
+        let row: Option<(Option<String>, String)> = self
+            .lock()?
+            .query_row(
+                "SELECT recording_role, output_json FROM sessions WHERE id = ?1",
+                params![session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match row {
+            Some((Some(role), json)) if matches!(role.as_str(), "screen" | "camera") => {
+                let json: serde_json::Value = serde_json::from_str(&json)?;
+                Ok(Some(
+                    json.get("sourceIsoOwnership")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()?,
+                ))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) fn source_iso_recording_expectations(
+        &self,
+        session_id: &str,
+    ) -> Result<(Option<f64>, bool)> {
+        let (output, diagnostics): (String, String) = self.lock()?.query_row(
+            "SELECT output_json, COALESCE(diagnostics_json, '{}') FROM sessions WHERE id = ?1",
+            params![session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let output: serde_json::Value = serde_json::from_str(&output)?;
+        let diagnostics: serde_json::Value = serde_json::from_str(&diagnostics)?;
+        Ok((
+            output
+                .get("video")
+                .and_then(|video| video.get("fps"))
+                .and_then(serde_json::Value::as_f64),
+            diagnostics
+                .get("sourceIsoExpectedAudio")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true),
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn verify_source_iso_capture_ownership(
+        &self,
+        session_id: &str,
+        path: &Path,
+    ) -> Result<()> {
+        if let Some(expected) = self.source_iso_recovery_ownership(session_id)? {
+            anyhow::ensure!(
+                expected.is_some(),
+                "ISO capture has no verified ownership; recovery cannot adopt its current path"
+            );
+            anyhow::ensure!(
+                capture_session_file_bound_identity(path)? == expected,
+                "ISO capture was replaced; recovery cannot adopt its current path"
+            );
+        }
+        Ok(())
+    }
+
+    /// Reserve every take member atomically before any ISO muxer can write.
+    pub fn reserve_source_iso_sessions(
+        &self,
+        take_id: &str,
+        roles: &[(&str, &str, String)],
+    ) -> Result<()> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let tagged = transaction.execute(
+            "UPDATE sessions SET take_id = ?1, recording_role = 'combined' WHERE id = ?1 AND status = 'running'",
+            params![take_id],
+        )?;
+        if tagged != 1 {
+            bail!("No running Combined session for take {take_id}");
+        }
+        for (role, suffix, output_path) in roles {
+            let id = format!("{take_id}-{role}");
+            transaction.execute(
+                "INSERT INTO sessions (id, title, started_at, status, mode, output_path, container,
+                 sources_json, layout_json, output_json, take_id, recording_role)
+                 SELECT ?2, title || ': ' || ?3, started_at, 'running', mode, NULL, 'mkv',
+                 sources_json, layout_json, json_set(output_json, '$.sourceIsoPublicationPath', ?4), ?1, ?5 FROM sessions WHERE id = ?1",
+                params![take_id, id, suffix, output_path, role],
+            )?;
+            transaction.execute(
+                "INSERT INTO session_chat_totals (session_id, totals_json) VALUES (?1, ?2)",
+                params![id, serde_json::to_string(&SessionChatTotals::empty(&id))?],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn fail_uncommitted_source_iso_sessions(&self, take_id: &str) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE sessions SET status = 'failed', ended_at = ?2, finalization_state = 'failed',
+             finalization_error = 'Session startup did not commit; any partial media was retained for recovery.'
+             WHERE take_id = ?1 AND recording_role IN ('screen', 'camera') AND status = 'running'",
+            params![take_id, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
     /// Plan 157: inserts one ISO sibling row beside the Combined row, copying
     /// the take's mode, sources, layout and output settings from it. The row
     /// is born terminal (`completed`/`failed`) because its muxer has already
     /// exited; the MP4 export then runs as an ordinary finalization job.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn create_source_iso_session(
         &self,
@@ -5253,6 +5461,7 @@ impl Database {
         for preparation in &mut preparations {
             let SessionDeletionPreparation::New {
                 operation_id,
+                session_id,
                 mp4_path,
                 output_path,
                 path_records,
@@ -5261,11 +5470,22 @@ impl Database {
             else {
                 continue;
             };
+            let expected_capture = self.source_iso_recovery_ownership(session_id)?;
             *path_records = distinct_nonempty_paths([mp4_path.clone(), output_path.clone()])
                 .into_iter()
                 .enumerate()
                 .map(|(index, path)| {
                     let ownership = capture_identity(Path::new(&path))?;
+                    if output_path.as_deref() == Some(path.as_str())
+                        && let Some(expected) = expected_capture.as_ref()
+                        && ownership.is_some()
+                    {
+                        anyhow::ensure!(
+                            expected.is_some() && &ownership == expected,
+                            "ISO capture was replaced; deletion cannot adopt its current path"
+                        );
+                    }
+
                     Ok(SessionDeletionPathRecord {
                         original_path: path.clone(),
                         quarantine_path: Some(
@@ -9957,6 +10177,191 @@ mod tests {
                 .is_some(),
             "every row owns a chat-totals record"
         );
+    }
+
+    #[test]
+    fn source_iso_reservations_survive_restart_and_reconcile_once() {
+        let dir =
+            std::env::temp_dir().join(format!("videorc-iso-restart-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("take.sqlite3");
+        {
+            let database = Database::open_file_for_tests(&path);
+            database
+                .create_session(&sample_session("take-restart"))
+                .unwrap();
+            database
+                .reserve_source_iso_sessions(
+                    "take-restart",
+                    &[
+                        (
+                            "screen",
+                            "Screen",
+                            dir.join("screen.mkv").display().to_string(),
+                        ),
+                        (
+                            "camera",
+                            "Camera",
+                            dir.join("camera.mkv").display().to_string(),
+                        ),
+                    ],
+                )
+                .unwrap();
+            assert_eq!(
+                database
+                    .list_session_items_page(None, 10)
+                    .unwrap()
+                    .items
+                    .len(),
+                3
+            );
+        }
+        let database = Database::open_file_for_tests(&path);
+        assert_eq!(database.reconcile_orphaned_sessions().unwrap(), 3);
+        assert_eq!(database.reconcile_orphaned_sessions().unwrap(), 0);
+        let page = database.list_session_items_page(None, 10).unwrap();
+        for row in &page.items {
+            assert_eq!(row.take_id.as_deref(), Some("take-restart"));
+            if row.recording_role.as_deref() != Some("combined") {
+                assert_eq!(
+                    row.finalization_state,
+                    Some(crate::protocol::RecordingFinalizationState::Failed)
+                );
+                assert!(
+                    row.finalization_error
+                        .as_deref()
+                        .unwrap()
+                        .contains("interrupted")
+                );
+            }
+        }
+        assert!(
+            database.sessions_pending_finalization().unwrap().is_empty(),
+            "interrupted captures must not silently export as success"
+        );
+    }
+
+    #[test]
+    fn source_iso_publication_recovery_preserves_identity_and_refuses_replacements() {
+        for (after_publish, already_failed) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let dir = std::env::temp_dir().join(format!("videorc-iso-publish-{}", Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let private = dir.join(".videorc-iso-owned");
+            std::fs::create_dir(&private).unwrap();
+            let capture = private.join("screen.mkv");
+            let public = dir.join("screen.mkv");
+            let database = Database::open_file_for_tests(&dir.join("test.sqlite"));
+            database
+                .create_session(&sample_session("take-publish"))
+                .unwrap();
+            database
+                .reserve_source_iso_sessions(
+                    "take-publish",
+                    &[("screen", "Screen", public.display().to_string())],
+                )
+                .unwrap();
+            assert!(
+                database
+                    .session_recording_path("take-publish-screen")
+                    .unwrap()
+                    .is_none()
+            );
+            database
+                .set_source_iso_capture_path("take-publish-screen", &capture)
+                .unwrap();
+            std::fs::write(&capture, b"owned growing capture").unwrap();
+            if after_publish {
+                database
+                    .bind_source_iso_capture("take-publish-screen", &capture)
+                    .unwrap();
+                let identity = capture_session_file_bound_identity(&capture)
+                    .unwrap()
+                    .unwrap();
+                crate::session_ops::publish_identity_bound_session_file(
+                    &capture, &public, &identity,
+                )
+                .unwrap();
+                // Crash immediately after rename, before the row's path update.
+                if already_failed {
+                    database.lock().unwrap().execute_batch("CREATE TRIGGER reject_iso_path BEFORE UPDATE OF output_path ON sessions BEGIN SELECT RAISE(ABORT, 'injected post-publication write failure'); END;").unwrap();
+                    assert!(
+                        database
+                            .set_source_iso_capture_path("take-publish-screen", &public)
+                            .is_err()
+                    );
+                    database
+                        .lock()
+                        .unwrap()
+                        .execute_batch("DROP TRIGGER reject_iso_path;")
+                        .unwrap();
+                }
+            }
+            if already_failed {
+                database
+                    .fail_uncommitted_source_iso_sessions("take-publish")
+                    .unwrap();
+            }
+            drop(database);
+            let database = Database::open_file_for_tests(&dir.join("test.sqlite"));
+            database.reconcile_orphaned_sessions().unwrap();
+            assert_eq!(database.reconcile_orphaned_sessions().unwrap(), 0);
+            let recovered = if after_publish { &public } else { &capture };
+            assert_eq!(
+                database
+                    .session_recording_path("take-publish-screen")
+                    .unwrap()
+                    .as_deref(),
+                Some(recovered.to_str().unwrap())
+            );
+            database
+                .verify_source_iso_capture_ownership("take-publish-screen", recovered)
+                .unwrap();
+            std::fs::rename(recovered, dir.join("original.mkv")).unwrap();
+            std::fs::write(recovered, b"foreign replacement").unwrap();
+            assert!(
+                database
+                    .verify_source_iso_capture_ownership("take-publish-screen", recovered)
+                    .is_err()
+            );
+            assert!(
+                database
+                    .prepare_session_deletions(&["take-publish-screen".into()])
+                    .is_err()
+            );
+            database.reconcile_orphaned_sessions().unwrap();
+            assert!(
+                database
+                    .verify_source_iso_capture_ownership("take-publish-screen", recovered)
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(recovered).unwrap(), b"foreign replacement");
+            drop(database);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn source_iso_reservation_transaction_rolls_back_on_duplicate_role() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("take-rollback"))
+            .unwrap();
+        assert!(
+            database
+                .reserve_source_iso_sessions(
+                    "take-rollback",
+                    &[
+                        ("screen", "Screen", "/tmp/a.mkv".into()),
+                        ("screen", "Screen", "/tmp/b.mkv".into()),
+                    ]
+                )
+                .is_err()
+        );
+        let page = database.list_session_items_page(None, 10).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].take_id, None);
     }
 
     fn sample_session(id: &str) -> NewSession {

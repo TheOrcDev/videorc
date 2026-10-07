@@ -908,6 +908,19 @@ async fn start_preview_screen_with_restart_signal(
     layout_intent_id: Option<u64>,
     mut admission_ready: Option<oneshot::Sender<Option<PreviewScreenStartingIdentity>>>,
 ) -> PreviewScreenLayoutStart {
+    #[cfg(test)]
+    if matches!(
+        params
+            .sources
+            .screen_id
+            .as_deref()
+            .or(params.sources.window_id.as_deref()),
+        Some("screen:iso-runtime" | "window:iso-runtime")
+    ) {
+        signal_screen_restart_ready(&mut restart_ready);
+        signal_screen_layout_admission(&mut admission_ready, None);
+        return PreviewScreenLayoutStart::without_admission(preview_screen_status(&state).await);
+    }
     if state.process_shutdown_requested() {
         signal_screen_restart_ready(&mut restart_ready);
         signal_screen_layout_admission(&mut admission_ready, None);
@@ -2824,7 +2837,11 @@ pub(crate) async fn test_install_live_screen_generation(
 ) {
     let source = SelectedScreenSource {
         source_id: source_id.to_string(),
-        source_kind: PreviewScreenSourceKind::Screen,
+        source_kind: if source_id == "window:iso-runtime" {
+            PreviewScreenSourceKind::Window
+        } else {
+            PreviewScreenSourceKind::Screen
+        },
         callback_cadence: if source_id.starts_with("screen:screencapturekit:") {
             ScreenCaptureCallbackCadence::Authoritative
         } else {
@@ -2883,18 +2900,26 @@ pub(crate) async fn test_publish_screen_pixels(
     pixel: [u8; 4],
     captured_at: Instant,
 ) {
+    let (width, height) = {
+        let slot = state.preview_screen.lock().await;
+        let Some(active) = slot.active.as_ref() else {
+            return;
+        };
+        (active.video.width, active.video.height)
+    };
+    let pixels = pixel.repeat((width * height) as usize);
     let slot = state.preview_screen.lock().await;
-    let active = slot.active.as_ref().expect("installed screen fixture");
+    let Some(active) = slot.active.as_ref() else {
+        return;
+    };
     let mut shared = active.shared.lock().unwrap();
-    let width = active.video.width;
-    let height = active.video.height;
     shared.frame_store.publish(
         sequence,
         width,
         height,
         PreviewScreenPixelFormat::Bgra8,
         captured_at,
-        pixel.repeat((width * height) as usize),
+        pixels,
     );
 }
 

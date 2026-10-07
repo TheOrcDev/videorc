@@ -212,8 +212,15 @@ pub(crate) fn iso_muxer_ffmpeg_args(
     fps: u32,
     role: RecordingRole,
     output_mkv: &Path,
+    track_shift_ms: i32,
 ) -> Result<Vec<String>> {
     let mut args = crate::recording::bridge_ffmpeg_base_args();
+    // A path created after preflight must never be overwritten.
+    for arg in &mut args {
+        if arg == "-y" {
+            *arg = "-n".into();
+        }
+    }
     let mut next_input_index = 0;
     let audio_input_index = audio_fifo.map(|path| {
         args.extend([
@@ -248,6 +255,9 @@ pub(crate) fn iso_muxer_ffmpeg_args(
         "copy".to_string(),
     ]);
     if let Some(audio_input_index) = audio_input_index {
+        let filter = iso_audio_timing_filter(track_shift_ms)
+            .map_or_else(|| "apad".into(), |filter| format!("{filter},apad"));
+        args.extend(["-af".to_string(), filter]);
         args.extend([
             "-map".to_string(),
             format!("{audio_input_index}:a?"),
@@ -271,16 +281,47 @@ pub(crate) fn iso_muxer_ffmpeg_args(
     Ok(args)
 }
 
+/// The bus already applies source gain/mute/delay. Only its common residual
+/// track shift remains, exactly as on the Combined file.
+fn iso_audio_timing_filter(track_shift_ms: i32) -> Option<String> {
+    match track_shift_ms.cmp(&0) {
+        std::cmp::Ordering::Less => Some(format!(
+            "atrim=start={:.3},asetpts=PTS-STARTPTS",
+            f64::from(track_shift_ms.saturating_abs()) / 1000.0,
+        )),
+        std::cmp::Ordering::Greater => Some(format!("adelay={track_shift_ms}:all=1")),
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
+/// Only output tags change: internal bus identity remains microphone.
+pub(crate) fn stamp_combined_audio_metadata(args: &mut Vec<String>) {
+    let mut index = 1;
+    while index < args.len() {
+        if args[index] == "title=Microphone" && args[index - 1].starts_with("-metadata:s:a:") {
+            args[index] = "title=Mix".into();
+            let key = args[index - 1].clone();
+            args.splice(index + 1..index + 1, [key, "handler_name=Mix".into()]);
+            index += 2;
+        }
+        index += 1;
+    }
+}
+
 /// One ISO role's writers.
 pub struct SourceIsoWriter {
     pub role: RecordingRole,
     pub mkv_path: PathBuf,
+    intended_mkv_path: PathBuf,
     video_fifo: PathBuf,
+    video_fifo_owned: bool,
     audio_fifo: Option<PathBuf>,
     bridge: Option<EncoderBridgeRecordingSession>,
     child: Option<tokio::process::Child>,
     pid: u32,
     stderr_task: Option<tokio::task::JoinHandle<()>>,
+    #[cfg(all(test, unix))]
+    reader_resume_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for SourceIsoWriter {
@@ -299,6 +340,18 @@ impl std::fmt::Debug for SourceIsoWriter {
 pub struct SourceIsoRuntime {
     pub writers: Vec<SourceIsoWriter>,
     pub taps: Arc<SourceAudioTaps>,
+    session_id: String,
+    ffmpeg_path: String,
+    fps: u32,
+    track_shift_ms: i32,
+    epoch: Arc<std::sync::OnceLock<Instant>>,
+    keep_original_media: bool,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    supervisors: Vec<(RecordingRole, tokio::task::JoinHandle<()>)>,
+    #[cfg(test)]
+    abort_done: Option<tokio::sync::oneshot::Sender<bool>>,
+    #[cfg(test)]
+    owned_pids: Vec<u32>,
 }
 
 /// What the stop path learned about one role's file.
@@ -309,9 +362,14 @@ pub struct FinishedSourceIsoRole {
     /// `Ok` when the muxer exited 0 within the grace; `Err(reason)` otherwise
     /// (the file is kept as recovery media and the row is marked failed).
     pub outcome: std::result::Result<(), String>,
+    pub duration_ms: Option<i64>,
+    pub fps: u32,
+    pub end_reason: Option<String>,
+    pub expect_audio: bool,
+    pub muxer_exit_code: Option<i32>,
 }
 
-/// Inputs the start path hands over once the Combined bridges are ready.
+/// Inputs shared by ISO construction and the Combined startup barrier.
 pub struct SourceIsoStartParams<'a> {
     pub state: &'a AppState,
     pub session_id: &'a str,
@@ -323,6 +381,9 @@ pub struct SourceIsoStartParams<'a> {
     pub frame_stores: CompositorSourceIsoFrameStores,
     pub video_epoch: Arc<std::sync::OnceLock<Instant>>,
     pub bitrate_kbps: u32,
+    pub track_shift_ms: i32,
+    pub keep_original_media: bool,
+    pub start_barrier: Option<Arc<crate::encoder_bridge::RecordingStartBarrier>>,
 }
 
 /// Creates the PCM taps for the roles the plan records. Called BEFORE the
@@ -334,7 +395,16 @@ pub fn prepare_source_audio_taps(
     let mut taps = SourceAudioTaps::default();
     for role in plan.iso_roles() {
         let path = iso_audio_fifo_path(session_id, role);
-        crate::audio::create_native_audio_fifo(&path)?;
+        if let Err(error) = crate::fifo::create_audio_new(&path) {
+            taps.abort_all();
+            for prior in [taps.microphone.as_ref(), taps.system.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                let _ = crate::fifo::cleanup(prior.path());
+            }
+            return Err(error.into());
+        }
         let tap = SourceAudioTap::spawn(path, role.as_str());
         match role {
             RecordingRole::Camera => taps.microphone = Some(tap),
@@ -357,15 +427,15 @@ pub(crate) fn role_audio_fifo(taps: &SourceAudioTaps, role: RecordingRole) -> Op
     tap.map(|tap| tap.path().to_path_buf())
 }
 
-/// Spawns the muxers and bridges for every ISO role and waits for the
-/// bridges' first-frame readiness. On any failure every started writer is
-/// torn down and the error returned; the caller fails the session start
+/// Synchronously constructs every ISO writer under an armed cleanup guard.
+/// The caller constructs Combined and awaits the shared readiness barrier.
+/// On failure every started writer is torn down; the caller rejects startup
 /// (an armed ISO take that silently became Combined-only is the one thing
 /// this feature must never do).
-pub async fn start_source_iso_writers(
+pub fn start_source_iso_writers(
     params: SourceIsoStartParams<'_>,
     taps: Arc<SourceAudioTaps>,
-) -> Result<SourceIsoRuntime> {
+) -> Result<SourceIsoStartGuard> {
     let SourceIsoStartParams {
         state,
         session_id,
@@ -377,9 +447,32 @@ pub async fn start_source_iso_writers(
         frame_stores,
         video_epoch,
         bitrate_kbps,
+        track_shift_ms,
+        keep_original_media,
+        start_barrier,
     } = params;
-    let mut writers = Vec::new();
-    let result: Result<()> = async {
+    // Install cancellation ownership before allocating the first role resource.
+    let mut guard = SourceIsoStartGuard::new(
+        SourceIsoRuntime {
+            writers: Vec::new(),
+            taps: taps.clone(),
+            session_id: session_id.to_string(),
+            ffmpeg_path: ffmpeg_path.to_string(),
+            fps: video.fps,
+            track_shift_ms,
+            epoch: video_epoch.clone(),
+            keep_original_media,
+            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            supervisors: Vec::new(),
+            #[cfg(test)]
+            abort_done: None,
+            #[cfg(test)]
+            owned_pids: Vec::new(),
+        },
+        state,
+    );
+    let writers = &mut guard.runtime.as_mut().expect("armed guard").writers;
+    let result: Result<()> = (|| {
         for role in plan.iso_roles() {
             let mkv_path = recording_role_mkv_path(combined_mkv_path, role);
             if mkv_path.exists() {
@@ -389,10 +482,60 @@ pub async fn start_source_iso_writers(
                     mkv_path.display()
                 );
             }
+            // FFmpeg writes inside a private directory. A concurrently created
+            // public sibling cannot be overwritten or mistaken for our media.
+            let intended_mkv_path = mkv_path;
+            let directory = intended_mkv_path
+                .parent()
+                .context("ISO output parent")?
+                .join(format!(".videorc-iso-{}", uuid::Uuid::new_v4()));
+            #[cfg(unix)]
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(not(unix))]
+            let builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            builder.create(&directory)?;
+            if let Err(error) = crate::session_ops::sync_session_file_parent(&directory) {
+                let _ = std::fs::remove_dir(&directory);
+                return Err(error.into());
+            }
+            let mkv_path = directory.join(
+                intended_mkv_path
+                    .file_name()
+                    .context("ISO output filename")?,
+            );
+            if let Err(error) = state
+                .database
+                .set_source_iso_capture_path(&format!("{session_id}-{}", role.as_str()), &mkv_path)
+            {
+                let _ = std::fs::remove_dir(&directory);
+                return Err(error);
+            }
             let video_fifo = iso_video_fifo_path(session_id, role);
-            crate::fifo::cleanup(&video_fifo).ok();
-            crate::fifo::create(&video_fifo)
+            writers.push(SourceIsoWriter {
+                role,
+                mkv_path: mkv_path.clone(),
+                intended_mkv_path,
+                video_fifo: video_fifo.clone(),
+                video_fifo_owned: false,
+                audio_fifo: role_audio_fifo(&taps, role),
+                bridge: None,
+                child: None,
+                pid: 0,
+                stderr_task: None,
+                #[cfg(all(test, unix))]
+                reader_resume_task: None,
+            });
+            crate::fifo::create_new(&video_fifo)
                 .with_context(|| format!("Could not create the {} video FIFO", role.as_str()))?;
+            writers
+                .last_mut()
+                .expect("registered writer")
+                .video_fifo_owned = true;
             let audio_fifo = role_audio_fifo(&taps, role);
             let args = iso_muxer_ffmpeg_args(
                 &video_fifo,
@@ -401,13 +544,15 @@ pub async fn start_source_iso_writers(
                 video.fps,
                 role,
                 &mkv_path,
+                track_shift_ms,
             )?;
             let mut command = tokio::process::Command::new(ffmpeg_path);
             command
                 .args(&args)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::piped());
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
             let mut child = crate::process_job::spawn_owned_tokio(&mut command)
                 .with_context(|| format!("Could not start the {} muxer", role.as_str()))?;
             let pid = child.id().unwrap_or_default();
@@ -431,16 +576,43 @@ pub async fn start_source_iso_writers(
                     }
                 })
             });
-            writers.push(SourceIsoWriter {
-                role,
-                mkv_path,
-                video_fifo,
-                audio_fifo,
-                bridge: None,
-                child: Some(child),
-                pid,
-                stderr_task,
-            });
+            let writer = writers.last_mut().expect("registered before spawn");
+            writer.child = Some(child);
+            writer.pid = pid;
+            writer.stderr_task = stderr_task;
+            #[cfg(all(test, unix))]
+            if role == RecordingRole::Camera
+                && let Ok(delay) = std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_READER_DELAY_MS")
+                && let Ok(delay) = delay.parse::<u64>()
+            {
+                // The actual owned FFmpeg reader is stopped before encoders
+                // release their origin. waitpid proves the stop boundary;
+                // the duration below deliberately injects a late FIFO reader.
+                anyhow::ensure!(
+                    unsafe { libc::kill(pid as i32, libc::SIGSTOP) } == 0,
+                    "stop owned ISO reader"
+                );
+                let mut status = 0;
+                anyhow::ensure!(
+                    unsafe { libc::waitpid(pid as i32, &mut status, libc::WUNTRACED) }
+                        == pid as i32
+                        && libc::WIFSTOPPED(status),
+                    "acknowledge stopped ISO reader"
+                );
+                let epoch = video_epoch.clone();
+                writer.reader_resume_task = Some(tokio::spawn(async move {
+                    let _ = tokio::time::timeout(Duration::from_secs(3), async {
+                        while epoch.get().is_none() {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await;
+                    tokio::time::sleep(Duration::from_millis(delay.min(1000))).await;
+                    unsafe {
+                        libc::kill(pid as i32, libc::SIGCONT);
+                    }
+                }));
+            }
         }
         // Bridges after every muxer exists: a bridge writer blocks on its
         // FIFO until the reader opens, and FFmpeg opens all inputs up front.
@@ -476,6 +648,7 @@ pub async fn start_source_iso_writers(
                 false,
                 diagnostics_context,
                 video_epoch.clone(),
+                start_barrier.clone(),
             )
             .with_context(|| {
                 format!(
@@ -485,19 +658,8 @@ pub async fn start_source_iso_writers(
             })?;
             writer.bridge = Some(bridge);
         }
-        for writer in writers.iter_mut() {
-            if let Some(bridge) = writer.bridge.as_mut() {
-                bridge.wait_until_ready().await.with_context(|| {
-                    format!(
-                        "The {} encoder bridge never became ready",
-                        writer.role.as_str()
-                    )
-                })?;
-            }
-        }
         Ok(())
-    }
-    .await;
+    })();
     match result {
         Ok(()) => {
             let roles = writers
@@ -509,13 +671,9 @@ pub async fn start_source_iso_writers(
                 "info",
                 format!("Separate source recordings armed for session {session_id}: {roles}."),
             );
-            Ok(SourceIsoRuntime { writers, taps })
+            Ok(guard)
         }
-        Err(error) => {
-            let runtime = SourceIsoRuntime { writers, taps };
-            runtime.abort(state).await;
-            Err(error)
-        }
+        Err(error) => Err(error),
     }
 }
 
@@ -524,6 +682,7 @@ impl SourceIsoRuntime {
     /// exit, which ends the muxer through `-shortest`). Non-blocking; the
     /// monitor finishes the teardown.
     pub fn request_stop(&self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
         for writer in &self.writers {
             if let Some(bridge) = writer.bridge.as_ref() {
                 bridge.stop();
@@ -547,9 +706,11 @@ impl SourceIsoRuntime {
                 task.abort();
             }
         }
-        self.taps.abort_all();
-        for writer in &self.writers {
-            let _ = std::fs::remove_file(&writer.mkv_path);
+        if let Some(tap) = &self.taps.microphone {
+            tap.request_abort();
+        }
+        if let Some(tap) = &self.taps.system {
+            tap.request_abort();
         }
         self.cleanup_fifos();
     }
@@ -574,22 +735,40 @@ impl SourceIsoRuntime {
             )
             .await;
         }
+        #[cfg(test)]
+        let mut children_reaped = true;
         for writer in self.writers.iter_mut() {
             if let Some(child) = writer.child.as_mut() {
-                let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+                let reaped = matches!(
+                    tokio::time::timeout(Duration::from_secs(2), child.wait()).await,
+                    Ok(Ok(_))
+                );
+                if !reaped {
+                    state.emit_log("warn", "An aborted ISO muxer did not acknowledge termination within the cleanup deadline.");
+                }
+                #[cfg(test)]
+                {
+                    children_reaped &= reaped;
+                }
             }
             if let Some(task) = writer.stderr_task.take() {
                 task.abort();
             }
-            let _ = std::fs::remove_file(&writer.mkv_path);
+            // Preserve uncertain partial media: durable reservations own recovery.
         }
         self.taps.abort_all();
         self.cleanup_fifos();
+        #[cfg(test)]
+        if let Some(done) = self.abort_done.take() {
+            let _ = done.send(children_reaped);
+        }
     }
 
     fn cleanup_fifos(&self) {
         for writer in &self.writers {
-            let _ = crate::fifo::cleanup(&writer.video_fifo);
+            if writer.video_fifo_owned {
+                let _ = crate::fifo::cleanup(&writer.video_fifo);
+            }
             if let Some(audio_fifo) = writer.audio_fifo.as_ref() {
                 let _ = crate::fifo::cleanup(audio_fifo);
             }
@@ -602,84 +781,497 @@ impl SourceIsoRuntime {
     /// report per-role outcomes for the Library rows.
     pub async fn finish(mut self, state: &AppState) -> Vec<FinishedSourceIsoRole> {
         self.request_stop();
-        let bridges = self
-            .writers
-            .iter_mut()
-            .filter_map(|writer| writer.bridge.take())
-            .collect::<Vec<_>>();
-        if let Some(batch) = begin_encoder_bridge_shutdown(bridges, ISO_BRIDGE_TEARDOWN_GRACE) {
-            let _ = crate::recording::finish_recording_encoder_bridge_teardown(
-                state,
-                Some(batch),
-                "source-iso-recording-process-exit",
-            )
-            .await;
-        }
-        // Both inputs must reach EOF before `-shortest` can let the muxer
-        // write its index and exit; an open audio FIFO would hold it.
-        let taps = self.taps.clone();
-        let (microphone, system) = tokio::task::spawn_blocking(move || taps.close_all())
-            .await
-            .unwrap_or((None, None));
-        let mut finished = Vec::with_capacity(self.writers.len());
-        for writer in self.writers.iter_mut() {
-            let outcome = match writer.child.as_mut() {
-                Some(child) => match tokio::time::timeout(ISO_MUXER_EXIT_GRACE, child.wait()).await
-                {
-                    Ok(Ok(status)) if status.success() => Ok(()),
-                    Ok(Ok(status)) => Err(format!(
-                        "The {} muxer exited with {status}",
-                        writer.role.as_str()
-                    )),
-                    Ok(Err(error)) => Err(format!(
-                        "Could not wait for the {} muxer: {error}",
-                        writer.role.as_str()
-                    )),
-                    Err(_) => {
-                        let _ = child.start_kill();
-                        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
-                        Err(format!(
-                            "The {} muxer did not finish within {}s after Stop and was killed; the file was kept as recovery media.",
-                            writer.role.as_str(),
-                            ISO_MUXER_EXIT_GRACE.as_secs()
-                        ))
-                    }
-                },
-                None => Err(format!(
-                    "The {} muxer was never started",
-                    writer.role.as_str()
-                )),
-            };
-            if let Some(task) = writer.stderr_task.take() {
-                let _ = tokio::time::timeout(Duration::from_millis(500), task).await;
+        for (role, task) in self.supervisors.drain(..) {
+            if let Err(error) = task.await {
+                let message = format!(
+                    "{} recording supervisor failed: {error}",
+                    role.title_suffix()
+                );
+                let id = format!("{}-{}", self.session_id, role.as_str());
+                if let Ok(finalization) = crate::storage::SessionFinalization::new(
+                    &id,
+                    "failed",
+                    Some(chrono::Utc::now().to_rfc3339()),
+                    None,
+                    None,
+                    &crate::diagnostics::idle_diagnostics(),
+                ) {
+                    let finalization =
+                        finalization.with_finalization_state("failed", Some(message.clone()));
+                    let _ = crate::recording::persist_finalization_or_recovery(
+                        state,
+                        &finalization,
+                        &mut None,
+                    );
+                }
+                state.emit_log("error", message);
             }
-            finished.push(FinishedSourceIsoRole {
-                role: writer.role,
-                mkv_path: writer.mkv_path.clone(),
-                outcome,
-            });
         }
-        let describe = |report: Option<crate::source_audio_tap::SourceAudioTapReport>| {
-            report.map_or_else(
-                || "off".to_string(),
-                |report| {
-                    format!(
-                        "{} chunks, {} dropped",
-                        report.offered_chunks, report.dropped_chunks
-                    )
-                },
-            )
-        };
-        state.emit_log(
-            "info",
-            format!(
-                "Separate source recordings finished: microphone tap {}; system tap {}.",
-                describe(microphone),
-                describe(system)
-            ),
-        );
         self.cleanup_fifos();
-        finished
+        // Role supervisors persist and register exports before completing.
+        Vec::new()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_owned_pids(&self) -> &[u32] {
+        &self.owned_pids
+    }
+
+    fn supervise(&mut self, state: &AppState) {
+        #[cfg(test)]
+        {
+            self.owned_pids = self.writers.iter().map(|writer| writer.pid).collect();
+        }
+        for writer in self.writers.drain(..) {
+            let state = state.clone();
+            let taps = self.taps.clone();
+            let stop = self.stop.clone();
+            let epoch = self.epoch.clone();
+            let session_id = self.session_id.clone();
+            let ffmpeg_path = self.ffmpeg_path.clone();
+            let fps = self.fps;
+            let track_shift_ms = self.track_shift_ms;
+            let keep_original_media = self.keep_original_media;
+            self.supervisors.push((
+                writer.role,
+                tokio::spawn(async move {
+                    let role = supervise_role(
+                        writer,
+                        &state,
+                        &session_id,
+                        taps,
+                        stop,
+                        epoch,
+                        fps,
+                        track_shift_ms,
+                        &ffmpeg_path,
+                    )
+                    .await;
+                    let ended_at = chrono::Utc::now().to_rfc3339();
+                    commit_finished_source_iso_roles(
+                        &state,
+                        &session_id,
+                        vec![role],
+                        &ffmpeg_path,
+                        &ended_at,
+                        None,
+                        keep_original_media,
+                    );
+                }),
+            ));
+        }
+    }
+}
+
+impl Drop for SourceIsoRuntime {
+    fn drop(&mut self) {
+        // Detached supervisors retain their own state/taps/children and finish
+        // bounded cleanup even if the active owner is cancelled while stopping.
+        self.request_stop();
+    }
+}
+
+impl Drop for SourceIsoWriter {
+    fn drop(&mut self) {
+        #[cfg(all(test, unix))]
+        if let Some(task) = self.reader_resume_task.take() {
+            task.abort();
+        }
+        if let Some(bridge) = self.bridge.as_ref() {
+            bridge.stop();
+        }
+        if let Some(task) = self.stderr_task.take() {
+            task.abort();
+        }
+        if let Some(mut child) = self.child.take() {
+            let _ = child.start_kill();
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+                });
+            }
+        }
+    }
+}
+
+fn role_audio_tap(taps: &SourceAudioTaps, role: RecordingRole) -> Option<&SourceAudioTap> {
+    match role {
+        RecordingRole::Camera => taps.microphone.as_ref(),
+        RecordingRole::Screen => taps.system.as_ref(),
+        RecordingRole::Combined => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn supervise_role(
+    mut writer: SourceIsoWriter,
+    state: &AppState,
+    session_id: &str,
+    taps: Arc<SourceAudioTaps>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    epoch: Arc<std::sync::OnceLock<Instant>>,
+    fps: u32,
+    track_shift_ms: i32,
+    ffmpeg_path: &str,
+) -> FinishedSourceIsoRole {
+    let mut failure = None;
+    let mut end_reason = None;
+    let mut ended_at = None;
+    let mut tick = tokio::time::interval(Duration::from_millis(10));
+    loop {
+        tick.tick().await;
+        #[cfg(test)]
+        if writer.role == RecordingRole::Camera
+            && epoch
+                .get()
+                .is_some_and(|origin| origin.elapsed() > Duration::from_secs(1))
+        {
+            match std::env::var("VIDEORC_SOURCE_ISO_RUNTIME_FAILURE").as_deref() {
+                Ok("bridge") => {
+                    if let Some(bridge) = writer.bridge.as_ref() {
+                        bridge.test_terminal_failure(
+                            "Injected ISO encoder failure after real encoded frames",
+                        );
+                    }
+                }
+                Ok("early-eof") => {
+                    if let Some(bridge) = writer.bridge.as_ref() {
+                        bridge.stop();
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Inspect failure before Stop so a simultaneous Stop cannot erase it.
+        if let Some(error) = writer
+            .bridge
+            .as_ref()
+            .and_then(|bridge| bridge.terminal_failure())
+        {
+            failure = Some(format!(
+                "{} encoder failed: {error}",
+                writer.role.title_suffix()
+            ));
+            break;
+        }
+        if let Some(error) =
+            role_audio_tap(&taps, writer.role).and_then(SourceAudioTap::terminal_failure)
+        {
+            failure = Some(format!(
+                "{} audio failed: {error}",
+                writer.role.title_suffix()
+            ));
+            break;
+        }
+        if let Some(child) = writer.child.as_mut() {
+            match child.try_wait() {
+                Ok(Some(status)) if !stop.load(std::sync::atomic::Ordering::Acquire) => {
+                    failure = Some(format!(
+                        "{} muxer exited before Stop ({status})",
+                        writer.role.title_suffix()
+                    ));
+                    break;
+                }
+                Err(error) => {
+                    failure = Some(format!(
+                        "{} muxer failed: {error}",
+                        writer.role.title_suffix()
+                    ));
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let source_snapshot = state
+            .live_source_switch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .snapshot(session_id)
+            .ok();
+        if let Some(snapshot) = source_snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.pending.is_none())
+        {
+            let source_key = match writer.role {
+                RecordingRole::Camera => snapshot
+                    .confirmed
+                    .camera_id
+                    .as_ref()
+                    .map(crate::source_registry::SourceKey::camera),
+                RecordingRole::Screen => snapshot
+                    .confirmed
+                    .window_id
+                    .as_ref()
+                    .map(crate::source_registry::SourceKey::window)
+                    .or_else(|| {
+                        snapshot
+                            .confirmed
+                            .screen_id
+                            .as_ref()
+                            .map(crate::source_registry::SourceKey::screen)
+                    }),
+                RecordingRole::Combined => None,
+            };
+            let terminal = source_key.as_ref().is_some_and(|key| {
+                state
+                    .capture_recovery
+                    .try_lock()
+                    .is_ok_and(|recovery| recovery.source_failed_after_recovery(key))
+            });
+            if terminal {
+                failure = Some(format!(
+                    "{} capture failed after source recovery",
+                    writer.role.title_suffix()
+                ));
+                break;
+            }
+        }
+        let removed = state
+            .live_source_switch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .source_removed_at(session_id, writer.role == RecordingRole::Camera);
+        if let Some(boundary) = removed {
+            ended_at = Some(boundary);
+            end_reason = Some(format!(
+                "{} recording ended because its selected source was removed.",
+                writer.role.title_suffix()
+            ));
+            break;
+        }
+        // A committed removal keeps its earlier boundary even when Stop was
+        // requested before this supervisor's next observation.
+        if stop.load(std::sync::atomic::Ordering::Acquire) {
+            break;
+        }
+    }
+    if let Some(reason) = failure.as_ref() {
+        let _ = crate::recording::emit_health_event(
+            state,
+            Some(session_id),
+            crate::protocol::HealthLevel::Warn,
+            HEALTH_ROLE_FAILED,
+            reason,
+        );
+    }
+    let duration_ms = epoch.get().map(|epoch| {
+        ended_at
+            .unwrap_or_else(Instant::now)
+            .saturating_duration_since(*epoch)
+            .as_millis() as i64
+    });
+    if let Some(bridge) = writer.bridge.as_ref() {
+        bridge.stop();
+    }
+    // The bus intentionally trails capture by its playout delay. Keep this
+    // role's tap open until the real samples covering its video boundary have
+    // arrived; closing at Stop would replace the last ~150ms with apad silence.
+    if failure.is_none()
+        && let (Some(tap), Some(duration_ms)) = (role_audio_tap(&taps, writer.role), duration_ms)
+    {
+        let buffered_delay_ms = if writer.role == RecordingRole::Screen {
+            track_shift_ms.saturating_neg().max(0)
+        } else {
+            0
+        };
+        let source_boundary_frames =
+            ((duration_ms as f64 + f64::from(buffered_delay_ms)) / 1000.0 * 48_000.0) as u64;
+        tap.end_at_frame(source_boundary_frames);
+        let required_frames = source_boundary_frames.saturating_sub(48_000 / u64::from(fps.max(1)));
+        let covered = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut readiness = tokio::time::interval(Duration::from_millis(5));
+            while tap.offered_frames() < required_frames {
+                if let Some(error) = tap.terminal_failure() {
+                    return Err(error);
+                }
+                readiness.tick().await;
+            }
+            Ok(())
+        })
+        .await;
+        match covered {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                failure.get_or_insert(error);
+            }
+            Err(_) => {
+                failure.get_or_insert(
+                    "Audio bus ended before the role's required stop samples arrived".into(),
+                );
+            }
+        }
+    }
+    let role = writer.role;
+    let closing_taps = taps.clone();
+    let tap_close = tokio::task::spawn_blocking(move || match role {
+        RecordingRole::Camera => closing_taps.microphone.as_ref().map(SourceAudioTap::close),
+        RecordingRole::Screen => closing_taps.system.as_ref().map(SourceAudioTap::close),
+        RecordingRole::Combined => None,
+    });
+    if let Some(bridge) = writer.bridge.take() {
+        let report = tokio::task::spawn_blocking(move || {
+            bridge.stop_and_reap_until(Instant::now() + ISO_BRIDGE_TEARDOWN_GRACE)
+        })
+        .await;
+        match report {
+            Ok(report) => {
+                if let Some(error) = report.terminal_failure {
+                    failure.get_or_insert(error);
+                }
+                if !report.reaped {
+                    failure.get_or_insert("Encoder writer could not be reaped".into());
+                }
+            }
+            Err(error) => {
+                failure.get_or_insert(format!("Encoder teardown failed: {error}"));
+            }
+        }
+    }
+    if let Err(error) = tap_close.await {
+        failure.get_or_insert(format!("Audio teardown failed: {error}"));
+    }
+    if let Some(error) =
+        role_audio_tap(&taps, writer.role).and_then(SourceAudioTap::terminal_failure)
+    {
+        failure.get_or_insert(error);
+    }
+    let mut muxer_exit_code = None;
+    if let Some(child) = writer.child.as_mut() {
+        match tokio::time::timeout(ISO_MUXER_EXIT_GRACE, child.wait()).await {
+            Ok(Ok(status)) if status.success() => {
+                muxer_exit_code = status.code();
+            }
+            Ok(Ok(status)) => {
+                muxer_exit_code = status.code();
+                failure.get_or_insert(format!(
+                    "{} muxer exited with {status}",
+                    role.title_suffix()
+                ));
+            }
+            Ok(Err(error)) => {
+                failure.get_or_insert(format!(
+                    "Could not reap {} muxer: {error}",
+                    role.title_suffix()
+                ));
+            }
+            Err(_) => {
+                let _ = child.start_kill();
+                let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+                failure.get_or_insert(format!(
+                    "{} muxer exceeded its stop deadline",
+                    role.title_suffix()
+                ));
+            }
+        }
+    }
+    if let Some(task) = writer.stderr_task.take() {
+        task.abort();
+    }
+    if writer.video_fifo_owned {
+        let _ = crate::fifo::cleanup(&writer.video_fifo);
+    }
+    if let Some(path) = &writer.audio_fifo {
+        let _ = crate::fifo::cleanup(path);
+    }
+    if failure.is_none() {
+        let actual = tokio::time::timeout(
+            Duration::from_secs(5),
+            crate::session_ops::probe_duration_ms(ffmpeg_path, &writer.mkv_path),
+        )
+        .await;
+        match actual {
+            Ok(Some(actual))
+                if actual > 0 && duration_ms.is_none_or(|expected| actual + 250 >= expected) => {}
+            Ok(Some(actual)) => {
+                failure = Some(format!(
+                    "{} artifact ended at {actual}ms, before its expected {}ms boundary",
+                    role.title_suffix(),
+                    duration_ms.unwrap_or_default()
+                ));
+            }
+            _ => {
+                failure = Some(format!(
+                    "{} artifact duration could not be verified",
+                    role.title_suffix()
+                ));
+            }
+        }
+    }
+    // Bind closed content before any publication-path change. A crash between
+    // no-replace rename publication and DB commit still has the same durable object.
+    if let Err(error) = state
+        .database
+        .bind_source_iso_capture(&format!("{session_id}-{}", role.as_str()), &writer.mkv_path)
+    {
+        failure.get_or_insert(format!(
+            "Could not bind {} recovery media: {error}",
+            role.title_suffix()
+        ));
+    }
+    // Publish without replacement, then bind the exact created object to its
+    // durable row. Failed media stays at its private capture path for recovery.
+    if failure.is_none() {
+        let publish = crate::storage::capture_session_file_bound_identity(&writer.mkv_path)
+            .and_then(|identity| identity.context("Closed ISO identity"))
+            .and_then(|identity| {
+                crate::session_ops::publish_identity_bound_session_file(
+                    &writer.mkv_path,
+                    &writer.intended_mkv_path,
+                    &identity,
+                )
+            });
+        match publish {
+            Ok(()) => {
+                let capture_path = writer.mkv_path.clone();
+                writer.mkv_path = writer.intended_mkv_path.clone();
+                if let Err(error) = state.database.set_source_iso_capture_path(
+                    &format!("{session_id}-{}", role.as_str()),
+                    &writer.mkv_path,
+                ) {
+                    failure = Some(format!(
+                        "Could not persist published {} path: {error}",
+                        role.title_suffix()
+                    ));
+                    writer.mkv_path = capture_path;
+                } else {
+                    if let Some(parent) = capture_path.parent() {
+                        let _ = std::fs::remove_dir(parent);
+                    }
+                }
+            }
+            Err(error) => {
+                failure = Some(format!(
+                    "Could not publish {} without replacing another file: {error}",
+                    role.title_suffix()
+                ));
+            }
+        }
+    }
+    if let Some(reason) = end_reason.as_ref() {
+        let _ = crate::recording::emit_health_event(
+            state,
+            Some(session_id),
+            crate::protocol::HealthLevel::Warn,
+            "separate-source-recordings-source-removed",
+            reason,
+        );
+        let _ = state.database.add_session_log(
+            &format!("{session_id}-{}", role.as_str()),
+            crate::protocol::HealthLevel::Warn,
+            "source-removed",
+            reason,
+            None,
+        );
+    }
+    FinishedSourceIsoRole {
+        role,
+        mkv_path: writer.mkv_path.clone(),
+        outcome: failure.map_or(Ok(()), Err),
+        duration_ms,
+        fps,
+        end_reason,
+        expect_audio: role_audio_tap(&taps, role).is_some(),
+        muxer_exit_code,
     }
 }
 
@@ -695,6 +1287,32 @@ pub struct SourceIsoStartGuard {
     state: AppState,
 }
 
+#[cfg(test)]
+pub(crate) struct SourceIsoStartReceipt {
+    pub pids: Vec<u32>,
+    pub fifos: Vec<PathBuf>,
+    pub reaped: tokio::sync::oneshot::Receiver<bool>,
+}
+#[cfg(test)]
+struct SourceIsoStartPause {
+    point: String,
+    entered: tokio::sync::oneshot::Sender<SourceIsoStartReceipt>,
+}
+#[cfg(test)]
+static SOURCE_ISO_START_PAUSE: std::sync::Mutex<Option<SourceIsoStartPause>> =
+    std::sync::Mutex::new(None);
+#[cfg(test)]
+pub(crate) fn test_pause_next_source_iso_start(
+    point: &str,
+) -> tokio::sync::oneshot::Receiver<SourceIsoStartReceipt> {
+    let (entered, receipt) = tokio::sync::oneshot::channel();
+    *SOURCE_ISO_START_PAUSE.lock().unwrap() = Some(SourceIsoStartPause {
+        point: point.into(),
+        entered,
+    });
+    receipt
+}
+
 impl SourceIsoStartGuard {
     pub fn new(runtime: SourceIsoRuntime, state: &AppState) -> Self {
         Self {
@@ -703,11 +1321,105 @@ impl SourceIsoStartGuard {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) async fn test_pause(&mut self, point: &str, combined_pid: u32) {
+        let pause = {
+            let mut slot = SOURCE_ISO_START_PAUSE.lock().unwrap();
+            if slot.as_ref().is_some_and(|pause| {
+                pause.point == point || (pause.point == "precommit-failure" && point == "precommit")
+            }) {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some(pause) = pause {
+            let runtime = self.runtime.as_mut().expect("armed runtime");
+            let (done, reaped) = tokio::sync::oneshot::channel();
+            runtime.abort_done = Some(done);
+            let mut pids = vec![combined_pid];
+            pids.extend(runtime.writers.iter().map(|writer| writer.pid));
+            let fifos = runtime
+                .writers
+                .iter()
+                .flat_map(|writer| {
+                    std::iter::once(writer.video_fifo.clone()).chain(writer.audio_fifo.clone())
+                })
+                .collect();
+            let _ = pause.entered.send(SourceIsoStartReceipt {
+                pids,
+                fifos,
+                reaped,
+            });
+            if pause.point == "precommit-failure" {
+                runtime
+                    .writers
+                    .iter()
+                    .find(|writer| writer.role == RecordingRole::Camera)
+                    .and_then(|writer| writer.bridge.as_ref())
+                    .expect("armed Camera bridge")
+                    .test_terminal_failure("Injected known ISO failure at precommit");
+                return;
+            }
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// Synchronous final check: no await may separate this from ownership
+    /// transfer into ActiveRecording. Known startup failures fail the take.
+    pub(crate) fn validate_health(&mut self) -> Result<()> {
+        let runtime = self.runtime.as_mut().expect("armed guard");
+        for writer in &mut runtime.writers {
+            if let Some(error) = role_audio_tap(&runtime.taps, writer.role)
+                .and_then(SourceAudioTap::terminal_failure)
+            {
+                bail!(
+                    "{} audio tap failed during startup: {error}",
+                    writer.role.title_suffix()
+                );
+            }
+            if let Some(error) = writer
+                .bridge
+                .as_ref()
+                .and_then(EncoderBridgeRecordingSession::terminal_failure)
+            {
+                bail!(
+                    "{} encoder failed during startup: {error}",
+                    writer.role.title_suffix()
+                );
+            }
+            if let Some(child) = writer.child.as_mut()
+                && let Some(status) = child
+                    .try_wait()
+                    .context("Inspect ISO muxer before startup commit")?
+            {
+                bail!(
+                    "{} muxer exited during startup ({status})",
+                    writer.role.title_suffix()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn wait_until_ready(&mut self) -> Result<()> {
+        self.validate_health()?;
+        for writer in &mut self.runtime.as_mut().expect("armed guard").writers {
+            if let Some(bridge) = writer.bridge.as_mut() {
+                bridge.wait_until_ready().await?;
+            }
+        }
+        self.validate_health()
+    }
+
     /// Ownership transfer: the session now owns stop/finish.
     pub fn commit(mut self) -> SourceIsoRuntime {
-        self.runtime
+        let mut runtime = self
+            .runtime
             .take()
-            .expect("SourceIsoStartGuard committed twice")
+            .expect("SourceIsoStartGuard committed twice");
+        runtime.supervise(&self.state);
+        runtime
     }
 }
 
@@ -730,9 +1442,9 @@ impl Drop for SourceIsoStartGuard {
     }
 }
 
-/// Commits the ISO rows beside the Combined row and queues their MKV→MP4
-/// finalization. Called from the monitor right after the Combined row is
-/// committed, so the Library shows the whole take at once.
+/// Advances already-reserved ISO rows and queues their MKV→MP4 finalization.
+/// Role supervisors call this independently; the monitor also uses it for
+/// any roles returned during session teardown.
 pub fn commit_finished_source_iso_roles(
     state: &AppState,
     combined_session_id: &str,
@@ -756,6 +1468,7 @@ pub fn commit_finished_source_iso_roles(
         );
     }
     for role in finished {
+        let wall_duration_ms = role.duration_ms.or(wall_duration_ms);
         let iso_session_id = format!("{combined_session_id}-{}", role.role.as_str());
         let mkv_exists = role.mkv_path.exists();
         let (status, finalization_state, finalization_error) = match (&role.outcome, mkv_exists) {
@@ -778,18 +1491,36 @@ pub fn commit_finished_source_iso_roles(
                 Some(reason.clone()),
             ),
         };
-        if let Err(error) = state.database.create_source_iso_session(
-            combined_session_id,
+        let mut diagnostics = crate::diagnostics::idle_diagnostics();
+        diagnostics.target_fps = Some(f64::from(role.fps));
+        // Preserve the stop cause alongside the row even after a restart.
+        let finalization = crate::storage::SessionFinalization::new(
             &iso_session_id,
-            role.role.as_str(),
-            role.role.title_suffix(),
-            &role.mkv_path.display().to_string(),
-            ended_at,
-            wall_duration_ms,
             status,
-            finalization_state,
-            finalization_error.as_deref(),
-        ) {
+            Some(ended_at.to_string()),
+            None,
+            wall_duration_ms,
+            &diagnostics,
+        )
+        .map(|mut finalization| {
+            let mut json: serde_json::Value =
+                serde_json::from_str(&finalization.diagnostics_json).unwrap_or_default();
+            json["sourceIsoExpectedAudio"] = serde_json::json!(role.expect_audio);
+            json["sourceIsoMuxerExitCode"] = serde_json::json!(role.muxer_exit_code);
+            if let Some(reason) = role.end_reason.as_ref() {
+                json["sourceIsoEndReason"] = serde_json::json!(reason);
+                json["sourceIsoOutcome"] = serde_json::json!("source-removed");
+                json["sourceIsoEndOffsetMs"] = serde_json::json!(wall_duration_ms);
+            }
+            finalization.diagnostics_json = json.to_string();
+            finalization.with_finalization_state(finalization_state, finalization_error.clone())
+        });
+        let persisted = finalization
+            .map_err(|error| error.to_string())
+            .and_then(|finalization| {
+                crate::recording::persist_finalization_or_recovery(state, &finalization, &mut None)
+            });
+        if let Err(error) = persisted {
             state.emit_log(
                 "warn",
                 format!(
@@ -836,10 +1567,13 @@ pub fn commit_finished_source_iso_roles(
                     keep_original_media,
                     ended_at: ended_at.to_string(),
                     wall_duration_ms,
-                    final_diagnostics: crate::diagnostics::idle_diagnostics(),
+                    final_diagnostics: diagnostics,
                     finalized_caption_artifact: None,
                     captioned_copy_requested: false,
-                    post_recording_gate: None,
+                    post_recording_gate: Some(crate::recording::PostRecordingGate {
+                        intended_fps: Some(f64::from(role.fps)),
+                        expect_audio: role.expect_audio,
+                    }),
                     pipeline_reported_freezes: false,
                 },
                 control,
@@ -852,7 +1586,7 @@ pub fn commit_finished_source_iso_roles(
         Some(combined_session_id),
         crate::protocol::HealthLevel::Info,
         HEALTH_FINISHED,
-        "Separate source recordings saved; exporting their MP4s in the background.",
+        "Separate source recording writers ended; each Library file shows its export or recovery status.",
     );
 }
 
@@ -864,6 +1598,281 @@ mod tests {
         SeparateSourceRecordingsSettings, SourceSelection, StartSessionParams, VideoPreset,
         VideoSettings, default_layout_settings,
     };
+
+    fn test_state() -> AppState {
+        let (events, _) = tokio::sync::broadcast::channel(64);
+        AppState::new(
+            "test".into(),
+            1234,
+            events,
+            crate::storage::Database::open_in_memory_for_tests(),
+        )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn source_iso_constructor_retains_foreign_fifo_and_cleans_failed_directory_reservation() {
+        for reserve in [false, true] {
+            let state = test_state();
+            let params = base_params();
+            let id = format!("iso-constructor-{}", uuid::Uuid::new_v4());
+            let directory = std::env::temp_dir().join(&id);
+            std::fs::create_dir(&directory).unwrap();
+            let combined = directory.join("take.mkv");
+            state
+                .database
+                .create_session(&crate::storage::NewSession {
+                    id: id.clone(),
+                    title: "Constructor failure".into(),
+                    started_at: chrono::Utc::now().to_rfc3339(),
+                    mode: "record".into(),
+                    output_path: Some(combined.display().to_string()),
+                    container: Some("mkv".into()),
+                    stream_preset: None,
+                    sources: params.sources.clone(),
+                    layout: params.layout.clone(),
+                    output: params.output.clone(),
+                })
+                .unwrap();
+            if reserve {
+                state
+                    .database
+                    .reserve_source_iso_sessions(
+                        &id,
+                        &[
+                            (
+                                "screen",
+                                "Screen",
+                                recording_role_mkv_path(&combined, RecordingRole::Screen)
+                                    .display()
+                                    .to_string(),
+                            ),
+                            (
+                                "camera",
+                                "Camera",
+                                recording_role_mkv_path(&combined, RecordingRole::Camera)
+                                    .display()
+                                    .to_string(),
+                            ),
+                        ],
+                    )
+                    .unwrap();
+            }
+            let foreign = iso_video_fifo_path(&id, RecordingRole::Screen);
+            std::fs::write(&foreign, b"foreign FIFO pathname").unwrap();
+            let result = start_source_iso_writers(
+                SourceIsoStartParams {
+                    state: &state,
+                    session_id: &id,
+                    plan: SourceIsoPlan::from_settings(
+                        params.output.separate_source_recordings.as_ref().unwrap(),
+                    )
+                    .unwrap(),
+                    combined_mkv_path: &combined,
+                    ffmpeg_path: "must-never-spawn",
+                    video: &params.output.video,
+                    video_output: EncoderBridgeVideoOutput::RawYuv420p,
+                    frame_stores: CompositorSourceIsoFrameStores {
+                        screen: Arc::new(std::sync::Mutex::new(
+                            crate::frame_store::FrameStore::new(2),
+                        )),
+                        camera: Arc::new(std::sync::Mutex::new(
+                            crate::frame_store::FrameStore::new(2),
+                        )),
+                    },
+                    video_epoch: Arc::new(Default::default()),
+                    bitrate_kbps: 8000,
+                    track_shift_ms: 0,
+                    keep_original_media: true,
+                    start_barrier: None,
+                },
+                Arc::new(SourceAudioTaps::default()),
+            );
+            assert!(result.is_err());
+            assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign FIFO pathname");
+            if !reserve {
+                assert_eq!(
+                    std::fs::read_dir(&directory).unwrap().count(),
+                    0,
+                    "failed DB reservation leaves no private directory"
+                );
+            }
+            tokio::task::yield_now().await;
+            assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign FIFO pathname");
+            std::fs::remove_file(foreign).unwrap();
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_iso_second_tap_creation_failure_retires_first_without_deleting_collision() {
+        let id = format!("tap-failure-{}", uuid::Uuid::new_v4());
+        let screen = iso_audio_fifo_path(&id, RecordingRole::Screen);
+        let camera = iso_audio_fifo_path(&id, RecordingRole::Camera);
+        std::fs::write(&camera, b"foreign file").unwrap();
+        let plan = SourceIsoPlan {
+            keep_combined: true,
+            roles: vec![RecordingRole::Screen, RecordingRole::Camera],
+        };
+        assert!(prepare_source_audio_taps(&id, &plan).is_err());
+        assert!(!screen.exists());
+        assert_eq!(std::fs::read(&camera).unwrap(), b"foreign file");
+        std::fs::remove_file(camera).unwrap();
+    }
+
+    #[test]
+    fn source_iso_child_process_fixture() {
+        if std::env::var_os("VIDEORC_ISO_CHILD_FIXTURE").is_none() {
+            return;
+        }
+        use std::io::{Read, Write};
+        println!("ISO_CHILD_READY");
+        std::io::stdout().flush().unwrap();
+        let mut bytes = Vec::new();
+        let _ = std::io::stdin().read_to_end(&mut bytes);
+        std::process::exit(0);
+    }
+
+    async fn fixture_child() -> tokio::process::Child {
+        use tokio::io::AsyncBufReadExt;
+        let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "source_iso::tests::source_iso_child_process_fixture",
+                "--nocapture",
+            ])
+            .env("VIDEORC_ISO_CHILD_FIXTURE", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        let ready = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(line) = lines.next_line().await? {
+                if line == "ISO_CHILD_READY" {
+                    return Ok::<_, std::io::Error>(());
+                }
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "fixture ended before readiness",
+            ))
+        })
+        .await;
+        if !matches!(ready, Ok(Ok(()))) {
+            let _ = child.start_kill();
+            let reaped = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+            assert!(
+                matches!(reaped, Ok(Ok(_))),
+                "fixture child reaped after readiness failure"
+            );
+        }
+        ready
+            .expect("bounded child readiness")
+            .expect("explicit child readiness");
+        child
+    }
+
+    #[tokio::test]
+    async fn source_iso_guard_cancellation_reaps_owned_child_and_bridge() {
+        let state = test_state();
+        let child = fixture_child().await;
+        let (bridge, stopped, release) = EncoderBridgeRecordingSession::blocked_for_lifecycle_test(
+            "source-iso-cancellation",
+            EncoderBridgeOutputRole::Recording,
+        );
+        let (done, finished) = tokio::sync::oneshot::channel();
+        let runtime = SourceIsoRuntime {
+            writers: vec![SourceIsoWriter {
+                role: RecordingRole::Screen,
+                mkv_path: PathBuf::from("/nonexistent-iso-owned-file"),
+                intended_mkv_path: PathBuf::from("/nonexistent-iso-public-file"),
+                video_fifo: crate::fifo::transport_path(&format!(
+                    "absent-{}",
+                    uuid::Uuid::new_v4()
+                )),
+                video_fifo_owned: false,
+                audio_fifo: None,
+                bridge: Some(bridge),
+                pid: child.id().unwrap(),
+                child: Some(child),
+                stderr_task: None,
+                #[cfg(all(test, unix))]
+                reader_resume_task: None,
+            }],
+            taps: Arc::new(SourceAudioTaps::default()),
+            session_id: "source-iso-cancellation".into(),
+            ffmpeg_path: "ffmpeg".into(),
+            fps: 30,
+            track_shift_ms: 0,
+            epoch: Arc::new(Default::default()),
+            keep_original_media: true,
+            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            supervisors: Vec::new(),
+            abort_done: Some(done),
+            owned_pids: Vec::new(),
+        };
+        let guard = SourceIsoStartGuard::new(runtime, &state);
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _guard = guard;
+            let _ = entered.send(());
+            std::future::pending::<()>().await;
+        });
+        waiting.await.unwrap();
+        task.abort();
+        let _ = task.await;
+        let signalled = stopped.load(std::sync::atomic::Ordering::Acquire);
+        release.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), finished)
+                .await
+                .expect("bounded owned cleanup")
+                .unwrap(),
+            "every child wait must acknowledge reaping"
+        );
+        assert!(signalled, "cancellation synchronously stopped bridge");
+    }
+
+    #[test]
+    fn residual_audio_shift_is_applied_without_source_processing() {
+        assert_eq!(
+            iso_audio_timing_filter(-120).as_deref(),
+            Some("atrim=start=0.120,asetpts=PTS-STARTPTS")
+        );
+        assert_eq!(iso_audio_timing_filter(0), None);
+        assert_eq!(
+            iso_audio_timing_filter(120).as_deref(),
+            Some("adelay=120:all=1")
+        );
+        assert_eq!(
+            iso_audio_timing_filter(-500).as_deref(),
+            Some("atrim=start=0.500,asetpts=PTS-STARTPTS")
+        );
+    }
+
+    #[test]
+    fn combined_output_metadata_keeps_internal_audio_identity() {
+        let mut args = vec![
+            "-metadata:s:a:0".into(),
+            "title=Microphone".into(),
+            "out.mkv".into(),
+        ];
+        stamp_combined_audio_metadata(&mut args);
+        assert_eq!(
+            args,
+            [
+                "-metadata:s:a:0",
+                "title=Mix",
+                "-metadata:s:a:0",
+                "handler_name=Mix",
+                "out.mkv"
+            ]
+        );
+    }
 
     fn base_params() -> StartSessionParams {
         let mut layout = default_layout_settings();
@@ -1045,6 +2054,7 @@ mod tests {
             60,
             RecordingRole::Camera,
             Path::new("/tmp/out-camera.mkv"),
+            0,
         )
         .unwrap();
         let joined = args.join(" ");
@@ -1067,7 +2077,10 @@ mod tests {
             joined.ends_with("-shortest -f matroska /tmp/out-camera.mkv"),
             "{joined}"
         );
-        assert!(!joined.contains("-af"), "no mixing filter on an ISO leg");
+        assert!(
+            joined.contains("-af apad"),
+            "video EOF owns the silent audio tail"
+        );
     }
 
     #[test]
@@ -1079,6 +2092,7 @@ mod tests {
             30,
             RecordingRole::Screen,
             Path::new("/tmp/out-screen.mkv"),
+            0,
         )
         .unwrap();
         let joined = args.join(" ");
@@ -1096,6 +2110,7 @@ mod tests {
             30,
             RecordingRole::Screen,
             Path::new("/tmp/out.mkv"),
+            0,
         )
         .expect_err("raw YUV cannot be stream-copied");
         assert!(

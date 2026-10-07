@@ -50,10 +50,13 @@ pub struct SourceAudioTap {
     sender: Mutex<Option<mpsc::SyncSender<TapChunk>>>,
     stop: Arc<AtomicBool>,
     offered: Arc<AtomicU64>,
+    offered_samples: AtomicU64,
+    end_frame: AtomicU64,
     dropped: Arc<AtomicU64>,
     /// Samples dropped at `offer` that the writer still owes as silence.
     owed_silence: Arc<AtomicU64>,
     writer: Mutex<Option<thread::JoinHandle<()>>>,
+    failure: Arc<Mutex<Option<String>>>,
 }
 
 impl std::fmt::Debug for SourceAudioTap {
@@ -82,25 +85,55 @@ impl SourceAudioTap {
         let offered = Arc::new(AtomicU64::new(0));
         let dropped = Arc::new(AtomicU64::new(0));
         let owed_silence = Arc::new(AtomicU64::new(0));
+        let failure = Arc::new(Mutex::new(None));
         let (sender, receiver) = mpsc::sync_channel::<TapChunk>(TAP_QUEUE_CHUNKS);
         let writer = {
             let path = path.clone();
             let stop = stop.clone();
             let owed_silence = owed_silence.clone();
+            let failure = failure.clone();
             thread::Builder::new()
                 .name(format!("videorc-source-audio-tap-{label}"))
-                .spawn(move || run_tap_writer(&path, &stop, receiver, &owed_silence, label))
+                .spawn(move || {
+                    if let Err(error) = run_tap_writer(&path, &stop, receiver, &owed_silence, label)
+                    {
+                        *failure.lock().unwrap_or_else(|p| p.into_inner()) =
+                            Some(error.to_string());
+                    }
+                })
                 .ok()
         };
+        if writer.is_none() {
+            *failure.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some("Could not spawn audio tap writer".into());
+        }
         Self {
             path,
             sender: Mutex::new(Some(sender)),
             stop,
             offered,
+            offered_samples: AtomicU64::new(0),
+            end_frame: AtomicU64::new(u64::MAX),
             dropped,
             owed_silence,
+            failure,
             writer: Mutex::new(writer),
         }
+    }
+
+    pub fn end_at_frame(&self, frame: u64) {
+        self.end_frame.fetch_min(frame, Ordering::AcqRel);
+    }
+
+    pub fn offered_frames(&self) -> u64 {
+        self.offered_samples.load(Ordering::Acquire) / 2
+    }
+
+    pub fn terminal_failure(&self) -> Option<String> {
+        self.failure
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     pub fn path(&self) -> &Path {
@@ -118,16 +151,24 @@ impl SourceAudioTap {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             return;
         };
+        let start = self.offered_samples.load(Ordering::Relaxed) / 2;
+        let remaining = self.end_frame.load(Ordering::Acquire).saturating_sub(start);
+        let mut owned_samples = samples.to_vec();
+        let keep = remaining.saturating_mul(2).min(owned_samples.len() as u64) as usize;
+        owned_samples[keep..].fill(0.0);
         let owed = self.owed_silence.swap(0, Ordering::AcqRel);
         let chunk = TapChunk {
             leading_silence_samples: usize::try_from(owed).unwrap_or(usize::MAX),
-            samples: samples.to_vec(),
+            samples: owned_samples,
         };
         if sender.try_send(chunk).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             self.owed_silence
                 .fetch_add(owed + samples.len() as u64, Ordering::AcqRel);
         }
+        // Publish coverage after queue/debt ownership, under close's mutex.
+        self.offered_samples
+            .fetch_add(samples.len() as u64, Ordering::Release);
     }
 
     pub fn report(&self) -> SourceAudioTapReport {
@@ -155,6 +196,8 @@ impl SourceAudioTap {
                     self.path.display(),
                     CLOSE_DRAIN_DEADLINE.as_secs()
                 );
+                *self.failure.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some("Audio tap did not drain before its deadline".into());
                 self.stop.store(true, Ordering::Release);
             }
             let _ = writer.join();
@@ -162,10 +205,15 @@ impl SourceAudioTap {
         self.report()
     }
 
+    pub fn request_abort(&self) {
+        self.stop.store(true, Ordering::Release);
+        self.sender.lock().unwrap_or_else(|p| p.into_inner()).take();
+    }
+
     /// Stops without draining: the queue is abandoned and the writer exits at
     /// its next check. Used when the muxer is already gone.
     pub fn abort(&self) -> SourceAudioTapReport {
-        self.stop.store(true, Ordering::Release);
+        self.request_abort();
         self.close()
     }
 }
@@ -183,24 +231,13 @@ fn run_tap_writer(
     receiver: mpsc::Receiver<TapChunk>,
     owed_silence: &AtomicU64,
     label: &'static str,
-) {
-    let mut file = match crate::fifo::open_audio_writer(
+) -> std::io::Result<()> {
+    let mut file = crate::fifo::open_audio_writer(
         path,
         stop,
         READER_OPEN_RETRY,
         "Source audio tap stopped before its muxer opened the FIFO",
-    ) {
-        Ok(file) => file,
-        Err(error) => {
-            tracing::warn!(
-                "Source audio tap ({label}) could not open {}: {error}",
-                path.display()
-            );
-            // Drain so the bus never observes a full queue as a stall signal.
-            while receiver.recv().is_ok() {}
-            return;
-        }
-    };
+    )?;
     let mut bytes = Vec::new();
     while let Ok(chunk) = receiver.recv() {
         if stop.load(Ordering::Acquire) {
@@ -218,14 +255,15 @@ fn run_tap_writer(
             if error.kind() != std::io::ErrorKind::Interrupted {
                 tracing::warn!("Source audio tap ({label}) ended: {error}");
             }
-            return;
+            return Err(error);
         }
     }
     // Chunks dropped after the last queued one still owe their span at EOF.
     let owed = usize::try_from(owed_silence.swap(0, Ordering::AcqRel)).unwrap_or(0);
     if owed > 0 && !stop.load(Ordering::Acquire) {
-        let _ = write_fully(&mut file, &vec![0u8; owed * 4], stop);
+        write_fully(&mut file, &vec![0u8; owed * 4], stop)?;
     }
+    Ok(())
 }
 
 /// Finishes a whole chunk across partial / would-block writes; the FIFO is
@@ -266,6 +304,7 @@ impl SourceAudioTaps {
     /// Closes both taps in order: queued chunks drain, then each FIFO closes
     /// so the muxer's audio input sees EOF. Returns the counters
     /// (microphone, system).
+    #[cfg(test)]
     pub fn close_all(&self) -> (Option<SourceAudioTapReport>, Option<SourceAudioTapReport>) {
         (
             self.microphone.as_ref().map(SourceAudioTap::close),
@@ -302,6 +341,37 @@ impl SourceAudioTaps {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn source_iso_tap_clips_at_exact_stereo_frame_and_closed_offers_never_claim_coverage() {
+        let (sender, receiver) = mpsc::sync_channel(4);
+        let tap = SourceAudioTap {
+            path: PathBuf::from("unused-cutoff-test"),
+            sender: Mutex::new(Some(sender)),
+            stop: Arc::new(AtomicBool::new(false)),
+            offered: Arc::new(AtomicU64::new(0)),
+            offered_samples: AtomicU64::new(0),
+            end_frame: AtomicU64::new(u64::MAX),
+            dropped: Arc::new(AtomicU64::new(0)),
+            owed_silence: Arc::new(AtomicU64::new(0)),
+            writer: Mutex::new(None),
+            failure: Arc::new(Mutex::new(None)),
+        };
+        tap.end_at_frame(3);
+        tap.offer(&[0.1, 0.2, 0.3, 0.4]);
+        tap.offer(&[0.5, 0.6, 0.7, 0.8]);
+        assert_eq!(tap.offered_frames(), 4);
+        tap.close();
+        tap.offer(&[1.0, 1.0]);
+        assert_eq!(
+            tap.offered_frames(),
+            4,
+            "closed offers cannot satisfy role readiness"
+        );
+        assert_eq!(receiver.recv().unwrap().samples, vec![0.1, 0.2, 0.3, 0.4]);
+        assert_eq!(receiver.recv().unwrap().samples, vec![0.5, 0.6, 0.0, 0.0]);
+        assert!(receiver.recv().is_err());
+    }
 
     #[test]
     fn tap_writes_offered_chunks_as_f32le_and_reports_counts() {
@@ -376,18 +446,63 @@ mod tests {
         tap.offer(&[0.9; 4]);
         assert_eq!(tap.report().dropped_chunks, 2);
         let reader_path = path.clone();
+        let (drained_tx, drained_rx) = mpsc::sync_channel(1);
+        let (finished_tx, finished_rx) = mpsc::sync_channel(1);
         let reader = thread::spawn(move || {
-            let mut file = std::fs::File::open(reader_path).unwrap();
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes).unwrap();
-            bytes
+            let result = (|| -> std::io::Result<Vec<u8>> {
+                #[cfg(unix)]
+                let mut file = {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    std::fs::OpenOptions::new()
+                        .read(true)
+                        .custom_flags(libc::O_NONBLOCK)
+                        .open(reader_path)?
+                };
+                #[cfg(not(unix))]
+                let mut file = std::fs::File::open(reader_path)?;
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                let mut bytes = Vec::new();
+                let mut acknowledged = false;
+                let mut buffer = [0; 4096];
+                loop {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "tap reader deadline",
+                        ));
+                    }
+                    match file.read(&mut buffer) {
+                        Ok(0) if acknowledged => break,
+                        Ok(0) => thread::yield_now(),
+                        Ok(count) => {
+                            bytes.extend_from_slice(&buffer[..count]);
+                            if !acknowledged && bytes.len() >= TAP_QUEUE_CHUNKS * 4 * 4 {
+                                acknowledged = true;
+                                let _ = drained_tx.send(());
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::yield_now()
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                Ok(bytes)
+            })();
+            let _ = finished_tx.send(result);
         });
-        // Once the reader drains, a late chunk must land AFTER the silence
-        // owed for the two drops.
-        thread::sleep(Duration::from_millis(50));
-        tap.offer(&[0.7; 4]);
-        tap.close();
-        let bytes = reader.join().unwrap();
+        let drained = drained_rx.recv_timeout(Duration::from_secs(5));
+        if drained.is_ok() {
+            tap.offer(&[0.7; 4]);
+            tap.close();
+        } else {
+            tap.abort();
+        }
+        let finished = finished_rx.recv_timeout(Duration::from_secs(12));
+        let _ = crate::fifo::cleanup(&path);
+        reader.join().unwrap();
+        drained.expect("reader acknowledged every initially queued sample");
+        let bytes = finished.expect("reader stopped within deadline").unwrap();
         let samples = bytes
             .chunks_exact(4)
             .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))

@@ -207,7 +207,7 @@ async fn copy_and_publish_session_file(
     }
 }
 
-fn publish_identity_bound_session_file(
+pub(crate) fn publish_identity_bound_session_file(
     staging: &Path,
     destination: &Path,
     expected: &SessionFileBoundIdentity,
