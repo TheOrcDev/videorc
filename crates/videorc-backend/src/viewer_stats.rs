@@ -64,6 +64,9 @@ pub struct TwitchViewerConfig {
     pub broadcaster_user_id: String,
     #[serde(default)]
     pub api_base_url: Option<String>,
+    /// The destination whose ingest this channel answers for (plan 161).
+    #[serde(default)]
+    pub target_id: Option<String>,
     /// Renews `access_token` mid-stream (plan 055, B2); never from params.
     #[serde(skip)]
     pub token_source: crate::session_token::SessionTokenSource,
@@ -84,6 +87,9 @@ pub struct KickViewerConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CountFetch {
     Count(Option<u64>),
+    /// A good answer that the channel is not live (Twitch: empty `data`).
+    /// No count, but a fact the platform watch uses (plan 161).
+    Offline,
     Refused,
     /// A 403 that is not the shared quota: permissions. Back off this platform.
     Forbidden,
@@ -133,7 +139,7 @@ impl CountFetch {
     fn count(self) -> Option<u64> {
         match self {
             Self::Count(count) => count,
-            Self::Refused | Self::Forbidden => None,
+            Self::Offline | Self::Refused | Self::Forbidden => None,
         }
     }
 }
@@ -200,7 +206,7 @@ async fn poll_youtube_count(
             backoff.forbidden_streak = 0;
             Some(count)
         }
-        CountFetch::Count(None) | CountFetch::Refused => None,
+        CountFetch::Count(None) | CountFetch::Offline | CountFetch::Refused => None,
     }
 }
 
@@ -478,7 +484,33 @@ async fn fetch_twitch_count(
         return outcome;
     }
     let body: Option<Value> = response.json().await.ok();
+    if body.as_ref().is_some_and(twitch_reports_offline) {
+        return CountFetch::Offline;
+    }
     CountFetch::Count(body.as_ref().and_then(parse_twitch_viewer_count))
+}
+
+/// Twitch Helix `Get Streams` with an empty `data` list: the channel is not
+/// live. A malformed body is not that answer.
+pub fn twitch_reports_offline(body: &Value) -> bool {
+    body.get("data")
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty)
+}
+
+/// The platform-watch answer for one Twitch poll (plan 161).
+fn twitch_platform_answer(
+    outcome: Option<CountFetch>,
+) -> crate::platform_stream_watch::PlatformAnswer {
+    match outcome {
+        Some(CountFetch::Count(Some(_))) => {
+            crate::platform_stream_watch::PlatformAnswer::Receiving
+        }
+        Some(CountFetch::Offline) => crate::platform_stream_watch::PlatformAnswer::NotReceiving(
+            "Twitch shows the channel offline".to_string(),
+        ),
+        _ => crate::platform_stream_watch::PlatformAnswer::Unknown,
+    }
 }
 
 async fn fetch_kick_count(
@@ -612,20 +644,32 @@ pub async fn run_viewer_sampler(
             config.token_source.clone(),
         );
         let mut deadline = ProviderDeadline::new();
+        let mut liveness = crate::platform_stream_watch::PlatformLiveness::default();
         loop {
             deadline.wait(&state, false).await;
             let client = &client;
             let config = &config;
-            let count = tokio::time::timeout(
+            let outcome = tokio::time::timeout(
                 Duration::from_secs(25),
-                poll_with_renewal(&state, client, &mut token, |access_token| async move {
+                poll_with_renewal_outcome(&state, client, &mut token, |access_token| async move {
                     fetch_twitch_count(client, config, &access_token).await
                 }),
             )
             .await
-            .ok()
-            .flatten();
+            .ok();
+            let count = outcome.and_then(CountFetch::count);
             record_provider_sample(&state, &session_id, StreamPlatform::Twitch, count);
+            // Plan 161: Twitch's own word on whether it receives the stream.
+            if let Some(observation) = liveness.observe(twitch_platform_answer(outcome)) {
+                crate::recording::observe_platform_stream(
+                    &state,
+                    &session_id,
+                    StreamPlatform::Twitch,
+                    config.target_id.as_deref(),
+                    observation,
+                )
+                .await;
+            }
         }
     };
     let kick_work = async {
@@ -751,6 +795,29 @@ fn provider_interval(state: &AppState, youtube: bool) -> Duration {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn twitch_empty_data_is_an_offline_answer_not_a_missing_count() {
+        assert!(twitch_reports_offline(&json!({"data": []})));
+        assert!(!twitch_reports_offline(&json!({"data": [{"viewer_count": 0}]})));
+        assert!(!twitch_reports_offline(&json!({"error": "nope"})));
+        use crate::platform_stream_watch::PlatformAnswer;
+        assert_eq!(
+            twitch_platform_answer(Some(CountFetch::Count(Some(0)))),
+            PlatformAnswer::Receiving,
+            "live with nobody watching is still live"
+        );
+        assert!(matches!(
+            twitch_platform_answer(Some(CountFetch::Offline)),
+            PlatformAnswer::NotReceiving(_)
+        ));
+        assert_eq!(
+            twitch_platform_answer(Some(CountFetch::Count(None))),
+            PlatformAnswer::Unknown
+        );
+        assert_eq!(twitch_platform_answer(None), PlatformAnswer::Unknown);
+        assert_eq!(CountFetch::Offline.count(), None);
+    }
     fn test_state() -> AppState {
         AppState::new(
             "test".into(),
@@ -847,6 +914,7 @@ mod tests {
                 client_id: "test".into(),
                 broadcaster_user_id: "test".into(),
                 api_base_url: Some(base),
+                target_id: None,
                 token_source: crate::session_token::SessionTokenSource::Fixed,
             }),
             None,
