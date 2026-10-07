@@ -9240,6 +9240,182 @@ mod mix_tests {
         );
     }
 
+    /// Amplitude of `hz` in one channel of interleaved stereo: Goertzel over
+    /// a whole number of cycles, so a pure tone reads its peak and a tone at
+    /// another whole-cycle frequency reads zero.
+    fn tone_amplitude(samples: &[f32], channel: usize, hz: f64) -> f64 {
+        let coefficient =
+            2.0 * (std::f64::consts::TAU * hz / f64::from(NATIVE_AUDIO_SAMPLE_RATE)).cos();
+        let (mut previous, mut before) = (0.0_f64, 0.0_f64);
+        for frame in samples.chunks_exact(2) {
+            let current = f64::from(frame[channel]) + coefficient * previous - before;
+            before = previous;
+            previous = current;
+        }
+        let power = previous * previous + before * before - coefficient * previous * before;
+        2.0 * power.max(0.0).sqrt() / (samples.len() / 2) as f64
+    }
+
+    /// Plan 157. Also consumed by smoke:separate-source-fixture. The real bus
+    /// mixes a 440 Hz microphone with a 1 kHz system source while the
+    /// production tap wiring (`prepare_source_audio_taps`, `role_audio_fifo`)
+    /// feeds the ISO muxer inputs. Read where each muxer reads, the Camera
+    /// input is the processed microphone alone, the Screen input is the
+    /// system contribution alone (stereo kept), and the two sum to the
+    /// Combined mix sample for sample on the Combined timeline. A swap at any
+    /// junction (bus offer, tap assignment, muxer input) fails here, with no
+    /// track title to hide behind. The smoke encodes the dumped PCM per role.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn source_iso_audio_artifact_fixture() {
+        use crate::source_iso::{
+            RecordingRole, SourceIsoPlan, prepare_source_audio_taps, role_audio_fifo,
+        };
+        // Mirrored in scripts/smoke-separate-source-fixture.mjs.
+        const MICROPHONE_HZ: f64 = 440.0;
+        const SYSTEM_HZ: f64 = 1_000.0;
+        const MICROPHONE_AMPLITUDE: f64 = 0.5;
+        const SYSTEM_AMPLITUDE: f64 = 0.3;
+        // The smoke's video legs are 3 s; the extra half second covers
+        // `-shortest`. The sources run a second longer so neither stalls.
+        const FRAMES: usize = 168_000;
+        // One steady second: whole cycles of both tones, past the attach ramp.
+        const WINDOW: std::ops::Range<usize> = 48_000..96_000;
+        let tone = |hz: f64, amplitude: f64, position: usize| {
+            let phase = (position % 48_000) as f64 / 48_000.0;
+            (amplitude * (std::f64::consts::TAU * hz * phase).sin()) as f32
+        };
+        let epoch = Instant::now() + Duration::from_millis(500);
+        let bus = start_bus(
+            epoch,
+            Some(signal_packets(epoch, 0, FRAMES + 48_000, 512, |position| {
+                let sample = tone(MICROPHONE_HZ, MICROPHONE_AMPLITUDE, position);
+                (sample, sample)
+            })),
+            AudioProcessingSettings::default(),
+            system_options(),
+        )
+        .await;
+        let plan =
+            SourceIsoPlan::from_settings(&crate::protocol::SeparateSourceRecordingsSettings {
+                enabled: true,
+                keep_combined: true,
+            })
+            .unwrap();
+        let session_id = format!("audio-fixture-{}", uuid::Uuid::new_v4());
+        let taps = Arc::new(prepare_source_audio_taps(&session_id, &plan).unwrap());
+        assert_eq!(
+            role_audio_fifo(&taps, RecordingRole::Combined),
+            None,
+            "the Combined muxer reads the bus FIFO, never a tap"
+        );
+        // Read exactly where each ISO muxer reads.
+        let readers = [RecordingRole::Screen, RecordingRole::Camera].map(|role| {
+            let path = role_audio_fifo(&taps, role)
+                .unwrap_or_else(|| panic!("the {role:?} muxer has no audio input"));
+            (path.clone(), spawn_fifo_reader(path).0)
+        });
+        // Armed before the epoch, as the start path does: the taps see every
+        // chunk the bus writes.
+        bus.session.set_source_taps(taps.clone());
+        let system = bus.session.system_audio();
+        let producer = prepare_system(
+            &system,
+            signal_packets(epoch, 0, FRAMES + 48_000, 960, |position| {
+                let sample = tone(SYSTEM_HZ, SYSTEM_AMPLITUDE, position);
+                (sample, sample * 0.5)
+            }),
+            quiet_failure(),
+        )
+        .await;
+        bus.session.attach_system(producer).await.unwrap();
+        bus.wait_for_frames(FRAMES).await;
+        let (combined, _) = bus.finish();
+        let (microphone_report, system_report) = taps.close_all();
+        let [(screen_path, screen), (camera_path, camera)] =
+            readers.map(|(path, reader)| (path, reader.join().unwrap()));
+        let _ = crate::fifo::cleanup(&screen_path);
+        let _ = crate::fifo::cleanup(&camera_path);
+        if let Some(directory) =
+            std::env::var_os("VIDEORC_SOURCE_ISO_ARTIFACT_DIR").map(PathBuf::from)
+        {
+            std::fs::create_dir_all(&directory).unwrap();
+            for (role, bytes) in [
+                ("combined", &combined),
+                ("screen", &screen),
+                ("camera", &camera),
+            ] {
+                std::fs::write(directory.join(format!("audio-{role}.f32le")), bytes).unwrap();
+            }
+        }
+        let (combined, screen, camera) = (decode(&combined), decode(&screen), decode(&camera));
+        assert_eq!(
+            microphone_report.map(|report| report.dropped_chunks),
+            Some(0)
+        );
+        assert_eq!(system_report.map(|report| report.dropped_chunks), Some(0));
+        assert!(
+            combined.len() >= FRAMES * 2,
+            "the bus wrote {}",
+            combined.len()
+        );
+        for (role, tap) in [("screen", &screen), ("camera", &camera)] {
+            // A stop may cut the last chunk after the bus wrote part of it;
+            // the tap then ends on the chunk before.
+            assert!(
+                tap.len() <= combined.len() && combined.len() - tap.len() <= CHUNK_FRAMES * 2,
+                "the {role} tap carried {} samples for {} written",
+                tap.len(),
+                combined.len()
+            );
+        }
+        let range = WINDOW.start * 2..WINDOW.end * 2;
+        let (combined, screen, camera) = (
+            &combined[range.clone()],
+            &screen[range.clone()],
+            &camera[range],
+        );
+        // Same bus positions: the two ingredients ARE the written mix (0.8
+        // peak, so the limiter never touches a sample).
+        let misaligned = combined
+            .iter()
+            .zip(screen.iter().zip(camera))
+            .position(|(mix, (system, microphone))| microphone + system != *mix);
+        assert_eq!(
+            misaligned, None,
+            "the taps must carry the Combined sum's ingredients sample for sample"
+        );
+        let camera_tones = (
+            tone_amplitude(camera, 0, MICROPHONE_HZ),
+            tone_amplitude(camera, 0, SYSTEM_HZ),
+        );
+        let screen_tones = (
+            tone_amplitude(screen, 0, MICROPHONE_HZ),
+            tone_amplitude(screen, 0, SYSTEM_HZ),
+        );
+        assert!(
+            (camera_tones.0 - MICROPHONE_AMPLITUDE).abs() < 0.01 && camera_tones.1 < 1.0e-3,
+            "the Camera input must be the microphone alone (440 Hz {:.4}, 1 kHz {:.4})",
+            camera_tones.0,
+            camera_tones.1
+        );
+        assert!(
+            (screen_tones.1 - SYSTEM_AMPLITUDE).abs() < 0.01 && screen_tones.0 < 1.0e-3,
+            "the Screen input must be system audio alone (440 Hz {:.4}, 1 kHz {:.4})",
+            screen_tones.0,
+            screen_tones.1
+        );
+        assert!(
+            camera.chunks_exact(2).all(|frame| frame[0] == frame[1]),
+            "the microphone is folded to both channels"
+        );
+        assert!(
+            screen
+                .chunks_exact(2)
+                .all(|frame| (frame[1] - frame[0] * 0.5).abs() <= 1.0e-6),
+            "system audio keeps its stereo image"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn silent_system_producer_is_never_retired_for_stalling() {
         let epoch = Instant::now() + Duration::from_millis(100);

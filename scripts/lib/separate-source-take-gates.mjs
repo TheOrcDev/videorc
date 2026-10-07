@@ -6,10 +6,11 @@
 // (a swapped mic/system pairing is a hard failure), and the three files must
 // cover the same span so an editor can lay them on one timeline.
 //
-// The pure evaluators take ffprobe JSON that has already been read; the
-// smoke script (`scripts/smoke-separate-source-take.mjs`) does the I/O.
+// The pure evaluators take ffprobe JSON (or decoded PCM) that has already
+// been read; the smoke scripts (`scripts/smoke-separate-source-take.mjs`,
+// `scripts/smoke-separate-source-fixture.mjs`) do the I/O.
 
-import { extname } from 'node:path'
+import path from 'node:path'
 
 export const TAKE_ROLES = Object.freeze(['combined', 'screen', 'camera'])
 
@@ -37,7 +38,9 @@ export const DEFAULT_TAKE_GATES = Object.freeze({
  * `recording_role_mkv_path` in `source_iso.rs`. Works for `.mkv` and `.mp4`.
  */
 export function takeSiblingPaths(combinedPath) {
-  const extension = extname(combinedPath)
+  // Windows rules on every host: they split on `/` and `\` alike, so a
+  // Windows path read on POSIX never takes `.dir\take` for an extension.
+  const extension = path.win32.extname(combinedPath)
   // Splice the role in before the extension; the directory and separators
   // are left exactly as given (POSIX or Windows), so the result sits beside
   // the Combined file on either platform.
@@ -171,4 +174,98 @@ export function evaluateTake(summaries, expectations = {}, gates = DEFAULT_TAKE_
   }
 
   return { pass: failures.length === 0, failures, warnings }
+}
+
+/** Which bus ingredient each role's audio carries (`source_audio_tap.rs`). */
+export const ROLE_AUDIO_SOURCES = Object.freeze({
+  combined: Object.freeze(['microphone', 'system']),
+  screen: Object.freeze(['system']),
+  camera: Object.freeze(['microphone'])
+})
+
+/**
+ * Amplitude of `frequency` in one channel of interleaved PCM (Goertzel). Over
+ * a whole number of cycles a pure tone reads its peak amplitude and a tone at
+ * another whole-cycle frequency reads zero.
+ */
+export function toneAmplitude(
+  samples,
+  { frequency, sampleRate = 48000, channels = 2, channel = 0 }
+) {
+  const frames = Math.floor(samples.length / channels)
+  if (frames === 0) return 0
+  const coefficient = 2 * Math.cos((2 * Math.PI * frequency) / sampleRate)
+  let previous = 0
+  let before = 0
+  for (let frame = 0; frame < frames; frame += 1) {
+    const current = samples[frame * channels + channel] + coefficient * previous - before
+    before = previous
+    previous = current
+  }
+  const power = previous * previous + before * before - coefficient * previous * before
+  return (2 * Math.sqrt(Math.max(power, 0))) / frames
+}
+
+/**
+ * Judges which source each role's audio carries from its decoded samples,
+ * not its track title: a take whose mic and system samples were swapped
+ * under the right titles still fails here.
+ *
+ * @param {{[role: string]: {microphone: number, system: number}|null}} levels
+ *   Measured amplitude of the microphone and system fixture tones per role.
+ * @param {{microphone: number, system: number}} expected
+ *   The amplitude each tone was recorded at.
+ * @returns {{pass:boolean, failures:string[]}}
+ */
+export function evaluateRoleAudioSources(levels, expected, gates = {}) {
+  // `tolerance`: a carried tone within ±20% of its level (lossy encode);
+  // `maxBleed`: a source a role must not carry stays under 5% of its level.
+  const { roles = TAKE_ROLES, tolerance = 0.2, maxBleed = 0.05 } = gates
+  const failures = []
+  for (const role of roles) {
+    const level = levels[role]
+    if (!level) {
+      failures.push(`${role} audio was not measured`)
+      continue
+    }
+    const wanted = ROLE_AUDIO_SOURCES[role]
+    const missing = []
+    const foreign = []
+    for (const source of ['microphone', 'system']) {
+      const amplitude = level[source]
+      if (wanted.includes(source)) {
+        if (!(Math.abs(amplitude - expected[source]) <= expected[source] * tolerance)) {
+          missing.push(source)
+        }
+      } else if (!(amplitude <= expected[source] * maxBleed)) {
+        foreign.push(source)
+      }
+    }
+    const swappedRole =
+      missing.length === wanted.length && foreign.length > 0
+        ? TAKE_ROLES.find(
+            (candidate) =>
+              candidate !== role &&
+              candidate !== 'combined' &&
+              ROLE_AUDIO_SOURCES[candidate].join() === foreign.join()
+          )
+        : undefined
+    if (swappedRole) {
+      failures.push(
+        `${role} file carries the ${swappedRole} audio samples (${foreign.join(' + ')}); the pairing is swapped`
+      )
+      continue
+    }
+    for (const source of missing) {
+      failures.push(
+        `${role} audio lacks the ${source} (amplitude ${level[source].toFixed(3)}, expected ${expected[source]})`
+      )
+    }
+    for (const source of foreign) {
+      failures.push(
+        `${role} audio carries the ${source} (amplitude ${level[source].toFixed(3)}); it must hold ${wanted.join(' + ')} only`
+      )
+    }
+  }
+  return { pass: failures.length === 0, failures }
 }

@@ -345,6 +345,18 @@ pub fn prepare_source_audio_taps(
     Ok(taps)
 }
 
+/// The PCM FIFO a role's muxer reads: the microphone tap for the Camera file,
+/// the system tap for the Screen file. The Combined muxer reads the bus FIFO,
+/// never a tap.
+pub(crate) fn role_audio_fifo(taps: &SourceAudioTaps, role: RecordingRole) -> Option<PathBuf> {
+    let tap = match role {
+        RecordingRole::Camera => taps.microphone.as_ref(),
+        RecordingRole::Screen => taps.system.as_ref(),
+        RecordingRole::Combined => None,
+    };
+    tap.map(|tap| tap.path().to_path_buf())
+}
+
 /// Spawns the muxers and bridges for every ISO role and waits for the
 /// bridges' first-frame readiness. On any failure every started writer is
 /// torn down and the error returned; the caller fails the session start
@@ -381,13 +393,7 @@ pub async fn start_source_iso_writers(
             crate::fifo::cleanup(&video_fifo).ok();
             crate::fifo::create(&video_fifo)
                 .with_context(|| format!("Could not create the {} video FIFO", role.as_str()))?;
-            let audio_fifo = match role {
-                RecordingRole::Camera => {
-                    taps.microphone.as_ref().map(|tap| tap.path().to_path_buf())
-                }
-                RecordingRole::Screen => taps.system.as_ref().map(|tap| tap.path().to_path_buf()),
-                RecordingRole::Combined => None,
-            };
+            let audio_fifo = role_audio_fifo(&taps, role);
             let args = iso_muxer_ffmpeg_args(
                 &video_fifo,
                 audio_fifo.as_deref(),

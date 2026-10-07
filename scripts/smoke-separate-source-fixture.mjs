@@ -1,24 +1,34 @@
 #!/usr/bin/env node
 // Separate source recordings fixture smoke (plan 157).
 //
-// No camera device is needed: the backend fixture test renders a
-// camera-in-screen scene through the production publisher with the ISO legs
-// armed and dumps every frame of the Combined, Screen and Camera legs (CPU and
-// Metal on macOS). This smoke encodes each leg into a real file beside the
-// others, with the audio track its role promises (sine tones at distinct
-// frequencies stand in for mic and system audio), then proves:
+// No camera or microphone is needed. Two backend fixture tests run first:
 //
-//   - the take gate passes (role files present, canvas, audio pairing, drift),
+//   - `compositor::scene_switch_tests::source_iso_artifact_fixture` renders a
+//     camera-in-screen scene through the production publisher with the ISO
+//     legs armed and dumps every frame of the Combined, Screen and Camera
+//     legs (CPU and Metal on macOS);
+//   - `session_audio::mix_tests::source_iso_audio_artifact_fixture` runs the
+//     real audio bus with a 440 Hz microphone and a 1 kHz system source
+//     through the production tap wiring and dumps the PCM each muxer reads
+//     (the bus FIFO for Combined, the role taps for Screen and Camera).
+//
+// This smoke encodes each leg into a real file beside the others, with the
+// routed PCM of its role, then proves:
+//
+//   - the take gate passes (role files present, canvas, audio titles, drift),
+//   - each file's decoded audio carries its role's source and nothing else
+//     (Screen = system tone, Camera = microphone tone, Combined = both),
 //   - every decoded frame of every file matches the compositor reference
 //     (the Screen file has no camera inset; the Camera file is camera-only),
 //   - each file passes the honest recording analyzer,
-//   - a deliberately swapped audio pairing is rejected by the take gate.
+//   - a swapped title pairing is rejected by the take gate, and swapped
+//     samples under the right titles are rejected by the audio source gate.
 //
 // Device acceptance with a real camera still happens through the packaged app
 // (`pnpm smoke:separate-source-take -- <combined-file>`).
 
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, renameSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -27,9 +37,11 @@ import { assertSceneSwitchPixels } from './lib/scene-switch-pixels.mjs'
 import {
   ROLE_AUDIO_TITLES,
   TAKE_ROLES,
+  evaluateRoleAudioSources,
   evaluateTake,
   summarizeRoleProbe,
-  takeSiblingPaths
+  takeSiblingPaths,
+  toneAmplitude
 } from './lib/separate-source-take-gates.mjs'
 
 const root = resolve(import.meta.dirname, '..')
@@ -39,10 +51,14 @@ const ffprobe = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
 const WIDTH = 64
 const HEIGHT = 36
 const FPS = 30
-const FRAMES = 90
-const DURATION_SECONDS = FRAMES / FPS
-// Distinct stand-ins so a swapped pairing is audible as well as mis-titled.
-const ROLE_TONE_HZ = { combined: 440, screen: 660, camera: 880 }
+// Mirrors `source_iso_audio_artifact_fixture` in `session_audio.rs`.
+const MICROPHONE_HZ = 440
+const SYSTEM_HZ = 1000
+const EXPECTED_LEVELS = { microphone: 0.5, system: 0.3 }
+// The fixture's steady second (bus frames 48000..96000): whole cycles of
+// both tones, past the system attach ramp.
+const ANALYSIS_FRAMES = { start: 48000, end: 96000 }
+const canvas = { width: WIDTH, height: HEIGHT, fps: FPS }
 
 console.log(`Separate source fixture evidence: ${directory}`)
 await run(
@@ -53,90 +69,40 @@ await run(
     'videorc-backend',
     '--bin',
     'videorc-backend',
-    'compositor::scene_switch_tests::source_iso_artifact_fixture',
     '--',
     '--exact',
+    'compositor::scene_switch_tests::source_iso_artifact_fixture',
+    'session_audio::mix_tests::source_iso_audio_artifact_fixture',
     '--nocapture'
   ],
   { ...process.env, VIDEORC_SOURCE_ISO_ARTIFACT_DIR: directory }
 )
+for (const role of TAKE_ROLES) {
+  if (!existsSync(audioPcm(role))) {
+    throw new Error(`the backend audio fixture did not dump ${audioPcm(role)}`)
+  }
+}
 
 for (const mode of process.platform === 'darwin' ? ['cpu', 'metal'] : ['cpu']) {
   const paths = takeSiblingPaths(join(directory, `${mode}-take.mp4`))
   for (const role of TAKE_ROLES) {
-    const reference = join(directory, `${mode}-${role}.yuv`)
-    await run(ffmpeg, [
-      '-hide_banner',
-      '-loglevel',
-      'error',
-      '-y',
-      '-f',
-      'rawvideo',
-      '-pixel_format',
-      'yuv420p',
-      '-video_size',
-      `${WIDTH}x${HEIGHT}`,
-      '-framerate',
-      String(FPS),
-      '-color_range',
-      'tv',
-      '-colorspace',
-      'bt709',
-      '-color_primaries',
-      'bt709',
-      '-color_trc',
-      'bt709',
-      '-i',
-      reference,
-      '-f',
-      'lavfi',
-      '-i',
-      `sine=frequency=${ROLE_TONE_HZ[role]}:sample_rate=48000:duration=${DURATION_SECONDS}`,
-      '-map',
-      '0:v',
-      '-map',
-      '1:a',
-      '-ac',
-      '2',
-      '-c:v',
-      'libx264',
-      '-preset',
-      'ultrafast',
-      '-crf',
-      '12',
-      '-pix_fmt',
-      'yuv420p',
-      '-color_range',
-      'tv',
-      '-colorspace',
-      'bt709',
-      '-color_primaries',
-      'bt709',
-      '-color_trc',
-      'bt709',
-      '-c:a',
-      'aac',
-      // Both tags, exactly as source_iso.rs writes them: `title` for MKV
-      // players, `handler_name` so the MP4 export keeps the role.
-      '-metadata:s:a:0',
-      `title=${ROLE_AUDIO_TITLES[role]}`,
-      '-metadata:s:a:0',
-      `handler_name=${ROLE_AUDIO_TITLES[role]}`,
-      '-shortest',
-      paths[role]
-    ])
+    await encodeRole(mode, role, role, paths[role])
   }
 
   // 1. The take gate on the real files.
-  const summaries = {}
-  for (const role of TAKE_ROLES) {
-    summaries[role] = summarizeRoleProbe(probeRaw(paths[role]))
-  }
-  const take = evaluateTake(summaries, { video: { width: WIDTH, height: HEIGHT, fps: FPS } })
+  const take = evaluateTake(probeTake(paths), { video: canvas })
   if (!take.pass) throw new Error(`${mode}: take gate failed: ${take.failures.join('; ')}`)
   console.log(`${mode}: take gate PASS (${TAKE_ROLES.length} roles)`)
 
-  // 2. Every decoded frame matches the compositor reference per role.
+  // 2. Each file's samples carry its role's source, whatever its title says.
+  const levels = Object.fromEntries(TAKE_ROLES.map((role) => [role, sourceLevels(paths[role])]))
+  const sources = evaluateRoleAudioSources(levels, EXPECTED_LEVELS)
+  if (!sources.pass) {
+    throw new Error(`${mode}: audio source gate failed: ${sources.failures.join('; ')}`)
+  }
+  console.log(`${mode}: audio source gate PASS ${describeLevels(levels)}`)
+
+  // 3. Every decoded frame matches the compositor reference per role.
   for (const role of TAKE_ROLES) {
     const decoded = spawnSync(
       ffmpeg,
@@ -165,7 +131,7 @@ for (const mode of process.platform === 'darwin' ? ['cpu', 'metal'] : ['cpu']) {
       decoded.stdout,
       { width: WIDTH, height: HEIGHT, label: paths[role] }
     )
-    // 3. Honest final-file analysis per role.
+    // 4. Honest final-file analysis per role.
     const quality = await analyzeRecording(paths[role], {
       ffmpegPath: ffmpeg,
       ffprobePath: ffprobe,
@@ -184,18 +150,12 @@ for (const mode of process.platform === 'darwin' ? ['cpu', 'metal'] : ['cpu']) {
     )
   }
 
-  // 4. A swapped mic/system pairing must be rejected by name.
+  // 5. A swapped title pairing must be rejected by name.
   const swapped = join(directory, `${mode}-swap.tmp`)
   renameSync(paths.screen, swapped)
   renameSync(paths.camera, paths.screen)
   renameSync(swapped, paths.camera)
-  const swappedSummaries = {}
-  for (const role of TAKE_ROLES) {
-    swappedSummaries[role] = summarizeRoleProbe(probeRaw(paths[role]))
-  }
-  const swappedTake = evaluateTake(swappedSummaries, {
-    video: { width: WIDTH, height: HEIGHT, fps: FPS }
-  })
+  const swappedTake = evaluateTake(probeTake(paths), { video: canvas })
   if (
     swappedTake.pass ||
     !swappedTake.failures.some((line) => /screen file carries the camera audio track/.test(line))
@@ -208,9 +168,165 @@ for (const mode of process.platform === 'darwin' ? ['cpu', 'metal'] : ['cpu']) {
   renameSync(paths.screen, swapped)
   renameSync(paths.camera, paths.screen)
   renameSync(swapped, paths.camera)
-  console.log(`${mode}: swapped pairing rejected (${swappedTake.failures.length} failures)`)
+  console.log(`${mode}: swapped title pairing rejected (${swappedTake.failures.length} failures)`)
+
+  // 6. Swapped samples under the RIGHT titles: the take gate cannot see it,
+  // the audio source gate must.
+  const misrouted = {
+    screen: join(directory, `${mode}-misrouted-screen.mp4`),
+    camera: join(directory, `${mode}-misrouted-camera.mp4`)
+  }
+  await encodeRole(mode, 'screen', 'camera', misrouted.screen)
+  await encodeRole(mode, 'camera', 'screen', misrouted.camera)
+  const isoRoles = ['screen', 'camera']
+  const misroutedTake = evaluateTake(probeTake(misrouted), { roles: isoRoles, video: canvas })
+  if (!misroutedTake.pass) {
+    throw new Error(
+      `${mode}: the misrouted fixture should pass the title gate: ${misroutedTake.failures.join('; ')}`
+    )
+  }
+  const misroutedSources = evaluateRoleAudioSources(
+    Object.fromEntries(isoRoles.map((role) => [role, sourceLevels(misrouted[role])])),
+    EXPECTED_LEVELS,
+    { roles: isoRoles }
+  )
+  if (
+    misroutedSources.pass ||
+    !misroutedSources.failures.some((line) =>
+      /screen file carries the camera audio samples/.test(line)
+    )
+  ) {
+    throw new Error(
+      `${mode}: swapped samples were not rejected: ${misroutedSources.failures.join('; ') || 'pass'}`
+    )
+  }
+  console.log(
+    `${mode}: swapped samples rejected under the right titles (${misroutedSources.failures.length} failures)`
+  )
 }
 console.log('separate-source-fixture: PASS')
+
+function audioPcm(role) {
+  return join(directory, `audio-${role}.f32le`)
+}
+
+/** Encodes `videoRole`'s frames with `audioRole`'s routed PCM, titled for `videoRole`. */
+function encodeRole(mode, videoRole, audioRole, output) {
+  return run(ffmpeg, [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-y',
+    '-f',
+    'rawvideo',
+    '-pixel_format',
+    'yuv420p',
+    '-video_size',
+    `${WIDTH}x${HEIGHT}`,
+    '-framerate',
+    String(FPS),
+    '-color_range',
+    'tv',
+    '-colorspace',
+    'bt709',
+    '-color_primaries',
+    'bt709',
+    '-color_trc',
+    'bt709',
+    '-i',
+    join(directory, `${mode}-${videoRole}.yuv`),
+    // The PCM the role's muxer read, in the muxer's input format.
+    '-f',
+    'f32le',
+    '-ar',
+    '48000',
+    '-ac',
+    '2',
+    '-i',
+    audioPcm(audioRole),
+    '-map',
+    '0:v',
+    '-map',
+    '1:a',
+    '-c:v',
+    'libx264',
+    '-preset',
+    'ultrafast',
+    '-crf',
+    '12',
+    '-pix_fmt',
+    'yuv420p',
+    '-color_range',
+    'tv',
+    '-colorspace',
+    'bt709',
+    '-color_primaries',
+    'bt709',
+    '-color_trc',
+    'bt709',
+    '-c:a',
+    'aac',
+    // Both tags, exactly as source_iso.rs writes them: `title` for MKV
+    // players, `handler_name` so the MP4 export keeps the role.
+    '-metadata:s:a:0',
+    `title=${ROLE_AUDIO_TITLES[videoRole]}`,
+    '-metadata:s:a:0',
+    `handler_name=${ROLE_AUDIO_TITLES[videoRole]}`,
+    '-shortest',
+    output
+  ])
+}
+
+/** Tone levels of the microphone and system fixture sources in one file. */
+function sourceLevels(filePath) {
+  const decoded = spawnSync(
+    ffmpeg,
+    [
+      '-v',
+      'error',
+      '-i',
+      filePath,
+      '-map',
+      '0:a:0',
+      '-ac',
+      '2',
+      '-ar',
+      '48000',
+      '-f',
+      'f32le',
+      'pipe:1'
+    ],
+    { maxBuffer: 64 * 1024 * 1024 }
+  )
+  if (decoded.status !== 0) {
+    throw new Error(`audio decode failed for ${filePath}: ${decoded.stderr?.toString()}`)
+  }
+  // Copy into a fresh buffer: Float32Array needs a 4-byte aligned offset.
+  const samples = new Float32Array(new Uint8Array(decoded.stdout).buffer)
+  const window = samples.subarray(ANALYSIS_FRAMES.start * 2, ANALYSIS_FRAMES.end * 2)
+  if (window.length < (ANALYSIS_FRAMES.end - ANALYSIS_FRAMES.start) * 2) {
+    throw new Error(`${filePath}: decoded only ${samples.length / 2} audio frames`)
+  }
+  return {
+    microphone: toneAmplitude(window, { frequency: MICROPHONE_HZ }),
+    system: toneAmplitude(window, { frequency: SYSTEM_HZ })
+  }
+}
+
+function describeLevels(levels) {
+  return Object.entries(levels)
+    .map(
+      ([role, level]) =>
+        `${role} mic ${level.microphone.toFixed(3)} / system ${level.system.toFixed(3)}`
+    )
+    .join(', ')
+}
+
+function probeTake(paths) {
+  return Object.fromEntries(
+    Object.entries(paths).map(([role, filePath]) => [role, summarizeRoleProbe(probeRaw(filePath))])
+  )
+}
 
 function probeRaw(filePath) {
   const result = spawnSync(ffprobe, [

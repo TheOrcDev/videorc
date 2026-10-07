@@ -4,9 +4,11 @@ import { describe, it } from 'node:test'
 import {
   ROLE_AUDIO_TITLES,
   audioStreamTitle,
+  evaluateRoleAudioSources,
   evaluateTake,
   summarizeRoleProbe,
-  takeSiblingPaths
+  takeSiblingPaths,
+  toneAmplitude
 } from './separate-source-take-gates.mjs'
 
 function probe(role, overrides = {}) {
@@ -55,6 +57,11 @@ describe('takeSiblingPaths', () => {
       'Windows separators are preserved as given'
     )
     assert.equal(takeSiblingPaths('take').camera, 'take-camera')
+    assert.equal(
+      takeSiblingPaths('C:\\Videos\\archive.dir\\take').screen,
+      'C:\\Videos\\archive.dir\\take-screen',
+      'a dotted Windows directory is never read as the extension, on any host'
+    )
   })
 })
 
@@ -147,5 +154,86 @@ describe('evaluateTake', () => {
     const result = evaluateTake(summaries, { roles: ['screen', 'camera'], video: canvas })
     assert.equal(result.pass, true, result.failures.join('; '))
     assert.equal(evaluateTake(summaries, { roles: ['stream'] }).pass, false)
+  })
+})
+
+function stereoTones(tones, frames = 48000) {
+  const samples = new Float32Array(frames * 2)
+  for (let frame = 0; frame < frames; frame += 1) {
+    let left = 0
+    let right = 0
+    for (const { frequency, amplitude, rightScale = 1 } of tones) {
+      const value = amplitude * Math.sin((2 * Math.PI * frequency * frame) / 48000)
+      left += value
+      right += value * rightScale
+    }
+    samples[frame * 2] = left
+    samples[frame * 2 + 1] = right
+  }
+  return samples
+}
+
+describe('toneAmplitude', () => {
+  it('reads a whole-cycle tone at its peak and another tone at zero', () => {
+    const samples = stereoTones([
+      { frequency: 440, amplitude: 0.5 },
+      { frequency: 1000, amplitude: 0.3, rightScale: 0.5 }
+    ])
+    assert.ok(Math.abs(toneAmplitude(samples, { frequency: 440 }) - 0.5) < 1e-4)
+    assert.ok(Math.abs(toneAmplitude(samples, { frequency: 1000 }) - 0.3) < 1e-4)
+    assert.ok(Math.abs(toneAmplitude(samples, { frequency: 1000, channel: 1 }) - 0.15) < 1e-4)
+    assert.ok(
+      toneAmplitude(stereoTones([{ frequency: 440, amplitude: 0.5 }]), { frequency: 1000 }) < 1e-4
+    )
+    assert.equal(toneAmplitude(new Float32Array(0), { frequency: 440 }), 0)
+  })
+})
+
+describe('evaluateRoleAudioSources', () => {
+  const expected = { microphone: 0.5, system: 0.3 }
+  const healthy = {
+    combined: { microphone: 0.49, system: 0.31 },
+    screen: { microphone: 0.001, system: 0.29 },
+    camera: { microphone: 0.51, system: 0.002 }
+  }
+
+  it('passes when each role carries exactly its sources', () => {
+    assert.deepEqual(evaluateRoleAudioSources(healthy, expected), { pass: true, failures: [] })
+  })
+
+  it('names swapped samples even when the titles were right', () => {
+    const result = evaluateRoleAudioSources(
+      { ...healthy, screen: healthy.camera, camera: healthy.screen },
+      expected
+    )
+    assert.equal(result.pass, false)
+    assert.deepEqual(result.failures, [
+      'screen file carries the camera audio samples (microphone); the pairing is swapped',
+      'camera file carries the screen audio samples (system); the pairing is swapped'
+    ])
+  })
+
+  it('fails a missing ingredient, a leak, and an unmeasured role', () => {
+    const result = evaluateRoleAudioSources(
+      {
+        combined: { microphone: 0.5, system: 0 },
+        screen: { microphone: 0.2, system: 0.3 },
+        camera: null
+      },
+      expected
+    )
+    assert.equal(result.pass, false)
+    assert.deepEqual(result.failures, [
+      'combined audio lacks the system (amplitude 0.000, expected 0.3)',
+      'screen audio carries the microphone (amplitude 0.200); it must hold system only',
+      'camera audio was not measured'
+    ])
+  })
+
+  it('judges only the roles asked for', () => {
+    const result = evaluateRoleAudioSources({ screen: healthy.screen }, expected, {
+      roles: ['screen']
+    })
+    assert.equal(result.pass, true, result.failures.join('; '))
   })
 })

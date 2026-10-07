@@ -38,10 +38,17 @@ takes for later NLE work.
     `compositor::scene_switch_tests::source_iso_artifact_fixture` renders a
     camera-in-screen scene with the ISO legs armed (CPU + Metal) and asserts
     per tick that the Screen leg has no camera inset and the Camera leg is the
-    camera alone; `pnpm smoke:separate-source-fixture` (in
-    `smoke:recording-studio`) encodes those legs into a real three-file take
-    and runs the take gate, frame-exact comparison and the recording analyzer
-    on each file, then proves a swapped pairing is rejected.
+    camera alone. `session_audio::mix_tests::source_iso_audio_artifact_fixture`
+    runs the real bus (440 Hz microphone, 1 kHz system source) with the taps
+    armed through `prepare_source_audio_taps` and reads each tap where
+    `role_audio_fifo` points the role's muxer: Camera is the microphone alone,
+    Screen is the system contribution alone (stereo kept), and the two sum to
+    the Combined mix sample for sample. `pnpm smoke:separate-source-fixture`
+    (in `smoke:recording-studio`) encodes those legs with that routed PCM into
+    a real three-file take and runs the take gate, an audio source gate on the
+    decoded samples, frame-exact comparison and the recording analyzer on each
+    file, then proves a swapped title pairing and swapped samples under the
+    right titles are both rejected.
   - The renderer only sends `separateSourceRecordings` when the toggle is on
     AND the scene is eligible, so a stale toggle never blocks Record; the
     Recording tab shows the exact ineligibility reason.
