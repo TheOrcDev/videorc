@@ -5265,7 +5265,10 @@ async fn start_session_with_timeline(
                         crate::source_iso::HEALTH_STARTED,
                         "Separate source recordings armed: Screen and Camera files record beside the Combined recording.",
                     );
-                    Some(runtime)
+                    // Cleanup-owned until `pending_active` takes it: the
+                    // startup-failure and overlay-failure returns below, and
+                    // cancellation of this future, abort the writers from Drop.
+                    Some(crate::source_iso::SourceIsoStartGuard::new(runtime, &state))
                 }
                 Err(error) => {
                     let message = format!("{error:#}");
@@ -5444,7 +5447,7 @@ async fn start_session_with_timeline(
         screen_overlay,
         encoder_bridge,
         encoder_bridge_stream,
-        source_iso: source_iso_runtime,
+        source_iso: source_iso_runtime.map(crate::source_iso::SourceIsoStartGuard::commit),
         #[cfg(target_os = "windows")]
         windows_d3d11_monitor,
         #[cfg(target_os = "windows")]

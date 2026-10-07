@@ -525,6 +525,29 @@ impl SourceIsoRuntime {
         }
     }
 
+    /// Synchronous part of a partial-start abort: muxers get SIGKILL now so
+    /// a dropped guard never leaks a writing FFmpeg, bridges are asked to
+    /// stop, taps stop, and the partial files/FIFOs go. Bridge reaping
+    /// (async) follows in `abort`.
+    fn abort_sync(&mut self) {
+        for writer in self.writers.iter_mut() {
+            if let Some(child) = writer.child.as_mut() {
+                let _ = child.start_kill();
+            }
+            if let Some(bridge) = writer.bridge.as_ref() {
+                bridge.stop();
+            }
+            if let Some(task) = writer.stderr_task.take() {
+                task.abort();
+            }
+        }
+        self.taps.abort_all();
+        for writer in &self.writers {
+            let _ = std::fs::remove_file(&writer.mkv_path);
+        }
+        self.cleanup_fifos();
+    }
+
     /// Partial-start failure: kill muxers, reap bridges, drop FIFOs.
     async fn abort(mut self, state: &AppState) {
         for writer in self.writers.iter_mut() {
@@ -651,6 +674,53 @@ impl SourceIsoRuntime {
         );
         self.cleanup_fifos();
         finished
+    }
+}
+
+/// Holds a started runtime until the session commits it into
+/// `ActiveRecording`. Any exit before `commit` (an error branch that returns
+/// early, or the start future being cancelled mid-await) aborts the writers
+/// from `Drop`: muxers are killed synchronously and the bridge reap runs on
+/// the process runtime, so no ISO FFmpeg or partial file outlives a failed
+/// start. Explicit abort calls on each error branch alone would not cover
+/// cancellation.
+pub struct SourceIsoStartGuard {
+    runtime: Option<SourceIsoRuntime>,
+    state: AppState,
+}
+
+impl SourceIsoStartGuard {
+    pub fn new(runtime: SourceIsoRuntime, state: &AppState) -> Self {
+        Self {
+            runtime: Some(runtime),
+            state: state.clone(),
+        }
+    }
+
+    /// Ownership transfer: the session now owns stop/finish.
+    pub fn commit(mut self) -> SourceIsoRuntime {
+        self.runtime
+            .take()
+            .expect("SourceIsoStartGuard committed twice")
+    }
+}
+
+impl Drop for SourceIsoStartGuard {
+    fn drop(&mut self) {
+        let Some(mut runtime) = self.runtime.take() else {
+            return;
+        };
+        self.state.emit_log(
+            "warn",
+            "Separate source recordings were started but the session did not commit; aborting the ISO writers.",
+        );
+        runtime.abort_sync();
+        // The bridge reap and child wait are async; outside a runtime the
+        // synchronous kill above is the whole cleanup (Drop must not panic).
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let state = self.state.clone();
+            handle.spawn(async move { runtime.abort(&state).await });
+        }
     }
 }
 

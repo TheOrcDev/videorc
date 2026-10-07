@@ -143,14 +143,19 @@ export function defaultSeparateSourceRecordings(): SeparateSourceRecordingsSetti
   return { enabled: false, keepCombined: true }
 }
 
+/**
+ * `keepCombined` is a reserved setting: this release has no control for it and
+ * the backend refuses `false`, so a stored `false` (a future build, a hand
+ * edit) is normalized back to `true` instead of turning Record into a refusal
+ * the Recording tab cannot explain.
+ */
 export function normalizeSeparateSourceRecordings(
   loaded: Partial<SeparateSourceRecordingsSettings> | undefined
 ): SeparateSourceRecordingsSettings {
   const defaults = defaultSeparateSourceRecordings()
   return {
     enabled: loaded?.enabled === true,
-    keepCombined:
-      typeof loaded?.keepCombined === 'boolean' ? loaded.keepCombined : defaults.keepCombined
+    keepCombined: defaults.keepCombined
   }
 }
 

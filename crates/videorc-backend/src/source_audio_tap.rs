@@ -6,7 +6,10 @@
 //! microphone (gain/mute applied, as written) and the gained system
 //! contribution (zeros while no system slot is attached). Each tap owns a
 //! writer thread and a bounded queue, so a stalled ISO muxer can never slow
-//! the master bus: the tap drops its chunk and counts it instead.
+//! the master bus: the tap drops its chunk and counts it instead. A dropped
+//! chunk is owed back as silence in queue order (ahead of the next chunk that
+//! does get queued, or at EOF), so the raw f32le byte timeline (FFmpeg dates
+//! samples by position) never shifts.
 //!
 //! The byte cadence is the bus cadence: one chunk per [`crate::session_audio::CHUNK_FRAMES`]
 //! frames, written as soon as the bus wrote the Combined chunk. That is the
@@ -29,14 +32,27 @@ const TAP_QUEUE_CHUNKS: usize = 300;
 /// bus's own epoch deadline spirit: a muxer that never opened is a failed
 /// writer, not a reason to block.
 const READER_OPEN_RETRY: Duration = Duration::from_millis(5);
+/// `close` drains the queue, then waits this long for the writer to finish
+/// before forcing it: a muxer that stopped reading its FIFO must not wedge
+/// Stop (the caller kills it next, which ends the writer with EPIPE anyway).
+const CLOSE_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
+
+/// One queued bus chunk plus the silence owed for chunks dropped right
+/// before it, so the writer lays both down in bus order.
+struct TapChunk {
+    leading_silence_samples: usize,
+    samples: Vec<f32>,
+}
 
 /// One PCM tap: a FIFO path plus the writer thread feeding it.
 pub struct SourceAudioTap {
     path: PathBuf,
-    sender: Mutex<Option<mpsc::SyncSender<Vec<f32>>>>,
+    sender: Mutex<Option<mpsc::SyncSender<TapChunk>>>,
     stop: Arc<AtomicBool>,
     offered: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
+    /// Samples dropped at `offer` that the writer still owes as silence.
+    owed_silence: Arc<AtomicU64>,
     writer: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
@@ -65,13 +81,15 @@ impl SourceAudioTap {
         let stop = Arc::new(AtomicBool::new(false));
         let offered = Arc::new(AtomicU64::new(0));
         let dropped = Arc::new(AtomicU64::new(0));
-        let (sender, receiver) = mpsc::sync_channel::<Vec<f32>>(TAP_QUEUE_CHUNKS);
+        let owed_silence = Arc::new(AtomicU64::new(0));
+        let (sender, receiver) = mpsc::sync_channel::<TapChunk>(TAP_QUEUE_CHUNKS);
         let writer = {
             let path = path.clone();
             let stop = stop.clone();
+            let owed_silence = owed_silence.clone();
             thread::Builder::new()
                 .name(format!("videorc-source-audio-tap-{label}"))
-                .spawn(move || run_tap_writer(&path, &stop, receiver, label))
+                .spawn(move || run_tap_writer(&path, &stop, receiver, &owed_silence, label))
                 .ok()
         };
         Self {
@@ -80,6 +98,7 @@ impl SourceAudioTap {
             stop,
             offered,
             dropped,
+            owed_silence,
             writer: Mutex::new(writer),
         }
     }
@@ -88,7 +107,10 @@ impl SourceAudioTap {
         &self.path
     }
 
-    /// Offers one written chunk. Never blocks: a full queue drops the chunk.
+    /// Offers one written chunk. Never blocks: a full queue drops the chunk
+    /// and its length is owed back as silence ahead of the next chunk that
+    /// does get queued, so the file's sample position keeps tracking the bus
+    /// clock.
     pub fn offer(&self, samples: &[f32]) {
         self.offered.fetch_add(1, Ordering::Relaxed);
         let sender = self.sender.lock().unwrap_or_else(|p| p.into_inner());
@@ -96,8 +118,15 @@ impl SourceAudioTap {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             return;
         };
-        if sender.try_send(samples.to_vec()).is_err() {
+        let owed = self.owed_silence.swap(0, Ordering::AcqRel);
+        let chunk = TapChunk {
+            leading_silence_samples: usize::try_from(owed).unwrap_or(usize::MAX),
+            samples: samples.to_vec(),
+        };
+        if sender.try_send(chunk).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
+            self.owed_silence
+                .fetch_add(owed + samples.len() as u64, Ordering::AcqRel);
         }
     }
 
@@ -109,11 +138,25 @@ impl SourceAudioTap {
     }
 
     /// Closes the queue so the writer drains what it has and exits (EOF on
-    /// the FIFO ends the ISO muxer's audio input), then joins it.
+    /// the FIFO ends the ISO muxer's audio input), then joins it. The drain
+    /// is bounded by [`CLOSE_DRAIN_DEADLINE`]: past it the writer is stopped
+    /// so a muxer that no longer reads cannot hold the session's Stop.
     pub fn close(&self) -> SourceAudioTapReport {
         drop(self.sender.lock().unwrap_or_else(|p| p.into_inner()).take());
         let writer = self.writer.lock().unwrap_or_else(|p| p.into_inner()).take();
         if let Some(writer) = writer {
+            let started = std::time::Instant::now();
+            while !writer.is_finished() && started.elapsed() < CLOSE_DRAIN_DEADLINE {
+                thread::sleep(Duration::from_millis(2));
+            }
+            if !writer.is_finished() {
+                tracing::warn!(
+                    "Source audio tap {} did not drain within {}s; forcing it closed",
+                    self.path.display(),
+                    CLOSE_DRAIN_DEADLINE.as_secs()
+                );
+                self.stop.store(true, Ordering::Release);
+            }
             let _ = writer.join();
         }
         self.report()
@@ -137,7 +180,8 @@ impl Drop for SourceAudioTap {
 fn run_tap_writer(
     path: &Path,
     stop: &AtomicBool,
-    receiver: mpsc::Receiver<Vec<f32>>,
+    receiver: mpsc::Receiver<TapChunk>,
+    owed_silence: &AtomicU64,
     label: &'static str,
 ) {
     let mut file = match crate::fifo::open_audio_writer(
@@ -158,21 +202,29 @@ fn run_tap_writer(
         }
     };
     let mut bytes = Vec::new();
-    while let Ok(samples) = receiver.recv() {
+    while let Ok(chunk) = receiver.recv() {
         if stop.load(Ordering::Acquire) {
             break;
         }
         bytes.clear();
-        bytes.reserve(samples.len() * 4);
-        for sample in &samples {
+        bytes.reserve((chunk.leading_silence_samples + chunk.samples.len()) * 4);
+        // Chunks dropped right before this one come back as silence FIRST so
+        // this chunk lands at its bus position; the file never runs early.
+        bytes.resize(chunk.leading_silence_samples * 4, 0);
+        for sample in &chunk.samples {
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
         if let Err(error) = write_fully(&mut file, &bytes, stop) {
             if error.kind() != std::io::ErrorKind::Interrupted {
                 tracing::warn!("Source audio tap ({label}) ended: {error}");
             }
-            break;
+            return;
         }
+    }
+    // Chunks dropped after the last queued one still owe their span at EOF.
+    let owed = usize::try_from(owed_silence.swap(0, Ordering::AcqRel)).unwrap_or(0);
+    if owed > 0 && !stop.load(Ordering::Acquire) {
+        let _ = write_fully(&mut file, &vec![0u8; owed * 4], stop);
     }
 }
 
@@ -305,6 +357,75 @@ mod tests {
         assert_eq!(report.offered_chunks as usize, TAP_QUEUE_CHUNKS + 10);
         assert!(report.dropped_chunks >= 1, "queue overflow must be counted");
         let _ = tap.abort();
+        let _ = crate::fifo::cleanup(&path);
+    }
+
+    #[test]
+    fn dropped_chunks_are_paid_back_as_silence_so_the_timeline_never_shifts() {
+        let path = crate::fifo::transport_path(&format!(
+            "videorc-source-audio-tap-owed-{}.f32le",
+            uuid::Uuid::new_v4()
+        ));
+        crate::fifo::create_audio(&path).unwrap();
+        let tap = SourceAudioTap::spawn(path.clone(), "test-owed");
+        // Fill the queue with no reader, then overflow it by two chunks.
+        for _ in 0..TAP_QUEUE_CHUNKS {
+            tap.offer(&[0.5; 4]);
+        }
+        tap.offer(&[0.9; 4]);
+        tap.offer(&[0.9; 4]);
+        assert_eq!(tap.report().dropped_chunks, 2);
+        let reader_path = path.clone();
+        let reader = thread::spawn(move || {
+            let mut file = std::fs::File::open(reader_path).unwrap();
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).unwrap();
+            bytes
+        });
+        // Once the reader drains, a late chunk must land AFTER the silence
+        // owed for the two drops.
+        thread::sleep(Duration::from_millis(50));
+        tap.offer(&[0.7; 4]);
+        tap.close();
+        let bytes = reader.join().unwrap();
+        let samples = bytes
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            samples.len(),
+            (TAP_QUEUE_CHUNKS + 3) * 4,
+            "every offered chunk occupies its span, dropped ones as silence"
+        );
+        assert_eq!(
+            &samples[TAP_QUEUE_CHUNKS * 4..(TAP_QUEUE_CHUNKS + 2) * 4],
+            &[0.0; 8]
+        );
+        assert_eq!(&samples[(TAP_QUEUE_CHUNKS + 2) * 4..], &[0.7; 4]);
+        let _ = crate::fifo::cleanup(&path);
+    }
+
+    #[test]
+    fn close_is_bounded_when_the_reader_stops_draining() {
+        let path = crate::fifo::transport_path(&format!(
+            "videorc-source-audio-tap-wedged-{}.f32le",
+            uuid::Uuid::new_v4()
+        ));
+        crate::fifo::create_audio(&path).unwrap();
+        let tap = SourceAudioTap::spawn(path.clone(), "test-wedged");
+        // A reader that opens the FIFO and never reads: the writer fills the
+        // pipe buffer and then sees WouldBlock forever.
+        let reader = std::fs::File::open(&path).unwrap();
+        for _ in 0..TAP_QUEUE_CHUNKS {
+            tap.offer(&[0.1; 4096]);
+        }
+        let started = std::time::Instant::now();
+        let _ = tap.close();
+        assert!(
+            started.elapsed() < CLOSE_DRAIN_DEADLINE + Duration::from_secs(2),
+            "close must give up on a reader that stopped draining"
+        );
+        drop(reader);
         let _ = crate::fifo::cleanup(&path);
     }
 

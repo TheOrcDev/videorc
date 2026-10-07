@@ -7707,6 +7707,21 @@ async fn publish_compositor_frame(
             image_source,
         } in legs
         {
+            let leg_camera_frame = camera_frame
+                .as_ref()
+                .filter(|_| scene_accepts_source(leg_snapshot, camera_key))
+                .map(|(frame, _)| frame);
+            let leg_screen_frame = screen_frame
+                .as_ref()
+                .filter(|_| scene_accepts_source(leg_snapshot, screen_key));
+            // Each ISO frame is stamped with ITS source's capture time (the
+            // bridge seeds the shared recording epoch from it); a leg with no
+            // live frame this tick is a continuity frame dated at publish.
+            let leg_captured_at = compositor_frame_content_captured_at(
+                leg_camera_frame,
+                leg_screen_frame,
+                published_at,
+            );
             let inputs = CompositorRenderInputs {
                 sequence,
                 width: iso_output.width.max(1),
@@ -7714,19 +7729,14 @@ async fn publish_compositor_frame(
                 snapshot: leg_snapshot,
                 active_image_source: image_source,
                 background_image_source: None,
-                camera_frame: camera_frame
-                    .as_ref()
-                    .filter(|_| scene_accepts_source(leg_snapshot, camera_key))
-                    .map(|(frame, _)| frame),
-                screen_frame: screen_frame
-                    .as_ref()
-                    .filter(|_| scene_accepts_source(leg_snapshot, screen_key)),
+                camera_frame: leg_camera_frame,
+                screen_frame: leg_screen_frame,
                 caption_overlay: None,
                 highlight_overlay: None,
             };
             if let Some(iso_timings) = publish_auxiliary_compositor_frame(
                 sequence,
-                captured_at,
+                leg_captured_at,
                 published_at,
                 store,
                 inputs,

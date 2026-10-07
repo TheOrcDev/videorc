@@ -12,15 +12,19 @@ export function recordingRoleLabel(role: RecordingRole): string {
   }
 }
 
-/** Secondary-line note explaining which audio the file carries. */
+/**
+ * Secondary-line note naming the audio TRACK the file carries. The track is
+ * always present (silence when that source was off), so this names the track,
+ * not a promise that the source was on.
+ */
 export function recordingRoleRowNote(role: RecordingRole): string {
   switch (role) {
     case 'combined':
       return 'combined take'
     case 'screen':
-      return 'screen + system audio'
+      return 'screen, system audio track'
     case 'camera':
-      return 'camera + microphone'
+      return 'camera, microphone track'
   }
 }
 

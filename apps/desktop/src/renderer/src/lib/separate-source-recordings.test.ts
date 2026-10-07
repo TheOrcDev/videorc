@@ -55,6 +55,12 @@ describe('separate source recordings (plan 157)', () => {
       enabled: false,
       keepCombined: true
     })
+    // Reserved: the backend refuses keepCombined=false and the UI cannot set
+    // it, so a stored false must not turn Record into an unexplained refusal.
+    expect(normalizeSeparateSourceRecordings({ enabled: true, keepCombined: false })).toEqual({
+      enabled: true,
+      keepCombined: true
+    })
   })
 
   it('loads a stored config without the key as Off', () => {

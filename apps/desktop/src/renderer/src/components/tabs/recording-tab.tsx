@@ -238,8 +238,9 @@ export function RecordingTab(): ReactElement {
                   Separate source recordings
                 </FieldLabel>
                 <p className="text-xs text-muted-foreground">
-                  Also saves a Screen file (system audio) and a Camera file (microphone) beside the
-                  Combined recording, at this recording size. Streams and preview stay composed.
+                  Also saves a Screen file with the system audio track and a Camera file with the
+                  microphone track beside the Combined recording, at this recording size. A source
+                  that is off records as silence. Streams and preview stay composed.
                 </p>
               </div>
               <Switch

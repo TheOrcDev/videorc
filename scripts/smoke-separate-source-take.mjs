@@ -80,6 +80,7 @@ function parseArgs(argv) {
         args.help = true
         break
       default:
+        if (arg === '--') break
         if (arg.startsWith('--')) throw new Error(`unknown option ${arg}`)
         positionals.push(arg)
     }
