@@ -130,6 +130,7 @@ function hasTargetNetworkProblem(streamTargets: readonly StreamTargetRuntime[]):
     (target) =>
       target.state === 'failed' ||
       target.state === 'warning' ||
+      target.state === 'reconnecting' ||
       /\breconnect(?:ed|ing)?\b/i.test(target.message ?? '')
   )
 }

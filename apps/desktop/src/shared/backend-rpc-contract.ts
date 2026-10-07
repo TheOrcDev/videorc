@@ -816,6 +816,7 @@ const streamTargetRuntimeSchema = objectSchema(
       'connecting',
       'live',
       'warning',
+      'reconnecting',
       'failed',
       'stopped'
     ]),

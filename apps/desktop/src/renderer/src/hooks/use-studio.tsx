@@ -44,6 +44,7 @@ import {
   type SetStateAction
 } from 'react'
 import { notifyOnce } from '@/lib/notify-once'
+import { streamTargetNotices } from '@/lib/stream-target-notices'
 import { toast } from '@/lib/toast'
 
 import { BackendClient, BackendRequestError } from '@/backendClient'
@@ -326,6 +327,7 @@ import type {
   StoreManualStreamKeyResult,
   StreamingSettings,
   StreamTargetRuntime,
+  StreamTargetState,
   StreamTargetSettings,
   StreamTargetStatus,
   StreamTargetsSnapshot,
@@ -3596,7 +3598,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   const nativePreviewSurfacePresentReportLastSentAtRef = useRef(0)
   const automaticSourceFallbacks = useRef<AutomaticSourceFallbackEvent[]>([])
-  const toastedFailedTargets = useRef<Set<string>>(new Set())
+  const streamTargetStatesRef = useRef<Map<string, StreamTargetState>>(new Map())
   const platformLifecycleRun = useRef(0)
   const platformLifecycleOwnerRef = useRef<PlatformLifecycleOwner | null>(null)
   const preparedPlatformLifecycleOwnersRef = useRef<PlatformLifecycleOwner[]>([])
@@ -3637,26 +3639,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const nativePreviewSurfaceEnabled = Boolean(runtimeInfo?.nativePreviewSurfaceProofEnabled)
 
   // Surface a per-target stream drop from any tab (the Streaming tab has the full
-  // banner + badges). Each failed destination toasts once per session; the set is
-  // cleared whenever streaming returns to an empty snapshot (session start/idle).
+  // banner + badges). Each destination toasts on the transitions that are news:
+  // stopped, reconnecting, not received by its platform, back (plan 161). The
+  // previous states are cleared whenever streaming returns to an empty snapshot.
   useEffect(() => {
     if (streamTargets.length === 0) {
-      toastedFailedTargets.current = new Set()
+      streamTargetStatesRef.current = new Map()
       return
     }
-    for (const target of streamTargets) {
-      if (target.state === 'failed' && !toastedFailedTargets.current.has(target.targetId)) {
-        toastedFailedTargets.current.add(target.targetId)
-        notifyOnce(
-          `stream-target-failed:${target.targetId}`,
-          'error',
-          `Streaming to ${target.label} stopped`,
-          {
-            description: target.message ?? 'The other destinations keep streaming.'
-          }
-        )
-      }
+    for (const notice of streamTargetNotices(streamTargetStatesRef.current, streamTargets)) {
+      notifyOnce(notice.key, notice.kind, notice.title, { description: notice.description })
     }
+    streamTargetStatesRef.current = new Map(
+      streamTargets.map((target) => [target.targetId, target.state])
+    )
   }, [streamTargets])
 
   const { registry: backgroundRegistry, setRegistry: setBackgroundRegistry } = useBackgroundAssets()

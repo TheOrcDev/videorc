@@ -260,7 +260,8 @@ const TARGET_STATE_LABELS: Record<StreamTargetState, string> = {
   ready: 'Ready',
   connecting: 'Connecting',
   live: 'Live',
-  warning: 'Unstable',
+  warning: 'Not receiving',
+  reconnecting: 'Reconnecting',
   failed: 'Failed',
   stopped: 'Stopped'
 }
@@ -268,13 +269,16 @@ const TARGET_STATE_LABELS: Record<StreamTargetState, string> = {
 const TARGET_DOTS: Partial<Record<StreamTargetState, StatDot>> = {
   live: 'good',
   connecting: 'warn',
-  warning: 'warn',
+  warning: 'error',
+  reconnecting: 'error',
   failed: 'error'
 }
 
 /**
  * The one health reading the bar shows, most urgent first: a failed
- * destination, dropped frames, a sagging bitrate, a destination still
+ * destination, one reconnecting, one its platform says isn't receiving the
+ * stream (plan 161: viewers there see nothing, so these outrank dropped
+ * frames), dropped frames, a sagging bitrate, a destination still
  * connecting. Healthy is just the bitrate.
  */
 function healthReading(
@@ -286,16 +290,21 @@ function healthReading(
   const failed = targets.filter((target) => target.state === 'failed')
   if (failed.length === 1) return { value: `${failed[0].label} failed`, tone: 'error' }
   if (failed.length > 1) return { value: `${failed.length} failed`, tone: 'error' }
+  const down = targets.filter(
+    (target) => target.state === 'reconnecting' || target.state === 'warning'
+  )
+  if (down.length > 1) return { value: `${down.length} not live`, tone: 'error' }
+  if (down.length === 1) {
+    const [target] = down
+    return {
+      value: `${target.label} ${target.state === 'reconnecting' ? 'reconnecting' : 'not receiving'}`,
+      tone: 'error'
+    }
+  }
   if (droppedLastMinute > 0) return { value: `${droppedLastMinute} dropped/min`, tone: 'warning' }
   if (sagging) return { value: 'Low bitrate', tone: 'warning' }
-  const unsettled = targets.find(
-    (target) => target.state === 'connecting' || target.state === 'warning'
-  )
-  if (unsettled) {
-    return {
-      value: unsettled.state === 'connecting' ? 'Connecting' : `${unsettled.label} unstable`,
-      tone: 'warning'
-    }
+  if (targets.some((target) => target.state === 'connecting')) {
+    return { value: 'Connecting', tone: 'warning' }
   }
   return { value: bitrate, tone: bitrate === '–' ? 'neutral' : 'good' }
 }
