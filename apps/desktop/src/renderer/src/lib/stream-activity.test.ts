@@ -637,9 +637,9 @@ describe('Power-ups and channel point redemptions (plan 162)', () => {
     const totals = activityTotals([celebration, gigantify, cheer, hydrate, unlock])
     expect(totals.bits).toBe(450)
     expect(totals.supporters).toBe(0)
-    expect(activityFilterCounts(activityItems([celebration, cheer, hydrate, unlock]))).toMatchObject(
-      { tips: 2, rewards: 2 }
-    )
+    expect(
+      activityFilterCounts(activityItems([celebration, cheer, hydrate, unlock]))
+    ).toMatchObject({ tips: 2, rewards: 2 })
   })
 
   it('thanks the viewer by name', () => {
