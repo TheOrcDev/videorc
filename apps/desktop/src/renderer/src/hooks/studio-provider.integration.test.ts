@@ -4,7 +4,11 @@ import {
   hydrateCommentsSnapshot,
   reconcileBrokerCommentsSnapshot
 } from '../../../shared/comments-snapshot-delta'
-import type { CommentsSnapshotDelta, CommentsViewSnapshot } from '../../../shared/backend'
+import type {
+  CommentsSnapshotDelta,
+  CommentsViewSnapshot,
+  OverlayLayout
+} from '../../../shared/backend'
 import { SCENE_LIBRARY_KEY, WORKING_SCENE_KEY, sameSceneVisual } from '../lib/scene-presets'
 import { act, createElement, useEffect, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -84,6 +88,7 @@ import type {
   VideorcApi
 } from '../../../shared/backend'
 import { resolveStreamOutputTopologyRequest } from '@/lib/go-live-output'
+import { DEFAULT_OVERLAY_LAYOUT } from '@/lib/overlay-layout'
 import { BackgroundAssetsProvider } from './use-background-assets'
 import { useFrameSource } from './use-frame-source'
 import { useStudioMicVisualSource } from './use-studio-mic-sources'
@@ -443,6 +448,7 @@ class StudioBackend {
   sessionListNextCursor: string | undefined
   sessionHealthEvents: HealthEvent[] = []
   sessionLogs: SessionLogEntry[] = []
+  overlayLayout: OverlayLayout = DEFAULT_OVERLAY_LAYOUT
   cohostSettings: CohostSettings = {
     enabled: true,
     tone: 'friendly',
@@ -618,6 +624,11 @@ class StudioBackend {
         return signedInAccount
       case 'account.sign_out':
         return { status: 'signed-out' }
+      case 'overlays.layout.get':
+        return this.overlayLayout
+      case 'overlays.layout.set':
+        this.overlayLayout = params as OverlayLayout
+        return this.overlayLayout
       case 'cohost.settings.get':
         return this.cohostSettings
       case 'cohost.settings.set':

@@ -132,6 +132,16 @@ import {
   type WsStatus
 } from '@/lib/capture'
 import {
+  burnTargetFromOverlaySwitches,
+  seedCaptionsSwitchesFromBurnTarget
+} from '@/lib/captions-output'
+import {
+  DEFAULT_OVERLAY_LAYOUT,
+  overlayLayoutsEqual,
+  overlayOrientationForCanvas,
+  overlaySnapRect
+} from '@/lib/overlay-layout'
+import {
   autoApplyPreset,
   isShippedDefaultOutput,
   isUntrustedPerformanceCheckResult,
@@ -353,6 +363,8 @@ import type {
   YouTubeChannel,
   YouTubeQuotaStatus,
   YouTubeStreamStatusResult,
+  OverlayLayout,
+  OverlayRect,
   SetCommentHighlightParams,
   ViewerSample
 } from '@/lib/backend'
@@ -485,6 +497,7 @@ type CaptionOverlayWork = {
     target: 'primary' | 'auxiliary'
     canvasWidth: number
     canvasHeight: number
+    rect?: OverlayRect
   }>
   styleId: CaptionStyleId
   styleRevision: number
@@ -1129,6 +1142,10 @@ export type StudioContextValue = {
   /** Live Chat Co-host (Premium): persisted settings + approve/dismiss actions.
    * `cohostState` itself lives on the chat context with the chat snapshot. */
   cohostSettings: CohostSettings | null
+  /** Overlay layout (plan 164): where the highlight card, captions and the
+   * Golem sit per orientation and which outputs carry them. Backend-owned. */
+  overlayLayout: OverlayLayout
+  setOverlayLayout: (layout: OverlayLayout) => Promise<void>
   cohostGate: EntitlementUiGate
   cohostActionPending: boolean
   patchCohostSettings: (patch: CohostSettingsPatch) => Promise<void>
@@ -2582,6 +2599,72 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     await openCaptionsWindow()
   }, [captionsWindow.open, closeCaptionsWindow, openCaptionsWindow])
   const [commentsWindow, setCommentsWindow] = useState<CommentsWindowState>(idleCommentsWindowState)
+  // Overlay layout (plan 164): backend-owned, loaded on connect and pushed
+  // to every window on change. A ref feeds the highlight and caption pushes
+  // so a placement applies to the very next raster without re-creating the
+  // relay listeners.
+  const [overlayLayout, setOverlayLayoutState] = useState<OverlayLayout>(DEFAULT_OVERLAY_LAYOUT)
+  const overlayLayoutRef = useRef<OverlayLayout>(DEFAULT_OVERLAY_LAYOUT)
+  overlayLayoutRef.current = overlayLayout
+  const commitOverlayLayout = useCallback((next: OverlayLayout) => {
+    setOverlayLayoutState((current) => (overlayLayoutsEqual(current, next) ? current : next))
+  }, [])
+  // The layout itself: loaded on connect, pushed on change (`overlays.layout`).
+  useEffect(() => {
+    if (!client || wsStatus !== 'connected') return
+    let cancelled = false
+    void client
+      .requestTyped('overlays.layout.get')
+      .then((layout) => {
+        if (!cancelled) commitOverlayLayout(layout)
+      })
+      // An older backend has no such method (or answers off-contract); the
+      // shipped defaults stand.
+      .catch(() => undefined)
+    const off = client.on('overlays.layout', commitOverlayLayout)
+    return () => {
+      cancelled = true
+      off()
+    }
+  }, [client, commitOverlayLayout, wsStatus])
+  const setOverlayLayout = useCallback(
+    async (layout: OverlayLayout): Promise<void> => {
+      if (!client) throw new Error('Backend socket is not connected.')
+      const saved = await client.requestTyped('overlays.layout.set', layout)
+      commitOverlayLayout(saved)
+    },
+    [client, commitOverlayLayout]
+  )
+  // Captions keep `burnTarget` on the wire, derived from the captions item's
+  // two switches (plan 164, D14). The first layout after the update is
+  // seeded once from a saved target that was on, so nobody loses it.
+  const captionsSwitchesKey = `${overlayLayout.captions.showOnStream}:${overlayLayout.captions.showInRecording}`
+  const captionsSeedRef = useRef<string | null>(null)
+  const captionsBurnTargetRef = useRef(captureConfig.captions.burnTarget)
+  captionsBurnTargetRef.current = captureConfig.captions.burnTarget
+  useEffect(() => {
+    if (!client || wsStatus !== 'connected') return
+    const savedTarget = captionsBurnTargetRef.current
+    const seeded =
+      captionsSeedRef.current === null
+        ? seedCaptionsSwitchesFromBurnTarget(overlayLayout.captions, savedTarget)
+        : null
+    captionsSeedRef.current = captionsSwitchesKey
+    if (seeded) {
+      void setOverlayLayout({ ...overlayLayoutRef.current, captions: seeded }).catch(() => {})
+      return
+    }
+    const derived = burnTargetFromOverlaySwitches(overlayLayout.captions)
+    if (derived === savedTarget) return
+    setCaptureConfig((current) =>
+      current.captions.burnTarget === derived
+        ? current
+        : { ...current, captions: { ...current.captions, burnTarget: derived } }
+    )
+    // The layout's switches are the one home; the key keeps this effect on
+    // switch changes (and a saved target arriving) only, never on a rect drag.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, wsStatus, captionsSwitchesKey, captureConfig.captions.burnTarget, setOverlayLayout])
   // The streamer's corner pick lives in main (it must survive the Chat window
   // being closed). A ref, not state, feeds the highlight RPC so a pick applies
   // to the very next highlight without re-creating the relay listeners.
@@ -2589,14 +2672,29 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const moveLiveCommentHighlightRef = useRef<((anchor: CommentHighlightAnchor) => void) | null>(
     null
   )
+  // The Stream Manager corner menu is a SNAP (plan 164, D11): it writes the
+  // highlight rect on both orientations; the layout change then re-sends a
+  // live card. A ref, so the relay listeners below never re-subscribe.
+  const snapHighlightToAnchorRef = useRef<(anchor: CommentHighlightAnchor) => void>(() => {})
+  snapHighlightToAnchorRef.current = (anchor) => {
+    const current = overlayLayoutRef.current
+    void setOverlayLayout({
+      ...current,
+      highlight: {
+        ...current.highlight,
+        horizontal: overlaySnapRect('highlight', 'horizontal', anchor),
+        vertical: overlaySnapRect('highlight', 'vertical', anchor)
+      }
+    }).catch(() => {})
+  }
   useEffect(() => {
     let cancelled = false
     const noteHighlightAnchor = (state: CommentsWindowState, move: boolean): void => {
       const anchor = normalizeCommentHighlightAnchor(state.highlightAnchor)
       if (anchor === commentHighlightAnchorRef.current) return
       commentHighlightAnchorRef.current = anchor
-      // A card already on the stream follows the pick immediately.
-      if (move) moveLiveCommentHighlightRef.current?.(anchor)
+      // A pick writes the layout; the placement effect moves a live card.
+      if (move) snapHighlightToAnchorRef.current(anchor)
     }
     const reconcile = async (): Promise<void> => {
       const fresh = await window.videorc?.getCommentsWindowState?.()
@@ -2813,11 +2911,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (commentHighlightIntentRef.current !== intent) return null
         const { renderCommentHighlightCards } = await loadCaptionOverlay()
         if (commentHighlightIntentRef.current !== intent) return null
+        // The streamer's placement (plan 164): the card wraps to the rect's
+        // width on each canvas and the backend blits it inside that rect.
+        const highlightLayout = overlayLayoutRef.current.highlight
+        const rect =
+          highlightLayout[overlayOrientationForCanvas(streamVideo.width, streamVideo.height)]
+        const verticalRect = highlightLayout.vertical
         const cards = await renderCommentHighlightCards(
           message,
           avatarUrl ?? null,
-          streamVideo,
-          canvases?.vertical
+          { ...streamVideo, rect },
+          canvases?.vertical ? { ...canvases.vertical, rect: verticalRect } : undefined
         )
         if (!cards) throw new Error('Could not render this message for the stream.')
         if (commentHighlightIntentRef.current !== intent) return null
@@ -2827,6 +2931,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             sessionId,
             messageId: message.id,
             anchor: commentHighlightAnchorRef.current,
+            rect,
+            ...(cards.verticalPngBase64 ? { verticalRect } : {}),
             ...cards
           } satisfies SetCommentHighlightParams)
         } catch (error) {
@@ -2888,6 +2994,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [applyCommentHighlight, client, publishCommentHighlightState]
   )
+
+  // Placement changed while a card is live (plan 164): the same re-send.
+  const highlightPlacementKey = JSON.stringify([
+    overlayLayout.highlight.horizontal,
+    overlayLayout.highlight.vertical
+  ])
+  const highlightPlacementSeenRef = useRef(highlightPlacementKey)
+  useEffect(() => {
+    if (highlightPlacementSeenRef.current === highlightPlacementKey) return
+    highlightPlacementSeenRef.current = highlightPlacementKey
+    moveLiveCommentHighlightRef.current?.(commentHighlightAnchorRef.current)
+  }, [highlightPlacementKey])
 
   // Corner changed while a card is live: re-send the same message so it moves.
   // The backend TTL restarts, which suits an adjustment the streamer is watching.
@@ -10868,12 +10986,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         canvasWidth: output.canvasWidth,
         canvasHeight: output.canvasHeight,
         textSize: work.textSize,
-        styleId: work.styleId
+        styleId: work.styleId,
+        maxBarWidthPx: output.rect ? Math.floor(output.rect.w * output.canvasWidth) : undefined
       })
       if (!pngBase64 || work.epoch !== captionOverlayEpochRef.current) return
       await work.client.request('captions.overlay.set', {
         pngBase64,
         position: work.position,
+        ...(output.rect ? { rect: output.rect } : {}),
         target: output.target,
         styleRevision: work.styleRevision
       })
@@ -10959,20 +11079,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       streamEnabled: captureConfig.streamEnabled,
       recordingVideo: captureConfig.video,
       streamVideo,
-      verticalLeg: simulcastLegLiveRequest(captureConfig)?.video
+      verticalLeg: simulcastLegLiveRequest(captureConfig)?.video,
+      captionsLayout: overlayLayout.captions
     })
     const candidateKey = latest
       ? outputs
-          .map((output) =>
-            captionOverlayKey(latest, {
-              styleId: captureConfig.captions.styleId,
-              styleRevision: captureConfig.captions.styleRevision,
-              position: captureConfig.captions.position,
-              textSize: captureConfig.captions.textSize,
-              canvasWidth: output.canvasWidth,
-              canvasHeight: output.canvasHeight,
-              outputLeg: output.target
-            })
+          .map(
+            (output) =>
+              captionOverlayKey(latest, {
+                styleId: captureConfig.captions.styleId,
+                styleRevision: captureConfig.captions.styleRevision,
+                position: captureConfig.captions.position,
+                textSize: captureConfig.captions.textSize,
+                canvasWidth: output.canvasWidth,
+                canvasHeight: output.canvasHeight,
+                outputLeg: output.target
+              }) + (output.rect ? `@${JSON.stringify(output.rect)}` : '')
           )
           .join('|')
       : undefined
@@ -11015,7 +11137,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       outputs: outputs.map((output) => ({
         target: output.target,
         canvasWidth: output.canvasWidth,
-        canvasHeight: output.canvasHeight
+        canvasHeight: output.canvasHeight,
+        ...(output.rect ? { rect: output.rect } : {})
       })),
       styleId: captureConfig.captions.styleId,
       styleRevision: captureConfig.captions.styleRevision,
@@ -11031,7 +11154,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captureConfig.recordEnabled,
     captureConfig.video,
     captureConfig.streamEnabled,
-    captureConfig.streaming
+    captureConfig.streaming,
+    overlayLayout.captions
   ])
 
   // Silence expiry belongs to the current line, not to a render attempt. Every
@@ -15175,6 +15299,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       commentHighlightFailure,
       toggleCommentHighlight,
       cohostSettings,
+      overlayLayout,
+      setOverlayLayout,
       cohostGate,
       cohostActionPending,
       patchCohostSettings,
@@ -15406,6 +15532,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       commentHighlightFailure,
       toggleCommentHighlight,
       cohostSettings,
+      overlayLayout,
+      setOverlayLayout,
       cohostGate,
       cohostActionPending,
       patchCohostSettings,

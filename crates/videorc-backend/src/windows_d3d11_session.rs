@@ -32,7 +32,7 @@ fn windows_d3d11_terminal_source_error(
 fn windows_d3d11_overlay_layer_geometry(
     overlay_size: (u32, u32),
     output_size: (u32, u32),
-    placement: crate::captions::OverlayPlacement,
+    rect: crate::overlay_layout::OverlayRect,
     safe_inset: usize,
 ) -> (
     crate::windows_d3d11_compositor::WindowsD3d11NormalizedTransform,
@@ -43,12 +43,12 @@ fn windows_d3d11_overlay_layer_geometry(
     let output_width = output_size.0.max(1) as usize;
     let output_height = output_size.1.max(1) as usize;
     let (source_left, destination_left, destination_top, draw_width) =
-        crate::compositor::caption_overlay_layout_with_inset(
+        crate::overlay_layout::overlay_blit_layout(
             overlay_width,
             overlay_height,
             output_width,
             output_height,
-            placement,
+            rect,
             safe_inset,
         );
     let draw_height = overlay_height.min(output_height);
@@ -2593,7 +2593,10 @@ mod runtime {
                     overlay.output_dimensions.width,
                     overlay.output_dimensions.height,
                 ),
-                overlay.overlay.placement,
+                overlay.overlay.blit_rect(
+                    overlay.output_dimensions.width,
+                    overlay.output_dimensions.height,
+                ),
                 overlay.safe_inset,
             );
             layers.push(WindowsD3d11SceneLayerInput {
@@ -3104,15 +3107,19 @@ mod tests {
     }
 
     #[test]
-    fn windows_d3d11_overlay_layer_geometry_follows_the_shared_corner_oracle() {
+    fn windows_d3d11_overlay_layer_geometry_follows_the_shared_rect_oracle() {
         use crate::captions::{CaptionOverlayPosition, OverlayPlacement};
         use crate::comment_highlight::CommentHighlightAnchor;
+        use crate::overlay_layout::OverlayRect;
 
+        let legacy = |placement: OverlayPlacement, width: u32, height: u32| {
+            placement.rect_for_canvas(width, height)
+        };
         // 1920x1080: margin = round(1080 * 0.04) = 43 px on BOTH axes.
         let (right, crop) = windows_d3d11_overlay_layer_geometry(
             (600, 200),
             (1920, 1080),
-            CommentHighlightAnchor::BottomRight.into(),
+            legacy(CommentHighlightAnchor::BottomRight.into(), 1920, 1080),
             0,
         );
         assert_eq!(right.x, (1920 - 600 - 43) as f32 / 1920.0);
@@ -3127,7 +3134,7 @@ mod tests {
         let (left, _) = windows_d3d11_overlay_layer_geometry(
             (600, 200),
             (1920, 1080),
-            CommentHighlightAnchor::TopLeft.into(),
+            legacy(CommentHighlightAnchor::TopLeft.into(), 1920, 1080),
             0,
         );
         assert_eq!(left.x, 43.0 / 1920.0);
@@ -3139,7 +3146,7 @@ mod tests {
         let (vertical, _) = windows_d3d11_overlay_layer_geometry(
             (600, 200),
             (1080, 1920),
-            CommentHighlightAnchor::TopRight.into(),
+            legacy(CommentHighlightAnchor::TopRight.into(), 1080, 1920),
             0,
         );
         assert_eq!(vertical.x, (1080 - 600 - 77) as f32 / 1080.0);
@@ -3149,17 +3156,34 @@ mod tests {
         let (caption, _) = windows_d3d11_overlay_layer_geometry(
             (1000, 100),
             (1920, 1080),
-            OverlayPlacement::from(CaptionOverlayPosition::Top),
+            legacy(
+                OverlayPlacement::from(CaptionOverlayPosition::Top),
+                1920,
+                1080,
+            ),
             222,
         );
         assert_eq!(caption.x, 460.0 / 1920.0);
         assert_eq!(caption.y, (43 + 222) as f32 / 1080.0);
 
-        // Over-wide overlays centre-crop regardless of anchor.
+        // A placed rect (plan 164): the bitmap sits at the rect's top-left.
+        let (placed, placed_crop) = windows_d3d11_overlay_layer_geometry(
+            (200, 100),
+            (1280, 720),
+            OverlayRect::new(0.1, 0.2, 0.25, 0.2),
+            0,
+        );
+        assert_eq!(placed.x, 128.0 / 1280.0);
+        assert_eq!(placed.y, 144.0 / 720.0);
+        assert_eq!(placed.width, 200.0 / 1280.0);
+        assert_eq!(placed.height, 100.0 / 720.0);
+        assert_eq!((placed_crop.left, placed_crop.right), (0.0, 0.0));
+
+        // Over-wide overlays centre-crop to the full-canvas rect.
         let (wide, wide_crop) = windows_d3d11_overlay_layer_geometry(
             (2400, 100),
             (1920, 1080),
-            CommentHighlightAnchor::TopRight.into(),
+            OverlayRect::new(0.0, 0.0, 1.0, 1.0),
             0,
         );
         assert_eq!((wide.x, wide.width), (0.0, 1.0));

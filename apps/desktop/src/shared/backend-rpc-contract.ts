@@ -377,6 +377,9 @@ export interface BackendEventMap {
   'diagnostics.stats': DiagnosticStats
   'cohost.state': CohostState
   'cohost.report.saved': CohostReportSavedEvent
+  // --- Overlay layout (plan 164) ---
+  'overlays.layout': OverlayLayout
+  // --- end overlay layout (plan 164) ---
   'session.marker.voice.status': {
     sessionId: string
     listening: import('./backend').CohostListening
@@ -3429,6 +3432,9 @@ const runtimeEventSchemas = {
   'diagnostics.stats': diagnosticStatsSchema,
   'cohost.state': cohostStateSchema,
   'cohost.report.saved': cohostReportSavedEventSchema,
+  // --- Overlay layout (plan 164) ---
+  'overlays.layout': overlayLayoutSchema,
+  // --- end overlay layout (plan 164) ---
   'session.marker.voice.status': objectSchema(
     { sessionId: boundedString, listening: cohostListeningSchema },
     { allowUnknown: false }

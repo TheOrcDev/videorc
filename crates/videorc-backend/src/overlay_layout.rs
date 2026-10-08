@@ -98,15 +98,6 @@ pub struct OverlayItemLayout {
     pub show_in_recording: bool,
 }
 
-impl OverlayItemLayout {
-    pub fn rect(&self, orientation: OverlayOrientation) -> OverlayRect {
-        match orientation {
-            OverlayOrientation::Horizontal => self.horizontal,
-            OverlayOrientation::Vertical => self.vertical,
-        }
-    }
-}
-
 /// The three placeable overlay items. `golem` is carried from Phase B on so
 /// the leg plan and the canvas already know it; Phase C adds its slot.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -177,6 +168,7 @@ pub enum OverlaySnap {
     BottomLeft,
     BottomRight,
     BottomCenter,
+    TopCenter,
 }
 
 impl From<CommentHighlightAnchor> for OverlaySnap {
@@ -229,10 +221,10 @@ pub fn overlay_snap_rect(
     let x = match snap {
         OverlaySnap::TopLeft | OverlaySnap::BottomLeft => side,
         OverlaySnap::TopRight | OverlaySnap::BottomRight => 1.0 - side - w,
-        OverlaySnap::BottomCenter => (1.0 - w) / 2.0,
+        OverlaySnap::BottomCenter | OverlaySnap::TopCenter => (1.0 - w) / 2.0,
     };
     let y = match snap {
-        OverlaySnap::TopLeft | OverlaySnap::TopRight => top,
+        OverlaySnap::TopLeft | OverlaySnap::TopRight | OverlaySnap::TopCenter => top,
         OverlaySnap::BottomLeft | OverlaySnap::BottomRight | OverlaySnap::BottomCenter => {
             1.0 - bottom - h
         }
@@ -291,14 +283,6 @@ impl OverlayLayout {
         }
     }
 
-    pub fn item_mut(&mut self, item: OverlayItem) -> &mut OverlayItemLayout {
-        match item {
-            OverlayItem::Highlight => &mut self.highlight,
-            OverlayItem::Captions => &mut self.captions,
-            OverlayItem::Golem => &mut self.golem,
-        }
-    }
-
     pub fn validate(&self) -> Result<()> {
         for item in OverlayItem::ALL {
             let layout = self.item(item);
@@ -311,6 +295,93 @@ impl OverlayLayout {
         }
         Ok(())
     }
+}
+
+// --- Blit layout -------------------------------------------------------------
+
+/// Which edge of its rect an overlay bitmap hugs horizontally. Decided by the
+/// rect's centre, so the three legacy anchors (left corner, centred bar,
+/// right corner) fall out of the rect alone and a rect dragged to the middle
+/// centres its content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayHorizontalGravity {
+    Left,
+    Center,
+    Right,
+}
+
+const CENTER_GRAVITY_BAND: f64 = 0.02;
+
+impl OverlayRect {
+    pub fn horizontal_gravity(&self) -> OverlayHorizontalGravity {
+        let center = self.x + self.w / 2.0;
+        if center < 0.5 - CENTER_GRAVITY_BAND {
+            OverlayHorizontalGravity::Left
+        } else if center > 0.5 + CENTER_GRAVITY_BAND {
+            OverlayHorizontalGravity::Right
+        } else {
+            OverlayHorizontalGravity::Center
+        }
+    }
+
+    /// The rect in canvas pixels: `(left, top, right, bottom)`, rounded and
+    /// clamped to the canvas.
+    pub fn pixels(
+        &self,
+        canvas_width: usize,
+        canvas_height: usize,
+    ) -> (usize, usize, usize, usize) {
+        let clamp = |value: f64, max: usize| -> usize {
+            (value * max as f64).round().clamp(0.0, max as f64) as usize
+        };
+        let left = clamp(self.x, canvas_width);
+        let right = clamp(self.x + self.w, canvas_width).max(left);
+        let top = clamp(self.y, canvas_height);
+        let bottom = clamp(self.y + self.h, canvas_height).max(top);
+        (left, top, right, bottom)
+    }
+}
+
+/// Where an overlay bitmap lands on a canvas: the single layout oracle shared
+/// by the CPU blit, the Metal source placement and the Windows D3D11 layer
+/// transform. Returns `(source_left, dest_left, dest_top, draw_width)`.
+///
+/// The bitmap keeps its pixel size: wider than the rect (or the canvas) it is
+/// centre-cropped to fit, narrower it hugs the rect edge its gravity picks
+/// (`horizontal_gravity`, `bottom_gravity`). `safe_inset` pushes a yielding
+/// overlay further inside its rect (the caption bar stepping above a card).
+pub fn overlay_blit_layout(
+    overlay_width: usize,
+    overlay_height: usize,
+    canvas_width: usize,
+    canvas_height: usize,
+    rect: OverlayRect,
+    safe_inset: usize,
+) -> (usize, usize, usize, usize) {
+    let canvas_width = canvas_width.max(1);
+    let canvas_height = canvas_height.max(1);
+    let (left, top, right, bottom) = rect.pixels(canvas_width, canvas_height);
+    let rect_width = (right - left).max(1);
+    let draw_width = overlay_width.min(rect_width).min(canvas_width).max(1);
+    let draw_height = overlay_height.min(canvas_height).max(1);
+    let source_left = overlay_width.saturating_sub(draw_width) / 2;
+    let max_dest_left = canvas_width - draw_width;
+    let dest_left = match rect.horizontal_gravity() {
+        OverlayHorizontalGravity::Left => left,
+        OverlayHorizontalGravity::Center => left + (rect_width.saturating_sub(draw_width)) / 2,
+        OverlayHorizontalGravity::Right => right.saturating_sub(draw_width),
+    }
+    .min(max_dest_left);
+    let max_dest_top = canvas_height - draw_height;
+    let dest_top = if rect.bottom_gravity() {
+        bottom
+            .saturating_sub(draw_height)
+            .saturating_sub(safe_inset)
+            .min(max_dest_top)
+    } else {
+        top.saturating_add(safe_inset).min(max_dest_top)
+    };
+    (source_left, dest_left, dest_top, draw_width)
 }
 
 // --- Leg plan (plan 164, D12) ------------------------------------------------
@@ -439,6 +510,7 @@ pub struct OverlaySessionPlans {
 }
 
 impl OverlaySessionPlans {
+    #[cfg(test)]
     pub fn plan(&self, item: OverlayItem) -> Option<OverlayLegPlan> {
         match item {
             OverlayItem::Highlight => Some(self.highlight),
@@ -565,6 +637,7 @@ pub const OVERLAY_LAYOUT_EVENT: &str = "overlays.layout";
 /// `overlays.layout.set`: persist the whole layout and tell every window.
 pub async fn set_overlay_layout(state: &AppState, layout: OverlayLayout) -> Result<OverlayLayout> {
     let saved = save_overlay_layout(&state.database, &layout)?;
+    crate::recording::apply_overlay_layout_to_active_session(state, &saved).await;
     state.emit_event(OVERLAY_LAYOUT_EVENT, saved);
     Ok(saved)
 }
@@ -941,6 +1014,130 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&vertical[0]).unwrap()["item"],
             "highlight"
+        );
+    }
+
+    #[test]
+    fn blit_layout_reproduces_the_legacy_corner_and_bar_positions() {
+        // 1920x1080, the shipped bottom-left card: 43 px margins on both axes.
+        let bottom_left = overlay_snap_rect(
+            OverlayItem::Highlight,
+            OverlayOrientation::Horizontal,
+            OverlaySnap::BottomLeft,
+        );
+        assert_eq!(
+            overlay_blit_layout(600, 200, 1920, 1080, bottom_left, 0),
+            (0, 43, 1080 - 200 - 43, 600)
+        );
+        let bottom_right = overlay_snap_rect(
+            OverlayItem::Highlight,
+            OverlayOrientation::Horizontal,
+            OverlaySnap::BottomRight,
+        );
+        assert_eq!(
+            overlay_blit_layout(600, 200, 1920, 1080, bottom_right, 0),
+            (0, 1920 - 600 - 43, 1080 - 200 - 43, 600)
+        );
+        let top_left = overlay_snap_rect(
+            OverlayItem::Highlight,
+            OverlayOrientation::Horizontal,
+            OverlaySnap::TopLeft,
+        );
+        assert_eq!(
+            overlay_blit_layout(600, 200, 1920, 1080, top_left, 0),
+            (0, 43, 43, 600)
+        );
+        // Portrait 1080x1920: 77 px side margin, the platform safe area vertically.
+        let vertical_top_right = overlay_snap_rect(
+            OverlayItem::Highlight,
+            OverlayOrientation::Vertical,
+            OverlaySnap::TopRight,
+        );
+        assert_eq!(
+            overlay_blit_layout(600, 200, 1080, 1920, vertical_top_right, 0),
+            (0, 1080 - 600 - 77, 154, 600)
+        );
+        let vertical_bottom = overlay_snap_rect(
+            OverlayItem::Captions,
+            OverlayOrientation::Vertical,
+            OverlaySnap::BottomCenter,
+        );
+        assert_eq!(
+            overlay_blit_layout(820, 160, 1080, 1920, vertical_bottom, 0),
+            (0, (1080 - 820) / 2, 1920 - 422 - 160, 820)
+        );
+        // A centred caption bar: centred inside its rect, the inset stacks on
+        // the margin, and the bar never leaves the canvas.
+        let bar = overlay_snap_rect(
+            OverlayItem::Captions,
+            OverlayOrientation::Horizontal,
+            OverlaySnap::BottomCenter,
+        );
+        assert_eq!(
+            overlay_blit_layout(1000, 100, 1920, 1080, bar, 0),
+            (0, 460, 1080 - 43 - 100, 1000)
+        );
+        assert_eq!(
+            overlay_blit_layout(1000, 100, 1920, 1080, bar, 222),
+            (0, 460, 1080 - 43 - 222 - 100, 1000)
+        );
+        let top_bar = overlay_snap_rect(
+            OverlayItem::Captions,
+            OverlayOrientation::Horizontal,
+            OverlaySnap::TopCenter,
+        );
+        assert_eq!(
+            overlay_blit_layout(1000, 100, 1920, 1080, top_bar, 222),
+            (0, 460, 43 + 222, 1000)
+        );
+        assert_eq!(
+            overlay_blit_layout(1000, 100, 1920, 1080, top_bar, 5000),
+            (0, 460, 980, 1000)
+        );
+        // Wider than the rect: centre-cropped to the rect; wider than the
+        // canvas: cropped to the canvas.
+        assert_eq!(
+            overlay_blit_layout(2400, 100, 1920, 1080, bar, 0),
+            (317, 77, 937, 1766)
+        );
+        let full = OverlayRect::new(0.0, 0.0, 1.0, 1.0);
+        assert_eq!(
+            overlay_blit_layout(2400, 100, 1920, 1080, full, 0),
+            (240, 0, 980, 1920)
+        );
+        // Degenerate canvases never panic and always draw one pixel.
+        assert_eq!(overlay_blit_layout(7, 3, 1, 1, bar, 0), (3, 0, 0, 1));
+        assert_eq!(overlay_blit_layout(1, 1, 0, 0, full, 0), (0, 0, 0, 1));
+    }
+
+    #[test]
+    fn blit_layout_follows_a_free_rect_and_its_gravity() {
+        // The parity fixture rect (S-B3.5): (0.1, 0.2, 0.25, 0.2) on 1280x720
+        // is a top-left box 128..448 x 144..288; a 200x100 bitmap sits at its
+        // top-left corner.
+        let rect = OverlayRect::new(0.1, 0.2, 0.25, 0.2);
+        assert_eq!(rect.pixels(1280, 720), (128, 144, 448, 288));
+        assert_eq!(rect.horizontal_gravity(), OverlayHorizontalGravity::Left);
+        assert!(!rect.bottom_gravity());
+        assert_eq!(
+            overlay_blit_layout(200, 100, 1280, 720, rect, 0),
+            (0, 128, 144, 200)
+        );
+        // The same bitmap in a bottom-right box hugs that corner.
+        let corner = OverlayRect::new(0.7, 0.7, 0.25, 0.25);
+        assert_eq!(
+            overlay_blit_layout(200, 100, 1280, 720, corner, 0),
+            (0, 1216 - 200, 684 - 100, 200)
+        );
+        // A rect straddling the middle centres its content.
+        let middle = OverlayRect::new(0.3, 0.4, 0.4, 0.2);
+        assert_eq!(
+            middle.horizontal_gravity(),
+            OverlayHorizontalGravity::Center
+        );
+        assert_eq!(
+            overlay_blit_layout(200, 100, 1280, 720, middle, 0),
+            (0, 384 + 156, 432 - 100, 200)
         );
     }
 

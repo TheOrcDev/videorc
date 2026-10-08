@@ -574,6 +574,33 @@ pub struct CompositorArmParams {
     pub highlight_overlay_on_aux: bool,
 }
 
+/// Plan 164 (S-B3.4): swap the comment-highlight flags of the live run in
+/// place when `overlays.layout.set` lands mid-session. Returns false when no
+/// run is live; the next session reads the stored layout at start.
+pub async fn update_overlay_flags(
+    state: &AppState,
+    highlight_on_primary: bool,
+    highlight_on_aux: bool,
+) -> bool {
+    let compositor = state.compositor.lock().await;
+    let Some(config_tx) = compositor.loop_config_tx.as_ref() else {
+        return false;
+    };
+    let current = *config_tx.borrow();
+    if current.highlight_overlay_on_primary == highlight_on_primary
+        && current.highlight_overlay_on_aux == highlight_on_aux
+    {
+        return true;
+    }
+    config_tx
+        .send(CompositorLoopConfig {
+            highlight_overlay_on_primary: highlight_on_primary,
+            highlight_overlay_on_aux: highlight_on_aux,
+            ..current
+        })
+        .is_ok()
+}
+
 /// Why a capture could not arm the preview compositor in place. Callers fall
 /// back to a fresh recording run; the Record button is never a dead click.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6029,12 +6056,12 @@ fn push_caption_overlay_gpu_source<'a>(
     if overlay.rgba.len() < overlay_width * overlay_height * 4 {
         return;
     }
-    let (source_left, dest_left, dest_top, draw_width) = caption_overlay_layout_with_inset(
+    let (source_left, dest_left, dest_top, draw_width) = crate::overlay_layout::overlay_blit_layout(
         overlay_width,
         overlay_height,
         canvas_width.max(1) as usize,
         canvas_height.max(1) as usize,
-        overlay.placement,
+        overlay.blit_rect(canvas_width, canvas_height),
         safe_inset,
     );
     let draw_height = overlay_height.min(canvas_height.max(1) as usize);
@@ -8511,38 +8538,12 @@ fn render_synthetic_source_rect(
     );
 }
 
-/// Vertical safe margin for the caption bar, as a fraction of canvas height.
-const CAPTION_OVERLAY_MARGIN: f64 = 0.04;
-/// Portrait canvases (the vertical simulcast leg, vertical scenes) are watched
-/// in TikTok, Shorts and Reels, which draw their own caption, username, music
-/// line and buttons across the bottom fifth and a header across the top.
-/// Overlays keep out of those bands; the side margin is unchanged (plan 077).
-/// Mirrored by the renderer's `captionBarFramePosition`.
-const PORTRAIT_OVERLAY_TOP_MARGIN: f64 = 0.08;
-const PORTRAIT_OVERLAY_BOTTOM_MARGIN: f64 = 0.22;
-
-/// The distance an overlay keeps from the top or bottom edge it is anchored to.
-fn overlay_edge_margin(
-    canvas_width: usize,
-    canvas_height: usize,
-    vertical: crate::captions::CaptionOverlayPosition,
-) -> usize {
-    let fraction = if canvas_height > canvas_width {
-        match vertical {
-            crate::captions::CaptionOverlayPosition::Top => PORTRAIT_OVERLAY_TOP_MARGIN,
-            crate::captions::CaptionOverlayPosition::Bottom => PORTRAIT_OVERLAY_BOTTOM_MARGIN,
-        }
-    } else {
-        CAPTION_OVERLAY_MARGIN
-    };
-    ((canvas_height as f64) * fraction).round() as usize
-}
 const OVERLAY_COLLISION_GAP: f64 = 0.02;
 
-/// The comment-highlight card owns its anchor corner and never yields. A
-/// caption sharing that vertical edge is pushed inward by the complete
-/// highlight bitmap plus a small title-safe gap, but only when the two draw
-/// rects would actually overlap horizontally on THIS canvas: a narrow centred
+/// The comment-highlight card owns its rect and never yields. A caption
+/// hugging the same vertical edge is pushed inward by the complete highlight
+/// bitmap plus a small title-safe gap, but only when the two draw rects
+/// would actually overlap horizontally on THIS canvas: a narrow centred
 /// caption next to a corner card keeps its normal position. CPU, Metal and
 /// D3D11 all consume this value, so the live stream cannot diverge from
 /// preview/recording output.
@@ -8557,42 +8558,43 @@ pub(crate) fn caption_overlay_safe_inset(
     };
     overlay_collision_inset(
         (caption.width as usize, caption.height as usize),
-        caption.placement,
+        caption.blit_rect(canvas_width, canvas_height),
         (highlight.width as usize, highlight.height as usize),
-        highlight.placement,
+        highlight.blit_rect(canvas_width, canvas_height),
         canvas_width.max(1) as usize,
         canvas_height.max(1) as usize,
     )
 }
 
 /// Pure collision rule behind `caption_overlay_safe_inset`: sizes are
-/// `(width, height)` in overlay pixels. Returns the extra vertical inset the
-/// YIELDING overlay needs; 0 when the two cannot touch.
+/// `(width, height)` in overlay pixels, rects the overlays' blit rects.
+/// Returns the extra vertical inset the YIELDING overlay needs; 0 when the
+/// two hug different edges or cannot touch horizontally.
 pub(crate) fn overlay_collision_inset(
     yielding_size: (usize, usize),
-    yielding_placement: crate::captions::OverlayPlacement,
+    yielding_rect: crate::overlay_layout::OverlayRect,
     fixed_size: (usize, usize),
-    fixed_placement: crate::captions::OverlayPlacement,
+    fixed_rect: crate::overlay_layout::OverlayRect,
     canvas_width: usize,
     canvas_height: usize,
 ) -> usize {
-    if yielding_placement.vertical != fixed_placement.vertical {
+    if yielding_rect.bottom_gravity() != fixed_rect.bottom_gravity() {
         return 0;
     }
-    let (_, yielding_left, _, yielding_width) = caption_overlay_layout_with_inset(
+    let (_, yielding_left, _, yielding_width) = crate::overlay_layout::overlay_blit_layout(
         yielding_size.0,
         yielding_size.1,
         canvas_width,
         canvas_height,
-        yielding_placement,
+        yielding_rect,
         0,
     );
-    let (_, fixed_left, _, fixed_width) = caption_overlay_layout_with_inset(
+    let (_, fixed_left, _, fixed_width) = crate::overlay_layout::overlay_blit_layout(
         fixed_size.0,
         fixed_size.1,
         canvas_width,
         canvas_height,
-        fixed_placement,
+        fixed_rect,
         0,
     );
     let x_ranges_overlap = yielding_left < fixed_left.saturating_add(fixed_width)
@@ -8604,70 +8606,6 @@ pub(crate) fn overlay_collision_inset(
         .round()
         .max(1.0) as usize;
     fixed_size.1.saturating_add(gap)
-}
-
-/// Alpha-composite the caption bar over a YUV420p frame — the one true
-/// alpha-blending blit (scene blits are binary: alpha<16 skip, else write).
-/// The bar is pre-rendered at the leg's output width; wider bars are
-/// center-cropped (bar edges are padding), never scaled.
-/// Where an overlay (caption bar or highlight card) lands on a canvas — the
-/// single layout oracle shared by the CPU blit, the Metal source placement and
-/// the Windows D3D11 layer transform. Returns
-/// `(source_left, dest_left, dest_top, draw_width)`.
-///
-/// Vertical: 4% of canvas height as the safe margin (plus `safe_inset`); on a
-/// portrait canvas the platform safe area instead (8% top, 22% bottom).
-/// Horizontal: `Center` is centred (captions); `Left`/`Right` sit the SAME
-/// pixel margin from the side edge, so a corner card is visually square in
-/// landscape and vertical. Wider-than-canvas overlays are center-cropped.
-#[cfg(test)]
-pub(crate) fn caption_overlay_layout(
-    overlay_width: usize,
-    overlay_height: usize,
-    canvas_width: usize,
-    canvas_height: usize,
-    placement: impl Into<crate::captions::OverlayPlacement>,
-) -> (usize, usize, usize, usize) {
-    caption_overlay_layout_with_inset(
-        overlay_width,
-        overlay_height,
-        canvas_width,
-        canvas_height,
-        placement,
-        0,
-    )
-}
-
-pub(crate) fn caption_overlay_layout_with_inset(
-    overlay_width: usize,
-    overlay_height: usize,
-    canvas_width: usize,
-    canvas_height: usize,
-    placement: impl Into<crate::captions::OverlayPlacement>,
-    safe_inset: usize,
-) -> (usize, usize, usize, usize) {
-    let placement = placement.into();
-    let draw_width = overlay_width.min(canvas_width);
-    let draw_height = overlay_height.min(canvas_height);
-    let source_left = (overlay_width - draw_width) / 2;
-    let margin = ((canvas_height as f64) * CAPTION_OVERLAY_MARGIN).round() as usize;
-    let edge_margin = overlay_edge_margin(canvas_width, canvas_height, placement.vertical);
-    let max_dest_left = canvas_width - draw_width;
-    let dest_left = match placement.horizontal {
-        crate::captions::OverlayHorizontal::Left => margin.min(max_dest_left),
-        crate::captions::OverlayHorizontal::Center => max_dest_left / 2,
-        crate::captions::OverlayHorizontal::Right => max_dest_left.saturating_sub(margin),
-    };
-    let inset_margin = edge_margin.saturating_add(safe_inset);
-    let dest_top = match placement.vertical {
-        crate::captions::CaptionOverlayPosition::Top => {
-            inset_margin.min(canvas_height.saturating_sub(draw_height))
-        }
-        crate::captions::CaptionOverlayPosition::Bottom => {
-            canvas_height.saturating_sub(draw_height.saturating_add(inset_margin))
-        }
-    };
-    (source_left, dest_left, dest_top, draw_width.max(1))
 }
 
 /// Straight-alpha source-over for one plane sample, shared by the caption
@@ -8695,12 +8633,12 @@ fn composite_caption_overlay(
     }
 
     let draw_height = overlay_height.min(canvas_height);
-    let (source_left, dest_left, dest_top, draw_width) = caption_overlay_layout_with_inset(
+    let (source_left, dest_left, dest_top, draw_width) = crate::overlay_layout::overlay_blit_layout(
         overlay_width,
         overlay_height,
         canvas_width,
         canvas_height,
-        overlay.placement,
+        overlay.blit_rect(canvas_width as u32, canvas_height as u32),
         safe_inset,
     );
 
@@ -9440,6 +9378,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::captions::OverlayPlacement;
     use crate::protocol::{
         SceneConfigParams, SourceSelection, StreamScreenStatus, VideoPreset, VideoSettings,
     };
@@ -14372,12 +14311,12 @@ mod tests {
         canvas_height: usize,
         safe_inset: usize,
     ) -> (usize, usize, usize, usize) {
-        let (_, left, top, draw_width) = caption_overlay_layout_with_inset(
+        let (_, left, top, draw_width) = crate::overlay_layout::overlay_blit_layout(
             overlay.width as usize,
             overlay.height as usize,
             canvas_width,
             canvas_height,
-            overlay.placement,
+            overlay.blit_rect(canvas_width as u32, canvas_height as u32),
             safe_inset,
         );
         let draw_height = (overlay.height as usize).min(canvas_height);
@@ -14393,7 +14332,14 @@ mod tests {
                 .round()
                 .max(1.0) as usize;
             for anchor in ALL_HIGHLIGHT_ANCHORS {
-                let highlight_edge = OverlayPlacement::from(anchor).vertical;
+                let highlight_edge = if OverlayPlacement::from(anchor)
+                    .rect_for_canvas(canvas_width as u32, canvas_height as u32)
+                    .bottom_gravity()
+                {
+                    CaptionOverlayPosition::Bottom
+                } else {
+                    CaptionOverlayPosition::Top
+                };
                 for position in [CaptionOverlayPosition::Top, CaptionOverlayPosition::Bottom] {
                     // Wide caption: its centred x-range reaches under either
                     // corner card. Narrow caption: clears both corners.
@@ -14458,6 +14404,44 @@ mod tests {
         );
     }
 
+    /// The legacy oracle for a push without a rect: `(source_left, left, top, width)`.
+    fn legacy_layout(
+        overlay_width: usize,
+        overlay_height: usize,
+        canvas_width: usize,
+        canvas_height: usize,
+        placement: impl Into<OverlayPlacement>,
+    ) -> (usize, usize, usize, usize) {
+        legacy_layout_with_inset(
+            overlay_width,
+            overlay_height,
+            canvas_width,
+            canvas_height,
+            placement,
+            0,
+        )
+    }
+
+    fn legacy_layout_with_inset(
+        overlay_width: usize,
+        overlay_height: usize,
+        canvas_width: usize,
+        canvas_height: usize,
+        placement: impl Into<OverlayPlacement>,
+        safe_inset: usize,
+    ) -> (usize, usize, usize, usize) {
+        crate::overlay_layout::overlay_blit_layout(
+            overlay_width,
+            overlay_height,
+            canvas_width,
+            canvas_height,
+            placement
+                .into()
+                .rect_for_canvas(canvas_width as u32, canvas_height as u32),
+            safe_inset,
+        )
+    }
+
     #[test]
     fn overlay_layout_portrait_keeps_out_of_the_platform_ui_bands() {
         use crate::captions::CaptionOverlayPosition;
@@ -14465,7 +14449,7 @@ mod tests {
         // A 1080x1920 vertical leg: a centred caption bar sits 8% below the
         // top or 22% above the bottom, clear of TikTok/Shorts/Reels chrome.
         let (bar_width, bar_height) = (820_usize, 160_usize);
-        let (_, left, top, width) = caption_overlay_layout(
+        let (_, left, top, width) = legacy_layout(
             bar_width,
             bar_height,
             1080,
@@ -14473,7 +14457,7 @@ mod tests {
             CaptionOverlayPosition::Top,
         );
         assert_eq!((left, top, width), ((1080 - 820) / 2, 154, 820));
-        let (_, _, top, _) = caption_overlay_layout(
+        let (_, _, top, _) = legacy_layout(
             bar_width,
             bar_height,
             1080,
@@ -14482,7 +14466,7 @@ mod tests {
         );
         assert_eq!(top, 1920 - 422 - 160);
         // The yielding inset still stacks on top of the safe area.
-        let (_, _, top, _) = caption_overlay_layout_with_inset(
+        let (_, _, top, _) = legacy_layout_with_inset(
             bar_width,
             bar_height,
             1080,
@@ -14492,8 +14476,7 @@ mod tests {
         );
         assert_eq!(top, 1920 - 422 - 100 - 160);
         // Square and landscape canvases keep the 4% rule.
-        let (_, _, top, _) =
-            caption_overlay_layout(100, 10, 1000, 1000, CaptionOverlayPosition::Bottom);
+        let (_, _, top, _) = legacy_layout(100, 10, 1000, 1000, CaptionOverlayPosition::Bottom);
         assert_eq!(top, 1000 - 40 - 10);
     }
 
@@ -14503,15 +14486,10 @@ mod tests {
 
         let (card_width, card_height) = (400_usize, 200_usize);
         for (canvas_width, canvas_height) in [(1920_usize, 1080_usize), (1080, 1920)] {
-            let margin = ((canvas_height as f64) * CAPTION_OVERLAY_MARGIN).round() as usize;
+            let margin = ((canvas_height as f64) * 0.04).round() as usize;
             for anchor in ALL_HIGHLIGHT_ANCHORS {
-                let (source_left, left, top, draw_width) = caption_overlay_layout(
-                    card_width,
-                    card_height,
-                    canvas_width,
-                    canvas_height,
-                    anchor,
-                );
+                let (source_left, left, top, draw_width) =
+                    legacy_layout(card_width, card_height, canvas_width, canvas_height, anchor);
                 assert_eq!((source_left, draw_width), (0, card_width));
                 let (right, bottom) = (left + card_width, top + card_height);
                 let x_margin = match anchor {
@@ -14539,12 +14517,11 @@ mod tests {
                 let expected_y_margin = if canvas_height > canvas_width {
                     match anchor {
                         CommentHighlightAnchor::TopLeft | CommentHighlightAnchor::TopRight => {
-                            ((canvas_height as f64) * PORTRAIT_OVERLAY_TOP_MARGIN).round() as usize
+                            ((canvas_height as f64) * 0.08).round() as usize
                         }
                         CommentHighlightAnchor::BottomLeft
                         | CommentHighlightAnchor::BottomRight => {
-                            ((canvas_height as f64) * PORTRAIT_OVERLAY_BOTTOM_MARGIN).round()
-                                as usize
+                            ((canvas_height as f64) * 0.22).round() as usize
                         }
                     }
                 } else {
@@ -14560,69 +14537,156 @@ mod tests {
     }
 
     #[test]
-    fn overlay_layout_center_placement_matches_the_legacy_caption_formula() {
-        use crate::captions::CaptionOverlayPosition;
+    fn overlay_layout_over_wide_or_tight_overlays_stay_inside_their_rect() {
+        for anchor in ALL_HIGHLIGHT_ANCHORS {
+            let rect = OverlayPlacement::from(anchor).rect_for_canvas(1920, 1080);
+            let (rect_left, _, rect_right, _) = rect.pixels(1920, 1080);
+            // Wider than the rect: centre-cropped to the rect, never scaled.
+            let (source_left, left, _, draw_width) = legacy_layout(2400, 100, 1920, 1080, anchor);
+            assert_eq!(draw_width, rect_right - rect_left, "{anchor:?}");
+            assert_eq!(source_left, (2400 - draw_width) / 2, "{anchor:?}");
+            assert_eq!(left, rect_left, "{anchor:?}");
+            // Fits the canvas but not the rect: the same crop.
+            let (source_left, left, _, draw_width) = legacy_layout(1900, 100, 1920, 1080, anchor);
+            assert_eq!(draw_width, rect_right - rect_left, "{anchor:?}");
+            assert_eq!(source_left, (1900 - draw_width) / 2, "{anchor:?}");
+            assert!(left + draw_width <= 1920, "{anchor:?}");
+        }
+        // A rect wider than the canvas clamps to it.
+        let full = crate::overlay_layout::OverlayRect::new(0.0, 0.0, 1.0, 1.0);
+        let (source_left, left, _, draw_width) =
+            crate::overlay_layout::overlay_blit_layout(2400, 100, 1920, 1080, full, 0);
+        assert_eq!((source_left, left, draw_width), (240, 0, 1920));
+    }
 
-        // Portrait canvases use the platform safe area instead (asserted in
-        // `overlay_layout_portrait_keeps_out_of_the_platform_ui_bands`).
-        for (canvas_width, canvas_height) in [(1920_usize, 1080_usize), (32, 16), (16, 8), (1, 1)] {
-            for (overlay_width, overlay_height) in [
-                (960_usize, 120_usize),
-                (1921, 300),
-                (4096, 2048),
-                (7, 3),
-                (1, 1),
-            ] {
-                for safe_inset in [0_usize, 1, 222, 5000] {
-                    for position in [CaptionOverlayPosition::Top, CaptionOverlayPosition::Bottom] {
-                        // The pre-anchor formula, verbatim.
-                        let draw_width = overlay_width.min(canvas_width);
-                        let draw_height = overlay_height.min(canvas_height);
-                        let source_left = (overlay_width - draw_width) / 2;
-                        let dest_left = (canvas_width - draw_width) / 2;
-                        let margin =
-                            ((canvas_height as f64) * CAPTION_OVERLAY_MARGIN).round() as usize;
-                        let inset_margin = margin.saturating_add(safe_inset);
-                        let dest_top = match position {
-                            CaptionOverlayPosition::Top => {
-                                inset_margin.min(canvas_height.saturating_sub(draw_height))
-                            }
-                            CaptionOverlayPosition::Bottom => canvas_height
-                                .saturating_sub(draw_height.saturating_add(inset_margin)),
-                        };
-                        assert_eq!(
-                            caption_overlay_layout_with_inset(
-                                overlay_width,
-                                overlay_height,
-                                canvas_width,
-                                canvas_height,
-                                position,
-                                safe_inset,
-                            ),
-                            (source_left, dest_left, dest_top, draw_width.max(1))
-                        );
-                    }
+    /// S-B3.5 parity fixture: a synthetic 1280x720 scene with a 200x100 red
+    /// overlay at rect (0.1, 0.2, 0.25, 0.2) renders through CPU and Metal
+    /// and the two agree on every pixel of the overlay rect and its 2 px
+    /// border (within ±2 per channel against each path's own clean render).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cpu_and_metal_blit_the_same_overlay_rect() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let (canvas_w, canvas_h) = (1280_u32, 720_u32);
+        let layout = crate::protocol::default_layout_settings();
+        let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
+            sources: crate::protocol::SourceSelection {
+                screen_id: None,
+                window_id: None,
+                camera_id: None,
+                microphone_id: None,
+                test_pattern: true,
+            },
+            layout: layout.clone(),
+            video: Some(VideoSettings {
+                preset: VideoPreset::Custom,
+                width: canvas_w,
+                height: canvas_h,
+                fps: 30,
+                bitrate_kbps: 6000,
+            }),
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        });
+        let snapshot = CompositorSceneSnapshot {
+            revision: 1,
+            scene: Some(scene),
+            layout,
+            active_screen: None,
+        };
+        let rect = crate::overlay_layout::OverlayRect::new(0.1, 0.2, 0.25, 0.2);
+        let overlay = test_caption_overlay(
+            200,
+            100,
+            [255, 0, 0, 255],
+            OverlayPlacement::new(Some(rect), crate::captions::CaptionOverlayPosition::Top),
+        );
+        let (left, top, right, bottom) = overlay_draw_rect(&overlay, 1280, 720, 0);
+        assert_eq!((left, top, right, bottom), (128, 144, 328, 244));
+        fn inputs<'a>(
+            snapshot: &'a CompositorSceneSnapshot,
+            highlight: Option<&'a crate::captions::CaptionOverlay>,
+            sequence: u64,
+        ) -> CompositorRenderInputs<'a> {
+            CompositorRenderInputs {
+                sequence,
+                width: 1280,
+                height: 720,
+                snapshot: Some(snapshot),
+                active_image_source: None,
+                background_image_source: None,
+                camera_frame: None,
+                screen_frame: None,
+                caption_overlay: None,
+                highlight_overlay: highlight,
+            }
+        }
+        let mut cpu_clean = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        render_compositor_yuv420p_frame(inputs(&snapshot, None, 1), &mut cpu_clean);
+        let mut cpu = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        render_compositor_yuv420p_frame(inputs(&snapshot, Some(&overlay), 1), &mut cpu);
+        // The same sequence for every render: the test pattern animates by
+        // sequence, and the border check compares each path with itself.
+        let metal_clean = try_gpu_compose(Some(&mut gpu), &inputs(&snapshot, None, 1), true)
+            .expect("clean scene renders on Metal")
+            .yuv;
+        let metal = try_gpu_compose(Some(&mut gpu), &inputs(&snapshot, Some(&overlay), 1), true)
+            .expect("overlay scene renders on Metal")
+            .yuv;
+        assert_eq!(metal.len(), cpu.len());
+
+        let (red_y, red_u, red_v) = rgb_to_yuv(255, 0, 0);
+        let width = canvas_w as usize;
+        let height = canvas_h as usize;
+        let (uv_width, uv_height) = (width.div_ceil(2), height.div_ceil(2));
+        let (u_start, v_start) = (width * height, width * height + uv_width * uv_height);
+        let close = |a: u8, b: u8| (i16::from(a) - i16::from(b)).abs() <= 2;
+        for y in top - 2..bottom + 2 {
+            for x in left - 2..right + 2 {
+                let inside = (left..right).contains(&x) && (top..bottom).contains(&y);
+                let index = y * width + x;
+                if inside {
+                    assert!(
+                        close(cpu[index], red_y),
+                        "cpu luma at {x},{y}: {}",
+                        cpu[index]
+                    );
+                    assert!(
+                        close(metal[index], red_y),
+                        "metal luma at {x},{y}: {}",
+                        metal[index]
+                    );
+                } else {
+                    assert!(
+                        close(cpu[index], cpu_clean[index]),
+                        "cpu border luma changed at {x},{y}"
+                    );
+                    assert!(
+                        close(metal[index], metal_clean[index]),
+                        "metal border luma changed at {x},{y}"
+                    );
                 }
             }
         }
-    }
-
-    #[test]
-    fn overlay_layout_over_wide_or_tight_overlays_stay_on_canvas_for_every_anchor() {
-        for anchor in ALL_HIGHLIGHT_ANCHORS {
-            // Wider than the canvas: centre-cropped exactly like captions.
-            let (source_left, left, _, draw_width) =
-                caption_overlay_layout(2400, 100, 1920, 1080, anchor);
-            assert_eq!(
-                (source_left, left, draw_width),
-                (240, 0, 1920),
-                "{anchor:?}"
-            );
-            // Fits, but with less slack than the margin: clamped on-canvas.
-            let (source_left, left, _, draw_width) =
-                caption_overlay_layout(1900, 100, 1920, 1080, anchor);
-            assert_eq!(source_left, 0);
-            assert!(left + draw_width <= 1920, "{anchor:?}");
+        // Chroma, sampled strictly inside the overlay (half resolution).
+        for uv_y in (top + 2) / 2..(bottom - 2) / 2 {
+            for uv_x in (left + 2) / 2..(right - 2) / 2 {
+                let uv_index = uv_y * uv_width + uv_x;
+                for (plane, expected, start) in [("u", red_u, u_start), ("v", red_v, v_start)] {
+                    assert!(
+                        close(cpu[start + uv_index], expected),
+                        "cpu {plane} at {uv_x},{uv_y}"
+                    );
+                    assert!(
+                        close(metal[start + uv_index], expected),
+                        "metal {plane} at {uv_x},{uv_y}"
+                    );
+                }
+            }
         }
     }
 
@@ -14827,9 +14891,13 @@ mod tests {
             &mut bytes,
         );
         let (white_y, _, _) = rgb_to_yuv(255, 255, 255);
-        // margin = 1 → rows 1..5 across the full width.
-        assert_eq!(bytes[2 * canvas_w as usize], white_y);
-        assert_eq!(bytes[2 * canvas_w as usize + 31], white_y);
+        // margin = 1 → rows 1..5 across the bar's rect: the legacy centred bar
+        // spans 4%..96% of the width (columns 1..31), and a bitmap wider than
+        // that is centre-cropped to it (plan 164: the rect bounds the width).
+        assert_eq!(bytes[2 * canvas_w as usize + 1], white_y);
+        assert_eq!(bytes[2 * canvas_w as usize + 30], white_y);
+        assert_ne!(bytes[2 * canvas_w as usize], white_y);
+        assert_ne!(bytes[2 * canvas_w as usize + 31], white_y);
         // Row 0 (above the margin) untouched by the bar.
         let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_scene(

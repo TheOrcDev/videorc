@@ -15,7 +15,10 @@ use serde::Serialize;
 use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::audio::AudioFrame;
-use crate::overlay_layout::{OverlayAuxLeg, overlay_leg_plan};
+use crate::overlay_layout::{
+    OverlayAuxLeg, OverlayItem, OverlayOrientation, OverlayRect, OverlaySnap, overlay_leg_plan,
+    overlay_snap_rect,
+};
 use crate::process_job::spawn_owned_tokio;
 use crate::state::AppState;
 use crate::videorc_api::{
@@ -644,6 +647,7 @@ pub struct CaptionOverlayLegPlan {
     pub captioned_copy: bool,
 }
 
+#[cfg(test)]
 pub fn caption_overlay_leg_plan(
     record_enabled: bool,
     stream_enabled: bool,
@@ -687,6 +691,7 @@ pub fn caption_overlay_leg_plan_with_vertical_leg(
 
 /// What a session's auxiliary compositor leg carries, as far as the
 /// comment-highlight card is concerned. The same enum serves every overlay.
+#[cfg(test)]
 pub use crate::overlay_layout::OverlayAuxLeg as HighlightAuxLeg;
 
 /// Per-leg plan for the comment-highlight overlay with the pre-plan-164
@@ -695,6 +700,7 @@ pub use crate::overlay_layout::OverlayAuxLeg as HighlightAuxLeg;
 /// (the D13 shared-leg fallback). Sessions read the streamer's switches
 /// through `overlay_layout::overlay_session_plans`; this wrapper keeps the
 /// shipped default reachable for callers without a layout.
+#[cfg(test)]
 pub fn highlight_overlay_leg_plan(
     record_enabled: bool,
     stream_enabled: bool,
@@ -2353,32 +2359,59 @@ pub enum CaptionOverlayPosition {
     Bottom,
 }
 
-/// Horizontal anchoring of a composited overlay. Internal only: captions are
-/// always `Center`; the comment-highlight card maps its wire anchor onto
-/// `Left`/`Right` (see `comment_highlight::CommentHighlightAnchor`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum OverlayHorizontal {
-    Left,
-    #[default]
-    Center,
-    Right,
+/// Where a composited overlay bitmap lands when its push carried no rect
+/// (older callers and smokes): one of the snap presets, resolved against the
+/// canvas orientation at blit time so a legacy push still clears the portrait
+/// safe area on a vertical leg. Not a wire type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverlayFallbackPlacement {
+    pub item: OverlayItem,
+    pub snap: OverlaySnap,
 }
 
-/// Where an overlay bitmap lands on a canvas: a vertical edge plus a
-/// horizontal anchor. Not a wire type — `CaptionOverlayPosition` stays the
-/// captions wire enum and converts to a centred placement.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+impl From<CaptionOverlayPosition> for OverlayFallbackPlacement {
+    fn from(position: CaptionOverlayPosition) -> Self {
+        Self {
+            item: OverlayItem::Captions,
+            snap: match position {
+                CaptionOverlayPosition::Top => OverlaySnap::TopCenter,
+                CaptionOverlayPosition::Bottom => OverlaySnap::BottomCenter,
+            },
+        }
+    }
+}
+
+/// How an installed overlay is placed: the streamer's rect from the overlay
+/// layout, or the legacy snap when the push carried none.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OverlayPlacement {
-    pub vertical: CaptionOverlayPosition,
-    pub horizontal: OverlayHorizontal,
+    pub rect: Option<OverlayRect>,
+    pub fallback: OverlayFallbackPlacement,
+}
+
+impl OverlayPlacement {
+    pub fn new(rect: Option<OverlayRect>, fallback: impl Into<OverlayFallbackPlacement>) -> Self {
+        Self {
+            rect,
+            fallback: fallback.into(),
+        }
+    }
+
+    /// The rect this overlay blits into on a canvas of this size.
+    pub fn rect_for_canvas(&self, canvas_width: u32, canvas_height: u32) -> OverlayRect {
+        self.rect.unwrap_or_else(|| {
+            overlay_snap_rect(
+                self.fallback.item,
+                OverlayOrientation::for_canvas(canvas_width, canvas_height),
+                self.fallback.snap,
+            )
+        })
+    }
 }
 
 impl From<CaptionOverlayPosition> for OverlayPlacement {
-    fn from(vertical: CaptionOverlayPosition) -> Self {
-        Self {
-            vertical,
-            horizontal: OverlayHorizontal::Center,
-        }
+    fn from(position: CaptionOverlayPosition) -> Self {
+        Self::new(None, position)
     }
 }
 
@@ -2393,10 +2426,19 @@ pub struct CaptionOverlay {
 }
 
 impl CaptionOverlay {
-    /// The vertical edge this overlay occupies.
+    /// The vertical edge this overlay occupies on a landscape canvas.
     #[cfg(test)]
     pub fn position(&self) -> CaptionOverlayPosition {
-        self.placement.vertical
+        if self.placement.rect_for_canvas(1920, 1080).bottom_gravity() {
+            CaptionOverlayPosition::Bottom
+        } else {
+            CaptionOverlayPosition::Top
+        }
+    }
+
+    /// The rect this overlay blits into on a canvas of this size.
+    pub fn blit_rect(&self, canvas_width: u32, canvas_height: u32) -> OverlayRect {
+        self.placement.rect_for_canvas(canvas_width, canvas_height)
     }
 }
 
@@ -2475,6 +2517,10 @@ pub struct SetCaptionOverlayParams {
     pub png_base64: String,
     #[serde(default)]
     pub position: CaptionOverlayPosition,
+    /// The captions rect for this target's orientation (plan 164). Missing =>
+    /// the legacy top/bottom bar snap for `position`.
+    #[serde(default)]
+    pub rect: Option<OverlayRect>,
     #[serde(default)]
     pub target: Option<CaptionOverlayTarget>,
     #[serde(default)]
@@ -2636,7 +2682,7 @@ pub fn install_caption_overlays(
         install_decoded_caption_overlay(
             &mut guard.primary,
             &decoded,
-            params.position,
+            OverlayPlacement::new(params.rect, params.position),
             params.style_revision,
         );
     }
@@ -2647,7 +2693,7 @@ pub fn install_caption_overlays(
         install_decoded_caption_overlay(
             &mut guard.auxiliary,
             &decoded,
-            params.position,
+            OverlayPlacement::new(params.rect, params.position),
             params.style_revision,
         );
     }
@@ -2720,7 +2766,7 @@ fn validate_overlay_style_revision(
 fn install_decoded_caption_overlay(
     target: &mut CaptionOverlayTargetState,
     decoded: &PreparedCaptionOverlay,
-    position: CaptionOverlayPosition,
+    placement: OverlayPlacement,
     style_revision: Option<u64>,
 ) {
     target.revision = target.revision.saturating_add(1);
@@ -2732,7 +2778,7 @@ fn install_decoded_caption_overlay(
         bgra: decoded.bgra.clone(),
         width: decoded.width,
         height: decoded.height,
-        placement: position.into(),
+        placement,
         revision: target.revision,
     });
 }
@@ -3279,7 +3325,7 @@ pub async fn install_caption_sign_out_test_session(state: &AppState) -> CaptionS
             bgra: Arc::new(vec![255, 255, 255, 255]),
             width: 1,
             height: 1,
-            placement: CaptionOverlayPosition::Bottom.into(),
+            placement: OverlayPlacement::from(CaptionOverlayPosition::Bottom),
             revision: 1,
         };
         overlays.primary.overlay = Some(overlay.clone());
@@ -10826,6 +10872,7 @@ mod tests {
             SetCaptionOverlayParams {
                 png_base64: encode_test_png(3_840, 320),
                 position: CaptionOverlayPosition::Bottom,
+                rect: None,
                 target: Some(CaptionOverlayTarget::Primary),
                 style_revision: Some(5),
             },
@@ -10836,6 +10883,7 @@ mod tests {
             SetCaptionOverlayParams {
                 png_base64: encode_test_png(1_920, 180),
                 position: CaptionOverlayPosition::Top,
+                rect: None,
                 target: Some(CaptionOverlayTarget::Auxiliary),
                 style_revision: Some(5),
             },
@@ -10858,6 +10906,7 @@ mod tests {
             SetCaptionOverlayParams {
                 png_base64: encode_test_png(640, 100),
                 position: CaptionOverlayPosition::Bottom,
+                rect: None,
                 target: Some(CaptionOverlayTarget::Primary),
                 style_revision: Some(9),
             },
@@ -10868,6 +10917,7 @@ mod tests {
             SetCaptionOverlayParams {
                 png_base64: encode_test_png(700, 110),
                 position: CaptionOverlayPosition::Bottom,
+                rect: None,
                 target: Some(CaptionOverlayTarget::Primary),
                 style_revision: Some(9),
             },
@@ -10884,6 +10934,7 @@ mod tests {
             SetCaptionOverlayParams {
                 png_base64: encode_test_png(800, 120),
                 position: CaptionOverlayPosition::Top,
+                rect: None,
                 target: Some(CaptionOverlayTarget::Primary),
                 style_revision: Some(8),
             },
@@ -10919,6 +10970,7 @@ mod tests {
             SetCaptionOverlayParams {
                 png_base64: encode_test_png(800, 140),
                 position: CaptionOverlayPosition::Bottom,
+                rect: None,
                 target: None,
                 style_revision: None,
             },

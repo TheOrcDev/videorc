@@ -2026,6 +2026,10 @@ pub struct ActiveRecording {
     /// Portrait canvas `(width, height)` of the vertical simulcast leg when it
     /// burns the comment card. The renderer rasterizes a second card for it.
     pub comment_highlight_vertical_canvas: Option<(u32, u32)>,
+    /// The session shape the overlay leg plan was built for (plan 164), kept
+    /// so a layout saved mid-session can re-plan the compositor flags. None
+    /// on paths without the compositor bridge (nothing draws overlays there).
+    pub overlay_session_shape: Option<crate::overlay_layout::OverlaySessionShape>,
     pub _capture_permit: Option<CapturePermit>,
     /// Signals the process monitor at the exact user-stop edge. The monitor
     /// orders this against FFmpeg exit readiness before it touches the shared
@@ -2141,6 +2145,7 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         performance_check: false,
         comment_highlight_available: false,
         comment_highlight_vertical_canvas: None,
+        overlay_session_shape: None,
         _capture_permit: None,
         stop_intent_sender: None,
         stop_requested: false,
@@ -4129,6 +4134,12 @@ async fn start_session_with_timeline(
             aux = highlight_overlay_plan.1,
             golem_primary = overlay_plans.golem.primary,
             golem_aux = overlay_plans.golem.aux,
+            // S-B2.2: any item (not only captions) whose switches disagree
+            // on a shared leg asks for the split; the topology decides.
+            needs_split = crate::overlay_layout::overlay_layout_needs_split(
+                overlay_session_shape,
+                &overlay_layout
+            ),
             vertical_canvas = ?comment_highlight_vertical_canvas,
             "overlay leg plan"
         );
@@ -5401,6 +5412,7 @@ async fn start_session_with_timeline(
             highlight_overlay_plan,
         ),
         comment_highlight_vertical_canvas,
+        overlay_session_shape: use_encoder_bridge.then_some(overlay_session_shape),
         _capture_permit: Some(capture_permit),
         stop_intent_sender: Some(stop_intent_sender),
         stop_requested: false,
@@ -20281,6 +20293,54 @@ fn caption_leg_plan(params: &StartSessionParams) -> crate::captions::CaptionOver
     )
 }
 
+/// Plan 164 (S-B3.4): a layout saved mid-session re-plans the highlight and
+/// Golem legs for the running session and swaps the compositor flags in
+/// place. Captions keep their start-time plan (their burn target is a session
+/// parameter, pre-armed with its leg); the Windows D3D11 pump keeps its
+/// start-time overlay input, which is said in the log rather than hidden.
+pub async fn apply_overlay_layout_to_active_session(
+    state: &AppState,
+    layout: &crate::overlay_layout::OverlayLayout,
+) {
+    let (session_id, plans, d3d11) = {
+        let mut recording = state.recording.lock().await;
+        let Some(active) = recording.as_mut() else {
+            return;
+        };
+        let Some(shape) = active.overlay_session_shape else {
+            return;
+        };
+        let plans = crate::overlay_layout::overlay_session_plans(shape, layout);
+        active.comment_highlight_available = plans.highlight.burns_anywhere();
+        #[cfg(target_os = "windows")]
+        let d3d11 = active.windows_d3d11_media.is_some();
+        #[cfg(not(target_os = "windows"))]
+        let d3d11 = false;
+        (active.session_id.clone(), plans, d3d11)
+    };
+    let swapped = crate::compositor::update_overlay_flags(
+        state,
+        plans.highlight.primary,
+        plans.highlight.aux,
+    )
+    .await;
+    tracing::info!(
+        session = %session_id,
+        highlight_primary = plans.highlight.primary,
+        highlight_aux = plans.highlight.aux,
+        golem_primary = plans.golem.primary,
+        golem_aux = plans.golem.aux,
+        swapped,
+        "overlay layout changed mid-session"
+    );
+    if d3d11 {
+        state.emit_log(
+            "warn",
+            "Overlay layout changed mid-session; the Windows D3D11 media path applies output switches at the next session start.",
+        );
+    }
+}
+
 /// A session can put a comment card on stream only when the compositor bridge
 /// renders it AND the leg plan burns it on at least one leg. Deriving this
 /// from the same plan the compositor receives keeps "On stream" honest: the
@@ -27122,6 +27182,7 @@ mod tests {
             performance_check: false,
             comment_highlight_available: false,
             comment_highlight_vertical_canvas: None,
+            overlay_session_shape: None,
             _capture_permit: None,
             stop_intent_sender: None,
             stop_requested: false,
@@ -33873,6 +33934,7 @@ mod tests {
             performance_check: false,
             comment_highlight_available: false,
             comment_highlight_vertical_canvas: None,
+            overlay_session_shape: None,
             _capture_permit: None,
             stop_intent_sender: Some(stop_intent_sender),
             stop_requested: false,

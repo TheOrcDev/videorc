@@ -261,11 +261,12 @@ export function layoutCommentHighlightTokens(params: {
   fragments?: readonly LiveChatMessageFragment[]
   canvasWidth: number
   canvasHeight?: number
+  maxCardWidthPx?: number
   platform?: StreamPlatform
   measure: HighlightTextMeasurer
   emoteSize: HighlightEmoteSizer
 }): HighlightTokenLayout | null {
-  const metrics = highlightMetrics(params.canvasWidth, params.canvasHeight)
+  const metrics = highlightMetrics(params.canvasWidth, params.canvasHeight, params.maxCardWidthPx)
   if (metrics.maxTextWidthPx <= 0) {
     return null
   }

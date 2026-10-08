@@ -3977,9 +3977,14 @@ export interface SetCommentHighlightParams {
   messageId: string
   pngBase64: string
   anchor: CommentHighlightAnchor
+  /** The placed highlight rect for the horizontal canvas (plan 164); omitted
+   *  keeps the `anchor` corner. */
+  rect?: OverlayRect
   /** The same card rasterized for the vertical simulcast leg; sent only when
    *  `comments.highlight.canvases` reports a vertical canvas. */
   verticalPngBase64?: string
+  /** The placed highlight rect for the vertical leg (plan 164). */
+  verticalRect?: OverlayRect
 }
 
 /** `comments.highlight.canvases`: extra canvases the running session burns
