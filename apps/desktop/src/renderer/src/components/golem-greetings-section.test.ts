@@ -32,7 +32,9 @@ function settings(templates: CohostGreetingTemplate[]): CohostSettings {
       bubbleStyle: 'speech',
       images: {},
       source: 'default',
-      avatar: { kind: 'still' }
+      avatar: { kind: 'still' },
+      motion: { intensity: 0.45, sleepAfterSeconds: 180, breathing: true },
+      reactions: {}
     },
     autoChat: {
       mode: 'off',

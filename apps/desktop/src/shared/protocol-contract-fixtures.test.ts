@@ -764,7 +764,9 @@ describe('shared high-risk protocol fixture', () => {
       bubbleStyle: 'speech',
       images: {},
       source: 'default',
-      avatar: { kind: 'still' }
+      avatar: { kind: 'still' },
+      motion: { intensity: 0.45, sleepAfterSeconds: 180, breathing: true },
+      reactions: {}
     })
     expect(fixtures.cohost.settings.autoChat).toStrictEqual({
       mode: 'off',
@@ -1143,6 +1145,42 @@ describe('Golem pets wire (plan 168, Phase A)', () => {
     const { avatar: _avatar, ...withoutAvatar } = persona
     expect(() =>
       validateBackendRpcParams('cohost.settings.set', { persona: withoutAvatar })
+    ).toThrow('cohost.settings.set')
+  })
+
+  it('carries motion, reaction overrides and a greeting reaction (S-A4)', () => {
+    const persona = fixtures.cohost.settingsPatch.persona!
+    expect(persona.motion).toStrictEqual({ intensity: 0.8, sleepAfterSeconds: 0, breathing: false })
+    expect(persona.reactions).toStrictEqual({
+      follow: 'wave',
+      tip: 'none',
+      'destination-failed': 'worried'
+    })
+    expect(fixtures.cohost.settingsPatch.autoChat?.greetings.templates[0]?.reaction).toBe('proud')
+    for (const motion of [
+      { intensity: 1.5, sleepAfterSeconds: 180, breathing: true },
+      { intensity: 0.5, sleepAfterSeconds: 10, breathing: true },
+      { intensity: 0.5, sleepAfterSeconds: 1801, breathing: true },
+      { intensity: 0.5, sleepAfterSeconds: 180 }
+    ]) {
+      expect(() =>
+        validateBackendRpcParams('cohost.settings.set', { persona: { ...persona, motion } })
+      ).toThrow('cohost.settings.set')
+    }
+    for (const reactions of [{ 'moderation-flag': 'laugh' }, { follow: 'Wave' }, { raid: '' }]) {
+      expect(() =>
+        validateBackendRpcParams('cohost.settings.set', { persona: { ...persona, reactions } })
+      ).toThrow('cohost.settings.set')
+    }
+    const autoChat = fixtures.cohost.settingsPatch.autoChat!
+    const template = autoChat.greetings.templates[0]!
+    expect(() =>
+      validateBackendRpcParams('cohost.settings.set', {
+        autoChat: {
+          ...autoChat,
+          greetings: { ...autoChat.greetings, templates: [{ ...template, reaction: null }] }
+        }
+      })
     ).toThrow('cohost.settings.set')
   })
 })

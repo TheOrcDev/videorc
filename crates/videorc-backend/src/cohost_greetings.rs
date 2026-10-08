@@ -353,6 +353,7 @@ mod tests {
             text: text.to_string(),
             state: CohostUtteranceState::Talk,
             enabled: true,
+            reaction: None,
         }
     }
 

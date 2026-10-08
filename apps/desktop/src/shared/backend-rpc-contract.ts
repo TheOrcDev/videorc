@@ -35,7 +35,9 @@ import type {
   CohostSettings,
   CohostSettingsPatch,
   GolemAvatar,
+  GolemMotionSettings,
   GolemPetSummary,
+  GolemReactionTable,
   MigrateHighlightAnchorParams,
   OverlayLayout,
   GolemOverlaySnapshot,
@@ -137,6 +139,11 @@ import { sessionChatIdentifierSchema, sessionChatTotalsSchema } from './session-
 import { LAYOUT_PRESET_VALUES } from './backend'
 import { TWITCH_GIF_MODES } from './chat-gif'
 import { isGolemPackId } from './golem-assets'
+import {
+  GOLEM_SLEEP_AFTER_MAX_SECONDS,
+  GOLEM_SLEEP_AFTER_MIN_SECONDS,
+  isGolemReactionId
+} from './golem-pet'
 import {
   arraySchema,
   boundedJsonValueSchema,
@@ -2227,6 +2234,47 @@ const golemAvatarSchema = unionSchema([
   objectSchema({ kind: literalSchema('still') }, { allowUnknown: false }),
   objectSchema({ kind: literalSchema('alive'), packId: golemPackIdSchema }, { allowUnknown: false })
 ]) as RuntimeSchema<GolemAvatar>
+// A reaction id a persona may name: 1 to 40 of [a-z0-9-] (`none` included).
+const golemReactionIdSchema = runtimeSchema<string>(
+  'a reaction id (1 to 40 lowercase letters, digits or dashes)',
+  (value, path) => {
+    if (!isGolemReactionId(value)) {
+      throw new RuntimeSchemaError(
+        path,
+        'a reaction id (1 to 40 lowercase letters, digits or dashes)'
+      )
+    }
+    return value
+  }
+)
+const golemMotionSchema = objectSchema(
+  {
+    intensity: numberSchema({ min: 0, max: 1 }),
+    sleepAfterSeconds: unionSchema([
+      literalSchema(0),
+      numberSchema({
+        integer: true,
+        min: GOLEM_SLEEP_AFTER_MIN_SECONDS,
+        max: GOLEM_SLEEP_AFTER_MAX_SECONDS
+      })
+    ]),
+    breathing: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<GolemMotionSettings>
+const golemReactionTableSchema = objectSchema(
+  {
+    follow: optionalSchema(golemReactionIdSchema),
+    subscription: optionalSchema(golemReactionIdSchema),
+    gift: optionalSchema(golemReactionIdSchema),
+    tip: optionalSchema(golemReactionIdSchema),
+    raid: optionalSchema(golemReactionIdSchema),
+    'watch-streak': optionalSchema(golemReactionIdSchema),
+    redemption: optionalSchema(golemReactionIdSchema),
+    'destination-failed': optionalSchema(golemReactionIdSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<GolemReactionTable>
 // --- end Golem pets (plan 168, Phase A) ---
 const cohostPersonaSchema = objectSchema(
   {
@@ -2244,8 +2292,11 @@ const cohostPersonaSchema = objectSchema(
       { allowUnknown: false }
     ),
     source: enumSchema(['default', 'uploaded', 'generated']),
-    // Plan 168 D2: the backend always sends it; a patch carries the whole persona.
-    avatar: golemAvatarSchema
+    // Plan 168 D2, D10, D14: the backend always sends these; a patch
+    // carries the whole persona.
+    avatar: golemAvatarSchema,
+    motion: golemMotionSchema,
+    reactions: golemReactionTableSchema
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostPersona>
@@ -2271,7 +2322,9 @@ const cohostGreetingTemplateSchema = objectSchema(
     platform: optionalSchema(enumSchema(['twitch', 'youtube', 'kick', 'x'])),
     text: stringSchema({ minLength: 1, maxLength: 200 }),
     state: enumSchema(['talk', 'laugh', 'think']),
-    enabled: booleanSchema
+    enabled: booleanSchema,
+    // Plan 168 D14: absent, never null.
+    reaction: optionalSchema(golemReactionIdSchema)
   },
   { allowUnknown: false }
 )

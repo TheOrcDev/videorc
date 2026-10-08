@@ -435,3 +435,74 @@ export interface GolemPetImportResult {
   pack: GolemPetSummary
   skippedFiles: string[]
 }
+
+// --- Persona motion and reactions (plan 168 S-A4, D10, D13, D14, D15) --------
+
+/** What an event makes the Golem react to (D14). Moderation flags never are. */
+export type GolemTrigger =
+  | 'follow'
+  | 'subscription'
+  | 'gift'
+  | 'tip'
+  | 'raid'
+  | 'watch-streak'
+  | 'redemption'
+  | 'destination-failed'
+
+export const GOLEM_TRIGGERS: readonly GolemTrigger[] = [
+  'follow',
+  'subscription',
+  'gift',
+  'tip',
+  'raid',
+  'watch-streak',
+  'redemption',
+  'destination-failed'
+]
+
+/** D14's default reaction per trigger, as a fallback chain: the first id the
+ * pack has wins, then a motion-only hop. Empty means none. */
+export const GOLEM_TRIGGER_DEFAULT_REACTIONS: Readonly<Record<GolemTrigger, readonly string[]>> = {
+  follow: ['wave', 'proud'],
+  subscription: ['excited'],
+  gift: ['excited'],
+  tip: ['surprised'],
+  raid: ['surprised'],
+  'watch-streak': ['proud'],
+  redemption: ['wink'],
+  'destination-failed': []
+}
+
+/** A reaction override that turns a trigger's reaction off. */
+export const GOLEM_REACTION_NONE = 'none'
+/** The still pack's reaction ids: the persona's state images (D2). */
+export const GOLEM_STILL_REACTION_IDS = ['talk', 'laugh', 'think'] as const
+
+const GOLEM_REACTION_ID = /^[a-z0-9-]{1,40}$/
+
+/** A reaction id a persona may name (a reaction override, a greeting's
+ * `reaction`): 1 to 40 characters of `[a-z0-9-]`, `none` included. */
+export function isGolemReactionId(value: unknown): value is string {
+  return typeof value === 'string' && GOLEM_REACTION_ID.test(value)
+}
+
+/** How the Golem moves on air (D10, D13, D15), per persona. */
+export interface GolemMotionSettings {
+  /** 0 to 1; multiplies every transform; 0 keeps frame changes only. */
+  intensity: number
+  /** 0 = never, else 30 to 1800. */
+  sleepAfterSeconds: number
+  breathing: boolean
+}
+
+export const GOLEM_SLEEP_AFTER_MIN_SECONDS = 30
+export const GOLEM_SLEEP_AFTER_MAX_SECONDS = 1800
+/** Owner defaults (plan 168 open questions 2 and 3). */
+export const GOLEM_MOTION_DEFAULTS: Readonly<GolemMotionSettings> = {
+  intensity: 0.45,
+  sleepAfterSeconds: 180,
+  breathing: true
+}
+
+/** Per-trigger reaction overrides (D14): a reaction id or `none`. */
+export type GolemReactionTable = Partial<Record<GolemTrigger, string>>

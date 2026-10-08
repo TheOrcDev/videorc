@@ -1284,6 +1284,378 @@ pub fn validate_avatar(avatar: &GolemAvatar) -> Result<(), String> {
     }
 }
 
+/// What an event makes the Golem react to (D14). Closed: an unknown
+/// trigger never deserializes. Moderation flags are never a trigger (they
+/// are private and never on air).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub enum GolemTrigger {
+    Follow,
+    /// Sub, resub, membership.
+    Subscription,
+    /// Sub gift, community gift.
+    Gift,
+    /// Cheer, bits, kicks, Super Chat, Super Sticker, Power-up.
+    Tip,
+    Raid,
+    WatchStreak,
+    Redemption,
+    DestinationFailed,
+}
+
+#[allow(dead_code)] // Phase C maps activity to triggers; Phase D lists them.
+impl GolemTrigger {
+    pub const ALL: [GolemTrigger; 8] = [
+        Self::Follow,
+        Self::Subscription,
+        Self::Gift,
+        Self::Tip,
+        Self::Raid,
+        Self::WatchStreak,
+        Self::Redemption,
+        Self::DestinationFailed,
+    ];
+
+    /// D14's default reaction, as a fallback chain: the first id the pack
+    /// has wins, then a motion-only hop. Empty means none (a failed
+    /// destination, owner default 4).
+    pub fn default_reactions(self) -> &'static [&'static str] {
+        match self {
+            Self::Follow => &["wave", "proud"],
+            Self::Subscription | Self::Gift => &["excited"],
+            Self::Tip | Self::Raid => &["surprised"],
+            Self::WatchStreak => &["proud"],
+            Self::Redemption => &["wink"],
+            Self::DestinationFailed => &[],
+        }
+    }
+}
+
+/// A reaction override that turns a trigger's reaction off.
+#[allow(dead_code)] // Phase C resolves overrides.
+pub const GOLEM_REACTION_NONE: &str = "none";
+/// A reaction id a persona may name (a reaction table entry, a greeting's
+/// `reaction`): 1 to 40 characters of `[a-z0-9-]`.
+pub const GOLEM_REACTION_ID_MAX: usize = 40;
+/// Motion defaults (D10, D13, D15; owner defaults 2 and 3).
+pub const GOLEM_MOTION_INTENSITY_DEFAULT: f64 = 0.45;
+pub const GOLEM_SLEEP_AFTER_DEFAULT_SECONDS: u32 = 180;
+pub const GOLEM_SLEEP_AFTER_MIN_SECONDS: u32 = 30;
+pub const GOLEM_SLEEP_AFTER_MAX_SECONDS: u32 = 1800;
+
+/// Whether `id` is a reaction id a persona may name.
+pub fn reaction_id_ok(id: &str) -> bool {
+    (1..=GOLEM_REACTION_ID_MAX).contains(&id.len())
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn default_motion_intensity() -> f64 {
+    GOLEM_MOTION_INTENSITY_DEFAULT
+}
+
+fn default_sleep_after_seconds() -> u32 {
+    GOLEM_SLEEP_AFTER_DEFAULT_SECONDS
+}
+
+fn default_breathing() -> bool {
+    true
+}
+
+/// How the Golem moves on air (D10, D13, D15), per persona.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GolemMotionSettings {
+    /// 0 to 1; multiplies every transform; 0 keeps frame changes only.
+    #[serde(default = "default_motion_intensity")]
+    pub intensity: f64,
+    /// 0 = never, else 30 to 1800.
+    #[serde(default = "default_sleep_after_seconds")]
+    pub sleep_after_seconds: u32,
+    #[serde(default = "default_breathing")]
+    pub breathing: bool,
+}
+
+// The persona (and the settings around it) compare with `Eq`. JSON cannot
+// carry NaN, and `validate_motion` refuses anything outside 0 to 1, so the
+// one float here is always comparable.
+impl Eq for GolemMotionSettings {}
+
+impl Default for GolemMotionSettings {
+    fn default() -> Self {
+        Self {
+            intensity: GOLEM_MOTION_INTENSITY_DEFAULT,
+            sleep_after_seconds: GOLEM_SLEEP_AFTER_DEFAULT_SECONDS,
+            breathing: true,
+        }
+    }
+}
+
+/// The motion settings as the wire may carry them.
+pub fn validate_motion(motion: &GolemMotionSettings) -> Result<(), String> {
+    if !motion.intensity.is_finite() || !(0.0..=1.0).contains(&motion.intensity) {
+        return Err("Motion is between 0 and 1.".to_string());
+    }
+    let sleep = motion.sleep_after_seconds;
+    if sleep != 0
+        && !(GOLEM_SLEEP_AFTER_MIN_SECONDS..=GOLEM_SLEEP_AFTER_MAX_SECONDS).contains(&sleep)
+    {
+        return Err(format!(
+            "Sleep after is never, or {GOLEM_SLEEP_AFTER_MIN_SECONDS} to {GOLEM_SLEEP_AFTER_MAX_SECONDS} seconds."
+        ));
+    }
+    Ok(())
+}
+
+/// The per-trigger reaction overrides (D14): each value a reaction id or
+/// `none`. Whether the pack has the id is resolved at play time (it falls
+/// back along the default chain).
+pub fn validate_reactions(reactions: &BTreeMap<GolemTrigger, String>) -> Result<(), String> {
+    if reactions.values().all(|id| reaction_id_ok(id)) {
+        Ok(())
+    } else {
+        Err(format!(
+            "A reaction is 1 to {GOLEM_REACTION_ID_MAX} lowercase letters, digits or dashes."
+        ))
+    }
+}
+
+// --- The still pack (plan 168 S-A4, D2) -----------------------------------------
+
+/// The id [`still_pack`] gives its in-memory pack.
+pub const STILL_PACK_ID: &str = "still";
+/// Its one in-memory sheet (never written).
+pub const STILL_PACK_SHEET: &str = "still.png";
+/// A stored state image is at most 8 MB (uploads 4 MB, generated PNGs 8 MB)
+/// and 20 megapixels (plan 164 D20).
+const STILL_IMAGE_MAX_BYTES: u64 = 8 * 1024 * 1024;
+const STILL_IMAGE_MAX_PIXELS: u64 = 20_000_000;
+/// The bundled default idle (plan 164 D22), the renderer's
+/// `assets/golem/default/idle.webp`: what a persona without its own idle
+/// image shows, built into the backend so the still pack never needs the
+/// renderer.
+const BUNDLED_IDLE_WEBP: &[u8] =
+    include_bytes!("../../../apps/desktop/src/renderer/src/assets/golem/default/idle.webp");
+
+/// One stored state image of the persona, decoded: a `<personaId>/<file>`
+/// under the write root, a regular file inside it, PNG, WebP or JPEG by its
+/// bytes, at most 8 MB and 20 megapixels. The reason is a plain clause.
+fn load_state_image(
+    roots: &[PathBuf],
+    persona_id: &str,
+    relative: &str,
+) -> Result<image::RgbaImage, String> {
+    let (folder, file) = relative
+        .split_once('/')
+        .ok_or("is not a managed asset path")?;
+    let file_ok = !file.is_empty()
+        && file
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        && !file.starts_with('.')
+        && [".png", ".webp", ".jpg"]
+            .iter()
+            .any(|ext| file.ends_with(ext));
+    if folder != persona_id || !file_ok {
+        return Err("is not one of this Golem's images".to_string());
+    }
+    let root = roots.first().ok_or("has no Golem storage to load from")?;
+    let dir = root.join(folder);
+    if !crate::resource_authority::canonical_path_is_within(&dir.join(file), &roots[..1]) {
+        return Err("is missing".to_string());
+    }
+    let bytes = read_pack_file(&dir, file, STILL_IMAGE_MAX_BYTES)
+        .map_err(|error| error.message)?
+        .ok_or("is missing")?;
+    let format = image::guess_format(&bytes)
+        .ok()
+        .filter(|format| {
+            matches!(
+                format,
+                image::ImageFormat::Png | image::ImageFormat::WebP | image::ImageFormat::Jpeg
+            )
+        })
+        .ok_or("is not a PNG, WebP or JPEG image")?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(GOLEM_PET_DECODED_MAX_BYTES);
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(&bytes[..]), format);
+    reader.limits(limits.clone());
+    let (width, height) = reader
+        .into_dimensions()
+        .map_err(|error| format!("could not be read ({error})"))?;
+    if u64::from(width) * u64::from(height) > STILL_IMAGE_MAX_PIXELS {
+        return Err("is over 20 megapixels".to_string());
+    }
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(&bytes[..]), format);
+    reader.limits(limits);
+    reader
+        .decode()
+        .map(|decoded| decoded.into_rgba8())
+        .map_err(|error| format!("could not be decoded ({error})"))
+}
+
+/// `image` contained in a `cell` square, centred horizontally and resting on
+/// the bottom edge (how plan 164's renderer drew the avatar), Lanczos3 when
+/// it has to scale, on a transparent background.
+fn contain_bottom(image: &image::RgbaImage, cell: u32) -> image::RgbaImage {
+    let (width, height) = image.dimensions();
+    let scale = (f64::from(cell) / f64::from(width)).min(f64::from(cell) / f64::from(height));
+    let fitted_width = ((f64::from(width) * scale).round() as u32).clamp(1, cell);
+    let fitted_height = ((f64::from(height) * scale).round() as u32).clamp(1, cell);
+    let mut out = image::RgbaImage::from_pixel(cell, cell, image::Rgba([0, 0, 0, 0]));
+    let x = i64::from((cell - fitted_width) / 2);
+    let y = i64::from(cell - fitted_height);
+    if (fitted_width, fitted_height) == (width, height) {
+        image::imageops::replace(&mut out, image, x, y);
+    } else {
+        let fitted = image::imageops::resize(
+            image,
+            fitted_width,
+            fitted_height,
+            image::imageops::FilterType::Lanczos3,
+        );
+        image::imageops::replace(&mut out, &fitted, x, y);
+    }
+    out
+}
+
+/// The still Golem as a flat pack (D2), built in memory from the persona's
+/// state images; no file is written. `idle` is the one gaze cell (`[0, 0]`,
+/// the neutral); `talk`, `laugh` and `think` are reactions, each falling
+/// back to the idle cell when the persona has no image for it (or it does
+/// not load). Without an idle image the bundled default idle shows. Cells
+/// are square at the largest image's size (128 to 1024 px), each image
+/// contained and bottom-aligned; `headTop` is measured.
+///
+/// Every fallback taken is a sentence in `notes`. Blocking (decodes and
+/// resizes): run it in `spawn_blocking`.
+#[allow(dead_code)] // Phase B renders the Still avatar through this.
+pub fn still_pack(
+    persona: &crate::cohost::CohostPersona,
+    roots: &[PathBuf],
+) -> Result<LoadedPack, PetError> {
+    use crate::cohost::CohostAvatarState;
+    let mut notes = Vec::new();
+    let mut load = |state: CohostAvatarState, path: Option<&str>| {
+        let path = path?;
+        match load_state_image(roots, &persona.id, path) {
+            Ok(image) => Some(image),
+            Err(reason) => {
+                notes.push(format!(
+                    "The {} image {reason}; the {} shows instead.",
+                    state.as_str(),
+                    if state == CohostAvatarState::Idle {
+                        "default Golem"
+                    } else {
+                        "idle image"
+                    }
+                ));
+                None
+            }
+        }
+    };
+    let images = &persona.images;
+    let idle = load(CohostAvatarState::Idle, images.idle.as_deref());
+    let others = [
+        (
+            CohostAvatarState::Talk,
+            load(CohostAvatarState::Talk, images.talk.as_deref()),
+        ),
+        (
+            CohostAvatarState::Laugh,
+            load(CohostAvatarState::Laugh, images.laugh.as_deref()),
+        ),
+        (
+            CohostAvatarState::Think,
+            load(CohostAvatarState::Think, images.think.as_deref()),
+        ),
+    ];
+    let idle = match idle {
+        Some(idle) => idle,
+        None => image::load_from_memory_with_format(BUNDLED_IDLE_WEBP, image::ImageFormat::WebP)
+            .map_err(|error| {
+                PetError::new(
+                    PetRule::SheetDecode,
+                    format!("The default Golem image could not be decoded: {error}"),
+                )
+            })?
+            .into_rgba8(),
+    };
+
+    let mut cells: Vec<(CohostAvatarState, image::RgbaImage)> =
+        vec![(CohostAvatarState::Idle, idle)];
+    cells.extend(
+        others
+            .into_iter()
+            .filter_map(|(state, image)| image.map(|image| (state, image))),
+    );
+    let cell = cells
+        .iter()
+        .map(|(_, image)| image.width().max(image.height()))
+        .max()
+        .unwrap_or(GOLEM_PET_CELL_MIN)
+        .clamp(GOLEM_PET_CELL_MIN, GOLEM_PET_CELL_MAX);
+    let mut atlas =
+        image::RgbaImage::from_pixel(cell * cells.len() as u32, cell, image::Rgba([0, 0, 0, 0]));
+    let mut rects: BTreeMap<CohostAvatarState, [u32; 4]> = BTreeMap::new();
+    for (index, (state, image)) in cells.iter().enumerate() {
+        let x = cell * index as u32;
+        image::imageops::replace(&mut atlas, &contain_bottom(image, cell), i64::from(x), 0);
+        rects.insert(*state, [x, 0, cell, cell]);
+    }
+    let idle_rect = rects[&CohostAvatarState::Idle];
+    let mut frames = vec![PetFrame {
+        id: CohostAvatarState::Idle.as_str().to_string(),
+        kind: PetFrameKind::Gaze,
+        sheet: STILL_PACK_SHEET.to_string(),
+        rect: idle_rect,
+        gaze: Some([0.0, 0.0]),
+    }];
+    for state in [
+        CohostAvatarState::Talk,
+        CohostAvatarState::Laugh,
+        CohostAvatarState::Think,
+    ] {
+        frames.push(PetFrame {
+            id: state.as_str().to_string(),
+            kind: PetFrameKind::Reaction,
+            sheet: STILL_PACK_SHEET.to_string(),
+            rect: rects.get(&state).copied().unwrap_or(idle_rect),
+            gaze: None,
+        });
+    }
+    let name = persona.name.trim();
+    let manifest = PetManifest {
+        version: 1,
+        name: if name.is_empty() {
+            crate::cohost::COHOST_DEFAULT_PERSONA_NAME.to_string()
+        } else {
+            name.to_string()
+        },
+        neutral: CohostAvatarState::Idle.as_str().to_string(),
+        pivot: None,
+        frames,
+    };
+    let sheets = BTreeMap::from([(STILL_PACK_SHEET.to_string(), atlas)]);
+    let head_top = measure_head_top(&manifest, &sheets).unwrap_or(0.0);
+    Ok(LoadedPack {
+        pack_id: STILL_PACK_ID.to_string(),
+        manifest,
+        sidecar: PetSidecar {
+            version: GOLEM_PET_SIDECAR_VERSION,
+            source: PetSource::Still,
+            head_top,
+            talk: Vec::new(),
+            created_at: None,
+            reference_sha256: None,
+        },
+        sheets,
+        notes,
+        sidecar_on_disk: false,
+    })
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1816,5 +2188,177 @@ pub(crate) mod tests {
             pack_dir(&temp_roots(), "../x", PACK_ID).unwrap_err().rule,
             PetRule::PackId
         );
+    }
+
+    // --- Still pack and persona wire (S-A4) -----------------------------------
+
+    fn still_persona(images: crate::cohost::CohostPersonaImages) -> crate::cohost::CohostPersona {
+        crate::cohost::CohostPersona {
+            id: "persona-1".to_string(),
+            images,
+            ..crate::cohost::CohostPersona::default()
+        }
+    }
+
+    /// The pack a still pack must be: a valid page-pet manifest whose rects
+    /// sit inside the one sheet.
+    fn assert_valid_still(pack: &LoadedPack) {
+        let manifest = validate_manifest(&serde_json::to_value(&pack.manifest).unwrap()).unwrap();
+        assert_eq!(manifest, pack.manifest);
+        let sizes = pack
+            .sheets
+            .iter()
+            .map(|(name, sheet)| (name.clone(), sheet.dimensions()))
+            .collect();
+        validate_sheet_sizes(&pack.manifest, &sizes).unwrap();
+    }
+
+    #[test]
+    fn golem_still_pack_of_the_default_persona_falls_back_to_the_bundled_idle() {
+        let pack = still_pack(&crate::cohost::CohostPersona::default(), &[]).unwrap();
+        assert_valid_still(&pack);
+        assert_eq!(pack.pack_id, STILL_PACK_ID);
+        assert_eq!(pack.sidecar.source, PetSource::Still);
+        assert!(pack.notes.is_empty(), "{:?}", pack.notes);
+        assert_eq!(pack.manifest.name, "Golem");
+        assert_eq!(pack.manifest.neutral, "idle");
+        // One gaze cell, three reactions, all three on the idle cell.
+        assert_eq!(pack.manifest.gaze_count(), 1);
+        assert_eq!(
+            pack.manifest.reaction_ids(),
+            STILL_REACTION_IDS.map(str::to_string).to_vec()
+        );
+        let idle = pack.manifest.neutral_frame().unwrap().clone();
+        assert_eq!(idle.gaze, Some([0.0, 0.0]));
+        for id in STILL_REACTION_IDS {
+            assert_eq!(pack.manifest.frame(id).unwrap().rect, idle.rect, "{id}");
+        }
+        // The bundled idle is 711 x 640: one 711 px cell, the image resting
+        // on its bottom edge, a measured head top below the cell's top.
+        assert_eq!(idle.rect, [0, 0, 711, 711]);
+        assert_eq!(pack.sheets[STILL_PACK_SHEET].dimensions(), (711, 711));
+        assert!(
+            pack.sidecar.head_top > 0.1 && pack.sidecar.head_top < 0.6,
+            "{}",
+            pack.sidecar.head_top
+        );
+        let sheet = &pack.sheets[STILL_PACK_SHEET];
+        assert!(
+            (0..711).all(|x| sheet.get_pixel(x, 0)[3] == 0),
+            "the band above the image is clear"
+        );
+    }
+
+    #[test]
+    fn golem_still_pack_uses_the_persona_images_and_names_each_fallback() {
+        let roots = temp_roots();
+        let folder = roots[0].join("persona-1");
+        std::fs::create_dir_all(&folder).unwrap();
+        // idle 100 x 100, talk 200 x 300 (the largest side sets the cell).
+        synthetic_sheet(100, 100, &[[0, 0, 100, 100]])
+            .save_with_format(folder.join("idle.png"), image::ImageFormat::Png)
+            .unwrap();
+        synthetic_sheet(200, 300, &[[0, 0, 200, 300]])
+            .save_with_format(folder.join("talk.webp"), image::ImageFormat::WebP)
+            .unwrap();
+        std::fs::write(folder.join("think.png"), b"not an image").unwrap();
+        let pack = still_pack(
+            &still_persona(crate::cohost::CohostPersonaImages {
+                idle: Some("persona-1/idle.png".to_string()),
+                talk: Some("persona-1/talk.webp".to_string()),
+                laugh: Some("persona-1/laugh.png".to_string()),
+                think: Some("persona-1/think.png".to_string()),
+            }),
+            &roots,
+        )
+        .unwrap();
+        assert_valid_still(&pack);
+        assert_eq!(pack.sheets[STILL_PACK_SHEET].dimensions(), (600, 300));
+        assert_eq!(pack.manifest.frame("idle").unwrap().rect, [0, 0, 300, 300]);
+        assert_eq!(
+            pack.manifest.frame("talk").unwrap().rect,
+            [300, 0, 300, 300]
+        );
+        // A missing file and an unreadable one fall back to idle, said once each.
+        assert_eq!(pack.manifest.frame("laugh").unwrap().rect, [0, 0, 300, 300]);
+        assert_eq!(pack.manifest.frame("think").unwrap().rect, [0, 0, 300, 300]);
+        assert_eq!(pack.notes.len(), 2, "{:?}", pack.notes);
+        assert!(
+            pack.notes[0].starts_with("The laugh image is missing"),
+            "{:?}",
+            pack.notes
+        );
+        assert!(
+            pack.notes[1].starts_with("The think image is not a PNG"),
+            "{:?}",
+            pack.notes
+        );
+        // The 100 px idle scaled to 300 and rests on the bottom: its head top
+        // (20 % of the drawing) is about 20 % down the cell (the Lanczos
+        // edge reaches a row above).
+        assert!(
+            (0.19..=0.2).contains(&pack.sidecar.head_top),
+            "{}",
+            pack.sidecar.head_top
+        );
+
+        // A path outside the persona's folder never loads.
+        let elsewhere = still_pack(
+            &still_persona(crate::cohost::CohostPersonaImages {
+                idle: Some("persona-2/idle.png".to_string()),
+                ..Default::default()
+            }),
+            &roots,
+        )
+        .unwrap();
+        assert_eq!(elsewhere.notes.len(), 1);
+        assert_eq!(elsewhere.manifest.neutral_frame().unwrap().rect[2], 711);
+        let _ = std::fs::remove_dir_all(roots[0].parent().unwrap());
+    }
+
+    #[test]
+    fn golem_persona_motion_and_reactions_round_trip_and_validate() {
+        let motion: GolemMotionSettings = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(motion, GolemMotionSettings::default());
+        assert_eq!(
+            serde_json::to_value(motion).unwrap(),
+            serde_json::json!({ "intensity": 0.45, "sleepAfterSeconds": 180, "breathing": true })
+        );
+        let wire =
+            serde_json::json!({ "intensity": 0.8, "sleepAfterSeconds": 0, "breathing": false });
+        let motion: GolemMotionSettings = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(motion).unwrap(), wire);
+        assert!(validate_motion(&motion).is_ok());
+        for (intensity, sleep) in [(1.2, 180), (-0.1, 180), (0.5, 29), (0.5, 1801)] {
+            let motion = GolemMotionSettings {
+                intensity,
+                sleep_after_seconds: sleep,
+                breathing: true,
+            };
+            assert!(validate_motion(&motion).is_err(), "{intensity} {sleep}");
+        }
+
+        let reactions: BTreeMap<GolemTrigger, String> = serde_json::from_value(
+            serde_json::json!({ "follow": "wave", "destination-failed": "worried", "tip": "none" }),
+        )
+        .unwrap();
+        assert!(validate_reactions(&reactions).is_ok());
+        assert!(
+            serde_json::from_value::<BTreeMap<GolemTrigger, String>>(
+                serde_json::json!({ "moderation-flag": "laugh" })
+            )
+            .is_err()
+        );
+        for bad in ["", "Wave", "wave!", &"x".repeat(41)] {
+            let table = BTreeMap::from([(GolemTrigger::Raid, bad.to_string())]);
+            assert!(validate_reactions(&table).is_err(), "{bad}");
+        }
+        assert_eq!(GolemTrigger::Follow.default_reactions(), &["wave", "proud"]);
+        assert!(
+            GolemTrigger::DestinationFailed
+                .default_reactions()
+                .is_empty()
+        );
+        assert_eq!(GolemTrigger::ALL.len(), 8);
     }
 }

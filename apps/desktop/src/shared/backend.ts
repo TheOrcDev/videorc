@@ -3,7 +3,12 @@ import type { LiveDashboardState } from './live-dashboard'
 import type { GlobalShortcutAction } from './global-shortcuts'
 import type { BackgroundImportResult } from './background-import'
 import type { TwitchGifMode } from './chat-gif'
-import type { GolemAvatar, GolemPetImportResult } from './golem-pet'
+import type {
+  GolemAvatar,
+  GolemMotionSettings,
+  GolemPetImportResult,
+  GolemReactionTable
+} from './golem-pet'
 export type { BackgroundImportResult } from './background-import'
 export type { TwitchGifMode } from './chat-gif'
 
@@ -5055,6 +5060,10 @@ export interface CohostPersona {
   source: CohostPersonaSource
   /** Still or Alive (plan 168 D2). The backend always sends it. */
   avatar: GolemAvatar
+  /** How the Golem moves on air (plan 168 D10, D13, D15). */
+  motion: GolemMotionSettings
+  /** Per-trigger reaction overrides (plan 168 D14); `{}` uses D14's defaults. */
+  reactions: GolemReactionTable
 }
 
 /** The chat posting mode (plan 164 D4). */
@@ -5104,6 +5113,9 @@ export interface CohostGreetingTemplate {
   text: string
   state: CohostUtteranceState
   enabled: boolean
+  /** Plan 168 D14: the reaction this greeting plays (a reaction id of the
+   * pack, or `none`); it wins over the trigger's. Absent, never null. */
+  reaction?: string
 }
 
 export interface CohostCooldownBehaviour {
@@ -5268,9 +5280,12 @@ export interface OverlayTargetsInfo {
 // `./golem-pet`; these are the RPC shapes.
 export type {
   GolemAvatar,
+  GolemMotionSettings,
   GolemPetImportResult,
   GolemPetSource,
-  GolemPetSummary
+  GolemPetSummary,
+  GolemReactionTable,
+  GolemTrigger
 } from './golem-pet'
 
 /** `cohost.pet.import` (main only, after it copied the folder): the folder
