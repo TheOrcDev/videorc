@@ -10,12 +10,14 @@ import {
   InputGroupInput
 } from '@/components/ui/input-group'
 import { Kbd } from '@/components/ui/kbd'
+import { Slider } from '@/components/ui/slider'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { setCohostSensitivity, useCohostSensitivity } from '@/hooks/use-cohost-sensitivity'
 import { useStudioChat, useStudioCore } from '@/hooks/use-studio'
-import type { CohostSettings, CohostSettingsPatch, CohostTone } from '@/lib/backend'
+import type { CohostAutoChat, CohostSettings, CohostSettingsPatch, CohostTone } from '@/lib/backend'
+import { GOLEM_POSTS_PROMISE } from '@/lib/golem-auto-chat-view'
 import {
   COHOST_LISTEN_CONSENT_SENTENCE,
   COHOST_SENSITIVITIES,
@@ -175,12 +177,36 @@ export function OrcleRepliesSection({
   const notesOverLimit = notesDraft.length > COHOST_NOTES_MAX_CHARS
   const notesDirty = notesDraft !== (cohostSettings.notes ?? '')
   const notesError = error
+  const autoChat = cohostSettings.autoChat
+  const saveAutoChat = (next: CohostAutoChat): void => save({ autoChat: next })
   return (
     <PanelSection
-      description="How Golem drafts the replies you approve, and the facts it answers from."
+      description="How Golem drafts the replies you approve, and the facts it answers from. Answers and Banter post as you, only in the modes you turn on in Stream Manager."
       title="Replies"
     >
       <FieldGroup variant="grouped">
+        {/* Plan 164 S-D5: the two AI behaviours and their cooldowns. Premium
+            and cloud AI, like the rest of this tab. */}
+        <CohostCooldownField
+          cooldown={autoChat.answers.cooldownSeconds}
+          description="A reply when a viewer asks the Golem by name, at most one per cooldown."
+          enabled={autoChat.answers.enabled}
+          id="cohost-answers"
+          label="Answers"
+          locked={locked}
+          max={300}
+          onChange={(answers) => saveAutoChat({ ...autoChat, answers })}
+        />
+        <CohostCooldownField
+          cooldown={autoChat.banter.cooldownSeconds}
+          description="A short remark when you have been quiet for a while, never within a minute of a greeting or an answer."
+          enabled={autoChat.banter.enabled}
+          id="cohost-banter"
+          label="Banter"
+          locked={locked}
+          max={1800}
+          onChange={(banter) => saveAutoChat({ ...autoChat, banter })}
+        />
         <Field>
           <FieldLabel htmlFor="cohost-tone">Reply tone</FieldLabel>
           <FieldDescription>How the drafted replies read before you edit them.</FieldDescription>
@@ -247,9 +273,78 @@ export function OrcleRepliesSection({
   )
 }
 
+/** One AI behaviour with its switch and cooldown slider (plan 164 S-D5). */
+function CohostCooldownField({
+  id,
+  label,
+  description,
+  enabled,
+  cooldown,
+  max,
+  locked,
+  onChange
+}: {
+  id: string
+  label: string
+  description: string
+  enabled: boolean
+  cooldown: number
+  max: number
+  locked: boolean
+  onChange: (next: { enabled: boolean; cooldownSeconds: number }) => void
+}): ReactElement {
+  const [draft, setDraft] = useState(cooldown)
+  useEffect(() => setDraft(cooldown), [cooldown])
+  return (
+    <Field data-slot={`${id}-field`}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 flex-col gap-0.5">
+          <FieldLabel htmlFor={id}>{label}</FieldLabel>
+          <FieldDescription>{description}</FieldDescription>
+        </div>
+        <Switch
+          checked={enabled}
+          disabled={locked}
+          id={id}
+          onCheckedChange={(next) => onChange({ enabled: next, cooldownSeconds: cooldown })}
+        />
+      </div>
+      <div className="flex items-center gap-3">
+        <Slider
+          aria-label={`${label} cooldown`}
+          className="max-w-56"
+          disabled={locked}
+          max={max}
+          min={5}
+          step={5}
+          value={[draft]}
+          onValueChange={([value]) => {
+            if (value !== undefined) setDraft(value)
+          }}
+          onValueCommit={([value]) => {
+            if (value !== undefined && value !== cooldown) {
+              onChange({ enabled, cooldownSeconds: value })
+            }
+          }}
+        />
+        <span className="text-xs tabular-nums text-muted-foreground">
+          {cooldownLabel(draft)} cooldown
+        </span>
+      </div>
+    </Field>
+  )
+}
+
+function cooldownLabel(seconds: number): string {
+  if (seconds < 60) return `${seconds} s`
+  const minutes = Math.floor(seconds / 60)
+  const rest = seconds % 60
+  return rest === 0 ? `${minutes} min` : `${minutes} min ${rest} s`
+}
+
 /**
  * Moderation (plan 150, Chat tab): what Golem flags for you and what it may
- * put on stream. Golem never acts on its own.
+ * put on stream. It posts only in the modes you turn on (plan 164 D4).
  */
 export function OrcleModerationSection({
   locked: lockedByTab = false
@@ -274,7 +369,7 @@ export function OrcleModerationSection({
   }
   return (
     <PanelSection
-      description="What Golem flags for you, and what it may put on stream. Golem never acts on its own."
+      description={`What Golem flags for you, and what it may put on stream. ${GOLEM_POSTS_PROMISE}`}
       title="Moderation"
     >
       <FieldGroup variant="grouped">

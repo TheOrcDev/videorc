@@ -23,22 +23,97 @@ The Golem tab names three powers:
   broke, and can put the comment you're talking about on screen.
 
 The Golem posts only in the modes you turn on. Everything is off by default
-(plan 164, D4): today it removes a comment only when you tell it to, and a
-reply goes out only when you send it. Automatic greetings and answers arrive
-with plan 164's Phase D, each behind its own switch.
+(plan 164, D4). It removes a comment only when you tell it to.
 Voice commands (highlight, clear and remove a comment by asking) are covered
 in [orcle-commands.md](orcle-commands.md).
 
+## Automatic chat (plan 164, Phase D)
+
+Everything the Golem posts goes out **as you**, on your own account, on the
+platforms you stream to (D3). The Stream Manager's Golem pane holds the one
+control: the **Chat** mode, `Off | Suggest | Auto`, and three switches under
+it.
+
+- **Off** (the default): the Golem never posts. Off also means the Golem
+  does not join the stream; the old "joins my streams" switch moved here.
+- **Suggest**: every message becomes a card in the Golem pane; one click (or
+  ↵ on the newest) sends it, ⌫ dismisses it, and a card leaves on its own
+  after 45 s.
+- **Auto**: messages go out by themselves, within the limits below. Auto
+  needs its own click after the consent dialog, every time.
+
+The first time the mode leaves Off, the consent dialog says: "The Golem
+posts to your chats as you, on the platforms you stream to, only in the
+modes you turn on. You can watch every message in Reports." Accepting lands
+in Suggest.
+
+The three behaviours:
+
+- **Greetings** (free): your own templates for follows, subs, cheers, raids,
+  streaks, Power-ups, redemptions, memberships, Super Chats and KICKs,
+  written in the Golem tab → Chat → Greetings. Fields in braces: `{name}`,
+  `{handle}`, `{platform}`, `{months}`, `{streak}`, `{count}`, `{amount}`,
+  `{reward}`, `{names}` and `{others}` (a burst). A greeting goes only to
+  the platform the event came from, never fanned out.
+- **Answers** (Premium + cloud AI): when a viewer asks the Golem by name
+  (`@<name>` or the name in the message), the drafted reply is sent, at most
+  one per cooldown (default 20 s). Questions that do not name the Golem stay
+  suggestions in the pane.
+- **Banter** (Premium + cloud AI, off by default): one short line when you
+  have been quiet for 20 s, never within a minute of a greeting or an answer,
+  at most one per cooldown (default 4 min). Only while the web speaks tick
+  contract v4.
+
+The throttle (D9), per platform: at most six automatic sends a minute and
+never two within 5 s; a cooldown per event kind (follow 10 s, subs and
+tips 5 s, raid 60 s, streak 15 s, Power-up and redemption 10 s); more than
+three same-kind events inside a cooldown collapse into one message using
+`{names}` ("Ana, Bo, Cy and 4 others"); one greeting per viewer and kind a
+session; the gifter of a community gift gets the one greeting. YouTube is
+skipped while the quota breaker is open (plan 094), and nothing is sent to
+a destination whose stream leg has failed (plan 161). Text is clipped to
+the strictest platform it reaches (X 140) with an ellipsis, and the log says
+so.
+
+Every automatic send is a `liveChat.send` with a Golem-owned `operationId`:
+its echo in chat is still yours (the ledger treats it as your account), but
+it never counts as "the streamer replied". Each send is written to the
+stream report as it lands (`posts`, Reports → "Posted as you").
+
+For developers:
+
+- Backend: `cohost_greetings.rs` (facts, templates, collapse),
+  `cohost_throttle.rs` (pure, clock-injected), `cohost_auto_chat.rs` (the
+  lane: mode, proposals, answers, banter, the Say box), and the send path in
+  `cohost.rs` (`send_automatic`, the pump that releases held greetings).
+- RPCs: `cohost.utterance.approve` / `cohost.utterance.dismiss`
+  `{sessionId, utteranceId}` and `cohost.utterance.say {sessionId, text,
+state?}` (mutations). `cohost.state` gains `utterances[]` and
+  `autoChatSends`.
+- Tick v4: the desktop sends `promptVersion: 4` with `persona {name,
+personality}` only when `/api/ai/capabilities` reports `cohost.tick: 4`;
+  otherwise v3 goes out exactly as before. v4 replies carry `addressed` and
+  `mood` per question; `intent: banter` returns `banter {text, mood}`.
+  Mood → state: amused → laugh, thinking → think, neutral → talk.
+- Stream Manager relay: `cohost-enable` carries an `autoChat` block (mode
+  and the three switches); `cohost-action` kinds `approve-utterance`,
+  `dismiss-utterance`, `say-utterance` (with `text`).
+- `pnpm smoke:live-chat-fake-providers` ends with the Golem scenario: three
+  templates in `auto` land exactly four greetings on the fake destinations
+  (one per event, 5 s apart on Twitch), the report holds the four posts, and
+  the same rows with the mode `off` send nothing.
+
 ## The one switch
 
-"Golem joins my streams" turns Golem Live on and off.
+The Stream Manager's chat mode (plan 164 S-D6) is what turns Golem Live on
+and off; the Golem tab shows the status and points there.
 
-- **On.** If Cloud AI is off, the "Turn on Golem Live?" dialog opens first,
-  and nothing is saved until you allow it. Then one settings save turns on
-  both Golem (`enabled`) and listening (`listen`), so Golem reads your chat
-  and hears you.
-- **Off.** Saves `enabled: false`. Nothing runs, and your other settings stay
-  as they are.
+- **Suggest or Auto.** One settings save turns on both Golem (`enabled`)
+  and listening (`listen`), so Golem reads your chat and hears you, and sets
+  the mode. The Stream Manager grants cloud-AI consent in the same click
+  where it is needed.
+- **Off.** Saves `enabled: false` and `mode: off`. Nothing runs, and your
+  other settings stay as they are.
 
 Golem's chat producer starts with the stream's live chat and stops with it.
 With Golem, Listen and Cloud AI consent enabled, addressed marker commands can
@@ -153,7 +228,7 @@ The persona and its images (plan 164, Phase A):
   `golem-assets:remove` deletes the folder for Start over.
 - Generation is `cohost.avatar.generate {state, prompt, style}`: accepted at
   once, the outcome arrives as `cohost.avatar.generated {requestId, state,
-  path?, opaque, error?}`. The backend posts to the web's
+path?, opaque, error?}`. The backend posts to the web's
   `/api/ai/cohost/avatar` (95 s, 8 MB) and writes the PNG into the same
   managed folder, which main hands over as `VIDEORC_MANAGED_GOLEM_ROOTS`.
   Generate is on only when `/api/ai/capabilities` reports
