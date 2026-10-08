@@ -11,10 +11,14 @@ works and how to check it.
 
 ## What you can say
 
-Say Golem's name first: "Golem, highlight the comment from coders X." Two
-phrases also work without the name, out of the box: "remove it from our chat"
-(or "delete this one") and "highlight the comment from coders X". To always
-require the name, turn on **Commands need “Golem” first**.
+Say "Golem" first, or your Golem's own name (plan 164): "Golem, highlight
+the comment from coders X", or "Grum, highlight the comment from coders X"
+when you named it Grum. Every word of the name with three letters or more
+works ("Grum the Goblin" answers to Grum and to Goblin); "golem" always works,
+so a name the speech model cannot hear is never a dead end. Two phrases also
+work without the name, out of the box: "remove it from our chat" (or "delete
+this one") and "highlight the comment from coders X". To always require the
+name, turn on **Commands need “Golem” first**.
 
 | Command   | Examples                                                                                                                                  | What happens                                                                                |
 | --------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
@@ -24,10 +28,11 @@ require the name, turn on **Commands need “Golem” first**.
 | Answer    | "Yes", "Do it", "Remove it" / "No", "Cancel", "Never mind"                                                                                | Confirms or stops a removal.                                                                |
 | Marker    | "Golem, make a marker here for Shadcn New Library", "Golem, mark this as Shadcn New Library"                                                | Saves a titled point on the active recording or livestream timeline.                        |
 
-The wake word also accepts close misses (orkle, orcel, orkel, orcl, orcal).
-"Oracle" and "orca" count only when a command verb follows within three words,
-so "Oracle database is slow" never fires. Anything else after a clear "Golem"
-shows "Golem didn't catch that: '…'" in the strip.
+The old name "Orcle" and its close misses (orkle, orcel, orkel, orcl, orcal)
+still wake the Golem for one release as hidden aliases. Real words never do:
+"Oracle database is slow" and "orca whales" are talk. Anything else after a
+clear "Golem" (or your Golem's name) shows "Golem didn't catch that: '…'" in
+the strip.
 
 Removing a message can't be undone, so an answer has to be clear. "Yes",
 "Yes, remove it", "Do it", "Go ahead" or "Golem, yes" confirms when you say it

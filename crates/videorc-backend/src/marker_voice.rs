@@ -621,4 +621,18 @@ mod tests {
         assert!(result.markers.is_empty());
         assert!(result.refusal.is_some());
     }
+
+    #[test]
+    fn the_persona_name_wakes_the_marker_grammar_too() {
+        assert!(marker_candidate("Golem make a marker here for Boss fight"));
+        assert!(!marker_candidate(
+            "Vexlar make a marker here for Boss fight"
+        ));
+        crate::cohost_command::set_persona_wake_tokens("Vexlar");
+        assert!(marker_candidate("Vexlar make a marker here for Boss fight"));
+        crate::cohost_command::set_persona_wake_tokens("Golem");
+        assert!(!marker_candidate(
+            "Vexlar make a marker here for Boss fight"
+        ));
+    }
 }

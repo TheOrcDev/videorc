@@ -5803,6 +5803,8 @@ pub struct CohostEngine {
 
 impl CohostEngine {
     pub fn new(settings: CohostSettings) -> Self {
+        // Plan 164 S-A7: the persona's name wakes the Golem from the start.
+        crate::cohost_command::set_persona_wake_tokens(&settings.persona.name);
         Self {
             settings: settings.normalized(),
             generation: 0,
@@ -6698,6 +6700,9 @@ fn clear_transcript(state: &AppState) {
 /// under the engine lock after every command change, so the mirror never
 /// trails a newer change; the caption task reads it without that lock.
 fn mirror_command_slot(state: &AppState, engine: &CohostEngine) {
+    // Plan 164 S-A7: the wake words follow the persona's name on every
+    // settings change, for the detector and the marker grammar alike.
+    crate::cohost_command::set_persona_wake_tokens(&engine.settings.persona.name);
     let (context, pending_operation) = engine.command_slot_mirror();
     if let Ok(mut commands) = state.cohost_commands.lock() {
         commands.context = context;

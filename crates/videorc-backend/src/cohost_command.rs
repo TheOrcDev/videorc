@@ -9,10 +9,10 @@
 //! command or nothing. Resolving names and acting is S3's
 //! (`cohost::dispatch_detected_command`).
 //!
-//! Grammar (plan 140 decisions 2 and 3). The wake word "Golem", and the
-//! aliases speech models produce for it, starts a command; words before it are
-//! ignored. "oracle" and "orca" count only with a command verb right behind
-//! them, so "Oracle database is slow" never fires. Two structured phrases work
+//! Grammar (plan 140 decisions 2 and 3; plan 164 D2). The wake word "golem",
+//! or a word of the persona's own name (`wake_words`), starts a command;
+//! words before it are ignored. The old "Orcle" spellings stay as hidden
+//! aliases for one release. Two structured phrases work
 //! without the wake word unless `require_wake_word` is set: a removal that
 //! points at a message ("remove it from our chat", "delete that message",
 //! "this one is toxic, remove it") and a highlight by name with a comment noun
@@ -43,17 +43,84 @@ const NAME_MAX_WORDS: usize = 4;
 const NAME_CARRY_MAX_WORDS: usize = 2;
 /// Only when that next final followed this closely.
 const NAME_CARRY_MAX_GAP: Duration = Duration::from_secs(4);
-/// "oracle" and "orca" count only with a command verb this close behind them.
-const WEAK_WAKE_VERB_WINDOW: usize = 3;
 /// The longest `heard` text handed on.
 const HEARD_MAX_CHARS: usize = 140;
 
 // --- Vocabulary -----------------------------------------------------------------
 
-/// "Golem" as speech models spell it.
-const WAKE_WORDS: &[&str] = &["orcle", "orkle", "orcel", "orkel", "orcl", "orcal"];
-/// Real words a model falls back to; they need a verb right behind them.
-const WEAK_WAKE_WORDS: &[&str] = &["oracle", "orca"];
+/// The wake word that always works (plan 164 D2), then the "Orcle" spellings
+/// speech models produce, kept as hidden aliases for one release (remove
+/// after 0.9.140). The weak "oracle"/"orca" entries are gone: a real word
+/// never wakes the Golem. The persona's own name is added per process by
+/// `set_persona_wake_tokens`.
+const WAKE_WORDS: &[&str] = &["golem", "orcle", "orkle", "orcel", "orkel", "orcl", "orcal"];
+/// The shortest name word that can wake the Golem.
+const NAME_TOKEN_MIN_LETTERS: usize = 3;
+
+/// The persona name's word tokens as the current wake words (plan 164 S-A7).
+/// The engine sets them whenever the settings change, so the detector and
+/// the marker grammar read the current name on every utterance.
+static PERSONA_WAKE_TOKENS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+/// Fold a letter to plain ASCII where a speech model would: Latin-1 accents
+/// drop their marks, everything else keeps its lowercase form.
+fn fold_ascii(ch: char) -> Option<char> {
+    let folded = match ch {
+        'à'..='å' | 'ā' | 'ă' | 'ą' => 'a',
+        'ç' | 'ć' | 'č' => 'c',
+        'è'..='ë' | 'ē' | 'ė' | 'ę' | 'ě' => 'e',
+        'ì'..='ï' | 'ī' | 'į' => 'i',
+        'ñ' | 'ń' | 'ň' => 'n',
+        'ò'..='ö' | 'ø' | 'ō' | 'ő' => 'o',
+        'ù'..='ü' | 'ū' | 'ů' | 'ű' => 'u',
+        'ý' | 'ÿ' => 'y',
+        'ß' => 's',
+        'š' | 'ś' => 's',
+        'ž' | 'ź' | 'ż' => 'z',
+        'ď' => 'd',
+        'ł' => 'l',
+        'ř' => 'r',
+        'ť' => 't',
+        other => other,
+    };
+    folded.is_ascii_alphabetic().then_some(folded)
+}
+
+/// The words of a persona name that wake the Golem (plan 164 D2): split like
+/// chat names (camelCase, separators, digits dropped), lowercased and
+/// ASCII-folded, three letters or more, and never a wake word already.
+/// "Grum the Goblin" gives `["grum", "the", "goblin"]` minus "the" (a stop
+/// word), so "Grum, highlight the last comment" and "Goblin, take it down"
+/// both work.
+pub fn wake_name_tokens(persona_name: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    for token in crate::cohost_ack::name_tokens(persona_name) {
+        let folded: String = token.chars().filter_map(fold_ascii).collect();
+        if folded.chars().count() < NAME_TOKEN_MIN_LETTERS
+            || is_stop_word(&folded)
+            || WAKE_WORDS.contains(&folded.as_str())
+            || tokens.contains(&folded)
+        {
+            continue;
+        }
+        tokens.push(folded);
+    }
+    tokens
+}
+
+/// Make the persona's name wake the Golem from now on (plan 164 S-A7).
+pub fn set_persona_wake_tokens(persona_name: &str) {
+    let tokens = wake_name_tokens(persona_name);
+    if let Ok(mut current) = PERSONA_WAKE_TOKENS.write() {
+        *current = tokens;
+    }
+}
+
+fn is_persona_wake_token(text: &str) -> bool {
+    PERSONA_WAKE_TOKENS
+        .read()
+        .is_ok_and(|tokens| tokens.iter().any(|token| token == text))
+}
 /// Words that introduce an address: "hey Golem", "okay Golem".
 const LEAD_INS: &[&str] = &[
     "hey", "ok", "okay", "hi", "yo", "so", "um", "uh", "and", "now", "alright", "oh", "right",
@@ -609,7 +676,7 @@ pub(crate) fn is_command_negation(text: &str) -> bool {
 }
 
 pub(crate) fn is_any_wake_word(text: &str) -> bool {
-    WAKE_WORDS.contains(&text) || WEAK_WAKE_WORDS.contains(&text)
+    WAKE_WORDS.contains(&text) || is_persona_wake_token(text)
 }
 
 fn verb_class(text: &str) -> Option<VerbClass> {
@@ -828,13 +895,13 @@ fn nearest_wake_before(words: &[Word], index: usize) -> Option<usize> {
         .find(|&candidate| is_any_wake_word(&words[candidate].text))
 }
 
-/// The index of the next strict wake word at or after `from`, else the end.
+/// The index of the next wake word at or after `from`, else the end.
 fn next_strict_wake(words: &[Word], from: usize) -> usize {
     words
         .iter()
         .enumerate()
         .skip(from)
-        .find(|(_, word)| WAKE_WORDS.contains(&word.text.as_str()))
+        .find(|(_, word)| is_any_wake_word(&word.text))
         .map(|(index, _)| index)
         .unwrap_or(words.len())
 }
@@ -850,22 +917,6 @@ enum WakeOutcome {
     Command(Detection),
     Unknown(Detection),
     Nothing,
-}
-
-/// "oracle"/"orca" count only with a verb within three words, and only
-/// fillers between: "the oracle said remove it" is a sentence about an oracle.
-fn weak_wake_has_verb(words: &[Word], wake: usize, span_end: usize) -> bool {
-    let limit = (wake + 1 + WEAK_WAKE_VERB_WINDOW).min(span_end);
-    for word in &words[wake + 1..limit] {
-        let text = word.text.as_str();
-        if verb_class(text).is_some() {
-            return true;
-        }
-        if !FILLERS.contains(&text) {
-            return false;
-        }
-    }
-    false
 }
 
 /// Whether the wake word at `wake` addresses Golem: at the start of an
@@ -887,13 +938,9 @@ fn addressed(words: &[Word], wake: usize) -> bool {
 }
 
 fn parse_wake(words: &[Word], wake: usize, newest: u64, ctx: &DetectContext) -> WakeOutcome {
-    let strict = WAKE_WORDS.contains(&words[wake].text.as_str());
     let from = wake + 1;
     let span_end = next_strict_wake(words, from);
     if from >= span_end {
-        return WakeOutcome::Nothing;
-    }
-    if !strict && !weak_wake_has_verb(words, wake, span_end) {
         return WakeOutcome::Nothing;
     }
     // Answers through the wake word: "Golem, yes", "Golem, cancel".
@@ -935,8 +982,7 @@ fn parse_wake(words: &[Word], wake: usize, newest: u64, ctx: &DetectContext) -> 
             })
         }
         None => {
-            if strict
-                && addressed(words, wake)
+            if addressed(words, wake)
                 && let Some(detection) = unknown_detection(words, wake, from, span_end, newest)
             {
                 WakeOutcome::Unknown(detection)
@@ -1141,7 +1187,7 @@ fn walk_after_verb(words: &[Word], verb: usize, end: usize) -> Walk<'_> {
     while index < end {
         let word = &words[index];
         let text = word.text.as_str();
-        if WAKE_WORDS.contains(&text) {
+        if is_any_wake_word(text) {
             break;
         }
         if let Some(noun) = noun_class(text) {
@@ -1529,11 +1575,8 @@ mod tests {
                 &PLAIN,
                 hit(Highlight, name("gamer 42"), true, None),
             ),
-            (
-                "Orca, show the last comment",
-                &PLAIN,
-                hit(Highlight, Last, false, None),
-            ),
+            // "orca" is a real word, not a wake word (plan 164 D2).
+            ("Orca, show the last comment", &PLAIN, None),
             // Structured highlight: a comment noun and a name, no wake word.
             (
                 "highlight the comment from coders X",
@@ -1795,8 +1838,11 @@ mod tests {
             ),
             ("the first one", &PLAIN, None),
             ("one more thing before we start", &CHOOSING, None),
-            // Talking about Golem, oracles and orcas.
+            // Talking about Golem, oracles and orcas. "oracle" and "orca" are
+            // real words, never wake words (plan 164 D2).
             ("Oracle database is slow", &PLAIN, None),
+            ("Oracle, take it down", &PLAIN, None),
+            ("Orca, take it down", &PLAIN, None),
             // "the oracle said" is a sentence about an oracle; the structured
             // phrase inside it still counts unless the wake word is required.
             (
@@ -1916,18 +1962,21 @@ mod tests {
     #[test]
     fn heard_and_wake_word_describe_what_was_said() {
         let command = detect_one("Golem, highlight the comment from coders X!", &PLAIN).unwrap();
-        assert_eq!(command.heard, "orcle highlight the comment from coders x");
+        assert_eq!(command.heard, "golem highlight the comment from coders x");
         assert!(command.wake_word);
         let command = detect_one("This one is toxic. Remove it from our chat.", &PLAIN).unwrap();
         assert_eq!(command.heard, "remove it from our chat");
         assert!(!command.wake_word);
-        let command = detect_one("Oracle, take it down", &PLAIN).unwrap();
-        assert_eq!(command.heard, "oracle take it down");
+        // Plan 164 D2: the hidden alias still works for one release; a real
+        // word ("oracle") no longer does.
+        let command = detect_one("Orcle, take it down", &PLAIN).unwrap();
+        assert_eq!(command.heard, "orcle take it down");
         assert!(command.wake_word);
+        assert!(detect_one("Oracle, take it down", &PLAIN).is_none());
         let command = detect_one("Golem, you are amazing.", &PLAIN).unwrap();
         assert_eq!(command.heard, "you are amazing");
         let command = detect_one("Golem, yes", &ANSWERING).unwrap();
-        assert_eq!(command.heard, "orcle yes");
+        assert_eq!(command.heard, "golem yes");
         assert!(command.wake_word);
         let command = detect_one("yes", &ANSWERING).unwrap();
         assert!(!command.wake_word);
@@ -1952,7 +2001,7 @@ mod tests {
             .expect("the second final completes the command");
         assert_eq!(found.kind, CommandKind::Highlight);
         assert_eq!(found.target, name("coders x"));
-        assert_eq!(found.heard, "orcle highlight the comment from coders x");
+        assert_eq!(found.heard, "golem highlight the comment from coders x");
         assert!(found.wake_word);
         // A later final with other words never re-matches it.
         assert_eq!(
@@ -2293,7 +2342,7 @@ mod tests {
         assert_eq!(
             texts,
             vec![
-                "hey", "orcle", "show", "codersx", "question", "its", "coders", "x"
+                "hey", "golem", "show", "codersx", "question", "its", "coders", "x"
             ]
         );
         assert!(words[1].pause_after && !words[1].sentence_end);
@@ -2321,5 +2370,56 @@ mod tests {
             detect_one("Golem, take it down", &PLAIN).unwrap().reason,
             None
         );
+    }
+
+    #[test]
+    fn the_wake_words_are_golem_the_persona_name_and_the_hidden_orcle_aliases() {
+        assert_eq!(
+            wake_name_tokens("Grum the Goblin"),
+            vec!["grum".to_string(), "goblin".to_string()]
+        );
+        // Lowercased, ASCII-folded, three letters or more, digits dropped,
+        // never a duplicate of a wake word.
+        assert_eq!(wake_name_tokens("Bö Golem99"), Vec::<String>::new());
+        assert_eq!(wake_name_tokens("Bö Vexlar99"), vec!["vexlar".to_string()]);
+        assert_eq!(wake_name_tokens("Zoë"), vec!["zoe".to_string()]);
+        assert_eq!(wake_name_tokens("Golem"), Vec::<String>::new());
+        assert_eq!(wake_name_tokens("Al"), Vec::<String>::new());
+        // "golem" always works; the "Orcle" spellings stay as hidden aliases
+        // for one release; the weak real words are gone.
+        assert_eq!(WAKE_WORDS[0], "golem");
+        assert!(WAKE_WORDS.contains(&"orcle"));
+        assert!(WAKE_WORDS.contains(&"orkle"));
+        assert!(!WAKE_WORDS.contains(&"oracle"));
+        assert!(!WAKE_WORDS.contains(&"orca"));
+    }
+
+    #[test]
+    fn golem_and_the_persona_name_wake_the_detector_and_oracle_does_not() {
+        let highlight =
+            |text: &str| detect_one(text, &PLAIN).map(|command| (command.kind, command.wake_word));
+        assert_eq!(
+            highlight("Golem, highlight the last comment"),
+            Some((CommandKind::Highlight, true))
+        );
+        // The hidden alias, one release more (plan 164 D2).
+        assert_eq!(
+            highlight("Orcle, highlight the last comment"),
+            Some((CommandKind::Highlight, true))
+        );
+        assert_eq!(highlight("Oracle, highlight the last comment"), None);
+        // A name the persona does not have is talk.
+        assert_eq!(highlight("Zarquon, highlight the last comment"), None);
+        set_persona_wake_tokens("Zarquon the Goblin");
+        assert_eq!(
+            highlight("Zarquon, highlight the last comment"),
+            Some((CommandKind::Highlight, true))
+        );
+        let heard = detect_one("Zarquon, take it down", &PLAIN).unwrap();
+        assert_eq!(heard.heard, "zarquon take it down");
+        assert!(heard.wake_word);
+        // A new name forgets the old one.
+        set_persona_wake_tokens("Golem");
+        assert_eq!(highlight("Zarquon, highlight the last comment"), None);
     }
 }
