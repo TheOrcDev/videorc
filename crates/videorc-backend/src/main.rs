@@ -37,6 +37,7 @@ mod ffmpeg;
 mod ffmpeg_work;
 mod fifo;
 mod frame_store;
+mod golem_overlay;
 mod h264_profile;
 mod host_pressure;
 mod kick;
@@ -5354,6 +5355,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "overlays.layout.set"
         | "overlays.layout.migrate_highlight_anchor"
         | "cohost.avatar.generate"
+        | "cohost.golem.say"
+        | "golem.overlay.set"
         | "cohost.command.choose"
         | "cohost.command.confirm"
         | "cohost.command.cancel"
@@ -5530,6 +5533,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "overlays.layout.get"
         | "cohost.status"
         | "cohost.settings.get"
+        | "cohost.golem.status"
         | "cohost.report.get"
         | "cohost.report.latest"
         | "ai.capabilities.get"
@@ -9364,6 +9368,39 @@ async fn handle_text_message_with_role(
         "cohost.settings.get" => {
             ServerResponse::ok(command.id, cohost::get_cohost_settings(state).await)
         }
+        // --- Golem overlay (plan 164 Phase C) ---
+        "cohost.golem.status" => ServerResponse::ok(command.id, golem_overlay::status(state).await),
+        "cohost.golem.say" => {
+            match serde_json::from_value::<golem_overlay::GolemSayParams>(command.params) {
+                Ok(params) => match golem_overlay::say(state, params).await {
+                    Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "golem.overlay.set" => {
+            match serde_json::from_value::<golem_overlay::SetGolemOverlayParams>(command.params) {
+                Ok(params) => {
+                    match golem_overlay::install_golem_overlay(&state.golem_overlay, params) {
+                        Ok(info) => ServerResponse::ok(command.id, info),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "golem-overlay-invalid",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // --- end Golem overlay ---
         "cohost.avatar.generate" => {
             match serde_json::from_value::<protocol::CohostAvatarGenerateParams>(command.params) {
                 Ok(params) => match cohost_avatar::generate(state.clone(), params).await {
@@ -19115,6 +19152,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                golem_overlay_on_primary: false,
+                golem_overlay_on_aux: false,
             },
         )
         .await;

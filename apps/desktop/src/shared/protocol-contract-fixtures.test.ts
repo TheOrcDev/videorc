@@ -633,6 +633,51 @@ describe('shared high-risk protocol fixture', () => {
     expect(fixtures.overlayLayout.defaults.golem.horizontal.x).toBeCloseTo(0.7975, 6)
   })
 
+  it('keeps the Golem overlay wire shapes strict (plan 164 Phase C)', () => {
+    const idle = { personaId: 'default', state: 'idle', bubble: null }
+    const talking = {
+      personaId: 'a1b2c3',
+      state: 'laugh',
+      bubble: { text: 'Welcome to the horde', until: '2026-10-08T12:00:03.000Z' }
+    }
+    for (const snapshot of [idle, talking]) {
+      expect(validateBackendRpcResult('cohost.golem.status', snapshot)).toStrictEqual(snapshot)
+      expect(validateBackendRpcResult('cohost.golem.say', snapshot)).toStrictEqual(snapshot)
+      expect(validateBackendEventPayload('cohost.golem.state', snapshot)).toStrictEqual(snapshot)
+    }
+    // The bubble is null or whole, never absent, and no field rides along.
+    expect(() =>
+      validateBackendEventPayload('cohost.golem.state', { personaId: 'x', state: 'idle' })
+    ).toThrow()
+    expect(() =>
+      validateBackendEventPayload('cohost.golem.state', { ...idle, bubble: { text: 'x' } })
+    ).toThrow()
+    expect(() => validateBackendEventPayload('cohost.golem.state', { ...idle, extra: 1 })).toThrow()
+    const say = { text: 'Hello horde', state: 'talk' }
+    expect(validateBackendRpcParams('cohost.golem.say', say)).toStrictEqual(say)
+    expect(() =>
+      validateBackendRpcParams('cohost.golem.say', { text: '', state: 'talk' })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcParams('cohost.golem.say', { text: 'x', state: 'idle' })
+    ).toThrow()
+    const set = {
+      target: 'auxiliary',
+      pngBase64: 'iVBORw0KGgo=',
+      rect: { x: 0.7975, y: 0.64, w: 0.18, h: 0.32 }
+    }
+    expect(validateBackendRpcParams('golem.overlay.set', set)).toStrictEqual(set)
+    expect(() =>
+      validateBackendRpcParams('golem.overlay.set', { ...set, rect: undefined })
+    ).toThrow()
+    const info = {
+      active: true,
+      primary: { active: true, width: 400, height: 520, revision: 3, styleRevision: 0 },
+      auxiliary: { active: false, width: 0, height: 0, revision: 0, styleRevision: 0 }
+    }
+    expect(validateBackendRpcResult('golem.overlay.set', info)).toStrictEqual(info)
+  })
+
   it('keeps Golem voice commands, their answers and settings identical across languages (plan 140 S3)', () => {
     // The Rust side round-trips the same objects in protocol.rs
     // (`shared_high_risk_contract_fixture_matches_cohost_dtos`).

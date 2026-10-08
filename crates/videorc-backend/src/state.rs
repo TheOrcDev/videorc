@@ -1147,6 +1147,11 @@ pub struct AppState {
     /// The same card rasterized for the vertical simulcast leg's portrait
     /// canvas. Installed and cleared together with `highlight_overlay`.
     pub simulcast_highlight_overlay: crate::captions::CaptionOverlaySlot,
+    /// The Golem avatar overlay (plan 164 Phase C): one raster per output
+    /// target, pushed by the renderer through `golem.overlay.set`.
+    pub golem_overlay: crate::captions::CaptionOverlaySlots,
+    /// Which avatar state shows and the bubble that is up (`cohost.golem.state`).
+    pub golem_overlay_state: crate::golem_overlay::GolemOverlayStateSlot,
     /// Backend-owned acknowledgement/lifetime for the viewer-facing comment
     /// card. The image slot above and this state are mutated under this
     /// state-machine lock so stale expiry tasks cannot clear newer cards.
@@ -1356,6 +1361,10 @@ impl AppState {
             caption_overlay: crate::captions::new_caption_overlay_slots(),
             highlight_overlay: crate::captions::new_caption_overlay_slot(),
             simulcast_highlight_overlay: crate::captions::new_caption_overlay_slot(),
+            golem_overlay: crate::captions::new_caption_overlay_slots(),
+            golem_overlay_state: crate::golem_overlay::new_golem_overlay_state_slot(
+                cohost_settings.persona.id.clone(),
+            ),
             comment_highlight: crate::comment_highlight::new_comment_highlight_slot(),
             comment_highlight_commit: Arc::new(tokio::sync::Mutex::new(())),
             cohost: crate::cohost::new_cohost_slot(cohost_settings),

@@ -5191,6 +5191,61 @@ export interface MigrateHighlightAnchorParams {
 }
 // --- end overlay layout (plan 164) ------------------------------------------
 
+// --- Golem overlay (plan 164) ---------------------------------------------
+// The Golem on stream (Phase C): the backend owns which avatar state shows
+// and the bubble that is up; the renderer rasterizes the avatar per output
+// canvas and pushes the PNG through `golem.overlay.set`.
+
+/** One output canvas of the session: the recording (or the only stream) and
+ * the split / vertical stream leg. */
+export type OverlayTarget = 'primary' | 'auxiliary'
+
+/** The bubble that is up: its text and when it ends (RFC 3339). */
+export interface GolemBubble {
+  text: string
+  until: string
+}
+
+/** `cohost.golem.state` (event) and `cohost.golem.status` (RPC): which
+ * persona's images to draw, the state to draw and the bubble, or null. */
+export interface GolemOverlaySnapshot {
+  personaId: string
+  state: CohostAvatarState
+  bubble: GolemBubble | null
+}
+
+/** `cohost.golem.say`: a manual utterance from the Stream Manager's Say box
+ * (D7). The backend trims the text and clips it to 200 characters. */
+export interface CohostGolemSayParams {
+  text: string
+  state: CohostUtteranceState
+}
+
+/** `golem.overlay.set`: the renderer's raster of the avatar (and bubble) for
+ * one output canvas, blitted inside `rect` (the Golem's placed rect for that
+ * canvas orientation). Mirrors `captions.overlay.set`. */
+export interface SetGolemOverlayParams {
+  target: OverlayTarget
+  pngBase64: string
+  rect: OverlayRect
+}
+
+export interface OverlayTargetInfo {
+  active: boolean
+  width: number
+  height: number
+  revision: number
+  styleRevision: number
+}
+
+/** What a per-target overlay slot holds after a set. */
+export interface OverlayTargetsInfo {
+  active: boolean
+  primary: OverlayTargetInfo
+  auxiliary: OverlayTargetInfo
+}
+// --- end Golem overlay (plan 164) -----------------------------------------
+
 /** Whether Golem hears the streamer right now (plan 068). */
 export type CohostListeningState = 'off' | 'starting' | 'on' | 'blocked'
 

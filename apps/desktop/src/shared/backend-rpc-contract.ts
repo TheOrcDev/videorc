@@ -29,6 +29,10 @@ import type {
   CohostSettingsPatch,
   MigrateHighlightAnchorParams,
   OverlayLayout,
+  CohostGolemSayParams,
+  GolemOverlaySnapshot,
+  OverlayTargetsInfo,
+  SetGolemOverlayParams,
   CohostStartParams,
   CohostState,
   CohostReportGetParams,
@@ -331,6 +335,11 @@ export interface BackendRpcMethodMap {
     CohostAvatarGenerateParams,
     CohostAvatarGenerateAccepted
   >
+  // --- Golem overlay (plan 164) ---
+  'cohost.golem.status': BackendRpcDefinition<undefined, GolemOverlaySnapshot>
+  'cohost.golem.say': BackendRpcDefinition<CohostGolemSayParams, GolemOverlaySnapshot>
+  'golem.overlay.set': BackendRpcDefinition<SetGolemOverlayParams, OverlayTargetsInfo>
+  // --- end Golem overlay (plan 164) ---
   'cohost.report.get': BackendRpcDefinition<CohostReportGetParams, CohostReportPayload>
   'cohost.report.latest': BackendRpcDefinition<undefined, CohostReportPayload | null>
   'liveChat.emotes.get': BackendRpcDefinition<undefined, ChatEmotesSettings>
@@ -390,6 +399,9 @@ export interface BackendEventMap {
   'overlays.layout': OverlayLayout
   // --- end overlay layout (plan 164) ---
   'cohost.avatar.generated': CohostAvatarGeneratedEvent
+  // --- Golem overlay (plan 164) ---
+  'cohost.golem.state': GolemOverlaySnapshot
+  // --- end Golem overlay (plan 164) ---
   'session.marker.voice.status': {
     sessionId: string
     listening: import('./backend').CohostListening
@@ -2964,6 +2976,50 @@ const cohostAvatarGeneratedEventSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostAvatarGeneratedEvent>
+// --- Golem overlay (plan 164) ---
+const golemBubbleSchema = objectSchema(
+  { text: stringSchema({ minLength: 1, maxLength: 200 }), until: timestamp },
+  { allowUnknown: false }
+)
+const golemOverlaySnapshotSchema = objectSchema(
+  {
+    personaId: boundedString,
+    state: cohostAvatarStateSchema,
+    bubble: nullableSchema(golemBubbleSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<GolemOverlaySnapshot>
+const cohostGolemSayParamsSchema = objectSchema(
+  {
+    text: stringSchema({ minLength: 1, maxLength: 200 }),
+    state: enumSchema(['talk', 'laugh', 'think'])
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostGolemSayParams>
+const overlayTargetInfoSchema = objectSchema(
+  {
+    active: booleanSchema,
+    width: numberSchema({ integer: true, min: 0 }),
+    height: numberSchema({ integer: true, min: 0 }),
+    revision: numberSchema({ integer: true, min: 0 }),
+    styleRevision: numberSchema({ integer: true, min: 0 })
+  },
+  { allowUnknown: false }
+)
+const overlayTargetsInfoSchema = objectSchema(
+  { active: booleanSchema, primary: overlayTargetInfoSchema, auxiliary: overlayTargetInfoSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<OverlayTargetsInfo>
+// A 4 MB PNG cap on the Rust side: base64 of that is 5.6 M characters.
+const setGolemOverlayParamsSchema = objectSchema(
+  {
+    target: enumSchema(['primary', 'auxiliary']),
+    pngBase64: stringSchema({ minLength: 4, maxLength: 5_600_000 }),
+    rect: overlayRectSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<SetGolemOverlayParams>
+// --- end Golem overlay (plan 164) ---
 
 const scheduledMutationSchema = objectSchema(
   {
@@ -3459,6 +3515,11 @@ const runtimeContracts = {
     params: cohostAvatarGenerateParamsSchema,
     result: cohostAvatarGenerateAcceptedSchema
   },
+  // --- Golem overlay (plan 164) ---
+  'cohost.golem.status': { params: undefinedSchema, result: golemOverlaySnapshotSchema },
+  'cohost.golem.say': { params: cohostGolemSayParamsSchema, result: golemOverlaySnapshotSchema },
+  'golem.overlay.set': { params: setGolemOverlayParamsSchema, result: overlayTargetsInfoSchema },
+  // --- end Golem overlay (plan 164) ---
   'liveChat.emotes.get': { params: undefinedSchema, result: chatEmotesSettingsSchema },
   'liveChat.emotes.set': {
     params: chatEmotesSettingsPatchSchema,
@@ -3552,6 +3613,9 @@ const runtimeEventSchemas = {
   'overlays.layout': overlayLayoutSchema,
   // --- end overlay layout (plan 164) ---
   'cohost.avatar.generated': cohostAvatarGeneratedEventSchema,
+  // --- Golem overlay (plan 164) ---
+  'cohost.golem.state': golemOverlaySnapshotSchema,
+  // --- end Golem overlay (plan 164) ---
   'session.marker.voice.status': objectSchema(
     { sessionId: boundedString, listening: cohostListeningSchema },
     { allowUnknown: false }

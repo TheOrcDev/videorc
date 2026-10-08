@@ -2700,6 +2700,26 @@ pub fn install_caption_overlays(
     Ok(caption_overlay_targets_info(&guard))
 }
 
+/// Decode one PNG and install it in one target (or both) with a placement and
+/// no style revision: the Golem overlay slot (plan 164 Phase C) shares the
+/// per-target slot type with captions but never carries a caption style.
+pub(crate) fn install_overlay_targets(
+    slots: &CaptionOverlaySlots,
+    png_base64: &str,
+    target: Option<CaptionOverlayTarget>,
+    placement: OverlayPlacement,
+) -> Result<CaptionOverlayTargetsInfo> {
+    let decoded = decode_caption_overlay(png_base64)?;
+    let mut guard = slots.inner.lock().expect("caption overlay slots lock");
+    if target.is_none_or(|target| target == CaptionOverlayTarget::Primary) {
+        install_decoded_caption_overlay(&mut guard.primary, &decoded, placement, None);
+    }
+    if target.is_none_or(|target| target == CaptionOverlayTarget::Auxiliary) {
+        install_decoded_caption_overlay(&mut guard.auxiliary, &decoded, placement, None);
+    }
+    Ok(caption_overlay_targets_info(&guard))
+}
+
 pub fn clear_caption_overlays(
     slots: &CaptionOverlaySlots,
     params: ClearCaptionOverlayParams,

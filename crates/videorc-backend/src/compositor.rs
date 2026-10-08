@@ -513,6 +513,8 @@ pub struct CompositorStartParams {
     /// aux when a split stream leg exists, else primary when it carries the stream.
     pub highlight_overlay_on_primary: bool,
     pub highlight_overlay_on_aux: bool,
+    pub golem_overlay_on_primary: bool,
+    pub golem_overlay_on_aux: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -547,6 +549,8 @@ pub struct CompositorLoopConfig {
     pub caption_overlay_on_aux: bool,
     pub highlight_overlay_on_primary: bool,
     pub highlight_overlay_on_aux: bool,
+    pub golem_overlay_on_primary: bool,
+    pub golem_overlay_on_aux: bool,
 }
 
 /// Capture ownership of the preview compositor run.
@@ -572,33 +576,40 @@ pub struct CompositorArmParams {
     pub caption_overlay_on_aux: bool,
     pub highlight_overlay_on_primary: bool,
     pub highlight_overlay_on_aux: bool,
+    pub golem_overlay_on_primary: bool,
+    pub golem_overlay_on_aux: bool,
 }
 
-/// Plan 164 (S-B3.4): swap the comment-highlight flags of the live run in
-/// place when `overlays.layout.set` lands mid-session. Returns false when no
-/// run is live; the next session reads the stored layout at start.
-pub async fn update_overlay_flags(
-    state: &AppState,
-    highlight_on_primary: bool,
-    highlight_on_aux: bool,
-) -> bool {
+/// The per-leg flags of the two layout-driven overlays (plan 164): the
+/// comment-highlight card and the Golem. Captions keep their start-time plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverlayLegFlags {
+    pub highlight_on_primary: bool,
+    pub highlight_on_aux: bool,
+    pub golem_on_primary: bool,
+    pub golem_on_aux: bool,
+}
+
+/// Plan 164 (S-B3.4, S-C1): swap the highlight and Golem flags of the live
+/// run in place when `overlays.layout.set` lands mid-session. Returns false
+/// when no run is live; the next session reads the stored layout at start.
+pub async fn update_overlay_flags(state: &AppState, flags: OverlayLegFlags) -> bool {
     let compositor = state.compositor.lock().await;
     let Some(config_tx) = compositor.loop_config_tx.as_ref() else {
         return false;
     };
     let current = *config_tx.borrow();
-    if current.highlight_overlay_on_primary == highlight_on_primary
-        && current.highlight_overlay_on_aux == highlight_on_aux
-    {
+    let next = CompositorLoopConfig {
+        highlight_overlay_on_primary: flags.highlight_on_primary,
+        highlight_overlay_on_aux: flags.highlight_on_aux,
+        golem_overlay_on_primary: flags.golem_on_primary,
+        golem_overlay_on_aux: flags.golem_on_aux,
+        ..current
+    };
+    if next == current {
         return true;
     }
-    config_tx
-        .send(CompositorLoopConfig {
-            highlight_overlay_on_primary: highlight_on_primary,
-            highlight_overlay_on_aux: highlight_on_aux,
-            ..current
-        })
-        .is_ok()
+    config_tx.send(next).is_ok()
 }
 
 /// Why a capture could not arm the preview compositor in place. Callers fall
@@ -2143,6 +2154,8 @@ mod editor_draft_tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                golem_overlay_on_primary: false,
+                golem_overlay_on_aux: false,
             },
         });
         assert_eq!(
@@ -2689,6 +2702,8 @@ async fn start_synthetic_compositor_with_lifecycle(
         caption_overlay_on_aux: params.caption_overlay_on_aux,
         highlight_overlay_on_primary: params.highlight_overlay_on_primary,
         highlight_overlay_on_aux: params.highlight_overlay_on_aux,
+        golem_overlay_on_primary: params.golem_overlay_on_primary,
+        golem_overlay_on_aux: params.golem_overlay_on_aux,
     });
     let stream_frame_store = params
         .stream_output
@@ -3038,6 +3053,8 @@ pub async fn arm_compositor_for_capture(
             caption_overlay_on_aux: params.caption_overlay_on_aux,
             highlight_overlay_on_primary: params.highlight_overlay_on_primary,
             highlight_overlay_on_aux: params.highlight_overlay_on_aux,
+            golem_overlay_on_primary: params.golem_overlay_on_primary,
+            golem_overlay_on_aux: params.golem_overlay_on_aux,
         };
         let config_sent = compositor
             .loop_config_tx
@@ -4963,6 +4980,8 @@ async fn run_synthetic_compositor_loop(
         mut caption_overlay_on_aux,
         mut highlight_overlay_on_primary,
         mut highlight_overlay_on_aux,
+        mut golem_overlay_on_primary,
+        mut golem_overlay_on_aux,
     } = *config_rx.borrow_and_update();
     let mut pending_loop_config: Option<CompositorLoopConfig> = None;
     let mut loop_config_closed = false;
@@ -5075,6 +5094,8 @@ async fn run_synthetic_compositor_loop(
             caption_overlay_on_aux = next.caption_overlay_on_aux;
             highlight_overlay_on_primary = next.highlight_overlay_on_primary;
             highlight_overlay_on_aux = next.highlight_overlay_on_aux;
+            golem_overlay_on_primary = next.golem_overlay_on_primary;
+            golem_overlay_on_aux = next.golem_overlay_on_aux;
             tracing::info!(
                 "compositor {run_id} loop config swapped in place: {} fps, consumer {}",
                 target_fps,
@@ -5187,6 +5208,8 @@ async fn run_synthetic_compositor_loop(
                         caption_overlay_on_aux,
                         highlight_overlay_on_primary,
                         highlight_overlay_on_aux,
+                        golem_overlay_on_primary,
+                        golem_overlay_on_aux,
                     )
                         .await;
                 // Adoption at the publish boundary uses the same recovery/
@@ -7348,6 +7371,8 @@ async fn publish_compositor_frame(
     caption_overlay_on_aux: bool,
     highlight_overlay_on_primary: bool,
     highlight_overlay_on_aux: bool,
+    _golem_overlay_on_primary: bool,
+    _golem_overlay_on_aux: bool,
 ) -> CompositorPublishResult {
     let source_fetch_started_at = Instant::now();
     let scene_snapshot_started_at = Instant::now();
@@ -10776,6 +10801,8 @@ mod tests {
             false,
             false,
             false,
+            false,
+            false,
         )
         .await;
         if result.compositor_backend != CompositorBackend::Metal {
@@ -10865,6 +10892,8 @@ mod tests {
             false,
             false,
             false,
+            false,
+            false,
         )
         .await;
         if result.compositor_backend != CompositorBackend::Metal {
@@ -10910,6 +10939,8 @@ mod tests {
             false,
             false,
             false,
+            false,
+            false,
         )
         .await;
         let store = compositor_frame_store(&state).await;
@@ -10932,6 +10963,8 @@ mod tests {
             CompositorFrameConsumer::JpegFallback,
             None,
             None,
+            false,
+            false,
             false,
             false,
             false,
@@ -11016,6 +11049,8 @@ mod tests {
             CompositorFrameConsumer::NativePreview,
             None,
             None,
+            false,
+            false,
             false,
             false,
             false,
@@ -11249,6 +11284,64 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn overlay_flags_swap_in_place_for_the_highlight_and_the_golem() {
+        let state = test_state();
+        let flags = OverlayLegFlags {
+            highlight_on_primary: true,
+            highlight_on_aux: false,
+            golem_on_primary: false,
+            golem_on_aux: true,
+        };
+        // No live run: nothing to swap; the next session reads the layout.
+        assert!(!update_overlay_flags(&state, flags).await);
+        let (loop_config_tx, mut loop_config_rx) = watch::channel(CompositorLoopConfig {
+            target_fps: 30,
+            frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+            caption_overlay_on_primary: true,
+            caption_overlay_on_aux: false,
+            highlight_overlay_on_primary: false,
+            highlight_overlay_on_aux: false,
+            golem_overlay_on_primary: false,
+            golem_overlay_on_aux: false,
+        });
+        state.compositor.lock().await.loop_config_tx = Some(loop_config_tx);
+        assert!(update_overlay_flags(&state, flags).await);
+        assert!(loop_config_rx.has_changed().unwrap());
+        let next = *loop_config_rx.borrow_and_update();
+        assert_eq!(
+            (
+                next.highlight_overlay_on_primary,
+                next.highlight_overlay_on_aux,
+                next.golem_overlay_on_primary,
+                next.golem_overlay_on_aux
+            ),
+            (true, false, false, true)
+        );
+        // Captions, fps and the consumer ride along untouched.
+        assert!(next.caption_overlay_on_primary);
+        assert_eq!(next.target_fps, 30);
+        assert_eq!(
+            next.frame_consumer,
+            CompositorFrameConsumer::VideoToolboxEncoder
+        );
+        // The same flags again: true, and nothing is sent.
+        assert!(update_overlay_flags(&state, flags).await);
+        assert!(!loop_config_rx.has_changed().unwrap());
+        // Only the Golem changes: still a swap.
+        assert!(
+            update_overlay_flags(
+                &state,
+                OverlayLegFlags {
+                    golem_on_aux: false,
+                    ..flags
+                }
+            )
+            .await
+        );
+        assert!(!loop_config_rx.borrow_and_update().golem_overlay_on_aux);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn independent_heartbeat_declares_blocked_render_before_loop_release() {
         let state = test_state();
@@ -11270,6 +11363,8 @@ mod tests {
             caption_overlay_on_aux: false,
             highlight_overlay_on_primary: false,
             highlight_overlay_on_aux: false,
+            golem_overlay_on_primary: false,
+            golem_overlay_on_aux: false,
         });
         let supervisor_state = state.clone();
         let supervisor = state.spawn_process_task(run_compositor_health_supervisor(
@@ -12102,6 +12197,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                golem_overlay_on_primary: false,
+                golem_overlay_on_aux: false,
             },
         )
         .await;
@@ -12157,6 +12254,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                golem_overlay_on_primary: false,
+                golem_overlay_on_aux: false,
             },
         )
         .await;
@@ -12248,6 +12347,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                golem_overlay_on_primary: false,
+                golem_overlay_on_aux: false,
             },
         )
         .await;
@@ -12460,6 +12561,8 @@ mod tests {
                 composes_simulcast_scene: false,
             }),
             Some(&mut stream_gpu),
+            false,
+            false,
             false,
             false,
             false,
@@ -13267,6 +13370,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                golem_overlay_on_primary: false,
+                golem_overlay_on_aux: false,
             },
         )
         .await;
@@ -13289,6 +13394,8 @@ mod tests {
             caption_overlay_on_aux: false,
             highlight_overlay_on_primary: false,
             highlight_overlay_on_aux: false,
+            golem_overlay_on_primary: false,
+            golem_overlay_on_aux: false,
         };
 
         let first = start_synthetic_compositor(state.clone(), params(64)).await;
@@ -13316,6 +13423,8 @@ mod tests {
             caption_overlay_on_aux: false,
             highlight_overlay_on_primary: false,
             highlight_overlay_on_aux: false,
+            golem_overlay_on_primary: false,
+            golem_overlay_on_aux: false,
         }
     }
 
@@ -13329,6 +13438,8 @@ mod tests {
             caption_overlay_on_aux: false,
             highlight_overlay_on_primary: false,
             highlight_overlay_on_aux: false,
+            golem_overlay_on_primary: false,
+            golem_overlay_on_aux: false,
         }
     }
 
@@ -13502,6 +13613,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                golem_overlay_on_primary: false,
+                golem_overlay_on_aux: false,
             },
         )
         .await;
@@ -13534,6 +13647,8 @@ mod tests {
             caption_overlay_on_aux: false,
             highlight_overlay_on_primary: false,
             highlight_overlay_on_aux: false,
+            golem_overlay_on_primary: false,
+            golem_overlay_on_aux: false,
         };
         let (left, right) = tokio::join!(
             start_synthetic_compositor(state.clone(), params(64)),
@@ -13566,6 +13681,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                golem_overlay_on_primary: false,
+                golem_overlay_on_aux: false,
             },
         )
         .await;
@@ -13600,6 +13717,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
+                golem_overlay_on_primary: false,
+                golem_overlay_on_aux: false,
             },
         )
         .await;
@@ -15654,6 +15773,8 @@ mod tests {
             false,
             false,
             false,
+            false,
+            false,
         )
         .await;
 
@@ -15755,6 +15876,8 @@ mod tests {
             CompositorFrameConsumer::RawYuvEncoder,
             None,
             None,
+            false,
+            false,
             false,
             false,
             false,
@@ -16109,6 +16232,8 @@ mod tests {
                     CompositorFrameConsumer::RawYuvEncoder,
                     None,
                     None,
+                    false,
+                    false,
                     false,
                     false,
                     false,

@@ -3667,6 +3667,9 @@ async fn start_session_with_timeline(
     // Same boundary rule for comment highlights, including backend state and
     // any old expiry task — a new session never inherits the prior card.
     let _ = crate::comment_highlight::clear_comment_highlight_for_session_start(&state).await;
+    // The Golem's bubble too (plan 164): the avatar stays (its raster is the
+    // renderer's, re-pushed for this session's canvases), the words do not.
+    let _ = crate::golem_overlay::clear(&state).await;
     // Burn-in needs the synthetic compositor (encoder-bridge path) and, for a
     // split-leg plan, an auxiliary render. Outside those shapes the captions
     // stay UI-only — say so instead of silently skipping pixels.
@@ -4181,6 +4184,8 @@ async fn start_session_with_timeline(
         && !session_caption_plan.aux
         && !highlight_overlay_plan.0
         && !highlight_overlay_plan.1
+        && !overlay_plans.golem.primary
+        && !overlay_plans.golem.aux
     {
         let camera_overlay = if matches!(params.layout.layout_preset, LayoutPreset::ScreenCamera) {
             let scene = scene_from_capture_config(SceneConfigParams {
@@ -4328,6 +4333,8 @@ async fn start_session_with_timeline(
                         caption_overlay_on_aux: session_caption_plan.aux,
                         highlight_overlay_on_primary: highlight_overlay_plan.0,
                         highlight_overlay_on_aux: highlight_overlay_plan.1,
+                        golem_overlay_on_primary: overlay_plans.golem.primary,
+                        golem_overlay_on_aux: overlay_plans.golem.aux,
                     },
                 )
                 .await
@@ -4387,6 +4394,8 @@ async fn start_session_with_timeline(
                         caption_overlay_on_aux: session_caption_plan.aux,
                         highlight_overlay_on_primary: highlight_overlay_plan.0,
                         highlight_overlay_on_aux: highlight_overlay_plan.1,
+                        golem_overlay_on_primary: overlay_plans.golem.primary,
+                        golem_overlay_on_aux: overlay_plans.golem.aux,
                     },
                 )
                 .await;
@@ -20320,8 +20329,12 @@ pub async fn apply_overlay_layout_to_active_session(
     };
     let swapped = crate::compositor::update_overlay_flags(
         state,
-        plans.highlight.primary,
-        plans.highlight.aux,
+        crate::compositor::OverlayLegFlags {
+            highlight_on_primary: plans.highlight.primary,
+            highlight_on_aux: plans.highlight.aux,
+            golem_on_primary: plans.golem.primary,
+            golem_on_aux: plans.golem.aux,
+        },
     )
     .await;
     tracing::info!(
