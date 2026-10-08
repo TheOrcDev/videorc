@@ -19030,7 +19030,143 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_v3_web_never_sends_the_persona_and_a_v4_web_does() {
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine_with(CohostAutoChatMode::Off, None, start);
+        engine.note_messages(&messages("session-1", 0..5));
+        let prepared = engine
+            .prepare_tick(generation, true, true, start + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(prepared.request.prompt_version, 3);
+        assert_eq!(prepared.request.persona, None);
+        assert_eq!(prepared.request.intent, None);
+        let body = serde_json::to_value(&prepared.request).unwrap();
+        assert!(
+            body.get("persona").is_none(),
+            "a v3 body stays byte-identical"
+        );
+        assert!(body.get("intent").is_none());
 
+        let (mut engine, generation) = running_engine_with(CohostAutoChatMode::Off, Some(4), start);
+        engine.note_messages(&messages("session-1", 0..5));
+        let prepared = engine
+            .prepare_tick(generation, true, true, start + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(prepared.request.prompt_version, 4);
+        assert_eq!(
+            prepared.request.persona,
+            Some(CohostTickPersona {
+                name: "Golem".to_string(),
+                personality: String::new(),
+            })
+        );
+        // A web that rolled back: the ladder steps to v3 and the persona leaves.
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Err(server_error(
+                400,
+                "prompt-version-unsupported",
+                "promptVersion 4 is not supported."
+            )),
+            start + Duration::from_secs(2),
+            "2026-08-22T10:00:02Z",
+        ));
+        let retried = engine
+            .prepare_tick(generation, true, true, start + Duration::from_secs(11))
+            .unwrap();
+        assert_eq!(retried.request.prompt_version, 3);
+        assert_eq!(retried.request.persona, None);
+        // A web that reports a lower tick version keeps v3 for a new session.
+        let (mut engine, generation) = running_engine_with(CohostAutoChatMode::Off, Some(3), start);
+        engine.note_messages(&messages("session-1", 0..5));
+        let prepared = engine
+            .prepare_tick(generation, true, true, start + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(prepared.request.prompt_version, 3);
+        assert_eq!(prepared.request.persona, None);
+    }
+
+    #[test]
+    fn an_addressed_question_is_answered_in_auto_proposed_in_suggest_and_ignored_off() {
+        let start = Instant::now();
+        let rows = messages("session-1", 0..5);
+        let run = |mode: CohostAutoChatMode, addressed: bool| {
+            let (mut engine, generation) = running_engine_with(mode, Some(4), start);
+            engine.note_messages(&rows);
+            let prepared = engine
+                .prepare_tick(generation, true, true, start + Duration::from_secs(1))
+                .unwrap();
+            assert_eq!(prepared.request.prompt_version, 4);
+            let mut tick_question = addressed_question(&rows[0].id);
+            tick_question.addressed = addressed;
+            assert!(engine.apply_tick_result(
+                generation,
+                0,
+                Ok(response(vec![tick_question])),
+                start + Duration::from_secs(2),
+                "2026-08-22T10:00:02Z",
+            ));
+            let pass = engine.route_answer_candidates(
+                generation,
+                start + Duration::from_secs(2),
+                "2026-08-22T10:00:02Z",
+            );
+            (engine, pass)
+        };
+        let (engine, auto) = run(CohostAutoChatMode::Auto, true);
+        assert_eq!(auto.send.len(), 1, "{auto:?}");
+        assert!(auto.propose.is_empty());
+        let answer = &auto.send[0];
+        assert_eq!(answer.text, "Keychron Q1!");
+        assert_eq!(
+            answer.state,
+            CohostUtteranceState::Laugh,
+            "amused reads as laugh"
+        );
+        assert_eq!(answer.trigger.kind, CohostUtteranceTriggerKind::Answer);
+        assert_eq!(
+            answer.trigger.message_id.as_deref(),
+            Some(rows[0].id.as_str())
+        );
+        assert_eq!(answer.destination_ids, vec!["twitch".to_string()]);
+        assert_eq!(engine.snapshot().utterances.len(), 1);
+
+        let (_, suggest) = run(CohostAutoChatMode::Suggest, true);
+        assert!(suggest.send.is_empty());
+        assert_eq!(suggest.propose.len(), 1);
+        assert_eq!(suggest.propose[0].status, CohostUtteranceStatus::Proposed);
+
+        let (engine, off) = run(CohostAutoChatMode::Off, true);
+        assert_eq!(off, AutoChatPass::default());
+        assert!(engine.snapshot().utterances.is_empty());
+
+        // An unaddressed question stays a suggestion in the pane (S-D3).
+        let (_, unaddressed) = run(CohostAutoChatMode::Auto, false);
+        assert_eq!(unaddressed, AutoChatPass::default());
+        // The same question on a later tick is not answered twice.
+        let (mut engine, generation) =
+            running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        for tick in 1..=2u64 {
+            // Fresh chat each tick, past the idle interval.
+            engine.note_messages(&messages(
+                "session-1",
+                (tick as u32 - 1) * 5..tick as u32 * 5,
+            ));
+            let at = start + Duration::from_secs(tick * 30);
+            engine.prepare_tick(generation, true, true, at).unwrap();
+            assert!(engine.apply_tick_result(
+                generation,
+                0,
+                Ok(response(vec![addressed_question(&rows[0].id)])),
+                at,
+                "2026-08-22T10:00:02Z",
+            ));
+            let pass = engine.route_answer_candidates(generation, at, "2026-08-22T10:00:02Z");
+            assert_eq!(pass.send.len(), usize::from(tick == 1));
+        }
+    }
 
 
     #[test]
