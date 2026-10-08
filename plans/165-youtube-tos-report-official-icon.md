@@ -523,6 +523,58 @@ retention, that becomes its own plan.
 | S4    | painter test with an output-pixel bound, LAN test, probe PNGs, recording gate |
 | S5    | full gates, screenshots, reply notes, green CI                                |
 
-## As built
+## As built (2026-10-08, branch `plan-165-youtube-tos`)
 
-_Not executed yet._
+**S0:** the owner's console checks are still open. They are listed in
+`docs/compliance/youtube-tos-report-v1-reply.md`.
+
+**S1:**
+
+- `assets/brand/youtube/youtube-icon-red.svg` is converted from the official
+  zip. Its hashes and the conversion command are in the folder's README.
+- The geometry and the 20 px floor live in `lib/youtube-mark.ts`, shared by
+  `YoutubeIcon` (`icons.tsx`) and the stream card.
+- `YoutubeIcon` sizes itself with inline styles, so a caller's `size-3.5` can
+  no longer shrink it.
+- Vite inlines the file as a data URI (1.3 KB).
+
+**S2:**
+
+- `PlatformGlyph` puts every platform in a 30 x 24 slot. YouTube shows its
+  official icon at 20 px; the other platforms get a 24 px tile (up from
+  20 px) with a 16 px glyph (up from 14 px).
+- `ListRow`'s icon slot now grows (`min-h-5 min-w-5`) and never clips a
+  platform mark.
+
+**S3:**
+
+- `ChatPlatformIcon` is 20 px for every platform. YouTube is untinted, with a
+  4 px trailing margin for clear space.
+- Owner feedback mid-run ("too big, make avatars bigger and the other icons
+  too"):
+  - Chat avatars went from 24 px to 32 px (compact) or 40 px (Stream
+    Manager).
+  - Activity avatars went from 28 px to 36 px.
+  - Every platform's activity mark moved inline on the name line; no platform
+    has an avatar overlay any more.
+- Badge chips (`comments-destination-status.tsx`) drop the YouTube mark and
+  keep the word "YouTube", because a Badge forces 12 px.
+
+**S4:**
+
+- The highlight card draws the official file at 20 px or more (output
+  pixels) between the avatar and the name, and the name loses its
+  "YouTube ·" prefix.
+- If the file fails to load, the card falls back to the words, never to a
+  redrawn mark.
+- The phone remote serves the same file at `/youtube-icon.svg`
+  (`include_str!` of the one copy) and shows it at 20 px in place of the
+  letter tile.
+
+**S5:**
+
+- Before and after screenshots are in
+  `docs/acceptance/2026-10-08-youtube-branding/`.
+- The reply notes are in `docs/compliance/youtube-tos-report-v1-reply.md`.
+- The Studio chat rail no longer exists, and the Orcle tab shows no platform
+  marks, so neither was captured.
