@@ -1,5 +1,11 @@
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
-import { importGolemImage, readGolemImage, removeGolemPersona } from './golem-assets'
+import {
+  importGolemImage,
+  readGolemImage,
+  readGolemPetFile,
+  removeGolemPersona,
+  type GolemPetRoots
+} from './golem-assets'
 import { globalShortcutEntries, isGlobalShortcutAction } from '../shared/global-shortcuts'
 import { normalizeAccelerator } from '../shared/accelerator'
 import { openableChatLink } from '../shared/chat-link'
@@ -8949,8 +8955,10 @@ function startBackendWithRegistryLock(): void {
       VIDEORC_MANAGED_BACKGROUND_ROOTS: managedBackgroundRoots().join(delimiter),
       VIDEORC_MANAGED_THUMBNAIL_ROOT: join(app.getPath('userData'), 'scheduled-thumbnails'),
       // The Golem's avatar images (plan 164 S-A3): uploads land here through
-      // main, generated images through the backend (S-A6).
-      VIDEORC_MANAGED_GOLEM_ROOTS: managedGolemRoot(),
+      // main, generated images through the backend (S-A6). The first root is
+      // the write root; the second is the read-only bundled pet root (plan
+      // 168 D3).
+      VIDEORC_MANAGED_GOLEM_ROOTS: managedGolemRoots().join(delimiter),
       // Debug smoke/test RPCs are a second, explicit capability boundary in
       // addition to the admin backend credential. Release builds compile the
       // handlers out regardless of this value.
@@ -13460,6 +13468,24 @@ function managedGolemRoot(): string {
   return join(app.getPath('userData'), 'golem-assets')
 }
 
+// Plan 168 D3: shipped pet packs (`bundled:<name>`) live in a read-only second
+// golem root, `golem-assets/bundled` in the packaged app (electron-builder.yml)
+// and the source tree in dev, the backgrounds precedent.
+function bundledGolemDirectory(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, 'golem-assets', 'bundled')
+    : resolve(workspaceRoot(), 'apps/desktop/resources/golem')
+}
+
+/** Write root first (uploads, generation, imported packs), bundled root second. */
+function managedGolemRoots(): string[] {
+  return [managedGolemRoot(), bundledGolemDirectory()]
+}
+
+function golemPetRoots(): GolemPetRoots {
+  return { write: managedGolemRoot(), bundled: bundledGolemDirectory() }
+}
+
 function resolveManagedGolemFile(relativePath: string): string | null {
   const parsed = parseGolemAssetPath(relativePath)
   if (!parsed) return null
@@ -14248,6 +14274,11 @@ app.whenReady().then(async () => {
   // The overlay raster decodes the persona's own files from bytes (S-C2).
   secureIpcHandle('golem-assets:read-image', (_event, relativePath: unknown) =>
     readGolemImage(managedGolemRoot(), relativePath)
+  )
+  // Plan 168: one pet pack file for the in-app preview (Phase D), from the
+  // persona's packs or the bundled root; null for anything else.
+  secureIpcHandle('golem-pets:read', (_event, personaId: unknown, packId: unknown, file: unknown) =>
+    readGolemPetFile(golemPetRoots(), personaId, packId, file)
   )
   secureIpcHandle('backgrounds:bundled-assets', () => bundledBackgroundAssets())
   secureIpcHandle('backgrounds:asset-exists', (_event, assetId: unknown) =>

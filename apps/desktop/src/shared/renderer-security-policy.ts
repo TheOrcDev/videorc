@@ -49,6 +49,9 @@ export const IPC_INVOKE_ROLES = {
   'golem-assets:remove': MAIN_ONLY,
   // The overlay raster decodes the persona's own files from bytes (S-C2).
   'golem-assets:read-image': MAIN_ONLY,
+  // Plan 168: pet pack files for the living preview in the Golem tab and the
+  // Stream Manager's Golem pane (Phase D); read-only, managed roots only.
+  'golem-pets:read': MAIN_AND_COMMENTS,
   'backgrounds:bundled-assets': MAIN_ONLY,
   'backgrounds:asset-exists': MAIN_ONLY,
   // The detached Comments window renders the same chat rows as Studio; without

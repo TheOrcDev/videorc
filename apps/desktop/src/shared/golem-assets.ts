@@ -87,3 +87,80 @@ export function parseGolemAssetPath(
     extension: match[3] as GolemImageExtension
   }
 }
+
+// --- Golem pet packs (plan 168 S-A2, D3, D4) --------------------------------
+// A pack lives at `<golemRoot>/<personaId>/pets/<packId>/` with a uuid id; the
+// read-only bundled root (second entry of `VIDEORC_MANAGED_GOLEM_ROOTS`)
+// holds `<name>/` folders addressed as `bundled:<name>`. Only the files below
+// are ever copied in or read back.
+
+export { GOLEM_PET_FILE_MAX_BYTES, GOLEM_PET_PACK_MAX_BYTES } from './golem-pet'
+/** At most this many files are copied for one pack (sources and redos included). */
+export const GOLEM_PET_MAX_FILES = 128
+/** An import reports at most this many skipped file names. */
+export const GOLEM_PET_SKIPPED_FILES_MAX = 50
+/** The prefix of a bundled pack id (`bundled:golem`, D3). */
+export const GOLEM_BUNDLED_PACK_PREFIX = 'bundled:'
+
+const GOLEM_PACK_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const GOLEM_BUNDLED_PACK_NAME = /^[a-z0-9-]{1,40}$/
+const GOLEM_PET_FIXED_FILES = new Set([
+  'manifest.json',
+  'golem.json',
+  'build-report.json',
+  'provenance.json'
+])
+const GOLEM_PET_SHEET_FILE = /^[A-Za-z0-9_-]{1,96}\.(webp|png)$/
+const GOLEM_PET_SOURCE_FILE = /^sources\/[A-Za-z0-9_-]{1,96}\.png$/
+
+/** A user pack id: a lowercase uuid (D3). */
+export function isGolemUserPackId(value: unknown): value is string {
+  return typeof value === 'string' && GOLEM_PACK_UUID.test(value)
+}
+
+/** The folder name of a bundled pack id, or null when it is not one. */
+export function golemBundledPackName(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.startsWith(GOLEM_BUNDLED_PACK_PREFIX)) return null
+  const name = value.slice(GOLEM_BUNDLED_PACK_PREFIX.length)
+  return GOLEM_BUNDLED_PACK_NAME.test(name) ? name : null
+}
+
+/** A pack id the store knows: a uuid or `bundled:<name>`. */
+export function isGolemPackId(value: unknown): value is string {
+  return isGolemUserPackId(value) || golemBundledPackName(value) !== null
+}
+
+/**
+ * Whether `file` (relative to the pack folder, `/`-separated) is one a pack
+ * may hold: `manifest.json`, `golem.json`, `build-report.json`,
+ * `provenance.json`, a `.webp` or `.png` sheet, or a `sources/<name>.png`.
+ */
+export function isGolemPetFileName(file: unknown): file is string {
+  return (
+    typeof file === 'string' &&
+    (GOLEM_PET_FIXED_FILES.has(file) ||
+      GOLEM_PET_SHEET_FILE.test(file) ||
+      GOLEM_PET_SOURCE_FILE.test(file))
+  )
+}
+
+/** `<personaId>/pets/<packId>/<file>` for a user pack. */
+export function golemPackRelativePath(personaId: string, packId: string, file: string): string {
+  return `${personaId}/pets/${packId}/${file}`
+}
+
+/**
+ * `<personaId>/pets/<packId>/<file>` taken apart, or null for anything else:
+ * a plain persona token, a uuid pack id, and an allow-listed file. No `..`,
+ * no absolute path, no other folder can pass.
+ */
+export function parseGolemPackPath(
+  relativePath: unknown
+): { personaId: string; packId: string; file: string } | null {
+  if (typeof relativePath !== 'string') return null
+  const match = /^([A-Za-z0-9_-]{1,128})\/pets\/([0-9a-f-]{36})\/(.+)$/.exec(relativePath)
+  if (!match) return null
+  const [, personaId, packId, file] = match
+  if (!isGolemUserPackId(packId) || !isGolemPetFileName(file)) return null
+  return { personaId: personaId!, packId: packId!, file: file! }
+}

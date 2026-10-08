@@ -4307,6 +4307,10 @@ export interface VideorcApi {
    * the Golem overlay raster to decode (plan 164 S-C2); null when there is
    * no such file. The renderer cannot fetch the managed scheme itself. */
   readGolemImage: (relativePath: string) => Promise<Uint8Array | null>
+  /** One file of a pet pack (plan 168): `manifest.json`, `golem.json`, a
+   * sheet, for the living preview (Phase D). `packId` is a uuid or
+   * `bundled:<name>`; null when there is no such file. */
+  readGolemPetFile: (personaId: string, packId: string, file: string) => Promise<Uint8Array | null>
   backgroundAssetExists: (assetId: string) => Promise<boolean>
   /** Fetch-and-cache a chat avatar from an allowlisted platform CDN; returns a
    * local videorc-asset:// URL or null (disallowed host / fetch failure). */

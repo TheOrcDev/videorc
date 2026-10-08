@@ -54,7 +54,7 @@ import {
   managedAvatarFileName
 } from './chat-avatar-bytes'
 import { TWITCH_GIF_MODES, twitchGifAssetUrl, type TwitchGifMode } from './chat-gif'
-import { GOLEM_IMAGE_MAX_BYTES } from './golem-assets'
+import { GOLEM_IMAGE_MAX_BYTES, GOLEM_PET_FILE_MAX_BYTES } from './golem-assets'
 import { openableChatLink } from './chat-link'
 import { SCOPE_RECONNECT_PLATFORMS } from './platform-scopes'
 import { MAX_RELAYED_MODERATION_OPERATIONS, MODERATION_PHASES } from './chat-moderation'
@@ -98,6 +98,7 @@ export const electronInvokeApiMethods = {
   'golem-assets:import-image': 'importGolemImage',
   'golem-assets:remove': 'removeGolemPersona',
   'golem-assets:read-image': 'readGolemImage',
+  'golem-pets:read': 'readGolemPetFile',
   'backgrounds:asset-exists': 'backgroundAssetExists',
   'backgrounds:bundled-assets': 'getBundledBackgroundAssets',
   'avatars:cache': 'cacheChatAvatar',
@@ -477,6 +478,25 @@ const golemImageBytesSchema = runtimeSchema<Uint8Array | null>(
       throw new RuntimeSchemaError(
         path,
         `null or image bytes of at most ${GOLEM_IMAGE_MAX_BYTES} bytes`
+      )
+    }
+    return value
+  }
+)
+/** One pet pack file as bytes (plan 168): the renderer preview decodes it.
+ * Null when the pack has no such file; never over page-pet's 32 MB cap. */
+const golemPetFileBytesSchema = runtimeSchema<Uint8Array | null>(
+  `null or pack file bytes of at most ${GOLEM_PET_FILE_MAX_BYTES} bytes`,
+  (value, path) => {
+    if (value === null) return null
+    if (
+      !(value instanceof Uint8Array) ||
+      value.byteLength === 0 ||
+      value.byteLength > GOLEM_PET_FILE_MAX_BYTES
+    ) {
+      throw new RuntimeSchemaError(
+        path,
+        `null or pack file bytes of at most ${GOLEM_PET_FILE_MAX_BYTES} bytes`
       )
     }
     return value
@@ -1383,6 +1403,16 @@ const specificRuntimeInvokeContracts = {
   'golem-assets:read-image': invokeContract(
     tupleSchema([stringSchema({ minLength: 1, maxLength: 256 })]),
     golemImageBytesSchema
+  ),
+  // Plan 168: persona id, pack id (uuid or `bundled:<name>`), and a file
+  // relative to the pack folder; main checks each against the store rules.
+  'golem-pets:read': invokeContract(
+    tupleSchema([
+      stringSchema({ minLength: 1, maxLength: 128 }),
+      stringSchema({ minLength: 1, maxLength: 64 }),
+      stringSchema({ minLength: 1, maxLength: 128 })
+    ]),
+    golemPetFileBytesSchema
   ),
   'avatars:read': invokeContract(tupleSchema([boundedIdentifier]), chatAvatarBytesSchema),
   'global-shortcuts:set': invokeContract(tupleSchema([globalShortcutsSchema])),

@@ -11,6 +11,10 @@ import {
   golemImageFormat,
   isGolemPersonaId,
   parseGolemAssetPath,
+  GOLEM_PET_FILE_MAX_BYTES,
+  golemBundledPackName,
+  isGolemPetFileName,
+  isGolemUserPackId,
   type GolemImageImportResult
 } from '../shared/golem-assets'
 
@@ -126,5 +130,74 @@ export async function listGolemPersonas(root: string): Promise<string[]> {
       .sort()
   } catch {
     return []
+  }
+}
+
+// --- Golem pet packs (plan 168 S-A2) ---------------------------------------
+
+/** The two golem roots: where packs are written, and the read-only bundled
+ * root shipped as `golem-assets/bundled` (D3). */
+export interface GolemPetRoots {
+  write: string
+  bundled: string
+}
+
+/** One file's bytes, at most `cap`: a file that grew after it was sized is
+ * refused, never truncated. */
+async function readCapped(path: string, cap: number): Promise<Buffer> {
+  const file = await open(path, 'r')
+  try {
+    const info = await file.stat()
+    if (!info.isFile() || info.size > cap) {
+      throw new Error(
+        'The pack is too large. Keep each file under 32 MB and the pack under 128 MB.'
+      )
+    }
+    const buffer = Buffer.alloc(info.size + 1)
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0)
+    if (bytesRead > info.size) {
+      throw new Error('A pack file changed while it was copied. Try again.')
+    }
+    return buffer.subarray(0, bytesRead)
+  } finally {
+    await file.close()
+  }
+}
+
+/**
+ * The bytes of one pack file for the renderer preview (plan 168 Phase D):
+ * a user pack under the write root or a bundled pack under the bundled root,
+ * an allow-listed file name, a regular file inside that root (symlinks
+ * resolved), at most 32 MB. Null, never a throw, for anything else.
+ */
+export async function readGolemPetFile(
+  roots: GolemPetRoots,
+  personaId: unknown,
+  packId: unknown,
+  file: unknown
+): Promise<Uint8Array | null> {
+  if (!isGolemPersonaId(personaId) || !isGolemPetFileName(file)) return null
+  const bundled = golemBundledPackName(packId)
+  let root: string
+  let folder: string
+  if (bundled) {
+    root = roots.bundled
+    folder = join(root, bundled)
+  } else if (isGolemUserPackId(packId)) {
+    root = roots.write
+    folder = join(root, personaId, 'pets', packId)
+  } else {
+    return null
+  }
+  try {
+    const [resolvedRoot, resolvedFile] = await Promise.all([
+      realpath(root),
+      realpath(join(folder, ...file.split('/')))
+    ])
+    if (!resolvedFile.startsWith(resolvedRoot + sep)) return null
+    const bytes = await readCapped(resolvedFile, GOLEM_PET_FILE_MAX_BYTES)
+    return bytes.length === 0 ? null : new Uint8Array(bytes)
+  } catch {
+    return null
   }
 }
