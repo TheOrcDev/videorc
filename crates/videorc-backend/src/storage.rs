@@ -10483,6 +10483,7 @@ mod tests {
             bits: 300,
             power_up: PowerUpKind::Celebration,
             emote_name: None,
+            title: None,
         });
         let mut redemption = sample_live_chat_message("session-plan-162", 2);
         redemption.event_type = LiveChatEventType::Redemption;

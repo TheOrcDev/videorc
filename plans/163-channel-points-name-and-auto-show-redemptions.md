@@ -1,4 +1,4 @@
-# Plan 163: Redemptions say the channel's own points name and auto-show
+# Plan 163: Redemptions say the channel's own points name and auto-show; Custom Power-ups keep their names
 
 > **Executor instructions**: This plan was executed in the same session that
 > wrote it (branch `plan-163-channel-points-name`). Its "Verification"
@@ -65,6 +65,16 @@ auto-show. Both change here.
 - **D4. Auto-show includes redemptions** when the Activity switch is on.
   `AUTO_SHOW_MAX_PENDING` (3) already keeps a run of them to a rolling
   sample.
+- **D5. Custom Power-ups keep their own name.** In the owner's screenshot
+  (2026-10-08), a big cat image titled "Meow, Mao" was drawn over a stream.
+  That is a Custom Power-up: Twitch launched them in May 2026
+  ([blog](https://blog.twitch.tv/en/2026/05/19/new-ways-to-turn-your-community-s-participation-into-earnings/)).
+  The streamer sets the title, icon and bits price, and viewers buy it with
+  bits. They arrive on `channel.bits.use` as `type: custom_power_up` with
+  `custom_power_up { title, reward_id }`. Plan 162 already made the row, but
+  dropped the title ("Used a Power-up · 500 bits"). The title now rides as
+  `PowerUp.title`: "Used Meow, Mao · 500 bits". EventSub sends no icon, so
+  Activity shows the viewer's avatar as for every Power-up.
 - **Not now: the points icon.** GQL returns it, but drawing it needs the
   avatar/emote image cache path. That is a cheap follow-up if wanted.
 
@@ -81,6 +91,8 @@ auto-show. Both change here.
 - `shared/backend.ts`: `pointsName?: string`. The contract fixture's
   redemption carries `"Orc Gold"`.
 - `stream-activity.ts`: `redemptionPoints` / `redemptionShort`.
+- `twitch_chat.rs` `normalize_bits_use`: keeps `custom_power_up.title`;
+  `stream-activity.ts` names a Custom Power-up by it.
 - `activity-auto-highlight.ts`: `'redemption'` joins the auto-show kinds.
   The switch's tooltip says "rewards".
 

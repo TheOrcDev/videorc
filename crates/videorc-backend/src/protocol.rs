@@ -6563,6 +6563,7 @@ mod tests {
                 bits: 50,
                 power_up: crate::live_chat::PowerUpKind::GigantifyAnEmote,
                 emote_name: Some("orcdevBONK".to_string()),
+                title: None,
             })
         );
         assert_eq!(messages[11].event_type, LiveChatEventType::Redemption);

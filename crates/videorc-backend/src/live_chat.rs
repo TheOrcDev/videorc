@@ -232,13 +232,16 @@ pub enum LiveChatEventDetails {
         channel_points_awarded: Option<u64>,
     },
     /// A Twitch Power-up paid with bits (plan 162). `emote_name` is the
-    /// gigantified emote, when there is one.
+    /// gigantified emote, when there is one; `title` is a Custom Power-up's
+    /// own name ("Meow, Mao", plan 163).
     #[serde(rename_all = "camelCase")]
     PowerUp {
         bits: u64,
         power_up: PowerUpKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         emote_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
     },
     /// A Twitch channel point redemption (plan 162). `title` is a custom
     /// reward's title; automatic rewards have none and the window names them.
@@ -3722,6 +3725,7 @@ fn fake_events(
                     bits: 300,
                     power_up: PowerUpKind::Celebration,
                     emote_name: None,
+                    title: None,
                 },
                 "party_starter used a Celebration",
                 None,

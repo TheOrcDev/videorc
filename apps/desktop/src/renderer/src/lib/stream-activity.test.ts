@@ -619,6 +619,28 @@ describe('Power-ups and channel point redemptions (plan 162)', () => {
     })
   })
 
+  it('names a Custom Power-up by its own title (plan 163)', () => {
+    const custom = (title?: string) =>
+      activityItems([
+        row(
+          'twitch',
+          'cat_fan',
+          'power-up',
+          { kind: 'power-up', bits: 500, powerUp: 'custom', ...(title ? { title } : {}) },
+          'cat_fan used Meow, Mao'
+        )
+      ])[0]
+    expect(custom('Meow, Mao')).toMatchObject({
+      filter: 'tips',
+      line: 'Used Meow, Mao · 500 bits',
+      short: 'Meow, Mao · 500 bits'
+    })
+    expect(custom()).toMatchObject({
+      line: 'Used a Power-up · 500 bits',
+      short: 'Power-up · 500 bits'
+    })
+  })
+
   it("lists a redemption under Rewards with the viewer's words", () => {
     expect(activityItems([hydrate])[0]).toMatchObject({
       kind: 'redemption',

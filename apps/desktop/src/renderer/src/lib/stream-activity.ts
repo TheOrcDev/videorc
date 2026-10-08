@@ -139,7 +139,8 @@ function powerUpName(details: PowerUpDetails): string {
     case 'message-effect':
       return 'Message effect'
     case 'custom':
-      return 'Power-up'
+      // A Custom Power-up's own name (plan 163): "Meow, Mao".
+      return details.title?.trim() || 'Power-up'
   }
 }
 
@@ -153,8 +154,10 @@ function powerUpLine(details: PowerUpDetails): string {
       return `${powerUpName(details)} · ${bits}`
     case 'message-effect':
       return `Sent a message effect · ${bits}`
-    case 'custom':
-      return `Used a Power-up · ${bits}`
+    case 'custom': {
+      const title = details.title?.trim()
+      return title ? `Used ${title} · ${bits}` : `Used a Power-up · ${bits}`
+    }
   }
 }
 

@@ -1229,6 +1229,8 @@ fn normalize_bits_use(
         }
     };
     let emote_name = non_empty(&event["power_up"]["emote"]["name"]);
+    // A Custom Power-up's own name (plan 163); Twitch sends no icon with it.
+    let title = non_empty(&event["custom_power_up"]["title"]);
     let mut message = base_message(
         format!("bits:{message_id}"),
         session_id,
@@ -1242,7 +1244,10 @@ fn normalize_bits_use(
         (PowerUpKind::GigantifyAnEmote, Some(emote)) => format!("{name} gigantified {emote}"),
         (PowerUpKind::GigantifyAnEmote, None) => format!("{name} gigantified an emote"),
         (PowerUpKind::MessageEffect, _) => format!("{name} sent a message effect"),
-        (PowerUpKind::Custom, _) => format!("{name} used a Power-up"),
+        (PowerUpKind::Custom, _) => match title.as_deref() {
+            Some(title) => format!("{name} used {title}"),
+            None => format!("{name} used a Power-up"),
+        },
     };
     message.fragments = activity_words(
         event["message"]["text"].as_str(),
@@ -1253,6 +1258,7 @@ fn normalize_bits_use(
         bits,
         power_up,
         emote_name,
+        title,
     });
     message.raw_provider_type = Some(format!("{BITS_USE_TYPE}:{use_type}"));
     Some(message)
@@ -2805,6 +2811,7 @@ mod tests {
                 bits: 300,
                 power_up: PowerUpKind::Celebration,
                 emote_name: None,
+                title: None,
             })
         );
         assert_eq!(celebration.author_name, "GVASTE");
@@ -2838,6 +2845,7 @@ mod tests {
                 bits: 50,
                 power_up: PowerUpKind::GigantifyAnEmote,
                 emote_name: Some("orcdevBONK".to_string()),
+                title: None,
             })
         );
         assert_eq!(gigantify.fragments[0].fragment_type, "emote");
@@ -2861,9 +2869,28 @@ mod tests {
             custom.details,
             Some(LiveChatEventDetails::PowerUp {
                 power_up: PowerUpKind::Custom,
+                title: None,
                 ..
             })
         ));
+        assert_eq!(custom.message_text, "GVASTE used a Power-up");
+
+        // Plan 163: a Custom Power-up keeps its own name.
+        let mut named = bits_use_event("custom_power_up", Value::Null);
+        named["custom_power_up"] = json!({ "title": "Meow, Mao", "reward_id": "reward-7" });
+        named["message"] = json!({ "text": "meow", "fragments": [] });
+        let named = normalize_test("channel.bits.use", &named).expect("named custom row");
+        assert_eq!(named.message_text, "GVASTE used Meow, Mao");
+        assert_eq!(
+            named.details,
+            Some(LiveChatEventDetails::PowerUp {
+                bits: 300,
+                power_up: PowerUpKind::Custom,
+                emote_name: None,
+                title: Some("Meow, Mao".to_string()),
+            })
+        );
+        assert_eq!(named.fragments[0].text, "meow");
 
         let mut cheer = bits_use_event("cheer", Value::Null);
         cheer["message"] = json!({ "text": "Cheer100 hi", "fragments": [] });
