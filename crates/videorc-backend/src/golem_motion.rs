@@ -117,8 +117,8 @@ pub const BREATH_FADE_SECONDS: f64 = 0.35;
 pub const GAZE_TURN_ANGLE_PER_UNIT: f64 = 9.0;
 /// D12: a pack without talk frames bobs on the neutral cell; each talk step
 /// adds this upward y velocity (180 px units per second) times the
-/// intensity. Chosen so one bob peaks near 1 px at 0.45 and a 130 ms cadence
-/// settles around 2 px; page-pet has no talk, so this number is ours.
+/// intensity. Chosen so a bob peaks near 1 px at Motion 0.45 and 180 px (a
+/// 130 ms train stays near that); page-pet has no talk, so this number is ours.
 pub const TALK_BOB_VELOCITY: f64 = -64.0;
 
 /// page-pet's `nudge()` velocity clamps.
