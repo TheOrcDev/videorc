@@ -16,7 +16,7 @@ import {
 
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 
-import { GolemPersonaSection } from './golem-persona-section'
+import { GolemPersonaSection, GolemStillLooks } from './golem-persona-section'
 
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
 vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
@@ -94,7 +94,9 @@ async function render({
   gate = premium as Record<string, unknown>,
   signedIn = true,
   consented = true,
-  capabilities = avatarOn as AiCapabilities | null
+  capabilities = avatarOn as AiCapabilities | null,
+  // Plan 168 S-D2: the four state tiles are the Avatar section's Still panel.
+  component = GolemPersonaSection as typeof GolemPersonaSection | typeof GolemStillLooks
 } = {}): Promise<void> {
   mocked.core = {
     account: signedIn ? { status: 'signed-in' } : { status: 'signed-out' },
@@ -105,7 +107,7 @@ async function render({
     patchCohostSettings,
     runtimeInfo: { platform: 'darwin' }
   }
-  await act(async () => root.render(createElement(GolemPersonaSection)))
+  await act(async () => root.render(createElement(component)))
 }
 
 function nameInput(): HTMLInputElement {
@@ -202,7 +204,7 @@ describe('GolemPersonaSection', () => {
   })
 
   it('shows four state tiles with the bundled pack and lets each upload', async () => {
-    await render()
+    await render({ component: GolemStillLooks })
     const tiles = [...document.querySelectorAll<HTMLElement>('[data-slot="golem-tile"]')]
     expect(tiles.map((tile) => tile.dataset.state)).toEqual(['idle', 'talk', 'laugh', 'think'])
     expect(document.body.textContent).toContain('Idle')
@@ -226,7 +228,7 @@ describe('GolemPersonaSection', () => {
   })
 
   it('disables Generate without cloud-AI consent and says so once under the tiles', async () => {
-    await render({ consented: false })
+    await render({ consented: false, component: GolemStillLooks })
     expect(generateButtons()).toHaveLength(4)
     expect(generateButtons().every((button) => button.disabled)).toBe(true)
     expect(
@@ -238,7 +240,7 @@ describe('GolemPersonaSection', () => {
   })
 
   it('says "Not available yet" when the web does not offer avatar generation', async () => {
-    await render({ capabilities: null })
+    await render({ capabilities: null, component: GolemStillLooks })
     expect(generateButtons().every((button) => button.disabled)).toBe(true)
     expect(document.querySelector('[data-slot="golem-generate-hint"]')?.textContent).toBe(
       GOLEM_GENERATE_NOT_AVAILABLE
@@ -246,7 +248,7 @@ describe('GolemPersonaSection', () => {
   })
 
   it('enables Generate once a prompt is typed, and counts what is left today', async () => {
-    await render()
+    await render({ component: GolemStillLooks })
     expect(generateButtons().every((button) => button.disabled)).toBe(true)
     expect(document.querySelector('[data-slot="golem-generate-hint"]')?.textContent).toBe(
       '24 generations left today'

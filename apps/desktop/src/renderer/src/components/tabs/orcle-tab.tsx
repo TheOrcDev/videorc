@@ -13,6 +13,7 @@ import {
 } from '@/components/cohost-settings-section'
 import { GolemGreetingsSection } from '@/components/golem-greetings-section'
 import { GolemPersonaSection } from '@/components/golem-persona-section'
+import { GolemPetSettings } from '@/components/golem-pet-settings'
 import { OrcleEmblem } from '@/components/orcle-emblem'
 import { OrcleReportCard } from '@/components/orcle-report-card'
 import { OrcleVoiceCommands } from '@/components/orcle-voice-commands'
@@ -186,6 +187,7 @@ export function OrcleTab({
                 switch (S-D6). */}
             <PageStack>
               <GolemPersonaSection />
+              <GolemPetSettings />
               <ConfigGrid className={CONFIG_GRID_PAIR}>
                 <OrcleLiveSection />
                 <div className="flex flex-col">

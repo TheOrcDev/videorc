@@ -61,25 +61,17 @@ import { GolemBubbleSample } from '@/components/golem-bubble-sample'
 
 /**
  * The Golem creation screen (plan 164 S-A4): name it, give it a personality
- * and its looks, pick its bubble. Everything here is free (D6) and persists
- * through `patchCohostSettings` on blur or tile change, with no success
- * toasts (the design skill): the screen is the confirmation. Only Generate
- * is Premium + consent + a web that offers the route, and when it is not,
- * the buttons are disabled with the one reason under the tiles.
+ * and pick its bubble. Everything here is free (D6) and persists through
+ * `patchCohostSettings` on blur or change, with no success toasts (the
+ * design skill): the screen is the confirmation. Its looks moved to the
+ * Avatar section (plan 168 S-D2), where the four state images are the Still
+ * panel (`GolemStillLooks`) beside the living preview.
  *
  * Stream Manager operates the Golem (plan 164, owner pick); this screen only
  * creates it.
  */
-export function GolemPersonaSection({
-  requestAvatar
-}: {
-  /** Tests inject the backend call; the app uses `useGolemAvatarRequester`. */
-  requestAvatar?: GolemAvatarRequester
-} = {}): ReactElement | null {
-  const { account, aiCapabilities, aiConsent, cohostGate, cohostSettings, patchCohostSettings } =
-    useStudioCore()
-  const connectedRequester = useGolemAvatarRequester()
-  const request = requestAvatar ?? connectedRequester ?? unavailableGolemAvatarRequester
+export function GolemPersonaSection(): ReactElement | null {
+  const { cohostSettings, patchCohostSettings } = useStudioCore()
   const persona = cohostSettings?.persona ?? null
   const [error, setError] = useState<string | null>(null)
   const save = async (next: CohostPersona): Promise<void> => {
@@ -96,45 +88,9 @@ export function GolemPersonaSection({
     void save(next).catch(() => undefined)
   }
 
-  const availability = golemGenerateAvailability({
-    signedIn: account?.status === 'signed-in',
-    gate: cohostGate,
-    consented: aiConsent,
-    capabilities: aiCapabilities
-  })
-
-  const personaRef = useRef(persona)
-  personaRef.current = persona
-  const { progress, busy, generateOne, generateAll } = useGolemAvatar({
-    request,
-    onImage: async (state, result) => {
-      const current = personaRef.current
-      if (!current) return
-      await save(withGolemImage(current, state, result.path, 'generated'))
-    }
-  })
-
-  const [prompt, setPrompt] = useState('')
-  const [style, setStyle] = useState<GolemAvatarStyle>('cartoon')
   const [startOverOpen, setStartOverOpen] = useState(false)
-  const { runtimeInfo } = useStudioCore()
-  const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
 
   if (!persona) return null
-  const canGenerate = availability.allowed && !busy
-  const promptReady = prompt.trim().length > 0
-
-  const upload = async (state: CohostAvatarState): Promise<void> => {
-    try {
-      const imported = await window.videorc.importGolemImage(persona.id, state)
-      if (!imported) return
-      await save(withGolemImage(persona, state, imported.path, 'uploaded'))
-    } catch (failure: unknown) {
-      toast.error(`Could not use that image for ${GOLEM_STATE_LABELS[state]}`, {
-        description: failure instanceof Error ? failure.message : undefined
-      })
-    }
-  }
 
   const startOver = async (): Promise<void> => {
     setStartOverOpen(false)
@@ -148,119 +104,32 @@ export function GolemPersonaSection({
     }
   }
 
-  const runGenerateAll = (): void => {
-    if (!canGenerate || !promptReady) return
-    void generateAll(persona, prompt.trim(), style)
-  }
-
   return (
     <PanelSection
       description="Name it, give it a personality and its looks. It answers to its name in chat and in voice; Stream Manager runs it while you're live."
       title="Your Golem"
     >
-      <div className="flex items-start gap-4" data-slot="golem-header">
-        <img
-          alt=""
-          aria-hidden
-          className="size-24 shrink-0 rounded-row border border-border bg-muted/30 object-contain"
-          data-slot="golem-preview"
-          decoding="async"
-          draggable={false}
-          src={golemStateImageUrl(persona, 'idle')}
-        />
-        <div className="flex min-w-0 flex-1 flex-col gap-2">
-          <GolemNameField persona={persona} onSave={saveQuietly} />
-          <div className="flex items-center gap-2">
-            <Button size="xs" type="button" variant="ghost" onClick={() => setStartOverOpen(true)}>
-              <ResetIcon data-icon="inline-start" />
-              Start over
-            </Button>
-            {error ? (
-              <span className="text-xs text-destructive" data-slot="golem-save-error">
-                {error}
-              </span>
-            ) : null}
-          </div>
-        </div>
+      <div className="flex flex-wrap items-start gap-2" data-slot="golem-header">
+        <GolemNameField persona={persona} onSave={saveQuietly} />
+        <Button
+          className="mt-0.5"
+          size="xs"
+          type="button"
+          variant="ghost"
+          onClick={() => setStartOverOpen(true)}
+        >
+          <ResetIcon data-icon="inline-start" />
+          Start over
+        </Button>
+        {error ? (
+          <span className="mt-1 text-xs text-destructive" data-slot="golem-save-error">
+            {error}
+          </span>
+        ) : null}
       </div>
 
       <FieldGroup variant="grouped">
         <GolemPersonalityField persona={persona} onSave={saveQuietly} />
-
-        <Field>
-          <FieldLabel htmlFor="golem-prompt">Looks</FieldLabel>
-          <FieldDescription>
-            Upload a PNG or WebP with transparency per state, or describe your Golem and generate
-            all four. Generation is part of Videorc Premium and uses cloud AI.
-          </FieldDescription>
-          <div className="flex flex-wrap items-center gap-2">
-            <Input
-              className="min-w-48 flex-1"
-              disabled={!availability.allowed}
-              id="golem-prompt"
-              maxLength={GOLEM_PROMPT_MAX_CHARS}
-              placeholder="Describe it: a small stone golem with glowing eyes…"
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                  event.preventDefault()
-                  runGenerateAll()
-                }
-              }}
-            />
-            <Select
-              disabled={!availability.allowed}
-              value={style}
-              onValueChange={(next) => setStyle(next as GolemAvatarStyle)}
-            >
-              <SelectTrigger aria-label="Style" className="w-28">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  {GOLEM_AVATAR_STYLES.map((preset) => (
-                    <SelectItem key={preset} value={preset}>
-                      {GOLEM_AVATAR_STYLE_LABELS[preset]}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-            <Button
-              data-testid="golem-generate-all"
-              disabled={!canGenerate || !promptReady}
-              type="button"
-              onClick={runGenerateAll}
-            >
-              <SparkleIcon data-icon="inline-start" />
-              Generate all
-              <Kbd className="ml-0.5">{modKey}↵</Kbd>
-            </Button>
-          </div>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4" data-slot="golem-tiles">
-            {COHOST_AVATAR_STATES.map((state) => (
-              <GolemStateTile
-                key={state}
-                canGenerate={canGenerate && promptReady}
-                persona={persona}
-                progress={progress[state]}
-                state={state}
-                onGenerate={() => void generateOne(persona, state, prompt.trim(), style)}
-                onUpload={() => void upload(state)}
-              />
-            ))}
-          </div>
-          {availability.reason ? (
-            <p className="text-xs text-subtle" data-slot="golem-generate-hint">
-              {availability.reason}
-            </p>
-          ) : availability.remaining !== null ? (
-            <p className="text-xs tabular-nums text-subtle" data-slot="golem-generate-hint">
-              {availability.remaining} generations left today
-            </p>
-          ) : null}
-        </Field>
 
         <Field>
           <FieldLabel htmlFor="golem-bubble-style">Bubble</FieldLabel>
@@ -296,8 +165,8 @@ export function GolemPersonaSection({
           <DialogHeader>
             <DialogTitle>Start over with a new Golem?</DialogTitle>
             <DialogDescription>
-              {persona.name}&apos;s name, personality and images are deleted from this computer.
-              Your greetings and chat settings stay.
+              {persona.name}&apos;s name, personality, images and packs are deleted from this
+              computer. Your greetings and chat settings stay.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -311,6 +180,164 @@ export function GolemPersonaSection({
         </DialogContent>
       </Dialog>
     </PanelSection>
+  )
+}
+
+/**
+ * The Still panel (plan 164 S-A4's Looks, plan 168 S-D2): the four state
+ * images, each uploaded or generated, and Generate all from one prompt.
+ * Upload is free; only Generate is Premium + consent + a web that offers the
+ * route, and when it is not, the buttons are disabled with the one reason
+ * under the tiles. Saves through `patchCohostSettings` with no success toast.
+ */
+export function GolemStillLooks({
+  requestAvatar
+}: {
+  /** Tests inject the backend call; the app uses `useGolemAvatarRequester`. */
+  requestAvatar?: GolemAvatarRequester
+} = {}): ReactElement | null {
+  const { account, aiCapabilities, aiConsent, cohostGate, cohostSettings, patchCohostSettings } =
+    useStudioCore()
+  const connectedRequester = useGolemAvatarRequester()
+  const request = requestAvatar ?? connectedRequester ?? unavailableGolemAvatarRequester
+  const persona = cohostSettings?.persona ?? null
+  const [error, setError] = useState<string | null>(null)
+  const save = async (next: CohostPersona): Promise<void> => {
+    setError(null)
+    try {
+      await patchCohostSettings({ persona: next })
+    } catch (failure: unknown) {
+      setError(failure instanceof Error ? failure.message : 'Could not save your Golem.')
+      throw failure
+    }
+  }
+
+  const availability = golemGenerateAvailability({
+    signedIn: account?.status === 'signed-in',
+    gate: cohostGate,
+    consented: aiConsent,
+    capabilities: aiCapabilities
+  })
+
+  const personaRef = useRef(persona)
+  personaRef.current = persona
+  const { progress, busy, generateOne, generateAll } = useGolemAvatar({
+    request,
+    onImage: async (state, result) => {
+      const current = personaRef.current
+      if (!current) return
+      await save(withGolemImage(current, state, result.path, 'generated'))
+    }
+  })
+
+  const [prompt, setPrompt] = useState('')
+  const [style, setStyle] = useState<GolemAvatarStyle>('cartoon')
+  const { runtimeInfo } = useStudioCore()
+  const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
+
+  if (!persona) return null
+  const canGenerate = availability.allowed && !busy
+  const promptReady = prompt.trim().length > 0
+
+  const upload = async (state: CohostAvatarState): Promise<void> => {
+    try {
+      const imported = await window.videorc.importGolemImage(persona.id, state)
+      if (!imported) return
+      await save(withGolemImage(persona, state, imported.path, 'uploaded'))
+    } catch (failure: unknown) {
+      toast.error(`Could not use that image for ${GOLEM_STATE_LABELS[state]}`, {
+        description: failure instanceof Error ? failure.message : undefined
+      })
+    }
+  }
+
+  const runGenerateAll = (): void => {
+    if (!canGenerate || !promptReady) return
+    void generateAll(persona, prompt.trim(), style)
+  }
+
+  return (
+    <FieldGroup variant="grouped">
+      <Field>
+        <FieldLabel htmlFor="golem-prompt">State images</FieldLabel>
+        <FieldDescription>
+          Upload a PNG or WebP with transparency per state, or describe your Golem and generate all
+          four. Generation is part of Videorc Premium and uses cloud AI.
+        </FieldDescription>
+        <div className="flex flex-wrap items-center gap-2">
+          <Input
+            className="min-w-48 flex-1"
+            disabled={!availability.allowed}
+            id="golem-prompt"
+            maxLength={GOLEM_PROMPT_MAX_CHARS}
+            placeholder="Describe it: a small stone golem with glowing eyes…"
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault()
+                runGenerateAll()
+              }
+            }}
+          />
+          <Select
+            disabled={!availability.allowed}
+            value={style}
+            onValueChange={(next) => setStyle(next as GolemAvatarStyle)}
+          >
+            <SelectTrigger aria-label="Style" className="w-28">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {GOLEM_AVATAR_STYLES.map((preset) => (
+                  <SelectItem key={preset} value={preset}>
+                    {GOLEM_AVATAR_STYLE_LABELS[preset]}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+          <Button
+            data-testid="golem-generate-all"
+            disabled={!canGenerate || !promptReady}
+            type="button"
+            onClick={runGenerateAll}
+          >
+            <SparkleIcon data-icon="inline-start" />
+            Generate all
+            <Kbd className="ml-0.5">{modKey}↵</Kbd>
+          </Button>
+        </div>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4" data-slot="golem-tiles">
+          {COHOST_AVATAR_STATES.map((state) => (
+            <GolemStateTile
+              key={state}
+              canGenerate={canGenerate && promptReady}
+              persona={persona}
+              progress={progress[state]}
+              state={state}
+              onGenerate={() => void generateOne(persona, state, prompt.trim(), style)}
+              onUpload={() => void upload(state)}
+            />
+          ))}
+        </div>
+        {availability.reason ? (
+          <p className="text-xs text-subtle" data-slot="golem-generate-hint">
+            {availability.reason}
+          </p>
+        ) : availability.remaining !== null ? (
+          <p className="text-xs tabular-nums text-subtle" data-slot="golem-generate-hint">
+            {availability.remaining} generations left today
+          </p>
+        ) : null}
+        {error ? (
+          <p className="text-xs text-destructive" data-slot="golem-save-error">
+            {error}
+          </p>
+        ) : null}
+      </Field>
+    </FieldGroup>
   )
 }
 
@@ -344,11 +371,11 @@ function GolemNameField({
     onSave({ ...persona, name })
   }
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex w-72 max-w-full flex-col gap-1">
       <Input
         aria-invalid={invalid || undefined}
         aria-label="Name"
-        className="max-w-72 text-base font-medium"
+        className="text-base font-medium"
         id="golem-name"
         maxLength={GOLEM_NAME_MAX_CHARS}
         placeholder="Name your Golem"
