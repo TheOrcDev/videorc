@@ -954,6 +954,8 @@ export type StreamTargetState =
   | 'connecting'
   | 'live'
   | 'warning'
+  // Plan 161: a live leg lost its connection and is being retried.
+  | 'reconnecting'
   | 'failed'
   | 'stopped'
 

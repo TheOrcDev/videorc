@@ -329,6 +329,36 @@ describe('stats bar items (plan 057)', () => {
       { targetId: 'x', platform: 'x', label: 'X', state: 'failed' }
     ])
     expect(reading(twoFailed)).toMatchObject({ value: '2 failed', tone: 'error' })
+
+    // Plan 161: a leg that is down outranks dropped frames, by name.
+    const reconnecting = withTargets(dropping, [
+      { targetId: 'yt', platform: 'youtube', label: 'YouTube', state: 'reconnecting' },
+      { targetId: 'x', platform: 'x', label: 'X', state: 'live' }
+    ])
+    expect(reading(reconnecting)).toMatchObject({
+      value: 'YouTube reconnecting',
+      tone: 'error'
+    })
+    expect(
+      reading(reconnecting)?.details.find((detail) => detail.label === 'YouTube')
+    ).toMatchObject({ value: 'Reconnecting', dot: 'error' })
+    const notReceiving = withTargets(healthy(), [
+      { targetId: 'yt', platform: 'youtube', label: 'YouTube', state: 'warning' }
+    ])
+    expect(reading(notReceiving)).toMatchObject({
+      value: 'YouTube not receiving',
+      tone: 'error'
+    })
+    const twoDown = withTargets(healthy(), [
+      { targetId: 'yt', platform: 'youtube', label: 'YouTube', state: 'warning' },
+      { targetId: 'x', platform: 'x', label: 'X', state: 'reconnecting' }
+    ])
+    expect(reading(twoDown)).toMatchObject({ value: '2 not live', tone: 'error' })
+    const failedAndDown = withTargets(healthy(), [
+      { targetId: 'yt', platform: 'youtube', label: 'YouTube', state: 'reconnecting' },
+      { targetId: 'x', platform: 'x', label: 'X', state: 'failed' }
+    ])
+    expect(reading(failedAndDown)).toMatchObject({ value: 'X failed', tone: 'error' })
   })
 
   it('sums followers as a number and a unit, and says why one is missing on hover', () => {

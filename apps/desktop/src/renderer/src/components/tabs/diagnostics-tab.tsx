@@ -1096,13 +1096,19 @@ function networkSummaryCopy(targets: StreamTargetRuntime[]): { label: string; to
   if (failed) {
     return { label: `${failed} failed`, tone: 'warn' }
   }
+  const reconnecting = targets.filter((target) => target.state === 'reconnecting').length
+  if (reconnecting) {
+    return { label: `${reconnecting} reconnecting`, tone: 'warn' }
+  }
+  const notReceiving = targets.filter((target) => target.state === 'warning').length
+  if (notReceiving) {
+    return { label: `${notReceiving} not receiving`, tone: 'warn' }
+  }
   const live = targets.filter((target) => target.state === 'live').length
   if (live) {
     return { label: `${live}/${targets.length} live`, tone: 'good' }
   }
-  const waiting = targets.filter(
-    (target) => target.state === 'connecting' || target.state === 'warning'
-  ).length
+  const waiting = targets.filter((target) => target.state === 'connecting').length
   if (waiting) {
     return { label: `${waiting} waiting`, tone: 'warn' }
   }

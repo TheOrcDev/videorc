@@ -66,6 +66,10 @@ pub enum StreamTargetState {
     Connecting,
     Live,
     Warning,
+    /// A live leg lost its connection and FFmpeg's fifo is retrying it every
+    /// few seconds (plan 161). Viewers on that platform see nothing until it
+    /// is back; the other destinations keep streaming.
+    Reconnecting,
     Failed,
     Stopped,
 }

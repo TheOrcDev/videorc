@@ -88,6 +88,10 @@ function runtimeBadge(runtime: StreamTargetRuntime): { tone: BadgeTone; label: s
       return { tone: 'live', label: 'On air' }
     case 'connecting':
       return { tone: 'warning', label: 'Connecting' }
+    case 'reconnecting':
+      return { tone: 'warning', label: 'Reconnecting' }
+    case 'warning':
+      return { tone: 'warning', label: 'Not receiving' }
     case 'failed':
       return { tone: 'destructive', label: 'Stopped' }
     case 'not-configured':

@@ -163,18 +163,21 @@ function StreamingSetup(): ReactElement {
     return map
   }, [oauthProviderCredentials])
 
-  // A destination is "in trouble" while live if its leg dropped (failed) or it was
-  // skipped this session for incomplete credentials (not-configured).
-  const problems = streamTargets.filter(
-    (runtime) => runtime.state === 'failed' || runtime.state === 'not-configured'
-  )
+  // A destination is "in trouble" while live if its leg dropped (failed), is
+  // reconnecting, its platform says it isn't receiving the stream (warning,
+  // plan 161), or it was skipped this session for incomplete credentials.
+  const problems = streamTargets.filter((runtime) => DESTINATION_PROBLEM_STATES.has(runtime.state))
+  // "Continue streaming" dismisses THIS set of problems. A destination that
+  // drops later is new news and brings the banner back (plan 161).
+  const problemsKey = problems.map((target) => `${target.targetId}:${target.state}`).join('|')
 
-  const [dismissed, setDismissed] = useState(false)
+  const [dismissedKey, setDismissedKey] = useState<string | null>(null)
   useEffect(() => {
     if (!isSessionActive) {
-      setDismissed(false)
+      setDismissedKey(null)
     }
   }, [isSessionActive])
+  const dismissed = dismissedKey === problemsKey
 
   // Plan 080 S7: the readiness list opens the card that needs attention.
   // Cards keep their own default until the user (or the list) toggles one.
@@ -209,7 +212,7 @@ function StreamingSetup(): ReactElement {
             {isSessionActive && problems.length > 0 && !dismissed ? (
               <StreamFailureBanner
                 problems={problems}
-                onDismiss={() => setDismissed(true)}
+                onDismiss={() => setDismissedKey(problemsKey)}
                 onStopAll={() => void stopSession()}
               />
             ) : null}
@@ -334,6 +337,13 @@ function sharedAccountLabel(
   return owner?.label
 }
 
+const DESTINATION_PROBLEM_STATES: ReadonlySet<StreamTargetRuntime['state']> = new Set([
+  'failed',
+  'reconnecting',
+  'warning',
+  'not-configured'
+])
+
 function StreamFailureBanner({
   problems,
   onStopAll,
@@ -344,6 +354,8 @@ function StreamFailureBanner({
   onDismiss: () => void
 }): ReactElement {
   const failed = problems.filter((target) => target.state === 'failed')
+  const reconnecting = problems.filter((target) => target.state === 'reconnecting')
+  const notReceiving = problems.filter((target) => target.state === 'warning')
   const skipped = problems.filter((target) => target.state === 'not-configured')
 
   return (
@@ -355,6 +367,18 @@ function StreamFailureBanner({
           <span>
             Stopped: {failed.map((target) => target.label).join(', ')}. The other destinations keep
             streaming.
+          </span>
+        ) : null}
+        {reconnecting.length ? (
+          <span>
+            Reconnecting: {reconnecting.map((target) => target.label).join(', ')}. Viewers there see
+            nothing until it is back.
+          </span>
+        ) : null}
+        {notReceiving.length ? (
+          <span>
+            Not receiving: {notReceiving.map((target) => target.label).join(', ')}. Videorc is still
+            sending; check the platform’s live dashboard.
           </span>
         ) : null}
         {skipped.length ? (

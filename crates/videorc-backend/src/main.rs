@@ -67,6 +67,7 @@ mod oauth_callback_page;
 mod panic_hook;
 mod performance_check;
 mod pipeline;
+mod platform_stream_watch;
 mod posters;
 mod preflight;
 mod preview_bmp;

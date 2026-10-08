@@ -239,6 +239,7 @@
     "smoke:multistream:vertical": "node scripts/run-with-env.mjs VIDEORC_SMOKE_VERTICAL_LEG=fit -- node scripts/smoke-multistream-app.mjs",
     "smoke:multistream:vertical-fill": "node scripts/run-with-env.mjs VIDEORC_SMOKE_VERTICAL_LEG=fill -- node scripts/smoke-multistream-app.mjs",
     "smoke:multistream-endurance": "node scripts/smoke-multistream-endurance-app.mjs",
+    "smoke:stream-leg-eof": "node scripts/smoke-stream-leg-eof-app.mjs",
     "smoke:packaged": "node scripts/smoke-packaged-app.mjs",
     "smoke:packaged:bundled": "node scripts/smoke-packaged-app.mjs --require-bundled-ffmpeg",
     "smoke:packaged:native-preview": "node scripts/run-with-env.mjs --platform=darwin VIDEORC_SMOKE_PACKAGED_APP=1 VIDEORC_EXPECT_NATIVE_METAL_PREVIEW=1 -- node scripts/smoke-preview-surface-app.mjs",

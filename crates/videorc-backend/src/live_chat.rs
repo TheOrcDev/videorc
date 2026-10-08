@@ -2071,6 +2071,7 @@ where
                     client_id: config.client_id.clone(),
                     broadcaster_user_id: config.broadcaster_user_id.clone(),
                     api_base_url: config.api_base_url.clone(),
+                    target_id: config.target_id.clone(),
                     token_source: config.token_source.clone(),
                 });
         let kick_viewers =
@@ -2082,6 +2083,27 @@ where
                     api_base_url: config.overrides.kick_api_base_url.clone(),
                     token_source: config.token_source.clone(),
                 });
+        // Plan 161: YouTube's own word on whether it receives the stream,
+        // on the same lifecycle (Twitch's rides the viewer poll).
+        if let Some(watch) = params.youtube.as_ref().and_then(|config| {
+            config.broadcast_id.clone().map(|broadcast_id| {
+                crate::platform_stream_watch::YouTubeIngestWatchConfig {
+                    access_token: config.access_token.clone(),
+                    broadcast_id,
+                    target_id: config.target_id.clone(),
+                    api_base_url: config.api_base_url.clone(),
+                    token_source: config.token_source.clone(),
+                }
+            })
+        }) {
+            let handle = tokio::spawn(crate::platform_stream_watch::run_youtube_ingest_watch(
+                state.clone(),
+                params.session_id.clone(),
+                watch,
+            ));
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.attach_task(handle);
+        }
         if youtube_viewers.is_some() || twitch_viewers.is_some() || kick_viewers.is_some() {
             let handle = tokio::spawn(crate::viewer_stats::run_viewer_sampler(
                 state.clone(),
