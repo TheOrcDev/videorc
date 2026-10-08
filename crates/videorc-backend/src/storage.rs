@@ -10491,6 +10491,7 @@ mod tests {
             channel_points: 500,
             title: Some("Hydrate".to_string()),
             emote_name: None,
+            points_name: None,
         });
         database.save_live_chat_message(&power_up).unwrap();
         database.save_live_chat_message(&redemption).unwrap();

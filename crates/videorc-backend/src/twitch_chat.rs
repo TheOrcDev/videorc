@@ -1290,6 +1290,7 @@ fn normalize_custom_redemption(
         channel_points: reward["cost"].as_u64().unwrap_or(0),
         title,
         emote_name: None,
+        points_name: None,
     });
     message.raw_provider_type = Some(CUSTOM_REDEMPTION_TYPE.to_string());
     Some(message)
@@ -1355,9 +1356,103 @@ fn normalize_automatic_redemption(
             .unwrap_or(0),
         title: None,
         emote_name,
+        points_name: None,
     });
     message.raw_provider_type = Some(AUTOMATIC_REDEMPTION_TYPE.to_string());
     Some(message)
+}
+
+/// Twitch's own GraphQL endpoint, the one twitch.tv's pages read. Helix has
+/// no field for a channel's points name or icon (plan 163), so this is the
+/// only place Videorc can read "Orc Gold". It is unofficial: it can change or
+/// refuse without notice, so every failure falls back to "points". Only the
+/// channel's public id is sent, never a Videorc token.
+const TWITCH_GQL_URL: &str = "https://gql.twitch.tv/gql";
+/// The public client id twitch.tv's web pages send with every GQL request.
+const TWITCH_WEB_CLIENT_ID: &str = "kimne78kx3ncx6brgo4mv6wki5h1ko";
+const POINTS_NAME_TIMEOUT: Duration = Duration::from_secs(5);
+/// Twitch caps the name well below this; a longer one is not trusted.
+const MAX_POINTS_NAME_CHARS: usize = 64;
+
+/// What the channel calls its points, from Twitch's GQL reply. `Ok(None)` is
+/// a channel that kept Twitch's default name.
+fn parse_channel_points_name(body: &Value) -> std::result::Result<Option<String>, String> {
+    let settings = &body["data"]["user"]["channel"]["communityPointsSettings"];
+    if !settings.is_object() {
+        return Err("Twitch returned no channel points settings".to_string());
+    }
+    Ok(non_empty(&settings["name"]).filter(|name| name.chars().count() <= MAX_POINTS_NAME_CHARS))
+}
+
+async fn fetch_channel_points_name(
+    client: &reqwest::Client,
+    config: &TwitchChatConfig,
+) -> std::result::Result<Option<String>, String> {
+    // Tests point `api_base_url` at a mock; the read follows it, so no test
+    // ever reaches Twitch.
+    let url = config
+        .api_base_url
+        .as_deref()
+        .map(|base| format!("{}/gql", base.trim_end_matches('/')))
+        .unwrap_or_else(|| TWITCH_GQL_URL.to_string());
+    let response = client
+        .post(url)
+        .header("Client-Id", TWITCH_WEB_CLIENT_ID)
+        .timeout(POINTS_NAME_TIMEOUT)
+        .json(&json!({
+            "operationName": "ChannelPointsName",
+            "query": "query ChannelPointsName($id: ID!) { user(id: $id) { channel { communityPointsSettings { name } } } }",
+            "variables": { "id": config.broadcaster_user_id },
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("could not reach Twitch: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("Twitch answered HTTP {}", response.status()));
+    }
+    let body = response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("unreadable reply: {error}"))?;
+    parse_channel_points_name(&body)
+}
+
+/// The channel's points name for this stream, read on the first redemption
+/// (plan 163). A failed read is logged once and not retried: the rows say
+/// "points" instead.
+#[derive(Debug, Default)]
+struct ChannelPointsName {
+    read: bool,
+    name: Option<String>,
+}
+
+impl ChannelPointsName {
+    async fn get(
+        &mut self,
+        state: &AppState,
+        client: &reqwest::Client,
+        config: &TwitchChatConfig,
+    ) -> Option<String> {
+        if !self.read {
+            self.read = true;
+            match fetch_channel_points_name(client, config).await {
+                Ok(name) => self.name = name,
+                Err(error) => state.emit_log(
+                    "warn",
+                    format!(
+                        "Could not read the Twitch channel points name ({error}); Activity says points."
+                    ),
+                ),
+            }
+        }
+        self.name.clone()
+    }
+}
+
+fn stamp_points_name(message: &mut LiveChatMessage, name: Option<String>) {
+    if let Some(LiveChatEventDetails::Redemption { points_name, .. }) = &mut message.details {
+        *points_name = name;
+    }
 }
 
 fn next_backoff_ms(current: u64) -> u64 {
@@ -1649,6 +1744,7 @@ async fn run_eventsub_session(
     subscribe: bool,
     seen: &mut HashSet<String>,
     avatars: &mut TwitchAvatarCache,
+    points_name: &mut ChannelPointsName,
     extras_live: &mut ExtraEvents,
 ) -> SessionOutcome {
     let (session_id, session_generation) = session_owner;
@@ -1720,6 +1816,15 @@ async fn run_eventsub_session(
                         &now,
                     ) && !seen.contains(&message.provider_message_id)
                     {
+                        // A redemption says the channel's own name for its
+                        // points (plan 163): read once, on the first one.
+                        if matches!(
+                            message.details,
+                            Some(LiveChatEventDetails::Redemption { .. })
+                        ) {
+                            let name = points_name.get(state, client, config).await;
+                            stamp_points_name(&mut message, name);
+                        }
                         // EventSub carries no avatar; backfill once per chatter
                         // (Comments window upgrade S1).
                         if message.author_avatar_url.is_none()
@@ -1888,6 +1993,7 @@ pub async fn run_twitch_chat_connector(
     .await;
 
     let mut avatars = TwitchAvatarCache::default();
+    let mut points_name = ChannelPointsName::default();
     let mut extras_live = ExtraEvents::default();
     loop {
         match run_eventsub_session(
@@ -1900,6 +2006,7 @@ pub async fn run_twitch_chat_connector(
             subscribe,
             &mut seen,
             &mut avatars,
+            &mut points_name,
             &mut extras_live,
         )
         .await
@@ -2110,6 +2217,34 @@ mod tests {
         (StatusCode::ACCEPTED, Json(json!({ "data": [] })))
     }
 
+    /// Twitch's GQL, as the points-name read must call it (plan 163): no
+    /// Videorc token, twitch.tv's web client id and the channel's id as a
+    /// variable. Anything else is refused, so the row would say "points".
+    async fn mock_gql(
+        headers: axum::http::HeaderMap,
+        Json(body): Json<Value>,
+    ) -> impl IntoResponse {
+        let well_formed = headers.get("authorization").is_none()
+            && headers
+                .get("client-id")
+                .is_some_and(|id| id == TWITCH_WEB_CLIENT_ID)
+            && body["variables"]["id"] == "broadcaster-1";
+        if !well_formed {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "bad request" })),
+            );
+        }
+        (
+            StatusCode::OK,
+            Json(json!({
+                "data": { "user": { "channel": {
+                    "communityPointsSettings": { "name": "Orc Gold" }
+                } } }
+            })),
+        )
+    }
+
     async fn mock_users() -> Json<Value> {
         Json(json!({
             "data": [
@@ -2194,6 +2329,7 @@ mod tests {
             .route("/eventsub", get(mock_eventsub_ws))
             .route("/helix/eventsub/subscriptions", post(mock_subscriptions))
             .route("/helix/users", get(mock_users))
+            .route("/gql", post(mock_gql))
             .with_state(state);
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -2768,6 +2904,7 @@ mod tests {
                 channel_points: 500,
                 title: Some("Hydrate".to_string()),
                 emote_name: None,
+                points_name: None,
             })
         );
 
@@ -2805,6 +2942,7 @@ mod tests {
                 channel_points: 100,
                 title: None,
                 emote_name: None,
+                points_name: None,
             })
         );
 
@@ -2830,6 +2968,67 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn the_points_name_is_the_channels_own_or_none() {
+        let reply = |settings: Value| {
+            json!({ "data": { "user": { "channel": {
+            "communityPointsSettings": settings
+        } } } })
+        };
+        assert_eq!(
+            parse_channel_points_name(&reply(json!({ "name": " Orc Gold " }))),
+            Ok(Some("Orc Gold".to_string()))
+        );
+        // Twitch's default name comes back as null: the window says "points".
+        assert_eq!(
+            parse_channel_points_name(&reply(json!({ "name": null }))),
+            Ok(None)
+        );
+        assert_eq!(
+            parse_channel_points_name(&reply(json!({ "name": "" }))),
+            Ok(None)
+        );
+        assert_eq!(
+            parse_channel_points_name(&reply(json!({ "name": "x".repeat(65) }))),
+            Ok(None)
+        );
+        assert!(parse_channel_points_name(&json!({ "data": { "user": null } })).is_err());
+        assert!(parse_channel_points_name(&json!({ "errors": [{ "message": "no" }] })).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_failed_points_name_read_is_logged_once_and_never_retried() {
+        let (api_base_url, eventsub_ws_url, _, _, _, shutdown) = spawn_mock_twitch_server().await;
+        let state = test_state();
+        let mut config = expiring_config(
+            api_base_url,
+            eventsub_ws_url,
+            crate::session_token::SessionTokenSource::Fixed,
+        );
+        // The mock refuses any other channel id.
+        config.broadcaster_user_id = "someone-else".to_string();
+        let client = reqwest::Client::new();
+        let mut points_name = ChannelPointsName::default();
+        assert_eq!(points_name.get(&state, &client, &config).await, None);
+        assert!(points_name.read);
+        config.broadcaster_user_id = "broadcaster-1".to_string();
+        assert_eq!(points_name.get(&state, &client, &config).await, None);
+        let _ = shutdown.send(());
+
+        let mut points_name = ChannelPointsName::default();
+        let (api_base_url, eventsub_ws_url, _, _, _, shutdown) = spawn_mock_twitch_server().await;
+        let config = expiring_config(
+            api_base_url,
+            eventsub_ws_url,
+            crate::session_token::SessionTokenSource::Fixed,
+        );
+        assert_eq!(
+            points_name.get(&state, &client, &config).await.as_deref(),
+            Some("Orc Gold")
+        );
+        let _ = shutdown.send(());
     }
 
     #[tokio::test]
@@ -3002,6 +3201,14 @@ mod tests {
             .collect();
         assert_eq!(rows.len(), 1, "{snapshot:?}");
         assert_eq!(rows[0].author_name, "CoolViewer");
+        // Plan 163: the channel's own name for its points rides on the row.
+        assert!(matches!(
+            &rows[0].details,
+            Some(LiveChatEventDetails::Redemption {
+                points_name: Some(name),
+                ..
+            }) if name == "Orc Gold"
+        ));
         assert_eq!(
             rows[0].author_avatar_url.as_deref(),
             Some("https://static-cdn.jtvnw.net/viewer.png")

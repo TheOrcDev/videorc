@@ -624,13 +624,36 @@ describe('Power-ups and channel point redemptions (plan 162)', () => {
       kind: 'redemption',
       filter: 'rewards',
       line: 'Redeemed Hydrate · 500 points',
-      short: 'Hydrate',
+      short: 'Hydrate · 500 points',
       message: 'drink water orc'
     })
     expect(activityItems([unlock])[0]).toMatchObject({
       line: 'Unlocked orcdevLURK · 2,000 points',
-      short: 'Unlocked orcdevLURK'
+      short: 'Unlocked orcdevLURK · 2,000 points'
     })
+  })
+
+  it("names the points the channel's own way (plan 163)", () => {
+    const named = (pointsName: string, channelPoints = 500) =>
+      activityItems([
+        {
+          ...hydrate,
+          details: {
+            kind: 'redemption',
+            reward: 'custom',
+            channelPoints,
+            title: 'Hydrate',
+            pointsName
+          }
+        }
+      ])[0]
+    expect(named('Orc Gold')).toMatchObject({
+      line: 'Redeemed Hydrate · 500 Orc Gold',
+      short: 'Hydrate · 500 Orc Gold'
+    })
+    expect(named('Diamonds', 1500).line).toBe('Redeemed Hydrate · 1,500 Diamonds')
+    // A blank name is Twitch's default.
+    expect(named('  ').line).toBe('Redeemed Hydrate · 500 points')
   })
 
   it('counts Power-up bits with cheers and never sums points (D3)', () => {

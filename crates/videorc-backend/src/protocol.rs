@@ -6573,6 +6573,7 @@ mod tests {
                 channel_points: 500,
                 title: Some("Hydrate".to_string()),
                 emote_name: None,
+                points_name: Some("Orc Gold".to_string()),
             })
         );
         assert!(messages[0].author_affiliation.is_none());

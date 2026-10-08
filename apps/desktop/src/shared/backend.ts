@@ -4730,13 +4730,15 @@ export type LiveChatEventDetails =
   /** A Twitch Power-up paid with bits (plan 162); `emoteName` when gigantified. */
   | { kind: 'power-up'; bits: number; powerUp: LiveChatPowerUpKind; emoteName?: string }
   /** A Twitch channel point redemption (plan 162). `title` is a custom
-   * reward's; automatic rewards have none. */
+   * reward's; automatic rewards have none. `pointsName` is the channel's own
+   * name for its points ("Orc Gold", plan 163), absent for Twitch's default. */
   | {
       kind: 'redemption'
       reward: LiveChatRedemptionKind
       channelPoints: number
       title?: string
       emoteName?: string
+      pointsName?: string
     }
 
 /** The message a chat message replies to, when the platform threads replies. */

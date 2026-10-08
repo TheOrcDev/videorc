@@ -910,7 +910,8 @@ describe('shared high-risk protocol fixture', () => {
       kind: 'redemption',
       reward: 'custom',
       channelPoints: 500,
-      title: 'Hydrate'
+      title: 'Hydrate',
+      pointsName: 'Orc Gold'
     })
     // Plan 155: a Twitch GIF is a plain message with one `gif` fragment.
     expect(gif.eventType).toBe('message')

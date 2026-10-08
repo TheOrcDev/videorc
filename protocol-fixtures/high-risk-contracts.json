@@ -533,7 +533,8 @@
           "kind": "redemption",
           "reward": "custom",
           "channelPoints": 500,
-          "title": "Hydrate"
+          "title": "Hydrate",
+          "pointsName": "Orc Gold"
         }
       }
     ]
