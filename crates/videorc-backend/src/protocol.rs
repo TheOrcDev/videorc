@@ -4728,6 +4728,62 @@ pub struct CohostSettingsPatch {
     pub auto_chat: Option<crate::cohost::CohostAutoChat>,
 }
 
+/// `cohost.avatar.generate` (plan 164 S-A6): one state image from a
+/// description and a style. The call is accepted at once; the outcome is the
+/// `cohost.avatar.generated` event.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarGenerateParams {
+    pub state: crate::cohost::CohostAvatarState,
+    pub prompt: String,
+    pub style: crate::cohost_avatar::CohostAvatarStyle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarGenerateAccepted {
+    pub request_id: String,
+    pub state: crate::cohost::CohostAvatarState,
+}
+
+/// Why one generation failed, in the web's code and the tile's words.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarErrorDetail {
+    pub code: String,
+    pub message: String,
+}
+
+impl CohostAvatarErrorDetail {
+    pub fn new(code: &str, message: impl Into<String>) -> Self {
+        Self {
+            code: code.to_string(),
+            message: message.into(),
+        }
+    }
+
+    pub fn new_owned(code: String, message: String) -> Self {
+        Self { code, message }
+    }
+}
+
+/// `cohost.avatar.generated` (plan 164 S-A6): `path` is the relative asset
+/// path the persona stores (`<personaId>/<state>.png`) on success, `error`
+/// the one line the tile shows otherwise. Each is absent, never null.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarGeneratedEvent {
+    pub request_id: String,
+    pub state: crate::cohost::CohostAvatarState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The model returned no alpha (S-A5); the tile says so.
+    #[serde(default)]
+    pub opaque: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<CohostAvatarErrorDetail>,
+}
+
 /// `cohost.command.choose` (plan 140 S3): pick one comment from the chooser
 /// the latest voice command opened. `index` is 0 to 2.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -5281,6 +5337,10 @@ pub struct AiCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entitlement_token: Option<String>,
     pub features: AiCapabilitiesFeatures,
+    /// The Golem routes (plan 164): the tick contract the web speaks and
+    /// whether avatar generation is on. Older servers omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cohost: Option<AiCapabilitiesCohost>,
     pub generated_at: String,
     pub limits: AiCapabilitiesLimits,
     pub models: AiCapabilitiesModels,
@@ -5288,6 +5348,29 @@ pub struct AiCapabilities {
     pub readiness: AiCapabilitiesReadiness,
     pub transcription: AiCapabilitiesTranscription,
     pub workflow: AiCapabilitiesWorkflow,
+}
+
+/// `cohost` from `GET /api/ai/capabilities` (plan 164): every field
+/// defaults so a partial block never breaks the load.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesCohost {
+    /// The newest tick prompt version the web accepts (4 adds the persona).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<AiCapabilitiesAvatar>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesAvatar {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub remaining_today: u32,
+    #[serde(default)]
+    pub daily_limit: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

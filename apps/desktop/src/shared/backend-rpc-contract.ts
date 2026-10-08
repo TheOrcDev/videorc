@@ -21,6 +21,9 @@ import type {
   ChatEmotesSettingsPatch,
   YouTubeQuotaStatus,
   CohostAutoChat,
+  CohostAvatarGenerateAccepted,
+  CohostAvatarGenerateParams,
+  CohostAvatarGeneratedEvent,
   CohostPersona,
   CohostSettings,
   CohostSettingsPatch,
@@ -314,6 +317,10 @@ export interface BackendRpcMethodMap {
   'cohost.command.cancel': BackendRpcDefinition<CohostCommandParams, CohostState>
   'cohost.settings.get': BackendRpcDefinition<undefined, CohostSettings>
   'cohost.settings.set': BackendRpcDefinition<CohostSettingsPatch, CohostSettings>
+  'cohost.avatar.generate': BackendRpcDefinition<
+    CohostAvatarGenerateParams,
+    CohostAvatarGenerateAccepted
+  >
   'cohost.report.get': BackendRpcDefinition<CohostReportGetParams, CohostReportPayload>
   'cohost.report.latest': BackendRpcDefinition<undefined, CohostReportPayload | null>
   'liveChat.emotes.get': BackendRpcDefinition<undefined, ChatEmotesSettings>
@@ -369,6 +376,7 @@ export interface BackendEventMap {
   'diagnostics.stats': DiagnosticStats
   'cohost.state': CohostState
   'cohost.report.saved': CohostReportSavedEvent
+  'cohost.avatar.generated': CohostAvatarGeneratedEvent
   'session.marker.voice.status': {
     sessionId: string
     listening: import('./backend').CohostListening
@@ -2885,6 +2893,32 @@ const cohostReportSavedEventSchema = objectSchema(
   { sessionId: boundedString },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostReportSavedEvent>
+// Plan 164 S-A6: avatar generation, accepted at once and answered by event.
+const cohostAvatarStateSchema = enumSchema(['idle', 'talk', 'laugh', 'think'])
+const cohostAvatarGenerateParamsSchema = objectSchema(
+  {
+    state: cohostAvatarStateSchema,
+    prompt: stringSchema({ minLength: 1, maxLength: 600 }),
+    style: enumSchema(['cartoon', 'pixel', 'painted', 'sticker'])
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostAvatarGenerateParams>
+const cohostAvatarGenerateAcceptedSchema = objectSchema(
+  { requestId: boundedString, state: cohostAvatarStateSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostAvatarGenerateAccepted>
+const cohostAvatarGeneratedEventSchema = objectSchema(
+  {
+    requestId: boundedString,
+    state: cohostAvatarStateSchema,
+    path: optionalSchema(stringSchema({ minLength: 1, maxLength: 256 })),
+    opaque: booleanSchema,
+    error: optionalSchema(
+      objectSchema({ code: boundedString, message: boundedString }, { allowUnknown: false })
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostAvatarGeneratedEvent>
 
 const scheduledMutationSchema = objectSchema(
   {
@@ -3368,6 +3402,10 @@ const runtimeContracts = {
   'cohost.command.cancel': { params: cohostCommandParamsSchema, result: cohostStateSchema },
   'cohost.settings.get': { params: undefinedSchema, result: cohostSettingsSchema },
   'cohost.settings.set': { params: cohostSettingsPatchSchema, result: cohostSettingsSchema },
+  'cohost.avatar.generate': {
+    params: cohostAvatarGenerateParamsSchema,
+    result: cohostAvatarGenerateAcceptedSchema
+  },
   'liveChat.emotes.get': { params: undefinedSchema, result: chatEmotesSettingsSchema },
   'liveChat.emotes.set': {
     params: chatEmotesSettingsPatchSchema,
@@ -3457,6 +3495,7 @@ const runtimeEventSchemas = {
   'diagnostics.stats': diagnosticStatsSchema,
   'cohost.state': cohostStateSchema,
   'cohost.report.saved': cohostReportSavedEventSchema,
+  'cohost.avatar.generated': cohostAvatarGeneratedEventSchema,
   'session.marker.voice.status': objectSchema(
     { sessionId: boundedString, listening: cohostListeningSchema },
     { allowUnknown: false }

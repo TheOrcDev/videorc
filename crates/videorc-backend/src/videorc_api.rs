@@ -40,6 +40,11 @@ pub(crate) const COHOST_SPOTLIGHT_MAX_BODY_BYTES: usize = 32 * 1024;
 pub(crate) const COHOST_COMMAND_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(2_500);
 const COHOST_COMMAND_PATH: &str = "/api/ai/cohost/command";
+/// Plan 164 S-A6: the route's own `maxDuration` is 90 s, so the client
+/// waits 95 (S-A5). A generated PNG over 8 MB is refused unread.
+pub(crate) const COHOST_AVATAR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(95);
+const COHOST_AVATAR_PATH: &str = "/api/ai/cohost/avatar";
+pub(crate) const COHOST_AVATAR_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024 + 64 * 1024;
 /// The route's limits (contract part E).
 pub(crate) const COHOST_COMMAND_MAX_BODY_BYTES: usize = 16 * 1024;
 pub(crate) const COHOST_COMMAND_MAX_CANDIDATES: usize = 20;
@@ -456,6 +461,30 @@ pub struct CohostSpotlightMatch {
     /// candidate that carried a `questionId`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answered: Option<f64>,
+}
+
+// --- Golem avatar wire types (plan 164 S-A5, S-A6) ---
+
+/// `POST /api/ai/cohost/avatar`: one state image. `baseImage` is the idle
+/// PNG/WebP as base64 for the other states, so the character stays
+/// consistent (D21); absent for idle.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarRequest {
+    pub prompt: String,
+    pub style: crate::cohost_avatar::CohostAvatarStyle,
+    pub state: crate::cohost::CohostAvatarState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_image: Option<String>,
+}
+
+/// The route's answer: a PNG, returned even when the model gave no alpha.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarResponse {
+    pub png_base64: String,
+    #[serde(default)]
+    pub opaque: bool,
 }
 
 // --- Golem command parser wire types (plan 140 S8, contract part E) ---
@@ -1142,6 +1171,70 @@ impl VideorcApiClient {
                 CohostApiError::malformed_response(
                     status.as_u16(),
                     format!("Could not read Golem's command response: {error}"),
+                )
+            });
+        }
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let (code, message) = read_error_code_and_message(response).await;
+        Err(classify_cohost_failure(
+            status.as_u16(),
+            &code,
+            message,
+            retry_after.as_deref(),
+        ))
+    }
+
+    /// One avatar generation (plan 164 S-A6): the tick's failure mapping, a
+    /// 95 s timeout and an 8 MB cap on the body read before it is parsed.
+    pub async fn post_cohost_avatar(
+        &self,
+        bearer_token: &str,
+        request: &CohostAvatarRequest,
+    ) -> std::result::Result<CohostAvatarResponse, CohostApiError> {
+        let response = self
+            .http
+            .post(self.endpoint(COHOST_AVATAR_PATH))
+            .bearer_auth(bearer_token)
+            .json(request)
+            .timeout(COHOST_AVATAR_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| CohostApiError::from_transport_within(error, COHOST_AVATAR_TIMEOUT))?;
+
+        let status = response.status();
+        if status.is_success() {
+            if response
+                .content_length()
+                .is_some_and(|length| length > COHOST_AVATAR_MAX_RESPONSE_BYTES as u64)
+            {
+                return Err(CohostApiError::malformed_response(
+                    status.as_u16(),
+                    "The generated image is over 8 MB.",
+                ));
+            }
+            let body = response.bytes().await.map_err(|error| {
+                if error.is_timeout() {
+                    return CohostApiError::from_transport_within(error, COHOST_AVATAR_TIMEOUT);
+                }
+                CohostApiError::malformed_response(
+                    status.as_u16(),
+                    format!("Could not read the generated image: {error}"),
+                )
+            })?;
+            if body.len() > COHOST_AVATAR_MAX_RESPONSE_BYTES {
+                return Err(CohostApiError::malformed_response(
+                    status.as_u16(),
+                    "The generated image is over 8 MB.",
+                ));
+            }
+            return serde_json::from_slice(&body).map_err(|error| {
+                CohostApiError::malformed_response(
+                    status.as_u16(),
+                    format!("Could not read the avatar response: {error}"),
                 )
             });
         }
@@ -1860,6 +1953,36 @@ mod tests {
             parsed.captions.is_none(),
             "older web deployments remain compatible during rollout"
         );
+    }
+
+    #[test]
+    fn ai_capabilities_cohost_block_is_optional_and_parses_the_avatar_cap() {
+        let without: AiCapabilities = serde_json::from_str(
+            r#"{"entitlement":{"checkedAt":"2026-06-15T12:00:00.000Z","cloudAi":true,"expiresAt":"2026-06-15T12:05:00.000Z","isPremium":true,"subscriptionStatus":"active","tier":"premium"},"features":{"cloudAiEnabled":true,"gatewayConfigured":true,"modelTestingEnabled":true,"multipartAudioJobsEnabled":true,"objectBackedJobsEnabled":false,"transcriptJobsEnabled":true,"uploadTicketsEnabled":false},"generatedAt":"2026-06-15T12:30:00.000Z","limits":{"dailyJobs":25,"maxAudioBytes":null,"maxAudioMegabytes":null,"maxOutputTokens":null,"maxTranscriptCharacters":90000,"monthlyJobs":600},"models":{"allowedTextModelCount":2,"allowedTextModelsConfigured":true,"defaultTextModel":null,"fallbackTextModels":[]},"objectStorage":{"deleteConfigured":false,"downloadConfigured":false,"provider":null,"providerError":null,"proofConfigured":false,"proofTtlMs":null,"uploadConfigured":false},"readiness":{"access":{"cloudAiEntitled":true,"globallyDisabled":false},"gateway":{"configError":null,"configured":true},"objectStorage":{"deleteConfigError":null,"downloadConfigError":null,"proofConfigError":null,"providerError":null,"uploadConfigError":null},"transcription":{"configError":null,"configured":true}},"transcription":{"configured":true,"configError":null,"maxAudioBytes":null,"maxAudioMegabytes":null,"requestTimeoutMs":65000},"workflow":{"inputModes":[],"kind":"post-recording-publish-pack","outputs":[]}}"#,
+        )
+        .unwrap();
+        assert!(
+            without.cohost.is_none(),
+            "older web deployments omit the block"
+        );
+        // Omitted on the way out too, never null (the renderer contract).
+        assert!(
+            serde_json::to_value(&without)
+                .unwrap()
+                .get("cohost")
+                .is_none()
+        );
+        let mut value = serde_json::to_value(&without).unwrap();
+        value["cohost"] = serde_json::json!({
+            "tick": 4,
+            "avatar": { "enabled": true, "remainingToday": 23, "dailyLimit": 24 }
+        });
+        let with: AiCapabilities = serde_json::from_value(value).unwrap();
+        let cohost = with.cohost.unwrap();
+        assert_eq!(cohost.tick, Some(4));
+        let avatar = cohost.avatar.unwrap();
+        assert!(avatar.enabled);
+        assert_eq!((avatar.remaining_today, avatar.daily_limit), (23, 24));
     }
 
     #[test]

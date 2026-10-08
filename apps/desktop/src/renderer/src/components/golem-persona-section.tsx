@@ -28,6 +28,7 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import {
   unavailableGolemAvatarRequester,
   useGolemAvatar,
+  useGolemAvatarRequester,
   type GolemAvatarRequester,
   type GolemTileProgress
 } from '@/hooks/use-golem-avatar'
@@ -70,13 +71,15 @@ import { GolemBubbleSample } from '@/components/golem-bubble-sample'
  * creates it.
  */
 export function GolemPersonaSection({
-  requestAvatar = unavailableGolemAvatarRequester
+  requestAvatar
 }: {
-  /** S-A6 injects the backend call; the default refuses with "Not available yet". */
+  /** Tests inject the backend call; the app uses `useGolemAvatarRequester`. */
   requestAvatar?: GolemAvatarRequester
 } = {}): ReactElement | null {
   const { account, aiCapabilities, aiConsent, cohostGate, cohostSettings, patchCohostSettings } =
     useStudioCore()
+  const connectedRequester = useGolemAvatarRequester()
+  const request = requestAvatar ?? connectedRequester ?? unavailableGolemAvatarRequester
   const persona = cohostSettings?.persona ?? null
   const [error, setError] = useState<string | null>(null)
   const save = async (next: CohostPersona): Promise<void> => {
@@ -103,7 +106,7 @@ export function GolemPersonaSection({
   const personaRef = useRef(persona)
   personaRef.current = persona
   const { progress, busy, generateOne, generateAll } = useGolemAvatar({
-    request: requestAvatar,
+    request,
     onImage: async (state, result) => {
       const current = personaRef.current
       if (!current) return

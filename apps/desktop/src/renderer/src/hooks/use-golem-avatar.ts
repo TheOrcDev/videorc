@@ -1,6 +1,8 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
-import type { CohostAvatarState, CohostPersona } from '@/lib/backend'
+import { BackendClient } from '@/backendClient'
+import { useStudioCore } from '@/hooks/use-studio'
+import type { CohostAvatarGeneratedEvent, CohostAvatarState, CohostPersona } from '@/lib/backend'
 import { COHOST_AVATAR_STATES } from '@/lib/backend'
 import { GOLEM_GENERATE_NOT_AVAILABLE, type GolemAvatarStyle } from '@/lib/golem-persona-view'
 
@@ -37,9 +39,91 @@ const IDLE_PROGRESS: GolemTileProgressMap = {
   think: { phase: 'idle' }
 }
 
-/** Until S-A6, every request is refused with the one hint the tiles show. */
+/** Without a backend (tests, a disconnected socket) every request is
+ * refused with the one hint the tiles show. */
 export const unavailableGolemAvatarRequester: GolemAvatarRequester = async () => {
   throw new Error(GOLEM_GENERATE_NOT_AVAILABLE)
+}
+
+/** The accept call answers in well under this; the outcome rides an event. */
+const ACCEPT_TIMEOUT_MS = 15_000
+/** The route's own budget is 90 s and the backend waits 95 (S-A5, S-A6). */
+const OUTCOME_TIMEOUT_MS = 100_000
+
+/**
+ * The backend call behind Generate (plan 164 S-A6): `cohost.avatar.generate`
+ * is accepted at once and the outcome arrives as `cohost.avatar.generated`
+ * for that request id. Like the stream report, the Golem tab opens its own
+ * backend client while mounted, so generation adds nothing to the shell.
+ * Null until the client is connected: the section then refuses with
+ * "Not available yet" instead of hanging a tile.
+ */
+export function useGolemAvatarRequester(): GolemAvatarRequester | null {
+  const { connection, wsStatus } = useStudioCore()
+  const online = wsStatus === 'connected' ? connection : null
+  const [client, setClient] = useState<BackendClient | null>(null)
+  useEffect(() => {
+    if (!online) return
+    let disposed = false
+    const next = new BackendClient(online)
+    next.connect().then(
+      () => {
+        if (!disposed) setClient(next)
+      },
+      () => undefined
+    )
+    return () => {
+      disposed = true
+      next.close()
+      setClient(null)
+    }
+  }, [online])
+  return useCallback<GolemAvatarRequester>(
+    async (request) => {
+      if (!client) throw new Error(GOLEM_GENERATE_NOT_AVAILABLE)
+      return generateThroughClient(client, request)
+    },
+    [client]
+  )
+}
+
+/** One request: subscribe first, accept, then wait for its own event. */
+export async function generateThroughClient(
+  client: Pick<BackendClient, 'requestTyped' | 'on'>,
+  request: GolemAvatarRequest,
+  outcomeTimeoutMs = OUTCOME_TIMEOUT_MS
+): Promise<GolemAvatarResult> {
+  let settle: ((event: CohostAvatarGeneratedEvent) => void) | null = null
+  const events: CohostAvatarGeneratedEvent[] = []
+  const off = client.on('cohost.avatar.generated', (event) => {
+    if (settle) settle(event)
+    else events.push(event)
+  })
+  try {
+    const accepted = await client.requestTyped(
+      'cohost.avatar.generate',
+      { state: request.state, prompt: request.prompt, style: request.style },
+      { timeoutMs: ACCEPT_TIMEOUT_MS }
+    )
+    const outcome = await new Promise<CohostAvatarGeneratedEvent>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('The model took too long. Try again.')),
+        outcomeTimeoutMs
+      )
+      const take = (event: CohostAvatarGeneratedEvent): boolean => {
+        if (event.requestId !== accepted.requestId) return false
+        clearTimeout(timer)
+        resolve(event)
+        return true
+      }
+      if (!events.some(take)) settle = take
+    })
+    if (outcome.error) throw new Error(outcome.error.message)
+    if (!outcome.path) throw new Error('The generated image was not saved.')
+    return { path: outcome.path, opaque: outcome.opaque }
+  } finally {
+    off()
+  }
 }
 
 /**

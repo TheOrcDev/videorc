@@ -139,6 +139,28 @@ Settings and live state:
   `{enabled: true, listen: true}` or `{enabled: false}`.
 - The `cohost.state` event carries the live pane.
 
+The persona and its images (plan 164, Phase A):
+
+- `cohostSettings.persona` holds the name, personality, bubble style, state
+  images (relative paths `<personaId>/<state>.<ext>`) and source; `autoChat`
+  holds the mode and the three behaviours, all off by default. Both ride
+  `cohost.settings.get/set` as whole objects; the backend refuses an
+  out-of-bounds persona with `cohost-persona-invalid` and bad templates with
+  `cohost-auto-chat-invalid`.
+- Uploads go through main (`golem-assets:import-image`): sniffed PNG/WebP
+  (JPEG for idle), 4 MB, copied to `userData/golem-assets/<personaId>/`,
+  served as `videorc-asset://golem/<personaId>/<state>.<ext>`.
+  `golem-assets:remove` deletes the folder for Start over.
+- Generation is `cohost.avatar.generate {state, prompt, style}`: accepted at
+  once, the outcome arrives as `cohost.avatar.generated {requestId, state,
+  path?, opaque, error?}`. The backend posts to the web's
+  `/api/ai/cohost/avatar` (95 s, 8 MB) and writes the PNG into the same
+  managed folder, which main hands over as `VIDEORC_MANAGED_GOLEM_ROOTS`.
+  Generate is on only when `/api/ai/capabilities` reports
+  `cohost.avatar.enabled`; the daily cap is the web's.
+- The bundled default pack (`assets/golem/default/`) is placeholder art the
+  owner replaces; `persona.source: 'default'` means "use it".
+
 The report:
 
 - `cohost.report.get {sessionId}` returns

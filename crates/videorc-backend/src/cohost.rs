@@ -507,8 +507,6 @@ pub enum CohostAvatarState {
 }
 
 impl CohostAvatarState {
-    pub const ALL: [Self; 4] = [Self::Idle, Self::Talk, Self::Laugh, Self::Think];
-
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Idle => "idle",
@@ -555,24 +553,6 @@ pub struct CohostPersonaImages {
 }
 
 impl CohostPersonaImages {
-    pub fn get(&self, state: CohostAvatarState) -> Option<&str> {
-        match state {
-            CohostAvatarState::Idle => self.idle.as_deref(),
-            CohostAvatarState::Talk => self.talk.as_deref(),
-            CohostAvatarState::Laugh => self.laugh.as_deref(),
-            CohostAvatarState::Think => self.think.as_deref(),
-        }
-    }
-
-    pub fn set(&mut self, state: CohostAvatarState, path: Option<String>) {
-        match state {
-            CohostAvatarState::Idle => self.idle = path,
-            CohostAvatarState::Talk => self.talk = path,
-            CohostAvatarState::Laugh => self.laugh = path,
-            CohostAvatarState::Think => self.think = path,
-        }
-    }
-
     fn entries(&self) -> [(CohostAvatarState, Option<&str>); 4] {
         [
             (CohostAvatarState::Idle, self.idle.as_deref()),

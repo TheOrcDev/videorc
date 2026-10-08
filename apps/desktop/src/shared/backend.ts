@@ -5094,6 +5094,35 @@ export interface CohostAutoChat {
   banter: CohostCooldownBehaviour
 }
 
+/** The generation style presets the web route takes (plan 164 S-A4). */
+export type CohostAvatarStyle = 'cartoon' | 'pixel' | 'painted' | 'sticker'
+
+/** `cohost.avatar.generate` (plan 164 S-A6): accepted at once; the outcome
+ * is the `cohost.avatar.generated` event. */
+export interface CohostAvatarGenerateParams {
+  state: CohostAvatarState
+  /** 1 to 600 characters. */
+  prompt: string
+  style: CohostAvatarStyle
+}
+
+export interface CohostAvatarGenerateAccepted {
+  requestId: string
+  state: CohostAvatarState
+}
+
+/** `cohost.avatar.generated`: `path` (the relative asset path the persona
+ * stores) on success, `error` (the web's code and the tile's line) otherwise.
+ * Each is absent, never null. */
+export interface CohostAvatarGeneratedEvent {
+  requestId: string
+  state: CohostAvatarState
+  path?: string
+  /** The model returned no alpha; the tile says so. */
+  opaque: boolean
+  error?: { code: string; message: string }
+}
+
 /** `cohost.settings.set`: absent fields are unchanged. */
 export interface CohostSettingsPatch {
   enabled?: boolean

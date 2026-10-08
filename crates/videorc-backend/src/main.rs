@@ -21,6 +21,7 @@ mod clean_cut;
 mod clip_marks;
 mod cohost;
 mod cohost_ack;
+mod cohost_avatar;
 mod cohost_command;
 mod color;
 mod comment_highlight;
@@ -5349,6 +5350,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.recap.draft"
         | "cohost.author.greeted"
         | "cohost.settings.set"
+        | "cohost.avatar.generate"
         | "cohost.command.choose"
         | "cohost.command.confirm"
         | "cohost.command.cancel"
@@ -9319,6 +9321,19 @@ async fn handle_text_message_with_role(
         }
         "cohost.settings.get" => {
             ServerResponse::ok(command.id, cohost::get_cohost_settings(state).await)
+        }
+        "cohost.avatar.generate" => {
+            match serde_json::from_value::<protocol::CohostAvatarGenerateParams>(command.params) {
+                Ok(params) => match cohost_avatar::generate(state.clone(), params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
         }
         "cohost.settings.set" => {
             match serde_json::from_value::<protocol::CohostSettingsPatch>(command.params) {
