@@ -619,18 +619,63 @@ describe('Power-ups and channel point redemptions (plan 162)', () => {
     })
   })
 
+  it('names a Custom Power-up by its own title (plan 163)', () => {
+    const custom = (title?: string) =>
+      activityItems([
+        row(
+          'twitch',
+          'cat_fan',
+          'power-up',
+          { kind: 'power-up', bits: 500, powerUp: 'custom', ...(title ? { title } : {}) },
+          'cat_fan used Meow, Mao'
+        )
+      ])[0]
+    expect(custom('Meow, Mao')).toMatchObject({
+      filter: 'tips',
+      line: 'Used Meow, Mao · 500 bits',
+      short: 'Meow, Mao · 500 bits'
+    })
+    expect(custom()).toMatchObject({
+      line: 'Used a Power-up · 500 bits',
+      short: 'Power-up · 500 bits'
+    })
+  })
+
   it("lists a redemption under Rewards with the viewer's words", () => {
     expect(activityItems([hydrate])[0]).toMatchObject({
       kind: 'redemption',
       filter: 'rewards',
       line: 'Redeemed Hydrate · 500 points',
-      short: 'Hydrate',
+      short: 'Hydrate · 500 points',
       message: 'drink water orc'
     })
     expect(activityItems([unlock])[0]).toMatchObject({
       line: 'Unlocked orcdevLURK · 2,000 points',
-      short: 'Unlocked orcdevLURK'
+      short: 'Unlocked orcdevLURK · 2,000 points'
     })
+  })
+
+  it("names the points the channel's own way (plan 163)", () => {
+    const named = (pointsName: string, channelPoints = 500) =>
+      activityItems([
+        {
+          ...hydrate,
+          details: {
+            kind: 'redemption',
+            reward: 'custom',
+            channelPoints,
+            title: 'Hydrate',
+            pointsName
+          }
+        }
+      ])[0]
+    expect(named('Orc Gold')).toMatchObject({
+      line: 'Redeemed Hydrate · 500 Orc Gold',
+      short: 'Hydrate · 500 Orc Gold'
+    })
+    expect(named('Diamonds', 1500).line).toBe('Redeemed Hydrate · 1,500 Diamonds')
+    // A blank name is Twitch's default.
+    expect(named('  ').line).toBe('Redeemed Hydrate · 500 points')
   })
 
   it('counts Power-up bits with cheers and never sums points (D3)', () => {

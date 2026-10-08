@@ -4727,16 +4727,25 @@ export type LiveChatEventDetails =
   /** A Twitch watch streak (plan 151): `streakCount` streams in a row.
    * `channelPointsAwarded` is what the viewer earned; kept, never shown. */
   | { kind: 'watch-streak'; streakCount: number; channelPointsAwarded?: number }
-  /** A Twitch Power-up paid with bits (plan 162); `emoteName` when gigantified. */
-  | { kind: 'power-up'; bits: number; powerUp: LiveChatPowerUpKind; emoteName?: string }
+  /** A Twitch Power-up paid with bits (plan 162); `emoteName` when
+   * gigantified, `title` a Custom Power-up's own name (plan 163). */
+  | {
+      kind: 'power-up'
+      bits: number
+      powerUp: LiveChatPowerUpKind
+      emoteName?: string
+      title?: string
+    }
   /** A Twitch channel point redemption (plan 162). `title` is a custom
-   * reward's; automatic rewards have none. */
+   * reward's; automatic rewards have none. `pointsName` is the channel's own
+   * name for its points ("Orc Gold", plan 163), absent for Twitch's default. */
   | {
       kind: 'redemption'
       reward: LiveChatRedemptionKind
       channelPoints: number
       title?: string
       emoteName?: string
+      pointsName?: string
     }
 
 /** The message a chat message replies to, when the platform threads replies. */

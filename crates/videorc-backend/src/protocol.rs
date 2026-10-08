@@ -6563,6 +6563,7 @@ mod tests {
                 bits: 50,
                 power_up: crate::live_chat::PowerUpKind::GigantifyAnEmote,
                 emote_name: Some("orcdevBONK".to_string()),
+                title: None,
             })
         );
         assert_eq!(messages[11].event_type, LiveChatEventType::Redemption);
@@ -6573,6 +6574,7 @@ mod tests {
                 channel_points: 500,
                 title: Some("Hydrate".to_string()),
                 emote_name: None,
+                points_name: Some("Orc Gold".to_string()),
             })
         );
         assert!(messages[0].author_affiliation.is_none());

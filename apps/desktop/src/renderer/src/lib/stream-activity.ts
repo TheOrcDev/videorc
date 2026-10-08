@@ -139,7 +139,8 @@ function powerUpName(details: PowerUpDetails): string {
     case 'message-effect':
       return 'Message effect'
     case 'custom':
-      return 'Power-up'
+      // A Custom Power-up's own name (plan 163): "Meow, Mao".
+      return details.title?.trim() || 'Power-up'
   }
 }
 
@@ -153,8 +154,10 @@ function powerUpLine(details: PowerUpDetails): string {
       return `${powerUpName(details)} · ${bits}`
     case 'message-effect':
       return `Sent a message effect · ${bits}`
-    case 'custom':
-      return `Used a Power-up · ${bits}`
+    case 'custom': {
+      const title = details.title?.trim()
+      return title ? `Used ${title} · ${bits}` : `Used a Power-up · ${bits}`
+    }
   }
 }
 
@@ -177,12 +180,28 @@ function redemptionName(details: RedemptionDetails): string {
   }
 }
 
-/** The redemption sentence: "Redeemed Hydrate · 500 points". */
+/** The points a redemption cost, in the channel's own currency (plan 163):
+ * "500 Orc Gold", or "500 points" where the channel kept Twitch's default. */
+function redemptionPoints(details: RedemptionDetails): string | null {
+  if (details.channelPoints <= 0) return null
+  const currency = details.pointsName?.trim()
+  return currency
+    ? `${details.channelPoints.toLocaleString()} ${currency}`
+    : plural(details.channelPoints, 'point', 'points')
+}
+
+/** The redemption sentence: "Redeemed Hydrate · 500 Orc Gold". */
 function redemptionLine(details: RedemptionDetails): string {
-  const points = plural(details.channelPoints, 'point', 'points')
   const name = redemptionName(details)
   const action = name.startsWith('Unlocked') ? name : `Redeemed ${name}`
-  return details.channelPoints > 0 ? `${action} · ${points}` : action
+  const points = redemptionPoints(details)
+  return points ? `${action} · ${points}` : action
+}
+
+/** A redemption at a glance, like a tip: "Hydrate · 500 Orc Gold". */
+function redemptionShort(details: RedemptionDetails): string {
+  const points = redemptionPoints(details)
+  return points ? `${redemptionName(details)} · ${points}` : redemptionName(details)
 }
 
 /** What a viewer typed with a Power-up or redemption: its fragments' text. */
@@ -431,7 +450,7 @@ function itemFromMessage(message: LiveChatMessage): ActivityItem | null {
         kind: 'redemption',
         filter: 'rewards',
         line: redemptionLine(details),
-        short: redemptionName(details),
+        short: redemptionShort(details),
         ...(words ? { message: words } : {})
       }
     }

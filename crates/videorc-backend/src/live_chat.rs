@@ -232,17 +232,22 @@ pub enum LiveChatEventDetails {
         channel_points_awarded: Option<u64>,
     },
     /// A Twitch Power-up paid with bits (plan 162). `emote_name` is the
-    /// gigantified emote, when there is one.
+    /// gigantified emote, when there is one; `title` is a Custom Power-up's
+    /// own name ("Meow, Mao", plan 163).
     #[serde(rename_all = "camelCase")]
     PowerUp {
         bits: u64,
         power_up: PowerUpKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         emote_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
     },
     /// A Twitch channel point redemption (plan 162). `title` is a custom
     /// reward's title; automatic rewards have none and the window names them.
-    /// `emote_name` is the emote an automatic reward unlocked.
+    /// `emote_name` is the emote an automatic reward unlocked. `points_name`
+    /// is what the channel calls its points ("Orc Gold", plan 163), absent
+    /// when the channel kept Twitch's default or the name could not be read.
     #[serde(rename_all = "camelCase")]
     Redemption {
         reward: RedemptionKind,
@@ -251,6 +256,8 @@ pub enum LiveChatEventDetails {
         title: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         emote_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        points_name: Option<String>,
     },
     /// A new follower. `handle` is the @-mentionable login (Twitch
     /// `user_login`, X and Kick `username`) when it differs from, or is
@@ -3718,6 +3725,7 @@ fn fake_events(
                     bits: 300,
                     power_up: PowerUpKind::Celebration,
                     emote_name: None,
+                    title: None,
                 },
                 "party_starter used a Celebration",
                 None,
@@ -3732,6 +3740,8 @@ fn fake_events(
                         channel_points: 500,
                         title: Some("Hydrate".to_string()),
                         emote_name: None,
+                        // Plan 163: a channel's own name for its points.
+                        points_name: Some("Diamonds".to_string()),
                     },
                     "hydration_hero redeemed Hydrate",
                     None,

@@ -538,7 +538,8 @@ try {
       powerUp.details.powerUp !== 'celebration' ||
       redemption?.eventType !== 'redemption' ||
       redemption.details.title !== 'Hydrate' ||
-      redemption.details.channelPoints !== 500
+      redemption.details.channelPoints !== 500 ||
+      redemption.details.pointsName !== 'Diamonds'
     ) {
       throw new Error(`Twitch Power-up or redemption row missing: ${JSON.stringify(eventRows)}`)
     }
