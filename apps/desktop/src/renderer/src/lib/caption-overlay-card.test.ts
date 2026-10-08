@@ -407,7 +407,9 @@ describe('renderCommentHighlightCards X mark and verified check (plan 167)', () 
       expect(loaded, verified).toEqual([X_LOGO_WHITE_URL, X_VERIFIED_URL[verified]])
       const checks = calls.filter((call) => call.method === 'drawImage' && call.args[0] === check)
       expect(checks, verified).toHaveLength(2)
-      const nameCall = calls.find((call) => call.method === 'fillText' && call.args[0] === 'Orc Dev')
+      const nameCall = calls.find(
+        (call) => call.method === 'fillText' && call.args[0] === 'Orc Dev'
+      )
       const marks = calls.filter((call) => call.method === 'drawImage' && call.args[0] === mark)
       for (const [index, { args }] of checks.entries()) {
         const [x, , width, height] = args.slice(1).map(Number)

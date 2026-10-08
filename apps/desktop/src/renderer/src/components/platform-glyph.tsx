@@ -70,12 +70,7 @@ export function PlatformGlyph({
         role="img"
         aria-label="X"
       >
-        <img
-          alt=""
-          className="size-6 dark:hidden"
-          draggable={false}
-          src={X_LOCKUP_URL.light}
-        />
+        <img alt="" className="size-6 dark:hidden" draggable={false} src={X_LOCKUP_URL.light} />
         <img
           alt=""
           className="hidden size-6 dark:block"

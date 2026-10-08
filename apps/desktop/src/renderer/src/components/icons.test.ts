@@ -172,7 +172,10 @@ describe('semantic icon registry', () => {
     const markup = (props: AppIconProps = {}): string =>
       renderToStaticMarkup(createElement(XPlatformIcon, props))
     const html = markup({ className: 'size-5 text-foreground', weight: 'fill' })
-    const kitFile = await readFile(new URL('../assets/brand/x/x-logo-white.svg', import.meta.url), 'utf8')
+    const kitFile = await readFile(
+      new URL('../assets/brand/x/x-logo-white.svg', import.meta.url),
+      'utf8'
+    )
     const kitPath = /<path d="([^"]+)"/.exec(kitFile)?.[1]
     expect(kitPath).toBe(X_MARK_PATH)
     expect(html.match(/<path /g)).toHaveLength(1)

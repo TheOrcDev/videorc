@@ -34,7 +34,11 @@ function xMessage(authorVerified?: LiveChatAuthorVerified): LiveChatMessage {
 
 function row(message: LiveChatMessage): string {
   return renderToStaticMarkup(
-    createElement(CommentRow, { highlight: { phase: 'idle' }, message, onHighlight: () => undefined })
+    createElement(CommentRow, {
+      highlight: { phase: 'idle' },
+      message,
+      onHighlight: () => undefined
+    })
   )
 }
 
