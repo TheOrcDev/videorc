@@ -11,7 +11,7 @@ import {
 // ordered currency rows and every accounting value remain unchanged.
 function fakeActivityWireTotals() {
   return JSON.parse(
-    '{"bits":1500,"chatters":7,"follows":2,"messageCount":14,"raids":1,"status":"available","supporters":7,"tips":[{"amountMicros":5000000,"currency":"USD"},{"amountMicros":2000000,"currency":"EUR"}]}'
+    '{"bits":1800,"chatters":7,"follows":2,"messageCount":16,"raids":1,"status":"available","supporters":7,"tips":[{"amountMicros":5000000,"currency":"USD"},{"amountMicros":2000000,"currency":"EUR"}]}'
   )
 }
 
@@ -27,9 +27,9 @@ test('normalized fake activity accounting accepts the equivalent fixture propert
 
 for (const [field, value] of [
   ['status', 'legacy-unavailable'],
-  ['messageCount', 13],
+  ['messageCount', 15],
   ['supporters', 6],
-  ['bits', 1499],
+  ['bits', 1799],
   ['follows', 1],
   ['raids', 0],
   ['chatters', 6]
@@ -167,7 +167,9 @@ const activityKinds = [
   'super-sticker',
   'membership',
   'kicks',
-  'watch-streak'
+  'watch-streak',
+  'power-up',
+  'redemption'
 ]
 
 function activityReceipts(sessionId = 'owned-activity') {
@@ -190,7 +192,9 @@ function activityReceipts(sessionId = 'owned-activity') {
     ['youtube', 'fake-event-super-sticker', 'super-sticker'],
     ['youtube', 'fake-event-membership', 'membership'],
     ['twitch', 'fake-event-watch-streak', 'watch-streak'],
-    ['twitch', 'fake-event-follow', 'follow']
+    ['twitch', 'fake-event-follow', 'follow'],
+    ['twitch', 'fake-event-channel.bits.use:power_up', 'power-up'],
+    ['twitch', 'fake-event-channel.channel_points_custom_reward_redemption.add', 'redemption']
   ].map(([platform, providerMessageId, kind]) => ({
     id: `${sessionId}:${platform}:${destinations[platform]}:${providerMessageId}`,
     sessionId,
@@ -277,7 +281,7 @@ for (const substitute of [
 ]) {
   test(`fake activity receipts keep totals pending with the last follow ${substitute}`, async () => {
     const rows = activityReceipts()
-    const initial = rows.slice(0, 13)
+    const initial = rows.slice(0, 15)
     if (substitute === 'foreign-session') initial.push(activityReceipts('foreign-activity').at(-1))
     if (substitute === 'duplicate-id') initial.push({ ...initial[0] })
     if (substitute === 'missing-id') initial.push({ ...initial[0], id: undefined })
@@ -298,7 +302,7 @@ for (const substitute of [
       new Set(
         finished.rows.map((row) => row.id).filter((id) => typeof id === 'string' && id.length > 0)
       ).size,
-      14
+      16
     )
     assert.ok(finished.rows.every((row) => row.sessionId === 'owned-activity'))
     assert.equal(finished.admissions, 1)
@@ -345,7 +349,7 @@ test('incomplete activity deadline preserves the original rejection object witho
   assert.equal(finished.waitArguments.timeoutMs, 90_000)
 })
 
-test('fourteen distinct owned receipts still require every original activity kind', async () => {
+test('sixteen distinct owned receipts still require every original activity kind', async () => {
   const rows = activityReceipts().map((row) =>
     row.details?.kind === 'raid' ? { ...row, details: undefined } : row
   )
@@ -360,7 +364,7 @@ test('fourteen distinct owned receipts still require every original activity kin
     finished = await fixture.finish()
   }
   assert.equal(finished.producerJoined && finished.ownerJoined, true)
-  assert.equal(new Set(rows.map((row) => row.id)).size, 14)
+  assert.equal(new Set(rows.map((row) => row.id)).size, 16)
   assert.deepEqual(observed, { pending: true, admissions: 0 })
   assert.equal(finished.error, deadlineError)
   assert.equal(finished.admissions, 0)
@@ -377,9 +381,9 @@ test('complete activity receipts still reject incorrect settled accounting', asy
   }
   assert.equal(finished.producerJoined && finished.ownerJoined, true)
   assert.equal(finished.error, undefined)
-  assert.equal(finished.rows.length, 14)
+  assert.equal(finished.rows.length, 16)
   const incorrect = fakeActivityWireTotals()
-  incorrect.messageCount = 13
+  incorrect.messageCount = 15
   assert.throws(() => assertFakeActivityTotals(incorrect), /accounting disagreed/)
 })
 

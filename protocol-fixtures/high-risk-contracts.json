@@ -489,6 +489,52 @@
         "eventType": "message",
         "isDeleted": false,
         "rawProviderType": "channel.chat.message"
+      },
+      {
+        "id": "session-fixture:twitch:bits:power-up-1",
+        "providerMessageId": "bits:power-up-1",
+        "platform": "twitch",
+        "sessionId": "session-fixture",
+        "authorId": "1010",
+        "authorName": "GVASTE",
+        "authorBadges": [],
+        "authorRoles": [],
+        "publishedAt": "2026-09-24T10:09:00Z",
+        "receivedAt": "2026-09-24T10:09:00.010Z",
+        "messageText": "GVASTE gigantified orcdevBONK",
+        "fragments": [],
+        "eventType": "power-up",
+        "isDeleted": false,
+        "rawProviderType": "channel.bits.use:power_up",
+        "details": {
+          "kind": "power-up",
+          "bits": 50,
+          "powerUp": "gigantify-an-emote",
+          "emoteName": "orcdevBONK"
+        }
+      },
+      {
+        "id": "session-fixture:twitch:redemption:redemption-1",
+        "providerMessageId": "redemption:redemption-1",
+        "platform": "twitch",
+        "sessionId": "session-fixture",
+        "authorId": "1011",
+        "authorName": "Von6",
+        "authorBadges": [],
+        "authorRoles": [],
+        "publishedAt": "2026-09-24T10:10:00Z",
+        "receivedAt": "2026-09-24T10:10:00.010Z",
+        "messageText": "Von6 redeemed Hydrate",
+        "fragments": [{ "type": "text", "text": "drink water orc" }],
+        "eventType": "redemption",
+        "isDeleted": false,
+        "rawProviderType": "channel.channel_points_custom_reward_redemption.add",
+        "details": {
+          "kind": "redemption",
+          "reward": "custom",
+          "channelPoints": 500,
+          "title": "Hydrate"
+        }
       }
     ]
   },

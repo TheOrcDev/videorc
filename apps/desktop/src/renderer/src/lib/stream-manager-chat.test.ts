@@ -50,12 +50,24 @@ const messages = [
   message('1', 'twitch', 'hello @OrcDev, love the setup'),
   message('2', 'youtube', 'which mic is that?'),
   message('3', 'x', 'first time here'),
-  message('4', 'twitch', 'Cool_User followed', { eventType: 'follow', details: { kind: 'follow' } })
+  message('4', 'twitch', 'Cool_User followed', {
+    eventType: 'follow',
+    details: { kind: 'follow' }
+  }),
+  // Plan 162: Power-ups and redemptions are Activity only, like follows.
+  message('5', 'twitch', 'GVASTE used a Celebration', {
+    eventType: 'power-up',
+    details: { kind: 'power-up', bits: 300, powerUp: 'celebration' }
+  }),
+  message('6', 'twitch', 'Von6 redeemed Hydrate', {
+    eventType: 'redemption',
+    details: { kind: 'redemption', reward: 'custom', channelPoints: 500, title: 'Hydrate' }
+  })
 ]
 const context = { questionMessageIds: new Set(['2']), mentionNames: ['OrcDev'] }
 
 describe('Stream Manager chat pane', () => {
-  it('never lists follows, and filters by platform, question, mention and search', () => {
+  it('never lists follows, Power-ups or redemptions, and filters by platform, question, mention and search', () => {
     const ids = (filter: ChatPaneFilter): string[] =>
       chatPaneMessages(messages, filter, context).map((row) => row.id)
     expect(ids(all)).toEqual(['1', '2', '3'])

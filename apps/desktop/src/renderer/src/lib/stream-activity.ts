@@ -26,16 +26,30 @@ export type ActivityKind =
   | 'raid'
   | 'watch-streak'
   | 'announcement'
+  | 'power-up'
+  | 'redemption'
   | 'destination-failed'
   | 'destination-recovered'
 
 /** The pane's filter chips. Announcements show only under All. */
-export type ActivityFilter = 'follows' | 'support' | 'tips' | 'raids' | 'streaks' | 'destinations'
+export type ActivityFilter =
+  | 'follows'
+  | 'support'
+  | 'tips'
+  | 'rewards'
+  | 'raids'
+  | 'streaks'
+  | 'destinations'
 
 export const ACTIVITY_FILTERS: readonly { id: ActivityFilter; label: string; title: string }[] = [
   { id: 'follows', label: 'Follows', title: 'New followers' },
   { id: 'support', label: 'Subs', title: 'Subs, gifts and memberships' },
-  { id: 'tips', label: 'Tips', title: 'Bits, KICKs, Super Chats and Super Stickers' },
+  {
+    id: 'tips',
+    label: 'Tips',
+    title: 'Bits, Power-ups, KICKs, Super Chats and Super Stickers'
+  },
+  { id: 'rewards', label: 'Rewards', title: 'Channel point redemptions' },
   { id: 'raids', label: 'Raids', title: 'Raids into your channel' },
   { id: 'streaks', label: 'Streaks', title: 'Viewers who watched several streams in a row' },
   { id: 'destinations', label: 'Destinations', title: 'A destination failed or came back' }
@@ -112,6 +126,73 @@ export function formatMicros(amountMicros: number, currency: string): string {
 
 type SubscriptionDetails = Extract<LiveChatEventDetails, { kind: 'subscription' }>
 type MembershipDetails = Extract<LiveChatEventDetails, { kind: 'membership' }>
+type PowerUpDetails = Extract<LiveChatEventDetails, { kind: 'power-up' }>
+type RedemptionDetails = Extract<LiveChatEventDetails, { kind: 'redemption' }>
+
+/** A Power-up at a glance (plan 162): "Celebration", "Gigantified orcdevBONK". */
+function powerUpName(details: PowerUpDetails): string {
+  switch (details.powerUp) {
+    case 'celebration':
+      return 'Celebration'
+    case 'gigantify-an-emote':
+      return details.emoteName ? `Gigantified ${details.emoteName}` : 'Gigantified an emote'
+    case 'message-effect':
+      return 'Message effect'
+    case 'custom':
+      return 'Power-up'
+  }
+}
+
+/** The Power-up sentence: "Used a Celebration · 300 bits". */
+function powerUpLine(details: PowerUpDetails): string {
+  const bits = plural(details.bits, 'bit', 'bits')
+  switch (details.powerUp) {
+    case 'celebration':
+      return `Used a Celebration · ${bits}`
+    case 'gigantify-an-emote':
+      return `${powerUpName(details)} · ${bits}`
+    case 'message-effect':
+      return `Sent a message effect · ${bits}`
+    case 'custom':
+      return `Used a Power-up · ${bits}`
+  }
+}
+
+/** What a redemption got (plan 162): a custom reward's title, or Twitch's
+ * automatic reward named in a few words. */
+function redemptionName(details: RedemptionDetails): string {
+  switch (details.reward) {
+    case 'custom':
+      return details.title?.trim() || 'a reward'
+    case 'highlighted-message':
+      return 'Highlighted message'
+    case 'sub-only-message':
+      return 'Message in sub-only mode'
+    case 'random-emote-unlock':
+    case 'chosen-emote-unlock':
+    case 'modified-emote-unlock':
+      return details.emoteName ? `Unlocked ${details.emoteName}` : 'Unlocked an emote'
+    case 'other':
+      return 'a reward'
+  }
+}
+
+/** The redemption sentence: "Redeemed Hydrate · 500 points". */
+function redemptionLine(details: RedemptionDetails): string {
+  const points = plural(details.channelPoints, 'point', 'points')
+  const name = redemptionName(details)
+  const action = name.startsWith('Unlocked') ? name : `Redeemed ${name}`
+  return details.channelPoints > 0 ? `${action} · ${points}` : action
+}
+
+/** What a viewer typed with a Power-up or redemption: its fragments' text. */
+function activityWords(message: LiveChatMessage): string | undefined {
+  const words = message.fragments
+    .map((fragment) => fragment.text)
+    .join('')
+    .trim()
+  return words || undefined
+}
 
 function subscriptionLine(details: SubscriptionDetails): string {
   const tier = subscriptionTierLabel(details.tier, details.isPrime)
@@ -330,6 +411,30 @@ function itemFromMessage(message: LiveChatMessage): ActivityItem | null {
         short: 'Announcement',
         ...(message.messageText.trim() ? { message: message.messageText.trim() } : {})
       }
+    // Plan 162: Power-ups are bits, so they sit under Tips; redemptions are
+    // loyalty, under Rewards.
+    case 'power-up': {
+      const words = activityWords(message)
+      return {
+        ...base,
+        kind: 'power-up',
+        filter: 'tips',
+        line: powerUpLine(details),
+        short: `${powerUpName(details)} · ${plural(details.bits, 'bit', 'bits')}`,
+        ...(words ? { message: words } : {})
+      }
+    }
+    case 'redemption': {
+      const words = activityWords(message)
+      return {
+        ...base,
+        kind: 'redemption',
+        filter: 'rewards',
+        line: redemptionLine(details),
+        short: redemptionName(details),
+        ...(words ? { message: words } : {})
+      }
+    }
   }
 }
 
@@ -468,6 +573,7 @@ export function activityTotals(messages: readonly LiveChatMessage[]): ActivityTo
         totals.supporters += supportersFrom(details)
         break
       case 'cheer':
+      case 'power-up':
         totals.bits += details.bits
         break
       // Listed per gift in Activity, never summed (plan 066).
@@ -480,8 +586,10 @@ export function activityTotals(messages: readonly LiveChatMessage[]): ActivityTo
       case 'raid':
         totals.raids += 1
         break
-      // Loyalty, not support: listed in Activity, never summed (plan 151, D4).
+      // Loyalty, not support: listed in Activity, never summed (plan 151, D4;
+      // plan 162, D3).
       case 'watch-streak':
+      case 'redemption':
       case 'announcement':
         break
     }
@@ -500,6 +608,7 @@ export function activityFilterCounts(
     follows: 0,
     support: 0,
     tips: 0,
+    rewards: 0,
     raids: 0,
     streaks: 0,
     destinations: 0
@@ -560,7 +669,10 @@ export function thankYouDraft(item: ActivityItem): string {
     case 'kicks':
     case 'super-chat':
     case 'super-sticker':
+    case 'power-up':
       return `Thank you so much, ${name}!`
+    case 'redemption':
+      return `Thanks for redeeming, ${name}!`
     case 'raid':
       return `Thanks for the raid, ${name}! Welcome in, everyone!`
     case 'watch-streak':

@@ -587,7 +587,9 @@ describe('Orcle tab: Voice commands (plan 140, S6 part A)', () => {
       optionalScopes: [
         'moderator:read:followers',
         'channel:read:subscriptions',
-        'moderator:manage:chat_messages'
+        'moderator:manage:chat_messages',
+        'bits:read',
+        'channel:read:redemptions'
       ]
     })
     await act(async () => rows[2].querySelector('button')!.click())

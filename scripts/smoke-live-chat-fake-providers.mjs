@@ -441,7 +441,9 @@ try {
       'super-sticker',
       'membership',
       'kicks',
-      'watch-streak'
+      'watch-streak',
+      'power-up',
+      'redemption'
     ]
     const eventRows = await waitForFakeActivityReceipts({
       eventMessages,
@@ -527,6 +529,19 @@ try {
     ) {
       throw new Error(`Twitch watch streak row missing: ${JSON.stringify(eventRows)}`)
     }
+    // Plan 162: Activity-only Power-up and redemption rows keep their facts.
+    const powerUp = eventRows.find((message) => message.details?.kind === 'power-up')
+    const redemption = eventRows.find((message) => message.details?.kind === 'redemption')
+    if (
+      powerUp?.eventType !== 'power-up' ||
+      powerUp.details.bits !== 300 ||
+      powerUp.details.powerUp !== 'celebration' ||
+      redemption?.eventType !== 'redemption' ||
+      redemption.details.title !== 'Hydrate' ||
+      redemption.details.channelPoints !== 500
+    ) {
+      throw new Error(`Twitch Power-up or redemption row missing: ${JSON.stringify(eventRows)}`)
+    }
     await waitFor(
       () =>
         audience.payloads.some((snapshot) =>
@@ -584,7 +599,7 @@ try {
         }
       ]
     })
-    const rolledTotals = await waitForSessionTotals(ws, eventsSessionId, 6015, timeoutMs)
+    const rolledTotals = await waitForSessionTotals(ws, eventsSessionId, 6017, timeoutMs)
     if (
       rolledTotals.supporters !== eventTotals.supporters ||
       rolledTotals.bits !== eventTotals.bits ||

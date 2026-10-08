@@ -4640,6 +4640,29 @@ export type LiveChatEventType =
   | 'deleted'
   | 'moderation'
   | 'follow'
+  /** Activity-only Twitch rows (plan 162): never listed in chat. */
+  | 'power-up'
+  | 'redemption'
+
+/** Event types listed in Activity and never in the chat list: follows, Twitch
+ * Power-ups and channel point redemptions (plan 162). */
+export function isActivityOnlyEvent(eventType: LiveChatEventType): boolean {
+  return eventType === 'follow' || eventType === 'power-up' || eventType === 'redemption'
+}
+
+/** Which Twitch Power-up a viewer paid bits for (plan 162). */
+export type LiveChatPowerUpKind = 'celebration' | 'gigantify-an-emote' | 'message-effect' | 'custom'
+
+/** Which channel point reward a viewer redeemed (plan 162). */
+export type LiveChatRedemptionKind =
+  | 'custom'
+  | 'highlighted-message'
+  | 'sub-only-message'
+  | 'random-emote-unlock'
+  | 'chosen-emote-unlock'
+  | 'modified-emote-unlock'
+  /** An automatic reward Twitch added after this build. */
+  | 'other'
 
 export type LiveChatMembershipKind = 'new' | 'upgrade' | 'milestone' | 'gift' | 'gift-received'
 
@@ -4702,6 +4725,17 @@ export type LiveChatEventDetails =
   /** A Twitch watch streak (plan 151): `streakCount` streams in a row.
    * `channelPointsAwarded` is what the viewer earned; kept, never shown. */
   | { kind: 'watch-streak'; streakCount: number; channelPointsAwarded?: number }
+  /** A Twitch Power-up paid with bits (plan 162); `emoteName` when gigantified. */
+  | { kind: 'power-up'; bits: number; powerUp: LiveChatPowerUpKind; emoteName?: string }
+  /** A Twitch channel point redemption (plan 162). `title` is a custom
+   * reward's; automatic rewards have none. */
+  | {
+      kind: 'redemption'
+      reward: LiveChatRedemptionKind
+      channelPoints: number
+      title?: string
+      emoteName?: string
+    }
 
 /** The message a chat message replies to, when the platform threads replies. */
 export interface LiveChatReply {
@@ -5863,6 +5897,9 @@ export interface PlatformAudience {
   subscriberPoints?: number
   /** Twitch only: false when follow alerts and the sub count need a reconnect. */
   audienceScopes?: boolean
+  /** Twitch only: false when Power-ups and channel point redemptions need a
+   * reconnect (plan 162). */
+  bitsPointsScopes?: boolean
   /** Followers gained this stream, one per read that set a new high, oldest first. */
   followerGains?: FollowerGain[]
   /** Since when a follow event subscription names each new follower (plan

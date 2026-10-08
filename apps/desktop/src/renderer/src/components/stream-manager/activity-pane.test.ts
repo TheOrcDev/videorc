@@ -211,6 +211,46 @@ describe('ActivityPane Show who followed', () => {
   })
 })
 
+// Plan 162: Power-ups and channel points ask once, above the rows.
+describe('ActivityPane Power-ups and channel points permission', () => {
+  const render = (bitsPointsScopes: boolean | undefined, withAction: boolean) =>
+    renderToStaticMarkup(
+      createElement(ActivityPane, {
+        items: [],
+        providers: [provider('twitch')],
+        nowMs: Date.parse('2026-09-24T10:01:00Z'),
+        audience: {
+          sessionId: 's',
+          updatedAt: '2026-09-24T10:00:00Z',
+          platforms: [
+            {
+              platform: 'twitch',
+              metric: 'followers',
+              capability: 'available',
+              audienceScopes: true,
+              ...(bitsPointsScopes === undefined ? {} : { bitsPointsScopes })
+            }
+          ]
+        },
+        ...(withAction ? { onShowFollowNames: () => undefined } : {})
+      })
+    )
+
+  it('asks for the permission while Twitch lacks it', () => {
+    const markup = render(false, true)
+    expect(markup).toContain('data-slot="activity-bits-points"')
+    expect(markup).toContain('Power-ups and channel points need one more Twitch permission.')
+    expect(markup).toContain('Reconnect Twitch')
+    expect(markup).not.toContain('bits:read')
+  })
+
+  it('stays quiet once granted, before the backend knows, or when the window cannot act', () => {
+    expect(render(true, true)).not.toContain('activity-bits-points')
+    expect(render(undefined, true)).not.toContain('activity-bits-points')
+    expect(render(false, false)).not.toContain('activity-bits-points')
+  })
+})
+
 // Plan 071, S4: X names followers while its follow subscription is live.
 describe('activityCapabilityNote for X', () => {
   const note = (namedFollowsSince?: string, namedFollowsUntil?: string) =>

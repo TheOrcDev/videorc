@@ -1511,6 +1511,8 @@ mod tests {
             LiveChatEventType::System,
             LiveChatEventType::Moderation,
             LiveChatEventType::Follow,
+            LiveChatEventType::PowerUp,
+            LiveChatEventType::Redemption,
         ] {
             let mut notice = message(StreamPlatform::Twitch, 6);
             notice.event_type = event_type;

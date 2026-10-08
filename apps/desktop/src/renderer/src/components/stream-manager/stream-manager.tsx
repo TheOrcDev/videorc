@@ -49,6 +49,7 @@ import type {
   ScopeReconnectPlatform,
   ViewerSample
 } from '@/lib/backend'
+import { isActivityOnlyEvent } from '@/lib/backend'
 import type { ChatSendFailure } from '@/lib/chat-send'
 import { useCohostSensitivity } from '@/hooks/use-cohost-sensitivity'
 import { cohostGroupedDeltaFlash } from '@/lib/cohost-presence'
@@ -511,7 +512,7 @@ export function StreamManager({
     inHistory ? undefined : snapshot.delivery,
     arrivalKey,
     chatVisible,
-    (message) => message.eventType !== 'follow'
+    (message) => !isActivityOnlyEvent(message.eventType)
   )
   const communityGifts = new Set([
     ...messages.flatMap((message) =>
@@ -535,12 +536,15 @@ export function StreamManager({
     (message) => chatDeliveryActivityMatches(message, communityGifts),
     inHistory ? [] : items.filter((item) => !item.messageId).map((item) => item.id)
   )
-  // A follow on stream has no chat row to say so (plan 095, D1): while
-  // Activity sits behind a tab, its tab carries the success dot.
+  // A follow, Power-up or redemption on stream has no chat row to say so
+  // (plan 095, D1; plan 162): while Activity sits behind a tab, its tab
+  // carries the success dot.
   const activityOnStream =
     !activityVisible &&
     liveHighlightId !== null &&
-    messages.some((message) => message.id === liveHighlightId && message.eventType === 'follow')
+    messages.some(
+      (message) => message.id === liveHighlightId && isActivityOnlyEvent(message.eventType)
+    )
   const orcleUnseen = useUnseen(
     undefined,
     `${arrivalKey}:${cohostSensitivity}`,

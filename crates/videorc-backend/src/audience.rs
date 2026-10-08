@@ -99,6 +99,11 @@ pub struct PlatformAudience {
     /// reconnect when this is false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audience_scopes: Option<bool>,
+    /// Twitch only: whether the account granted the opt-in scopes for
+    /// Power-ups and channel point redemptions in Activity (plan 162). The
+    /// window offers the reconnect when this is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bits_points_scopes: Option<bool>,
     /// Followers gained this stream, one entry per read that rose above the
     /// session's highest total, oldest first. X never says who followed and
     /// Twitch only does with the opt-in scope, so Activity lists these.
@@ -241,6 +246,7 @@ impl AudienceHub {
                     subscribers: None,
                     subscriber_points: None,
                     audience_scopes: None,
+                    bits_points_scopes: None,
                     follower_gains: Vec::new(),
                     named_follows_since: self
                         .pending_named_follows
@@ -348,12 +354,13 @@ impl AudienceHub {
     }
 
     /// Records whether a platform's account holds the opt-in audience
-    /// scopes. Returns the snapshot to emit when that changed.
+    /// scopes, and the Power-up and channel point scopes (plan 162). Returns
+    /// the snapshot to emit when either changed.
     pub fn apply_audience_scopes(
         &mut self,
         session_id: &str,
         platform: StreamPlatform,
-        granted: bool,
+        granted: TwitchActivityScopes,
         now: &str,
     ) -> Option<AudienceSnapshot> {
         let snapshot = self
@@ -364,10 +371,13 @@ impl AudienceHub {
             .platforms
             .iter_mut()
             .find(|entry| entry.platform == platform)?;
-        if entry.audience_scopes == Some(granted) {
+        if entry.audience_scopes == Some(granted.audience)
+            && entry.bits_points_scopes == Some(granted.bits_points)
+        {
             return None;
         }
-        entry.audience_scopes = Some(granted);
+        entry.audience_scopes = Some(granted.audience);
+        entry.bits_points_scopes = Some(granted.bits_points);
         snapshot.updated_at = now.to_string();
         Some(snapshot.clone())
     }
@@ -783,8 +793,16 @@ pub async fn fetch_x_followers_oauth1(
 struct SourceRead {
     reading: AudienceReading,
     subscribers: Option<SubscriberCount>,
-    /// Twitch: whether both opt-in audience scopes are granted.
-    audience_scopes: Option<bool>,
+    /// Twitch: which opt-in Activity scopes are granted.
+    audience_scopes: Option<TwitchActivityScopes>,
+}
+
+/// Which of a Twitch account's opt-in Activity scopes are granted: follow
+/// alerts and the sub count, and Power-ups and channel points (plan 162).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TwitchActivityScopes {
+    pub audience: bool,
+    pub bits_points: bool,
 }
 
 impl From<AudienceReading> for SourceRead {
@@ -912,8 +930,14 @@ async fn read_source(
             Err(error) => return token_error_reading(source.platform, &error).into(),
         }
     }
-    let audience_scopes = (source.platform == StreamPlatform::Twitch)
-        .then(|| twitch_audience_scopes_granted(&credential.account.scopes));
+    let audience_scopes =
+        (source.platform == StreamPlatform::Twitch).then(|| TwitchActivityScopes {
+            audience: twitch_audience_scopes_granted(&credential.account.scopes),
+            bits_points: twitch_scopes_granted(
+                crate::oauth::TWITCH_BITS_POINTS_SCOPES,
+                &credential.account.scopes,
+            ),
+        });
     SourceRead {
         subscribers: read_twitch_subscribers(client, source.platform, &credential, &token).await,
         reading,
@@ -925,7 +949,11 @@ async fn read_source(
 /// audience scopes, never every optional scope. Plan 140 made the moderation
 /// scope optional too, and an account without it must still name followers.
 fn twitch_audience_scopes_granted(scopes: &[String]) -> bool {
-    crate::oauth::TWITCH_AUDIENCE_SCOPES
+    twitch_scopes_granted(crate::oauth::TWITCH_AUDIENCE_SCOPES, scopes)
+}
+
+fn twitch_scopes_granted(wanted: &[&str], scopes: &[String]) -> bool {
+    wanted
         .iter()
         .all(|scope| scopes.iter().any(|held| held == scope))
 }
@@ -1790,6 +1818,16 @@ mod tests {
         assert!(
             !crate::oauth::TWITCH_AUDIENCE_SCOPES.contains(&crate::oauth::TWITCH_MODERATION_SCOPE)
         );
+        // Plan 162: Power-ups and channel points are their own pair, apart
+        // from the audience scopes.
+        let bits_points = crate::oauth::TWITCH_BITS_POINTS_SCOPES;
+        assert!(twitch_scopes_granted(bits_points, &scopes(bits_points)));
+        assert!(!twitch_scopes_granted(
+            bits_points,
+            &scopes(&[crate::oauth::TWITCH_BITS_SCOPE])
+        ));
+        assert!(!twitch_scopes_granted(bits_points, &scopes(&audience)));
+        assert!(twitch_audience_scopes_granted(&scopes(&audience)));
     }
 
     fn test_state() -> AppState {

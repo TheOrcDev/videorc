@@ -859,8 +859,20 @@ describe('shared high-risk protocol fixture', () => {
   })
 
   it('loads chat rows with and without structured event details', () => {
-    const [plain, cheer, resub, raid, superChat, follow, kicks, affiliated, streak, gif] =
-      fixtures.comments.eventMessages
+    const [
+      plain,
+      cheer,
+      resub,
+      raid,
+      superChat,
+      follow,
+      kicks,
+      affiliated,
+      streak,
+      gif,
+      powerUp,
+      redemption
+    ] = fixtures.comments.eventMessages
     expect(
       'details' in plain ||
         'reply' in plain ||
@@ -884,6 +896,21 @@ describe('shared high-risk protocol fixture', () => {
       badgeUrl: 'https://pbs.twimg.com/profile_images/2/neon_normal.jpg',
       description: 'Neon',
       url: 'https://x.com/neondatabase'
+    })
+    // Plan 162: Activity-only Power-up and channel point rows.
+    expect(powerUp.eventType).toBe('power-up')
+    expect(powerUp.details).toEqual({
+      kind: 'power-up',
+      bits: 50,
+      powerUp: 'gigantify-an-emote',
+      emoteName: 'orcdevBONK'
+    })
+    expect(redemption.eventType).toBe('redemption')
+    expect(redemption.details).toEqual({
+      kind: 'redemption',
+      reward: 'custom',
+      channelPoints: 500,
+      title: 'Hydrate'
     })
     // Plan 155: a Twitch GIF is a plain message with one `gif` fragment.
     expect(gif.eventType).toBe('message')

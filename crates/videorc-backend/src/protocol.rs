@@ -6555,6 +6555,26 @@ mod tests {
             messages[9].fragments[0].image_url.as_deref(),
             Some("https://media2.giphy.com/media/aUovxH8Vf9qDu/giphy.gif")
         );
+        // Plan 162: Activity-only Twitch Power-up and channel point rows.
+        assert_eq!(messages[10].event_type, LiveChatEventType::PowerUp);
+        assert_eq!(
+            messages[10].details,
+            Some(LiveChatEventDetails::PowerUp {
+                bits: 50,
+                power_up: crate::live_chat::PowerUpKind::GigantifyAnEmote,
+                emote_name: Some("orcdevBONK".to_string()),
+            })
+        );
+        assert_eq!(messages[11].event_type, LiveChatEventType::Redemption);
+        assert_eq!(
+            messages[11].details,
+            Some(LiveChatEventDetails::Redemption {
+                reward: crate::live_chat::RedemptionKind::Custom,
+                channel_points: 500,
+                title: Some("Hydrate".to_string()),
+                emote_name: None,
+            })
+        );
         assert!(messages[0].author_affiliation.is_none());
         assert_eq!(
             messages[7]

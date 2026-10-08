@@ -1,9 +1,10 @@
 import type { LiveChatMessage, LiveChatProviderState, StreamPlatform } from '@/lib/backend'
+import { isActivityOnlyEvent } from '@/lib/backend'
 import { commentMentions } from '@/components/comment-row'
 
 // The Stream Manager's chat filters (plan 055, D3): platform, Orcle's
-// questions, mentions of the streamer, and search. Follows are activity and
-// never appear in chat.
+// questions, mentions of the streamer, and search. Follows, Power-ups and
+// channel point redemptions are activity and never appear in chat.
 
 export interface ChatPaneFilter {
   platform: StreamPlatform | 'all'
@@ -21,7 +22,7 @@ export function chatPaneMessages<
 ): T[] {
   const query = filter.search.trim().toLowerCase()
   return messages.filter((message) => {
-    if (message.eventType === 'follow') return false
+    if (isActivityOnlyEvent(message.eventType)) return false
     if (filter.platform !== 'all' && message.platform !== filter.platform) return false
     if (filter.questions && !context.questionMessageIds.has(message.id)) return false
     if (filter.mentions && !commentMentions(message, context.mentionNames)) return false
