@@ -147,3 +147,14 @@ describe('Greetings editor (plan 164 S-D5)', () => {
     })
   })
 })
+
+describe('Greetings rhythm (plan 168 S-02)', () => {
+  it('puts the Greet activity row in a grouped card, as a field', async () => {
+    await render([])
+    const card = document.querySelector('[data-slot="field-group"][data-variant="grouped"]')
+    expect(card).toBeTruthy()
+    expect(card!.children).toHaveLength(1)
+    expect(card!.children[0]!.getAttribute('data-slot')).toBe('field')
+    expect(card!.querySelector('#golem-greetings-enabled')).toBeTruthy()
+  })
+})

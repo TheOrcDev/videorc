@@ -300,7 +300,7 @@ function px(value: string): number {
 // Plan 168 S-00: the grouped card pads its rows by selecting the shadcn
 // `data-slot="field"`. Answers and Banter once replaced that slot with their
 // own and sat flush against the card's edges and the hairline above them.
-describe('grouped cards (plan 168 S-00)', () => {
+describe('grouped cards (plan 168 Phase 0)', () => {
   it('pads Answers and Banter exactly like Reply tone and Golem notes', async () => {
     await render(settings())
     const replies = [...document.querySelectorAll<HTMLElement>('[data-slot="panel-section"]')].find(
@@ -323,8 +323,12 @@ describe('grouped cards (plan 168 S-00)', () => {
     }
   })
 
-  it('keeps the shadcn slots on every grouped card and its rows', async () => {
+  it('keeps the shadcn slots on every grouped card and its rows, even with a save error', async () => {
+    patchCohostSettings.mockRejectedValue(new Error('Could not reach the backend.'))
     await render(settings())
+    await act(async () => (document.getElementById('cohost-listen') as HTMLButtonElement).click())
+    // The error shows under the listen card, never as an unpadded row in it.
+    expect(document.body.textContent).toContain('Could not reach the backend.')
     const cards = [...document.querySelectorAll<HTMLElement>('[data-variant="grouped"]')]
     // Listen (Live tab), Replies and Moderation (Chat tab).
     expect(cards).toHaveLength(3)

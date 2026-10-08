@@ -128,25 +128,31 @@ export function CohostListenField({
 } = {}): ReactElement | null {
   const { cohostSettings, locked, save, error } = useCohostSettingsSave(lockedByTab)
   if (!cohostSettings) return null
+  // The error sits under the card, as in Moderation: a row in a grouped card
+  // that is not a Field gets none of the card's padding (plan 168 S-02).
   return (
-    <FieldGroup variant="grouped">
-      <Field>
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex min-w-0 flex-col gap-0.5">
-            <FieldLabel htmlFor="cohost-listen">Golem hears you while you&apos;re live</FieldLabel>
-            <p className="text-xs text-muted-foreground">{COHOST_LISTEN_CONSENT_SENTENCE}</p>
-            <CohostListenAllowance />
+    <>
+      <FieldGroup variant="grouped">
+        <Field>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <FieldLabel htmlFor="cohost-listen">
+                Golem hears you while you&apos;re live
+              </FieldLabel>
+              <p className="text-xs text-muted-foreground">{COHOST_LISTEN_CONSENT_SENTENCE}</p>
+              <CohostListenAllowance />
+            </div>
+            <Switch
+              checked={cohostSettings.listen === true}
+              disabled={locked}
+              id="cohost-listen"
+              onCheckedChange={(listen) => save({ listen })}
+            />
           </div>
-          <Switch
-            checked={cohostSettings.listen === true}
-            disabled={locked}
-            id="cohost-listen"
-            onCheckedChange={(listen) => save({ listen })}
-          />
-        </div>
-      </Field>
+        </Field>
+      </FieldGroup>
       <SaveError error={error} />
-    </FieldGroup>
+    </>
   )
 }
 

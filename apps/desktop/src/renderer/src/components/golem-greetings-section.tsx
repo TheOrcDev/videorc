@@ -5,7 +5,7 @@ import { ChatPlatformIcon } from '@/components/chat-platform-icon'
 import { GroupedList, ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { Button } from '@/components/ui/button'
-import { Field, FieldDescription, FieldLabel } from '@/components/ui/field'
+import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Kbd } from '@/components/ui/kbd'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
@@ -84,23 +84,27 @@ export function GolemGreetingsSection(): ReactElement | null {
       description="What the Golem posts as you when chat does something, in your own words. Free. Greetings go out only in the modes you turn on in Stream Manager, at most six a minute per platform."
       title="Greetings"
     >
-      <Field>
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex min-w-0 flex-col gap-0.5">
-            <FieldLabel htmlFor="golem-greetings-enabled">Greet activity</FieldLabel>
-            <FieldDescription>
-              Follows, subs, cheers, raids and the rest, each with its own line.
-            </FieldDescription>
+      {/* A settings row sits in a grouped card like every Settings row (plan
+          168 S-02), so its label and switch line up with the templates'. */}
+      <FieldGroup variant="grouped">
+        <Field>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <FieldLabel htmlFor="golem-greetings-enabled">Greet activity</FieldLabel>
+              <FieldDescription>
+                Follows, subs, cheers, raids and the rest, each with its own line.
+              </FieldDescription>
+            </div>
+            <Switch
+              checked={autoChat.greetings.enabled}
+              id="golem-greetings-enabled"
+              onCheckedChange={(enabled) =>
+                save({ ...autoChat, greetings: { ...autoChat.greetings, enabled } })
+              }
+            />
           </div>
-          <Switch
-            checked={autoChat.greetings.enabled}
-            id="golem-greetings-enabled"
-            onCheckedChange={(enabled) =>
-              save({ ...autoChat, greetings: { ...autoChat.greetings, enabled } })
-            }
-          />
-        </div>
-      </Field>
+        </Field>
+      </FieldGroup>
       {templates.length === 0 ? (
         <div className="flex flex-wrap items-center gap-2" data-slot="golem-greetings-empty">
           <span className="text-xs text-subtle">No greetings yet.</span>

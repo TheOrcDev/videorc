@@ -457,4 +457,5 @@ Checks:
   greeting engine, the throttle (a 50-follow burst: one now, one collapsed at
   +10 s, the rest deduped), the lane and the bubble state machine.
 - `node scripts/capture-ui-pages.mjs` captures every page and opens the
-  Golem tab by its id `ai`.
+  Golem tab by its id `ai`; `--theme=light` or `--theme=dark` switches the
+  app first and adds the theme to every file name.
