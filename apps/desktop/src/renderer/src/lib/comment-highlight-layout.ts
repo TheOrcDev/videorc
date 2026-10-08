@@ -252,8 +252,28 @@ export interface HighlightTokenLayout {
   lines: HighlightLine[]
   cardWidthPx: number
   cardHeightPx: number
-  /** YouTube's icon closing the identity row on the right (plan 165). */
+  /** YouTube's or X's mark closing the identity row on the right (plans
+   * 165, 167). */
   platformMark: HighlightPlatformMarkSize | null
+  /** X's verified check right after the name (plan 167). */
+  verifiedMark: HighlightVerifiedMarkSize | null
+  /** The fitted name's painted width, where the verified check starts. */
+  nameWidthPx: number
+}
+
+export interface HighlightVerifiedMarkSize {
+  sizePx: number
+  /** Space between the name and the check. */
+  gapPx: number
+}
+
+/** X's verified check on the card, in output pixels: the name's size, never
+ * under 16 px (the size X's kit sets for its marks). */
+export function highlightVerifiedMarkSize(metrics: HighlightMetrics): HighlightVerifiedMarkSize {
+  return {
+    sizePx: Math.max(16, Math.round(metrics.nameFontPx)),
+    gapPx: Math.max(4, Math.round(metrics.nameFontPx * 0.25))
+  }
 }
 
 export interface HighlightPlatformMarkSize {
@@ -266,14 +286,21 @@ export interface HighlightPlatformMarkSize {
  * for every other platform, which keeps its badge over the avatar. The
  * identity gap (half the text size, at least 10 px) on each side keeps the
  * clear space brand.youtube asks for: the triangle's width, about 0.37 of the
- * mark's height. */
+ * mark's height.
+ *
+ * X's mark (plan 167) takes the same slot as a square: the kit file's 24 px
+ * grid, at least 20 px, so the visible mark (about 0.8 of the box) stays
+ * above the kit's 16 px minimum. */
 export function highlightPlatformMarkSize(
   metrics: HighlightMetrics,
   platform?: StreamPlatform
 ): HighlightPlatformMarkSize | null {
-  if (platform !== 'youtube') return null
   const heightPx = Math.max(YOUTUBE_MARK_MIN_PX, metrics.nameFontPx)
-  return { widthPx: Math.ceil(heightPx * YOUTUBE_MARK_ASPECT), heightPx }
+  if (platform === 'youtube') {
+    return { widthPx: Math.ceil(heightPx * YOUTUBE_MARK_ASPECT), heightPx }
+  }
+  if (platform === 'x') return { widthPx: Math.ceil(heightPx), heightPx: Math.ceil(heightPx) }
+  return null
 }
 
 /** The card layout with emotes: the same identity row and card sizing as
@@ -285,8 +312,11 @@ export function layoutCommentHighlightTokens(params: {
   canvasWidth: number
   canvasHeight?: number
   platform?: StreamPlatform
-  /** The painter has YouTube's icon to draw beside the name (plan 165). */
+  /** The painter has YouTube's or X's mark to draw beside the name (plans
+   * 165, 167). */
   platformMark?: boolean
+  /** The painter has X's verified check to draw after the name (plan 167). */
+  verified?: boolean
   measure: HighlightTextMeasurer
   emoteSize: HighlightEmoteSizer
 }): HighlightTokenLayout | null {
@@ -306,7 +336,9 @@ export function layoutCommentHighlightTokens(params: {
   // The mark and its gap (on the row's right end) come out of the name's
   // share of the row.
   const markLeadPx = platformMark ? platformMark.widthPx + metrics.identityGapPx : 0
-  const maxNameWidthPx = Math.max(0, metrics.maxNameWidthPx - markLeadPx)
+  const verifiedMark = params.verified ? highlightVerifiedMarkSize(metrics) : null
+  const verifiedLeadPx = verifiedMark ? verifiedMark.gapPx + verifiedMark.sizePx : 0
+  const maxNameWidthPx = Math.max(0, metrics.maxNameWidthPx - markLeadPx - verifiedLeadPx)
   const name = fitHighlightName(
     commentHighlightIdentity(params.authorName, params.platform, platformMark !== null),
     metrics.nameFontPx,
@@ -317,7 +349,8 @@ export function layoutCommentHighlightTokens(params: {
     params.measure(name, metrics.nameFontPx, HIGHLIGHT_NAME_WEIGHT),
     maxNameWidthPx
   )
-  const identityRowWidth = metrics.avatarPx + metrics.identityGapPx + markLeadPx + nameWidth
+  const identityRowWidth =
+    metrics.avatarPx + metrics.identityGapPx + markLeadPx + nameWidth + verifiedLeadPx
   const widestLine = lines.reduce((widest, line) => Math.max(widest, line.widthPx), 0)
   const contentWidth = Math.min(Math.max(identityRowWidth, widestLine), metrics.maxTextWidthPx)
   const messageHeight =
@@ -328,7 +361,9 @@ export function layoutCommentHighlightTokens(params: {
     lines,
     cardWidthPx: Math.ceil(metrics.paddingPx * 2 + contentWidth),
     cardHeightPx: Math.ceil(metrics.paddingPx * 2 + metrics.avatarPx + messageHeight),
-    platformMark
+    platformMark,
+    verifiedMark,
+    nameWidthPx: nameWidth
   }
 }
 
