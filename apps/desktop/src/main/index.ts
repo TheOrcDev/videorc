@@ -467,6 +467,8 @@ import type {
   CaptionsUpdate,
   CaptionsWindowState,
   CohostActionCommand,
+  CohostGolemActionCommand,
+  CohostSessionActionCommand,
   CohostCommandRelayCommand,
   CohostEnableCommand,
   CohostState,
@@ -3075,6 +3077,38 @@ function currentCommentsView(): CommentsViewSnapshot | null {
   }
   const cached = commentsHistoryCache.get(mode.sessionId)
   return cached ? { ...cached, mode } : null
+}
+
+/**
+ * The Golem's own relayed actions (plan 164 S-C4), checked here before they
+ * reach Studio: null when `value` is not one, an Error when it is one with a
+ * bad shape, else the command to relay.
+ */
+function golemActionCommand(
+  requestId: string,
+  value: unknown
+): CohostGolemActionCommand | Error | null {
+  if (!value || typeof value !== 'object' || !('kind' in value)) return null
+  const { kind } = value as { kind: unknown }
+  if (kind === 'golem-say') {
+    const { text, state } = value as { text?: unknown; state?: unknown }
+    const trimmed = typeof text === 'string' ? text.trim() : ''
+    if (!trimmed || [...trimmed].length > 200) {
+      return new Error('Say something between 1 and 200 characters.')
+    }
+    if (state !== 'talk' && state !== 'laugh' && state !== 'think') {
+      return new Error('Golem say needs a state: talk, laugh or think.')
+    }
+    return { requestId, kind, text: trimmed, state }
+  }
+  if (kind === 'golem-show-on-stream') {
+    const { showOnStream } = value as { showOnStream?: unknown }
+    if (typeof showOnStream !== 'boolean') {
+      return new Error('Show on stream needs true or false.')
+    }
+    return { requestId, kind, showOnStream }
+  }
+  return null
 }
 
 function assertLiveCommentsCommandSession(sessionId: unknown): asserts sessionId is string {
@@ -14442,6 +14476,23 @@ app.whenReady().then(async () => {
         return Promise.reject(new Error('Only the Chat window can send Golem actions.'))
       }
       const requestId = commentsCommandRequestId(value)
+      const relay = (command: CohostActionCommand): Promise<CohostState> =>
+        commentsCommandBroker.request(requestId, () => {
+          if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+          sendElectronEvent(
+            mainWindow.webContents,
+            'comments-window:cohost-action-request',
+            command
+          )
+          return true
+        })
+      // The Golem's own actions (plan 164 S-C4) are not chat commands: the
+      // bubble goes to the overlay and the switch to the overlay layout, so
+      // they need no live session. Main checks the shape before relaying.
+      const golem = golemActionCommand(requestId, value)
+      if (golem !== null) {
+        return golem instanceof Error ? Promise.reject(golem) : relay(golem)
+      }
       if (
         !value ||
         typeof value !== 'object' ||
@@ -14451,7 +14502,7 @@ app.whenReady().then(async () => {
       ) {
         return Promise.reject(new Error('Golem action requires a session, kind, and target.'))
       }
-      const command = value as CohostActionCommand
+      const command = value as CohostSessionActionCommand
       if (
         !COHOST_ACTION_KINDS.includes(command.kind) ||
         typeof command.targetId !== 'string' ||
@@ -14460,11 +14511,7 @@ app.whenReady().then(async () => {
         return Promise.reject(new Error('Golem action requires a known kind and target id.'))
       }
       assertLiveCommentsCommandSession(command.sessionId)
-      return commentsCommandBroker.request(requestId, () => {
-        if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
-        sendElectronEvent(mainWindow.webContents, 'comments-window:cohost-action-request', command)
-        return true
-      })
+      return relay(command)
     }
   )
   secureIpcHandle(

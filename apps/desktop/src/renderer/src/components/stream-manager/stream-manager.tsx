@@ -38,6 +38,8 @@ import type {
   CohostQuestion,
   CohostSayHi,
   CohostState,
+  CohostUtteranceState,
+  CohostWindowGolem,
   CommentHighlightAnchor,
   CommentHighlightState,
   CommentsHistoryStats,
@@ -271,6 +273,15 @@ export interface StreamManagerProps {
   cohostNudgeDismissedForever?: boolean
   /** Persisted `cohost.settings.listen` (plan 068); unknown hides its card. */
   cohostListen?: boolean
+  /** The Golem on stream (plan 164 S-C4): the pane's header shows and
+   * operates it; absent hides the header. */
+  cohostGolem?: CohostWindowGolem
+  /** A Golem action is on its way through the relay. */
+  golemPending?: boolean
+  /** Say something in the bubble (D7): ↵ talks, ⌘↵ laughs. */
+  onGolemSay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
+  /** `overlayLayout.golem.showOnStream`, through the Studio relay. */
+  onGolemShowOnStream?: (showOnStream: boolean) => void
   /** Golem Live's one switch (plan 119), from the status popover and the
    * nudge: on means Golem reads chat and hears you, off only stops it. */
   onCohostEnable?: (enabled: boolean) => void
@@ -342,6 +353,10 @@ export function StreamManager({
   cohostStarting = false,
   cohostNudgeDismissedForever = false,
   cohostListen,
+  cohostGolem,
+  golemPending = false,
+  onGolemSay,
+  onGolemShowOnStream,
   onCohostEnable,
   onCohostListenOn,
   onCohostNudgeDismiss,
@@ -770,6 +785,10 @@ export function StreamManager({
             actionPending={cohostActionPending}
             consented={cohostConsented}
             enabled={cohostEnabled}
+            golem={cohostGolem ?? null}
+            sayPending={golemPending}
+            onSay={onGolemSay}
+            onShowOnStreamChange={onGolemShowOnStream}
             expandSignal={cohostExpand}
             flash={cohostFlash}
             gate={cohostGate!}

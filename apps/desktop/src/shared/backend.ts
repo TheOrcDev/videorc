@@ -5879,6 +5879,21 @@ export interface CohostWindowState {
    * without it (smokes); the window then never offers the listening card.
    */
   listen?: boolean
+  /** The Golem on stream (plan 164 Phase C): what the pane's header shows
+   * and operates. Absent from a relay seeded without it (older Studio,
+   * smokes); the window then shows no header. */
+  golem?: CohostWindowGolem
+}
+
+/** The Golem as the Stream Manager operates it (plan 164 S-C4). The window
+ * resolves the state image itself (its own file or the bundled pack). */
+export interface CohostWindowGolem {
+  persona: Pick<CohostPersona, 'id' | 'name' | 'images' | 'bubbleStyle' | 'source'>
+  state: CohostAvatarState
+  /** The bubble's text while one is up. */
+  bubble: string | null
+  /** `overlayLayout.golem.showOnStream`. */
+  showOnStream: boolean
 }
 
 /**
@@ -5921,6 +5936,22 @@ export const COHOST_ACTION_KINDS: readonly CohostActionKind[] = [
   'author-greeted'
 ]
 
+/** The Golem's own actions from the Stream Manager (plan 164 S-C4): a manual
+ * utterance for the bubble (D7) and the Show on stream switch. Not chat
+ * commands, so they need no live session: the bubble goes to the overlay and
+ * the switch to the overlay layout. Studio makes the matching call. */
+export type CohostGolemActionCommand =
+  | {
+      requestId: string
+      kind: 'golem-say'
+      /** 1 to 200 characters. */
+      text: string
+      state: CohostUtteranceState
+    }
+  | { requestId: string; kind: 'golem-show-on-stream'; showOnStream: boolean }
+
+export const COHOST_GOLEM_ACTION_KINDS = ['golem-say', 'golem-show-on-stream'] as const
+
 /** Correlated co-host action from the Comments window, brokered through main
  * to the main renderer (which makes the actual `cohost.*` RPC). */
 /**
@@ -5944,7 +5975,7 @@ export type CohostCommandRelayCommand =
       commandId: string
     }
 
-export interface CohostActionCommand {
+export interface CohostSessionActionCommand {
   requestId: string
   sessionId: string
   kind: CohostActionKind
@@ -5953,6 +5984,8 @@ export interface CohostActionCommand {
    * (they have no target of their own); the author key for `author-greeted`. */
   targetId: string
 }
+
+export type CohostActionCommand = CohostSessionActionCommand | CohostGolemActionCommand
 
 /**
  * Correlated "turn the co-host on/off" from the Comments window (presence W2).

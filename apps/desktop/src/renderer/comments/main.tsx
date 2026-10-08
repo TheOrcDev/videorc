@@ -8,8 +8,10 @@ import { removeMessagesReconnectStarted } from '@/components/stream-manager/remo
 import { WindowFrame } from '@/components/window-frame'
 import type {
   CohostActionKind,
+  CohostGolemActionCommand,
   CohostQuestion,
   CohostState,
+  CohostUtteranceState,
   CohostWindowState,
   CommentHighlightAnchor,
   CommentHighlightState,
@@ -28,6 +30,13 @@ import { applyCohostState } from '@/lib/cohost-state'
 import { ChatGifModeProvider } from '@/lib/chat-gifs'
 import { DEFAULT_TWITCH_GIF_MODE, type TwitchGifMode } from '../../shared/chat-gif'
 import type { CommandAnswer } from '@/components/stream-manager/command-cards'
+
+/** A Golem action before main's request id (distributive, one per kind). */
+type GolemActionBody = CohostGolemActionCommand extends infer Command
+  ? Command extends { requestId: string }
+    ? Omit<Command, 'requestId'>
+    : never
+  : never
 import {
   cohostHighlightMessageId,
   cohostNudgeDismissedFromStorage,
@@ -408,6 +417,29 @@ function CommentsWindowApp(): ReactElement {
         .finally(() => setCohostActionPending(false))
     }
 
+  // The Golem's own actions (plan 164 S-C4): a manual utterance for the
+  // bubble and the Show on stream switch. Not chat commands, so no session
+  // is needed; Studio makes the call and the window state push follows.
+  const [golemPending, setGolemPending] = useState(false)
+  const sendGolemAction = (command: GolemActionBody): Promise<void> => {
+    const send = window.videorc?.sendCohostAction
+    if (!send) return Promise.resolve()
+    setGolemPending(true)
+    return send({ requestId: crypto.randomUUID(), ...command } as CohostGolemActionCommand)
+      .then(() => undefined)
+      .catch((error) => {
+        toast.error(error instanceof Error ? error.message : 'Golem action failed.', {
+          id: 'golem-action'
+        })
+      })
+      .finally(() => setGolemPending(false))
+  }
+  const sayGolem = (text: string, state: CohostUtteranceState): Promise<void> =>
+    sendGolemAction({ kind: 'golem-say', text, state })
+  const setGolemShowOnStream = (showOnStream: boolean): void => {
+    void sendGolemAction({ kind: 'golem-show-on-stream', showOnStream })
+  }
+
   // Answers to Golem's voice command cards (plan 140, S6 part B). The reply
   // merges like an event: the newer command (by `at`) wins.
   const [commandAnsweringId, setCommandAnsweringId] = useState<string | null>(null)
@@ -504,6 +536,10 @@ function CommentsWindowApp(): ReactElement {
           cohostNudgeDismissedForever={cohostNudgeDismissed}
           cohostStarting={cohostStarting}
           cohostState={cohost.state}
+          cohostGolem={cohost.golem}
+          golemPending={golemPending}
+          onGolemSay={sayGolem}
+          onGolemShowOnStream={setGolemShowOnStream}
           moderationOperations={moderationOperations}
           removalAnsweringIds={removalAnsweringIds}
           removalRequestIds={removalRequestIds}

@@ -18,8 +18,10 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Command, CommandList } from '@/components/ui/command'
+import { Input } from '@/components/ui/input'
 import { Kbd } from '@/components/ui/kbd'
 import { Separator } from '@/components/ui/separator'
+import { Switch } from '@/components/ui/switch'
 import type {
   CohostFlag,
   CohostPromise,
@@ -27,8 +29,12 @@ import type {
   CohostRecap,
   CohostRecentlyResolved,
   CohostSayHi,
-  CohostState
+  CohostState,
+  CohostUtteranceState,
+  CohostWindowGolem
 } from '@/lib/backend'
+import { golemStateImageUrl } from '@/lib/golem-default-pack'
+import { displayKeyGlyph } from '@/lib/platform'
 import { cohostEmptyStateCopy, cohostPresenceView, cohostQuestionIds } from '@/lib/cohost-presence'
 import { activeCohostSpotlight } from '@/lib/cohost-marks'
 import { REMOVE_FROM_CHAT_LABEL } from '@/lib/chat-removal-view'
@@ -66,10 +72,13 @@ import { cn } from '@/lib/utils'
 
 /**
  * The Golem pane in the Stream Manager, which only the detached Comments
- * window mounts. It renders the backend's `cohost.state` and nothing else: it
- * never decides what is a question and never sends anything. A flag is only
- * acted on when the streamer asks: "Remove from chat" on the selected flag
- * (plan 140, S6) is the same manual removal as the chat row's ⋯ menu.
+ * window mounts. Its header (plan 164 S-C4) operates the Golem on stream:
+ * the state image, the creature's name, the Show on stream switch and the
+ * Say box (↵ talks, ⌘↵ laughs), free for everyone (D6). Under it the pane
+ * renders the backend's `cohost.state` and nothing else: it never decides
+ * what is a question and never sends anything to chat. A flag is only acted
+ * on when the streamer asks: "Remove from chat" on the selected flag (plan
+ * 140, S6) is the same manual removal as the chat row's ⋯ menu.
  *
  * Keyboard-first (videorc-design): the rows stay dense single lines and the
  * footer bar carries the actions for the selected row with their key chips.
@@ -103,7 +112,11 @@ export function CohostPane({
   onJumpToMessage,
   onEnableConsent,
   onOpenChange,
-  onUpgrade
+  onUpgrade,
+  golem = null,
+  sayPending = false,
+  onSay,
+  onShowOnStreamChange
 }: {
   state: CohostState | null
   gate: EntitlementUiGate
@@ -143,8 +156,24 @@ export function CohostPane({
    * collapsed-pane question toast against what is actually on screen. */
   onOpenChange?: (open: boolean) => void
   onUpgrade?: (url: string) => void
+  /** The Golem on stream (plan 164 S-C4); null hides the header. */
+  golem?: CohostWindowGolem | null
+  /** A Say is on its way through the relay. */
+  sayPending?: boolean
+  /** Say something in the bubble (D7). Absent disables the box. */
+  onSay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
+  /** `overlayLayout.golem.showOnStream`. Absent disables the switch. */
+  onShowOnStreamChange?: (showOnStream: boolean) => void
 }): ReactElement | null {
   const mode = cohostPaneMode({ gate, consented, enabled })
+  const header = golem ? (
+    <GolemHeader
+      golem={golem}
+      sayPending={sayPending}
+      onSay={onSay}
+      onShowOnStreamChange={onShowOnStreamChange}
+    />
+  ) : null
   const [open, setOpen] = useState(true)
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [nowMs, setNowMs] = useState(() => Date.now())
@@ -244,36 +273,44 @@ export function CohostPane({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [mode.kind])
 
+  // The header is free (D6): it stays above every notice, and alone when the
+  // AI side is off.
   if (mode.kind === 'upsell') {
     return (
-      <CohostNotice label="Premium">
-        <span className="min-w-0 flex-1 truncate">{mode.reason}</span>
-        {mode.upgradeUrl && onUpgrade ? (
-          <Button size="xs" variant="ghost" onClick={() => onUpgrade(mode.upgradeUrl as string)}>
-            View Premium
-          </Button>
-        ) : null}
-      </CohostNotice>
+      <>
+        {header}
+        <CohostNotice label="Premium">
+          <span className="min-w-0 flex-1 truncate">{mode.reason}</span>
+          {mode.upgradeUrl && onUpgrade ? (
+            <Button size="xs" variant="ghost" onClick={() => onUpgrade(mode.upgradeUrl as string)}>
+              View Premium
+            </Button>
+          ) : null}
+        </CohostNotice>
+      </>
     )
   }
 
   if (mode.kind === 'consent') {
     return (
-      <CohostNotice label="Golem">
-        <span className="min-w-0 flex-1 truncate" title={mode.reason}>
-          {mode.reason}
-        </span>
-        {onEnableConsent ? (
-          <Button size="xs" variant="ghost" onClick={onEnableConsent}>
-            Turn on cloud AI
-          </Button>
-        ) : null}
-      </CohostNotice>
+      <>
+        {header}
+        <CohostNotice label="Golem">
+          <span className="min-w-0 flex-1 truncate" title={mode.reason}>
+            {mode.reason}
+          </span>
+          {onEnableConsent ? (
+            <Button size="xs" variant="ghost" onClick={onEnableConsent}>
+              Turn on cloud AI
+            </Button>
+          ) : null}
+        </CohostNotice>
+      </>
     )
   }
 
   if (mode.kind === 'disabled') {
-    return null
+    return header
   }
 
   // The failed tick in the server's own words. The engine clears `detail` the
@@ -345,305 +382,415 @@ export function CohostPane({
   }
 
   return (
-    <Collapsible
-      ref={paneRef}
-      className="@container/cohost-pane shrink-0"
-      data-slot="cohost-pane"
-      open={open}
-      onOpenChange={setOpen}
-    >
-      <CollapsibleTrigger className="group flex w-full min-w-0 items-center gap-2 overflow-hidden px-3 py-1.5 text-left hover:bg-accent/60 @max-[400px]/cohost-pane:gap-1.5">
-        <ChevronDownIcon
-          aria-hidden
-          className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=closed]:-rotate-90"
-        />
-        <OrcleIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
-        <span className="shrink-0 text-xs font-medium text-foreground">Golem</span>
-        <span
-          className={cn(
-            'shrink-0 text-[10px] font-medium tracking-wide text-muted-foreground',
-            PANE_NARROW_HIDDEN
-          )}
-        >
-          alpha
-        </span>
-        <CohostPresenceDot view={presence} />
-        <span
-          className="min-w-0 truncate text-[11px] text-muted-foreground"
-          data-slot="cohost-pane-status"
-          title={
-            [
-              ...presence.tooltipLines,
-              ...(state?.mood ? [`Chat mood: ${COHOST_MOOD_LABELS[state.mood]}`] : [])
-            ].join('\n') || undefined
-          }
-        >
-          {flash ?? presence.label.replace(/^Golem\s*(·\s*)?/, '')}
-        </span>
-        {presence.dots ? <CohostTypingDots fast={presence.kind === 'thinking'} /> : null}
-        <span className="flex-1" />
-        {presence.unreadBadge ? (
-          <Badge
-            aria-label={`${presence.unreadBadge} new questions`}
-            className="shrink-0 tabular-nums"
-            data-slot="cohost-unread-badge"
-            variant="secondary"
-          >
-            {presence.unreadBadge} new
-          </Badge>
-        ) : null}
-        {alerts.map((alert) => (
-          <Badge
-            key={alert.kind}
-            className="min-w-0 shrink"
-            data-slot="cohost-alert"
-            title="Several viewers said this in chat in the last two minutes."
-            variant="warning"
-          >
-            <span className="truncate">{cohostAlertLabel(alert)}</span>
-          </Badge>
-        ))}
-        {state?.partial ? (
-          <Badge
-            className={cn('shrink-0', PANE_NARROW_HIDDEN)}
-            title="Chat outran one AI pass; the newest messages were used."
-            variant="outline"
-          >
-            Partial
-          </Badge>
-        ) : null}
-        {state?.mood ? (
+    <>
+      {header}
+      <Collapsible
+        ref={paneRef}
+        className="@container/cohost-pane shrink-0"
+        data-slot="cohost-pane"
+        open={open}
+        onOpenChange={setOpen}
+      >
+        <CollapsibleTrigger className="group flex w-full min-w-0 items-center gap-2 overflow-hidden px-3 py-1.5 text-left hover:bg-accent/60 @max-[400px]/cohost-pane:gap-1.5">
+          <ChevronDownIcon
+            aria-hidden
+            className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=closed]:-rotate-90"
+          />
+          <OrcleIcon
+            aria-hidden
+            className="size-4 shrink-0 text-muted-foreground"
+            weight="duotone"
+          />
+          <span className="shrink-0 text-xs font-medium text-foreground">Golem</span>
           <span
-            className={cn('shrink-0 text-[11px] text-subtle', PANE_NARROW_HIDDEN)}
-            title={cohostMoodScoresLabel(state.moodScores) ?? undefined}
-          >
-            {COHOST_MOOD_LABELS[state.mood]}
-          </span>
-        ) : null}
-      </CollapsibleTrigger>
-
-      <CollapsibleContent>
-        <Separator />
-        {topic ? (
-          // What the streamer is talking about (tick v3): one quiet line, the
-          // same tier as the error detail, present only when the server said.
-          <p
-            className="truncate px-2.5 py-1 text-[11px] text-muted-foreground"
-            data-slot="cohost-topic"
-            title={`Talking about: ${topic}`}
-          >
-            <span className="text-subtle">Talking about:</span> {topic}
-          </p>
-        ) : null}
-        {errorDetail ? (
-          // The failed tick in the server's own words, so "AI error" is never
-          // the whole story. Monochrome; the dot already carries the state.
-          <p
-            className="truncate px-2.5 py-1 text-[11px] text-subtle"
-            data-slot="cohost-error-detail"
-            title={errorDetail}
-          >
-            {errorDetail}
-          </p>
-        ) : null}
-        <Command
-          ref={rootRef}
-          aria-label="Golem questions and flags"
-          className="bg-transparent outline-none"
-          shouldFilter={false}
-          tabIndex={0}
-          value={activeKey ?? ''}
-          onKeyDown={handleKeyDown}
-          onValueChange={setSelectedKey}
-        >
-          <CommandList className="max-h-48 px-1 py-1">
-            {rows.length === 0 ? (
-              <p className="px-2 py-3 text-xs text-subtle" data-slot="cohost-empty-state">
-                {cohostEmptyStateCopy(presence, state)}
-              </p>
-            ) : (
-              <>
-                {questions.map((question) => (
-                  <CohostQuestionRow
-                    key={question.id}
-                    nowMs={nowMs}
-                    onStream={
-                      highlightedMessageId !== null &&
-                      cohostHighlightMessageId(question) === highlightedMessageId
-                    }
-                    question={question}
-                    selected={activeKey === cohostQuestionRowKey(question.id)}
-                    talkingAbout={spotlightQuestionId === question.id}
-                    onReply={onReply}
-                    onSelect={setSelectedKey}
-                  />
-                ))}
-                {flags.map((flag) => (
-                  <CohostFlagRow
-                    key={flag.messageId}
-                    flag={flag}
-                    nowMs={nowMs}
-                    selected={activeKey === cohostFlagRowKey(flag.messageId)}
-                    onJump={(value) => onJumpToMessage?.(value.messageId)}
-                    onSelect={setSelectedKey}
-                  />
-                ))}
-              </>
+            className={cn(
+              'shrink-0 text-[10px] font-medium tracking-wide text-muted-foreground',
+              PANE_NARROW_HIDDEN
             )}
-          </CommandList>
-        </Command>
-        {answeredOnAir.length > 0 ? (
-          <AnsweredOnAir
-            disabled={actionPending || !onRestoreQuestion}
-            items={answeredOnAir}
-            onRestore={(question) => onRestoreQuestion?.(question)}
-          />
-        ) : null}
-        {sayHi.length > 0 ? (
-          <CohostSayHiList
-            disabled={actionPending}
-            items={sayHi}
-            nowMs={nowMs}
-            onGreeted={onSayHiGreeted}
-          />
-        ) : null}
-        {promises.length > 0 ? (
-          <CohostPromises
-            disabled={actionPending}
-            items={promises}
-            onDismiss={onPromiseDismiss}
-            onDone={onPromiseDone}
-          />
-        ) : null}
-        {recap ? (
-          <CohostRecapCard
-            disabled={actionPending}
-            recap={recap}
-            onDismiss={onRecapDismiss}
-            onPost={onRecapPost}
-          />
-        ) : onRecapDraft ? (
-          <>
-            <Separator />
-            <div className="flex h-7 items-center gap-1 px-2" data-slot="cohost-recap-draft">
-              <span
-                className={cn(
-                  'min-w-0 flex-1 truncate text-[11px] text-subtle',
-                  PANE_NARROW_HIDDEN
-                )}
-              >
-                For viewers who just arrived.
-              </span>
-              <Button
-                className="shrink-0"
-                disabled={actionPending}
-                size="xs"
-                type="button"
-                variant="ghost"
-                onClick={onRecapDraft}
-              >
-                Draft a recap
-              </Button>
-            </div>
-          </>
-        ) : null}
-
-        {activeRow ? (
-          <>
-            <Separator />
-            <div
-              className="flex flex-wrap items-center justify-end gap-1 px-2 py-1"
-              data-slot="cohost-actions"
+          >
+            alpha
+          </span>
+          <CohostPresenceDot view={presence} />
+          <span
+            className="min-w-0 truncate text-[11px] text-muted-foreground"
+            data-slot="cohost-pane-status"
+            title={
+              [
+                ...presence.tooltipLines,
+                ...(state?.mood ? [`Chat mood: ${COHOST_MOOD_LABELS[state.mood]}`] : [])
+              ].join('\n') || undefined
+            }
+          >
+            {flash ?? presence.label.replace(/^Golem\s*(·\s*)?/, '')}
+          </span>
+          {presence.dots ? <CohostTypingDots fast={presence.kind === 'thinking'} /> : null}
+          <span className="flex-1" />
+          {presence.unreadBadge ? (
+            <Badge
+              aria-label={`${presence.unreadBadge} new questions`}
+              className="shrink-0 tabular-nums"
+              data-slot="cohost-unread-badge"
+              variant="secondary"
             >
-              <span
-                className={cn(
-                  'min-w-0 flex-1 truncate text-[11px] text-subtle',
-                  PANE_NARROW_HIDDEN
-                )}
-                data-slot="cohost-acts-on-ask"
-                title={COHOST_ACTS_ON_ASK_COPY}
-              >
-                {COHOST_ACTS_ON_ASK_HINT}
-              </span>
-              {activeRow.kind === 'question' ? (
+              {presence.unreadBadge} new
+            </Badge>
+          ) : null}
+          {alerts.map((alert) => (
+            <Badge
+              key={alert.kind}
+              className="min-w-0 shrink"
+              data-slot="cohost-alert"
+              title="Several viewers said this in chat in the last two minutes."
+              variant="warning"
+            >
+              <span className="truncate">{cohostAlertLabel(alert)}</span>
+            </Badge>
+          ))}
+          {state?.partial ? (
+            <Badge
+              className={cn('shrink-0', PANE_NARROW_HIDDEN)}
+              title="Chat outran one AI pass; the newest messages were used."
+              variant="outline"
+            >
+              Partial
+            </Badge>
+          ) : null}
+          {state?.mood ? (
+            <span
+              className={cn('shrink-0 text-[11px] text-subtle', PANE_NARROW_HIDDEN)}
+              title={cohostMoodScoresLabel(state.moodScores) ?? undefined}
+            >
+              {COHOST_MOOD_LABELS[state.mood]}
+            </span>
+          ) : null}
+        </CollapsibleTrigger>
+
+        <CollapsibleContent>
+          <Separator />
+          {topic ? (
+            // What the streamer is talking about (tick v3): one quiet line, the
+            // same tier as the error detail, present only when the server said.
+            <p
+              className="truncate px-2.5 py-1 text-[11px] text-muted-foreground"
+              data-slot="cohost-topic"
+              title={`Talking about: ${topic}`}
+            >
+              <span className="text-subtle">Talking about:</span> {topic}
+            </p>
+          ) : null}
+          {errorDetail ? (
+            // The failed tick in the server's own words, so "AI error" is never
+            // the whole story. Monochrome; the dot already carries the state.
+            <p
+              className="truncate px-2.5 py-1 text-[11px] text-subtle"
+              data-slot="cohost-error-detail"
+              title={errorDetail}
+            >
+              {errorDetail}
+            </p>
+          ) : null}
+          <Command
+            ref={rootRef}
+            aria-label="Golem questions and flags"
+            className="bg-transparent outline-none"
+            shouldFilter={false}
+            tabIndex={0}
+            value={activeKey ?? ''}
+            onKeyDown={handleKeyDown}
+            onValueChange={setSelectedKey}
+          >
+            <CommandList className="max-h-48 px-1 py-1">
+              {rows.length === 0 ? (
+                <p className="px-2 py-3 text-xs text-subtle" data-slot="cohost-empty-state">
+                  {cohostEmptyStateCopy(presence, state)}
+                </p>
+              ) : (
                 <>
-                  <CohostAction
-                    disabled={actionPending}
-                    keyLabel="R"
-                    label="Reply"
-                    onClick={() => {
-                      const question = questions.find((candidate) => candidate.id === activeRow.id)
-                      if (question) onReply(question)
-                    }}
-                  />
-                  {onShowOnStream ? (
+                  {questions.map((question) => (
+                    <CohostQuestionRow
+                      key={question.id}
+                      nowMs={nowMs}
+                      onStream={
+                        highlightedMessageId !== null &&
+                        cohostHighlightMessageId(question) === highlightedMessageId
+                      }
+                      question={question}
+                      selected={activeKey === cohostQuestionRowKey(question.id)}
+                      talkingAbout={spotlightQuestionId === question.id}
+                      onReply={onReply}
+                      onSelect={setSelectedKey}
+                    />
+                  ))}
+                  {flags.map((flag) => (
+                    <CohostFlagRow
+                      key={flag.messageId}
+                      flag={flag}
+                      nowMs={nowMs}
+                      selected={activeKey === cohostFlagRowKey(flag.messageId)}
+                      onJump={(value) => onJumpToMessage?.(value.messageId)}
+                      onSelect={setSelectedKey}
+                    />
+                  ))}
+                </>
+              )}
+            </CommandList>
+          </Command>
+          {answeredOnAir.length > 0 ? (
+            <AnsweredOnAir
+              disabled={actionPending || !onRestoreQuestion}
+              items={answeredOnAir}
+              onRestore={(question) => onRestoreQuestion?.(question)}
+            />
+          ) : null}
+          {sayHi.length > 0 ? (
+            <CohostSayHiList
+              disabled={actionPending}
+              items={sayHi}
+              nowMs={nowMs}
+              onGreeted={onSayHiGreeted}
+            />
+          ) : null}
+          {promises.length > 0 ? (
+            <CohostPromises
+              disabled={actionPending}
+              items={promises}
+              onDismiss={onPromiseDismiss}
+              onDone={onPromiseDone}
+            />
+          ) : null}
+          {recap ? (
+            <CohostRecapCard
+              disabled={actionPending}
+              recap={recap}
+              onDismiss={onRecapDismiss}
+              onPost={onRecapPost}
+            />
+          ) : onRecapDraft ? (
+            <>
+              <Separator />
+              <div className="flex h-7 items-center gap-1 px-2" data-slot="cohost-recap-draft">
+                <span
+                  className={cn(
+                    'min-w-0 flex-1 truncate text-[11px] text-subtle',
+                    PANE_NARROW_HIDDEN
+                  )}
+                >
+                  For viewers who just arrived.
+                </span>
+                <Button
+                  className="shrink-0"
+                  disabled={actionPending}
+                  size="xs"
+                  type="button"
+                  variant="ghost"
+                  onClick={onRecapDraft}
+                >
+                  Draft a recap
+                </Button>
+              </div>
+            </>
+          ) : null}
+
+          {activeRow ? (
+            <>
+              <Separator />
+              <div
+                className="flex flex-wrap items-center justify-end gap-1 px-2 py-1"
+                data-slot="cohost-actions"
+              >
+                <span
+                  className={cn(
+                    'min-w-0 flex-1 truncate text-[11px] text-subtle',
+                    PANE_NARROW_HIDDEN
+                  )}
+                  data-slot="cohost-acts-on-ask"
+                  title={COHOST_ACTS_ON_ASK_COPY}
+                >
+                  {COHOST_ACTS_ON_ASK_HINT}
+                </span>
+                {activeRow.kind === 'question' ? (
+                  <>
                     <CohostAction
                       disabled={actionPending}
-                      keyLabel="H"
-                      label="Show on stream"
+                      keyLabel="R"
+                      label="Reply"
                       onClick={() => {
                         const question = questions.find(
                           (candidate) => candidate.id === activeRow.id
                         )
-                        if (question) onShowOnStream(question)
+                        if (question) onReply(question)
                       }}
                     />
-                  ) : null}
-                  <CohostAction
-                    disabled={actionPending}
-                    keyLabel="A"
-                    label="Answered"
-                    onClick={() => {
-                      const question = questions.find((candidate) => candidate.id === activeRow.id)
-                      if (question) onAnswered(question)
-                    }}
-                  />
-                  <CohostAction
-                    disabled={actionPending}
-                    keyLabel="⌫"
-                    label="Dismiss"
-                    onClick={() => {
-                      const question = questions.find((candidate) => candidate.id === activeRow.id)
-                      if (question) onDismissQuestion(question)
-                    }}
-                  />
-                </>
-              ) : (
-                <>
-                  {onJumpToMessage ? (
+                    {onShowOnStream ? (
+                      <CohostAction
+                        disabled={actionPending}
+                        keyLabel="H"
+                        label="Show on stream"
+                        onClick={() => {
+                          const question = questions.find(
+                            (candidate) => candidate.id === activeRow.id
+                          )
+                          if (question) onShowOnStream(question)
+                        }}
+                      />
+                    ) : null}
                     <CohostAction
-                      keyLabel="↵"
-                      label="Jump to message"
-                      onClick={() => onJumpToMessage(activeRow.id)}
+                      disabled={actionPending}
+                      keyLabel="A"
+                      label="Answered"
+                      onClick={() => {
+                        const question = questions.find(
+                          (candidate) => candidate.id === activeRow.id
+                        )
+                        if (question) onAnswered(question)
+                      }}
                     />
-                  ) : null}
-                  <CohostAction
-                    disabled={actionPending}
-                    keyLabel="⌫"
-                    label="Dismiss"
-                    onClick={() => {
-                      const flag = flags.find((candidate) => candidate.messageId === activeRow.id)
-                      if (flag) onDismissFlag(flag)
-                    }}
-                  />
-                  {onRemoveFlagged && removableMessageIds?.has(activeRow.id) ? (
                     <CohostAction
-                      keyLabel={COHOST_REMOVE_FLAGGED_KEY}
-                      label={REMOVE_FROM_CHAT_LABEL}
-                      variant="destructive"
+                      disabled={actionPending}
+                      keyLabel="⌫"
+                      label="Dismiss"
+                      onClick={() => {
+                        const question = questions.find(
+                          (candidate) => candidate.id === activeRow.id
+                        )
+                        if (question) onDismissQuestion(question)
+                      }}
+                    />
+                  </>
+                ) : (
+                  <>
+                    {onJumpToMessage ? (
+                      <CohostAction
+                        keyLabel="↵"
+                        label="Jump to message"
+                        onClick={() => onJumpToMessage(activeRow.id)}
+                      />
+                    ) : null}
+                    <CohostAction
+                      disabled={actionPending}
+                      keyLabel="⌫"
+                      label="Dismiss"
                       onClick={() => {
                         const flag = flags.find((candidate) => candidate.messageId === activeRow.id)
-                        if (flag) onRemoveFlagged(flag)
+                        if (flag) onDismissFlag(flag)
                       }}
                     />
-                  ) : null}
-                </>
-              )}
-            </div>
-          </>
+                    {onRemoveFlagged && removableMessageIds?.has(activeRow.id) ? (
+                      <CohostAction
+                        keyLabel={COHOST_REMOVE_FLAGGED_KEY}
+                        label={REMOVE_FROM_CHAT_LABEL}
+                        variant="destructive"
+                        onClick={() => {
+                          const flag = flags.find(
+                            (candidate) => candidate.messageId === activeRow.id
+                          )
+                          if (flag) onRemoveFlagged(flag)
+                        }}
+                      />
+                    ) : null}
+                  </>
+                )}
+              </div>
+            </>
+          ) : null}
+        </CollapsibleContent>
+      </Collapsible>
+    </>
+  )
+}
+
+/**
+ * The Golem on stream (plan 164 S-C4): the state image at 32 px, the name,
+ * the bubble while one is up, the Show on stream switch, and the Say box.
+ * ↵ says it talking, ⌘↵ laughing (⚑ chips for states can follow). The right
+ * side of the top row is free for Phase D's chat mode control. Free for
+ * everyone (D6): no Premium, no consent, no live session.
+ */
+export function GolemHeader({
+  golem,
+  sayPending = false,
+  onSay,
+  onShowOnStreamChange
+}: {
+  golem: CohostWindowGolem
+  sayPending?: boolean
+  onSay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
+  onShowOnStreamChange?: (showOnStream: boolean) => void
+}): ReactElement {
+  const [draft, setDraft] = useState('')
+  const image = golemStateImageUrl(golem.persona, golem.state)
+  const modKey = displayKeyGlyph('⌘', undefined)
+  const say = (state: CohostUtteranceState): void => {
+    const text = draft.trim()
+    if (!text || !onSay || sayPending) return
+    setDraft('')
+    void onSay(text, state)
+  }
+  return (
+    <div className="@container/golem-header shrink-0" data-slot="golem-header">
+      <div className="flex h-10 min-w-0 items-center gap-2 px-3">
+        <img
+          alt=""
+          className="size-8 shrink-0 rounded-chip bg-foreground/[0.04] object-contain"
+          data-slot="golem-state-image"
+          data-state={golem.state}
+          draggable={false}
+          src={image}
+        />
+        <span
+          className="min-w-0 shrink truncate text-xs font-medium text-foreground"
+          data-slot="golem-name"
+          title={golem.persona.name}
+        >
+          {golem.persona.name}
+        </span>
+        {golem.bubble ? (
+          <span
+            className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground"
+            data-slot="golem-bubble"
+            title={golem.bubble}
+          >
+            “{golem.bubble}”
+          </span>
         ) : null}
-      </CollapsibleContent>
-    </Collapsible>
+        <label className="flex shrink-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+          <Switch
+            aria-label="Show on stream"
+            checked={golem.showOnStream}
+            data-slot="golem-show-on-stream"
+            disabled={!onShowOnStreamChange}
+            size="sm"
+            onCheckedChange={(checked) => onShowOnStreamChange?.(checked)}
+          />
+          <span className={PANE_NARROW_HIDDEN}>Show on stream</span>
+        </label>
+        {/* Phase D's chat mode control (Off · Suggest · Auto) lands here. */}
+        <span className="flex-1" />
+      </div>
+      <div className="flex items-center gap-1.5 px-3 pb-2" data-slot="golem-say">
+        <Input
+          aria-label={`Say something as ${golem.persona.name}`}
+          className="h-7 text-xs"
+          disabled={!onSay}
+          maxLength={200}
+          placeholder="Say something on stream"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter') return
+            event.preventDefault()
+            say(event.metaKey || event.ctrlKey ? 'laugh' : 'talk')
+          }}
+        />
+        <Kbd className={PANE_NARROW_HIDDEN} title="Say it">
+          ↵
+        </Kbd>
+        <Kbd className={PANE_NARROW_HIDDEN} title="Say it laughing">
+          {modKey}↵
+        </Kbd>
+      </div>
+      <Separator />
+    </div>
   )
 }
 

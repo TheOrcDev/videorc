@@ -4623,6 +4623,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // re-derives Premium or consent, it renders what the main renderer resolved.
   // Presence is unconditional: before the engine reports (or when it is off)
   // the relay carries the off shape, never null.
+  const golemShowOnStream = overlayLayout.golem.showOnStream
   const cohostWindowState = useMemo<CohostWindowState>(
     () => ({
       state: cohostState ?? offCohostState(),
@@ -4631,9 +4632,35 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       upgradeUrl: (cohostGate.allowed ? undefined : cohostGate.upgradeUrl) ?? null,
       consented: aiConsent,
       enabled: cohostEnabled,
-      listen: cohostListen
+      listen: cohostListen,
+      // The Golem on stream (plan 164 S-C4): the pane's header operates it.
+      ...(golemPersona
+        ? {
+            golem: {
+              persona: {
+                id: golemPersona.id,
+                name: golemPersona.name,
+                images: golemPersona.images,
+                bubbleStyle: golemPersona.bubbleStyle,
+                source: golemPersona.source
+              },
+              state: golemOverlay?.state ?? 'idle',
+              bubble: golemOverlay?.bubble?.text ?? null,
+              showOnStream: golemShowOnStream
+            }
+          }
+        : {})
     }),
-    [aiConsent, cohostEnabled, cohostGate, cohostListen, cohostState]
+    [
+      aiConsent,
+      cohostEnabled,
+      cohostGate,
+      cohostListen,
+      cohostState,
+      golemOverlay,
+      golemPersona,
+      golemShowOnStream
+    ]
   )
 
   const cohostWindowStateRef = useRef(cohostWindowState)
@@ -4687,6 +4714,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const off = window.videorc?.onCohostActionRequest?.((command: CohostActionCommand) => {
       void (async () => {
         if (!client) throw new Error('Backend socket is not connected.')
+        // The Golem's own actions (plan 164 S-C4): the bubble and the output
+        // switch. Neither touches the engine; the reply is the current state.
+        if (command.kind === 'golem-say') {
+          await sayGolem(command.text, command.state)
+          return cohostStateRef.current ?? offCohostState()
+        }
+        if (command.kind === 'golem-show-on-stream') {
+          const current = overlayLayoutRef.current
+          if (current.golem.showOnStream !== command.showOnStream) {
+            await setOverlayLayout({
+              ...current,
+              golem: { ...current.golem, showOnStream: command.showOnStream }
+            })
+          }
+          return cohostStateRef.current ?? offCohostState()
+        }
         if (command.kind === 'dismiss-flag') {
           return runCohostAction('cohost.flag.dismiss', {
             sessionId: command.sessionId,
@@ -4740,7 +4783,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         })
     })
     return off
-  }, [client, runCohostAction])
+  }, [client, runCohostAction, sayGolem, setOverlayLayout])
 
   const refreshAiReadinessForClient = useCallback(
     async (
