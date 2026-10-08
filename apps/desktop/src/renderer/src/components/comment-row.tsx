@@ -39,6 +39,7 @@ import type {
   CohostFlag,
   CommentHighlightState,
   LiveChatAuthorAffiliation,
+  LiveChatAuthorVerified,
   LiveChatMessage,
   LiveChatMessageFragment
 } from '@/lib/backend'
@@ -51,6 +52,7 @@ import { chatLinksIn, splitLinks, type ChatLinkPiece } from '@/lib/chat-links'
 import { noticeViewerWords } from '@/lib/chat-notice'
 import { cohostFlagActionLabel, cohostFlagChipLabel, cohostFlagDetail } from '@/lib/cohost-view'
 import { cn } from '@/lib/utils'
+import { X_VERIFIED_LABEL, X_VERIFIED_URL } from '@/lib/x-mark'
 
 export type CommentHighlightPhase = 'idle' | 'applying' | 'live' | 'failed'
 export type CommentTimestamps = 'always' | 'hover'
@@ -281,6 +283,26 @@ function AffiliationBadge({
       data-slot="comment-affiliation"
       draggable={false}
       src={localUrl}
+      title={label}
+    />
+  )
+}
+
+/**
+ * The author's verified check (plan 167): X's own Premium, Verified
+ * Organization or government check, as X's file, never tinted. It sits right
+ * after the name, before the organization logo, in X's order.
+ */
+function VerifiedCheck({ verified }: { verified: LiveChatAuthorVerified }): ReactElement {
+  const label = X_VERIFIED_LABEL[verified]
+  return (
+    <img
+      alt={label}
+      className="size-4 shrink-0"
+      data-slot="comment-verified"
+      data-verified={verified}
+      draggable={false}
+      src={X_VERIFIED_URL[verified]}
       title={label}
     />
   )
@@ -632,6 +654,7 @@ function CommentContent({
           <span className="min-w-0 truncate text-left font-medium text-foreground">
             {message.authorName}
           </span>
+          {message.authorVerified ? <VerifiedCheck verified={message.authorVerified} /> : null}
           {message.authorAffiliation ? (
             <AffiliationBadge affiliation={message.authorAffiliation} />
           ) : null}
