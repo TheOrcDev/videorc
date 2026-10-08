@@ -23,6 +23,7 @@ mod cohost;
 mod cohost_ack;
 mod cohost_avatar;
 mod cohost_command;
+mod cohost_greetings;
 mod color;
 mod comment_highlight;
 mod compositor;

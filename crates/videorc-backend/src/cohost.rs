@@ -607,7 +607,7 @@ pub enum CohostAutoChatMode {
 
 /// The activity kinds a greeting template answers (plan 164). Closed: an
 /// unknown kind is refused at the wire, never stored.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub enum CohostActivityTemplateKind {
     Follow,

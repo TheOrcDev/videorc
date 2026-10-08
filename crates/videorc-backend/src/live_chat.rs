@@ -3595,6 +3595,16 @@ async fn run_fake_connector(
     .await;
 }
 
+/// The fake activity rows for the greeting tests (plan 164 S-D1).
+#[cfg(test)]
+pub(crate) fn fake_events_for_tests(
+    session_id: &str,
+    platform: StreamPlatform,
+    target_id: Option<&str>,
+) -> Vec<LiveChatMessage> {
+    fake_events(session_id, platform, target_id)
+}
+
 /// Build one deterministic fake message. Shared by the fake connector and the unit tests.
 /// One of each activity event a platform has, shaped as its connector would
 /// normalize it (plan 055 smoke; the parsers' own tests pin the real payloads).
