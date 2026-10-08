@@ -1237,7 +1237,7 @@ pub const KICK_CHAT_MODERATE_SCOPE: &str = crate::oauth::KICK_MODERATION_SCOPE;
 
 /// The hide reason the moderation engine shows after "Viewers on Kick still
 /// see it."
-pub const KICK_MODERATE_RECONNECT_REASON: &str = "Reconnect Kick to let Orcle remove messages.";
+pub const KICK_MODERATE_RECONNECT_REASON: &str = "Reconnect Kick to let Golem remove messages.";
 
 /// Kick message ids are UUIDs; anything else never becomes a path segment.
 fn kick_message_id_is_safe(message_id: &str) -> bool {

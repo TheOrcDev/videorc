@@ -11,9 +11,9 @@ import type {
 // of the eager renderer bundle.
 
 /**
- * Orcle Live's one switch (plan 119): on means Orcle reads chat AND hears you,
- * in one save; off only stops Orcle joining and leaves listening as it was.
- * The Orcle tab and every Comments-window way on write this one patch.
+ * Golem Live's one switch (plan 119): on means Golem reads chat AND hears you,
+ * in one save; off only stops Golem joining and leaves listening as it was.
+ * The Golem tab and every Comments-window way on write this one patch.
  */
 export function orcleLiveSettingsPatch(on: boolean): CohostSettingsPatch {
   return on ? { enabled: true, listen: true } : { enabled: false }
@@ -78,20 +78,20 @@ export function cohostErrorToastKey(state: CohostState | null): string | null {
 }
 
 export const COHOST_ERROR_TOAST_MESSAGES: Record<CohostReason, string> = {
-  'premium-required': 'Orcle stopped: Videorc Premium is required.',
-  'consent-required': 'Orcle stopped: cloud AI consent is off.',
-  'session-expired': 'Orcle stopped: your Videorc sign-in expired.',
-  'signed-out': 'Orcle stopped: sign in to Videorc to use it.',
-  'quota-exhausted': 'Orcle paused: daily AI quota is used up.',
-  'server-unconfigured': 'Orcle stopped: Videorc AI is unavailable right now.',
-  network: 'Orcle stopped: no connection to Videorc AI.',
-  'gateway-error': 'Orcle stopped: Videorc AI returned an error.'
+  'premium-required': 'Golem stopped: Videorc Premium is required.',
+  'consent-required': 'Golem stopped: cloud AI consent is off.',
+  'session-expired': 'Golem stopped: your Videorc sign-in expired.',
+  'signed-out': 'Golem stopped: sign in to Videorc to use it.',
+  'quota-exhausted': 'Golem paused: daily AI quota is used up.',
+  'server-unconfigured': 'Golem stopped: Videorc AI is unavailable right now.',
+  network: 'Golem stopped: no connection to Videorc AI.',
+  'gateway-error': 'Golem stopped: Videorc AI returned an error.'
 }
 
 /**
  * Toast copy with the server's words attached:
- * "Orcle stopped: Videorc AI returned an error (ai-gateway-error: The
- * Orcle tick failed on every configured model)." The HTTP status stays in
+ * "Golem stopped: Videorc AI returned an error (ai-gateway-error: The
+ * Golem tick failed on every configured model)." The HTTP status stays in
  * the chip tooltip — a toast is read in a second, not debugged.
  */
 export function cohostErrorToastMessage(
@@ -130,8 +130,8 @@ export function cohostErrorToast(
  * reason and no toast.
  */
 export const COHOST_STOPPED_TOAST_MESSAGES: Partial<Record<CohostReason, string>> = {
-  'premium-required': 'Orcle stopped. Premium ended.',
-  'signed-out': 'Orcle stopped. You signed out.'
+  'premium-required': 'Golem stopped. Premium ended.',
+  'signed-out': 'Golem stopped. You signed out.'
 }
 
 /**

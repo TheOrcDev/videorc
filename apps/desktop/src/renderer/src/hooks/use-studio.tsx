@@ -1150,15 +1150,15 @@ export type StudioContextValue = {
   cohostActionPending: boolean
   patchCohostSettings: (patch: CohostSettingsPatch) => Promise<void>
   /**
-   * Orcle Live's one switch (plan 119). On without cloud-AI consent only
-   * raises `orcleConsentRequested` (the Orcle tab's consent dialog) and writes
+   * Golem Live's one switch (plan 119). On without cloud-AI consent only
+   * raises `orcleConsentRequested` (the Golem tab's consent dialog) and writes
    * nothing; on with consent writes `{enabled: true, listen: true}` in one
    * `cohost.settings.set`; off writes `{enabled: false}`.
    */
   setOrcleLive: (on: boolean) => Promise<void>
-  /** The consent dialog Orcle Live asked for is waiting for an answer. */
+  /** The consent dialog Golem Live asked for is waiting for an answer. */
   orcleConsentRequested: boolean
-  /** Accept: grant cloud-AI consent, then the one Orcle Live patch. Decline:
+  /** Accept: grant cloud-AI consent, then the one Golem Live patch. Decline:
    * close the dialog and change nothing. */
   answerOrcleConsent: (accepted: boolean) => Promise<void>
   markCohostQuestionAnswered: (questionId: string, sessionId?: string) => void
@@ -4276,8 +4276,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [client]
   )
 
-  // Orcle Live's one switch (plan 119 S2). Consent comes first: on without it
-  // only asks (the Orcle tab's consent dialog), and nothing is written until
+  // Golem Live's one switch (plan 119 S2). Consent comes first: on without it
+  // only asks (the Golem tab's consent dialog), and nothing is written until
   // the streamer accepts. On is one save: chat and listening together.
   const [orcleConsentRequested, setOrcleConsentRequested] = useState(false)
   const setOrcleLive = useCallback(
@@ -4411,7 +4411,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [toggleCommentHighlight]
   )
 
-  // Orcle's automatic card (plan 060 S1): the ENGINE decides (cadence, roles,
+  // Golem's automatic card (plan 060 S1): the ENGINE decides (cadence, roles,
   // safety gate, one command per decision with an engine-wide generation) and
   // the renderer only executes it. Always-set semantics: an automatic path
   // must never read a repeat as "un-pin" (the H key keeps its toggle). No
@@ -4452,7 +4452,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     executeCohostAutoHighlightRef.current(cohostAutoHighlightMessageId)
   }, [cohostAutoHighlightGeneration, cohostAutoHighlightMessageId])
 
-  // Plan 156: the Activity auto-show engine. Manual and Orcle cards always
+  // Plan 156: the Activity auto-show engine. Manual and Golem cards always
   // win — auto only fires into an idle slot with no apply in flight, never
   // un-pins (always-set semantics), and a backlog or History view never
   // replays: the queue reseeds on session change and on switch-on, so only
@@ -4535,9 +4535,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     void window.videorc?.pushCohostWindowState?.(cohostWindowState)
   }, [cohostWindowState])
 
-  // Orcle Live's one switch from the Comments window (plan 119): its presence
+  // Golem Live's one switch from the Comments window (plan 119): its presence
   // popover, nudge, consent CTA and one-time listening card. On is the same
-  // single `{enabled: true, listen: true}` save as the Orcle tab (the window
+  // single `{enabled: true, listen: true}` save as the Golem tab (the window
   // sends `listen: true` too), off only `{enabled: false}`. The settings and
   // cloud-AI consent are main-renderer owned, so the window asks and gets the
   // resolved window state back; its consent CTA grants consent in the click.
@@ -4569,7 +4569,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           await window.videorc?.pushCohostEnableResult?.({
             requestId: command.requestId,
             ok: false,
-            error: error instanceof Error ? error.message : 'Could not change the Orcle setting.'
+            error: error instanceof Error ? error.message : 'Could not change the Golem setting.'
           })
         })
     })
@@ -4628,7 +4628,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           await window.videorc?.pushCohostActionResult?.({
             requestId: command.requestId,
             ok: false,
-            error: error instanceof Error ? error.message : 'Orcle action failed.'
+            error: error instanceof Error ? error.message : 'Golem action failed.'
           })
         })
     })
@@ -6182,7 +6182,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       .catch(() => undefined)
     // Chat removals (plan 140, S6): a lazy chunk keeps the live session's
     // removal ledger, relays the Stream Manager's Remove from chat and card
-    // answers, and mirrors an open Orcle card as a toast while the Stream
+    // answers, and mirrors an open Golem card as a toast while the Stream
     // Manager is closed. Events that arrive first wait for it.
     let moderation: typeof chatModerationRef.current = null
     let stopCohostCommandRelay: (() => void) | null = null
@@ -6190,7 +6190,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     void import('@/lib/chat-moderation-relay')
       .then(({ startChatModerationRelay, startCohostCommandRelay }) => {
         if (!generationIsCurrent()) return
-        // Plan 140, S6 part B: the Stream Manager's answers to Orcle's cards.
+        // Plan 140, S6 part B: the Stream Manager's answers to Golem's cards.
         stopCohostCommandRelay = startCohostCommandRelay({
           client: nextClient,
           sessionId: () => liveChatSnapshotRef.current.sessionId,

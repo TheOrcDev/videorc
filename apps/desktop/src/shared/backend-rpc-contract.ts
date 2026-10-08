@@ -20,6 +20,11 @@ import type {
   ChatEmotesSettings,
   ChatEmotesSettingsPatch,
   YouTubeQuotaStatus,
+  CohostAutoChat,
+  CohostAvatarGenerateAccepted,
+  CohostAvatarGenerateParams,
+  CohostAvatarGeneratedEvent,
+  CohostPersona,
   CohostSettings,
   CohostSettingsPatch,
   MigrateHighlightAnchorParams,
@@ -322,6 +327,10 @@ export interface BackendRpcMethodMap {
     OverlayLayout
   >
   // --- end overlay layout (plan 164) ---
+  'cohost.avatar.generate': BackendRpcDefinition<
+    CohostAvatarGenerateParams,
+    CohostAvatarGenerateAccepted
+  >
   'cohost.report.get': BackendRpcDefinition<CohostReportGetParams, CohostReportPayload>
   'cohost.report.latest': BackendRpcDefinition<undefined, CohostReportPayload | null>
   'liveChat.emotes.get': BackendRpcDefinition<undefined, ChatEmotesSettings>
@@ -380,6 +389,7 @@ export interface BackendEventMap {
   // --- Overlay layout (plan 164) ---
   'overlays.layout': OverlayLayout
   // --- end overlay layout (plan 164) ---
+  'cohost.avatar.generated': CohostAvatarGeneratedEvent
   'session.marker.voice.status': {
     sessionId: string
     listening: import('./backend').CohostListening
@@ -2169,6 +2179,77 @@ const cohostToneSchema = enumSchema(['friendly', 'short', 'professional'])
 const cohostNotesSchema = stringSchema({ maxLength: 4000 })
 // The backend normalises rules to these caps before it stores or sends them.
 const cohostRulesSchema = arraySchema(stringSchema({ maxLength: 120 }), { maxLength: 10 })
+// Plan 164 S-A2: the persona and the automatic chat block. Both sides
+// validate the same bounds; image paths and template ids are plain strings
+// the backend checks for shape.
+const cohostPersonaImagePathSchema = stringSchema({ minLength: 1, maxLength: 256 })
+const cohostPersonaSchema = objectSchema(
+  {
+    id: stringSchema({ minLength: 1, maxLength: 128 }),
+    name: stringSchema({ minLength: 1, maxLength: 24 }),
+    personality: stringSchema({ maxLength: 1200 }),
+    bubbleStyle: enumSchema(['speech', 'thought', 'shout']),
+    images: objectSchema(
+      {
+        idle: optionalSchema(cohostPersonaImagePathSchema),
+        talk: optionalSchema(cohostPersonaImagePathSchema),
+        laugh: optionalSchema(cohostPersonaImagePathSchema),
+        think: optionalSchema(cohostPersonaImagePathSchema)
+      },
+      { allowUnknown: false }
+    ),
+    source: enumSchema(['default', 'uploaded', 'generated'])
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostPersona>
+const cohostGreetingTemplateSchema = objectSchema(
+  {
+    id: stringSchema({ minLength: 1, maxLength: 128 }),
+    kind: enumSchema([
+      'follow',
+      'sub',
+      'resub',
+      'sub-gift',
+      'community-sub-gift',
+      'membership',
+      'cheer',
+      'kicks',
+      'super-chat',
+      'super-sticker',
+      'raid',
+      'watch-streak',
+      'power-up',
+      'redemption'
+    ]),
+    platform: optionalSchema(enumSchema(['twitch', 'youtube', 'kick', 'x'])),
+    text: stringSchema({ minLength: 1, maxLength: 200 }),
+    state: enumSchema(['talk', 'laugh', 'think']),
+    enabled: booleanSchema
+  },
+  { allowUnknown: false }
+)
+const cohostCooldownBehaviourSchema = objectSchema(
+  {
+    enabled: booleanSchema,
+    cooldownSeconds: numberSchema({ integer: true, min: 1, max: 3600 })
+  },
+  { allowUnknown: false }
+)
+const cohostAutoChatSchema = objectSchema(
+  {
+    mode: enumSchema(['off', 'suggest', 'auto']),
+    greetings: objectSchema(
+      {
+        enabled: booleanSchema,
+        templates: arraySchema(cohostGreetingTemplateSchema, { maxLength: 60 })
+      },
+      { allowUnknown: false }
+    ),
+    answers: cohostCooldownBehaviourSchema,
+    banter: cohostCooldownBehaviourSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostAutoChat>
 const cohostSettingsSchema = objectSchema(
   {
     enabled: booleanSchema,
@@ -2177,11 +2258,14 @@ const cohostSettingsSchema = objectSchema(
     autoHighlight: booleanSchema,
     voiceHighlight: booleanSchema,
     rules: cohostRulesSchema,
-    // Plan 068: Orcle hears the microphone while live.
+    // Plan 068: Golem hears the microphone while live.
     listen: booleanSchema,
     // Plan 140 S3: voice commands. The backend always sends both.
     wakeWordRequired: booleanSchema,
-    removeConfirm: enumSchema(['confirm', 'countdown'])
+    removeConfirm: enumSchema(['confirm', 'countdown']),
+    // Plan 164 S-A2: the backend always sends both.
+    persona: cohostPersonaSchema,
+    autoChat: cohostAutoChatSchema
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSettings>
@@ -2196,7 +2280,9 @@ const cohostSettingsPatchSchema = objectSchema(
     rules: optionalSchema(arraySchema(stringSchema({ maxLength: 2000 }), { maxLength: 100 })),
     listen: optionalSchema(booleanSchema),
     wakeWordRequired: optionalSchema(booleanSchema),
-    removeConfirm: optionalSchema(enumSchema(['confirm', 'countdown']))
+    removeConfirm: optionalSchema(enumSchema(['confirm', 'countdown'])),
+    persona: optionalSchema(cohostPersonaSchema),
+    autoChat: optionalSchema(cohostAutoChatSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSettingsPatch>
@@ -2467,7 +2553,7 @@ const clipMarkedEventSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<ClipMarkedEvent>
 
-// Plan 068: whether Orcle hears the streamer. Every optional field is omitted
+// Plan 068: whether Golem hears the streamer. Every optional field is omitted
 // by the backend when absent (never null).
 const cohostListeningSchema = objectSchema(
   {
@@ -2672,7 +2758,7 @@ const cohostCommandParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<CohostCommandParams>
 
-// Plan 119 S1: the Orcle report. The blocks always ride; every optional list
+// Plan 119 S1: the Golem report. The blocks always ride; every optional list
 // is omitted by the backend while empty (never null). `version` is pinned:
 // the backend reads any other stored version as unavailable, so a report on
 // the wire is always this shape.
@@ -2852,6 +2938,32 @@ const cohostReportSavedEventSchema = objectSchema(
   { sessionId: boundedString },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostReportSavedEvent>
+// Plan 164 S-A6: avatar generation, accepted at once and answered by event.
+const cohostAvatarStateSchema = enumSchema(['idle', 'talk', 'laugh', 'think'])
+const cohostAvatarGenerateParamsSchema = objectSchema(
+  {
+    state: cohostAvatarStateSchema,
+    prompt: stringSchema({ minLength: 1, maxLength: 600 }),
+    style: enumSchema(['cartoon', 'pixel', 'painted', 'sticker'])
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostAvatarGenerateParams>
+const cohostAvatarGenerateAcceptedSchema = objectSchema(
+  { requestId: boundedString, state: cohostAvatarStateSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostAvatarGenerateAccepted>
+const cohostAvatarGeneratedEventSchema = objectSchema(
+  {
+    requestId: boundedString,
+    state: cohostAvatarStateSchema,
+    path: optionalSchema(stringSchema({ minLength: 1, maxLength: 256 })),
+    opaque: booleanSchema,
+    error: optionalSchema(
+      objectSchema({ code: boundedString, message: boundedString }, { allowUnknown: false })
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostAvatarGeneratedEvent>
 
 const scheduledMutationSchema = objectSchema(
   {
@@ -3343,6 +3455,10 @@ const runtimeContracts = {
     result: overlayLayoutSchema
   },
   // --- end overlay layout (plan 164) ---
+  'cohost.avatar.generate': {
+    params: cohostAvatarGenerateParamsSchema,
+    result: cohostAvatarGenerateAcceptedSchema
+  },
   'liveChat.emotes.get': { params: undefinedSchema, result: chatEmotesSettingsSchema },
   'liveChat.emotes.set': {
     params: chatEmotesSettingsPatchSchema,
@@ -3435,6 +3551,7 @@ const runtimeEventSchemas = {
   // --- Overlay layout (plan 164) ---
   'overlays.layout': overlayLayoutSchema,
   // --- end overlay layout (plan 164) ---
+  'cohost.avatar.generated': cohostAvatarGeneratedEventSchema,
   'session.marker.voice.status': objectSchema(
     { sessionId: boundedString, listening: cohostListeningSchema },
     { allowUnknown: false }

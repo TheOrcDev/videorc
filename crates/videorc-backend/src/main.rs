@@ -21,6 +21,7 @@ mod clean_cut;
 mod clip_marks;
 mod cohost;
 mod cohost_ack;
+mod cohost_avatar;
 mod cohost_command;
 mod color;
 mod comment_highlight;
@@ -5352,6 +5353,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.settings.set"
         | "overlays.layout.set"
         | "overlays.layout.migrate_highlight_anchor"
+        | "cohost.avatar.generate"
         | "cohost.command.choose"
         | "cohost.command.confirm"
         | "cohost.command.cancel"
@@ -8905,7 +8907,7 @@ async fn handle_text_message_with_role(
                             tokio::spawn(async move {
                                 refresh_account_entitlements(&entitlement_state).await
                             });
-                            // Orcle stopped listening at sign-out; a session
+                            // Golem stopped listening at sign-out; a session
                             // still running with listening on resumes now.
                             let listen_state = state.clone();
                             tokio::spawn(async move {
@@ -9361,6 +9363,19 @@ async fn handle_text_message_with_role(
         }
         "cohost.settings.get" => {
             ServerResponse::ok(command.id, cohost::get_cohost_settings(state).await)
+        }
+        "cohost.avatar.generate" => {
+            match serde_json::from_value::<protocol::CohostAvatarGenerateParams>(command.params) {
+                Ok(params) => match cohost_avatar::generate(state.clone(), params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
         }
         "cohost.settings.set" => {
             match serde_json::from_value::<protocol::CohostSettingsPatch>(command.params) {
@@ -10411,7 +10426,7 @@ async fn handle_text_message_with_role(
             }
         }
         "session.stop" => {
-            // Orcle's listen task drains with this capture (plan 068 review).
+            // Golem's listen task drains with this capture (plan 068 review).
             live_chat::stop_live_chat_for_capture_end(state).await;
             // Older renderers send no params; the click timestamp is telemetry
             // only, so a malformed payload degrades to "no timestamp".
@@ -12513,7 +12528,7 @@ async fn refresh_account_entitlements(state: &AppState) {
     // Phase 3: compare+hydrate+persist atomically with sign-in/sign-out. A
     // newer refresh generation also wins for the same token/account.
     let transition = state.account_auth_transition.lock().await;
-    // Plan 140 S8: the same read turns Orcle's cloud command parser on or
+    // Plan 140 S8: the same read turns Golem's cloud command parser on or
     // off (applied below, outside this lock). Signed out reads as off; a
     // failed read keeps the last answer.
     let mut command_parser = None;
@@ -12549,7 +12564,7 @@ async fn refresh_account_entitlements(state: &AppState) {
 }
 
 /// Every `entitlements.updated` goes out through here (plan 140 S1): publish
-/// the effective snapshot, then let Orcle react to it. A session running
+/// the effective snapshot, then let Golem react to it. A session running
 /// without `LiveCohost` stops through its normal stop path, with its report
 /// saved. The stop runs on its own task: two of the three emitters call from a
 /// synchronous closure under `account_auth_transition`, and the stop takes the
@@ -12560,7 +12575,7 @@ fn publish_entitlements_updated(state: &AppState) {
     state.emit_event("entitlements.updated", entitlements::current_entitlements());
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         tracing::warn!(
-            "Entitlements changed outside the runtime; Orcle re-checks on its next start."
+            "Entitlements changed outside the runtime; Golem re-checks on its next start."
         );
         return;
     };

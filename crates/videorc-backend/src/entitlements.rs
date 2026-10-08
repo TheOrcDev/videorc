@@ -15,7 +15,7 @@ const ENTITLEMENT_SCHEMA_VERSION: u32 = 1;
 // and the RTMP upload rides the user's own bandwidth, so 4K/1080p60 streaming
 // costs Videorc nothing to serve — the same argument that made multistreaming
 // free (2026-09-15). Premium is the features Videorc pays to serve: cloud AI,
-// live captions, Orcle co-host, Noise Cleanup.
+// live captions, Golem co-host, Noise Cleanup.
 const RECORDING_MAX_WIDTH: u32 = 3840;
 const RECORDING_MAX_HEIGHT: u32 = 2160;
 const RECORDING_MAX_FPS: u32 = 60;
@@ -35,7 +35,7 @@ pub const STREAMING_MAX_DESTINATIONS: u32 = 5;
 const CLOUD_AI_DISABLED_REASON: &str =
     "Cloud AI is a Videorc Premium feature. Sign in with a Premium account to enable it.";
 const NOISE_CLEANUP_DISABLED_REASON: &str = "Noise Cleanup requires Videorc Premium.";
-const LIVE_COHOST_DISABLED_REASON: &str = "Orcle requires Videorc Premium.";
+const LIVE_COHOST_DISABLED_REASON: &str = "Golem requires Videorc Premium.";
 const DEV_BUILD_OVERRIDE_REASON: &str = "Enabled by Videorc debug/dev backend build.";
 
 // --- Account-hydrated Premium entitlement (cloud AI, captions, co-host) ------

@@ -178,18 +178,18 @@ export function AppShell(): ReactElement {
   } = useStudioShell()
   const { recording } = useStudioRecordingState()
   const [active, setActiveTab] = useState<WorkspaceTab>('studio')
-  // Library's "Orcle report" opens the Orcle tab on one session's report (plan
+  // Library's "Golem report" opens the Golem tab on one session's report (plan
   // 119 S3). Any other way to a page drops that ask, so the next visit to
-  // Orcle shows the last stream again.
+  // Golem shows the last stream again.
   const [orcleReportSessionId, setOrcleReportSessionId] = useState<string | null>(null)
   // Clean cut (plan 119 S14): Library's "Clean cut" selects a recording in
-  // the Orcle tab, and the ready toast opens a cut's review there. The card's
+  // the Golem tab, and the ready toast opens a cut's review there. The card's
   // "Open in Library" focuses the cut copy's row. Like the report ask, any
   // other way to a page drops them.
   const [cleanCutRequest, setCleanCutRequest] = useState<CleanCutTabRequest | null>(null)
   const [libraryFocusSessionId, setLibraryFocusSessionId] = useState<string | null>(null)
   const cleanCutNonceRef = useRef(0)
-  // Plan 150: Orcle reopens on its tab used last, like Settings; the
+  // Plan 150: Golem reopens on its tab used last, like Settings; the
   // Library's report and clean-cut asks select the tab that answers them.
   const [orcleTab, setOrcleTab] = useState<OrcleTabId>(readLastOrcleTab)
   const selectOrcleTab = useCallback((tab: OrcleTabId) => {
@@ -446,7 +446,7 @@ export function AppShell(): ReactElement {
           <Pane>
             <Toolbar title={workspaceTabLabel(active)} />
             {/* Library manages its own scroll (pinned header and toolbar,
-                  only the table scrolls), and so do Settings and Orcle (their
+                  only the table scrolls), and so do Settings and Golem (their
                   tab strips stay pinned, only the tab under it scrolls); every
                   other tab scrolls as one. */}
             <PaneBody scroll={active !== 'library' && active !== 'settings' && active !== 'ai'}>

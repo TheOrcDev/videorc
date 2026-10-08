@@ -458,7 +458,21 @@ class StudioBackend {
     rules: [],
     listen: false,
     wakeWordRequired: false,
-    removeConfirm: 'confirm'
+    removeConfirm: 'confirm',
+    persona: {
+      id: 'default',
+      name: 'Golem',
+      personality: '',
+      bubbleStyle: 'speech',
+      images: {},
+      source: 'default'
+    },
+    autoChat: {
+      mode: 'off',
+      greetings: { enabled: false, templates: [] },
+      answers: { enabled: false, cooldownSeconds: 20 },
+      banter: { enabled: false, cooldownSeconds: 240 }
+    }
   }
   cohostState: CohostState = {
     sessionId: null,
@@ -7812,7 +7826,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(toastSpies.error).not.toHaveBeenCalled()
   }, 15_000)
 
-  it('applies cloud-AI preference flips to the same active Orcle session from backend replies', async () => {
+  it('applies cloud-AI preference flips to the same active Golem session from backend replies', async () => {
     const backend = new StudioBackend()
     backend.entitlements = premiumEntitlements
     backend.cohostSettings.listen = true
@@ -7984,8 +7998,8 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()?.chat.cohostState?.status).toBe('paused')
   }, 15_000)
 
-  // Plan 119 S2: Orcle Live is one switch. On asks for cloud-AI consent first
-  // (the Orcle tab's dialog), then writes chat AND listening in ONE save; off
+  // Plan 119 S2: Golem Live is one switch. On asks for cloud-AI consent first
+  // (the Golem tab's dialog), then writes chat AND listening in ONE save; off
   // writes `enabled` alone. Cloud AI is its own choice and never rewrites them.
   async function mountOrcleLiveProvider(consent: '0' | '1'): Promise<{
     backend: StudioBackend
@@ -8033,7 +8047,7 @@ describe('real StudioProvider lifecycle', () => {
     }
   }
 
-  it('turns Orcle Live on only through the consent dialog, then in one save with listening', async () => {
+  it('turns Golem Live on only through the consent dialog, then in one save with listening', async () => {
     const { latest, settingsWrites } = await mountOrcleLiveProvider('0')
 
     await act(async () => latest()!.core.setOrcleLive(true))
@@ -8059,7 +8073,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(toastSpies.error).not.toHaveBeenCalled()
   }, 15_000)
 
-  it('changes nothing when the Orcle Live consent dialog is declined', async () => {
+  it('changes nothing when the Golem Live consent dialog is declined', async () => {
     const { latest, settingsWrites } = await mountOrcleLiveProvider('0')
 
     await act(async () => latest()!.core.setOrcleLive(true))
@@ -8073,7 +8087,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()!.core.cohostSettings?.enabled).toBe(false)
   }, 15_000)
 
-  it('turns Orcle Live on without a dialog once cloud AI is allowed', async () => {
+  it('turns Golem Live on without a dialog once cloud AI is allowed', async () => {
     const { latest, settingsWrites } = await mountOrcleLiveProvider('1')
 
     await act(async () => latest()!.core.setOrcleLive(true))
@@ -8082,7 +8096,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
   }, 15_000)
 
-  it('revokes cloud AI without rewriting Orcle settings, and asks again on the next on', async () => {
+  it('revokes cloud AI without rewriting Golem settings, and asks again on the next on', async () => {
     const { latest, settingsWrites } = await mountOrcleLiveProvider('1')
     await act(async () => latest()!.core.setOrcleLive(true))
     await waitForObservation(() => latest()?.core.cohostSettings?.enabled === true)
@@ -8098,7 +8112,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
   }, 15_000)
 
-  it('applies the same Orcle Live save to every Comments-window way on', async () => {
+  it('applies the same Golem Live save to every Comments-window way on', async () => {
     const { latest, settingsWrites, emitApi, pushCohostEnableResult } =
       await mountOrcleLiveProvider('0')
 
@@ -8138,9 +8152,9 @@ describe('real StudioProvider lifecycle', () => {
   }, 15_000)
 
   // Stop never starts a cloud job on its own: a streamed, recorded session
-  // Orcle heard finalizes with its transcript, and only the cloud-AI
+  // Golem heard finalizes with its transcript, and only the cloud-AI
   // readiness reads go out.
-  it('starts no cloud job when a streamed recording Orcle heard finalizes', async () => {
+  it('starts no cloud job when a streamed recording Golem heard finalizes', async () => {
     // Cloud AI reads ready, so only a missing trigger keeps a job from going out.
     class CloudReadyBackend extends StudioBackend {
       override response(command: BackendCommand): unknown {
@@ -8212,7 +8226,7 @@ describe('real StudioProvider lifecycle', () => {
         await Promise.resolve()
       })
     }
-    // Everything a post-recording job could key on: Orcle heard the stream,
+    // Everything a post-recording job could key on: Golem heard the stream,
     // the transcript landed, and the MP4 finalized.
     await emit('liveChat.snapshot', {
       sessionId: 'pack-1',

@@ -14,8 +14,8 @@ import type {
 } from '@/lib/chat-removal-view'
 import { cn } from '@/lib/utils'
 
-// Orcle's removal cards (plan 140, S6), at the top of the Stream Manager's
-// Orcle pane: what Orcle is about to remove because you asked, and how to stop
+// Golem's removal cards (plan 140, S6), at the top of the Stream Manager's
+// Golem pane: what Golem is about to remove because you asked, and how to stop
 // it. The backend owns the timing; a card only counts down to it, and leaves
 // a one-line result behind when the operation ends.
 //
@@ -107,7 +107,7 @@ export function RemovalCards({
   if (!view.active) return null
   return (
     <div
-      aria-label="Removals Orcle is waiting on"
+      aria-label="Removals Golem is waiting on"
       className="flex shrink-0 flex-col gap-1.5 border-b border-border p-2"
       data-slot="removal-cards"
     >

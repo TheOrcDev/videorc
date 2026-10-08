@@ -65,7 +65,7 @@ import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { cn } from '@/lib/utils'
 
 /**
- * The Orcle pane in the Stream Manager, which only the detached Comments
+ * The Golem pane in the Stream Manager, which only the detached Comments
  * window mounts. It renders the backend's `cohost.state` and nothing else: it
  * never decides what is a question and never sends anything. A flag is only
  * acted on when the streamer asks: "Remove from chat" on the selected flag
@@ -259,7 +259,7 @@ export function CohostPane({
 
   if (mode.kind === 'consent') {
     return (
-      <CohostNotice label="Orcle">
+      <CohostNotice label="Golem">
         <span className="min-w-0 flex-1 truncate" title={mode.reason}>
           {mode.reason}
         </span>
@@ -358,7 +358,7 @@ export function CohostPane({
           className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=closed]:-rotate-90"
         />
         <OrcleIcon aria-hidden className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
-        <span className="shrink-0 text-xs font-medium text-foreground">Orcle</span>
+        <span className="shrink-0 text-xs font-medium text-foreground">Golem</span>
         <span
           className={cn(
             'shrink-0 text-[10px] font-medium tracking-wide text-muted-foreground',
@@ -378,7 +378,7 @@ export function CohostPane({
             ].join('\n') || undefined
           }
         >
-          {flash ?? presence.label.replace(/^Orcle\s*(·\s*)?/, '')}
+          {flash ?? presence.label.replace(/^Golem\s*(·\s*)?/, '')}
         </span>
         {presence.dots ? <CohostTypingDots fast={presence.kind === 'thinking'} /> : null}
         <span className="flex-1" />
@@ -448,7 +448,7 @@ export function CohostPane({
         ) : null}
         <Command
           ref={rootRef}
-          aria-label="Orcle questions and flags"
+          aria-label="Golem questions and flags"
           className="bg-transparent outline-none"
           shouldFilter={false}
           tabIndex={0}
@@ -648,8 +648,8 @@ export function CohostPane({
 }
 
 /**
- * The one-time "Orcle can hear you" card (plan 068 D3) at the top of the
- * Orcle pane, for someone who already runs Orcle with listening off. Either
+ * The one-time "Golem can hear you" card (plan 068 D3) at the top of the
+ * Golem pane, for someone who already runs Golem with listening off. Either
  * answer is final: Turn on and Not now both persist, so it never comes back.
  * A flush Alert row, not a card on a card; the words say what listening sends
  * before the streamer opts in.
@@ -659,7 +659,7 @@ export function CohostListenPrompt({
   listen,
   onTurnOn
 }: {
-  /** Orcle can run here: Premium, cloud-AI consent, and Orcle on. */
+  /** Golem can run here: Premium, cloud-AI consent, and Golem on. */
   enabled: boolean
   /** Persisted `cohost.settings.listen`; unknown never shows the card. */
   listen: boolean | undefined
@@ -673,9 +673,9 @@ export function CohostListenPrompt({
   }
   return (
     <div className="shrink-0 p-2" data-slot="cohost-listen-prompt">
-      <Alert aria-label="Orcle can hear you while you're live" role="group">
+      <Alert aria-label="Golem can hear you while you're live" role="group">
         <MicrophoneIcon aria-hidden weight="duotone" />
-        <AlertTitle className="text-xs">Orcle can hear you while you&apos;re live</AlertTitle>
+        <AlertTitle className="text-xs">Golem can hear you while you&apos;re live</AlertTitle>
         <AlertDescription className="text-xs">
           Your mic audio goes to Videorc&apos;s cloud speech-to-text to be turned into text. Videorc
           servers don&apos;t keep it. The transcript is saved with your recording on this computer.
@@ -856,7 +856,7 @@ function CohostSayHiList({
       <Separator />
       <p
         className="px-2 pt-1.5 pb-0.5 text-[11px] font-semibold text-subtle"
-        title="First time in your chat. Say their name and Orcle takes them off."
+        title="First time in your chat. Say their name and Golem takes them off."
       >
         Say hi
       </p>
@@ -901,7 +901,7 @@ function CohostSayHiList({
 
 /**
  * A recap for viewers who asked what they missed, or one the streamer
- * drafted. Post to chat pre-fills the composer and nothing else: Orcle never
+ * drafted. Post to chat pre-fills the composer and nothing else: Golem never
  * sends.
  */
 function CohostRecapCard({

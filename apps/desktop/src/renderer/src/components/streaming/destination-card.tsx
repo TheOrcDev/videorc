@@ -864,7 +864,7 @@ function OAuthAccountPanel({
   const platformName = metadataPlatformLabel(platform)
   // Connect and Reconnect ask for the platform's ordinary optional
   // permissions (plan 071 S2, plan 140 S5): all of Twitch's, so Activity names
-  // followers and Orcle can remove messages from the first stream. The
+  // followers and Golem can remove messages from the first stream. The
   // permission row asks for every optional permission, which is the only
   // place Kick's moderation permission is requested.
   const connect = (): void => onConnect(platform, platformConnectOptions(platform))

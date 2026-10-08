@@ -116,9 +116,9 @@ export function LibraryTab({
   onOpenCleanCut,
   focusSessionId = null
 }: {
-  /** "Orcle report": the Orcle tab, opened on this session's report. */
+  /** "Golem report": the Golem tab, opened on this session's report. */
   onOpenOrcleReport: (sessionId: string) => void
-  /** "Clean cut": the Orcle tab's Clean cut, on this recording (plan 119 S14). */
+  /** "Clean cut": the Golem tab's Clean cut, on this recording (plan 119 S14). */
   onOpenCleanCut: (sessionId: string) => void
   /** Clean cut's "Open in Library": the row to show and focus. */
   focusSessionId?: string | null
@@ -956,11 +956,11 @@ function RowActions({
               // The report is saved when the stream ends (plan 119 S3).
               <DropdownMenuItem disabled={live} onClick={onOpenOrcleReport}>
                 <OrcleIcon />
-                Orcle report
+                Golem report
               </DropdownMenuItem>
             ) : null}
             {isCleanCutEligible(session) ? (
-              // The Orcle tab's Clean cut, on this recording (plan 119 S14).
+              // The Golem tab's Clean cut, on this recording (plan 119 S14).
               <DropdownMenuItem onClick={onOpenCleanCut}>
                 <ClipIcon />
                 Clean cut

@@ -573,7 +573,33 @@
       "rules": ["No spoilers", "English only"],
       "listen": true,
       "wakeWordRequired": true,
-      "removeConfirm": "countdown"
+      "removeConfirm": "countdown",
+      "persona": {
+        "id": "persona-fixture",
+        "name": "Grum the Goblin",
+        "personality": "Cheerful goblin merchant",
+        "bubbleStyle": "shout",
+        "images": { "idle": "persona-fixture/idle.png", "laugh": "persona-fixture/laugh.webp" },
+        "source": "uploaded"
+      },
+      "autoChat": {
+        "mode": "suggest",
+        "greetings": {
+          "enabled": true,
+          "templates": [
+            {
+              "id": "template-fixture",
+              "kind": "follow",
+              "platform": "twitch",
+              "text": "Welcome to the horde, {name}",
+              "state": "laugh",
+              "enabled": true
+            }
+          ]
+        },
+        "answers": { "enabled": true, "cooldownSeconds": 30 },
+        "banter": { "enabled": false, "cooldownSeconds": 240 }
+      }
     },
     "settings": {
       "enabled": true,
@@ -584,7 +610,21 @@
       "rules": [],
       "listen": false,
       "wakeWordRequired": false,
-      "removeConfirm": "confirm"
+      "removeConfirm": "confirm",
+      "persona": {
+        "id": "default",
+        "name": "Golem",
+        "personality": "",
+        "bubbleStyle": "speech",
+        "images": {},
+        "source": "default"
+      },
+      "autoChat": {
+        "mode": "off",
+        "greetings": { "enabled": false, "templates": [] },
+        "answers": { "enabled": false, "cooldownSeconds": 20 },
+        "banter": { "enabled": false, "cooldownSeconds": 240 }
+      }
     },
     "state": {
       "sessionId": "session-fixture",
@@ -647,7 +687,7 @@
       "reason": "gateway-error",
       "detail": {
         "code": "ai-gateway-error",
-        "message": "The Orcle tick failed on every configured model.",
+        "message": "The Golem tick failed on every configured model.",
         "status": 502
       },
       "questions": [],
@@ -668,7 +708,7 @@
       "reason": "network",
       "detail": {
         "code": "timeout",
-        "message": "Orcle did not answer within 12 s.",
+        "message": "Golem did not answer within 12 s.",
         "status": null
       },
       "questions": [],
@@ -790,7 +830,7 @@
       "listening": {
         "state": "blocked",
         "reasonCode": "listen-monthly-quota-exhausted",
-        "message": "Orcle's listening allowance for this month is used up.",
+        "message": "Golem's listening allowance for this month is used up.",
         "remainingSeconds": 0
       },
       "topic": "Mechanical keyboards",

@@ -56,10 +56,10 @@ const ASKERS_YIELD =
 const LABEL_STAYS = '[&_[data-slot=list-row-title]]:shrink-0'
 
 /**
- * The Orcle tab's Reports tab (plan 119 S3, plan 150 S6): what Orcle caught in
+ * The Golem tab's Reports tab (plan 119 S3, plan 150 S6): what Golem caught in
  * the stream that ended last, or in any recent stream the picker names.
  * `sessionId` null follows the newest stream, so the next one that ends
- * replaces it on its own; the Library's "Orcle report" passes one session.
+ * replaces it on its own; the Library's "Golem report" passes one session.
  */
 export function OrcleReportCard({
   sessionId,
@@ -337,7 +337,7 @@ function StreamLine({ view }: { view: ShownReport }): ReactElement {
 
 /**
  * What voice commands did this stream (plan 140, S6): one row, counts only,
- * and only when Orcle counted any.
+ * and only when Golem counted any.
  */
 function ReportCommands({ commands }: { commands: ShownReport['commands'] }): ReactElement | null {
   if (!commands) return null

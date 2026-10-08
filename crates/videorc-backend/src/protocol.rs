@@ -4711,15 +4711,77 @@ pub struct CohostSettingsPatch {
     /// Replaces the whole list; the engine normalises it (trim, <= 10 x 120).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules: Option<Vec<String>>,
-    /// Orcle hears the microphone while live (plan 068 D2).
+    /// Golem hears the microphone while live (plan 068 D2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen: Option<bool>,
-    /// Voice commands need "Orcle" first (plan 140 S3).
+    /// Voice commands need "Golem" first (plan 140 S3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_word_required: Option<bool>,
     /// How a voice removal is confirmed (plan 140 S3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remove_confirm: Option<crate::live_chat_moderation::RemoveConfirmMode>,
+    /// The whole persona (plan 164 S-A2); the engine validates and trims it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<crate::cohost::CohostPersona>,
+    /// The whole automatic chat block (plan 164 S-A2), validated likewise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_chat: Option<crate::cohost::CohostAutoChat>,
+}
+
+/// `cohost.avatar.generate` (plan 164 S-A6): one state image from a
+/// description and a style. The call is accepted at once; the outcome is the
+/// `cohost.avatar.generated` event.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarGenerateParams {
+    pub state: crate::cohost::CohostAvatarState,
+    pub prompt: String,
+    pub style: crate::cohost_avatar::CohostAvatarStyle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarGenerateAccepted {
+    pub request_id: String,
+    pub state: crate::cohost::CohostAvatarState,
+}
+
+/// Why one generation failed, in the web's code and the tile's words.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarErrorDetail {
+    pub code: String,
+    pub message: String,
+}
+
+impl CohostAvatarErrorDetail {
+    pub fn new(code: &str, message: impl Into<String>) -> Self {
+        Self {
+            code: code.to_string(),
+            message: message.into(),
+        }
+    }
+
+    pub fn new_owned(code: String, message: String) -> Self {
+        Self { code, message }
+    }
+}
+
+/// `cohost.avatar.generated` (plan 164 S-A6): `path` is the relative asset
+/// path the persona stores (`<personaId>/<state>.png`) on success, `error`
+/// the one line the tile shows otherwise. Each is absent, never null.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarGeneratedEvent {
+    pub request_id: String,
+    pub state: crate::cohost::CohostAvatarState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The model returned no alpha (S-A5); the tile says so.
+    #[serde(default)]
+    pub opaque: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<CohostAvatarErrorDetail>,
 }
 
 /// `cohost.command.choose` (plan 140 S3): pick one comment from the chooser
@@ -4739,7 +4801,7 @@ pub struct CohostCommandParams {
     pub command_id: String,
 }
 
-// --- Orcle report (plan 119 S1; mirrored in shared/backend.ts) ---
+// --- Golem report (plan 119 S1; mirrored in shared/backend.ts) ---
 
 /// The report format this build writes and reads. A stored report with any
 /// other version reads as unavailable, never as an error.
@@ -4766,7 +4828,7 @@ pub struct CohostReportSavedEvent {
     pub session_id: String,
 }
 
-/// What became of a question Orcle caught. The latest outcome wins; a
+/// What became of a question Golem caught. The latest outcome wins; a
 /// restore puts it back to `open`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -4799,7 +4861,7 @@ pub struct CohostReportQuestion {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostReportQuestions {
-    /// Distinct question ids Orcle surfaced.
+    /// Distinct question ids Golem surfaced.
     #[serde(default)]
     pub total: u64,
     #[serde(default)]
@@ -4905,7 +4967,7 @@ pub struct CohostReportAlert {
     pub first_seen_at: String,
 }
 
-/// Recaps are never posted by Orcle, so posting leaves no count.
+/// Recaps are never posted by Golem, so posting leaves no count.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostReportRecap {
@@ -4943,7 +5005,7 @@ pub struct CohostReportCommands {
     /// A removal that failed or ended unknown, or a refused request.
     #[serde(default)]
     pub failed: u64,
-    /// No comment matched, or Orcle didn't catch what was said.
+    /// No comment matched, or Golem didn't catch what was said.
     #[serde(default)]
     pub not_found: u64,
 }
@@ -4966,7 +5028,7 @@ impl CohostReportCommands {
     }
 }
 
-/// What Orcle caught in one stream, saved on this computer when the session
+/// What Golem caught in one stream, saved on this computer when the session
 /// ends and deleted with the recording (plan 119 decision 6). Counts and the
 /// question log; never raw chat or drafts. Every optional field is omitted,
 /// never null; the blocks always ride and default on read.
@@ -4977,7 +5039,7 @@ pub struct CohostSessionReport {
     pub session_id: String,
     pub started_at: String,
     pub ended_at: String,
-    /// Orcle sessions folded into this report: turning Orcle off and on
+    /// Golem sessions folded into this report: turning Golem off and on
     /// mid-stream adds one.
     #[serde(default)]
     pub segments: u32,
@@ -5014,7 +5076,7 @@ impl CohostSessionReport {
         (report.version == COHOST_SESSION_REPORT_VERSION).then_some(report)
     }
 
-    /// Fold a later report of the same session into this one (Orcle turned
+    /// Fold a later report of the same session into this one (Golem turned
     /// off and on mid-stream, or a replacing start): counts add up, questions
     /// union by id with the later outcome winning, open promises union by
     /// text, and the span covers both.
@@ -5175,7 +5237,7 @@ pub struct CohostReportChat {
 }
 
 /// `cohost.report.get` / `cohost.report.latest`: the saved report (null when
-/// Orcle left none), the session's moments (computed on read, never stored)
+/// Golem left none), the session's moments (computed on read, never stored)
 /// and its chat totals.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -5189,7 +5251,7 @@ pub struct CohostReportPayload {
 }
 
 /// A moment worth a clip: a clip mark or a chat peak, snapped to the
-/// captions. Computed on read for the Orcle report, never stored.
+/// captions. Computed on read for the Golem report, never stored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipMoment {
@@ -5275,6 +5337,10 @@ pub struct AiCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entitlement_token: Option<String>,
     pub features: AiCapabilitiesFeatures,
+    /// The Golem routes (plan 164): the tick contract the web speaks and
+    /// whether avatar generation is on. Older servers omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cohost: Option<AiCapabilitiesCohost>,
     pub generated_at: String,
     pub limits: AiCapabilitiesLimits,
     pub models: AiCapabilitiesModels,
@@ -5282,6 +5348,29 @@ pub struct AiCapabilities {
     pub readiness: AiCapabilitiesReadiness,
     pub transcription: AiCapabilitiesTranscription,
     pub workflow: AiCapabilitiesWorkflow,
+}
+
+/// `cohost` from `GET /api/ai/capabilities` (plan 164): every field
+/// defaults so a partial block never breaks the load.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesCohost {
+    /// The newest tick prompt version the web accepts (4 adds the persona).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<AiCapabilitiesAvatar>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesAvatar {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub remaining_today: u32,
+    #[serde(default)]
+    pub daily_limit: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5356,7 +5445,7 @@ pub struct AiCapabilitiesFeatures {
     #[serde(default)]
     pub clean_cut_enabled: bool,
     pub cloud_ai_enabled: bool,
-    /// The Orcle command route is on and its model configured (plan 140 S8,
+    /// The Golem command route is on and its model configured (plan 140 S8,
     /// contract part E). Older servers omit it: the parser stays off.
     #[serde(default)]
     pub cohost_command_enabled: bool,
@@ -6834,7 +6923,7 @@ mod tests {
             errored.detail,
             Some(crate::cohost::CohostErrorDetail {
                 code: "ai-gateway-error".to_string(),
-                message: "The Orcle tick failed on every configured model.".to_string(),
+                message: "The Golem tick failed on every configured model.".to_string(),
                 status: Some(502),
             })
         );
@@ -6912,7 +7001,7 @@ mod tests {
             Some(crate::cohost::CohostListening {
                 state: crate::cohost::CohostListeningState::Blocked,
                 reason_code: Some("listen-monthly-quota-exhausted".to_string()),
-                message: Some("Orcle's listening allowance for this month is used up.".to_string()),
+                message: Some("Golem's listening allowance for this month is used up.".to_string()),
                 remaining_seconds: Some(0),
             })
         );
@@ -7132,7 +7221,7 @@ mod tests {
         let mut without = base.clone();
         without.commands = None;
 
-        // Orcle off and on mid-stream: the counts add up.
+        // Golem off and on mid-stream: the counts add up.
         let merged = base.clone().merged_with(base.clone());
         let doubled = merged.commands.unwrap();
         assert_eq!(doubled.highlighted, counted.highlighted * 2);

@@ -48,7 +48,7 @@ describe('ORCLE_TABS (plan 150)', () => {
       'clean-cut'
     ])
     expect(ORCLE_TABS.map((tab) => tab.label)).toEqual([
-      'Live',
+      'Golem',
       'Chat',
       'Voice',
       'Reports',
@@ -120,7 +120,7 @@ describe('writeLastOrcleTab', () => {
 })
 
 describe('openOrcleTab', () => {
-  it('asks the shell to open Orcle on the tab, on the workspace navigation event', () => {
+  it('asks the shell to open Golem on the tab, on the workspace navigation event', () => {
     const target = new EventTarget()
     const opened: unknown[] = []
     target.addEventListener('videorc:navigate-workspace', (event) =>

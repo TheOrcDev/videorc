@@ -22,6 +22,9 @@ const COLOUR_LITERAL_ALLOWLIST = new Set([
   'src/components/captions-reader.tsx',
   // The comment highlight overlay drawn onto the stream.
   'src/lib/comment-highlight.ts',
+  // The Golem's comic bubble as it is drawn onto the stream (plan 164 D17):
+  // always the light variant, the stream is not themed.
+  'src/components/golem-bubble-sample.tsx',
   // Chroma-key colours are the key itself.
   'src/lib/capture.ts',
   'src/components/tabs/layout-tab.tsx',

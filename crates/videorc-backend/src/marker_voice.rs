@@ -61,7 +61,7 @@ pub fn marker_candidate(text: &str) -> bool {
         .iter()
         .skip_while(|t| t.word == "please" || crate::cohost_command::is_command_negation(&t.word))
         .collect();
-    // Reserve only marker grammar (including incomplete prefixes). Other Orcle
+    // Reserve only marker grammar (including incomplete prefixes). Other Golem
     // actions, especially the existing "mark clip" command, retain their owner.
     match tail.first().map(|t| t.word.as_str()) {
         // A wake-only final belongs to the shared command detector too. It
@@ -202,7 +202,7 @@ impl UtteranceBuffer {
         // A blocked wake-only chunk still reaches ordinary command handling;
         // its following marker header reserves the rest of this speech turn.
         self.suppress_until_boundary |= marker_candidate(text)
-            || (self.cancelled_wake && marker_candidate(&format!("Orcle {text}")));
+            || (self.cancelled_wake && marker_candidate(&format!("Golem {text}")));
         if !text.trim().is_empty() {
             self.cancelled_wake = !self.suppress_until_boundary && wake_only(text);
         }
@@ -391,7 +391,7 @@ mod tests {
         closing.extend(vec![0; 32_000]);
         let at = std::time::Instant::now();
         for (seq, offset, text, samples) in [
-            (1, 0.0, "Orcle", &voice),
+            (1, 0.0, "Golem", &voice),
             (2, 3.0, "highlight the last comment.", &closing),
         ] {
             let outcome = buffer.observe(seq, offset, 3.0, samples, text, &[]);
@@ -406,7 +406,7 @@ mod tests {
             }
         }
         let mut buffer = UtteranceBuffer::default();
-        assert!(!buffer.observe(1, 0.0, 3.0, &voice, "Orcle", &[]).consumed);
+        assert!(!buffer.observe(1, 0.0, 3.0, &voice, "Golem", &[]).consumed);
         let marker = buffer.observe(
             2,
             3.0,
@@ -422,9 +422,9 @@ mod tests {
     #[test]
     fn grammar_preserves_titles_and_rejects_negation_and_discussion() {
         for phrase in [
-            "Orcle make a marker here for Shadcn New Library",
-            "Orcle add a marker called Shadcn New Library",
-            "Orcle mark this as Shadcn New Library",
+            "Golem make a marker here for Shadcn New Library",
+            "Golem add a marker called Shadcn New Library",
+            "Golem mark this as Shadcn New Library",
         ] {
             assert_eq!(
                 parse_marker(phrase, 12.5, &[]).unwrap(),
@@ -435,7 +435,7 @@ mod tests {
             );
         }
         assert!(
-            parse_marker("Orcle don't make a marker", 0.0, &[])
+            parse_marker("Golem don't make a marker", 0.0, &[])
                 .unwrap()
                 .is_none()
         );
@@ -445,7 +445,7 @@ mod tests {
                 .is_none()
         );
         assert!(
-            parse_marker("Orcle's marker looks nice", 0.0, &[])
+            parse_marker("Golem's marker looks nice", 0.0, &[])
                 .unwrap()
                 .is_none()
         );
@@ -454,11 +454,11 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(parse_marker("Orcle make a marker here for", 0.0, &[]).is_err());
-        assert!(marker_candidate("Orcle don't make a marker for Alpha"));
-        assert!(marker_candidate("Orcle make a"));
-        assert!(!marker_candidate("Orcle mark clip"));
-        assert!(!marker_candidate("Orcle make an announcement"));
+        assert!(parse_marker("Golem make a marker here for", 0.0, &[]).is_err());
+        assert!(marker_candidate("Golem don't make a marker for Alpha"));
+        assert!(marker_candidate("Golem make a"));
+        assert!(!marker_candidate("Golem mark clip"));
+        assert!(!marker_candidate("Golem make an announcement"));
     }
     #[test]
     fn chunk_finals_wait_for_silence_and_preserve_first_verb_timing() {
@@ -471,7 +471,7 @@ mod tests {
                     20.0,
                     3.0,
                     &voice,
-                    "Orcle make a marker here for Shadcn",
+                    "Golem make a marker here for Shadcn",
                     &[CaptionSegment {
                         text: "make".into(),
                         start_second: 0.7,
@@ -503,31 +503,31 @@ mod tests {
         let voice = vec![1000; 48000];
         let quiet = vec![0; 48000];
         let mut blocked = UtteranceBuffer::default();
-        assert!(blocked.observe_cancelled(&voice, "Orcle make a marker here for"));
+        assert!(blocked.observe_cancelled(&voice, "Golem make a marker here for"));
         blocked.cancel();
         assert!(blocked.observe_cancelled(&voice, "clip that and remove it from our chat"));
         assert!(blocked.observe_cancelled(&quiet, ""));
         assert!(!blocked.observe_cancelled(&voice, "clip that"));
 
         let mut split_wake = UtteranceBuffer::default();
-        assert!(!split_wake.observe_cancelled(&voice, "Orcle"));
+        assert!(!split_wake.observe_cancelled(&voice, "Golem"));
         split_wake.cancel();
         assert!(!split_wake.observe_cancelled(&voice, "highlight the last comment"));
-        assert!(!split_wake.observe_cancelled(&voice, "Orcle"));
+        assert!(!split_wake.observe_cancelled(&voice, "Golem"));
         split_wake.cancel();
         assert!(split_wake.observe_cancelled(&voice, "make a marker here for"));
         split_wake.cancel();
         assert!(split_wake.observe_cancelled(&voice, "clip that"));
 
         let mut regrant = UtteranceBuffer::default();
-        assert!(!regrant.observe_cancelled(&voice, "Orcle"));
+        assert!(!regrant.observe_cancelled(&voice, "Golem"));
         regrant.cancel();
         let outcome = regrant.observe(1, 0.0, 3.0, &voice, "make a marker for Private title", &[]);
         assert!(outcome.consumed);
         assert!(outcome.markers.is_empty());
 
         let mut retired_wake = UtteranceBuffer::default();
-        retired_wake.observe(1, 0.0, 3.0, &voice, "Orcle", &[]);
+        retired_wake.observe(1, 0.0, 3.0, &voice, "Golem", &[]);
         assert!(retired_wake.cancel());
         let outcome =
             retired_wake.observe(2, 3.0, 3.0, &voice, "make a marker for Private title", &[]);
@@ -535,7 +535,7 @@ mod tests {
         assert!(outcome.markers.is_empty());
 
         let mut split_quiet = UtteranceBuffer::default();
-        assert!(split_quiet.observe_cancelled(&voice, "Orcle make a marker for"));
+        assert!(split_quiet.observe_cancelled(&voice, "Golem make a marker for"));
         assert!(split_quiet.observe_cancelled(&vec![0; 4800], ""));
         split_quiet.cancel();
         assert!(split_quiet.observe_cancelled(&vec![0; 3200], ""));
@@ -549,7 +549,7 @@ mod tests {
             0.0,
             3.0,
             &vec![1000; 48000],
-            "Orcle make a marker for",
+            "Golem make a marker for",
             &[],
         );
         assert!(buffer.cancel());
@@ -560,7 +560,7 @@ mod tests {
         buffer.observe(3, 6.0, 3.0, &vec![0; 48000], "", &[]);
         assert!(!buffer.suppress_until_boundary);
         assert_eq!(
-            parse_marker("Orcle mark this as \"Don't stop / 新 Library\"", 0.0, &[])
+            parse_marker("Golem mark this as \"Don't stop / 新 Library\"", 0.0, &[])
                 .unwrap()
                 .unwrap()
                 .label
@@ -576,7 +576,7 @@ mod tests {
             0.0,
             3.0,
             &vec![1000; 48000],
-            "Orcle make a marker for Shadcn New Library",
+            "Golem make a marker for Shadcn New Library",
             &[],
         );
         // The provider returned no extra words, but its audio contains the
@@ -601,7 +601,7 @@ mod tests {
             0.0,
             3.0,
             &vec![1000; 48000],
-            "Orcle make a marker for Shadcn",
+            "Golem make a marker for Shadcn",
             &[],
         );
         let result = buffer.observe(3, 6.0, 3.0, &vec![0; 48000], "New Library", &[]);
@@ -615,10 +615,24 @@ mod tests {
             9.0,
             3.0,
             &audio,
-            "Orcle make a marker for Alpha. What is next?",
+            "Golem make a marker for Alpha. What is next?",
             &[],
         );
         assert!(result.markers.is_empty());
         assert!(result.refusal.is_some());
+    }
+
+    #[test]
+    fn the_persona_name_wakes_the_marker_grammar_too() {
+        assert!(marker_candidate("Golem make a marker here for Boss fight"));
+        assert!(!marker_candidate(
+            "Vexlar make a marker here for Boss fight"
+        ));
+        crate::cohost_command::set_persona_wake_tokens("Vexlar");
+        assert!(marker_candidate("Vexlar make a marker here for Boss fight"));
+        crate::cohost_command::set_persona_wake_tokens("Golem");
+        assert!(!marker_candidate(
+            "Vexlar make a marker here for Boss fight"
+        ));
     }
 }

@@ -1774,7 +1774,7 @@ describe('backend RPC contract', () => {
     ).toThrow('clip.marks.list')
   })
 
-  it('validates the Orcle report RPCs and the saved event (plan 119 S1)', () => {
+  it('validates the Golem report RPCs and the saved event (plan 119 S1)', () => {
     const report = {
       version: 1,
       sessionId: 'session-1',
@@ -2087,7 +2087,7 @@ describe('backend RPC contract', () => {
     // and closed: a bad code/status shape fails the event like any other.
     const detail = {
       code: 'ai-gateway-error',
-      message: 'The Orcle tick failed on every configured model.',
+      message: 'The Golem tick failed on every configured model.',
       status: 502
     }
     const errored = { ...state, status: 'error', reason: 'gateway-error', detail }
@@ -2144,7 +2144,21 @@ describe('backend RPC contract', () => {
       rules: ['No spoilers'],
       listen: false,
       wakeWordRequired: false,
-      removeConfirm: 'confirm'
+      removeConfirm: 'confirm',
+      persona: {
+        id: 'default',
+        name: 'Golem',
+        personality: '',
+        bubbleStyle: 'speech',
+        images: {},
+        source: 'default'
+      },
+      autoChat: {
+        mode: 'off',
+        greetings: { enabled: false, templates: [] },
+        answers: { enabled: false, cooldownSeconds: 20 },
+        banter: { enabled: false, cooldownSeconds: 240 }
+      }
     }
     expect(validateBackendRpcResult('cohost.settings.get', settings)).toEqual(settings)
     expect(validateBackendRpcParams('cohost.settings.set', { listen: true })).toEqual({
@@ -2326,7 +2340,7 @@ describe('backend RPC contract', () => {
     ).toThrow('liveChat.moderation.request')
   })
 
-  it('types and exactly validates Orcle voice commands, their answers and the kill switches (plan 140 S3)', () => {
+  it('types and exactly validates Golem voice commands, their answers and the kill switches (plan 140 S3)', () => {
     const base = {
       sessionId: 'session-1',
       status: 'listening',
@@ -2392,7 +2406,7 @@ describe('backend RPC contract', () => {
       heard: 'what is the weather',
       kind: 'unknown',
       status: 'not-found',
-      message: "Orcle didn't catch that: 'what is the weather'.",
+      message: "Golem didn't catch that: 'what is the weather'.",
       at: '2026-10-04T12:00:00Z'
     }
     for (const status of [
@@ -2502,7 +2516,21 @@ describe('backend RPC contract', () => {
       rules: [],
       listen: true,
       wakeWordRequired: true,
-      removeConfirm: 'countdown'
+      removeConfirm: 'countdown',
+      persona: {
+        id: 'default',
+        name: 'Golem',
+        personality: '',
+        bubbleStyle: 'speech',
+        images: {},
+        source: 'default'
+      },
+      autoChat: {
+        mode: 'off',
+        greetings: { enabled: false, templates: [] },
+        answers: { enabled: false, cooldownSeconds: 20 },
+        banter: { enabled: false, cooldownSeconds: 240 }
+      }
     }
     expect(validateBackendRpcResult('cohost.settings.get', settings)).toEqual(settings)
     const withoutWakeWord: Record<string, unknown> = { ...settings }

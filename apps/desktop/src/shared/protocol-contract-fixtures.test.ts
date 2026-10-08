@@ -541,7 +541,7 @@ describe('shared high-risk protocol fixture', () => {
     expect(fixtures.cohost.stateV2.listening).toStrictEqual({
       state: 'blocked',
       reasonCode: 'listen-monthly-quota-exhausted',
-      message: "Orcle's listening allowance for this month is used up.",
+      message: "Golem's listening allowance for this month is used up.",
       remainingSeconds: 0
     })
     expect(fixtures.cohost.state).not.toHaveProperty('listening')
@@ -583,12 +583,12 @@ describe('shared high-risk protocol fixture', () => {
     }
     expect(fixtures.cohost.errorState.detail).toStrictEqual({
       code: 'ai-gateway-error',
-      message: 'The Orcle tick failed on every configured model.',
+      message: 'The Golem tick failed on every configured model.',
       status: 502
     })
     expect(fixtures.cohost.timeoutState.detail).toStrictEqual({
       code: 'timeout',
-      message: 'Orcle did not answer within 12 s.',
+      message: 'Golem did not answer within 12 s.',
       status: null
     })
     expect('detail' in fixtures.cohost.legacyState).toBe(false)
@@ -633,7 +633,7 @@ describe('shared high-risk protocol fixture', () => {
     expect(fixtures.overlayLayout.defaults.golem.horizontal.x).toBeCloseTo(0.7975, 6)
   })
 
-  it('keeps Orcle voice commands, their answers and settings identical across languages (plan 140 S3)', () => {
+  it('keeps Golem voice commands, their answers and settings identical across languages (plan 140 S3)', () => {
     // The Rust side round-trips the same objects in protocol.rs
     // (`shared_high_risk_contract_fixture_matches_cohost_dtos`).
     expect(
@@ -693,6 +693,53 @@ describe('shared high-risk protocol fixture', () => {
       wakeWordRequired: true,
       removeConfirm: 'countdown'
     })
+    // Plan 164 S-A2: the persona and the automatic chat block ride the
+    // settings (defaults: the bundled pack, everything automatic off) and
+    // the patch (whole objects). Absent images are omitted, never null.
+    expect(fixtures.cohost.settings.persona).toStrictEqual({
+      id: 'default',
+      name: 'Golem',
+      personality: '',
+      bubbleStyle: 'speech',
+      images: {},
+      source: 'default'
+    })
+    expect(fixtures.cohost.settings.autoChat).toStrictEqual({
+      mode: 'off',
+      greetings: { enabled: false, templates: [] },
+      answers: { enabled: false, cooldownSeconds: 20 },
+      banter: { enabled: false, cooldownSeconds: 240 }
+    })
+    expect(fixtures.cohost.settingsPatch.persona?.images).toStrictEqual({
+      idle: 'persona-fixture/idle.png',
+      laugh: 'persona-fixture/laugh.webp'
+    })
+    expect(fixtures.cohost.settingsPatch.autoChat?.greetings.templates[0]).toMatchObject({
+      kind: 'follow',
+      platform: 'twitch',
+      state: 'laugh'
+    })
+    expect(() =>
+      validateBackendRpcParams('cohost.settings.set', {
+        persona: { ...fixtures.cohost.settingsPatch.persona, images: { idle: null } }
+      })
+    ).toThrow('cohost.settings.set')
+    expect(() =>
+      validateBackendRpcParams('cohost.settings.set', {
+        autoChat: {
+          ...fixtures.cohost.settingsPatch.autoChat,
+          greetings: {
+            enabled: true,
+            templates: [
+              {
+                ...fixtures.cohost.settingsPatch.autoChat!.greetings.templates[0],
+                kind: 'hype-train'
+              }
+            ]
+          }
+        }
+      })
+    ).toThrow('cohost.settings.set')
     // The report counts commands; the minimal report has none (never null).
     expect(fixtures.cohost.report.commands).toStrictEqual({
       highlighted: 3,
@@ -739,7 +786,7 @@ describe('shared high-risk protocol fixture', () => {
     }
   })
 
-  it('keeps the Orcle report, its payload and the saved event identical across languages (plan 119 S1)', () => {
+  it('keeps the Golem report, its payload and the saved event identical across languages (plan 119 S1)', () => {
     expect(
       validateBackendRpcParams('cohost.report.get', fixtures.cohost.reportGetParams)
     ).toStrictEqual(fixtures.cohost.reportGetParams)

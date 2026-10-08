@@ -3272,7 +3272,7 @@ export interface FollowNamesCommand {
 export type ScopeReconnectPlatform = Extract<StreamPlatform, 'twitch' | 'kick'>
 
 /** Stream Manager → main: reconnect Twitch or Kick asking for every optional
- * permission, so Orcle can remove messages (plan 140, S5). Main picks the
+ * permission, so Golem can remove messages (plan 140, S5). Main picks the
  * scopes; the window only names the platform. */
 export interface ScopeReconnectCommand {
   requestId: string
@@ -3322,6 +3322,17 @@ export interface AiCapabilities {
     modes?: string[]
     workflowKind?: string
   }
+  /** The Golem routes (plan 164): the tick contract the web speaks and
+   * whether avatar generation is on, with today's remaining count. Older
+   * servers omit the block: Generate stays off. */
+  cohost?: {
+    tick?: number
+    avatar?: {
+      enabled: boolean
+      remainingToday: number
+      dailyLimit: number
+    }
+  }
   entitlement: {
     checkedAt: string
     cloudAi: boolean
@@ -3334,7 +3345,7 @@ export interface AiCapabilities {
     /** Clean cut kill switch off and its provider configured; older servers omit it. */
     cleanCutEnabled?: boolean
     cloudAiEnabled: boolean
-    /** The Orcle command parser route is on (plan 140 S8); older servers omit it. */
+    /** The Golem command parser route is on (plan 140 S8); older servers omit it. */
     cohostCommandEnabled?: boolean
     gatewayConfigured: boolean
     modelTestingEnabled: boolean
@@ -3899,7 +3910,7 @@ export interface ModerationOperationParams {
  * on one message, or an answer to an open removal card. The window never
  * picks the source: Studio sends every `remove` as `manual`, which runs at
  * once (the menu click is the express consent). Voice removals come from the
- * backend's own Orcle engine, never through this relay.
+ * backend's own Golem engine, never through this relay.
  */
 export type CommentsModerationCommand =
   | {
@@ -4011,7 +4022,7 @@ export interface CommentsViewSnapshot {
   /**
    * Live mode only (plan 140, S6): the live session's chat removals, every
    * open one then the newest finished ones, at most 100. Studio publishes it;
-   * the Stream Manager renders the row status and Orcle's removal cards.
+   * the Stream Manager renders the row status and Golem's removal cards.
    */
   moderationOperations?: ModerationOperation[]
   /** History mode only: the finished session's saved stats (plan 055, S9). */
@@ -4284,6 +4295,14 @@ export interface VideorcApi {
   // managed asset (Assets Tab plan, slice A4).
   importBackgroundImage: () => Promise<BackgroundImportResult | null>
   importScheduledThumbnail: () => Promise<ScheduledThumbnail | null>
+  /** Picks a PNG/WebP (JPEG for idle) and copies it into the persona's
+   * managed folder (plan 164 S-A3); null when the picker was cancelled. */
+  importGolemImage: (
+    personaId: string,
+    state: CohostAvatarState
+  ) => Promise<GolemImageImportResult | null>
+  /** "Start over": deletes the persona's managed folder. */
+  removeGolemPersona: (personaId: string) => Promise<void>
   backgroundAssetExists: (assetId: string) => Promise<boolean>
   /** Fetch-and-cache a chat avatar from an allowlisted platform CDN; returns a
    * local videorc-asset:// URL or null (disallowed host / fetch failure). */
@@ -4337,7 +4356,7 @@ export interface VideorcApi {
    * socket and opens the browser, so the main window's eager bundle carries
    * none of it. Resolves once the browser opened. */
   showFollowNamesFromCommentsWindow: (command: FollowNamesCommand) => Promise<boolean>
-  /** "Reconnect Twitch to let Orcle remove messages" from the Stream Manager
+  /** "Reconnect Twitch to let Golem remove messages" from the Stream Manager
    * (plan 140, S5): like Show who followed, main starts the reconnect with
    * every optional permission and opens the browser. Resolves once it opened. */
   reconnectScopesFromCommentsWindow: (command: ScopeReconnectCommand) => Promise<boolean>
@@ -4357,8 +4376,8 @@ export interface VideorcApi {
   getCohostWindowState: () => Promise<CohostWindowState>
   onCohostWindowState: (callback: (state: CohostWindowState) => void) => () => void
   sendCohostAction: (command: CohostActionCommand) => Promise<CohostState>
-  /** Answers to Orcle's voice command cards (plan 140, S6 part B), relayed
-   * like the other Orcle actions: the MAIN renderer makes the call. */
+  /** Answers to Golem's voice command cards (plan 140, S6 part B), relayed
+   * like the other Golem actions: the MAIN renderer makes the call. */
   sendCohostCommand: (command: CohostCommandRelayCommand) => Promise<CohostState>
   onCohostCommandRequest: (callback: (command: CohostCommandRelayCommand) => void) => () => void
   pushCohostCommandResult: (resolution: CommentsCommandResolution<CohostState>) => Promise<boolean>
@@ -4954,7 +4973,7 @@ export interface CohostSettings {
   /** Streamer notes the model answers from; at most 4000 characters. */
   notes: string
   /**
-   * Orcle's picks go on stream by themselves: the server's suggested
+   * Golem's picks go on stream by themselves: the server's suggested
    * comments and high-priority questions, under the engine's cadence rules
    * (default off).
    */
@@ -4967,12 +4986,12 @@ export interface CohostSettings {
   /** Plain-language chat rules the co-host flags against; ≤ 10 × 120 chars. */
   rules: string[]
   /**
-   * Orcle hears the microphone for the whole live stream, as text, even with
+   * Golem hears the microphone for the whole live stream, as text, even with
    * live captions off (plan 068; default off).
    */
   listen: boolean
   /**
-   * Plan 140: "Commands need 'Orcle' first". On, the structured phrases
+   * Plan 140: "Commands need 'Golem' first". On, the structured phrases
    * ("remove it from our chat") stop working without the wake word
    * (default off).
    */
@@ -4983,6 +5002,130 @@ export interface CohostSettings {
    * which always waits for a yes.
    */
   removeConfirm: RemoveConfirmMode
+  /** The user's creature (plan 164 S-A2). The backend always sends it. */
+  persona: CohostPersona
+  /** Automatic chat (plan 164 S-A2). Everything off by default. */
+  autoChat: CohostAutoChat
+}
+
+/** The avatar's state images (plan 164 D16). `idle` is required on stream;
+ * the others fall back to it. */
+export type CohostAvatarState = 'idle' | 'talk' | 'laugh' | 'think'
+export const COHOST_AVATAR_STATES: readonly CohostAvatarState[] = ['idle', 'talk', 'laugh', 'think']
+/** How the comic bubble is drawn (plan 164 D17). */
+export type CohostBubbleStyle = 'speech' | 'thought' | 'shout'
+/** Where the persona's images came from; `default` is the bundled pack. */
+export type CohostPersonaSource = 'default' | 'uploaded' | 'generated'
+
+/**
+ * The user's creature (plan 164): name, personality and looks. `images` are
+ * relative paths under the managed golem-assets root (`<personaId>/<state>.<ext>`),
+ * absent (never null) for a state with no image.
+ */
+export interface CohostPersona {
+  /** Names the asset folder; regenerated by "Start over". `default` on a fresh install. */
+  id: string
+  /** 1 to 24 characters. */
+  name: string
+  /** At most 1200 characters. */
+  personality: string
+  bubbleStyle: CohostBubbleStyle
+  images: Partial<Record<CohostAvatarState, string>>
+  source: CohostPersonaSource
+}
+
+/** The chat posting mode (plan 164 D4). */
+export type CohostAutoChatMode = 'off' | 'suggest' | 'auto'
+/** The activity kinds a greeting template answers (plan 164). */
+export type CohostActivityTemplateKind =
+  | 'follow'
+  | 'sub'
+  | 'resub'
+  | 'sub-gift'
+  | 'community-sub-gift'
+  | 'membership'
+  | 'cheer'
+  | 'kicks'
+  | 'super-chat'
+  | 'super-sticker'
+  | 'raid'
+  | 'watch-streak'
+  | 'power-up'
+  | 'redemption'
+export const COHOST_ACTIVITY_TEMPLATE_KINDS: readonly CohostActivityTemplateKind[] = [
+  'follow',
+  'sub',
+  'resub',
+  'sub-gift',
+  'community-sub-gift',
+  'membership',
+  'cheer',
+  'kicks',
+  'super-chat',
+  'super-sticker',
+  'raid',
+  'watch-streak',
+  'power-up',
+  'redemption'
+]
+export type CohostGreetingPlatform = 'twitch' | 'youtube' | 'kick' | 'x'
+/** The avatar state an utterance shows (plan 164 D18); never `idle`. */
+export type CohostUtteranceState = 'talk' | 'laugh' | 'think'
+
+export interface CohostGreetingTemplate {
+  id: string
+  kind: CohostActivityTemplateKind
+  /** Omitted means any platform. */
+  platform?: CohostGreetingPlatform
+  /** 1 to 200 characters, fields in braces (`{name}`). */
+  text: string
+  state: CohostUtteranceState
+  enabled: boolean
+}
+
+export interface CohostCooldownBehaviour {
+  enabled: boolean
+  /** 1 to 3600. */
+  cooldownSeconds: number
+}
+
+/** Automatic chat (plan 164 D5): one mode, three behaviours. */
+export interface CohostAutoChat {
+  mode: CohostAutoChatMode
+  greetings: { enabled: boolean; templates: CohostGreetingTemplate[] }
+  /** Default cooldown 20 s. */
+  answers: CohostCooldownBehaviour
+  /** Default cooldown 240 s. */
+  banter: CohostCooldownBehaviour
+}
+
+/** The generation style presets the web route takes (plan 164 S-A4). */
+export type CohostAvatarStyle = 'cartoon' | 'pixel' | 'painted' | 'sticker'
+
+/** `cohost.avatar.generate` (plan 164 S-A6): accepted at once; the outcome
+ * is the `cohost.avatar.generated` event. */
+export interface CohostAvatarGenerateParams {
+  state: CohostAvatarState
+  /** 1 to 600 characters. */
+  prompt: string
+  style: CohostAvatarStyle
+}
+
+export interface CohostAvatarGenerateAccepted {
+  requestId: string
+  state: CohostAvatarState
+}
+
+/** `cohost.avatar.generated`: `path` (the relative asset path the persona
+ * stores) on success, `error` (the web's code and the tile's line) otherwise.
+ * Each is absent, never null. */
+export interface CohostAvatarGeneratedEvent {
+  requestId: string
+  state: CohostAvatarState
+  path?: string
+  /** The model returned no alpha; the tile says so. */
+  opaque: boolean
+  error?: { code: string; message: string }
 }
 
 /** `cohost.settings.set`: absent fields are unchanged. */
@@ -4997,6 +5140,10 @@ export interface CohostSettingsPatch {
   listen?: boolean
   wakeWordRequired?: boolean
   removeConfirm?: RemoveConfirmMode
+  /** Replaces the whole persona; the backend validates and trims it. */
+  persona?: CohostPersona
+  /** Replaces the whole block; the backend validates it. */
+  autoChat?: CohostAutoChat
 }
 
 // --- Overlay layout (plan 164) ---------------------------------------------
@@ -5044,7 +5191,7 @@ export interface MigrateHighlightAnchorParams {
 }
 // --- end overlay layout (plan 164) ------------------------------------------
 
-/** Whether Orcle hears the streamer right now (plan 068). */
+/** Whether Golem hears the streamer right now (plan 068). */
 export type CohostListeningState = 'off' | 'starting' | 'on' | 'blocked'
 
 export interface CohostListening {
@@ -5078,7 +5225,7 @@ export interface CohostQuestion {
 export type CohostPromiseTriggerKind = 'none' | 'viewers' | 'minutes'
 
 /** When a promise reminder fires: at `value` viewers, after `value` minutes,
- * or (`none`) 20 minutes after Orcle first heard it. */
+ * or (`none`) 20 minutes after Golem first heard it. */
 export interface CohostPromiseTrigger {
   kind: CohostPromiseTriggerKind | (string & Record<never, never>)
   value?: number
@@ -5100,7 +5247,7 @@ export interface CohostPromiseReminder {
 }
 
 /** A recap for viewers who asked what they missed, or one the streamer
- * drafted; never posted by Orcle. Gone after `expiresAt`. */
+ * drafted; never posted by Golem. Gone after `expiresAt`. */
 export interface CohostRecap {
   text: string
   at: string
@@ -5227,7 +5374,7 @@ export interface CohostErrorDetail {
   status: number | null
 }
 
-// --- Orcle voice commands (plan 140 S3; contract part B) ---
+// --- Golem voice commands (plan 140 S3; contract part B) ---
 
 /**
  * What a voice command asked for. `confirm` and `cancel` answer the open card,
@@ -5238,10 +5385,10 @@ export type CohostCommandKind = 'highlight' | 'clear' | 'remove' | 'confirm' | '
 /**
  * Where the latest voice command stands:
  * - `done`: highlighted, cleared, removed or hidden;
- * - `not-found`: no comment matched, or (kind `unknown`) Orcle didn't catch it;
+ * - `not-found`: no comment matched, or (kind `unknown`) Golem didn't catch it;
  * - `ambiguous`: a chooser is open, `candidates` lists the comments;
  * - `confirm`: a card waits for a yes: a voice removal (`operationId`) or a
- *   highlight of a comment Orcle flagged. A removal card without `operationId`
+ *   highlight of a comment Golem flagged. A removal card without `operationId`
  *   is still opening; one without `expiresAt` was confirmed and is running;
  * - `refused`: chat moderation refused, or the removal failed;
  * - `unavailable`: paused by Videorc, or Premium is required;
@@ -5274,7 +5421,7 @@ export interface CohostCommandTarget {
 export interface CohostCommand {
   /** `cmd-<uuid>`. */
   id: string
-  /** The words that made the command, as Orcle heard them. */
+  /** The words that made the command, as Golem heard them. */
   heard: string
   kind: CohostCommandKind
   status: CohostCommandStatus
@@ -5376,7 +5523,7 @@ export interface CohostState {
    */
   recentlyResolved?: CohostRecentlyResolved[]
   /**
-   * Whether Orcle hears the streamer (plan 068); absent without a session or
+   * Whether Golem hears the streamer (plan 068); absent without a session or
    * from a backend before the field (never null).
    */
   listening?: CohostListening
@@ -5403,7 +5550,7 @@ export interface CohostState {
 }
 
 /**
- * Plan 119 S1: what became of a question Orcle caught. The latest outcome
+ * Plan 119 S1: what became of a question Golem caught. The latest outcome
  * wins; a restore puts it back to `open`; `shown` means still open, but its
  * comment was on stream.
  */
@@ -5428,7 +5575,7 @@ export interface CohostReportQuestion {
 }
 
 export interface CohostReportQuestions {
-  /** Distinct question ids Orcle surfaced. */
+  /** Distinct question ids Golem surfaced. */
   total: number
   markedAnswered: number
   dismissed: number
@@ -5496,7 +5643,7 @@ export interface CohostReportAlert {
   firstSeenAt: string
 }
 
-/** Recaps are never posted by Orcle, so posting leaves no count. */
+/** Recaps are never posted by Golem, so posting leaves no count. */
 export interface CohostReportRecap {
   offered: number
   drafted: number
@@ -5521,12 +5668,12 @@ export interface CohostReportCommands {
   expired: number
   /** A removal that failed or ended unknown, or a refused request. */
   failed: number
-  /** No comment matched, or Orcle didn't catch what was said. */
+  /** No comment matched, or Golem didn't catch what was said. */
   notFound: number
 }
 
 /**
- * What Orcle caught in one stream (plan 119 decision 6): counts by outcome,
+ * What Golem caught in one stream (plan 119 decision 6): counts by outcome,
  * the questions and what became of them, the promises still open. Saved on
  * this computer when the session ends and deleted with the recording.
  * `cohost.report.get` returns it; `cohost.report.saved` announces it. Every
@@ -5537,7 +5684,7 @@ export interface CohostSessionReport {
   sessionId: string
   startedAt: string
   endedAt: string
-  /** Orcle sessions folded into this report: off and on mid-stream adds one. */
+  /** Golem sessions folded into this report: off and on mid-stream adds one. */
   segments: number
   streamTitle?: string
   messagesSeen: number
@@ -5566,7 +5713,7 @@ export interface CohostReportChat {
 
 /**
  * `cohost.report.get` / `cohost.report.latest`: the saved report (null when
- * Orcle left none), the session's moments (clip marks and chat peaks, computed
+ * Golem left none), the session's moments (clip marks and chat peaks, computed
  * on read and never stored) and its chat totals.
  */
 export interface CohostReportPayload {
@@ -5718,7 +5865,7 @@ export const COHOST_ACTION_KINDS: readonly CohostActionKind[] = [
 /** Correlated co-host action from the Comments window, brokered through main
  * to the main renderer (which makes the actual `cohost.*` RPC). */
 /**
- * Stream Manager → main → Studio (plan 140, S6 part B): an answer to Orcle's
+ * Stream Manager → main → Studio (plan 140, S6 part B): an answer to Golem's
  * open voice command, by its id. `choose` picks from the chooser (0 to 2),
  * `confirm` and `cancel` answer the card. Studio makes the matching
  * `cohost.command.*` call; the reply is the state after the answer.
@@ -6100,6 +6247,19 @@ export interface ScheduledStreamCapabilities {
   accounts: PlatformAccount[]
   audienceEditable: false
 }
+/** What `importGolemImage` hands back (plan 164 S-A3): the relative path the
+ * persona stores and the managed URL the tile shows. */
+export interface GolemImageImportResult {
+  personaId: string
+  state: CohostAvatarState
+  /** `<personaId>/<state>.<ext>`, the value `persona.images[state]` stores. */
+  path: string
+  /** `videorc-asset://golem/<personaId>/<state>.<ext>`. */
+  url: string
+  width: number
+  height: number
+}
+
 export interface ScheduledThumbnail {
   id: string
   previewUrl: string

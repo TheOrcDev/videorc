@@ -67,7 +67,7 @@ pub enum ServiceFlagsSource {
     Remote { fetched_at: String },
 }
 
-/// The Orcle kill switches (plan 140, contract part D): the document's
+/// The Golem kill switches (plan 140, contract part D): the document's
 /// optional top-level `orcle` object. A missing object or field means enabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,7 +101,7 @@ pub struct YouTubeServiceFlags {
     /// An owner-set global pause, UTC. Fed to the breaker while in the future.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_until: Option<DateTime<Utc>>,
-    /// The Orcle switches ride the same document and the same refresh.
+    /// The Golem switches ride the same document and the same refresh.
     #[serde(default)]
     pub orcle: OrcleServiceFlags,
     pub source: ServiceFlagsSource,
@@ -125,7 +125,7 @@ impl Default for YouTubeServiceFlags {
     }
 }
 
-/// Whether Orcle voice commands are allowed right now (contract part D).
+/// Whether Golem voice commands are allowed right now (contract part D).
 /// (`YouTubeQuota::flags` is private to `youtube_quota`; read the copy in
 /// effect through its public accessor.)
 pub fn orcle_voice_commands_enabled(state: &AppState) -> bool {
@@ -187,7 +187,7 @@ impl YouTubeServiceFlags {
         let orcle = match (self.orcle.voice_commands, self.orcle.remove) {
             (true, true) => String::new(),
             (voice_commands, remove) => format!(
-                ", Orcle voice commands {}, Orcle removals {}",
+                ", Golem voice commands {}, Golem removals {}",
                 if voice_commands { "on" } else { "paused" },
                 if remove { "on" } else { "paused" }
             ),
@@ -217,7 +217,7 @@ struct WireDocument {
     orcle: Option<serde_json::Value>,
 }
 
-/// Read one Orcle switch: only a JSON boolean counts; anything else keeps the
+/// Read one Golem switch: only a JSON boolean counts; anything else keeps the
 /// switch on and leaves a note.
 fn orcle_switch(
     object: &serde_json::Map<String, serde_json::Value>,
@@ -249,7 +249,7 @@ fn parse_orcle_flags(
         },
         Some(other) => {
             notes.push(format!(
-                "orcle {other} is not an object; keeping Orcle enabled"
+                "orcle {other} is not an object; keeping Golem enabled"
             ));
             OrcleServiceFlags::default()
         }
@@ -670,7 +670,7 @@ mod tests {
         assert_eq!(absent.orcle, OrcleServiceFlags::default());
         assert!(absent.orcle.voice_commands && absent.orcle.remove);
         assert!(absent.is_default_behaviour());
-        assert!(!absent.summary().contains("Orcle"));
+        assert!(!absent.summary().contains("Golem"));
 
         let partial =
             parse_service_flags(r#"{"version":1,"orcle":{"remove":false}}"#, now()).unwrap();
@@ -678,7 +678,7 @@ mod tests {
         assert!(!partial.orcle.remove);
         assert!(!partial.is_default_behaviour());
         assert!(
-            partial.summary().contains("Orcle removals paused"),
+            partial.summary().contains("Golem removals paused"),
             "{}",
             partial.summary()
         );
@@ -690,7 +690,7 @@ mod tests {
         )
         .unwrap();
         assert!(!both.orcle.voice_commands && !both.orcle.remove);
-        assert!(both.summary().contains("Orcle voice commands paused"));
+        assert!(both.summary().contains("Golem voice commands paused"));
 
         // Wrong types keep the switch on, with a note; so does a non-object.
         let wrong = parse_service_flags(

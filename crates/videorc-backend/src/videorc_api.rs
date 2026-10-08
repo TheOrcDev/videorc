@@ -34,12 +34,17 @@ const COHOST_SPOTLIGHT_PATH: &str = "/api/ai/cohost/spotlight";
 /// The server rejects a larger body (checked on content-length bytes) as
 /// `invalid-request`; the engine trims candidates until the JSON fits.
 pub(crate) const COHOST_SPOTLIGHT_MAX_BODY_BYTES: usize = 32 * 1024;
-/// The Orcle command parser (plan 140 S8) answers a wake-word utterance the
+/// The Golem command parser (plan 140 S8) answers a wake-word utterance the
 /// local grammar could not read. The server's own budget is 2 s; past 2.5 s
 /// the streamer has moved on, so the engine says "didn't catch that".
 pub(crate) const COHOST_COMMAND_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(2_500);
 const COHOST_COMMAND_PATH: &str = "/api/ai/cohost/command";
+/// Plan 164 S-A6: the route's own `maxDuration` is 90 s, so the client
+/// waits 95 (S-A5). A generated PNG over 8 MB is refused unread.
+pub(crate) const COHOST_AVATAR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(95);
+const COHOST_AVATAR_PATH: &str = "/api/ai/cohost/avatar";
+pub(crate) const COHOST_AVATAR_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024 + 64 * 1024;
 /// The route's limits (contract part E).
 pub(crate) const COHOST_COMMAND_MAX_BODY_BYTES: usize = 16 * 1024;
 pub(crate) const COHOST_COMMAND_MAX_CANDIDATES: usize = 20;
@@ -458,9 +463,33 @@ pub struct CohostSpotlightMatch {
     pub answered: Option<f64>,
 }
 
-// --- Orcle command parser wire types (plan 140 S8, contract part E) ---
+// --- Golem avatar wire types (plan 164 S-A5, S-A6) ---
 
-/// `POST /api/ai/cohost/command`: what the streamer said after "Orcle" that
+/// `POST /api/ai/cohost/avatar`: one state image. `baseImage` is the idle
+/// PNG/WebP as base64 for the other states, so the character stays
+/// consistent (D21); absent for idle.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarRequest {
+    pub prompt: String,
+    pub style: crate::cohost_avatar::CohostAvatarStyle,
+    pub state: crate::cohost::CohostAvatarState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_image: Option<String>,
+}
+
+/// The route's answer: a PNG, returned even when the model gave no alpha.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarResponse {
+    pub png_base64: String,
+    #[serde(default)]
+    pub opaque: bool,
+}
+
+// --- Golem command parser wire types (plan 140 S8, contract part E) ---
+
+/// `POST /api/ai/cohost/command`: what the streamer said after "Golem" that
 /// the local grammar could not read, plus the chat comments it may mean.
 /// Build it with `CohostCommandRequest::shaped`, which enforces the route's
 /// limits; the client refuses anything else without sending.
@@ -794,11 +823,11 @@ impl CohostApiError {
     fn from_transport_within(error: reqwest::Error, timeout: std::time::Duration) -> Self {
         if error.is_timeout() {
             Self::timeout(format!(
-                "Orcle did not answer within {} s.",
+                "Golem did not answer within {} s.",
                 timeout.as_secs()
             ))
         } else {
-            Self::network(format!("Could not reach Orcle: {error}"))
+            Self::network(format!("Could not reach Golem: {error}"))
         }
     }
 }
@@ -1034,7 +1063,7 @@ impl VideorcApiClient {
             return response.json().await.map_err(|error| {
                 CohostApiError::malformed_response(
                     status.as_u16(),
-                    format!("Could not read Orcle's response: {error}"),
+                    format!("Could not read Golem's response: {error}"),
                 )
             });
         }
@@ -1077,7 +1106,7 @@ impl VideorcApiClient {
             return response.json().await.map_err(|error| {
                 CohostApiError::malformed_response(
                     status.as_u16(),
-                    format!("Could not read Orcle's spotlight response: {error}"),
+                    format!("Could not read Golem's spotlight response: {error}"),
                 )
             });
         }
@@ -1095,7 +1124,7 @@ impl VideorcApiClient {
         ))
     }
 
-    /// One Orcle command parse (plan 140 S8). Same auth, client version and
+    /// One Golem command parse (plan 140 S8). Same auth, client version and
     /// failure mapping as the spotlight; a request out of the route's shape
     /// is refused here, before anything is sent.
     pub async fn post_cohost_command(
@@ -1118,7 +1147,7 @@ impl VideorcApiClient {
                 kind: CohostApiErrorKind::InvalidRequest,
                 detail: CohostErrorDetail::new(
                     "invalid-request",
-                    format!("Orcle did not send the command: {problem}."),
+                    format!("Golem did not send the command: {problem}."),
                     None,
                 ),
             });
@@ -1141,7 +1170,71 @@ impl VideorcApiClient {
                 }
                 CohostApiError::malformed_response(
                     status.as_u16(),
-                    format!("Could not read Orcle's command response: {error}"),
+                    format!("Could not read Golem's command response: {error}"),
+                )
+            });
+        }
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let (code, message) = read_error_code_and_message(response).await;
+        Err(classify_cohost_failure(
+            status.as_u16(),
+            &code,
+            message,
+            retry_after.as_deref(),
+        ))
+    }
+
+    /// One avatar generation (plan 164 S-A6): the tick's failure mapping, a
+    /// 95 s timeout and an 8 MB cap on the body read before it is parsed.
+    pub async fn post_cohost_avatar(
+        &self,
+        bearer_token: &str,
+        request: &CohostAvatarRequest,
+    ) -> std::result::Result<CohostAvatarResponse, CohostApiError> {
+        let response = self
+            .http
+            .post(self.endpoint(COHOST_AVATAR_PATH))
+            .bearer_auth(bearer_token)
+            .json(request)
+            .timeout(COHOST_AVATAR_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| CohostApiError::from_transport_within(error, COHOST_AVATAR_TIMEOUT))?;
+
+        let status = response.status();
+        if status.is_success() {
+            if response
+                .content_length()
+                .is_some_and(|length| length > COHOST_AVATAR_MAX_RESPONSE_BYTES as u64)
+            {
+                return Err(CohostApiError::malformed_response(
+                    status.as_u16(),
+                    "The generated image is over 8 MB.",
+                ));
+            }
+            let body = response.bytes().await.map_err(|error| {
+                if error.is_timeout() {
+                    return CohostApiError::from_transport_within(error, COHOST_AVATAR_TIMEOUT);
+                }
+                CohostApiError::malformed_response(
+                    status.as_u16(),
+                    format!("Could not read the generated image: {error}"),
+                )
+            })?;
+            if body.len() > COHOST_AVATAR_MAX_RESPONSE_BYTES {
+                return Err(CohostApiError::malformed_response(
+                    status.as_u16(),
+                    "The generated image is over 8 MB.",
+                ));
+            }
+            return serde_json::from_slice(&body).map_err(|error| {
+                CohostApiError::malformed_response(
+                    status.as_u16(),
+                    format!("Could not read the avatar response: {error}"),
                 )
             });
         }
@@ -1596,7 +1689,7 @@ pub struct CaptionRealtimeToken {
 
 /// Which allowance one transcription chunk is metered against (plan 068 D5).
 /// `Captions` wins while captions present: one upload, one charge. `Listen`
-/// is Orcle's own bucket and an old chunk route ignores the field.
+/// is Golem's own bucket and an old chunk route ignores the field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptionChunkPurpose {
     Captions,
@@ -1612,7 +1705,7 @@ impl CaptionChunkPurpose {
     }
 }
 
-/// Terminal codes that end only Orcle's listen intent (plan 068 D5): the
+/// Terminal codes that end only Golem's listen intent (plan 068 D5): the
 /// listen allowance is separate from captions, so a presenting caption
 /// session keeps going when one of these arrives.
 pub fn is_listen_block_code(code: &str) -> bool {
@@ -1860,6 +1953,36 @@ mod tests {
             parsed.captions.is_none(),
             "older web deployments remain compatible during rollout"
         );
+    }
+
+    #[test]
+    fn ai_capabilities_cohost_block_is_optional_and_parses_the_avatar_cap() {
+        let without: AiCapabilities = serde_json::from_str(
+            r#"{"entitlement":{"checkedAt":"2026-06-15T12:00:00.000Z","cloudAi":true,"expiresAt":"2026-06-15T12:05:00.000Z","isPremium":true,"subscriptionStatus":"active","tier":"premium"},"features":{"cloudAiEnabled":true,"gatewayConfigured":true,"modelTestingEnabled":true,"multipartAudioJobsEnabled":true,"objectBackedJobsEnabled":false,"transcriptJobsEnabled":true,"uploadTicketsEnabled":false},"generatedAt":"2026-06-15T12:30:00.000Z","limits":{"dailyJobs":25,"maxAudioBytes":null,"maxAudioMegabytes":null,"maxOutputTokens":null,"maxTranscriptCharacters":90000,"monthlyJobs":600},"models":{"allowedTextModelCount":2,"allowedTextModelsConfigured":true,"defaultTextModel":null,"fallbackTextModels":[]},"objectStorage":{"deleteConfigured":false,"downloadConfigured":false,"provider":null,"providerError":null,"proofConfigured":false,"proofTtlMs":null,"uploadConfigured":false},"readiness":{"access":{"cloudAiEntitled":true,"globallyDisabled":false},"gateway":{"configError":null,"configured":true},"objectStorage":{"deleteConfigError":null,"downloadConfigError":null,"proofConfigError":null,"providerError":null,"uploadConfigError":null},"transcription":{"configError":null,"configured":true}},"transcription":{"configured":true,"configError":null,"maxAudioBytes":null,"maxAudioMegabytes":null,"requestTimeoutMs":65000},"workflow":{"inputModes":[],"kind":"post-recording-publish-pack","outputs":[]}}"#,
+        )
+        .unwrap();
+        assert!(
+            without.cohost.is_none(),
+            "older web deployments omit the block"
+        );
+        // Omitted on the way out too, never null (the renderer contract).
+        assert!(
+            serde_json::to_value(&without)
+                .unwrap()
+                .get("cohost")
+                .is_none()
+        );
+        let mut value = serde_json::to_value(&without).unwrap();
+        value["cohost"] = serde_json::json!({
+            "tick": 4,
+            "avatar": { "enabled": true, "remainingToday": 23, "dailyLimit": 24 }
+        });
+        let with: AiCapabilities = serde_json::from_value(value).unwrap();
+        let cohost = with.cohost.unwrap();
+        assert_eq!(cohost.tick, Some(4));
+        let avatar = cohost.avatar.unwrap();
+        assert!(avatar.enabled);
+        assert_eq!((avatar.remaining_today, avatar.daily_limit), (23, 24));
     }
 
     #[test]
@@ -2178,11 +2301,11 @@ mod tests {
         // answered 502 with this envelope; the desktop must carry both parts.
         assert_eq!(
             parse_error_envelope(
-                r#"{"error":{"code":"ai-gateway-error","message":"The Orcle tick failed on every configured model."}}"#
+                r#"{"error":{"code":"ai-gateway-error","message":"The Golem tick failed on every configured model."}}"#
             ),
             (
                 "ai-gateway-error".to_string(),
-                "The Orcle tick failed on every configured model.".to_string()
+                "The Golem tick failed on every configured model.".to_string()
             )
         );
         assert_eq!(
@@ -2216,21 +2339,21 @@ mod tests {
 
     #[test]
     fn cohost_desktop_side_failures_carry_their_own_detail_codes() {
-        let network = CohostApiError::network("Could not reach Orcle: dns");
+        let network = CohostApiError::network("Could not reach Golem: dns");
         assert_eq!(network.kind, CohostApiErrorKind::Network);
         assert_eq!(network.reason(), CohostReason::Network);
         assert_eq!(network.detail.code, COHOST_DETAIL_CODE_NETWORK);
         assert_eq!(network.detail.status, None);
 
-        let timeout = CohostApiError::timeout("Orcle did not answer within 12 s.");
+        let timeout = CohostApiError::timeout("Golem did not answer within 12 s.");
         assert_eq!(timeout.kind, CohostApiErrorKind::Network);
         assert_eq!(timeout.reason(), CohostReason::Network);
         assert_eq!(timeout.detail.code, COHOST_DETAIL_CODE_TIMEOUT);
         assert_eq!(timeout.detail.status, None);
-        assert_eq!(timeout.message(), "Orcle did not answer within 12 s.");
+        assert_eq!(timeout.message(), "Golem did not answer within 12 s.");
 
         let malformed =
-            CohostApiError::malformed_response(200, "Could not read Orcle's response: EOF");
+            CohostApiError::malformed_response(200, "Could not read Golem's response: EOF");
         assert_eq!(malformed.kind, CohostApiErrorKind::MalformedResponse);
         assert_eq!(malformed.reason(), CohostReason::GatewayError);
         assert_eq!(malformed.detail.code, COHOST_DETAIL_CODE_MALFORMED_RESPONSE);
@@ -2353,7 +2476,7 @@ mod tests {
         assert!(response.usage.is_none());
     }
 
-    // --- Orcle command parser (plan 140 S8) ---
+    // --- Golem command parser (plan 140 S8) ---
 
     fn command_candidate(id: &str, author: &str, text: &str) -> CohostCommandCandidate {
         CohostCommandCandidate {

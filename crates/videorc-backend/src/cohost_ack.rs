@@ -1,6 +1,6 @@
 //! Chat you haven't acknowledged (plan 068 D9).
 //!
-//! Local and pure: an author ledger per Orcle session (who chatted, who is new
+//! Local and pure: an author ledger per Golem session (who chatted, who is new
 //! here, who the streamer already greeted and how), the fuzzy name matcher
 //! behind "greeted by voice" and "greeted in chat", and the dead-air nudge
 //! decision. Nothing here talks to the network or the audio thread; the
@@ -580,7 +580,7 @@ pub(crate) struct LedgerAuthor {
     name_forms: NameForms,
 }
 
-/// How the session's chatters were greeted, for the Orcle report (plan 119).
+/// How the session's chatters were greeted, for the Golem report (plan 119).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct GreetingCounts {
     /// Authors whose first message in the channel landed this session.
@@ -592,7 +592,7 @@ pub(crate) struct GreetingCounts {
     pub(crate) manual: u64,
 }
 
-/// Every chatter of one Orcle session, keyed like alert corroboration
+/// Every chatter of one Golem session, keyed like alert corroboration
 /// (`alert_author_key`). Lives in the session and leaves with it.
 #[derive(Debug, Default)]
 pub(crate) struct AuthorLedger {
@@ -837,7 +837,7 @@ impl AuthorLedger {
         self.log.clear();
     }
 
-    /// Greeting totals for the Orcle report (plan 119 S1), over every author
+    /// Greeting totals for the Golem report (plan 119 S1), over every author
     /// of the session. Never the "Say hi" list: that one is pruned as entries
     /// age out or get greeted.
     pub(crate) fn greeting_counts(&self) -> GreetingCounts {
@@ -888,7 +888,7 @@ fn describe_greeting(author: &LedgerAuthor) -> String {
         })
         .unwrap_or((Duration::ZERO, "somehow"));
     format!(
-        "Orcle: {} ({}) was greeted {how}, {} s after their first message here ({} message(s){}).",
+        "Golem: {} ({}) was greeted {how}, {} s after their first message here ({} message(s){}).",
         author.name,
         stream_platform_id(author.platform),
         after.as_secs(),

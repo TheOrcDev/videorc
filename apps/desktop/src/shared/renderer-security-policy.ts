@@ -44,6 +44,9 @@ export const IPC_INVOKE_ROLES = {
   'screens:pick-image': MAIN_ONLY,
   'backgrounds:import-image': MAIN_ONLY,
   'scheduled-streams:import-thumbnail': MAIN_ONLY,
+  // The Golem's avatar images (plan 164 S-A3): the Studio renderer only.
+  'golem-assets:import-image': MAIN_ONLY,
+  'golem-assets:remove': MAIN_ONLY,
   'backgrounds:bundled-assets': MAIN_ONLY,
   'backgrounds:asset-exists': MAIN_ONLY,
   // The detached Comments window renders the same chat rows as Studio; without
@@ -136,7 +139,7 @@ export const IPC_INVOKE_ROLES = {
   // window asks (its handler refuses any other sender), Studio replies.
   'comments-window:moderation': MAIN_AND_COMMENTS,
   'comments-window:moderation-result-push': MAIN_ONLY,
-  // Answers to Orcle's voice command cards (plan 140, S6 part B).
+  // Answers to Golem's voice command cards (plan 140, S6 part B).
   'comments-window:cohost-command': MAIN_AND_COMMENTS,
   'comments-window:cohost-command-result-push': MAIN_ONLY,
   'captions-window:open': MAIN_ONLY,

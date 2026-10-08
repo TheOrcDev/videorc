@@ -5,14 +5,14 @@ import { cohostErrorDetailText, cohostListeningView } from './cohost-view'
 import type { EntitlementUiGate } from './entitlement-ui'
 import type { OrcleTabId } from './orcle-tabs'
 
-// The Orcle tab (plan 119 S2): Videorc's AI tab, under Studio. Everything here
+// The Golem tab (plan 119 S2): Videorc's AI tab, under Studio. Everything here
 // is a pure derivation of what the studio provider already holds, so the tab,
-// its tests and the Comments window cannot disagree about what Orcle Live is
+// its tests and the Comments window cannot disagree about what Golem Live is
 // doing.
 
 /**
- * What Orcle Live does (plan 119 decision 4), as the Live tab's "What Orcle
- * does" rows (plan 150): each names the Orcle tab that holds its settings, so
+ * What Golem Live does (plan 119 decision 4), as the Live tab's "What Golem
+ * does" rows (plan 150): each names the Golem tab that holds its settings, so
  * the row is a way there rather than a pitch.
  */
 export const ORCLE_LIVE_POWERS: readonly {
@@ -23,37 +23,37 @@ export const ORCLE_LIVE_POWERS: readonly {
   {
     title: 'Never miss a question',
     description:
-      'Questions from every platform, grouped, each with a drafted reply you approve. Answer out loud and Orcle clears it.',
+      'Questions from every platform, grouped, each with a drafted reply you approve. Answer out loud and Golem clears it.',
     tab: 'chat'
   },
   {
     title: 'Chat stays safe',
     description:
-      'Spam, scams and abuse are flagged against your own rules. Orcle never acts on its own.',
+      'Spam, scams and abuse are flagged against your own rules. Golem never acts on its own.',
     tab: 'chat'
   },
   {
     title: 'The room, handled',
     description:
-      "Orcle greets first-timers, reminds you of your promises, nudges you in dead air, tells you when viewers say your audio broke, and can put the comment you're talking about on screen.",
+      "Golem greets first-timers, reminds you of your promises, nudges you in dead air, tells you when viewers say your audio broke, and can put the comment you're talking about on screen.",
     tab: 'chat'
   },
   {
-    title: 'Talk to Orcle',
-    description: 'Ask Orcle to put a comment on stream, take it down, or remove it from chat.',
+    title: 'Talk to Golem',
+    description: 'Ask Golem to put a comment on stream, take it down, or remove it from chat.',
     tab: 'voice'
   }
 ]
 
 /**
  * What Cloud AI covers, one line per use (plan 119 decision 3). Every consent
- * dialog (Orcle Live, Clean cut) and the Cloud AI row show this one list, so a
+ * dialog (Golem Live, Clean cut) and the Cloud AI row show this one list, so a
  * feature that needs cloud AI extends the consent here, never in a second
  * store.
  */
 export const CLOUD_AI_USES: readonly string[] = [
-  'Orcle reads your live chat.',
-  "Orcle hears you while you're live: your microphone audio goes to Videorc's cloud speech-to-text and comes back as text.",
+  'Golem reads your live chat.',
+  "Golem hears you while you're live: your microphone audio goes to Videorc's cloud speech-to-text and comes back as text.",
   "Clean cut uploads a recording's audio, never the video, in short chunks for a word-by-word transcript, and sends its sentences to Videorc's cloud AI to find retakes. Neither is kept on Videorc servers after the job finishes."
 ]
 
@@ -73,14 +73,14 @@ export const ORCLE_LIVE_STATUS_LABELS: Record<OrcleLiveStatusKind, string> = {
 export interface OrcleLiveStatus {
   kind: OrcleLiveStatusKind
   label: string
-  /** A plain reason. Always set for `attention`; for `live`, only when Orcle
+  /** A plain reason. Always set for `attention`; for `live`, only when Golem
    * reads chat but cannot hear you. */
   reason: string | null
   /** The server's own words for a failed pass, for the tooltip. */
   detail: string | null
 }
 
-/** What unlocks Orcle Live for this account, and its one plain line. */
+/** What unlocks Golem Live for this account, and its one plain line. */
 export interface OrcleLiveUnlock {
   action: { kind: 'sign-in' } | { kind: 'view-premium'; url: string } | null
   reason: string
@@ -94,7 +94,7 @@ export interface OrcleLiveViewInput {
   gate: EntitlementUiGate
   /** Renderer-owned cloud-AI consent (`videorc.aiConsent`). */
   consented: boolean
-  /** On air right now (`sessionIsLive`): Orcle only runs during a stream. */
+  /** On air right now (`sessionIsLive`): Golem only runs during a stream. */
   live: boolean
   /** The latest `cohost.state`; null until the engine reports. */
   state: CohostState | null
@@ -104,7 +104,7 @@ export interface OrcleLiveView {
   status: OrcleLiveStatus
   /** The switch shows the stored choice. */
   checked: boolean
-  /** A locked account can still turn Orcle off, never on. */
+  /** A locked account can still turn Golem off, never on. */
   switchDisabled: boolean
   /** Null when nothing is locked. */
   unlock: OrcleLiveUnlock | null
@@ -112,10 +112,10 @@ export interface OrcleLiveView {
   streamManager: boolean
 }
 
-export const ORCLE_SIGNED_OUT_REASON = 'Sign in to use Orcle Live, part of Videorc Premium.'
+export const ORCLE_SIGNED_OUT_REASON = 'Sign in to use Golem Live, part of Videorc Premium.'
 
 export const ORCLE_CONSENT_OFF_REASON =
-  "Cloud AI is off, so Orcle can't read chat or hear you. Allow it under Customize."
+  "Cloud AI is off, so Golem can't read chat or hear you. Allow it under Customize."
 
 function status(
   kind: OrcleLiveStatusKind,
@@ -163,8 +163,8 @@ export function orcleLiveStatus({
     const reason = state.reason
       ? COHOST_ERROR_TOAST_MESSAGES[state.reason]
       : state.status === 'paused'
-        ? 'Orcle paused.'
-        : 'Orcle hit an error.'
+        ? 'Golem paused.'
+        : 'Golem hit an error.'
     return status('attention', reason, cohostErrorDetailText(cohostErrorDetail(state)))
   }
   // Reading chat, or starting to. Not hearing you is a line, not an alarm.
@@ -203,19 +203,19 @@ export const ORCLE_VOICE_COMMANDS: readonly {
     title: 'Highlight',
     result: 'Puts it on stream.',
     phrases: [
-      'Orcle, highlight the comment from coders X',
-      'Orcle, put this one up',
-      'Orcle, show the last comment',
-      "Orcle, show coders X's question"
+      'Golem, highlight the comment from coders X',
+      'Golem, put this one up',
+      'Golem, show the last comment',
+      "Golem, show coders X's question"
     ]
   },
   {
     title: 'Clear',
     result: 'Takes it off stream.',
     phrases: [
-      'Orcle, take it down',
-      'Orcle, clear the highlight',
-      'Orcle, remove it from the screen'
+      'Golem, take it down',
+      'Golem, clear the highlight',
+      'Golem, remove it from the screen'
     ]
   },
   {
@@ -223,7 +223,7 @@ export const ORCLE_VOICE_COMMANDS: readonly {
     result: 'Shows it first. Removes it when you confirm.',
     phrases: [
       'This one is toxic. Remove it from our chat.',
-      'Orcle, delete the comment from coders X'
+      'Golem, delete the comment from coders X'
     ]
   },
   {
@@ -242,19 +242,19 @@ export function orcleVoicePhrasesLabel(phrases: readonly string[], count = 1): s
 }
 
 export const ORCLE_VOICE_COMMANDS_DESCRIPTION =
-  'Ask Orcle to put a comment on stream, take it down, or remove it from chat.'
+  'Ask Golem to put a comment on stream, take it down, or remove it from chat.'
 
-export const ORCLE_VOICE_COMMANDS_OFF = 'Turn on Orcle Live to use voice commands.'
+export const ORCLE_VOICE_COMMANDS_OFF = 'Turn on Golem Live to use voice commands.'
 
 /** The numbers the web guide promises (contract part A). */
 export const ORCLE_REMOVAL_LIMITS =
   'A removal waits 20 seconds for your answer, then nothing is removed. At most 10 removals a minute.'
 
 export const ORCLE_REMOVAL_FALLBACK =
-  'If the platform cannot remove it, Orcle hides it in Videorc and tells you viewers may still see it.'
+  'If the platform cannot remove it, Golem hides it in Videorc and tells you viewers may still see it.'
 
 export const ORCLE_VOICE_PREMIUM =
-  "Voice commands are part of Orcle, which is Premium. Remove from chat in a comment's menu is free for everyone."
+  "Voice commands are part of Golem, which is Premium. Remove from chat in a comment's menu is free for everyone."
 
 export const ORCLE_REMOVE_MESSAGES_NO_ACCOUNT =
   'Connect YouTube, Twitch, Kick or X under Livestream to remove their chat messages.'
@@ -303,7 +303,7 @@ export function removeMessagesRows(
           label,
           accountLabel,
           ready,
-          message: 'Authorize X Live to let Orcle remove messages.',
+          message: 'Authorize X Live to let Golem remove messages.',
           action: { kind: 'authorize-x', label: 'Authorize X Live' }
         }
       ]
@@ -314,7 +314,7 @@ export function removeMessagesRows(
         label,
         accountLabel,
         ready,
-        message: `Reconnect ${label} to let Orcle remove messages.`,
+        message: `Reconnect ${label} to let Golem remove messages.`,
         action: { kind: 'reconnect', label: 'Reconnect' }
       }
     ]

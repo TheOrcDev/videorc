@@ -22,7 +22,7 @@ import { cn } from '@/lib/utils'
  * A page's intro: the toolbar already names the page, so the title is for
  * assistive tech; the description is a flush intro line, with any action at
  * its end (never in the toolbar's corner). `media` leads the line: a page
- * with its own mark (the Orcle tab's emblem, plan 149) puts it there.
+ * with its own mark (the Golem tab's emblem, plan 149) puts it there.
  */
 export function PageHeader({
   title,
@@ -75,7 +75,7 @@ export function ConfigGrid({
 /**
  * A config grid of exactly two sections that fills the visible height at
  * `lg`, so the column hairline runs the full height however short the tab
- * is (Settings' tabs, plan 064; the Orcle tab's, plan 150). Stacked, the rows
+ * is (Settings' tabs, plan 064; the Golem tab's, plan 150). Stacked, the rows
  * keep their content height.
  */
 export const CONFIG_GRID_PAIR = 'flex-1 content-start lg:content-stretch lg:[&>*]:border-b-0'

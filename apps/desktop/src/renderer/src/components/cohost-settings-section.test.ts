@@ -37,6 +37,20 @@ function settings(overrides: Partial<CohostSettings> = {}): CohostSettings {
     listen: false,
     wakeWordRequired: false,
     removeConfirm: 'confirm',
+    persona: {
+      id: 'default',
+      name: 'Golem',
+      personality: '',
+      bubbleStyle: 'speech',
+      images: {},
+      source: 'default'
+    },
+    autoChat: {
+      mode: 'off',
+      greetings: { enabled: false, templates: [] },
+      answers: { enabled: false, cooldownSeconds: 20 },
+      banter: { enabled: false, cooldownSeconds: 240 }
+    },
     ...overrides
   }
 }
@@ -107,9 +121,9 @@ describe('Show on stream automatically', () => {
     await render(settings())
     expect(document.body.textContent).toContain('Show on stream automatically')
     expect(document.body.textContent).toContain(
-      'What I talk about needs Orcle to hear you (or live captions).'
+      'What I talk about needs Golem to hear you (or live captions).'
     )
-    expect(document.body.textContent).toContain('nothing Orcle flagged is ever shown')
+    expect(document.body.textContent).toContain('nothing Golem flagged is ever shown')
     expect(option('Off').getAttribute('data-state')).toBe('on')
 
     await act(async () => option('What I talk about').click())
@@ -117,7 +131,7 @@ describe('Show on stream automatically', () => {
       autoHighlight: false,
       voiceHighlight: true
     })
-    await act(async () => option("What I talk about and Orcle's picks").click())
+    await act(async () => option("What I talk about and Golem's picks").click())
     expect(patchCohostSettings).toHaveBeenLastCalledWith({
       autoHighlight: true,
       voiceHighlight: true
@@ -126,7 +140,7 @@ describe('Show on stream automatically', () => {
 
   it('shows a stored picks-only row as the third option and rewrites it on a click', async () => {
     await render(settings({ autoHighlight: true, voiceHighlight: false }))
-    const third = option("What I talk about and Orcle's picks")
+    const third = option("What I talk about and Golem's picks")
     expect(third.getAttribute('data-state')).toBe('on')
     await act(async () => third.click())
     expect(patchCohostSettings).toHaveBeenLastCalledWith({
@@ -145,9 +159,9 @@ describe('Show on stream automatically', () => {
     await render(settings(), {
       allowed: false,
       featureId: 'live-cohost',
-      reason: 'Orcle requires Videorc Premium.'
+      reason: 'Golem requires Videorc Premium.'
     })
-    for (const label of ['Off', 'What I talk about', "What I talk about and Orcle's picks"]) {
+    for (const label of ['Off', 'What I talk about', "What I talk about and Golem's picks"]) {
       expect(option(label).disabled).toBe(true)
     }
   })
@@ -160,14 +174,14 @@ describe('Show on stream automatically', () => {
   })
 })
 
-// Plan 119 S2, plan 150: the settings live in the Orcle tab's Chat tab, where
-// Orcle Live's switch owns `enabled` and the Premium call to action.
-describe('under the Orcle tab', () => {
+// Plan 119 S2, plan 150: the settings live in the Golem tab's Chat tab, where
+// Golem Live's switch owns `enabled` and the Premium call to action.
+describe('under the Golem tab', () => {
   it('splits into Replies and Moderation, with no Enable switch', async () => {
     await render(settings())
     expect(document.getElementById('cohost-enabled')).toBeNull()
-    expect(document.body.textContent).not.toContain('Enable Orcle')
-    expect(document.body.textContent).not.toContain('Orcle (alpha)')
+    expect(document.body.textContent).not.toContain('Enable Golem')
+    expect(document.body.textContent).not.toContain('Golem (alpha)')
     const titles = [...document.querySelectorAll('[data-slot="panel-section"] h3')].map(
       (heading) => heading.textContent
     )
@@ -180,16 +194,16 @@ describe('under the Orcle tab', () => {
     expect(moderation.querySelector('#cohost-rule-new')).toBeTruthy()
     expect(moderation.querySelector('#cohost-sensitivity')).toBeTruthy()
     expect(moderation.querySelector('#cohost-show-on-stream')).toBeTruthy()
-    // Listening sits outside both: it belongs with Orcle Live's switch.
+    // Listening sits outside both: it belongs with Golem Live's switch.
     expect(replies.querySelector('#cohost-listen')).toBeNull()
     expect(moderation.querySelector('#cohost-listen')).toBeNull()
   })
 
-  it('leaves the Premium call to action to Orcle Live: a Basic account sees it disabled', async () => {
+  it('leaves the Premium call to action to Golem Live: a Basic account sees it disabled', async () => {
     await render(settings(), {
       allowed: false,
       featureId: 'live-cohost',
-      reason: 'Orcle requires Videorc Premium.',
+      reason: 'Golem requires Videorc Premium.',
       upgradeUrl: 'https://www.videorc.com/premium'
     })
     expect(document.body.textContent).not.toContain('View Premium')
@@ -198,7 +212,7 @@ describe('under the Orcle tab', () => {
   })
 })
 
-describe('Orcle hears you while you are live (plan 068)', () => {
+describe('Golem hears you while you are live (plan 068)', () => {
   function listenSwitch(): HTMLButtonElement {
     const control = document.getElementById('cohost-listen') as HTMLButtonElement | null
     expect(control).toBeTruthy()
@@ -207,7 +221,7 @@ describe('Orcle hears you while you are live (plan 068)', () => {
 
   it('is a switch bound to the listen setting', async () => {
     await render(settings())
-    expect(document.body.textContent).toContain("Orcle hears you while you're live")
+    expect(document.body.textContent).toContain("Golem hears you while you're live")
     expect(listenSwitch().getAttribute('data-state')).toBe('unchecked')
     await act(async () => listenSwitch().click())
     expect(patchCohostSettings).toHaveBeenLastCalledWith({ listen: true })

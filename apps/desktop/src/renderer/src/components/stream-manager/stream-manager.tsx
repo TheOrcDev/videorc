@@ -239,11 +239,11 @@ export interface StreamManagerProps {
    * owned by Electron main; the Studio renderer runs the engine. */
   autoShowActivity?: boolean
   onAutoShowActivityChange?: (on: boolean) => void
-  /** Reconnect Twitch or Kick so Orcle can remove messages (plan 140, S5);
+  /** Reconnect Twitch or Kick so Golem can remove messages (plan 140, S5);
    * Electron main starts it. Rows show only while live. */
   onReconnectScopes?: (platform: ScopeReconnectPlatform) => void
   /** The live session's chat removals (plan 140, S6), relayed by Studio:
-   * row chips, and Orcle's removal cards in the Orcle pane. */
+   * row chips, and Golem's removal cards in the Golem pane. */
   moderationOperations?: readonly ModerationOperation[]
   /** "Remove from chat" asked for, before any operation answered. */
   removalRequestIds?: ReadonlySet<string>
@@ -251,9 +251,9 @@ export interface StreamManagerProps {
   removalAnsweringIds?: ReadonlySet<string>
   /** ⋯ Remove from chat on a row, or on a flagged message: a manual removal. */
   onRemoveFromChat?: (message: LiveChatMessage) => void
-  /** Remove or Cancel on an Orcle removal card. */
+  /** Remove or Cancel on a Golem removal card. */
   onAnswerRemoval?: (operation: ModerationOperation, answer: RemovalAnswer) => void
-  /** Answer Orcle's open voice command (plan 140, S6 part B): pick from the
+  /** Answer Golem's open voice command (plan 140, S6 part B): pick from the
    * chooser, or Show / Cancel a flagged highlight. */
   onAnswerCommand?: (commandId: string, answer: CommandAnswer) => void
   /** The command whose answer is on its way. */
@@ -271,8 +271,8 @@ export interface StreamManagerProps {
   cohostNudgeDismissedForever?: boolean
   /** Persisted `cohost.settings.listen` (plan 068); unknown hides its card. */
   cohostListen?: boolean
-  /** Orcle Live's one switch (plan 119), from the status popover and the
-   * nudge: on means Orcle reads chat and hears you, off only stops it. */
+  /** Golem Live's one switch (plan 119), from the status popover and the
+   * nudge: on means Golem reads chat and hears you, off only stops it. */
   onCohostEnable?: (enabled: boolean) => void
   /** Turn listening on from the one-time card (plan 068 D3). */
   onCohostListenOn?: () => void
@@ -361,7 +361,7 @@ export function StreamManager({
   const trafficLightGutter = useTrafficLightGutter()
   const messages = useMemo(() => sortMessagesChronological(snapshot.messages), [snapshot.messages])
   // The message on stream now (plan 095, S2): the backend's live state when
-  // it has one. Chat, Activity and Orcle all read this one slot.
+  // it has one. Chat, Activity and Golem all read this one slot.
   const liveHighlightId =
     highlightState?.phase === 'live' ? (highlightState.messageId ?? null) : highlightedId
   const inHistory = viewMode?.kind === 'history'
@@ -373,7 +373,7 @@ export function StreamManager({
   const [nowMs, setNowMs] = useState(() => Date.now())
   const onAir =
     !inHistory && dashboard?.session.state !== undefined && dashboard.session.state !== 'off-air'
-  // Chat removals (plan 140, S6): each row's newest removal, and Orcle's
+  // Chat removals (plan 140, S6): each row's newest removal, and Golem's
   // cards and their result lines. History never has any.
   const removalOperations = live ? moderationOperations : NO_MODERATION_OPERATIONS
   const removals = useMemo(
@@ -381,7 +381,7 @@ export function StreamManager({
     [removalOperations]
   )
   const removalPane = removalPaneView(removalOperations, nowMs, removalAnsweringIds)
-  // Orcle voice commands (plan 140, S6 part B): the strip, the chooser and
+  // Golem voice commands (plan 140, S6 part B): the strip, the chooser and
   // the "show it anyway?" card, from the latest command. Live only.
   const command = live ? (cohostState?.command ?? null) : null
   const commandStrip = commandStripView(command, nowMs)
@@ -401,7 +401,7 @@ export function StreamManager({
     return () => clearInterval(timer)
   }, [onAir, orcleCardsActive])
 
-  // --- Orcle (unchanged behaviour, moved into its own pane: D5) ---
+  // --- Golem (unchanged behaviour, moved into its own pane: D5) ---
   const cohostSensitivity = useCohostSensitivity()
   const shownCohostState = useMemo(
     () => cohostStateForSensitivity(cohostState, cohostSensitivity),
@@ -605,7 +605,7 @@ export function StreamManager({
     setCohostExpand((value) => value + 1)
   }, [])
 
-  // A new Orcle removal card brings the Orcle pane forward when it sits behind
+  // A new Golem removal card brings the Golem pane forward when it sits behind
   // a tab, without taking focus from the composer. Once the cards and their
   // result lines are gone, the pane the streamer was on comes back, unless
   // they moved on themselves.
@@ -635,7 +635,7 @@ export function StreamManager({
     setRightPane((current) => (current === 'orcle' ? from.right : current))
   }, [orcleCardsActive])
 
-  // ⌘J focuses Orcle wherever it sits; ⌘F searches chat. The pane is shown
+  // ⌘J focuses Golem wherever it sits; ⌘F searches chat. The pane is shown
   // first, so its own focus handling lands on a visible element.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -705,8 +705,8 @@ export function StreamManager({
         )}
         data-slot="orcle-pane-header"
       >
-        <span className="shrink-0 text-xs font-medium">Orcle</span>
-        {/* Whether Orcle hears you (plan 068); nothing while listening is off. */}
+        <span className="shrink-0 text-xs font-medium">Golem</span>
+        {/* Whether Golem hears you (plan 068); nothing while listening is off. */}
         {cohostVisible ? <CohostListeningIndicator listening={cohostState?.listening} /> : null}
         <span className="flex-1" />
         <CohostStatus
@@ -723,8 +723,8 @@ export function StreamManager({
           onUpgrade={onCohostUpgrade}
         />
       </div>
-      {/* Plan 140, S6: what Orcle heard and did, what waits for an answer
-          (the chooser, "show it anyway?"), then what Orcle is about to remove
+      {/* Plan 140, S6: what Golem heard and did, what waits for an answer
+          (the chooser, "show it anyway?"), then what Golem is about to remove
           because you asked, and how to stop it. Above the scroll, so none of
           it scrolls away. */}
       <CommandStrip view={commandStrip} />
@@ -747,7 +747,7 @@ export function StreamManager({
         />
       ) : null}
       {/* Plan 140, S5: a quiet row per platform whose account must be
-          reconnected before Orcle can remove messages there. Live only. */}
+          reconnected before Golem can remove messages there. Live only. */}
       {live && onReconnectScopes ? (
         <RemoveMessagesReconnectRows
           platforms={removeMessagesReconnectPlatforms(snapshot.providers)}
@@ -756,7 +756,7 @@ export function StreamManager({
       ) : null}
       {/* The one-time listening card (plan 068 D3), on air or off, above the
           scroll so it never scrolls away. Same gate as the pane itself:
-          Premium, cloud-AI consent, and Orcle on. */}
+          Premium, cloud-AI consent, and Golem on. */}
       {onCohostListenOn ? (
         <CohostListenPrompt
           enabled={cohostEnabled && cohostConsented && cohostGate?.allowed === true}
@@ -820,7 +820,7 @@ export function StreamManager({
         <Empty className="border-0 p-6">
           <EmptyHeader>
             <EmptyDescription>
-              Orcle listens to chat during a live stream: questions, flags and the room's mood.
+              Golem listens to chat during a live stream: questions, flags and the room's mood.
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
@@ -901,13 +901,13 @@ export function StreamManager({
               </TabsTrigger>
               {cohostPresent ? (
                 <TabsTrigger value="orcle">
-                  <PaneLabel dot={cohostTone(cohostState)} label="Orcle" unseen={orcleUnseen} />
+                  <PaneLabel dot={cohostTone(cohostState)} label="Golem" unseen={orcleUnseen} />
                 </TabsTrigger>
               ) : null}
             </TabsList>
           </Tabs>
         </div>
-        {/* At Wide: Chat on the left, Activity · Orcle on the right. */}
+        {/* At Wide: Chat on the left, Activity · Golem on the right. */}
         <div
           className={cn(
             'col-start-2 row-start-1 items-center border-b border-l border-border px-2 py-1.5',
@@ -925,7 +925,7 @@ export function StreamManager({
               </TabsTrigger>
               {cohostPresent ? (
                 <TabsTrigger value="orcle">
-                  <PaneLabel dot={cohostTone(cohostState)} label="Orcle" unseen={orcleUnseen} />
+                  <PaneLabel dot={cohostTone(cohostState)} label="Golem" unseen={orcleUnseen} />
                 </TabsTrigger>
               ) : null}
             </TabsList>

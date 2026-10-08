@@ -1171,7 +1171,7 @@ pub struct AppState {
     /// Clip-that phrase matcher state (plan 068 D6). Std mutex: the caption
     /// task matches and returns.
     pub clip_marks: crate::clip_marks::ClipMarkDetectorSlot,
-    /// Orcle voice-command detector and the engine session it serves (plan
+    /// Golem voice-command detector and the engine session it serves (plan
     /// 140 S2). Std mutex: the caption task observes a final and returns.
     pub cohost_commands: crate::cohost_command::CommandDetectorSlot,
 }

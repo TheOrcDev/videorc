@@ -125,7 +125,7 @@ describe('Settings layout', () => {
     })
   })
 
-  it('has no Orcle panel: Orcle is configured in its own tab (plan 119)', () => {
+  it('has no Golem panel: Golem is configured in its own tab (plan 119)', () => {
     expect(shellSource).not.toContain('CohostSettingsSection')
     expect(tabPanels().map((panel) => panel.value)).not.toContain('orcle')
   })

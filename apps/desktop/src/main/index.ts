@@ -1,4 +1,5 @@
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
+import { importGolemImage, removeGolemPersona } from './golem-assets'
 import { globalShortcutEntries, isGlobalShortcutAction } from '../shared/global-shortcuts'
 import { normalizeAccelerator } from '../shared/accelerator'
 import { openableChatLink } from '../shared/chat-link'
@@ -258,6 +259,7 @@ import {
   type DeferredPermissionRestartState
 } from './deferred-permission-restart'
 import { isPathInsideAnyRoot } from './managed-asset-paths'
+import { isGolemAvatarState, isGolemPersonaId, parseGolemAssetPath } from '../shared/golem-assets'
 import {
   managedImageDecodeScript,
   normalizeManagedImageDecodeResult
@@ -1095,7 +1097,7 @@ if (shouldDisableOcclusionThrottling(process.platform, electronBackgroundPolicy)
 // Plan 069 (system audio): on macOS, play renderer audio from the main process
 // instead of Chromium's out-of-process audio service. ScreenCaptureKit cannot
 // attribute that helper's audio to Videorc, so without this Library playback
-// and Orcle's voice would leak into recordings with System audio on. Merged,
+// and Golem's voice would leak into recordings with System audio on. Merged,
 // never overwritten: Chromium honours a single disable-features value.
 const disabledChromiumFeatures = mergeDisabledFeatures(
   app.commandLine.getSwitchValue(DISABLE_FEATURES_SWITCH),
@@ -2907,7 +2909,7 @@ function restoreNotesWindowOnLaunch(): void {
 
 // --- Stream Manager window (code name: comments) ------------------------------
 // The live dashboard in its own OS window (plan 055): chat, activity, stats
-// and Orcle, relayed from the main renderer. Plain BrowserWindow with no
+// and Golem, relayed from the main renderer. Plain BrowserWindow with no
 // native surface. It is NOT capture-protected (owner call, 2026-08-19: only
 // Notes is), so Studio closes it during a recording that would capture it.
 type CommentsWindowPrefs = {
@@ -8875,6 +8877,9 @@ function startBackendWithRegistryLock(): void {
         : '',
       VIDEORC_MANAGED_BACKGROUND_ROOTS: managedBackgroundRoots().join(delimiter),
       VIDEORC_MANAGED_THUMBNAIL_ROOT: join(app.getPath('userData'), 'scheduled-thumbnails'),
+      // The Golem's avatar images (plan 164 S-A3): uploads land here through
+      // main, generated images through the backend (S-A6).
+      VIDEORC_MANAGED_GOLEM_ROOTS: managedGolemRoot(),
       // Debug smoke/test RPCs are a second, explicit capability boundary in
       // addition to the admin backend credential. Release builds compile the
       // handlers out regardless of this value.
@@ -11002,7 +11007,7 @@ async function runSmokePreviewMotionCommand(
     return { cohost: latestCohostWindowState }
   }
 
-  // Narrow-width proof (plan 047): real geometry of the header and the Orcle
+  // Narrow-width proof (plan 047): real geometry of the header and the Golem
   // action bar, so the probe can assert nothing overflows or clips.
   if (command === 'comments-window-layout-metrics') {
     const window = commentsWindow
@@ -13376,6 +13381,46 @@ function resolveManagedBackgroundFile(fileName: string): string | null {
   return null
 }
 
+// --- Golem avatar images (plan 164 S-A3) --------------------------------------
+// `userData/golem-assets/<personaId>/<state>.<ext>`, served under the `golem`
+// host by the relative path the persona stores. Exactly one folder and one
+// file; anything else is not found.
+function managedGolemRoot(): string {
+  return join(app.getPath('userData'), 'golem-assets')
+}
+
+function resolveManagedGolemFile(relativePath: string): string | null {
+  const parsed = parseGolemAssetPath(relativePath)
+  if (!parsed) return null
+  return resolveRegularFileInsideRoot(
+    join(managedGolemRoot(), parsed.personaId),
+    `${parsed.state}.${parsed.extension}`
+  )
+}
+
+async function pickGolemImage(personaId: unknown, state: unknown) {
+  if (!isGolemPersonaId(personaId) || !isGolemAvatarState(state)) {
+    throw new Error('Golem image import needs a persona id and a state.')
+  }
+  const options: Electron.OpenDialogOptions = {
+    title: `Choose the ${state} image`,
+    properties: ['openFile'],
+    filters: [
+      {
+        name: state === 'idle' ? 'PNG, WebP or JPEG' : 'PNG or WebP with transparency',
+        extensions: state === 'idle' ? ['png', 'webp', 'jpg', 'jpeg'] : ['png', 'webp']
+      }
+    ]
+  }
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options)
+  if (result.canceled || !result.filePaths[0]) return null
+  return importGolemImage(result.filePaths[0], managedGolemRoot(), personaId, state, (bytes) =>
+    nativeImage.createFromBuffer(bytes).getSize()
+  )
+}
+
 // --- Chat avatar cache (Comments window upgrade S1) ----------------------------
 // Renderers never hot-link platform CDNs: main fetches each avatar once from
 // an allowlisted host (avatar-cache.ts policy), stores it here, and serves it
@@ -13609,7 +13654,9 @@ function registerManagedAssetProtocol(): void {
               ? resolveManagedAvatarFile(fileName)
               : url.host === 'screen'
                 ? resolveManagedScreenFile(fileName)
-                : null
+                : url.host === 'golem'
+                  ? resolveManagedGolemFile(fileName)
+                  : null
       if (!resolved) {
         return new Response('Not found', { status: 404 })
       }
@@ -14118,6 +14165,15 @@ app.whenReady().then(async () => {
   )
   secureIpcHandle('backgrounds:import-image', () => importBackgroundImage())
   secureIpcHandle('scheduled-streams:import-thumbnail', () => pickScheduledThumbnail())
+  // The Golem's avatar images (plan 164 S-A3): the picker, then the sniffed
+  // copy into the persona's folder; Start over removes the folder.
+  secureIpcHandle('golem-assets:import-image', (_event, personaId: unknown, state: unknown) =>
+    pickGolemImage(personaId, state)
+  )
+  secureIpcHandle('golem-assets:remove', async (_event, personaId: unknown) => {
+    if (!isGolemPersonaId(personaId)) throw new Error('Golem removal needs a persona id.')
+    await removeGolemPersona(managedGolemRoot(), personaId)
+  })
   secureIpcHandle('backgrounds:bundled-assets', () => bundledBackgroundAssets())
   secureIpcHandle('backgrounds:asset-exists', (_event, assetId: unknown) =>
     backgroundAssetFileExists(assetId)
@@ -14379,7 +14435,7 @@ app.whenReady().then(async () => {
     'comments-window:cohost-action',
     (event, value: unknown): Promise<CohostState> => {
       if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
-        return Promise.reject(new Error('Only the Chat window can send Orcle actions.'))
+        return Promise.reject(new Error('Only the Chat window can send Golem actions.'))
       }
       const requestId = commentsCommandRequestId(value)
       if (
@@ -14389,7 +14445,7 @@ app.whenReady().then(async () => {
         !('kind' in value) ||
         !('targetId' in value)
       ) {
-        return Promise.reject(new Error('Orcle action requires a session, kind, and target.'))
+        return Promise.reject(new Error('Golem action requires a session, kind, and target.'))
       }
       const command = value as CohostActionCommand
       if (
@@ -14397,7 +14453,7 @@ app.whenReady().then(async () => {
         typeof command.targetId !== 'string' ||
         !command.targetId.trim()
       ) {
-        return Promise.reject(new Error('Orcle action requires a known kind and target id.'))
+        return Promise.reject(new Error('Golem action requires a known kind and target id.'))
       }
       assertLiveCommentsCommandSession(command.sessionId)
       return commentsCommandBroker.request(requestId, () => {
@@ -14414,14 +14470,14 @@ app.whenReady().then(async () => {
       return commentsCommandBroker.resolve(resolution)
     }
   )
-  // Answers to Orcle's voice command cards (plan 140, S6 part B), relayed like
-  // the Orcle actions above: the window names the command and its answer,
+  // Answers to Golem's voice command cards (plan 140, S6 part B), relayed like
+  // the Golem actions above: the window names the command and its answer,
   // the MAIN renderer makes the cohost.command.* call.
   secureIpcHandle(
     'comments-window:cohost-command',
     (event, value: unknown): Promise<CohostState> => {
       if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
-        return Promise.reject(new Error('Only the Chat window can answer Orcle.'))
+        return Promise.reject(new Error('Only the Chat window can answer Golem.'))
       }
       const requestId = commentsCommandRequestId(value)
       const command = value as CohostCommandRelayCommand
@@ -14447,21 +14503,21 @@ app.whenReady().then(async () => {
     'comments-window:cohost-enable',
     (event, value: unknown): Promise<CohostWindowState> => {
       if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
-        return Promise.reject(new Error('Only the Chat window can change Orcle settings.'))
+        return Promise.reject(new Error('Only the Chat window can change Golem settings.'))
       }
       const requestId = commentsCommandRequestId(value)
       if (!value || typeof value !== 'object' || !('enabled' in value)) {
-        return Promise.reject(new Error('Orcle enable requires an enabled flag.'))
+        return Promise.reject(new Error('Golem enable requires an enabled flag.'))
       }
       const command = value as CohostEnableCommand
       if (typeof command.enabled !== 'boolean') {
-        return Promise.reject(new Error('Orcle enable requires a boolean enabled flag.'))
+        return Promise.reject(new Error('Golem enable requires a boolean enabled flag.'))
       }
       if (command.grantConsent !== undefined && typeof command.grantConsent !== 'boolean') {
-        return Promise.reject(new Error('Orcle consent grant must be a boolean.'))
+        return Promise.reject(new Error('Golem consent grant must be a boolean.'))
       }
       if (command.listen !== undefined && typeof command.listen !== 'boolean') {
-        return Promise.reject(new Error('Orcle listening must be a boolean.'))
+        return Promise.reject(new Error('Golem listening must be a boolean.'))
       }
       return commentsCommandBroker.request(requestId, () => {
         if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
@@ -14667,7 +14723,7 @@ app.whenReady().then(async () => {
       return startScopeReconnect('twitch')
     }
   )
-  // "Reconnect Twitch to let Orcle remove messages" (plan 140, S5). The
+  // "Reconnect Twitch to let Golem remove messages" (plan 140, S5). The
   // runtime contract already admits only {requestId, platform: twitch | kick};
   // the checks below keep the handler safe on its own.
   secureIpcHandle(

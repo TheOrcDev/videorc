@@ -13,8 +13,8 @@ import type {
 } from '@/lib/orcle-command-view'
 import { cn } from '@/lib/utils'
 
-// Orcle voice commands in the Stream Manager's Orcle pane (plan 140, S6 part
-// B), directly above the removal cards: what Orcle heard and did (the strip),
+// Golem voice commands in the Stream Manager's Golem pane (plan 140, S6 part
+// B), directly above the removal cards: what Golem heard and did (the strip),
 // then what waits for you (the chooser, or "show it anyway?").
 //
 // Keys follow the removal cards' scoping (`removalKeyAnswer`): Enter only
@@ -30,7 +30,7 @@ export type CommandAnswer =
   | { action: 'confirm' }
   | { action: 'cancel' }
 
-/** "Heard: “…”", then what Orcle did. Quiet statuses use secondary text. */
+/** "Heard: “…”", then what Golem did. Quiet statuses use secondary text. */
 export function CommandStrip({ view }: { view: CommandStripView | null }): ReactElement | null {
   if (!view) return null
   return (

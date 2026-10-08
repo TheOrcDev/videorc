@@ -40,21 +40,21 @@ import { permissionReconnectOptions } from '../../../shared/platform-scopes'
 const REMOVE_CONFIRM_MODES: readonly RemoveConfirmMode[] = ['confirm', 'countdown']
 
 /**
- * The Orcle tab's Voice tab (plan 140 S6, plan 150 S5), in Settings' two
+ * The Golem tab's Voice tab (plan 140 S6, plan 150 S5), in Settings' two
  * columns. Commands: what you can say, each phrase over what it does, then the
  * two settings (the wake word and how a removal is confirmed). Remove
- * messages: whether each platform lets Orcle remove messages (with its one
+ * messages: whether each platform lets Golem remove messages (with its one
  * fix), its limits as the section's description. Above both, one reason when
- * voice commands can't run: locked (`lead`, from the tab), Orcle Live off, or
+ * voice commands can't run: locked (`lead`, from the tab), Golem Live off, or
  * Videorc's kill switches.
  */
 export function OrcleVoiceCommands({
   lead = null,
   onOpenLive
 }: {
-  /** The tab's locked alert, given only while Orcle is locked (plan 150, D7). */
+  /** The tab's locked alert, given only while Golem is locked (plan 150, D7). */
   lead?: ReactNode
-  /** Opens the Live tab, from the "turn on Orcle Live" alert. */
+  /** Opens the Live tab, from the "turn on Golem Live" alert. */
   onOpenLive?: () => void
 }): ReactElement {
   const {
@@ -177,7 +177,7 @@ export function OrcleVoiceCommands({
               </div>
             </Field>
             <Field>
-              <FieldLabel htmlFor="orcle-remove-confirm">Before Orcle removes a comment</FieldLabel>
+              <FieldLabel htmlFor="orcle-remove-confirm">Before Golem removes a comment</FieldLabel>
               <FieldDescription>
                 {REMOVE_CONFIRM_DESCRIPTIONS[removeConfirm]} {YOUTUBE_ALWAYS_CONFIRMS}
               </FieldDescription>

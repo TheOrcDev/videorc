@@ -81,7 +81,7 @@ export function CohostQuestionRow({
       ) : null}
       {question.fromNotes ? (
         <NoteIcon
-          aria-label="Answered from your Orcle notes"
+          aria-label="Answered from your Golem notes"
           className="size-3.5 shrink-0 text-muted-foreground"
           weight="duotone"
         />

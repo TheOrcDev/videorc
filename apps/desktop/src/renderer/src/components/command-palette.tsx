@@ -156,12 +156,12 @@ export function CommandPalette({
 
         <CommandSeparator />
 
-        {/* Plan 150: every Orcle tab is one jump away, like Settings'. */}
-        <CommandGroup heading="Orcle">
+        {/* Plan 150: every Golem tab is one jump away, like Settings'. */}
+        <CommandGroup heading="Golem">
           {ORCLE_TABS.map((tab) => (
             <CommandItem
               key={tab.id}
-              value={`Orcle ${tab.label}`}
+              value={`Golem ${tab.label}`}
               onSelect={() => run(() => openOrcle(tab.id))}
             >
               <OrcleIcon className="size-4" />
