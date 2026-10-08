@@ -1,18 +1,26 @@
 import { STORAGE_KEYS } from '@/lib/capture'
 
 /**
- * The Orcle tab's own tabs (plan 150), in strip order, built like Settings'
- * (plan 064). Each answers one question: is Orcle on (Live), how does it
- * reply and moderate (Chat), what can I say to it (Voice), what happened on
- * my streams (Reports), and edit my recordings (Clean cut). Ids are stable:
- * they are stored as the last-used tab and carried by deep links. Labels are
- * copy.
+ * The page's name everywhere a user reads it (plan 164, D1): the sidebar
+ * entry, the ⌘K group, shortcut labels and window copy. Code, RPC names and
+ * storage keys stay `cohost` / `orcle` (the plan 119 rule).
+ */
+export const GOLEM_TAB_LABEL = 'Golem'
+
+/**
+ * The Golem tab's own tabs (plan 150, renamed in plan 164), in strip order,
+ * built like Settings' (plan 064). Each answers one question: who is my Golem
+ * and is it on (Golem, formerly Live: the creation screen), how does it reply
+ * and moderate (Chat), what can I say to it (Voice), what happened on my
+ * streams (Reports), and edit my recordings (Clean cut). Ids are stable: they
+ * are stored as the last-used tab and carried by deep links, so the first tab
+ * keeps its `live` id. Labels are copy.
  *
  * The shell imports this module, so it sits in the eager chunk: keep it to
  * ids, labels and the storage helpers (no icons, no components).
  */
 export const ORCLE_TABS = [
-  { id: 'live', label: 'Live' },
+  { id: 'live', label: GOLEM_TAB_LABEL },
   { id: 'chat', label: 'Chat' },
   { id: 'voice', label: 'Voice' },
   { id: 'reports', label: 'Reports' },
@@ -37,7 +45,7 @@ function pageStorage(): Storage | null {
 }
 
 /**
- * The tab Orcle opens on: the last one used on this device, else Live. The
+ * The tab Golem opens on: the last one used on this device, else Live. The
  * choice is a convenience, so storage that is missing, holds an unknown id,
  * or throws falls back instead of breaking the page.
  */
@@ -59,14 +67,14 @@ export function writeLastOrcleTab(
   try {
     storage?.setItem(STORAGE_KEYS.orcleTab, tab)
   } catch {
-    // Not remembering the tab is harmless; Orcle opens on Live next time.
+    // Not remembering the tab is harmless; Golem opens on Live next time.
   }
 }
 
 /**
- * Opens the Orcle page on `tab` from outside React (a toast action, a lib).
+ * Opens the Golem page on `tab` from outside React (a toast action, a lib).
  * The shell handles it on the event every page is opened with from outside
- * React. The workspace id of the Orcle page is `ai`.
+ * React. The workspace id of the Golem page is `ai`.
  */
 export function openOrcleTab(tab: OrcleTabId): void {
   window.dispatchEvent(

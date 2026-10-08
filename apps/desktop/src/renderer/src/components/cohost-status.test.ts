@@ -57,12 +57,12 @@ describe('CohostStatus', () => {
     const markup = renderStatus({ state: offCohostState(), enabled: false })
     expect(markup).toContain('data-slot="cohost-status"')
     expect(markup).toContain('data-state-kind="off"')
-    expect(markup).toContain('Orcle off')
+    expect(markup).toContain('Golem off')
     expect(markup).toContain('data-tone="muted"')
   })
 
   it('renders the same element for a null state — presence is unconditional', () => {
-    expect(renderStatus({ state: null, enabled: false })).toContain('Orcle off')
+    expect(renderStatus({ state: null, enabled: false })).toContain('Golem off')
   })
 
   it('earns the live dot only while listening', () => {
@@ -71,13 +71,13 @@ describe('CohostStatus', () => {
     expect(markup).toContain('data-tone="live"')
     expect(markup).toContain('tone-success')
     expect(markup).toContain('glass-dot')
-    expect(markup).toContain('Orcle · 1 q')
+    expect(markup).toContain('Golem · 1 q')
     expect(markup).not.toContain('cohost-typing-dots')
   })
 
   it('shows the typing shimmer while reading queued chat', () => {
     const markup = renderStatus({ state: listening({ pendingMessages: 4 }) })
-    expect(markup).toContain('Orcle · reading 4 new…')
+    expect(markup).toContain('Golem · reading 4 new…')
     expect(markup).toContain('data-slot="cohost-typing-dots"')
     expect(markup).toContain('typing-dot')
     expect(markup).not.toContain('typing-dot-fast')
@@ -85,7 +85,7 @@ describe('CohostStatus', () => {
 
   it('runs the shimmer faster and pulses the dot while a tick is in flight', () => {
     const markup = renderStatus({ state: listening({ tickInFlight: true, pendingMessages: 4 }) })
-    expect(markup).toContain('Orcle · thinking…')
+    expect(markup).toContain('Golem · thinking…')
     expect(markup).toContain('typing-dot-fast')
     expect(markup).toContain('animate-pulse')
   })
@@ -100,7 +100,7 @@ describe('CohostStatus', () => {
     })
     expect(markup).toContain('data-state-kind="error"')
     expect(markup).toContain('data-tone="destructive"')
-    expect(markup).toContain('Orcle error')
+    expect(markup).toContain('Golem error')
     // The server's own words live in the tooltip, not in the label.
     expect(markup).toContain('ai-gateway-error (HTTP 502)')
   })
@@ -109,7 +109,7 @@ describe('CohostStatus', () => {
     const markup = renderStatus({
       state: listening({ status: 'paused', reason: 'quota-exhausted' })
     })
-    expect(markup).toContain('Orcle paused · quota')
+    expect(markup).toContain('Golem paused · quota')
     expect(markup).toContain('data-tone="muted"')
     expect(markup).not.toContain('tone-destructive')
   })
@@ -120,7 +120,7 @@ describe('CohostStatus', () => {
       state: listening({ questions: [question()] })
     })
     expect(markup).toContain('grouped 2 questions')
-    expect(markup).not.toContain('>Orcle · 1 q<')
+    expect(markup).not.toContain('>Golem · 1 q<')
   })
 
   it('carries the collapsed-pane unread count', () => {
@@ -147,9 +147,9 @@ describe('CohostStatus', () => {
     expect(markup).toMatch(
       /class="[^"]*@max-\[330px\]\/chat-header:sr-only[^"]*"[^>]*data-slot="cohost-status-label"/
     )
-    expect(markup).toContain('aria-label="Orcle paused · quota')
-    // Hovering the lone dot still says what Orcle is doing.
-    expect(markup).toMatch(/title="Orcle paused · quota/)
+    expect(markup).toContain('aria-label="Golem paused · quota')
+    // Hovering the lone dot still says what Golem is doing.
+    expect(markup).toMatch(/title="Golem paused · quota/)
   })
 
   it('keeps the trigger draggable-safe in the frameless window header', () => {
@@ -172,7 +172,7 @@ describe('CohostListeningIndicator (plan 068)', () => {
     expect(markup).toContain('data-listening-state="on"')
     expect(markup).toContain('>Listening<')
     expect(markup).toContain('text-success')
-    expect(markup).toContain('title="Orcle hears your microphone as text."')
+    expect(markup).toContain('title="Golem hears your microphone as text."')
   })
 
   it('says Starting to listen without a tone', () => {
@@ -186,11 +186,11 @@ describe('CohostListeningIndicator (plan 068)', () => {
     const markup = render({
       state: 'blocked',
       reasonCode: 'no-microphone',
-      message: 'Select a microphone so Orcle can hear you.'
+      message: 'Select a microphone so Golem can hear you.'
     })
     expect(markup).toContain('>Not listening: no microphone selected<')
     expect(markup).toContain('text-warning')
-    expect(markup).toContain('title="Select a microphone so Orcle can hear you."')
+    expect(markup).toContain('title="Select a microphone so Golem can hear you."')
   })
 
   it('keeps only the microphone in a tight header', () => {
@@ -201,6 +201,6 @@ describe('CohostListeningIndicator (plan 068)', () => {
 
   it('adds the listening sentence to the status tooltip', () => {
     const markup = renderStatus({ state: listening({ listening: { state: 'on' } }) })
-    expect(markup).toContain('Orcle hears your microphone as text.')
+    expect(markup).toContain('Golem hears your microphone as text.')
   })
 })

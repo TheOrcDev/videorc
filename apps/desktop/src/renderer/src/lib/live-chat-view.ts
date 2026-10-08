@@ -530,7 +530,7 @@ export type CommentRowTint = 'paid' | 'spotlight' | 'member' | null
 
 /**
  * The one background a chat row paints (plan 154, D3). Lowest to highest:
- * a member's own message, Orcle's "Talking about this" pull-up, a paid
+ * a member's own message, Golem's "Talking about this" pull-up, a paid
  * message. An on-stream row paints none: its button fill says so.
  */
 export function commentRowTint(

@@ -420,7 +420,7 @@ pub enum CohostListeningState {
     Blocked,
 }
 
-/// Whether Orcle hears the streamer right now (plan 068 D2). Owned by the
+/// Whether Golem hears the streamer right now (plan 068 D2). Owned by the
 /// caption coordinator's listen intent; every optional field is omitted when
 /// absent because the renderer contract rejects `null`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -489,7 +489,7 @@ pub struct CohostSettings {
     pub enabled: bool,
     pub tone: CohostTone,
     pub notes: String,
-    /// Orcle's picks go on stream by themselves (server highlights and
+    /// Golem's picks go on stream by themselves (server highlights and
     /// high-priority questions, with the engine's cadence rules).
     pub auto_highlight: bool,
     /// The comment the streamer is talking about goes on stream by itself.
@@ -500,12 +500,12 @@ pub struct CohostSettings {
     /// so a settings row from before the field still loads.
     #[serde(default)]
     pub rules: Vec<String>,
-    /// Orcle hears the microphone for the whole live stream, as text, even
+    /// Golem hears the microphone for the whole live stream, as text, even
     /// with live captions off (plan 068 D2). `default` so a settings row from
     /// before the field still loads.
     #[serde(default)]
     pub listen: bool,
-    /// "Commands need 'Orcle' first" (plan 140 S3): the structured phrases
+    /// "Commands need 'Golem' first" (plan 140 S3): the structured phrases
     /// ("remove it from our chat") stop working without the wake word.
     /// Default off. `default` so a settings row from before the field loads.
     #[serde(default)]
@@ -588,7 +588,7 @@ pub fn load_cohost_settings(database: &Database) -> CohostSettings {
         Ok(Some(settings)) => settings.normalized(),
         Ok(None) => CohostSettings::default(),
         Err(error) => {
-            tracing::warn!("Could not read Orcle settings; using defaults: {error:#}");
+            tracing::warn!("Could not read Golem settings; using defaults: {error:#}");
             CohostSettings::default()
         }
     }
@@ -660,7 +660,7 @@ pub struct CohostPromiseReminder {
 }
 
 /// A recap for viewers who asked what they missed, or one the streamer
-/// drafted from the summary. Never posted by Orcle; gone after `RECAP_TTL`.
+/// drafted from the summary. Never posted by Golem; gone after `RECAP_TTL`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostRecap {
@@ -711,12 +711,12 @@ pub enum CohostCommandKind {
 pub enum CohostCommandStatus {
     /// It happened: highlighted, cleared, removed or hidden.
     Done,
-    /// No comment matched, or Orcle didn't catch what was said.
+    /// No comment matched, or Golem didn't catch what was said.
     NotFound,
     /// A chooser is open: `candidates` holds the comments to pick from.
     Ambiguous,
     /// A card waits for a yes: a voice removal (`operationId`), or a highlight
-    /// of a comment Orcle flagged. While a confirmed removal runs at the
+    /// of a comment Golem flagged. While a confirmed removal runs at the
     /// platform the status stays `confirm`, without `expiresAt`.
     Confirm,
     /// Chat moderation refused, or the removal failed.
@@ -747,7 +747,7 @@ pub struct CohostCommandTarget {
 pub struct CohostCommand {
     /// `cmd-<uuid>`; the `cohost.command.*` RPCs take it back.
     pub id: String,
-    /// The words that made the command, as Orcle heard them.
+    /// The words that made the command, as Golem heard them.
     pub heard: String,
     pub kind: CohostCommandKind,
     pub status: CohostCommandStatus,
@@ -808,7 +808,7 @@ impl CohostCommandError {
     fn not_pending() -> Self {
         Self {
             code: "not-pending",
-            message: "No Orcle command is waiting for that answer.".to_string(),
+            message: "No Golem command is waiting for that answer.".to_string(),
         }
     }
 }
@@ -958,7 +958,7 @@ pub struct CohostState {
     /// first, at most three. Omitted while empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recently_resolved: Vec<CohostRecentlyResolved>,
-    /// Whether Orcle hears the streamer (plan 068). Omitted without a session
+    /// Whether Golem hears the streamer (plan 068). Omitted without a session
     /// or by a backend from before the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listening: Option<CohostListening>,
@@ -1030,19 +1030,19 @@ impl CohostState {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CohostError {
-    #[error("Orcle is turned off in Settings.")]
+    #[error("Golem is turned off in Settings.")]
     Disabled,
-    /// Plan 140 S1: Orcle is Premium only, enforced here and not just by the
+    /// Plan 140 S1: Golem is Premium only, enforced here and not just by the
     /// renderer's `liveCohostGate`.
-    #[error("Orcle requires Videorc Premium.")]
+    #[error("Golem requires Videorc Premium.")]
     PremiumRequired,
-    #[error("Orcle needs the active live chat session; sessionId did not match.")]
+    #[error("Golem needs the active live chat session; sessionId did not match.")]
     SessionMismatch,
     #[error("sessionId and the question, message, promise or author id are required.")]
     InvalidParams,
-    #[error("Orcle has nothing to recap yet: no summary has arrived this session.")]
+    #[error("Golem has nothing to recap yet: no summary has arrived this session.")]
     NoSummary,
-    #[error("Could not persist Orcle settings: {0}")]
+    #[error("Could not persist Golem settings: {0}")]
     Storage(String),
 }
 
@@ -1412,7 +1412,7 @@ struct CohostSession {
     session_id: String,
     generation: u64,
     consent: bool,
-    /// Whether Orcle hears the streamer this session (plan 068).
+    /// Whether Golem hears the streamer this session (plan 068).
     listening: Option<CohostListening>,
     stream_title: Option<String>,
     status: CohostStatus,
@@ -1584,7 +1584,7 @@ pub(crate) struct PreparedCommandParse {
 enum UnknownCommandResolution {
     /// The parser read it: run it like a spoken command.
     Resolved(CommandKind, Vec<String>),
-    /// "Orcle didn't catch that".
+    /// "Golem didn't catch that".
     Unheard,
     /// A newer command, or a session change, landed while the parser was
     /// thinking: say nothing.
@@ -1845,7 +1845,7 @@ const COMMAND_FLAG_MAX_AGE_SECS: i64 = 120;
 const COMMAND_CANDIDATES_CAP: usize = 3;
 /// A card's excerpt, in UTF-16 units (like the moderation audit row).
 const COMMAND_EXCERPT_MAX_UNITS: usize = 140;
-/// What Orcle heard, as the strip shows it.
+/// What Golem heard, as the strip shows it.
 const COMMAND_HEARD_MAX_UNITS: usize = 300;
 
 /// Plan 140 S8, desktop-owned thresholds (contract part E): the cloud parser
@@ -1867,7 +1867,7 @@ const COMMAND_PARSE_MAX_PAUSE: Duration = Duration::from_secs(24 * 60 * 60);
 
 const COMMAND_VOICE_PAUSED: &str = "Voice commands are paused by Videorc.";
 const COMMAND_SIGNED_OUT: &str = "Cancelled because you signed out.";
-const COMMAND_STOPPED_LISTENING: &str = "Cancelled because Orcle stopped listening.";
+const COMMAND_STOPPED_LISTENING: &str = "Cancelled because Golem stopped listening.";
 
 /// What a voice command's card waits for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1876,7 +1876,7 @@ enum CommandPending {
     None,
     /// A chooser: picking one runs the command on it.
     Choice,
-    /// A highlight of a comment Orcle flagged (high severity) waits for a yes.
+    /// A highlight of a comment Golem flagged (high severity) waits for a yes.
     HighlightConfirm,
     /// The removal request is on its way to chat moderation.
     Requesting,
@@ -1909,7 +1909,7 @@ impl CommandIntent {
 #[derive(Debug, Clone)]
 struct CommandRecord {
     wire: CohostCommand,
-    /// `None` for an utterance Orcle did not understand.
+    /// `None` for an utterance Golem did not understand.
     intent: Option<CommandIntent>,
     pending: CommandPending,
     /// When it was heard: the same-target and correction windows count from here.
@@ -2043,7 +2043,7 @@ struct NewCommand {
     spec: CommandTargetSpec,
     heard: String,
     reason: Option<String>,
-    /// Addressed with the wake word ("Orcle, ..."). A structured phrase
+    /// Addressed with the wake word ("Golem, ..."). A structured phrase
     /// heard without it is `false`.
     wake_word: bool,
 }
@@ -3500,9 +3500,9 @@ impl CohostSession {
         let nothing = || {
             CommandResolution::NotFound(
                 match intent {
-                    CommandIntent::Remove => "Orcle couldn't find a comment to remove.",
+                    CommandIntent::Remove => "Golem couldn't find a comment to remove.",
                     CommandIntent::Highlight | CommandIntent::Clear => {
-                        "Orcle couldn't find a comment to show."
+                        "Golem couldn't find a comment to show."
                     }
                 }
                 .to_string(),
@@ -3519,7 +3519,7 @@ impl CohostSession {
                 eligible.truncate(COMMAND_CANDIDATES_CAP);
                 match eligible.len() {
                     0 => {
-                        CommandResolution::NotFound("Orcle couldn't find that comment.".to_string())
+                        CommandResolution::NotFound("Golem couldn't find that comment.".to_string())
                     }
                     1 => CommandResolution::One(eligible.remove(0)),
                     _ => CommandResolution::Several(eligible),
@@ -3546,7 +3546,7 @@ impl CohostSession {
                     }
                 },
                 CommandTarget::None => CommandResolution::NotFound(
-                    "Orcle couldn't tell which comment you mean.".to_string(),
+                    "Golem couldn't tell which comment you mean.".to_string(),
                 ),
             },
         }
@@ -3566,7 +3566,7 @@ impl CohostSession {
     ) -> CommandResolution {
         let not_found = || {
             CommandResolution::NotFound(format!(
-                "Orcle couldn't find a comment from {}.",
+                "Golem couldn't find a comment from {}.",
                 spoken.trim()
             ))
         };
@@ -3723,7 +3723,7 @@ impl CohostSession {
                 let recent = self.newest_command_messages(COMMAND_CANDIDATES_CAP);
                 if recent.is_empty() {
                     CommandResolution::NotFound(
-                        "Orcle couldn't find a comment to remove.".to_string(),
+                        "Golem couldn't find a comment to remove.".to_string(),
                     )
                 } else {
                     CommandResolution::Several(recent)
@@ -3955,7 +3955,7 @@ impl CohostSession {
 
     /// One comment to show: on stream now (`CohostAutoHighlight`, source
     /// `command`, past the automatic cadence rules: the streamer asked),
-    /// unless Orcle flagged it high: then it asks first.
+    /// unless Golem flagged it high: then it asks first.
     fn highlight_or_ask(
         &mut self,
         record: &mut CommandRecord,
@@ -3977,8 +3977,8 @@ impl CohostSession {
             record.pending = CommandPending::HighlightConfirm;
             record.wire.status = CohostCommandStatus::Confirm;
             record.wire.message = match command_flag_label(kind) {
-                Some(label) => format!("Orcle flagged this ({label}). Show it anyway?"),
-                None => "Orcle flagged this. Show it anyway?".to_string(),
+                Some(label) => format!("Golem flagged this ({label}). Show it anyway?"),
+                None => "Golem flagged this. Show it anyway?".to_string(),
             };
             record.wire.expires_at = Some(expires_at.clone());
             record.wire.at = ctx.now_iso();
@@ -4174,7 +4174,7 @@ impl CohostSession {
         Ok(effects)
     }
 
-    /// Orcle was addressed and understood nothing: "Orcle didn't catch
+    /// Golem was addressed and understood nothing: "Golem didn't catch
     /// that: '…'". Never while a card is open: an unclear utterance must not
     /// close a card the streamer may still answer.
     fn note_unheard_command(&mut self, heard: &str, ctx: &CommandContext) -> bool {
@@ -4190,7 +4190,7 @@ impl CohostSession {
         if let Some(message) = command_gate(ctx, None) {
             record.finish(CohostCommandStatus::Unavailable, message, &now_iso);
         } else {
-            let message = format!("Orcle didn't catch that: '{}'.", record.wire.heard);
+            let message = format!("Golem didn't catch that: '{}'.", record.wire.heard);
             record.finish(CohostCommandStatus::NotFound, message, &now_iso);
             self.report.commands.not_found += 1;
         }
@@ -5347,7 +5347,7 @@ pub(crate) fn tick_message_from_chat(message: &LiveChatMessage) -> Option<Cohost
     })
 }
 
-/// What Orcle reads for a message with Twitch GIFs (plan 155, D7). The raw
+/// What Golem reads for a message with Twitch GIFs (plan 155, D7). The raw
 /// text is the GIPHY title in brackets (`[Y A Y Yes GIF]`), which reads as a
 /// viewer's words. A GIF alone becomes `sent a GIF: <title>`; a GIF among
 /// words becomes `(GIF: <title>)` in its place. Without a gif fragment the
@@ -5428,7 +5428,7 @@ pub struct CohostEngine {
     /// sessions, so the renderer can key on it alone.
     auto_highlight_generation: u64,
     /// The voice-command kill switches as last read (plan 140 S3); `None`
-    /// while both are on. Every state carries it, Orcle running or not.
+    /// while both are on. Every state carries it, Golem running or not.
     command_availability: Option<CohostCommandAvailability>,
     /// The cloud command parser (plan 140 S8).
     command_parser: CommandParserLane,
@@ -5456,7 +5456,7 @@ impl CohostEngine {
     }
 
     /// Whether a parse may go out for `scope` now: the capability, Premium,
-    /// the voice kill switch, Orcle on with this session and its consent to
+    /// the voice kill switch, Golem on with this session and its consent to
     /// process chat, nothing in flight, and the gap and any pause over.
     fn command_parser_ready(
         &self,
@@ -6192,7 +6192,7 @@ pub(crate) fn note_caption_final(state: &AppState, update: &CaptionsUpdate) {
     }
 }
 
-/// Orcle learns a transcript final only when the caption coordinator still
+/// Golem learns a transcript final only when the caption coordinator still
 /// owns its admitted speech epoch. Caption callbacks route clip marks through
 /// their immutable recording owner independently, before this admission gate.
 /// The caller checks ownership and calls this synchronously under that lock;
@@ -6219,7 +6219,7 @@ pub(crate) fn note_transcript_final(
     }
 }
 
-/// Plan 140 S2: the pure command detector reads the final while an Orcle
+/// Plan 140 S2: the pure command detector reads the final while a Golem
 /// session is armed (`arm_command_detector`). Std mutex, no await: the
 /// caption task observes and returns, like the buffers above. The context
 /// (the wake-word setting, an open card or chooser) is the engine's mirror
@@ -6257,7 +6257,7 @@ pub(crate) fn dispatch_detected_command(
 ) {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         tracing::warn!(
-            "Heard an Orcle command ({}) but no runtime is available to run it.",
+            "Heard a Golem command ({}) but no runtime is available to run it.",
             command.kind.label()
         );
         return;
@@ -6320,7 +6320,7 @@ fn clear_transcript(state: &AppState) {
         handle.spawn(async move {
             if let Err(refusal) = crate::live_chat_moderation::cancel(&state, &operation_id).await {
                 tracing::debug!(
-                    "An Orcle removal was no longer pending at a session boundary: {refusal}"
+                    "A Golem removal was no longer pending at a session boundary: {refusal}"
                 );
             }
         });
@@ -6390,7 +6390,7 @@ async fn run_detected_command(
         question = command.question,
         reason = command.reason.as_deref().unwrap_or("none"),
         wake_word = command.wake_word,
-        "Orcle heard a command: '{}'.",
+        "Golem heard a command: '{}'.",
         command.heard
     );
     let intent = match command.kind {
@@ -6404,7 +6404,7 @@ async fn run_detected_command(
             return answer_by_voice(state, scope, CommandAnswer::Choose(index), premium).await;
         }
         CommandKind::Unknown => {
-            // Only a clearly addressed "Orcle" earns a reply.
+            // Only a clearly addressed "Golem" earns a reply.
             if !command.wake_word {
                 return;
             }
@@ -6426,7 +6426,7 @@ async fn run_detected_command(
                 }
                 UnknownCommandResolution::Superseded => {
                     tracing::info!(
-                        "Orcle dropped a parsed command: a newer command or session came first."
+                        "Golem dropped a parsed command: a newer command or session came first."
                     );
                 }
             };
@@ -6456,7 +6456,7 @@ async fn run_detected_command(
 /// Plan 140 S8: every wake-word utterance the local grammar could not read
 /// is offered to the cloud command parser first, when the web enabled it
 /// (`features.cohostCommandEnabled`), on Premium, with the voice kill switch
-/// on, an Orcle session for `scope` and its consent to process chat. One
+/// on, a Golem session for `scope` and its consent to process chat. One
 /// call at most, never retried, on this command's own task with no lock
 /// held across it. Any failure, timeout or doubt is "didn't catch that".
 async fn resolve_unknown_command(
@@ -6533,7 +6533,7 @@ where
             tracing::info!(
                 code = %error.detail.code,
                 status = ?error.detail.status,
-                "Orcle's command parser failed: {}",
+                "Golem's command parser failed: {}",
                 error.message()
             );
             return if current {
@@ -6551,14 +6551,14 @@ where
             tracing::info!(
                 kind = %kind.label(),
                 targets = message_ids.len(),
-                "Orcle's command parser read '{heard}'."
+                "Golem's command parser read '{heard}'."
             );
             UnknownCommandResolution::Resolved(kind, message_ids)
         }
         None => {
             tracing::info!(
                 choice = %response.intent.choice,
-                "Orcle's command parser was not sure enough about '{heard}'."
+                "Golem's command parser was not sure enough about '{heard}'."
             );
             UnknownCommandResolution::Unheard
         }
@@ -6702,7 +6702,7 @@ async fn run_new_command(
             let mut engine = state.cohost.lock().await;
             engine.set_command_availability(ctx.availability());
             let Some(effects) = engine.begin_command(scope, command, &ctx) else {
-                tracing::info!("Orcle dropped a voice command: its session changed.");
+                tracing::info!("Golem dropped a voice command: its session changed.");
                 return;
             };
             mirror_command_slot(state, &engine);
@@ -6732,7 +6732,7 @@ async fn answer_by_voice(
     {
         tracing::debug!(
             code = error.code,
-            "Orcle dropped a voice answer: {}",
+            "Golem dropped a voice answer: {}",
             error.message
         );
     }
@@ -6790,7 +6790,7 @@ async fn run_command_effects(
     // otherwise find the old one still pending.
     for operation_id in &effects.cancel_superseded {
         if let Err(refusal) = crate::live_chat_moderation::cancel(state, operation_id).await {
-            tracing::debug!("A replaced Orcle removal was no longer pending: {refusal}");
+            tracing::debug!("A replaced Golem removal was no longer pending: {refusal}");
         }
     }
     if effects.clear_highlight {
@@ -6897,7 +6897,7 @@ async fn request_command_removal(
         // Replaced (or its session ended) while the request was on its way:
         // no card is left to answer it, so nothing may wait for an answer.
         if let Err(refusal) = crate::live_chat_moderation::cancel(state, &operation_id).await {
-            tracing::debug!("A replaced Orcle removal was no longer pending: {refusal}");
+            tracing::debug!("A replaced Golem removal was no longer pending: {refusal}");
         }
     }
 }
@@ -6909,7 +6909,7 @@ async fn confirm_command_removal(state: &AppState, operation_id: &str) {
     let operation = match crate::live_chat_moderation::confirm(state, operation_id).await {
         Ok(operation) => Some(operation),
         Err(refusal) => {
-            tracing::info!("An Orcle removal could not run: {refusal}");
+            tracing::info!("A Golem removal could not run: {refusal}");
             state
                 .database
                 .get_chat_moderation_operation(operation_id)
@@ -6927,7 +6927,7 @@ async fn cancel_command_removal(state: &AppState, operation_id: &str) {
     let operation = match crate::live_chat_moderation::cancel(state, operation_id).await {
         Ok(operation) => Some(operation),
         Err(refusal) => {
-            tracing::info!("An Orcle removal could not be cancelled: {refusal}");
+            tracing::info!("A Golem removal could not be cancelled: {refusal}");
             state
                 .database
                 .get_chat_moderation_operation(operation_id)
@@ -6986,7 +6986,7 @@ pub(crate) fn note_moderation_operation(state: &AppState, operation: &Moderation
     });
 }
 
-/// Orcle was addressed and understood nothing.
+/// Golem was addressed and understood nothing.
 async fn note_unheard_command(
     state: &AppState,
     scope: &CommandSession,
@@ -7106,7 +7106,7 @@ async fn publish_listening_under_fence(
     emit_state(state, &snapshot, lifecycle_delivery);
 }
 
-/// Sign-out is a privacy boundary for what Orcle heard (plan 068 review):
+/// Sign-out is a privacy boundary for what Golem heard (plan 068 review):
 /// the spotlight transcript, the recent-speech buffer, the Clip that tail and
 /// voice activity go, and so do the session's pending transcript, summary,
 /// topic, promises, recap, on-topic marks and voice greetings; a tick in
@@ -7136,7 +7136,7 @@ pub(crate) async fn purge_speech_for_sign_out(state: &AppState) {
         {
             session.listening = Some(CohostListening::blocked(
                 "signed-out",
-                "Sign in so Orcle can hear you.",
+                "Sign in so Golem can hear you.",
             ));
         }
         // Plan 140 S3: the closed card waits for nothing any more.
@@ -7156,11 +7156,11 @@ async fn cancel_abandoned_removal(state: &AppState, operation_id: Option<String>
         return;
     };
     if let Err(refusal) = crate::live_chat_moderation::cancel(state, &operation_id).await {
-        tracing::debug!("An abandoned Orcle removal was no longer pending: {refusal}");
+        tracing::debug!("An abandoned Golem removal was no longer pending: {refusal}");
     }
 }
 
-/// Sign-in completed: a running Orcle session with listening on hears the
+/// Sign-in completed: a running Golem session with listening on hears the
 /// streamer again (its consent still decides, as at start).
 pub(crate) async fn resume_listen_after_sign_in(state: &AppState) {
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
@@ -7215,7 +7215,7 @@ async fn start_listen_if_wanted(state: &AppState, session_id: &str, consent: boo
     } else if !consent {
         CohostListening::blocked(
             "consent-required",
-            "Orcle can hear you once cloud AI consent is on.",
+            "Golem can hear you once cloud AI consent is on.",
         )
     } else {
         crate::captions::start_listen_for_cohost(state, session_id).await
@@ -7223,7 +7223,7 @@ async fn start_listen_if_wanted(state: &AppState, session_id: &str, consent: boo
     record_listening(state, session_id, listening).await;
 }
 
-/// A running Orcle session for `session_id`, without its schedulers, for the
+/// A running Golem session for `session_id`, without its schedulers, for the
 /// stop-path tests outside this module.
 #[cfg(test)]
 pub(crate) async fn start_cohost_session_for_test(state: &AppState, session_id: &str) {
@@ -7235,7 +7235,7 @@ pub(crate) async fn start_cohost_session_for_test(state: &AppState, session_id: 
 }
 
 pub async fn cohost_status(state: &AppState) -> CohostState {
-    // The kill switches ride every state, Orcle running or not (plan 140).
+    // The kill switches ride every state, Golem running or not (plan 140).
     fresh_snapshot(state).await
 }
 
@@ -7284,7 +7284,7 @@ pub async fn set_cohost_settings(
         crate::captions::retire_orcle_speech(state).await;
         clear_transcript(state);
         crate::captions::stop_listen(state).await;
-        state.emit_log("info", "Orcle stopped: turned off in Settings.");
+        state.emit_log("info", "Golem stopped: turned off in Settings.");
         emit_state(state, &snapshot, &lifecycle_delivery);
         return Ok(next);
     }
@@ -7311,7 +7311,7 @@ pub async fn start_cohost(
     start_cohost_if_entitled(state, params, premium_entitled()).await
 }
 
-/// Plan 140 S1: Orcle is Premium only, in the backend too. The renderer gate
+/// Plan 140 S1: Golem is Premium only, in the backend too. The renderer gate
 /// (`liveCohostGate`) stays, but a `cohost.start` from a Basic account is
 /// refused here with `premium-required`, whatever the renderer believes. The
 /// decision is passed in, like `prepare_tick`'s, so the gate is testable
@@ -7432,7 +7432,7 @@ where
     start_listen_if_wanted(state, &session_id, consent, listen).await;
     let snapshot = fresh_snapshot(state).await;
     before_state_emit.await;
-    state.emit_log("info", format!("Orcle listening for session {session_id}."));
+    state.emit_log("info", format!("Golem listening for session {session_id}."));
     emit_state(state, &snapshot, &lifecycle_delivery);
     drop(lifecycle_delivery);
     Ok(snapshot)
@@ -7450,7 +7450,7 @@ pub async fn stop_cohost(state: &AppState) -> CohostState {
     .await
 }
 
-/// Plan 140 S1: Orcle is Premium only. Called after every
+/// Plan 140 S1: Golem is Premium only. Called after every
 /// `entitlements.updated` publication: when `LiveCohost` is no longer
 /// entitled, a running session stops through the normal stop path (its report
 /// is saved) and the stopped state carries the reason, so the renderer can
@@ -7518,19 +7518,19 @@ where
     if stopped {
         match stopped_reason {
             Some(CohostReason::PremiumRequired) => {
-                state.emit_log("warn", "Orcle stopped: Videorc Premium is required.");
+                state.emit_log("warn", "Golem stopped: Videorc Premium is required.");
             }
             Some(CohostReason::SignedOut) => {
-                state.emit_log("warn", "Orcle stopped: sign in to Videorc to use it.");
+                state.emit_log("warn", "Golem stopped: sign in to Videorc to use it.");
             }
             Some(reason) => state.emit_log(
                 "warn",
                 format!(
-                    "Orcle stopped: {}.",
+                    "Golem stopped: {}.",
                     serde_json::to_string(&reason).unwrap_or_default()
                 ),
             ),
-            None => state.emit_log("info", "Orcle stopped."),
+            None => state.emit_log("info", "Golem stopped."),
         }
         emit_state(state, &snapshot, lifecycle_delivery);
     }
@@ -7603,7 +7603,7 @@ async fn stop_cohost_for_session_end_if_matching_impl<F>(
     }
     before_state_emit.await;
     if stopped {
-        state.emit_log("info", "Orcle stopped.");
+        state.emit_log("info", "Golem stopped.");
         emit_state(state, &snapshot, lifecycle_delivery);
     }
 }
@@ -7622,7 +7622,7 @@ fn save_session_report(state: &AppState, report: Option<CohostSessionReport>) {
             state.emit_log(
                 "info",
                 format!(
-                    "Orcle saved the report for session {session_id}: {} question(s), {} flag(s), {} open promise(s).",
+                    "Golem saved the report for session {session_id}: {} question(s), {} flag(s), {} open promise(s).",
                     report.questions.total,
                     report.flags.raised,
                     report.promises.open.len()
@@ -7635,16 +7635,16 @@ fn save_session_report(state: &AppState, report: Option<CohostSessionReport>) {
         }
         Ok(false) => state.emit_log(
             "info",
-            format!("Orcle report for session {session_id} skipped: the session row is gone."),
+            format!("Golem report for session {session_id} skipped: the session row is gone."),
         ),
         Err(error) => state.emit_log(
             "warn",
-            format!("Orcle report for session {session_id} could not be saved: {error}"),
+            format!("Golem report for session {session_id} could not be saved: {error}"),
         ),
     }
 }
 
-/// `cohost.report.get`: the saved report (null when Orcle left none), the
+/// `cohost.report.get`: the saved report (null when Golem left none), the
 /// session's moments (computed now, never stored) and its chat totals.
 pub async fn get_session_report(
     state: &AppState,
@@ -7870,7 +7870,7 @@ pub async fn dismiss_flag(
 
 /// Chat moderation hook (plan 140 S4): a message the streamer removed or hid
 /// takes its flag with it. A deletion alone never cleared flags; this does,
-/// without counting a dismissal. Silent when Orcle is off or on another
+/// without counting a dismissal. Silent when Golem is off or on another
 /// session. Called after the tombstone delivery, never under its fence.
 pub(crate) async fn resolve_flag_for_removed_message(
     state: &AppState,
@@ -8014,7 +8014,7 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
         state.emit_log(
             "info",
             format!(
-                "Orcle puts {} on stream ({}{}).",
+                "Golem puts {} on stream ({}{}).",
                 command.message_id,
                 serde_json::to_string(&command.source).unwrap_or_default(),
                 if command.refresh { ", refresh" } else { "" }
@@ -8072,11 +8072,11 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
         if reminded && let Some(reminder) = &snapshot.promise_reminder {
             state.emit_log(
                 "info",
-                format!("Orcle reminds you of a promise: {}", reminder.text),
+                format!("Golem reminds you of a promise: {}", reminder.text),
             );
         }
         if let Some(text) = nudged {
-            state.emit_log("info", format!("Orcle nudges you: {text}"));
+            state.emit_log("info", format!("Golem nudges you: {text}"));
         }
         emit_state(state, &snapshot, &lifecycle_delivery);
     }
@@ -8098,7 +8098,7 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
             state.emit_log(
                 "warn",
                 format!(
-                    "Orcle paused: {}.",
+                    "Golem paused: {}.",
                     serde_json::to_string(&reason).unwrap_or_default()
                 ),
             );
@@ -8123,7 +8123,7 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
         Ok(response) => Some((
             "info",
             format!(
-                "Orcle tick {} merged: {} message(s), {} open question(s), {} flag(s).",
+                "Golem tick {} merged: {} message(s), {} open question(s), {} flag(s).",
                 prepared.request.tick_seq,
                 message_count,
                 response.questions.len(),
@@ -8137,7 +8137,7 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
             Some((
                 "info",
                 format!(
-                    "Orcle tick {}: the server does not speak tick contract v{}; using v{} for the rest of this session.",
+                    "Golem tick {}: the server does not speak tick contract v{}; using v{} for the rest of this session.",
                     prepared.request.tick_seq,
                     prepared.request.prompt_version,
                     fallback_prompt_version(prepared.request.prompt_version).unwrap_or(1)
@@ -8147,7 +8147,7 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
         Err(error) => Some((
             "warn",
             format!(
-                "Orcle tick {} failed ({}, {}{}): {}",
+                "Golem tick {} failed ({}, {}{}): {}",
                 prepared.request.tick_seq,
                 serde_json::to_string(&error.reason()).unwrap_or_default(),
                 error.detail.code,
@@ -8173,7 +8173,7 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
         if !applied {
             state.emit_log(
                 "warn",
-                "Orcle tick response dropped: its session was replaced.",
+                "Golem tick response dropped: its session was replaced.",
             );
             return false;
         }
@@ -8295,14 +8295,14 @@ async fn run_spotlight_pass(state: &AppState, generation: u64) -> bool {
         state.emit_log(
             "info",
             format!(
-                "Orcle spotlight: the streamer is talking about {message_id} (about {about:.2})."
+                "Golem spotlight: the streamer is talking about {message_id} (about {about:.2})."
             ),
         );
     }
     for question_id in &outcome.resolved {
         state.emit_log(
             "info",
-            format!("Orcle marks question {question_id} answered on air."),
+            format!("Golem marks question {question_id} answered on air."),
         );
     }
     if let (Some(off), Some(failure)) = (outcome.lane_off_for, failure) {
@@ -8310,7 +8310,7 @@ async fn run_spotlight_pass(state: &AppState, generation: u64) -> bool {
         state.emit_log(
             "info",
             format!(
-                "Orcle spotlight lane paused for {} s after {failure}.",
+                "Golem spotlight lane paused for {} s after {failure}.",
                 off.as_secs()
             ),
         );
@@ -9278,7 +9278,7 @@ mod tests {
                 &mut engine,
                 t,
                 version,
-                CohostApiError::timeout("Orcle did not answer within 3 s."),
+                CohostApiError::timeout("Golem did not answer within 3 s."),
             );
             assert_eq!(outcome.lane_off_for, None);
             t += secs(3);
@@ -11073,7 +11073,7 @@ mod tests {
         }
     }
 
-    /// Plan 155, D7: Orcle hears a Twitch GIF as an action with its title,
+    /// Plan 155, D7: Golem hears a Twitch GIF as an action with its title,
     /// never as the bracketed GIPHY title pretending to be the viewer's words.
     #[test]
     fn orcle_reads_a_twitch_gif_as_an_action_with_its_title() {
@@ -11725,7 +11725,7 @@ mod tests {
             Err(server_error(
                 502,
                 "ai-gateway-error",
-                "The Orcle tick failed on every configured model."
+                "The Golem tick failed on every configured model."
             )),
             start + secs(2),
             "t1"
@@ -11737,7 +11737,7 @@ mod tests {
             snapshot.detail,
             Some(CohostErrorDetail {
                 code: "ai-gateway-error".to_string(),
-                message: "The Orcle tick failed on every configured model.".to_string(),
+                message: "The Golem tick failed on every configured model.".to_string(),
                 status: Some(502),
             })
         );
@@ -11771,7 +11771,7 @@ mod tests {
         assert!(engine.apply_tick_result(
             generation,
             0,
-            Err(CohostApiError::timeout("Orcle did not answer within 12 s.")),
+            Err(CohostApiError::timeout("Golem did not answer within 12 s.")),
             start + secs(42),
             "t3"
         ));
@@ -11781,7 +11781,7 @@ mod tests {
             snapshot.detail,
             Some(CohostErrorDetail {
                 code: "timeout".to_string(),
-                message: "Orcle did not answer within 12 s.".to_string(),
+                message: "Golem did not answer within 12 s.".to_string(),
                 status: None,
             })
         );
@@ -12956,7 +12956,7 @@ mod tests {
             revoked.listening,
             Some(CohostListening::blocked(
                 "consent-required",
-                "Orcle can hear you once cloud AI consent is on."
+                "Golem can hear you once cloud AI consent is on."
             ))
         );
         assert!(!crate::captions::listen_wanted_for_test(&state).await);
@@ -13225,7 +13225,7 @@ mod tests {
         .await
         .unwrap();
 
-        // No consent: Orcle never starts the intent.
+        // No consent: Golem never starts the intent.
         let started = start_cohost(
             &state,
             CohostStartParams {
@@ -13318,7 +13318,7 @@ mod tests {
             "no emit without a change"
         );
 
-        // Every Orcle stop ends the intent.
+        // Every Golem stop ends the intent.
         stop_cohost(&state).await;
         assert!(!crate::captions::listen_wanted_for_test(&state).await);
         assert_eq!(cohost_status(&state).await.listening, None);
@@ -13852,7 +13852,7 @@ mod tests {
         assert!(utf16(blocked.message.as_deref().unwrap()) <= 2_000);
     }
 
-    /// Finding 4: sign-out purges everything Orcle heard under the account,
+    /// Finding 4: sign-out purges everything Golem heard under the account,
     /// blocks listening, and drops the answer of a tick in flight.
     #[tokio::test]
     async fn sign_out_purges_what_orcle_heard_and_blocks_listening() {
@@ -13989,7 +13989,7 @@ mod tests {
             engine.start_session("session-1".to_string(), true, None, Instant::now());
             engine.session.as_mut().unwrap().listening = Some(CohostListening::blocked(
                 "signed-out",
-                "Sign in so Orcle can hear you.",
+                "Sign in so Golem can hear you.",
             ));
         }
         let mut events = state.events.subscribe();
@@ -14007,7 +14007,7 @@ mod tests {
         assert!(!crate::captions::listen_wanted_for_test(&state).await);
     }
 
-    /// Finding 2: the recording monitor's Orcle stop (a capture end) leaves
+    /// Finding 2: the recording monitor's Golem stop (a capture end) leaves
     /// the listen-only task to drain in `finish_captions_for_capture`; an
     /// explicit `cohost.stop` still ends it at once.
     #[tokio::test]
@@ -14048,7 +14048,7 @@ mod tests {
         assert!(!crate::captions::caption_task_alive_for_test(&state).await);
     }
 
-    // --- Plan 119 S1: the Orcle report -------------------------------------------
+    // --- Plan 119 S1: the Golem report -------------------------------------------
 
     fn overlay(message_id: &str, remaining: Duration) -> OverlayObservation {
         OverlayObservation {
@@ -14486,7 +14486,7 @@ mod tests {
             .database
             .get_cohost_report("s-settings")
             .unwrap()
-            .expect("turning Orcle off saves the report");
+            .expect("turning Golem off saves the report");
         assert_eq!(report.messages_seen, 3);
         assert_eq!(report.stream_title.as_deref(), Some("Night one"));
         assert_eq!(report.segments, 1);
@@ -14567,7 +14567,7 @@ mod tests {
         );
     }
 
-    /// Plan 140 S1: Orcle is Premium only in the backend too. A Basic account's
+    /// Plan 140 S1: Golem is Premium only in the backend too. A Basic account's
     /// start is refused before any chat validation or state publication, with
     /// the plan's code and copy; the same start with Premium runs.
     #[tokio::test]
@@ -14587,22 +14587,22 @@ mod tests {
 
         let refused = start_cohost_if_entitled(&state, start_params("s-basic"), false)
             .await
-            .expect_err("a Basic account cannot start Orcle");
+            .expect_err("a Basic account cannot start Golem");
         assert_eq!(refused, CohostError::PremiumRequired);
         assert_eq!(refused.code(), "premium-required");
-        assert_eq!(refused.to_string(), "Orcle requires Videorc Premium.");
+        assert_eq!(refused.to_string(), "Golem requires Videorc Premium.");
         assert_eq!(cohost_status(&state).await, CohostState::off());
-        // Nothing was published: the renderer keeps its locked Orcle card.
+        // Nothing was published: the renderer keeps its locked Golem card.
         assert!(events.try_recv().is_err());
 
         let started = start_cohost_if_entitled(&state, start_params("s-basic"), true)
             .await
-            .expect("Premium starts Orcle");
+            .expect("Premium starts Golem");
         assert_eq!(started.session_id.as_deref(), Some("s-basic"));
         stop_cohost(&state).await;
     }
 
-    /// Plan 140 S1: a mid-session Premium lapse ends Orcle through the normal
+    /// Plan 140 S1: a mid-session Premium lapse ends Golem through the normal
     /// stop path. The report is saved and announced, the published off state
     /// names the reason, and nothing happens while Premium holds or when
     /// nothing is running.
@@ -14662,7 +14662,7 @@ mod tests {
         assert!(events.try_recv().is_err());
     }
 
-    /// Orcle turned off and back on mid-stream: one report, merged.
+    /// Golem turned off and back on mid-stream: one report, merged.
     #[tokio::test]
     async fn orcle_off_and_on_mid_stream_folds_into_one_report() {
         let state = test_state();
@@ -14938,7 +14938,7 @@ mod tests {
     }
 
     /// A Twitch chat session holding `rows` (with `sender` as its delete
-    /// credentials) and an Orcle session on it that noted them.
+    /// credentials) and a Golem session on it that noted them.
     async fn command_state(
         rows: &[LiveChatMessage],
         sender: Option<crate::live_chat::ChatSenderConfig>,
@@ -15134,7 +15134,7 @@ mod tests {
             heard: "orcle highlight coders x".to_string(),
             kind: CohostCommandKind::Highlight,
             status: CohostCommandStatus::NotFound,
-            message: "Orcle couldn't find a comment from coders x.".to_string(),
+            message: "Golem couldn't find a comment from coders x.".to_string(),
             target: None,
             candidates: Vec::new(),
             operation_id: None,
@@ -15149,7 +15149,7 @@ mod tests {
                 "heard": "orcle highlight coders x",
                 "kind": "highlight",
                 "status": "not-found",
-                "message": "Orcle couldn't find a comment from coders x.",
+                "message": "Golem couldn't find a comment from coders x.",
                 "at": "2026-10-04T12:00:00Z"
             })
         );
@@ -15203,7 +15203,7 @@ mod tests {
         assert_eq!(
             session.resolve_command_name("old timer", false, now),
             CommandResolution::NotFound(
-                "Orcle couldn't find a comment from old timer.".to_string()
+                "Golem couldn't find a comment from old timer.".to_string()
             )
         );
         assert_eq!(
@@ -15390,7 +15390,7 @@ mod tests {
             assert_eq!(session.highlight_deixis(now), None);
             assert_eq!(
                 session.resolve_removal_deixis(Some(owner.id.as_str()), now, chrono::Utc::now()),
-                CommandResolution::NotFound("Orcle couldn't find a comment to remove.".to_string())
+                CommandResolution::NotFound("Golem couldn't find a comment to remove.".to_string())
             );
         }
         // An id handed in from elsewhere (S8) gets the same rules.
@@ -15411,7 +15411,7 @@ mod tests {
             .unwrap();
         let command = current_command(&engine);
         assert_eq!(command.status, CohostCommandStatus::NotFound);
-        assert_eq!(command.message, "Orcle couldn't find that comment.");
+        assert_eq!(command.message, "Golem couldn't find that comment.");
         assert!(engine.snapshot().auto_highlight.is_none());
     }
 
@@ -15520,7 +15520,7 @@ mod tests {
         assert_eq!(card.kind, CohostCommandKind::Highlight);
         assert_eq!(
             card.message,
-            "Orcle flagged this (harassment). Show it anyway?"
+            "Golem flagged this (harassment). Show it anyway?"
         );
         assert!(card.expires_at.is_some() && card.operation_id.is_none());
         assert!(
@@ -15833,7 +15833,7 @@ mod tests {
             ctx.on_stream = Some(rows[0].id.clone());
             ctx
         };
-        // "Orcle, remove it": the card on stream is the one.
+        // "Golem, remove it": the card on stream is the one.
         let operation = open_removal_card(
             &mut engine,
             &scope,
@@ -15914,7 +15914,7 @@ mod tests {
             })
             .collect();
         let (mut engine, scope) = command_engine(now, &rows);
-        let hidden = "Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Orcle remove messages.";
+        let hidden = "Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Golem remove messages.";
         let outcomes = [
             (
                 ModerationPhase::Removed,
@@ -16049,7 +16049,7 @@ mod tests {
             command_row(2, "ada", StreamPlatform::Twitch, "hello"),
         ];
         let (state, scope) = command_state(&rows, fake_deletes()).await;
-        // Orcle flagged it a moment ago: "this one" is that comment.
+        // Golem flagged it a moment ago: "this one" is that comment.
         state
             .cohost
             .lock()
@@ -16290,7 +16290,7 @@ mod tests {
                 .request_removal
                 .map(|request| request.confirm_mode)
         };
-        // "Orcle, remove ada's comment": the setting applies.
+        // "Golem, remove ada's comment": the setting applies.
         assert_eq!(
             mode_for(&mut engine, spoken(CommandIntent::Remove, named("ada"))),
             Some(RemoveConfirmMode::Countdown)
@@ -16437,7 +16437,7 @@ mod tests {
         run_new_command(&state, &scope, resolved_removal(&rows[0].id), false).await;
         let refused = state_command(&state).await;
         assert_eq!(refused.status, CohostCommandStatus::Unavailable);
-        assert_eq!(refused.message, "Orcle requires Videorc Premium.");
+        assert_eq!(refused.message, "Golem requires Videorc Premium.");
         assert!(no_operations(&state));
 
         // Removing paused by Videorc: the same, with its own line.
@@ -16461,7 +16461,7 @@ mod tests {
         run_new_command(&state, &scope, resolved_removal(&rows[0].id), true).await;
         let premium = state_command(&state).await;
         assert_eq!(premium.status, CohostCommandStatus::Unavailable);
-        assert_eq!(premium.message, "Orcle requires Videorc Premium.");
+        assert_eq!(premium.message, "Golem requires Videorc Premium.");
         crate::live_chat_moderation::set_premium_check_for_tests(&state, Arc::new(|| true)).await;
 
         // The rate limit: ten removals a minute, then a plain refusal.
@@ -16507,7 +16507,7 @@ mod tests {
             detect_voice_command(
                 &state,
                 &caption_final(1),
-                &spoken_final("Orcle, highlight coders x.")
+                &spoken_final("Golem, highlight coders x.")
             )
             .is_none()
         );
@@ -16548,7 +16548,7 @@ mod tests {
         let (_, command) = detect_voice_command(
             &state,
             &caption_final(2),
-            &spoken_final("Orcle, highlight coders x."),
+            &spoken_final("Golem, highlight coders x."),
         )
         .unwrap();
         assert_eq!(command.kind, CommandKind::Highlight);
@@ -16589,11 +16589,11 @@ mod tests {
             )
             .is_none()
         );
-        // ...with "Orcle" first it is a command.
+        // ...with "Golem" first it is a command.
         let (session, command) = detect_voice_command(
             &state,
             &caption_final(2),
-            &spoken_final("Orcle, remove it from our chat."),
+            &spoken_final("Golem, remove it from our chat."),
         )
         .unwrap();
         assert_eq!(session.session_id, "session-1");
@@ -16827,7 +16827,7 @@ mod tests {
         );
         assert_eq!(
             unheard.message,
-            "Orcle didn't catch that: 'what is the weather'."
+            "Golem didn't catch that: 'what is the weather'."
         );
         assert_eq!(state_counts(&state).await.not_found, 1);
         // Never without the wake word.
@@ -17095,7 +17095,7 @@ mod tests {
             ),
             (
                 parse_answer(7, "highlight", 0.9, &[("elsewhere", 0.99)]),
-                "a comment Orcle never sent",
+                "a comment Golem never sent",
             ),
             (
                 parse_answer(8, "highlight", 0.9, &[("m1", 0.9)]),
@@ -17342,7 +17342,7 @@ mod tests {
 
         // A timeout and an error envelope are "didn't catch that", never a retry.
         for error in [
-            CohostApiError::timeout("Orcle did not answer within 2 s."),
+            CohostApiError::timeout("Golem did not answer within 2 s."),
             crate::videorc_api::classify_cohost_failure(
                 504,
                 "judge-timeout",

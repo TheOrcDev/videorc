@@ -23,7 +23,7 @@ const SECTION_PAIR = 'flex-1 content-start lg:content-stretch lg:[&>*]:border-b-
 
 /**
  * Settings (plan 064): six tabs in a segmented strip under the toolbar, one
- * tab's sections below it (Orcle's moved to the Orcle tab, plan 119). The strip never scrolls away: Settings owns its
+ * tab's sections below it (Golem's moved to the Golem tab, plan 119). The strip never scrolls away: Settings owns its
  * scroll (app-shell turns the pane body's off), and only the region under the
  * strip scrolls. The selected tab lives in app-shell, so links can open a
  * named tab and Settings reopens on the one used last.

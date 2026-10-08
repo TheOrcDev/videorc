@@ -1,4 +1,4 @@
-//! Orcle voice commands (plan 140 S2): the pure command detector.
+//! Golem voice commands (plan 140 S2): the pure command detector.
 //!
 //! Transcript finals arrive as text (fixed 3 s listen chunks, or realtime
 //! completions). The detector keeps a rolling ten-second word window across
@@ -9,7 +9,7 @@
 //! command or nothing. Resolving names and acting is S3's
 //! (`cohost::dispatch_detected_command`).
 //!
-//! Grammar (plan 140 decisions 2 and 3). The wake word "Orcle", and the
+//! Grammar (plan 140 decisions 2 and 3). The wake word "Golem", and the
 //! aliases speech models produce for it, starts a command; words before it are
 //! ignored. "oracle" and "orca" count only with a command verb right behind
 //! them, so "Oracle database is slow" never fires. Two structured phrases work
@@ -21,7 +21,7 @@
 //! removes the message. Answers ("yes", "no", "remove it") count without the
 //! wake word only while a removal card is open, and choices ("the first one")
 //! only while a chooser is open. `Unknown` is rare on purpose: only a clearly
-//! addressed "Orcle" followed by a closed sentence that matches nothing. When
+//! addressed "Golem" followed by a closed sentence that matches nothing. When
 //! unsure, the detector says nothing.
 
 use std::collections::VecDeque;
@@ -50,16 +50,16 @@ const HEARD_MAX_CHARS: usize = 140;
 
 // --- Vocabulary -----------------------------------------------------------------
 
-/// "Orcle" as speech models spell it.
+/// "Golem" as speech models spell it.
 const WAKE_WORDS: &[&str] = &["orcle", "orkle", "orcel", "orkel", "orcl", "orcal"];
 /// Real words a model falls back to; they need a verb right behind them.
 const WEAK_WAKE_WORDS: &[&str] = &["oracle", "orca"];
-/// Words that introduce an address: "hey Orcle", "okay Orcle".
+/// Words that introduce an address: "hey Golem", "okay Golem".
 const LEAD_INS: &[&str] = &[
     "hey", "ok", "okay", "hi", "yo", "so", "um", "uh", "and", "now", "alright", "oh", "right",
 ];
-/// After the wake word, these mean Orcle is the subject of a sentence, not
-/// being addressed: "Orcle is great tonight".
+/// After the wake word, these mean Golem is the subject of a sentence, not
+/// being addressed: "Golem is great tonight".
 const SUBJECT_CONTINUATIONS: &[&str] = &[
     "is", "isnt", "was", "wasnt", "has", "hasnt", "had", "will", "wont", "would", "wouldnt", "can",
     "cant", "could", "couldnt", "does", "doesnt", "did", "didnt", "just", "also", "really",
@@ -68,7 +68,7 @@ const SUBJECT_CONTINUATIONS: &[&str] = &[
     "stopped", "went", "goes", "likes", "loves", "hates", "and", "or", "but", "too", "as", "for",
     "with", "in",
 ];
-/// Words between "Orcle" and the verb that carry no meaning of their own.
+/// Words between "Golem" and the verb that carry no meaning of their own.
 const FILLERS: &[&str] = &[
     "please", "can", "could", "would", "will", "you", "i", "we", "just", "now", "um", "uh", "hey",
     "so", "and", "then", "also", "maybe", "quickly", "kindly", "go", "ahead", "lets", "let", "us",
@@ -261,7 +261,7 @@ const CONTRACTION_BASES: &[&str] = &[
 /// What the engine is waiting for when a final arrives (S3 wires these).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DetectContext {
-    /// The "Commands need 'Orcle' first" setting: structured phrases are off.
+    /// The "Commands need 'Golem' first" setting: structured phrases are off.
     pub require_wake_word: bool,
     /// A removal card is open, waiting for yes or no.
     pub awaiting_answer: bool,
@@ -278,7 +278,7 @@ pub enum CommandKind {
     Cancel,
     /// A chooser pick, 0 to 2.
     Choose(u8),
-    /// Orcle was clearly addressed and understood nothing.
+    /// Golem was clearly addressed and understood nothing.
     Unknown,
 }
 
@@ -335,7 +335,7 @@ pub struct DetectedCommand {
     pub wake_word: bool,
 }
 
-/// The Orcle engine session the detector serves (plan 140 S2): set when a
+/// The Golem engine session the detector serves (plan 140 S2): set when a
 /// session starts, or hears again after sign-in, and cleared with the
 /// transcript. S3 checks the generation under the engine lock before acting.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,7 +348,7 @@ pub struct CommandSession {
 #[derive(Debug, Default)]
 pub struct CommandDetectorState {
     pub detector: CommandDetector,
-    /// `None` while no Orcle session hears the streamer: nothing is detected.
+    /// `None` while no Golem session hears the streamer: nothing is detected.
     pub session: Option<CommandSession>,
     /// What the engine waits for, and the wake-word setting (plan 140 S3).
     /// The engine mirrors it here after every change, so the caption task
@@ -445,7 +445,7 @@ impl CommandDetector {
             end,
         } = detect(&self.words, self.final_index, ctx)?;
         // A command closed by a sentence mark is finished: its words never
-        // start or extend a later command. Without this, "Orcle, clear the
+        // start or extend a later command. Without this, "Golem, clear the
         // highlight." followed by "This one is toxic. Remove it from our
         // chat." read the second sentence as the clear's target and lost the
         // removal. An unclosed command keeps its words, so a name cut by a
@@ -496,7 +496,7 @@ fn split_possessive(core: &str) -> (&str, bool) {
     (core, false)
 }
 
-/// Unicode-aware lowercase words with their punctuation flags: "Orcle," →
+/// Unicode-aware lowercase words with their punctuation flags: "Golem," →
 /// `orcle` with a pause after it; "coders_x" is two words; "don't" is "dont".
 fn tokenize(text: &str, final_index: u64, at: Instant, next_ordinal: &mut u64) -> Vec<Word> {
     let mut words: Vec<Word> = Vec::new();
@@ -739,7 +739,7 @@ fn detect(words: &[Word], newest: u64, ctx: &DetectContext) -> Option<Detection>
     if !ctx.awaiting_answer {
         return scan_commands(words, newest, ctx, false);
     }
-    // A new command beats an answer (plan 140 review): "Yes Orcle, delete
+    // A new command beats an answer (plan 140 review): "Yes Golem, delete
     // the comment from bob" is a new removal, never a yes to the open card,
     // wherever in the final the command sits.
     if let Some(detection) = scan_commands(words, newest, ctx, true) {
@@ -803,8 +803,8 @@ fn scan_commands(
             continue;
         }
         // A wake word earlier in the window owns this verb when its own
-        // parse works and reaches it ("Orcle, this one is toxic, remove it
-        // from our chat"). A command that ended before this verb ("Orcle,
+        // parse works and reaches it ("Golem, this one is toxic, remove it
+        // from our chat"). A command that ended before this verb ("Golem,
         // clear the highlight. This one is toxic, remove it") does not.
         if let Some(wake) = nearest_wake_before(words, index)
             && let WakeOutcome::Command(detection) = parse_wake(words, wake, newest, ctx)
@@ -868,9 +868,9 @@ fn weak_wake_has_verb(words: &[Word], wake: usize, span_end: usize) -> bool {
     false
 }
 
-/// Whether the wake word at `wake` addresses Orcle: at the start of an
+/// Whether the wake word at `wake` addresses Golem: at the start of an
 /// utterance or sentence, after a lead-in ("hey"), or followed by a comma,
-/// and not as the subject of a sentence ("Orcle is great tonight").
+/// and not as the subject of a sentence ("Golem is great tonight").
 fn addressed(words: &[Word], wake: usize) -> bool {
     let word = &words[wake];
     if word.possessive {
@@ -896,7 +896,7 @@ fn parse_wake(words: &[Word], wake: usize, newest: u64, ctx: &DetectContext) -> 
     if !strict && !weak_wake_has_verb(words, wake, span_end) {
         return WakeOutcome::Nothing;
     }
-    // Answers through the wake word: "Orcle, yes", "Orcle, cancel".
+    // Answers through the wake word: "Golem, yes", "Golem, cancel".
     let sentence_end = first_sentence_end(words, from, span_end);
     if let Some(kind) = answer_kind(&words[from..=sentence_end], ctx.awaiting_answer) {
         if words[sentence_end].final_index != newest {
@@ -969,10 +969,10 @@ fn parse_structured(words: &[Word], verb: usize, newest: u64) -> Option<Detectio
     })
 }
 
-/// Orcle was addressed and nothing matched. Only once the sentence is closed
+/// Golem was addressed and nothing matched. Only once the sentence is closed
 /// (a sentence mark, or another wake word) and only when it holds a content
-/// word and no verb or reason: "Orcle, this one is toxic" is a removal still
-/// being said, "Orcle, um" is nothing yet.
+/// word and no verb or reason: "Golem, this one is toxic" is a removal still
+/// being said, "Golem, um" is nothing yet.
 fn unknown_detection(
     words: &[Word],
     wake: usize,
@@ -1034,7 +1034,7 @@ fn dedupe_key(parsed: &Parsed) -> String {
 }
 
 /// Parse one command in `words[from..end]`. With the wake word the verb may
-/// come later in the span ("Orcle, this one is toxic, remove it"); a
+/// come later in the span ("Golem, this one is toxic, remove it"); a
 /// structured phrase starts at its verb and must point at a message.
 fn parse_command(words: &[Word], from: usize, end: usize, structured: bool) -> Option<Parsed> {
     let verb = if structured {
@@ -1455,57 +1455,57 @@ mod tests {
         let cases = [
             // Highlight (decision 3).
             (
-                "Orcle, highlight the comment from coders X",
+                "Golem, highlight the comment from coders X",
                 &PLAIN,
                 hit(Highlight, name("coders x"), false, None),
             ),
             (
-                "Orcle, show coders X's question",
+                "Golem, show coders X's question",
                 &PLAIN,
                 hit(Highlight, name("coders x"), true, None),
             ),
             (
-                "Orcle, put this one up",
+                "Golem, put this one up",
                 &PLAIN,
                 hit(Highlight, Deixis, false, None),
             ),
             (
-                "Orcle, show the last comment",
+                "Golem, show the last comment",
                 &PLAIN,
                 hit(Highlight, Last, false, None),
             ),
             (
-                "Orcle highlight CodersX",
+                "Golem highlight CodersX",
                 &PLAIN,
                 hit(Highlight, name("codersx"), false, None),
             ),
             (
-                "Orcle, highlight the message from coders_x",
+                "Golem, highlight the message from coders_x",
                 &PLAIN,
                 hit(Highlight, name("coders x"), false, None),
             ),
             (
-                "Orcle, show what coders X asked",
+                "Golem, show what coders X asked",
                 &PLAIN,
                 hit(Highlight, name("coders x"), true, None),
             ),
             (
-                "Orcle, highlight that question",
+                "Golem, highlight that question",
                 &PLAIN,
                 hit(Highlight, Deixis, true, None),
             ),
             (
-                "Orcle, put it on stream",
+                "Golem, put it on stream",
                 &PLAIN,
                 hit(Highlight, Deixis, false, None),
             ),
             (
-                "Orcle, bring up the comment from dark knight 99",
+                "Golem, bring up the comment from dark knight 99",
                 &PLAIN,
                 hit(Highlight, name("dark knight 99"), false, None),
             ),
             (
-                "Hey Orcle, can you show the last question please?",
+                "Hey Golem, can you show the last question please?",
                 &PLAIN,
                 hit(Highlight, Last, true, None),
             ),
@@ -1525,7 +1525,7 @@ mod tests {
                 hit(Highlight, name("coders x"), false, None),
             ),
             (
-                "Orcle, show the question from Gamer_42",
+                "Golem, show the question from Gamer_42",
                 &PLAIN,
                 hit(Highlight, name("gamer 42"), true, None),
             ),
@@ -1544,56 +1544,56 @@ mod tests {
             ("highlight the comment from coders X", &WAKE_REQUIRED, None),
             // Clear (decision 3): the noun decides.
             (
-                "Orcle, take it down",
+                "Golem, take it down",
                 &PLAIN,
                 hit(Clear, Deixis, false, None),
             ),
             (
-                "Orcle, clear the highlight",
+                "Golem, clear the highlight",
                 &PLAIN,
                 hit(Clear, NoTarget, false, None),
             ),
             (
-                "Orcle, remove it from the screen",
+                "Golem, remove it from the screen",
                 &PLAIN,
                 hit(Clear, Deixis, false, None),
             ),
             (
-                "Orcle, take that off the stream",
+                "Golem, take that off the stream",
                 &PLAIN,
                 hit(Clear, Deixis, false, None),
             ),
-            ("Orcle, clear it", &PLAIN, hit(Clear, Deixis, false, None)),
+            ("Golem, clear it", &PLAIN, hit(Clear, Deixis, false, None)),
             (
-                "Orcle, hide the overlay",
+                "Golem, hide the overlay",
                 &PLAIN,
                 hit(Clear, NoTarget, false, None),
             ),
             (
-                "Orcle, remove this from the stream",
+                "Golem, remove this from the stream",
                 &PLAIN,
                 hit(Clear, Deixis, false, None),
             ),
             (
-                "Orcle, dismiss the card",
+                "Golem, dismiss the card",
                 &PLAIN,
                 hit(Clear, NoTarget, false, None),
             ),
             (
-                "Orcle, take the highlight down",
+                "Golem, take the highlight down",
                 &PLAIN,
                 hit(Clear, NoTarget, false, None),
             ),
             ("remove it from the screen", &PLAIN, None),
-            // A whole-chat clear is refused: Orcle did not catch that.
+            // A whole-chat clear is refused: Golem did not catch that.
             (
-                "Orcle, clear the chat",
+                "Golem, clear the chat",
                 &PLAIN,
                 hit(Unknown, NoTarget, false, None),
             ),
             // Remove (decision 3): reasons become the audit reason.
             (
-                "Orcle, remove this one, it's toxic",
+                "Golem, remove this one, it's toxic",
                 &PLAIN,
                 hit(Remove, Deixis, false, Some("toxic")),
             ),
@@ -1603,7 +1603,7 @@ mod tests {
                 hit(Remove, Deixis, false, Some("toxic")),
             ),
             (
-                "Orcle, delete the comment from coders X",
+                "Golem, delete the comment from coders X",
                 &PLAIN,
                 hit(Remove, name("coders x"), false, None),
             ),
@@ -1618,47 +1618,47 @@ mod tests {
                 hit(Remove, Deixis, false, Some("spam")),
             ),
             (
-                "Orcle, get rid of this one",
+                "Golem, get rid of this one",
                 &PLAIN,
                 hit(Remove, Deixis, false, None),
             ),
             (
-                "Orcle, remove the last message from chat",
+                "Golem, remove the last message from chat",
                 &PLAIN,
                 hit(Remove, Last, false, None),
             ),
             (
-                "Orcle, delete coders X's message",
+                "Golem, delete coders X's message",
                 &PLAIN,
                 hit(Remove, name("coders x"), false, None),
             ),
             (
-                "Orcle this one is toxic, remove it from our chat",
+                "Golem this one is toxic, remove it from our chat",
                 &PLAIN,
                 hit(Remove, Deixis, false, Some("toxic")),
             ),
             (
-                "That guy is a scammer. Orcle, remove his message.",
+                "That guy is a scammer. Golem, remove his message.",
                 &PLAIN,
                 hit(Remove, Deixis, false, Some("scam")),
             ),
             (
-                "Orcle, take it down from chat",
+                "Golem, take it down from chat",
                 &PLAIN,
                 hit(Remove, Deixis, false, None),
             ),
             (
-                "Orcle, hide it from chat",
+                "Golem, hide it from chat",
                 &PLAIN,
                 hit(Remove, Deixis, false, None),
             ),
             (
-                "Orcle, remove this one",
+                "Golem, remove this one",
                 &PLAIN,
                 hit(Remove, Deixis, false, None),
             ),
             (
-                "Orcle, that comment is harassment, delete it",
+                "Golem, that comment is harassment, delete it",
                 &PLAIN,
                 hit(Remove, Deixis, false, Some("harassment")),
             ),
@@ -1676,7 +1676,7 @@ mod tests {
             ),
             ("remove it from our chat", &WAKE_REQUIRED, None),
             (
-                "Orcle, remove it from our chat",
+                "Golem, remove it from our chat",
                 &WAKE_REQUIRED,
                 hit(Remove, Deixis, false, None),
             ),
@@ -1743,18 +1743,18 @@ mod tests {
                 hit(Cancel, NoTarget, false, None),
             ),
             (
-                "Orcle, yes",
+                "Golem, yes",
                 &ANSWERING,
                 hit(Confirm, NoTarget, false, None),
             ),
             (
-                "Orcle, remove it",
+                "Golem, remove it",
                 &ANSWERING,
                 hit(Confirm, NoTarget, false, None),
             ),
             // A new command while a card is open is still a command.
             (
-                "Orcle, remove the comment from coders X",
+                "Golem, remove the comment from coders X",
                 &ANSWERING,
                 hit(Remove, name("coders x"), false, None),
             ),
@@ -1762,8 +1762,8 @@ mod tests {
             ("no", &PLAIN, None),
             // With the wake word an answer is always read; S3 ignores it
             // without an open card.
-            ("Orcle, cancel", &PLAIN, hit(Cancel, NoTarget, false, None)),
-            ("Orcle, stop", &PLAIN, hit(Cancel, NoTarget, false, None)),
+            ("Golem, cancel", &PLAIN, hit(Cancel, NoTarget, false, None)),
+            ("Golem, stop", &PLAIN, hit(Cancel, NoTarget, false, None)),
             // Choices count only while a chooser is open.
             (
                 "the first one",
@@ -1783,7 +1783,7 @@ mod tests {
                 hit(Choose(2), NoTarget, false, None),
             ),
             (
-                "Orcle, the second one",
+                "Golem, the second one",
                 &CHOOSING,
                 hit(Choose(1), NoTarget, false, None),
             ),
@@ -1795,7 +1795,7 @@ mod tests {
             ),
             ("the first one", &PLAIN, None),
             ("one more thing before we start", &CHOOSING, None),
-            // Talking about Orcle, oracles and orcas.
+            // Talking about Golem, oracles and orcas.
             ("Oracle database is slow", &PLAIN, None),
             // "the oracle said" is a sentence about an oracle; the structured
             // phrase inside it still counts unless the wake word is required.
@@ -1805,30 +1805,30 @@ mod tests {
                 hit(Remove, Deixis, false, None),
             ),
             ("the oracle said remove it from chat", &WAKE_REQUIRED, None),
-            ("Orcle is great tonight", &PLAIN, None),
-            ("I built Orcle", &PLAIN, None),
-            ("I built Orcle.", &PLAIN, None),
+            ("Golem is great tonight", &PLAIN, None),
+            ("I built Golem", &PLAIN, None),
+            ("I built Golem.", &PLAIN, None),
             ("the orcle integration is done", &PLAIN, None),
             ("orca whales are cool", &PLAIN, None),
-            ("Orcle.", &PLAIN, None),
-            ("Orcle highlight", &PLAIN, None),
-            ("Orcle, can you do a backflip.", &PLAIN, None),
+            ("Golem.", &PLAIN, None),
+            ("Golem highlight", &PLAIN, None),
+            ("Golem, can you do a backflip.", &PLAIN, None),
             // Addressed, closed, and understood nothing.
             (
-                "Orcle, you are amazing.",
+                "Golem, you are amazing.",
                 &PLAIN,
                 hit(Unknown, NoTarget, false, None),
             ),
             (
-                "Orcle, ban him.",
+                "Golem, ban him.",
                 &PLAIN,
                 hit(Unknown, NoTarget, false, None),
             ),
             // Non-English: nothing without the wake word; addressed in
-            // another language, Orcle says it did not catch that.
+            // another language, Golem says it did not catch that.
             ("resalta el comentario de coders x", &PLAIN, None),
             (
-                "Orcle, resalta el comentario.",
+                "Golem, resalta el comentario.",
                 &PLAIN,
                 hit(Unknown, NoTarget, false, None),
             ),
@@ -1861,19 +1861,19 @@ mod tests {
         let bob = name("bob");
         let cases: [(&str, Option<(CommandKind, CommandTarget)>); 6] = [
             (
-                "Yes Orcle, delete the comment from bob",
+                "Yes Golem, delete the comment from bob",
                 Some((CommandKind::Remove, bob.clone())),
             ),
             (
-                "Yeah, Orcle, remove bob's comment",
+                "Yeah, Golem, remove bob's comment",
                 Some((CommandKind::Remove, bob.clone())),
             ),
             (
-                "Orcle, remove bob's comment. Orcle, yes.",
+                "Golem, remove bob's comment. Golem, yes.",
                 Some((CommandKind::Remove, bob.clone())),
             ),
             (
-                "Yes. Orcle, highlight the comment from bob.",
+                "Yes. Golem, highlight the comment from bob.",
                 Some((CommandKind::Highlight, bob.clone())),
             ),
             // A structured removal also wins over the answer around it.
@@ -1883,7 +1883,7 @@ mod tests {
             ),
             // A pure answer is still an answer.
             (
-                "Orcle, remove it",
+                "Golem, remove it",
                 Some((CommandKind::Confirm, CommandTarget::None)),
             ),
         ];
@@ -1915,7 +1915,7 @@ mod tests {
 
     #[test]
     fn heard_and_wake_word_describe_what_was_said() {
-        let command = detect_one("Orcle, highlight the comment from coders X!", &PLAIN).unwrap();
+        let command = detect_one("Golem, highlight the comment from coders X!", &PLAIN).unwrap();
         assert_eq!(command.heard, "orcle highlight the comment from coders x");
         assert!(command.wake_word);
         let command = detect_one("This one is toxic. Remove it from our chat.", &PLAIN).unwrap();
@@ -1924,9 +1924,9 @@ mod tests {
         let command = detect_one("Oracle, take it down", &PLAIN).unwrap();
         assert_eq!(command.heard, "oracle take it down");
         assert!(command.wake_word);
-        let command = detect_one("Orcle, you are amazing.", &PLAIN).unwrap();
+        let command = detect_one("Golem, you are amazing.", &PLAIN).unwrap();
         assert_eq!(command.heard, "you are amazing");
-        let command = detect_one("Orcle, yes", &ANSWERING).unwrap();
+        let command = detect_one("Golem, yes", &ANSWERING).unwrap();
         assert_eq!(command.heard, "orcle yes");
         assert!(command.wake_word);
         let command = detect_one("yes", &ANSWERING).unwrap();
@@ -1938,7 +1938,7 @@ mod tests {
         let mut detector = CommandDetector::default();
         let start = Instant::now();
         assert_eq!(
-            detector.observe_final("c", 1, "Orcle, highlight the comment", start, &PLAIN),
+            detector.observe_final("c", 1, "Golem, highlight the comment", start, &PLAIN),
             None
         );
         let found = detector
@@ -1975,7 +1975,7 @@ mod tests {
         let mut detector = CommandDetector::default();
         let start = Instant::now();
         let clear = detector
-            .observe_final("c", 1, "Orcle, clear the highlight.", start, &PLAIN)
+            .observe_final("c", 1, "Golem, clear the highlight.", start, &PLAIN)
             .expect("the clear");
         assert_eq!(clear.kind, CommandKind::Clear);
         let removal = detector
@@ -1996,7 +1996,7 @@ mod tests {
         let mut detector = CommandDetector::default();
         assert!(
             detector
-                .observe_final("c", 1, "Orcle, clear the highlight.", start, &PLAIN)
+                .observe_final("c", 1, "Golem, clear the highlight.", start, &PLAIN)
                 .is_some()
         );
         assert_eq!(
@@ -2016,14 +2016,14 @@ mod tests {
         // One final, two sentences: the latest start wins, and the clear that
         // ended before "remove" does not swallow it.
         let command = detect_one(
-            "Orcle, clear the highlight. This one is toxic, remove it from our chat.",
+            "Golem, clear the highlight. This one is toxic, remove it from our chat.",
             &PLAIN,
         )
         .expect("a command");
         assert_eq!(command.kind, CommandKind::Remove);
         assert_eq!(command.target, CommandTarget::Deixis);
         // The wake word still owns a verb its own command reaches.
-        let owned = detect_one("Orcle, this one is toxic, remove it from our chat.", &PLAIN)
+        let owned = detect_one("Golem, this one is toxic, remove it from our chat.", &PLAIN)
             .expect("a command");
         assert_eq!(owned.kind, CommandKind::Remove);
         assert!(owned.wake_word);
@@ -2060,7 +2060,7 @@ mod tests {
             .observe_final(
                 "c",
                 1,
-                "Orcle, highlight the comment from coders",
+                "Golem, highlight the comment from coders",
                 start,
                 &PLAIN,
             )
@@ -2085,7 +2085,7 @@ mod tests {
                 .observe_final(
                     "c",
                     1,
-                    "Orcle, highlight the comment from coders",
+                    "Golem, highlight the comment from coders",
                     start,
                     &PLAIN
                 )
@@ -2110,13 +2110,13 @@ mod tests {
         let start = Instant::now();
         assert!(
             detector
-                .observe_final("c", 1, "Orcle, take it down", start, &PLAIN)
+                .observe_final("c", 1, "Golem, take it down", start, &PLAIN)
                 .is_some()
         );
         // The same final again (a replayed completion) is ignored.
         assert!(
             detector
-                .observe_final("c", 1, "Orcle, take it down", start, &PLAIN)
+                .observe_final("c", 1, "Golem, take it down", start, &PLAIN)
                 .is_none()
         );
         // The same command within ten seconds is the same request.
@@ -2125,7 +2125,7 @@ mod tests {
                 .observe_final(
                     "c",
                     2,
-                    "Orcle, take it down",
+                    "Golem, take it down",
                     start + Duration::from_secs(5),
                     &PLAIN
                 )
@@ -2137,7 +2137,7 @@ mod tests {
                 .observe_final(
                     "c",
                     3,
-                    "Orcle, show the last comment",
+                    "Golem, show the last comment",
                     start + Duration::from_secs(6),
                     &PLAIN
                 )
@@ -2149,7 +2149,7 @@ mod tests {
                 .observe_final(
                     "c",
                     4,
-                    "Orcle, take it down",
+                    "Golem, take it down",
                     start + Duration::from_secs(11),
                     &PLAIN
                 )
@@ -2162,7 +2162,7 @@ mod tests {
         let mut detector = CommandDetector::default();
         let start = Instant::now();
         assert_eq!(
-            detector.observe_final("c", 1, "Orcle, highlight the comment", start, &PLAIN),
+            detector.observe_final("c", 1, "Golem, highlight the comment", start, &PLAIN),
             None
         );
         assert_eq!(
@@ -2226,7 +2226,7 @@ mod tests {
         let mut detector = CommandDetector::default();
         let start = Instant::now();
         assert_eq!(
-            detector.observe_final("c", 1, "Orcle, highlight the comment", start, &PLAIN),
+            detector.observe_final("c", 1, "Golem, highlight the comment", start, &PLAIN),
             None
         );
         detector.clear();
@@ -2245,7 +2245,7 @@ mod tests {
             detector.observe_final(
                 "c",
                 1,
-                "Orcle, take it down",
+                "Golem, take it down",
                 start + Duration::from_secs(4),
                 &PLAIN
             ),
@@ -2258,7 +2258,7 @@ mod tests {
         let mut detector = CommandDetector::default();
         let start = Instant::now();
         let unknown = detector
-            .observe_final("c", 1, "Orcle, you are amazing.", start, &PLAIN)
+            .observe_final("c", 1, "Golem, you are amazing.", start, &PLAIN)
             .expect("addressed and not understood");
         assert_eq!(unknown.kind, CommandKind::Unknown);
         assert_eq!(unknown.heard, "you are amazing");
@@ -2272,7 +2272,7 @@ mod tests {
             detector.observe_final(
                 "c",
                 3,
-                "Orcle, this one",
+                "Golem, this one",
                 start + Duration::from_secs(6),
                 &PLAIN
             ),
@@ -2284,7 +2284,7 @@ mod tests {
     fn words_normalise_case_punctuation_and_possessives() {
         let mut ordinal = 0;
         let words = tokenize(
-            "Hey Orcle, show CodersX's question! It's coders_x.",
+            "Hey Golem, show CodersX's question! It's coders_x.",
             1,
             Instant::now(),
             &mut ordinal,
@@ -2310,15 +2310,15 @@ mod tests {
     #[test]
     fn reasons_are_canonical_and_nearest_the_verb() {
         let command = detect_one(
-            "That was spam earlier. Anyway this one is hateful, Orcle remove it from chat",
+            "That was spam earlier. Anyway this one is hateful, Golem remove it from chat",
             &PLAIN,
         )
         .unwrap();
         assert_eq!(command.reason.as_deref(), Some("hate"));
-        let command = detect_one("Orcle, delete that message, he's a scammer", &PLAIN).unwrap();
+        let command = detect_one("Golem, delete that message, he's a scammer", &PLAIN).unwrap();
         assert_eq!(command.reason.as_deref(), Some("scam"));
         assert_eq!(
-            detect_one("Orcle, take it down", &PLAIN).unwrap().reason,
+            detect_one("Golem, take it down", &PLAIN).unwrap().reason,
             None
         );
     }

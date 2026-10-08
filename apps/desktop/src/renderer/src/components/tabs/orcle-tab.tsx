@@ -87,16 +87,16 @@ function initialTab(
 }
 
 /**
- * The Orcle tab (plan 150): Videorc's AI tab, right under Studio, built like
+ * The Golem tab (plan 150): Videorc's AI tab, right under Studio, built like
  * Settings. Five tabs in a segmented strip under the toolbar, each answering
- * one question: Live (is Orcle on), Chat (how it replies and moderates),
+ * one question: Live (is Golem on), Chat (how it replies and moderates),
  * Voice (what you can say), Reports (what happened on your streams) and
  * Clean cut (edit your recordings). The strip never scrolls away: the shell
  * turns the pane body's scroll off, and only the region under the strip
  * scrolls. The selected tab lives in app-shell, so links open a named tab and
- * Orcle reopens on the one used last.
+ * Golem reopens on the one used last.
  *
- * `reportSessionId` is the Library's "Orcle report" ask: Reports opens on
+ * `reportSessionId` is the Library's "Golem report" ask: Reports opens on
  * that session. Without it the report follows the last stream.
  * `cleanCutRequest` is the Library's "Clean cut" (select that recording) or
  * the ready toast's Review (open that cut's review, inside Clean cut).
@@ -163,7 +163,7 @@ export function OrcleTab({
       >
         {/* Settings' strip, verbatim; the toolbar carries only the title. */}
         <div className="shrink-0 border-b border-border px-gutter py-2">
-          <TabsList aria-label="Orcle sections">
+          <TabsList aria-label="Golem sections">
             {ORCLE_TABS.map(({ id, label }) => (
               <TabsTrigger key={id} data-videorc-orcle-tab={id} value={id}>
                 {label}
@@ -238,7 +238,7 @@ function CleanCutReviewFallback(): ReactElement {
 }
 
 /**
- * Orcle Live's state as the provider holds it, shared by the Live tab and the
+ * Golem Live's state as the provider holds it, shared by the Live tab and the
  * locked alert every other settings tab leads with (plan 150, D7).
  */
 function useOrcleLive(): ReturnType<typeof orcleLiveView> {
@@ -256,7 +256,7 @@ function useOrcleLive(): ReturnType<typeof orcleLiveView> {
 }
 
 /**
- * Why Orcle is locked, with its one action (sign in or Premium). Locked means
+ * Why Golem is locked, with its one action (sign in or Premium). Locked means
  * disabled with one reason (plan 150, D7): the tab's controls render disabled
  * under it, and nothing live-looking sits beside it.
  */
@@ -288,7 +288,7 @@ function OrcleUnlockAlert({ slot = 'orcle-live-unlock' }: { slot?: string }): Re
 }
 
 /**
- * The Chat tab (plan 150): Replies beside Moderation. When Orcle is locked,
+ * The Chat tab (plan 150): Replies beside Moderation. When Golem is locked,
  * one alert above both columns says why and every field under it is
  * disabled (D7), the same reason Live shows.
  */
@@ -321,9 +321,9 @@ function OrcleVoiceTab({ onOpenLive }: { onOpenLive: () => void }): ReactElement
 }
 
 /**
- * The Live tab's left column (plan 150): Orcle's emblem beside the one switch
+ * The Live tab's left column (plan 150): Golem's emblem beside the one switch
  * and its status, then why it is locked, the Stream Manager while live, and
- * whether Orcle hears you, which is part of what turning it on means.
+ * whether Golem hears you, which is part of what turning it on means.
  */
 function OrcleLiveSection(): ReactElement {
   const { runtimeInfo, setOrcleLive } = useStudioCore()
@@ -339,7 +339,7 @@ function OrcleLiveSection(): ReactElement {
     setPending(true)
     void setOrcleLive(on)
       .catch((error: unknown) =>
-        toast.error('Could not change Orcle Live', {
+        toast.error('Could not change Golem Live', {
           description: error instanceof Error ? error.message : undefined
         })
       )
@@ -349,14 +349,14 @@ function OrcleLiveSection(): ReactElement {
   return (
     <PanelSection
       action={<Badge variant="outline">Alpha</Badge>}
-      description="Orcle reads your chat and hears you while you stream. It never posts on its own."
-      title="Orcle Live"
+      description="Golem reads your chat and hears you while you stream. It never posts on its own."
+      title="Golem Live"
     >
       <div className="flex items-center gap-3" data-slot="orcle-live-status-block">
         <OrcleEmblem size="lg" />
         <Field className="min-w-0 flex-1" orientation="horizontal">
           <FieldContent>
-            <FieldLabel htmlFor="orcle-live-switch">Orcle joins my streams</FieldLabel>
+            <FieldLabel htmlFor="orcle-live-switch">Golem joins my streams</FieldLabel>
             <OrcleLiveStatusLine status={view.status} />
           </FieldContent>
           <Switch
@@ -392,7 +392,7 @@ function OrcleLiveSection(): ReactElement {
 }
 
 /**
- * "What Orcle does" (plan 150, D5): the powers as rows, each with a way to the
+ * "What Golem does" (plan 150, D5): the powers as rows, each with a way to the
  * tab that holds its settings. Navigation, not a pitch.
  */
 function OrcleLivePowers({
@@ -401,8 +401,8 @@ function OrcleLivePowers({
   onSelectTab: (tab: OrcleTabId) => void
 }): ReactElement {
   return (
-    <PanelSection title="What Orcle does">
-      <FieldGroup aria-label="What Orcle Live does" role="list" variant="grouped">
+    <PanelSection title="What Golem does">
+      <FieldGroup aria-label="What Golem Live does" role="list" variant="grouped">
         {ORCLE_LIVE_POWERS.map((power) => {
           const label = ORCLE_TABS.find((entry) => entry.id === power.tab)?.label ?? power.tab
           return (
@@ -475,7 +475,7 @@ function CloudAiSection(): ReactElement {
   const { aiConsent, setAiConsent } = useStudioCore()
   return (
     <PanelSection
-      description="What Orcle and Clean cut send to Videorc's cloud, and what is kept."
+      description="What Golem and Clean cut send to Videorc's cloud, and what is kept."
       title="Cloud AI"
     >
       <FieldGroup variant="grouped">
@@ -499,7 +499,7 @@ function CloudAiSection(): ReactElement {
 }
 
 /**
- * The consent Orcle Live asks for when it is turned on without it. Accepting
+ * The consent Golem Live asks for when it is turned on without it. Accepting
  * grants cloud-AI consent, then makes the one settings save; declining
  * changes nothing. The safe choice has the focus.
  */
@@ -507,7 +507,7 @@ function OrcleConsentDialog(): ReactElement {
   const { orcleConsentRequested, answerOrcleConsent } = useStudioCore()
   const answer = (accepted: boolean): void => {
     void answerOrcleConsent(accepted).catch((error: unknown) =>
-      toast.error('Could not turn on Orcle Live', {
+      toast.error('Could not turn on Golem Live', {
         description: error instanceof Error ? error.message : undefined
       })
     )
@@ -521,14 +521,14 @@ function OrcleConsentDialog(): ReactElement {
     >
       <DialogContent showCloseButton={false}>
         <DialogHeader>
-          {/* Orcle's emblem leads, the way the Videorc logo leads
+          {/* Golem's emblem leads, the way the Videorc logo leads
               permissions onboarding (plan 149). */}
           <div className="flex items-center gap-3">
             <OrcleEmblem size="lg" />
             <div className="flex flex-col gap-1">
-              <DialogTitle>Turn on Orcle Live?</DialogTitle>
+              <DialogTitle>Turn on Golem Live?</DialogTitle>
               <DialogDescription>
-                Orcle uses Videorc&apos;s cloud AI while you&apos;re live.
+                Golem uses Videorc&apos;s cloud AI while you&apos;re live.
               </DialogDescription>
             </div>
           </div>

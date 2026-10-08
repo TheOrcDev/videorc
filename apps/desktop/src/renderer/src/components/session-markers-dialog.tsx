@@ -206,7 +206,7 @@ export function SessionMarkersDialog({
             {!markers.length && !loading && !error ? (
               <p className="py-5 text-center text-xs text-muted-foreground">
                 No markers yet. During capture, type /marker [title] in Stream Manager or say
-                “Orcle, make a marker here for [title]”.
+                “Golem, make a marker here for [title]”.
               </p>
             ) : null}
           </div>

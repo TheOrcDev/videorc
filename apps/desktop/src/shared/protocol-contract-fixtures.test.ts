@@ -536,7 +536,7 @@ describe('shared high-risk protocol fixture', () => {
     expect(fixtures.cohost.stateV2.listening).toStrictEqual({
       state: 'blocked',
       reasonCode: 'listen-monthly-quota-exhausted',
-      message: "Orcle's listening allowance for this month is used up.",
+      message: "Golem's listening allowance for this month is used up.",
       remainingSeconds: 0
     })
     expect(fixtures.cohost.state).not.toHaveProperty('listening')
@@ -578,12 +578,12 @@ describe('shared high-risk protocol fixture', () => {
     }
     expect(fixtures.cohost.errorState.detail).toStrictEqual({
       code: 'ai-gateway-error',
-      message: 'The Orcle tick failed on every configured model.',
+      message: 'The Golem tick failed on every configured model.',
       status: 502
     })
     expect(fixtures.cohost.timeoutState.detail).toStrictEqual({
       code: 'timeout',
-      message: 'Orcle did not answer within 12 s.',
+      message: 'Golem did not answer within 12 s.',
       status: null
     })
     expect('detail' in fixtures.cohost.legacyState).toBe(false)
@@ -600,7 +600,7 @@ describe('shared high-risk protocol fixture', () => {
     }
   })
 
-  it('keeps Orcle voice commands, their answers and settings identical across languages (plan 140 S3)', () => {
+  it('keeps Golem voice commands, their answers and settings identical across languages (plan 140 S3)', () => {
     // The Rust side round-trips the same objects in protocol.rs
     // (`shared_high_risk_contract_fixture_matches_cohost_dtos`).
     expect(
@@ -706,7 +706,7 @@ describe('shared high-risk protocol fixture', () => {
     }
   })
 
-  it('keeps the Orcle report, its payload and the saved event identical across languages (plan 119 S1)', () => {
+  it('keeps the Golem report, its payload and the saved event identical across languages (plan 119 S1)', () => {
     expect(
       validateBackendRpcParams('cohost.report.get', fixtures.cohost.reportGetParams)
     ).toStrictEqual(fixtures.cohost.reportGetParams)

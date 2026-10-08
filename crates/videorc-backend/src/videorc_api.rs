@@ -34,7 +34,7 @@ const COHOST_SPOTLIGHT_PATH: &str = "/api/ai/cohost/spotlight";
 /// The server rejects a larger body (checked on content-length bytes) as
 /// `invalid-request`; the engine trims candidates until the JSON fits.
 pub(crate) const COHOST_SPOTLIGHT_MAX_BODY_BYTES: usize = 32 * 1024;
-/// The Orcle command parser (plan 140 S8) answers a wake-word utterance the
+/// The Golem command parser (plan 140 S8) answers a wake-word utterance the
 /// local grammar could not read. The server's own budget is 2 s; past 2.5 s
 /// the streamer has moved on, so the engine says "didn't catch that".
 pub(crate) const COHOST_COMMAND_TIMEOUT: std::time::Duration =
@@ -458,9 +458,9 @@ pub struct CohostSpotlightMatch {
     pub answered: Option<f64>,
 }
 
-// --- Orcle command parser wire types (plan 140 S8, contract part E) ---
+// --- Golem command parser wire types (plan 140 S8, contract part E) ---
 
-/// `POST /api/ai/cohost/command`: what the streamer said after "Orcle" that
+/// `POST /api/ai/cohost/command`: what the streamer said after "Golem" that
 /// the local grammar could not read, plus the chat comments it may mean.
 /// Build it with `CohostCommandRequest::shaped`, which enforces the route's
 /// limits; the client refuses anything else without sending.
@@ -794,11 +794,11 @@ impl CohostApiError {
     fn from_transport_within(error: reqwest::Error, timeout: std::time::Duration) -> Self {
         if error.is_timeout() {
             Self::timeout(format!(
-                "Orcle did not answer within {} s.",
+                "Golem did not answer within {} s.",
                 timeout.as_secs()
             ))
         } else {
-            Self::network(format!("Could not reach Orcle: {error}"))
+            Self::network(format!("Could not reach Golem: {error}"))
         }
     }
 }
@@ -1034,7 +1034,7 @@ impl VideorcApiClient {
             return response.json().await.map_err(|error| {
                 CohostApiError::malformed_response(
                     status.as_u16(),
-                    format!("Could not read Orcle's response: {error}"),
+                    format!("Could not read Golem's response: {error}"),
                 )
             });
         }
@@ -1077,7 +1077,7 @@ impl VideorcApiClient {
             return response.json().await.map_err(|error| {
                 CohostApiError::malformed_response(
                     status.as_u16(),
-                    format!("Could not read Orcle's spotlight response: {error}"),
+                    format!("Could not read Golem's spotlight response: {error}"),
                 )
             });
         }
@@ -1095,7 +1095,7 @@ impl VideorcApiClient {
         ))
     }
 
-    /// One Orcle command parse (plan 140 S8). Same auth, client version and
+    /// One Golem command parse (plan 140 S8). Same auth, client version and
     /// failure mapping as the spotlight; a request out of the route's shape
     /// is refused here, before anything is sent.
     pub async fn post_cohost_command(
@@ -1118,7 +1118,7 @@ impl VideorcApiClient {
                 kind: CohostApiErrorKind::InvalidRequest,
                 detail: CohostErrorDetail::new(
                     "invalid-request",
-                    format!("Orcle did not send the command: {problem}."),
+                    format!("Golem did not send the command: {problem}."),
                     None,
                 ),
             });
@@ -1141,7 +1141,7 @@ impl VideorcApiClient {
                 }
                 CohostApiError::malformed_response(
                     status.as_u16(),
-                    format!("Could not read Orcle's command response: {error}"),
+                    format!("Could not read Golem's command response: {error}"),
                 )
             });
         }
@@ -1596,7 +1596,7 @@ pub struct CaptionRealtimeToken {
 
 /// Which allowance one transcription chunk is metered against (plan 068 D5).
 /// `Captions` wins while captions present: one upload, one charge. `Listen`
-/// is Orcle's own bucket and an old chunk route ignores the field.
+/// is Golem's own bucket and an old chunk route ignores the field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptionChunkPurpose {
     Captions,
@@ -1612,7 +1612,7 @@ impl CaptionChunkPurpose {
     }
 }
 
-/// Terminal codes that end only Orcle's listen intent (plan 068 D5): the
+/// Terminal codes that end only Golem's listen intent (plan 068 D5): the
 /// listen allowance is separate from captions, so a presenting caption
 /// session keeps going when one of these arrives.
 pub fn is_listen_block_code(code: &str) -> bool {
@@ -2178,11 +2178,11 @@ mod tests {
         // answered 502 with this envelope; the desktop must carry both parts.
         assert_eq!(
             parse_error_envelope(
-                r#"{"error":{"code":"ai-gateway-error","message":"The Orcle tick failed on every configured model."}}"#
+                r#"{"error":{"code":"ai-gateway-error","message":"The Golem tick failed on every configured model."}}"#
             ),
             (
                 "ai-gateway-error".to_string(),
-                "The Orcle tick failed on every configured model.".to_string()
+                "The Golem tick failed on every configured model.".to_string()
             )
         );
         assert_eq!(
@@ -2216,21 +2216,21 @@ mod tests {
 
     #[test]
     fn cohost_desktop_side_failures_carry_their_own_detail_codes() {
-        let network = CohostApiError::network("Could not reach Orcle: dns");
+        let network = CohostApiError::network("Could not reach Golem: dns");
         assert_eq!(network.kind, CohostApiErrorKind::Network);
         assert_eq!(network.reason(), CohostReason::Network);
         assert_eq!(network.detail.code, COHOST_DETAIL_CODE_NETWORK);
         assert_eq!(network.detail.status, None);
 
-        let timeout = CohostApiError::timeout("Orcle did not answer within 12 s.");
+        let timeout = CohostApiError::timeout("Golem did not answer within 12 s.");
         assert_eq!(timeout.kind, CohostApiErrorKind::Network);
         assert_eq!(timeout.reason(), CohostReason::Network);
         assert_eq!(timeout.detail.code, COHOST_DETAIL_CODE_TIMEOUT);
         assert_eq!(timeout.detail.status, None);
-        assert_eq!(timeout.message(), "Orcle did not answer within 12 s.");
+        assert_eq!(timeout.message(), "Golem did not answer within 12 s.");
 
         let malformed =
-            CohostApiError::malformed_response(200, "Could not read Orcle's response: EOF");
+            CohostApiError::malformed_response(200, "Could not read Golem's response: EOF");
         assert_eq!(malformed.kind, CohostApiErrorKind::MalformedResponse);
         assert_eq!(malformed.reason(), CohostReason::GatewayError);
         assert_eq!(malformed.detail.code, COHOST_DETAIL_CODE_MALFORMED_RESPONSE);
@@ -2353,7 +2353,7 @@ mod tests {
         assert!(response.usage.is_none());
     }
 
-    // --- Orcle command parser (plan 140 S8) ---
+    // --- Golem command parser (plan 140 S8) ---
 
     fn command_candidate(id: &str, author: &str, text: &str) -> CohostCommandCandidate {
         CohostCommandCandidate {

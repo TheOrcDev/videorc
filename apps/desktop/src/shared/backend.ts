@@ -3272,7 +3272,7 @@ export interface FollowNamesCommand {
 export type ScopeReconnectPlatform = Extract<StreamPlatform, 'twitch' | 'kick'>
 
 /** Stream Manager → main: reconnect Twitch or Kick asking for every optional
- * permission, so Orcle can remove messages (plan 140, S5). Main picks the
+ * permission, so Golem can remove messages (plan 140, S5). Main picks the
  * scopes; the window only names the platform. */
 export interface ScopeReconnectCommand {
   requestId: string
@@ -3334,7 +3334,7 @@ export interface AiCapabilities {
     /** Clean cut kill switch off and its provider configured; older servers omit it. */
     cleanCutEnabled?: boolean
     cloudAiEnabled: boolean
-    /** The Orcle command parser route is on (plan 140 S8); older servers omit it. */
+    /** The Golem command parser route is on (plan 140 S8); older servers omit it. */
     cohostCommandEnabled?: boolean
     gatewayConfigured: boolean
     modelTestingEnabled: boolean
@@ -3899,7 +3899,7 @@ export interface ModerationOperationParams {
  * on one message, or an answer to an open removal card. The window never
  * picks the source: Studio sends every `remove` as `manual`, which runs at
  * once (the menu click is the express consent). Voice removals come from the
- * backend's own Orcle engine, never through this relay.
+ * backend's own Golem engine, never through this relay.
  */
 export type CommentsModerationCommand =
   | {
@@ -4006,7 +4006,7 @@ export interface CommentsViewSnapshot {
   /**
    * Live mode only (plan 140, S6): the live session's chat removals, every
    * open one then the newest finished ones, at most 100. Studio publishes it;
-   * the Stream Manager renders the row status and Orcle's removal cards.
+   * the Stream Manager renders the row status and Golem's removal cards.
    */
   moderationOperations?: ModerationOperation[]
   /** History mode only: the finished session's saved stats (plan 055, S9). */
@@ -4332,7 +4332,7 @@ export interface VideorcApi {
    * socket and opens the browser, so the main window's eager bundle carries
    * none of it. Resolves once the browser opened. */
   showFollowNamesFromCommentsWindow: (command: FollowNamesCommand) => Promise<boolean>
-  /** "Reconnect Twitch to let Orcle remove messages" from the Stream Manager
+  /** "Reconnect Twitch to let Golem remove messages" from the Stream Manager
    * (plan 140, S5): like Show who followed, main starts the reconnect with
    * every optional permission and opens the browser. Resolves once it opened. */
   reconnectScopesFromCommentsWindow: (command: ScopeReconnectCommand) => Promise<boolean>
@@ -4352,8 +4352,8 @@ export interface VideorcApi {
   getCohostWindowState: () => Promise<CohostWindowState>
   onCohostWindowState: (callback: (state: CohostWindowState) => void) => () => void
   sendCohostAction: (command: CohostActionCommand) => Promise<CohostState>
-  /** Answers to Orcle's voice command cards (plan 140, S6 part B), relayed
-   * like the other Orcle actions: the MAIN renderer makes the call. */
+  /** Answers to Golem's voice command cards (plan 140, S6 part B), relayed
+   * like the other Golem actions: the MAIN renderer makes the call. */
   sendCohostCommand: (command: CohostCommandRelayCommand) => Promise<CohostState>
   onCohostCommandRequest: (callback: (command: CohostCommandRelayCommand) => void) => () => void
   pushCohostCommandResult: (resolution: CommentsCommandResolution<CohostState>) => Promise<boolean>
@@ -4949,7 +4949,7 @@ export interface CohostSettings {
   /** Streamer notes the model answers from; at most 4000 characters. */
   notes: string
   /**
-   * Orcle's picks go on stream by themselves: the server's suggested
+   * Golem's picks go on stream by themselves: the server's suggested
    * comments and high-priority questions, under the engine's cadence rules
    * (default off).
    */
@@ -4962,12 +4962,12 @@ export interface CohostSettings {
   /** Plain-language chat rules the co-host flags against; ≤ 10 × 120 chars. */
   rules: string[]
   /**
-   * Orcle hears the microphone for the whole live stream, as text, even with
+   * Golem hears the microphone for the whole live stream, as text, even with
    * live captions off (plan 068; default off).
    */
   listen: boolean
   /**
-   * Plan 140: "Commands need 'Orcle' first". On, the structured phrases
+   * Plan 140: "Commands need 'Golem' first". On, the structured phrases
    * ("remove it from our chat") stop working without the wake word
    * (default off).
    */
@@ -4994,7 +4994,7 @@ export interface CohostSettingsPatch {
   removeConfirm?: RemoveConfirmMode
 }
 
-/** Whether Orcle hears the streamer right now (plan 068). */
+/** Whether Golem hears the streamer right now (plan 068). */
 export type CohostListeningState = 'off' | 'starting' | 'on' | 'blocked'
 
 export interface CohostListening {
@@ -5028,7 +5028,7 @@ export interface CohostQuestion {
 export type CohostPromiseTriggerKind = 'none' | 'viewers' | 'minutes'
 
 /** When a promise reminder fires: at `value` viewers, after `value` minutes,
- * or (`none`) 20 minutes after Orcle first heard it. */
+ * or (`none`) 20 minutes after Golem first heard it. */
 export interface CohostPromiseTrigger {
   kind: CohostPromiseTriggerKind | (string & Record<never, never>)
   value?: number
@@ -5050,7 +5050,7 @@ export interface CohostPromiseReminder {
 }
 
 /** A recap for viewers who asked what they missed, or one the streamer
- * drafted; never posted by Orcle. Gone after `expiresAt`. */
+ * drafted; never posted by Golem. Gone after `expiresAt`. */
 export interface CohostRecap {
   text: string
   at: string
@@ -5177,7 +5177,7 @@ export interface CohostErrorDetail {
   status: number | null
 }
 
-// --- Orcle voice commands (plan 140 S3; contract part B) ---
+// --- Golem voice commands (plan 140 S3; contract part B) ---
 
 /**
  * What a voice command asked for. `confirm` and `cancel` answer the open card,
@@ -5188,10 +5188,10 @@ export type CohostCommandKind = 'highlight' | 'clear' | 'remove' | 'confirm' | '
 /**
  * Where the latest voice command stands:
  * - `done`: highlighted, cleared, removed or hidden;
- * - `not-found`: no comment matched, or (kind `unknown`) Orcle didn't catch it;
+ * - `not-found`: no comment matched, or (kind `unknown`) Golem didn't catch it;
  * - `ambiguous`: a chooser is open, `candidates` lists the comments;
  * - `confirm`: a card waits for a yes: a voice removal (`operationId`) or a
- *   highlight of a comment Orcle flagged. A removal card without `operationId`
+ *   highlight of a comment Golem flagged. A removal card without `operationId`
  *   is still opening; one without `expiresAt` was confirmed and is running;
  * - `refused`: chat moderation refused, or the removal failed;
  * - `unavailable`: paused by Videorc, or Premium is required;
@@ -5224,7 +5224,7 @@ export interface CohostCommandTarget {
 export interface CohostCommand {
   /** `cmd-<uuid>`. */
   id: string
-  /** The words that made the command, as Orcle heard them. */
+  /** The words that made the command, as Golem heard them. */
   heard: string
   kind: CohostCommandKind
   status: CohostCommandStatus
@@ -5326,7 +5326,7 @@ export interface CohostState {
    */
   recentlyResolved?: CohostRecentlyResolved[]
   /**
-   * Whether Orcle hears the streamer (plan 068); absent without a session or
+   * Whether Golem hears the streamer (plan 068); absent without a session or
    * from a backend before the field (never null).
    */
   listening?: CohostListening
@@ -5353,7 +5353,7 @@ export interface CohostState {
 }
 
 /**
- * Plan 119 S1: what became of a question Orcle caught. The latest outcome
+ * Plan 119 S1: what became of a question Golem caught. The latest outcome
  * wins; a restore puts it back to `open`; `shown` means still open, but its
  * comment was on stream.
  */
@@ -5378,7 +5378,7 @@ export interface CohostReportQuestion {
 }
 
 export interface CohostReportQuestions {
-  /** Distinct question ids Orcle surfaced. */
+  /** Distinct question ids Golem surfaced. */
   total: number
   markedAnswered: number
   dismissed: number
@@ -5446,7 +5446,7 @@ export interface CohostReportAlert {
   firstSeenAt: string
 }
 
-/** Recaps are never posted by Orcle, so posting leaves no count. */
+/** Recaps are never posted by Golem, so posting leaves no count. */
 export interface CohostReportRecap {
   offered: number
   drafted: number
@@ -5471,12 +5471,12 @@ export interface CohostReportCommands {
   expired: number
   /** A removal that failed or ended unknown, or a refused request. */
   failed: number
-  /** No comment matched, or Orcle didn't catch what was said. */
+  /** No comment matched, or Golem didn't catch what was said. */
   notFound: number
 }
 
 /**
- * What Orcle caught in one stream (plan 119 decision 6): counts by outcome,
+ * What Golem caught in one stream (plan 119 decision 6): counts by outcome,
  * the questions and what became of them, the promises still open. Saved on
  * this computer when the session ends and deleted with the recording.
  * `cohost.report.get` returns it; `cohost.report.saved` announces it. Every
@@ -5487,7 +5487,7 @@ export interface CohostSessionReport {
   sessionId: string
   startedAt: string
   endedAt: string
-  /** Orcle sessions folded into this report: off and on mid-stream adds one. */
+  /** Golem sessions folded into this report: off and on mid-stream adds one. */
   segments: number
   streamTitle?: string
   messagesSeen: number
@@ -5516,7 +5516,7 @@ export interface CohostReportChat {
 
 /**
  * `cohost.report.get` / `cohost.report.latest`: the saved report (null when
- * Orcle left none), the session's moments (clip marks and chat peaks, computed
+ * Golem left none), the session's moments (clip marks and chat peaks, computed
  * on read and never stored) and its chat totals.
  */
 export interface CohostReportPayload {
@@ -5668,7 +5668,7 @@ export const COHOST_ACTION_KINDS: readonly CohostActionKind[] = [
 /** Correlated co-host action from the Comments window, brokered through main
  * to the main renderer (which makes the actual `cohost.*` RPC). */
 /**
- * Stream Manager → main → Studio (plan 140, S6 part B): an answer to Orcle's
+ * Stream Manager → main → Studio (plan 140, S6 part B): an answer to Golem's
  * open voice command, by its id. `choose` picks from the chooser (0 to 2),
  * `confirm` and `cancel` answer the card. Studio makes the matching
  * `cohost.command.*` call; the reply is the state after the answer.

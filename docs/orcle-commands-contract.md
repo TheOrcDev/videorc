@@ -1,4 +1,4 @@
-# Orcle voice commands: contract (plan 140)
+# Golem voice commands: contract (plan 140)
 
 These are the binding shapes for plan 140's slices, which several agents build
 in parallel. Parts D and E cross the web ↔ desktop line; identical copies
@@ -8,7 +8,7 @@ desktop-internal, but every slice builds against them.
 All new serialized optional fields use
 `#[serde(default, skip_serializing_if = …)]` in Rust and `optionalSchema` in
 `backend-rpc-contract.ts`. Code, wire and storage names keep `cohost`;
-user-facing copy says "Orcle".
+user-facing copy says "Golem".
 
 ## Named session markers (desktop, plan 152)
 
@@ -44,7 +44,7 @@ retrospective hints and report Moments remain ranges. See
 ## A. Chat moderation (desktop, S4)
 
 Moderation is a chat feature. Manual removal is free; voice-sourced removal is
-Premium (Orcle).
+Premium (Golem).
 
 ### Rust API (`live_chat_moderation.rs`), used by S3
 
@@ -144,7 +144,7 @@ A provider's own deletion keeps its provider type (Twitch
 `channel.chat.message_delete`, YouTube/Kick `message-delete`). The matching
 `ModerationOperation` carries the plain `outcome` sentence and `outcomeCode`.
 
-## B. Orcle command state and settings (desktop, S3, read by S6)
+## B. Golem command state and settings (desktop, S3, read by S6)
 
 ### `CohostState.command?`: the latest command (absent when none)
 
@@ -182,17 +182,17 @@ Additive notes from S3 (the shapes above are unchanged):
   `expiresAt` is absent and `message` says "Removing coders_x's comment…": show
   no buttons then. A removal card without `operationId` is still opening (a
   few milliseconds); answers wait for it.
-- A highlight of a comment Orcle flagged with high severity is a `confirm`
-  card too (`kind: highlight`, no `operationId`): "Orcle flagged this
+- A highlight of a comment Golem flagged with high severity is a `confirm`
+  card too (`kind: highlight`, no `operationId`): "Golem flagged this
   (harassment). Show it anyway?"
-- `kind: unknown` comes with `status: not-found` and "Orcle didn't catch that:
-  '…'" (only after a clearly addressed "Orcle"; never while a card is open).
+- `kind: unknown` comes with `status: not-found` and "Golem didn't catch that:
+  '…'" (only after a clearly addressed "Golem"; never while a card is open).
 - Choosers and highlight cards expire after 20 s (`expired`); a removal card
   follows its moderation operation (`expired`: "Nothing was removed.").
 
 `CohostState.commandAvailability?` (additive, S3) carries the kill switches of
 part D: `{ "voiceCommands": "on|paused", "remove": "on|paused" }`. It is absent
-while both are on, and present on every state, Orcle running or not. The
+while both are on, and present on every state, Golem running or not. The
 renderer shows "Voice commands are paused by Videorc." and "Removing messages
 is paused by Videorc." from it.
 
@@ -305,7 +305,7 @@ an existing free string, so this is not a new enum value.
 Gates run in the same order as the spotlight route: session, body, schema,
 consent, then `decideCohostAccess`. A request fails with:
 
-- 403 `"Orcle requires Videorc Premium."` without `liveCohost`;
+- 403 `"Golem requires Videorc Premium."` without `liveCohost`;
 - 503 `command-disabled` unless `VIDEORC_AI_COHOST_COMMAND_ENABLED` is `true`, or when `VIDEORC_AI_COHOST_COMMAND_DISABLED` is set (the parser ships off);
 - 503 `judge-unconfigured` without a Jev model;
 - 429 when the daily cap `VIDEORC_AI_COHOST_DAILY_COMMAND_LIMIT` (default 300)
@@ -320,5 +320,5 @@ recorded as kind `cohost-command`.
   and Jev is configured.
 - `limits.dailyCommandCalls`.
 
-The desktop calls the parser only when that flag is true, Orcle heard the wake
+The desktop calls the parser only when that flag is true, Golem heard the wake
 word, and the local grammar matched nothing.

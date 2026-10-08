@@ -289,11 +289,11 @@ describe('Stream Manager reconnect rows (plan 140, S5)', () => {
     expect(removeMessagesReconnectPlatforms([])).toEqual([])
   })
 
-  it('says Reconnect and names Orcle, in plain words', () => {
+  it('says Reconnect and names Golem, in plain words', () => {
     expect(removeMessagesReconnectCopy('twitch')).toBe(
-      'Reconnect Twitch to let Orcle remove messages.'
+      'Reconnect Twitch to let Golem remove messages.'
     )
-    expect(removeMessagesReconnectCopy('kick')).toBe('Reconnect Kick to let Orcle remove messages.')
+    expect(removeMessagesReconnectCopy('kick')).toBe('Reconnect Kick to let Golem remove messages.')
     for (const platform of ['twitch', 'kick'] as const) {
       expect(removeMessagesReconnectCopy(platform)).not.toMatch(/—|co-host/i)
     }

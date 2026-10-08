@@ -2164,7 +2164,7 @@ const cohostSettingsSchema = objectSchema(
     autoHighlight: booleanSchema,
     voiceHighlight: booleanSchema,
     rules: cohostRulesSchema,
-    // Plan 068: Orcle hears the microphone while live.
+    // Plan 068: Golem hears the microphone while live.
     listen: booleanSchema,
     // Plan 140 S3: voice commands. The backend always sends both.
     wakeWordRequired: booleanSchema,
@@ -2422,7 +2422,7 @@ const clipMarkedEventSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<ClipMarkedEvent>
 
-// Plan 068: whether Orcle hears the streamer. Every optional field is omitted
+// Plan 068: whether Golem hears the streamer. Every optional field is omitted
 // by the backend when absent (never null).
 const cohostListeningSchema = objectSchema(
   {
@@ -2627,7 +2627,7 @@ const cohostCommandParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<CohostCommandParams>
 
-// Plan 119 S1: the Orcle report. The blocks always ride; every optional list
+// Plan 119 S1: the Golem report. The blocks always ride; every optional list
 // is omitted by the backend while empty (never null). `version` is pinned:
 // the backend reads any other stored version as unavailable, so a report on
 // the wire is always this shape.

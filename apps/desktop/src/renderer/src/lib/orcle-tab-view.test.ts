@@ -29,7 +29,7 @@ const premium: EntitlementUiGate = { allowed: true }
 const basic: EntitlementUiGate = {
   allowed: false,
   featureId: 'live-cohost',
-  reason: 'Orcle requires Videorc Premium.',
+  reason: 'Golem requires Videorc Premium.',
   upgradeUrl: 'https://www.videorc.com/premium'
 }
 
@@ -60,13 +60,13 @@ function input(overrides: Partial<OrcleLiveViewInput> = {}): OrcleLiveViewInput 
   }
 }
 
-describe('Orcle tab copy (plan 119 S2)', () => {
-  it('names what Orcle does, each with the tab that holds its settings (plan 150)', () => {
+describe('Golem tab copy (plan 119 S2)', () => {
+  it('names what Golem does, each with the tab that holds its settings (plan 150)', () => {
     expect(ORCLE_LIVE_POWERS.map((power) => [power.title, power.tab])).toEqual([
       ['Never miss a question', 'chat'],
       ['Chat stays safe', 'chat'],
       ['The room, handled', 'chat'],
-      ['Talk to Orcle', 'voice']
+      ['Talk to Golem', 'voice']
     ])
   })
 
@@ -87,8 +87,8 @@ describe('Orcle tab copy (plan 119 S2)', () => {
 
   it('names every cloud use and what is kept, the one list consent shows', () => {
     expect(CLOUD_AI_USES).toEqual([
-      'Orcle reads your live chat.',
-      "Orcle hears you while you're live: your microphone audio goes to Videorc's cloud speech-to-text and comes back as text.",
+      'Golem reads your live chat.',
+      "Golem hears you while you're live: your microphone audio goes to Videorc's cloud speech-to-text and comes back as text.",
       "Clean cut uploads a recording's audio, never the video, in short chunks for a word-by-word transcript, and sends its sentences to Videorc's cloud AI to find retakes. Neither is kept on Videorc servers after the job finishes."
     ])
     expect(CLOUD_AI_KEEPS).toContain("Videorc servers don't keep your chat or your audio.")
@@ -97,7 +97,7 @@ describe('Orcle tab copy (plan 119 S2)', () => {
 })
 
 describe('orcleLiveSettingsPatch', () => {
-  it('turns Orcle on with listening in one patch, and off without touching listening', () => {
+  it('turns Golem on with listening in one patch, and off without touching listening', () => {
     expect(orcleLiveSettingsPatch(true)).toEqual({ enabled: true, listen: true })
     expect(orcleLiveSettingsPatch(false)).toEqual({ enabled: false })
   })
@@ -115,7 +115,7 @@ describe('orcleLiveUnlock', () => {
   it('offers Premium to a signed-in Basic account, with the gate reason', () => {
     expect(orcleLiveUnlock(true, basic)).toEqual({
       action: { kind: 'view-premium', url: 'https://www.videorc.com/premium' },
-      reason: 'Orcle requires Videorc Premium.'
+      reason: 'Golem requires Videorc Premium.'
     })
   })
 
@@ -191,7 +191,7 @@ describe('orcleLiveView', () => {
     expect(paused.status).toMatchObject({
       kind: 'attention',
       label: 'Needs attention',
-      reason: 'Orcle paused: daily AI quota is used up.'
+      reason: 'Golem paused: daily AI quota is used up.'
     })
 
     const failed = orcleLiveView(
@@ -207,17 +207,17 @@ describe('orcleLiveView', () => {
     expect(failed.status).toEqual({
       kind: 'attention',
       label: 'Needs attention',
-      reason: 'Orcle stopped: Videorc AI returned an error.',
+      reason: 'Golem stopped: Videorc AI returned an error.',
       detail: 'ai-gateway-error (HTTP 502): Every model failed.'
     })
 
     expect(
       orcleLiveView(input({ live: true, state: engine({ status: 'error', reason: null }) })).status
         .reason
-    ).toBe('Orcle hit an error.')
+    ).toBe('Golem hit an error.')
   })
 
-  it('needs attention when cloud AI was revoked with Orcle still on', () => {
+  it('needs attention when cloud AI was revoked with Golem still on', () => {
     const view = orcleLiveView(input({ consented: false, live: true, state: engine() }))
     expect(view.status).toMatchObject({ kind: 'attention', reason: ORCLE_CONSENT_OFF_REASON })
     // The switch still shows the stored choice; turning it off stays possible.
@@ -241,7 +241,7 @@ describe('orcleLiveView', () => {
     expect(basicOn.switchDisabled).toBe(false)
     expect(basicOn.status).toMatchObject({
       kind: 'attention',
-      reason: 'Orcle requires Videorc Premium.'
+      reason: 'Golem requires Videorc Premium.'
     })
   })
 
@@ -263,12 +263,12 @@ describe('Voice commands (plan 140, S6 part A)', () => {
     ])
     const phrases = ORCLE_VOICE_COMMANDS.flatMap((command) => command.phrases)
     for (const phrase of [
-      'Orcle, highlight the comment from coders X',
-      'Orcle, put this one up',
-      'Orcle, take it down',
-      'Orcle, remove it from the screen',
+      'Golem, highlight the comment from coders X',
+      'Golem, put this one up',
+      'Golem, take it down',
+      'Golem, remove it from the screen',
       'This one is toxic. Remove it from our chat.',
-      'Orcle, delete the comment from coders X',
+      'Golem, delete the comment from coders X',
       'Yes',
       'Never mind'
     ]) {
@@ -279,12 +279,12 @@ describe('Voice commands (plan 140, S6 part A)', () => {
 
   it('keeps the promises plain: never on its own, 20 seconds, 10 a minute, free removal', () => {
     expect(COHOST_ACTS_ON_ASK_COPY).toBe(
-      'Orcle never acts on its own. It removes a comment only when you tell it to.'
+      'Golem never acts on its own. It removes a comment only when you tell it to.'
     )
     expect(ORCLE_REMOVAL_LIMITS).toContain('20 seconds')
     expect(ORCLE_REMOVAL_LIMITS).toContain('At most 10 removals a minute.')
     expect(ORCLE_REMOVAL_FALLBACK).toBe(
-      'If the platform cannot remove it, Orcle hides it in Videorc and tells you viewers may still see it.'
+      'If the platform cannot remove it, Golem hides it in Videorc and tells you viewers may still see it.'
     )
     expect(ORCLE_VOICE_PREMIUM).toContain('Premium')
     expect(ORCLE_VOICE_PREMIUM).toContain('free for everyone')
@@ -327,8 +327,8 @@ describe('Voice commands (plan 140, S6 part A)', () => {
     expect(rows.map((row) => [row.platform, row.ready, row.message, row.action?.label])).toEqual([
       ['youtube', true, 'Ready', undefined],
       ['twitch', true, 'Ready', undefined],
-      ['kick', false, 'Reconnect Kick to let Orcle remove messages.', 'Reconnect'],
-      ['x', false, 'Authorize X Live to let Orcle remove messages.', 'Authorize X Live']
+      ['kick', false, 'Reconnect Kick to let Golem remove messages.', 'Reconnect'],
+      ['x', false, 'Authorize X Live to let Golem remove messages.', 'Authorize X Live']
     ])
     expect(rows[0].accountLabel).toBe('youtube-channel')
   })

@@ -41,7 +41,7 @@ function command(patch: Partial<CohostCommand> = {}): CohostCommand {
 }
 
 describe('commandStripView (plan 140, S6 part B)', () => {
-  it('says what Orcle heard, then what it did', () => {
+  it('says what Golem heard, then what it did', () => {
     expect(commandStripView(command(), NOW)).toEqual({
       commandId: 'cmd-1',
       heard: 'Heard: “orcle highlight the comment from coders x”',
@@ -63,11 +63,11 @@ describe('commandStripView (plan 140, S6 part B)', () => {
         command({
           kind: 'unknown',
           status: 'not-found',
-          message: "Orcle didn't catch that: 'blorp'"
+          message: "Golem didn't catch that: 'blorp'"
         }),
         NOW
       )
-    ).toMatchObject({ quiet: true, message: "Orcle didn't catch that: 'blorp'" })
+    ).toMatchObject({ quiet: true, message: "Golem didn't catch that: 'blorp'" })
   })
 
   it('fades a finished command after a few seconds, and keeps an open one', () => {
@@ -124,14 +124,14 @@ describe('commandChooserView', () => {
 describe('commandConfirmView', () => {
   const flagged = command({
     status: 'confirm',
-    message: 'Orcle flagged this (harassment). Show it anyway?',
+    message: 'Golem flagged this (harassment). Show it anyway?',
     expiresAt: '2026-10-04T12:00:28Z'
   })
 
-  it('asks before showing a comment Orcle flagged', () => {
+  it('asks before showing a comment Golem flagged', () => {
     expect(commandConfirmView(flagged, NOW)).toEqual({
       commandId: 'cmd-1',
-      title: 'Orcle flagged this (harassment). Show it anyway?',
+      title: 'Golem flagged this (harassment). Show it anyway?',
       target: { ...target, platformLabel: 'Twitch' },
       timer: 'Expires in 18s',
       busy: false
@@ -155,7 +155,7 @@ describe('commandConfirmView', () => {
   })
 })
 
-describe('the Orcle tab copy for voice commands', () => {
+describe('the Golem tab copy for voice commands', () => {
   it('names the kill switches only when paused', () => {
     expect(commandAvailabilityLines(undefined)).toEqual([])
     expect(commandAvailabilityLines({ voiceCommands: 'on', remove: 'on' })).toEqual([])
@@ -170,7 +170,7 @@ describe('the Orcle tab copy for voice commands', () => {
   })
 
   it('matches the web words, and the numbers follow the mode', () => {
-    expect(WAKE_WORD_LABEL).toBe('Commands need “Orcle” first')
+    expect(WAKE_WORD_LABEL).toBe('Commands need “Golem” first')
     expect(REMOVE_CONFIRM_LABELS).toEqual({
       confirm: 'Confirm first',
       countdown: '5-second countdown'

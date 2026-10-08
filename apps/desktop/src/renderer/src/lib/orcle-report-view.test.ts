@@ -172,13 +172,13 @@ function session(overrides: Partial<SessionSummary> = {}): SessionSummary {
   }
 }
 
-describe('Orcle report copy (plan 119 S3)', () => {
+describe('Golem report copy (plan 119 S3)', () => {
   it("says what the report holds in the website's words", () => {
     expect(ORCLE_REPORT_DESCRIPTION).toBe(
-      'Orcle saves a short report on your computer: questions caught and missed, flags, promises, first-timers greeted, and the moments you marked by saying clip that.'
+      'Golem saves a short report on your computer: questions caught and missed, flags, promises, first-timers greeted, and the moments you marked by saying clip that.'
     )
-    expect(ORCLE_REPORT_EMPTY).toBe('The report appears here after your first stream with Orcle.')
-    expect(ORCLE_REPORT_TURN_ON).toBe('Turn on Orcle to also catch questions.')
+    expect(ORCLE_REPORT_EMPTY).toBe('The report appears here after your first stream with Golem.')
+    expect(ORCLE_REPORT_TURN_ON).toBe('Turn on Golem to also catch questions.')
     for (const copy of [
       ORCLE_REPORT_DESCRIPTION,
       ORCLE_REPORT_EMPTY,
@@ -394,7 +394,7 @@ describe('report view', () => {
     expect(named.title).toBe('Friday stream')
   })
 
-  it('keeps moments and chat for a stream Orcle missed, and says how to catch questions', () => {
+  it('keeps moments and chat for a stream Golem missed, and says how to catch questions', () => {
     const view = orcleReportView({
       payload: payload({ report: null }),
       session: SESSION,
@@ -404,8 +404,8 @@ describe('report view', () => {
     if (view.kind !== 'orcle-off') return
     expect(view.title).toBe('Friday stream')
     expect(view.note).toEqual({
-      title: 'Orcle was off for this stream.',
-      hint: 'Turn on Orcle to also catch questions.'
+      title: 'Golem was off for this stream.',
+      hint: 'Turn on Golem to also catch questions.'
     })
     expect(view.stats).toEqual([])
     expect(view.missed).toEqual([])
@@ -424,7 +424,7 @@ describe('report view', () => {
   it('is empty before the first stream', () => {
     expect(orcleReportView({ payload: null, session: null, orcleOn: false })).toEqual({
       kind: 'empty',
-      message: 'The report appears here after your first stream with Orcle.'
+      message: 'The report appears here after your first stream with Golem.'
     })
   })
 
@@ -508,7 +508,7 @@ describe('report view', () => {
         notFound: 0
       })
     ).toBeNull()
-    // The card's view carries it; a stream Orcle missed has none.
+    // The card's view carries it; a stream Golem missed has none.
     const view = orcleReportView({
       payload: payload({ report: report({ commands: counts }) }),
       session: SESSION,

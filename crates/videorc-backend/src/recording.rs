@@ -5594,7 +5594,7 @@ async fn start_session_with_timeline(
             state.clone(),
             session_id.clone(),
         ));
-        // Orcle's listen intent (plan 068): wanted before this capture, it
+        // Golem's listen intent (plan 068): wanted before this capture, it
         // resumes now. Off the recording path; it never fails or delays it.
         let listen_state = state.clone();
         tokio::spawn(async move {

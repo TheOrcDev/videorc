@@ -323,7 +323,7 @@ function CommentsWindowApp(): ReactElement {
       )
       .finally(() => flagId(setRemovalRequestIds, message.id, false))
   }
-  // An Orcle removal card's Remove or Cancel (Enter or Esc).
+  // A Golem removal card's Remove or Cancel (Enter or Esc).
   const answerRemoval = (operation: ModerationOperation, answer: RemovalAnswer): void => {
     const sessionId = snapshot.sessionId
     const moderate = window.videorc?.moderateFromCommentsWindow
@@ -400,7 +400,7 @@ function CommentsWindowApp(): ReactElement {
             {
               destinationId: 'cohost-command',
               platform: 'custom',
-              reason: error instanceof Error ? error.message : 'Orcle action failed.'
+              reason: error instanceof Error ? error.message : 'Golem action failed.'
             }
           ])
           return null
@@ -408,7 +408,7 @@ function CommentsWindowApp(): ReactElement {
         .finally(() => setCohostActionPending(false))
     }
 
-  // Answers to Orcle's voice command cards (plan 140, S6 part B). The reply
+  // Answers to Golem's voice command cards (plan 140, S6 part B). The reply
   // merges like an event: the newer command (by `at`) wins.
   const [commandAnsweringId, setCommandAnsweringId] = useState<string | null>(null)
   const answerCommand = (commandId: string, answer: CommandAnswer): void => {
@@ -421,14 +421,14 @@ function CommentsWindowApp(): ReactElement {
         setCohost((current) => ({ ...current, state: applyCohostState(current.state, state) }))
       )
       .catch((error) =>
-        toast.error(error instanceof Error ? error.message : 'Could not answer Orcle.', {
+        toast.error(error instanceof Error ? error.message : 'Could not answer Golem.', {
           id: `cohost-command:${commandId}`
         })
       )
       .finally(() => setCommandAnsweringId((current) => (current === commandId ? null : current)))
   }
 
-  // Orcle Live's one switch (plan 119), relayed: on means Orcle reads chat AND
+  // Golem Live's one switch (plan 119), relayed: on means Golem reads chat AND
   // hears you (`listen: true`), off only stops it joining. Every way on (the
   // status popover, the nudge, the consent CTA and the listening card) sends
   // the same command; the consent CTA also grants cloud-AI consent in the same
@@ -445,7 +445,7 @@ function CommentsWindowApp(): ReactElement {
       .then((state) => state && setCohost(state))
       .catch((error) =>
         toast.error(
-          error instanceof Error ? error.message : 'Could not change the Orcle setting.',
+          error instanceof Error ? error.message : 'Could not change the Golem setting.',
           {
             id: 'cohost-enable'
           }
@@ -468,7 +468,7 @@ function CommentsWindowApp(): ReactElement {
     : {
         allowed: false,
         featureId: 'live-cohost',
-        reason: cohost.entitlementReason ?? 'Orcle requires Videorc Premium.',
+        reason: cohost.entitlementReason ?? 'Golem requires Videorc Premium.',
         ...(cohost.upgradeUrl ? { upgradeUrl: cohost.upgradeUrl } : {})
       }
 

@@ -45,12 +45,12 @@ happens underneath.
   YouTube (other platforms ingest up to 1080p).
 - **Live captions.** Streaming speech-to-text (~1s latency) with optional
   caption burn-in on the stream, the recording, both, or neither.
-- **Orcle, your AI producer.** One switch, "Orcle joins my streams", and Orcle
-  catches questions from every platform with a drafted reply you approve,
+- **Golem, your AI companion.** Name it, give it a personality and looks, and
+  it catches questions from every platform with a drafted reply you approve,
   flags spam and abuse against your own rules, greets first-timers and reminds
-  you of your promises. It never posts or acts on its own. Cloud AI is
-  opt-in, and after each stream a short report stays on your computer. See
-  [docs/orcle-live.md](docs/orcle-live.md).
+  you of your promises. It posts only in the modes you turn on, and everything
+  is off by default. Cloud AI is opt-in, and after each stream a short report
+  stays on your computer. See [docs/golem.md](docs/golem.md).
 - **Platform-aware preview.** macOS uses a detached native CAMetalLayer preview.
   Windows Alpha currently uses the documented uncompressed, latest-wins Electron
   proof surface; it must not be described as CAMetalLayer or as final native

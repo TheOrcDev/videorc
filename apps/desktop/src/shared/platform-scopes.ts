@@ -8,7 +8,7 @@ import type {
 // Optional OAuth scopes (plan 055, S6; plan 140, S5). Opt-in: adding a scope
 // to a platform's base set would make every existing connection reconnect
 // once. Kept out of `backend.ts` so the main window's eager bundle does not
-// carry them: only lazy surfaces (Livestream setup, the Orcle tab), the
+// carry them: only lazy surfaces (Livestream setup, the Golem tab), the
 // Stream Manager window and Electron main import this module.
 //
 // The optional lists mirror `optional_scopes_for` in
@@ -49,7 +49,7 @@ export const KICK_OPTIONAL_SCOPES = [KICK_MODERATION_SCOPE] as const
 /**
  * Every optional scope `platform` offers, exactly `optional_scopes_for` in
  * `oauth.rs`: what a permission row's Reconnect asks for ("Reconnect Twitch
- * to let Orcle remove messages", the Stream Manager's twin, Show who
+ * to let Golem remove messages", the Stream Manager's twin, Show who
  * followed). Never a hand-picked subset.
  */
 export function permissionReconnectScopes(platform: StreamPlatform): readonly string[] {
@@ -65,7 +65,7 @@ export function permissionReconnectScopes(platform: StreamPlatform): readonly st
 
 /**
  * The optional scopes an ordinary Connect or Reconnect of `platform` asks for.
- * Twitch asks for all of them, so Activity names followers and Orcle can
+ * Twitch asks for all of them, so Activity names followers and Golem can
  * remove messages from the first stream. Kick asks for none: Kick can refuse a
  * scope its app settings don't enable, and that would fail every Kick connect,
  * so its moderation scope is asked for only from the "Remove messages" row.
@@ -180,7 +180,7 @@ const SCOPE_RECONNECT_LABELS: Record<ScopeReconnectPlatform, string> = {
 
 /** The quiet sentence for a platform that can't remove messages until a reconnect. */
 export function removeMessagesReconnectCopy(platform: ScopeReconnectPlatform): string {
-  return `Reconnect ${SCOPE_RECONNECT_LABELS[platform]} to let Orcle remove messages.`
+  return `Reconnect ${SCOPE_RECONNECT_LABELS[platform]} to let Golem remove messages.`
 }
 
 /**

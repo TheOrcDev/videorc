@@ -1116,7 +1116,7 @@ const moderationOperationIpcSchema = boundedSemanticValue(
 const relayedModerationOperationsSchema = arraySchema(moderationOperationIpcSchema, {
   maxLength: MAX_RELAYED_MODERATION_OPERATIONS
 })
-// Answers to Orcle's voice command cards (plan 140, S6 part B): a command id
+// Answers to Golem's voice command cards (plan 140, S6 part B): a command id
 // and, for the chooser, an index. Nothing else crosses.
 const cohostCommandIdSchema = stringSchema({ minLength: 1, maxLength: 128 })
 const cohostCommandRelaySchema = unionSchema([
@@ -1266,7 +1266,7 @@ const specificRuntimeInvokeContracts = {
     ]),
     booleanSchema
   ),
-  // Plan 140, S6 part B: one answer to Orcle's open voice command.
+  // Plan 140, S6 part B: one answer to Golem's open voice command.
   'comments-window:cohost-command': invokeContract(tupleSchema([cohostCommandRelaySchema])),
   'comments-window:cohost-command-result-push': invokeContract(
     tupleSchema([

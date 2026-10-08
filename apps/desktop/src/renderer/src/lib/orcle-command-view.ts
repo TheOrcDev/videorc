@@ -9,10 +9,10 @@ import type {
 import { CHAT_PLATFORM_LABELS } from './live-chat-view'
 import { secondsUntil } from './chat-removal-view'
 
-// Orcle voice commands, the renderer's view (plan 140, S6 part B). A pure
+// Golem voice commands, the renderer's view (plan 140, S6 part B). A pure
 // derivation of `CohostState.command` (contract part B): the strip that says
-// what Orcle heard and did, the chooser when several comments fit, and the
-// "show it anyway?" card for a comment Orcle flagged. A removal's card is the
+// what Golem heard and did, the chooser when several comments fit, and the
+// "show it anyway?" card for a comment Golem flagged. A removal's card is the
 // moderation operation's (part A), never a second card here.
 
 /** How long a finished command stays in the strip, counted from `command.at`. */
@@ -45,7 +45,7 @@ function parseTime(iso: string | undefined): number | null {
 }
 
 /**
- * The command strip: what Orcle heard, then what it did. An open command
+ * The command strip: what Golem heard, then what it did. An open command
  * (a chooser or a card) stays while it waits; a finished one fades
  * `COMMAND_STRIP_VISIBLE_MS` after it reached its status.
  */
@@ -126,7 +126,7 @@ export function commandChooserView(
 
 export interface CommandConfirmView {
   commandId: string
-  /** "Orcle flagged this (harassment). Show it anyway?" */
+  /** "Golem flagged this (harassment). Show it anyway?" */
   title: string
   target: (CohostCommandTarget & { platformLabel: string }) | null
   timer: string | null
@@ -135,7 +135,7 @@ export interface CommandConfirmView {
 }
 
 /**
- * The card for a highlight of a comment Orcle flagged. A removal in `confirm`
+ * The card for a highlight of a comment Golem flagged. A removal in `confirm`
  * has its moderation card (part A), so it never gets this one; a removal card
  * without `operationId` is still opening and shows nothing yet.
  */
@@ -168,7 +168,7 @@ export function openCommandCardId(
     : null
 }
 
-// --- The Orcle tab's settings and kill switches -------------------------------
+// --- The Golem tab's settings and kill switches -------------------------------
 
 export const VOICE_COMMANDS_PAUSED = 'Voice commands are paused by Videorc.'
 export const REMOVING_MESSAGES_PAUSED = 'Removing messages is paused by Videorc.'
@@ -184,7 +184,7 @@ export function commandAvailabilityLines(
   ]
 }
 
-export const WAKE_WORD_LABEL = 'Commands need “Orcle” first'
+export const WAKE_WORD_LABEL = 'Commands need “Golem” first'
 export const WAKE_WORD_DESCRIPTION =
   'Off: “remove it from our chat” and “highlight the comment from coders X” also work without the name.'
 

@@ -4711,10 +4711,10 @@ pub struct CohostSettingsPatch {
     /// Replaces the whole list; the engine normalises it (trim, <= 10 x 120).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules: Option<Vec<String>>,
-    /// Orcle hears the microphone while live (plan 068 D2).
+    /// Golem hears the microphone while live (plan 068 D2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen: Option<bool>,
-    /// Voice commands need "Orcle" first (plan 140 S3).
+    /// Voice commands need "Golem" first (plan 140 S3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_word_required: Option<bool>,
     /// How a voice removal is confirmed (plan 140 S3).
@@ -4739,7 +4739,7 @@ pub struct CohostCommandParams {
     pub command_id: String,
 }
 
-// --- Orcle report (plan 119 S1; mirrored in shared/backend.ts) ---
+// --- Golem report (plan 119 S1; mirrored in shared/backend.ts) ---
 
 /// The report format this build writes and reads. A stored report with any
 /// other version reads as unavailable, never as an error.
@@ -4766,7 +4766,7 @@ pub struct CohostReportSavedEvent {
     pub session_id: String,
 }
 
-/// What became of a question Orcle caught. The latest outcome wins; a
+/// What became of a question Golem caught. The latest outcome wins; a
 /// restore puts it back to `open`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -4799,7 +4799,7 @@ pub struct CohostReportQuestion {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostReportQuestions {
-    /// Distinct question ids Orcle surfaced.
+    /// Distinct question ids Golem surfaced.
     #[serde(default)]
     pub total: u64,
     #[serde(default)]
@@ -4905,7 +4905,7 @@ pub struct CohostReportAlert {
     pub first_seen_at: String,
 }
 
-/// Recaps are never posted by Orcle, so posting leaves no count.
+/// Recaps are never posted by Golem, so posting leaves no count.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostReportRecap {
@@ -4943,7 +4943,7 @@ pub struct CohostReportCommands {
     /// A removal that failed or ended unknown, or a refused request.
     #[serde(default)]
     pub failed: u64,
-    /// No comment matched, or Orcle didn't catch what was said.
+    /// No comment matched, or Golem didn't catch what was said.
     #[serde(default)]
     pub not_found: u64,
 }
@@ -4966,7 +4966,7 @@ impl CohostReportCommands {
     }
 }
 
-/// What Orcle caught in one stream, saved on this computer when the session
+/// What Golem caught in one stream, saved on this computer when the session
 /// ends and deleted with the recording (plan 119 decision 6). Counts and the
 /// question log; never raw chat or drafts. Every optional field is omitted,
 /// never null; the blocks always ride and default on read.
@@ -4977,7 +4977,7 @@ pub struct CohostSessionReport {
     pub session_id: String,
     pub started_at: String,
     pub ended_at: String,
-    /// Orcle sessions folded into this report: turning Orcle off and on
+    /// Golem sessions folded into this report: turning Golem off and on
     /// mid-stream adds one.
     #[serde(default)]
     pub segments: u32,
@@ -5014,7 +5014,7 @@ impl CohostSessionReport {
         (report.version == COHOST_SESSION_REPORT_VERSION).then_some(report)
     }
 
-    /// Fold a later report of the same session into this one (Orcle turned
+    /// Fold a later report of the same session into this one (Golem turned
     /// off and on mid-stream, or a replacing start): counts add up, questions
     /// union by id with the later outcome winning, open promises union by
     /// text, and the span covers both.
@@ -5175,7 +5175,7 @@ pub struct CohostReportChat {
 }
 
 /// `cohost.report.get` / `cohost.report.latest`: the saved report (null when
-/// Orcle left none), the session's moments (computed on read, never stored)
+/// Golem left none), the session's moments (computed on read, never stored)
 /// and its chat totals.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -5189,7 +5189,7 @@ pub struct CohostReportPayload {
 }
 
 /// A moment worth a clip: a clip mark or a chat peak, snapped to the
-/// captions. Computed on read for the Orcle report, never stored.
+/// captions. Computed on read for the Golem report, never stored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipMoment {
@@ -5356,7 +5356,7 @@ pub struct AiCapabilitiesFeatures {
     #[serde(default)]
     pub clean_cut_enabled: bool,
     pub cloud_ai_enabled: bool,
-    /// The Orcle command route is on and its model configured (plan 140 S8,
+    /// The Golem command route is on and its model configured (plan 140 S8,
     /// contract part E). Older servers omit it: the parser stays off.
     #[serde(default)]
     pub cohost_command_enabled: bool,
@@ -6834,7 +6834,7 @@ mod tests {
             errored.detail,
             Some(crate::cohost::CohostErrorDetail {
                 code: "ai-gateway-error".to_string(),
-                message: "The Orcle tick failed on every configured model.".to_string(),
+                message: "The Golem tick failed on every configured model.".to_string(),
                 status: Some(502),
             })
         );
@@ -6912,7 +6912,7 @@ mod tests {
             Some(crate::cohost::CohostListening {
                 state: crate::cohost::CohostListeningState::Blocked,
                 reason_code: Some("listen-monthly-quota-exhausted".to_string()),
-                message: Some("Orcle's listening allowance for this month is used up.".to_string()),
+                message: Some("Golem's listening allowance for this month is used up.".to_string()),
                 remaining_seconds: Some(0),
             })
         );
@@ -7132,7 +7132,7 @@ mod tests {
         let mut without = base.clone();
         without.commands = None;
 
-        // Orcle off and on mid-stream: the counts add up.
+        // Golem off and on mid-stream: the counts add up.
         let merged = base.clone().merged_with(base.clone());
         let doubled = merged.commands.unwrap();
         assert_eq!(doubled.highlighted, counted.highlighted * 2);

@@ -1340,7 +1340,7 @@ pub async fn send_broadcast_chat_message(
 
 /// The hide reason the moderation engine shows after "Viewers on X still see it."
 pub const X_MODERATE_REAUTHORIZE_REASON: &str =
-    "Authorize X Live again to let Orcle remove messages.";
+    "Authorize X Live again to let Golem remove messages.";
 
 /// X chat message ids are snowflake-sized decimal strings. The relay's
 /// `messageId` is validated to this shape before it ever becomes a path

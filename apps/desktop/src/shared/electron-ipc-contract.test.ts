@@ -38,7 +38,7 @@ describe('Electron IPC contract', () => {
     // 121: plan 152 adds marker request/reply and capture context get/push.
     // 117: plan 151 added chat:open-link.
     // 125: plan 156 added the Activity auto-show switch channel (116: plan
-    // 140 S6 part B added the Orcle command answer pair; part A
+    // 140 S6 part B added the Golem command answer pair; part A
     // the chat removal relay pair; S5 the Stream
     // Manager's reconnect-scopes channel; plan 119 the in-app player's
     // media:grant-session; plan 095 the highlight card's avatars:read; plan 071
@@ -455,7 +455,7 @@ describe('Electron IPC contract', () => {
     expect(validateElectronInvokeResult('comments-window:moderation-result-push', true)).toBe(true)
   })
 
-  it('relays one answer to an Orcle command by id, nothing more (plan 140, S6 part B)', () => {
+  it('relays one answer to a Golem command by id, nothing more (plan 140, S6 part B)', () => {
     const choose = {
       requestId: 'r-1',
       sessionId: 'session-1',

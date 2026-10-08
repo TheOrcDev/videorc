@@ -37,7 +37,7 @@ const TONE_LABELS: Record<CohostTone, string> = {
 }
 
 /** "Show on stream automatically" (plan 060 D8): one three-way choice over the
- * two engine flags. `autoHighlight` keeps meaning Orcle's picks and
+ * two engine flags. `autoHighlight` keeps meaning Golem's picks and
  * `voiceHighlight` means what the streamer talks about. */
 export type CohostShowOnStreamMode = 'off' | 'voice' | 'voice-and-picks'
 
@@ -50,7 +50,7 @@ export const COHOST_SHOW_ON_STREAM_MODES: readonly CohostShowOnStreamMode[] = [
 export const COHOST_SHOW_ON_STREAM_LABELS: Record<CohostShowOnStreamMode, string> = {
   off: 'Off',
   voice: 'What I talk about',
-  'voice-and-picks': "What I talk about and Orcle's picks"
+  'voice-and-picks': "What I talk about and Golem's picks"
 }
 
 export const COHOST_SHOW_ON_STREAM_PATCHES: Record<
@@ -72,12 +72,12 @@ export function cohostShowOnStreamMode(
 }
 
 /**
- * Saving Orcle's settings (plan 119; Settings → Orcle before). Persisted per
+ * Saving Golem's settings (plan 119; Settings → Golem before). Persisted per
  * profile through `cohost.settings.get/set` (the engine reads the same row
  * when it builds a tick), NOT through local settings — so what the streamer
  * types here is what the model is given.
  *
- * Orcle Live's switch owns `enabled` and the Premium gate's call to action,
+ * Golem Live's switch owns `enabled` and the Premium gate's call to action,
  * so neither repeats here: a locked account sees these controls disabled.
  */
 function useCohostSettingsSave(lockedByTab = false): {
@@ -92,7 +92,7 @@ function useCohostSettingsSave(lockedByTab = false): {
   const save = (patch: CohostSettingsPatch): void => {
     setError(null)
     void patchCohostSettings(patch).catch((failure: unknown) =>
-      setError(failure instanceof Error ? failure.message : 'Could not save Orcle settings.')
+      setError(failure instanceof Error ? failure.message : 'Could not save Golem settings.')
     )
   }
   return {
@@ -114,14 +114,14 @@ function SaveError({ error }: { error: string | null }): ReactElement | null {
 }
 
 /**
- * "Orcle hears you while you're live" (plan 068), on the Orcle tab's Live tab
- * (plan 150): listening is part of what turning Orcle on means, so it sits
- * under Orcle Live's switch rather than with the reply settings.
+ * "Golem hears you while you're live" (plan 068), on the Golem tab's Live tab
+ * (plan 150): listening is part of what turning Golem on means, so it sits
+ * under Golem Live's switch rather than with the reply settings.
  */
 export function CohostListenField({
   locked: lockedByTab = false
 }: {
-  /** Orcle Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
+  /** Golem Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
   locked?: boolean
 } = {}): ReactElement | null {
   const { cohostSettings, locked, save, error } = useCohostSettingsSave(lockedByTab)
@@ -131,7 +131,7 @@ export function CohostListenField({
       <Field>
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 flex-col gap-0.5">
-            <FieldLabel htmlFor="cohost-listen">Orcle hears you while you&apos;re live</FieldLabel>
+            <FieldLabel htmlFor="cohost-listen">Golem hears you while you&apos;re live</FieldLabel>
             <p className="text-xs text-muted-foreground">{COHOST_LISTEN_CONSENT_SENTENCE}</p>
             <CohostListenAllowance />
           </div>
@@ -149,13 +149,13 @@ export function CohostListenField({
 }
 
 /**
- * Replies (plan 150, Chat tab): how Orcle drafts the replies you approve, and
+ * Replies (plan 150, Chat tab): how Golem drafts the replies you approve, and
  * the facts it answers from.
  */
 export function OrcleRepliesSection({
   locked: lockedByTab = false
 }: {
-  /** Orcle Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
+  /** Golem Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
   locked?: boolean
 } = {}): ReactElement | null {
   const { cohostSettings, locked, save, error } = useCohostSettingsSave(lockedByTab)
@@ -177,7 +177,7 @@ export function OrcleRepliesSection({
   const notesError = error
   return (
     <PanelSection
-      description="How Orcle drafts the replies you approve, and the facts it answers from."
+      description="How Golem drafts the replies you approve, and the facts it answers from."
       title="Replies"
     >
       <FieldGroup variant="grouped">
@@ -203,9 +203,9 @@ export function OrcleRepliesSection({
           </ToggleGroup>
         </Field>
         <Field>
-          <FieldLabel htmlFor="cohost-notes">Orcle notes</FieldLabel>
+          <FieldLabel htmlFor="cohost-notes">Golem notes</FieldLabel>
           <FieldDescription>
-            Facts Orcle answers from, one per line. For example:
+            Facts Golem answers from, one per line. For example:
             <br />
             <span className="text-subtle">Keyboard: Keychron Q1 with Boba U4T switches.</span>
             <br />
@@ -248,13 +248,13 @@ export function OrcleRepliesSection({
 }
 
 /**
- * Moderation (plan 150, Chat tab): what Orcle flags for you and what it may
- * put on stream. Orcle never acts on its own.
+ * Moderation (plan 150, Chat tab): what Golem flags for you and what it may
+ * put on stream. Golem never acts on its own.
  */
 export function OrcleModerationSection({
   locked: lockedByTab = false
 }: {
-  /** Orcle Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
+  /** Golem Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
   locked?: boolean
 } = {}): ReactElement | null {
   const { cohostSettings, locked, save, error } = useCohostSettingsSave(lockedByTab)
@@ -274,14 +274,14 @@ export function OrcleModerationSection({
   }
   return (
     <PanelSection
-      description="What Orcle flags for you, and what it may put on stream. Orcle never acts on its own."
+      description="What Golem flags for you, and what it may put on stream. Golem never acts on its own."
       title="Moderation"
     >
       <FieldGroup variant="grouped">
         <Field>
           <FieldLabel htmlFor="cohost-rule-new">Chat rules</FieldLabel>
           <FieldDescription>
-            Plain-language rules Orcle flags for you, like “no spoilers” or “English only”.
+            Plain-language rules Golem flags for you, like “no spoilers” or “English only”.
           </FieldDescription>
           {rules.length > 0 ? (
             <ul aria-label="Chat rules" className="flex flex-col gap-1.5">
@@ -356,7 +356,7 @@ export function OrcleModerationSection({
         <Field>
           <FieldLabel htmlFor="cohost-sensitivity">Flag sensitivity</FieldLabel>
           <FieldDescription>
-            How sure Orcle must be before a flag shows up. Relaxed shows only the clear cases,
+            How sure Golem must be before a flag shows up. Relaxed shows only the clear cases,
             Strict shows everything it noticed.
           </FieldDescription>
           <ToggleGroup
@@ -409,9 +409,9 @@ export function OrcleModerationSection({
             ))}
           </ToggleGroup>
           <FieldDescription className="flex flex-col gap-0.5">
-            <span>What I talk about needs Orcle to hear you (or live captions).</span>
+            <span>What I talk about needs Golem to hear you (or live captions).</span>
             <span>
-              Orcle&apos;s picks: at most one card every 45 seconds; nothing Orcle flagged is ever
+              Golem&apos;s picks: at most one card every 45 seconds; nothing Golem flagged is ever
               shown.
             </span>
           </FieldDescription>

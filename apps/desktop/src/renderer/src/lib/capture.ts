@@ -486,7 +486,7 @@ export const STORAGE_KEYS = {
   outputChosenByUser: 'videorc.outputChosenByUser',
   // The Settings tab used last (plan 064), so Settings reopens where it was left.
   settingsTab: 'videorc.settingsTab',
-  // The Orcle tab's own tab used last (plan 150), so Orcle reopens where it was left.
+  // The Golem tab's own tab used last (plan 150), so Golem reopens where it was left.
   orcleTab: 'videorc.orcleTab'
 } as const
 

@@ -135,7 +135,7 @@ function labels(items: HTMLElement[]): string[] {
   return items.map((item) => item.textContent?.trim() ?? '')
 }
 
-describe('Library → Orcle report (plan 119 S3)', () => {
+describe('Library → Golem report (plan 119 S3)', () => {
   it('says where files live', async () => {
     await render()
     expect(document.querySelector('[data-slot="page-header"]')?.textContent).toContain(
@@ -143,20 +143,20 @@ describe('Library → Orcle report (plan 119 S3)', () => {
     )
   })
 
-  it("opens a stream's report in the Orcle tab from the row menu, right after Play", async () => {
+  it("opens a stream's report in the Golem tab from the row menu, right after Play", async () => {
     await render()
     const items = await openMenu('stream-1')
-    expect(labels(items).slice(0, 2)).toEqual(['Play', 'Orcle report'])
+    expect(labels(items).slice(0, 2)).toEqual(['Play', 'Golem report'])
     await act(async () => items[1].click())
     expect(onOpenOrcleReport).toHaveBeenCalledExactlyOnceWith('stream-1')
 
     const streamOnly = await openMenu('stream-only')
-    expect(labels(streamOnly)).toContain('Orcle report')
+    expect(labels(streamOnly)).toContain('Golem report')
   })
 
   it('offers no report for a recording that never went live', async () => {
     await render()
-    expect(labels(await openMenu('recording-1'))).not.toContain('Orcle report')
+    expect(labels(await openMenu('recording-1'))).not.toContain('Golem report')
   })
 
   it('waits for the live stream to end: its report is saved then', async () => {
@@ -168,7 +168,7 @@ describe('Library → Orcle report (plan 119 S3)', () => {
     }
     await render()
     const report = (await openMenu('live-1')).find(
-      (item) => item.textContent?.trim() === 'Orcle report'
+      (item) => item.textContent?.trim() === 'Golem report'
     )
     expect(report?.hasAttribute('data-disabled')).toBe(true)
     await closeMenu()

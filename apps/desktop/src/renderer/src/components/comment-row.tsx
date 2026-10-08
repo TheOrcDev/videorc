@@ -172,7 +172,7 @@ export function RemovalStatus({
 }
 
 /**
- * What Orcle says about this comment. A flag names its kind (plus who it is
+ * What Golem says about this comment. A flag names its kind (plus who it is
  * aimed at, or the chat rule it broke) and, at most, LABELS a suggested
  * action: the flag itself never moderates; only the streamer's "Remove from
  * chat" does. "Suggested" marks a comment worth showing; it sits inside the
@@ -208,7 +208,7 @@ function CohostMarks({
     return (
       <Badge
         data-slot="cohost-comment-spotlight"
-        title="Orcle heard you talking about this message"
+        title="Golem heard you talking about this message"
         variant="outline"
       >
         <MicrophoneIcon aria-hidden data-icon="inline-start" weight="fill" />
@@ -220,7 +220,7 @@ function CohostMarks({
   return (
     <Badge
       data-slot="cohost-comment-suggested"
-      title="Orcle suggests showing this message on the stream"
+      title="Golem suggests showing this message on the stream"
       variant="outline"
     >
       <SparkleIcon aria-hidden data-icon="inline-start" weight="fill" />
@@ -877,7 +877,7 @@ export function CommentRow({
             highlight.phase === 'live'
               ? `Take ${message.authorName}'s message off the stream`
               : suggested
-                ? `Show ${message.authorName}'s message on the stream (Orcle suggestion)`
+                ? `Show ${message.authorName}'s message on the stream (Golem suggestion)`
                 : `Show ${message.authorName}'s message on the stream`
           }
           aria-pressed={highlight.phase === 'live'}

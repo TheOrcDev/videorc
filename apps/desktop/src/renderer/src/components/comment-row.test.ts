@@ -179,7 +179,7 @@ describe('CommentRow: Talking about this', () => {
     expect(markup).toContain('Talking about this')
     expect(markup).toContain('data-spotlight="true"')
     expect(markup).toContain('bg-accent')
-    // One Orcle mark at a time: the pull-up wins over the suggestion.
+    // One Golem mark at a time: the pull-up wins over the suggestion.
     expect(markup).not.toContain('data-slot="cohost-comment-suggested"')
   })
 

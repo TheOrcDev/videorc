@@ -136,7 +136,7 @@ export const IPC_INVOKE_ROLES = {
   // window asks (its handler refuses any other sender), Studio replies.
   'comments-window:moderation': MAIN_AND_COMMENTS,
   'comments-window:moderation-result-push': MAIN_ONLY,
-  // Answers to Orcle's voice command cards (plan 140, S6 part B).
+  // Answers to Golem's voice command cards (plan 140, S6 part B).
   'comments-window:cohost-command': MAIN_AND_COMMENTS,
   'comments-window:cohost-command-result-push': MAIN_ONLY,
   'captions-window:open': MAIN_ONLY,

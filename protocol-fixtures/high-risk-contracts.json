@@ -647,7 +647,7 @@
       "reason": "gateway-error",
       "detail": {
         "code": "ai-gateway-error",
-        "message": "The Orcle tick failed on every configured model.",
+        "message": "The Golem tick failed on every configured model.",
         "status": 502
       },
       "questions": [],
@@ -668,7 +668,7 @@
       "reason": "network",
       "detail": {
         "code": "timeout",
-        "message": "Orcle did not answer within 12 s.",
+        "message": "Golem did not answer within 12 s.",
         "status": null
       },
       "questions": [],
@@ -790,7 +790,7 @@
       "listening": {
         "state": "blocked",
         "reasonCode": "listen-monthly-quota-exhausted",
-        "message": "Orcle's listening allowance for this month is used up.",
+        "message": "Golem's listening allowance for this month is used up.",
         "remainingSeconds": 0
       },
       "topic": "Mechanical keyboards",

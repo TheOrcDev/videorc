@@ -2896,7 +2896,7 @@ pub async fn stop_live_chat(state: &AppState) -> LiveChatSnapshot {
     .await
 }
 
-/// `session.stop`: the chat session ends with the capture. Orcle stops too,
+/// `session.stop`: the chat session ends with the capture. Golem stops too,
 /// but a listen-only transcription task drains with the capture so the
 /// stream's last words still reach its SRT and Clip that (plan 068 review).
 pub async fn stop_live_chat_for_capture_end(state: &AppState) -> LiveChatSnapshot {
@@ -3190,7 +3190,7 @@ async fn mark_first_time_chatters(
 }
 
 /// Turn 7TV emote names into image fragments (plan 089) before the buffer,
-/// SQLite, the renderer, the phone and Orcle see the message, so they all
+/// SQLite, the renderer, the phone and Golem see the message, so they all
 /// agree. A pure lookup in the session's loaded index, outside every fence;
 /// it never touches the network.
 async fn decorate_seventv_emotes(
@@ -7238,7 +7238,7 @@ mod tests {
         );
     }
 
-    /// Plan 068 review, finding 2: `session.stop` retires chat and Orcle, but
+    /// Plan 068 review, finding 2: `session.stop` retires chat and Golem, but
     /// a listen-only transcription task drains with the capture (its last
     /// words reach the SRT and Clip that); with no capture running, or on an
     /// explicit `liveChat.stop`, it ends at once.

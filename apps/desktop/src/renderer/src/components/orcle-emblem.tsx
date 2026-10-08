@@ -5,8 +5,8 @@ import emblem112Url from '@/assets/orcle/orcle-emblem-112.webp'
 import { cn } from '@/lib/utils'
 
 /**
- * Orcle's emblem (plan 149): the cybernetic orc eye in full colour, shown
- * large in two places, the Orcle tab header and the Orcle Live consent
+ * Golem's emblem (plan 149): the cybernetic orc eye in full colour, shown
+ * large in two places, the Golem tab header and the Golem Live consent
  * dialog. Icon slots show the same image through `OrcleIcon`.
  *
  * Each size ships its 2× file and lets the browser scale it down on 1×
@@ -26,7 +26,7 @@ export function OrcleEmblem({
   className
 }: {
   size?: OrcleEmblemSize
-  /** Empty (decorative) by default: the text beside it names Orcle. */
+  /** Empty (decorative) by default: the text beside it names Golem. */
   alt?: string
   className?: string
 }): ReactElement {

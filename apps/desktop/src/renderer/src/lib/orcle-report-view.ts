@@ -16,18 +16,18 @@ import { dayLabel, durationMsLabel } from './format'
 import { CHAT_PLATFORM_LABELS } from './live-chat-view'
 import { formatClipMarkClock } from '../../../shared/clip-marks'
 
-// The Orcle tab's stream report (plan 119 S3): what Orcle caught in one
+// The Golem tab's stream report (plan 119 S3): what Golem caught in one
 // stream, from `cohost.report.get` / `cohost.report.latest`. Everything here
 // is a pure derivation of that payload and the Library's session row, so the
 // card and its tests cannot disagree about a count.
 
 /** The website's line for the report, word for word (plan 119 S5). */
 export const ORCLE_REPORT_DESCRIPTION =
-  'Orcle saves a short report on your computer: questions caught and missed, flags, promises, first-timers greeted, and the moments you marked by saying clip that.'
+  'Golem saves a short report on your computer: questions caught and missed, flags, promises, first-timers greeted, and the moments you marked by saying clip that.'
 
-export const ORCLE_REPORT_EMPTY = 'The report appears here after your first stream with Orcle.'
-export const ORCLE_REPORT_OFF = 'Orcle was off for this stream.'
-export const ORCLE_REPORT_TURN_ON = 'Turn on Orcle to also catch questions.'
+export const ORCLE_REPORT_EMPTY = 'The report appears here after your first stream with Golem.'
+export const ORCLE_REPORT_OFF = 'Golem was off for this stream.'
+export const ORCLE_REPORT_TURN_ON = 'Turn on Golem to also catch questions.'
 export const ORCLE_REPORT_NEXT_STREAM = 'It joins your next stream.'
 export const ORCLE_REPORT_UNTITLED = 'Untitled stream'
 
@@ -164,15 +164,15 @@ export type OrcleReportView =
       date: string | null
       duration: string | null
       chat: OrcleReportChatView
-      /** Empty when Orcle was off. */
+      /** Empty when Golem was off. */
       stats: OrcleReportStat[]
-      /** Orcle-off only: why nothing was caught, and what to do about it. */
+      /** Golem-off only: why nothing was caught, and what to do about it. */
       note: { title: string; hint: string } | null
       missed: OrcleReportQuestionRow[]
       promises: OrcleReportPromiseRow[]
       moments: OrcleReportMomentRow[]
       alerts: OrcleReportAlertRow[]
-      /** Plan 140 S3: null when no voice command was counted (or Orcle was off). */
+      /** Plan 140 S3: null when no voice command was counted (or Golem was off). */
       commands: OrcleReportCommandsView | null
     }
 
@@ -181,7 +181,7 @@ export interface OrcleReportViewInput {
   payload: CohostReportPayload | null
   /** The Library row of the payload's session, when the loaded list has it. */
   session: Pick<SessionSummary, 'id' | 'title' | 'startedAt' | 'durationMs'> | null
-  /** Orcle Live's stored switch, for what the Orcle-off note asks for. */
+  /** Golem Live's stored switch, for what the Golem-off note asks for. */
   orcleOn: boolean
 }
 

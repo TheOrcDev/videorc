@@ -29,7 +29,7 @@
 //!
 //! Both outcomes below write a tombstone over the original row through the
 //! normal inbound path (`try_deliver_messages`), which persists it, redacts the
-//! text, clears the on-stream card and tells Orcle. The row keeps its app id;
+//! text, clears the on-stream card and tells Golem. The row keeps its app id;
 //! `isDeleted` is true and `eventType` is `deleted` in both cases. They differ
 //! in `rawProviderType` and `messageText`:
 //!
@@ -66,13 +66,13 @@ use crate::streaming::{StreamPlatform, stream_platform_label};
 /// Event name for every change of a `ModerationOperation`. Never a LAN event.
 pub const MODERATION_OPERATION_EVENT: &str = "liveChat.moderationOperation";
 
-/// How long an Orcle removal card waits for an answer in confirm mode.
+/// How long a Golem removal card waits for an answer in confirm mode.
 #[cfg(not(test))]
 pub const CONFIRM_WINDOW: Duration = Duration::from_secs(20);
 #[cfg(test)]
 pub const CONFIRM_WINDOW: Duration = Duration::from_millis(250);
 
-/// The opt-in countdown before an unanswered Orcle removal runs.
+/// The opt-in countdown before an unanswered Golem removal runs.
 #[cfg(not(test))]
 pub const COUNTDOWN: Duration = Duration::from_secs(5);
 #[cfg(test)]
@@ -91,7 +91,7 @@ pub const RATE_LIMIT_PER_MINUTE: usize = 10;
 pub const LIST_LIMIT: usize = 200;
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 
-/// Audit excerpt and reason caps (UTF-16 units, like the Orcle copy caps).
+/// Audit excerpt and reason caps (UTF-16 units, like the Golem copy caps).
 pub const EXCERPT_MAX_UNITS: usize = 140;
 pub const REASON_MAX_UNITS: usize = 40;
 
@@ -111,7 +111,7 @@ pub const HIDDEN_PROVIDER_TYPE: &str = "videorc.hidden";
 
 /// The kill switch's user-facing line (contract part D).
 pub const REMOVE_PAUSED_MESSAGE: &str = "Removing messages is paused by Videorc.";
-pub const PREMIUM_REQUIRED_MESSAGE: &str = "Orcle requires Videorc Premium.";
+pub const PREMIUM_REQUIRED_MESSAGE: &str = "Golem requires Videorc Premium.";
 
 /// Restart sweep outcomes (storage writes them; the renderer shows them).
 pub const RESTART_CANCELLED_OUTCOME: &str =
@@ -273,7 +273,7 @@ impl std::fmt::Display for ModerationRefusal {
 }
 
 /// What one provider delete attempt came back with. Providers return the
-/// actionable tail of a hide reason ("Reconnect Twitch to let Orcle remove
+/// actionable tail of a hide reason ("Reconnect Twitch to let Golem remove
 /// messages."); the engine prefixes the "Hidden in Videorc" sentence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderDeleteOutcome {
@@ -900,7 +900,7 @@ fn spawn_timer(
 }
 
 /// Run one `executing` operation to its terminal phase: gates, the provider
-/// call with its bounded retry, the local tombstone and the Orcle flag.
+/// call with its bounded retry, the local tombstone and the Golem flag.
 async fn run_execution(
     state: &AppState,
     mut operation: ModerationOperation,
@@ -990,7 +990,7 @@ async fn run_execution(
             ),
             StreamPlatform::Youtube | StreamPlatform::Twitch | StreamPlatform::Kick => (
                 ModerationOutcomeCode::MissingScope,
-                format!("Reconnect {label} to let Orcle remove messages."),
+                format!("Reconnect {label} to let Golem remove messages."),
             ),
             _ => (
                 ModerationOutcomeCode::Unsupported,
@@ -1106,7 +1106,7 @@ async fn run_execution(
 }
 
 /// The platform deleted it (or never had it): tombstone the row as
-/// "Removed by you" and resolve the Orcle flag.
+/// "Removed by you" and resolve the Golem flag.
 async fn mark_removed(
     state: &AppState,
     mut operation: ModerationOperation,
@@ -1224,7 +1224,7 @@ async fn delete_once(
             let Some(credentials) = crate::x_live::x_livestream_credentials().ok().flatten() else {
                 return ProviderDeleteOutcome::CannotDelete {
                     code: ModerationOutcomeCode::MissingScope,
-                    reason: "Authorize X Live to let Orcle remove messages.".to_string(),
+                    reason: "Authorize X Live to let Golem remove messages.".to_string(),
                 };
             };
             crate::x_live::delete_broadcast_chat_message(
@@ -1256,7 +1256,7 @@ fn fake_scripted_delete(
         FakeChatDeleteBehavior::MissingScope => ProviderDeleteOutcome::CannotDelete {
             code: ModerationOutcomeCode::MissingScope,
             reason: format!(
-                "Reconnect {} to let Orcle remove messages.",
+                "Reconnect {} to let Golem remove messages.",
                 stream_platform_label(platform)
             ),
         },
@@ -1605,9 +1605,9 @@ mod tests {
         assert_eq!(
             hidden_outcome(
                 StreamPlatform::Twitch,
-                "Reconnect Twitch to let Orcle remove messages."
+                "Reconnect Twitch to let Golem remove messages."
             ),
-            "Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Orcle remove messages."
+            "Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Golem remove messages."
         );
     }
 
@@ -2241,7 +2241,7 @@ mod tests {
         assert_eq!(
             operation.outcome.as_deref(),
             Some(
-                "Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Orcle remove messages."
+                "Hidden in Videorc. Viewers on Twitch still see it. Reconnect Twitch to let Golem remove messages."
             )
         );
         assert_eq!(
@@ -2738,7 +2738,7 @@ mod tests {
             fake_scripted_delete(FakeChatDeleteBehavior::MissingScope, StreamPlatform::Kick),
             ProviderDeleteOutcome::CannotDelete {
                 code: ModerationOutcomeCode::MissingScope,
-                reason: "Reconnect Kick to let Orcle remove messages.".to_string(),
+                reason: "Reconnect Kick to let Golem remove messages.".to_string(),
             }
         );
     }

@@ -157,7 +157,7 @@ pub const YOUTUBE_MODERATE_PAUSED_REASON: &str =
 pub const YOUTUBE_MODERATE_SHED_REASON: &str =
     "YouTube removals are paused for today to save Videorc's daily YouTube limit.";
 pub const YOUTUBE_MODERATE_RECONNECT_REASON: &str =
-    "Reconnect YouTube to let Orcle remove messages.";
+    "Reconnect YouTube to let Golem remove messages.";
 
 /// Remove one message from the broadcast's live chat (plan 140 S4):
 /// `DELETE /youtube/v3/liveChat/messages?id=` answers 204. The already-held

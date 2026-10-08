@@ -98,7 +98,7 @@ export function CohostStatus({
         <PopoverHeader>
           <PopoverTitle className="flex items-center gap-2 text-sm">
             <OrcleIcon aria-hidden className="size-4 shrink-0" weight="duotone" />
-            Orcle
+            Golem
           </PopoverTitle>
           <PopoverDescription>
             Groups the questions your chat is repeating and drafts a reply for each. Nothing sends
@@ -140,11 +140,11 @@ export function CohostStatus({
             ) : null}
           </div>
         ) : (
-          // Orcle Live's one switch (plan 119): on means Orcle reads chat and
-          // hears you, the same as the Orcle tab's switch.
+          // Golem Live's one switch (plan 119): on means Golem reads chat and
+          // hears you, the same as the Golem tab's switch.
           <div className="flex items-center gap-3">
             <Label className="min-w-0 flex-1 text-xs font-normal" htmlFor="cohost-status-enable">
-              Orcle joins my streams
+              Golem joins my streams
             </Label>
             <Switch
               checked={enabled}
@@ -232,8 +232,8 @@ export function CohostPresenceDot({
 }
 
 /**
- * Whether Orcle hears the streamer (plan 068): a microphone and a few words
- * beside Orcle's status, nothing at all while listening is off. The icon
+ * Whether Golem hears the streamer (plan 068): a microphone and a few words
+ * beside Golem's status, nothing at all while listening is off. The icon
  * carries the tone (green on, amber blocked) and the words stay chrome; in a
  * tight header only the icon shows and the words move to the tooltip.
  */
