@@ -597,6 +597,7 @@ mod tests {
             text: text.to_string(),
             state: CohostUtteranceState::Laugh,
             enabled: true,
+            reaction: None,
         }
     }
 

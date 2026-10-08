@@ -36,6 +36,14 @@ extraResources:
     to: background-assets/bundled
     filter:
       - '*.webp'
+  # Plan 168 D3: shipped Golem pet packs (`bundled:<name>` = `<name>/`), the
+  # read-only second VIDEORC_MANAGED_GOLEM_ROOTS entry. Pack files only.
+  - from: resources/golem
+    to: golem-assets/bundled
+    filter:
+      - '**/*'
+      - '!.gitkeep'
+      - '!README.md'
 
 mac:
   category: public.app-category.video

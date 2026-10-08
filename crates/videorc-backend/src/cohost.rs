@@ -14,7 +14,7 @@
 //! recording (plan 119 decision 6). It never holds chat text beyond the
 //! question wording, and nothing of it reaches a server.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -33,6 +33,7 @@ use crate::cohost_command::{
     CommandKind, CommandSession, CommandTarget, DetectContext, DetectedCommand, is_command_word,
 };
 use crate::comment_highlight::{CommentHighlightPhase, CommentHighlightState};
+pub use crate::golem_pet::{GolemAvatar, GolemMotionSettings, GolemTrigger};
 use crate::live_chat::{
     LiveChatEventType, LiveChatMessage, LiveChatMessageFragment, comments_destination_id,
 };
@@ -589,6 +590,17 @@ pub struct CohostPersona {
     pub images: CohostPersonaImages,
     #[serde(default)]
     pub source: CohostPersonaSource,
+    /// Still or Alive (plan 168 D2). `default` so a row from before plan 168
+    /// loads as Still.
+    #[serde(default)]
+    pub avatar: GolemAvatar,
+    /// How the Golem moves on air (plan 168 D10, D13, D15).
+    #[serde(default)]
+    pub motion: GolemMotionSettings,
+    /// Per-trigger reaction overrides (plan 168 D14); a reaction id or
+    /// `none`. Absent triggers use D14's defaults.
+    #[serde(default)]
+    pub reactions: BTreeMap<GolemTrigger, String>,
 }
 
 impl Default for CohostPersona {
@@ -600,6 +612,9 @@ impl Default for CohostPersona {
             bubble_style: CohostBubbleStyle::Speech,
             images: CohostPersonaImages::default(),
             source: CohostPersonaSource::Default,
+            avatar: GolemAvatar::Still,
+            motion: GolemMotionSettings::default(),
+            reactions: BTreeMap::new(),
         }
     }
 }
@@ -725,6 +740,11 @@ pub struct CohostGreetingTemplate {
     pub state: CohostUtteranceState,
     #[serde(default)]
     pub enabled: bool,
+    /// The reaction this greeting plays (plan 168 D14): a reaction id of the
+    /// persona's pack, or `none`; it wins over the trigger's. Absent, never
+    /// null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reaction: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -851,6 +871,9 @@ pub(crate) fn validate_persona(persona: &CohostPersona) -> Result<CohostPersona,
             ));
         }
     }
+    crate::golem_pet::validate_avatar(&valid.avatar)?;
+    crate::golem_pet::validate_motion(&valid.motion)?;
+    crate::golem_pet::validate_reactions(&valid.reactions)?;
     Ok(valid)
 }
 
@@ -876,6 +899,15 @@ pub(crate) fn validate_auto_chat(auto_chat: &CohostAutoChat) -> Result<CohostAut
             return Err(format!(
                 "A greeting is at most {COHOST_GREETING_TEXT_MAX_CHARS} characters."
             ));
+        }
+        if template
+            .reaction
+            .as_deref()
+            .is_some_and(|reaction| !crate::golem_pet::reaction_id_ok(reaction))
+        {
+            return Err(
+                "A greeting's reaction is 1 to 40 lowercase letters, digits or dashes.".to_string(),
+            );
         }
     }
     for (label, behaviour) in [("answers", &valid.answers), ("banter", &valid.banter)] {
@@ -13400,6 +13432,19 @@ mod tests {
                     ..CohostPersonaImages::default()
                 },
                 source: CohostPersonaSource::Uploaded,
+                avatar: GolemAvatar::Alive {
+                    pack_id: "0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a".to_string(),
+                },
+                motion: GolemMotionSettings {
+                    intensity: 0.8,
+                    sleep_after_seconds: 0,
+                    breathing: false,
+                },
+                reactions: BTreeMap::from([
+                    (GolemTrigger::Follow, "wave".to_string()),
+                    (GolemTrigger::DestinationFailed, "worried".to_string()),
+                    (GolemTrigger::Tip, "none".to_string()),
+                ]),
             }),
             auto_chat: Some(CohostAutoChat {
                 mode: CohostAutoChatMode::Suggest,
@@ -13412,6 +13457,7 @@ mod tests {
                         text: "Welcome to the horde, {name}".to_string(),
                         state: CohostUtteranceState::Laugh,
                         enabled: true,
+                        reaction: Some("proud".to_string()),
                     }],
                 },
                 answers: CohostCooldownBehaviour {
@@ -13433,6 +13479,28 @@ mod tests {
         assert_eq!(json["persona"]["images"]["idle"], "p-1/idle.png");
         // Absent states are omitted, never null (the renderer contract).
         assert!(json["persona"]["images"].get("talk").is_none());
+        // Plan 168 D2: the avatar rides as a tagged object.
+        assert_eq!(
+            json["persona"]["avatar"],
+            serde_json::json!({ "kind": "alive", "packId": "0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a" })
+        );
+        // Plan 168 D10, D14: motion and the reaction overrides round-trip.
+        assert_eq!(
+            json["persona"]["motion"],
+            serde_json::json!({ "intensity": 0.8, "sleepAfterSeconds": 0, "breathing": false })
+        );
+        assert_eq!(
+            json["persona"]["reactions"],
+            serde_json::json!({ "follow": "wave", "tip": "none", "destination-failed": "worried" })
+        );
+        assert_eq!(
+            json["autoChat"]["greetings"]["templates"][0]["reaction"],
+            "proud"
+        );
+        // A row from before plan 168 loads Still with the default motion.
+        assert_eq!(loaded.persona.avatar, GolemAvatar::Still);
+        assert_eq!(loaded.persona.motion, GolemMotionSettings::default());
+        assert!(loaded.persona.reactions.is_empty());
         assert_eq!(json["autoChat"]["mode"], "suggest");
         assert_eq!(
             json["autoChat"]["greetings"]["templates"][0]["kind"],
@@ -13477,6 +13545,48 @@ mod tests {
         assert!(validate_persona(&bad_path).is_err());
         bad_path.images.idle = Some("p-1/idle.png".to_string());
         assert!(validate_persona(&bad_path).is_ok());
+        // Plan 168: an Alive avatar names a uuid or a bundled pack.
+        for good in ["0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a", "bundled:golem"] {
+            bad_path.avatar = GolemAvatar::Alive {
+                pack_id: good.to_string(),
+            };
+            assert!(validate_persona(&bad_path).is_ok(), "{good}");
+        }
+        let mut moving = persona("Grum", "");
+        moving.motion.intensity = 1.5;
+        assert_eq!(
+            validate_persona(&moving).unwrap_err(),
+            "Motion is between 0 and 1."
+        );
+        moving.motion = GolemMotionSettings {
+            sleep_after_seconds: 10,
+            ..GolemMotionSettings::default()
+        };
+        assert!(validate_persona(&moving).is_err());
+        moving.motion = GolemMotionSettings::default();
+        moving
+            .reactions
+            .insert(GolemTrigger::Raid, "Big Wave".to_string());
+        assert!(validate_persona(&moving).is_err());
+        moving
+            .reactions
+            .insert(GolemTrigger::Raid, "surprised".to_string());
+        assert!(validate_persona(&moving).is_ok());
+        for bad in [
+            "../x",
+            "bundled:",
+            "0B1E9F0E-6C8A-4C55-9A3F-3F6D2B1C4E5A",
+            "",
+        ] {
+            bad_path.avatar = GolemAvatar::Alive {
+                pack_id: bad.to_string(),
+            };
+            assert_eq!(
+                validate_persona(&bad_path).unwrap_err(),
+                "The avatar's pack id is not a pack id.",
+                "{bad}"
+            );
+        }
         let refused = CohostSettings::validated_patch(CohostSettingsPatch {
             persona: Some(persona("", "")),
             ..CohostSettingsPatch::default()
@@ -13491,6 +13601,7 @@ mod tests {
             text: text.to_string(),
             state: CohostUtteranceState::Talk,
             enabled: true,
+            reaction: None,
         };
         let auto_chat = |templates: Vec<CohostGreetingTemplate>| CohostAutoChat {
             greetings: CohostGreetingsSettings {
@@ -13513,6 +13624,22 @@ mod tests {
         );
         assert!(validate_auto_chat(&auto_chat(vec![template(&"x".repeat(201))])).is_err());
         assert!(validate_auto_chat(&auto_chat(vec![template("hi"); 61])).is_err());
+        // Plan 168 D14: a greeting's reaction is a plain reaction id.
+        for (reaction, ok) in [
+            ("laugh", true),
+            ("none", true),
+            ("talk-a", true),
+            ("Laugh", false),
+            ("", false),
+        ] {
+            let mut with_reaction = template("hi");
+            with_reaction.reaction = Some(reaction.to_string());
+            assert_eq!(
+                validate_auto_chat(&auto_chat(vec![with_reaction])).is_ok(),
+                ok,
+                "{reaction}"
+            );
+        }
         let refused = CohostSettings::validated_patch(CohostSettingsPatch {
             auto_chat: Some(auto_chat(vec![template("")])),
             ..CohostSettingsPatch::default()
@@ -19026,6 +19153,7 @@ mod tests {
                     text: "Welcome {name}!".to_string(),
                     state: CohostUtteranceState::Talk,
                     enabled: true,
+                    reaction: None,
                 }],
             },
             answers: CohostCooldownBehaviour {

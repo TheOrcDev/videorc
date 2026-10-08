@@ -27,8 +27,17 @@ import type {
   CohostAvatarGenerateParams,
   CohostAvatarGeneratedEvent,
   CohostPersona,
+  CohostPetImportParams,
+  CohostPetReactAccepted,
+  CohostPetReactParams,
+  CohostPetRemoveParams,
+  CohostPetRemoved,
   CohostSettings,
   CohostSettingsPatch,
+  GolemAvatar,
+  GolemMotionSettings,
+  GolemPetSummary,
+  GolemReactionTable,
   MigrateHighlightAnchorParams,
   OverlayLayout,
   GolemOverlaySnapshot,
@@ -129,6 +138,12 @@ import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { sessionChatIdentifierSchema, sessionChatTotalsSchema } from './session-chat-totals'
 import { LAYOUT_PRESET_VALUES } from './backend'
 import { TWITCH_GIF_MODES } from './chat-gif'
+import { isGolemPackId } from './golem-assets'
+import {
+  GOLEM_SLEEP_AFTER_MAX_SECONDS,
+  GOLEM_SLEEP_AFTER_MIN_SECONDS,
+  isGolemReactionId
+} from './golem-pet'
 import {
   arraySchema,
   boundedJsonValueSchema,
@@ -343,6 +358,12 @@ export interface BackendRpcMethodMap {
   'cohost.golem.status': BackendRpcDefinition<undefined, GolemOverlaySnapshot>
   'golem.overlay.set': BackendRpcDefinition<SetGolemOverlayParams, OverlayTargetsInfo>
   // --- end Golem overlay (plan 164) ---
+  // --- Golem pets (plan 168, Phase A) ---
+  'cohost.pet.list': BackendRpcDefinition<undefined, GolemPetSummary[]>
+  'cohost.pet.import': BackendRpcDefinition<CohostPetImportParams, GolemPetSummary>
+  'cohost.pet.remove': BackendRpcDefinition<CohostPetRemoveParams, CohostPetRemoved>
+  'cohost.pet.react': BackendRpcDefinition<CohostPetReactParams, CohostPetReactAccepted>
+  // --- end Golem pets (plan 168, Phase A) ---
   'cohost.report.get': BackendRpcDefinition<CohostReportGetParams, CohostReportPayload>
   'cohost.report.latest': BackendRpcDefinition<undefined, CohostReportPayload | null>
   'liveChat.emotes.get': BackendRpcDefinition<undefined, ChatEmotesSettings>
@@ -2198,6 +2219,63 @@ const cohostRulesSchema = arraySchema(stringSchema({ maxLength: 120 }), { maxLen
 // validate the same bounds; image paths and template ids are plain strings
 // the backend checks for shape.
 const cohostPersonaImagePathSchema = stringSchema({ minLength: 1, maxLength: 256 })
+// --- Golem pets (plan 168, Phase A) ---
+// A pack id is a lowercase uuid (the persona's own) or `bundled:<name>`.
+const golemPackIdSchema = runtimeSchema<string>(
+  'a pack id (a uuid or bundled:<name>)',
+  (value, path) => {
+    if (!isGolemPackId(value)) {
+      throw new RuntimeSchemaError(path, 'a pack id (a uuid or bundled:<name>)')
+    }
+    return value
+  }
+)
+const golemAvatarSchema = unionSchema([
+  objectSchema({ kind: literalSchema('still') }, { allowUnknown: false }),
+  objectSchema({ kind: literalSchema('alive'), packId: golemPackIdSchema }, { allowUnknown: false })
+]) as RuntimeSchema<GolemAvatar>
+// A reaction id a persona may name: 1 to 40 of [a-z0-9-] (`none` included).
+const golemReactionIdSchema = runtimeSchema<string>(
+  'a reaction id (1 to 40 lowercase letters, digits or dashes)',
+  (value, path) => {
+    if (!isGolemReactionId(value)) {
+      throw new RuntimeSchemaError(
+        path,
+        'a reaction id (1 to 40 lowercase letters, digits or dashes)'
+      )
+    }
+    return value
+  }
+)
+const golemMotionSchema = objectSchema(
+  {
+    intensity: numberSchema({ min: 0, max: 1 }),
+    sleepAfterSeconds: unionSchema([
+      literalSchema(0),
+      numberSchema({
+        integer: true,
+        min: GOLEM_SLEEP_AFTER_MIN_SECONDS,
+        max: GOLEM_SLEEP_AFTER_MAX_SECONDS
+      })
+    ]),
+    breathing: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<GolemMotionSettings>
+const golemReactionTableSchema = objectSchema(
+  {
+    follow: optionalSchema(golemReactionIdSchema),
+    subscription: optionalSchema(golemReactionIdSchema),
+    gift: optionalSchema(golemReactionIdSchema),
+    tip: optionalSchema(golemReactionIdSchema),
+    raid: optionalSchema(golemReactionIdSchema),
+    'watch-streak': optionalSchema(golemReactionIdSchema),
+    redemption: optionalSchema(golemReactionIdSchema),
+    'destination-failed': optionalSchema(golemReactionIdSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<GolemReactionTable>
+// --- end Golem pets (plan 168, Phase A) ---
 const cohostPersonaSchema = objectSchema(
   {
     id: stringSchema({ minLength: 1, maxLength: 128 }),
@@ -2213,7 +2291,12 @@ const cohostPersonaSchema = objectSchema(
       },
       { allowUnknown: false }
     ),
-    source: enumSchema(['default', 'uploaded', 'generated'])
+    source: enumSchema(['default', 'uploaded', 'generated']),
+    // Plan 168 D2, D10, D14: the backend always sends these; a patch
+    // carries the whole persona.
+    avatar: golemAvatarSchema,
+    motion: golemMotionSchema,
+    reactions: golemReactionTableSchema
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostPersona>
@@ -2239,7 +2322,9 @@ const cohostGreetingTemplateSchema = objectSchema(
     platform: optionalSchema(enumSchema(['twitch', 'youtube', 'kick', 'x'])),
     text: stringSchema({ minLength: 1, maxLength: 200 }),
     state: enumSchema(['talk', 'laugh', 'think']),
-    enabled: booleanSchema
+    enabled: booleanSchema,
+    // Plan 168 D14: absent, never null.
+    reaction: optionalSchema(golemReactionIdSchema)
   },
   { allowUnknown: false }
 )
@@ -2301,6 +2386,36 @@ const cohostSettingsPatchSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSettingsPatch>
+// --- Golem pets (plan 168, Phase A) ---
+const golemPetSummarySchema = objectSchema(
+  {
+    packId: golemPackIdSchema,
+    name: stringSchema({ minLength: 1, maxLength: 64 }),
+    cellSize: numberSchema({ integer: true, min: 128, max: 1024 }),
+    gazeCount: numberSchema({ integer: true, min: 1, max: 64 }),
+    reactions: arraySchema(stringSchema({ minLength: 1, maxLength: 64 }), { maxLength: 64 }),
+    source: enumSchema(['videorc-creator', 'page-pet-import', 'still']),
+    hasTalk: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<GolemPetSummary>
+const cohostPetImportParamsSchema = objectSchema(
+  { folderToken: stringSchema({ minLength: 1, maxLength: 256 }) },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostPetImportParams>
+const cohostPetRemoveParamsSchema = objectSchema(
+  { packId: golemPackIdSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostPetRemoveParams>
+const cohostPetRemovedSchema = objectSchema(
+  { packId: golemPackIdSchema, settings: cohostSettingsSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostPetRemoved>
+const cohostPetReactionSchema = objectSchema(
+  { reaction: stringSchema({ minLength: 1, maxLength: 64 }) },
+  { allowUnknown: false }
+)
+// --- end Golem pets (plan 168, Phase A) ---
 // --- Overlay layout (plan 164) ---
 const overlayRectSchema = objectSchema(
   {
@@ -3571,6 +3686,18 @@ const runtimeContracts = {
   'cohost.golem.status': { params: undefinedSchema, result: golemOverlaySnapshotSchema },
   'golem.overlay.set': { params: setGolemOverlayParamsSchema, result: overlayTargetsInfoSchema },
   // --- end Golem overlay (plan 164) ---
+  // --- Golem pets (plan 168, Phase A) ---
+  'cohost.pet.list': {
+    params: undefinedSchema,
+    result: arraySchema(golemPetSummarySchema, { maxLength: 256 })
+  },
+  'cohost.pet.import': { params: cohostPetImportParamsSchema, result: golemPetSummarySchema },
+  'cohost.pet.remove': { params: cohostPetRemoveParamsSchema, result: cohostPetRemovedSchema },
+  'cohost.pet.react': {
+    params: cohostPetReactionSchema as RuntimeSchema<CohostPetReactParams>,
+    result: cohostPetReactionSchema as RuntimeSchema<CohostPetReactAccepted>
+  },
+  // --- end Golem pets (plan 168, Phase A) ---
   'liveChat.emotes.get': { params: undefinedSchema, result: chatEmotesSettingsSchema },
   'liveChat.emotes.set': {
     params: chatEmotesSettingsPatchSchema,

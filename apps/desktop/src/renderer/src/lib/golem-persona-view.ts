@@ -1,5 +1,6 @@
 import type { AiCapabilities, CohostAvatarState, CohostBubbleStyle, CohostPersona } from './backend'
 import type { EntitlementUiGate } from './entitlement-ui'
+import { GOLEM_MOTION_DEFAULTS } from '../../../shared/golem-pet'
 
 // The Golem creation screen (plan 164 S-A4): pure derivations the section
 // and its tests share.
@@ -101,7 +102,10 @@ export function freshGolemPersona(id: string): CohostPersona {
     personality: '',
     bubbleStyle: 'speech',
     images: {},
-    source: 'default'
+    source: 'default',
+    avatar: { kind: 'still' },
+    motion: { ...GOLEM_MOTION_DEFAULTS },
+    reactions: {}
   }
 }
 

@@ -63,7 +63,9 @@ export const AUXILIARY_API_KEYS = {
     'sendCohostAction',
     // Answers to Golem's voice command cards (plan 140, S6 part B).
     'sendCohostCommand',
-    'sendCohostEnable'
+    'sendCohostEnable',
+    // The Golem pane's living preview reads its pet pack (plan 168 Phase D).
+    'readGolemPetFile'
   ],
   captions: [
     'getCaptionsWindowState',
