@@ -76,7 +76,13 @@ const TWITCH_SCOPES = [
 ]
 const TWITCH_AUDIENCE = ['moderator:read:followers', 'channel:read:subscriptions']
 const TWITCH_MODERATION = 'moderator:manage:chat_messages'
-const TWITCH_ALL_SCOPES = [...TWITCH_SCOPES, ...TWITCH_AUDIENCE, TWITCH_MODERATION]
+const TWITCH_BITS_POINTS = ['bits:read', 'channel:read:redemptions']
+const TWITCH_ALL_SCOPES = [
+  ...TWITCH_SCOPES,
+  ...TWITCH_AUDIENCE,
+  TWITCH_MODERATION,
+  ...TWITCH_BITS_POINTS
+]
 const KICK_SCOPES = [
   'user:read',
   'channel:read',
@@ -260,7 +266,9 @@ describe('DestinationCard signed-in account', () => {
   it('keeps the Twitch follower permission prompt, in fewer words', () => {
     const markup = render({
       target: target('twitch'),
-      account: account('twitch', { scopes: [...TWITCH_SCOPES, TWITCH_MODERATION] }),
+      account: account('twitch', {
+        scopes: [...TWITCH_SCOPES, TWITCH_MODERATION, ...TWITCH_BITS_POINTS]
+      }),
       validation: validation('twitch', 'valid')
     })
     expect(markup).toContain('Follow alerts and sub count need one more Twitch permission.')
@@ -313,7 +321,9 @@ describe('DestinationCard Remove messages permission (plan 140, S5)', () => {
   it('asks a Twitch account without the moderation scope to reconnect, naming Orcle', () => {
     const markup = render({
       target: target('twitch'),
-      account: account('twitch', { scopes: [...TWITCH_SCOPES, ...TWITCH_AUDIENCE] }),
+      account: account('twitch', {
+        scopes: [...TWITCH_SCOPES, ...TWITCH_AUDIENCE, ...TWITCH_BITS_POINTS]
+      }),
       validation: validation('twitch', 'valid')
     })
     const row = permissions(markup)
@@ -328,7 +338,7 @@ describe('DestinationCard Remove messages permission (plan 140, S5)', () => {
   it('folds the follow permission into the same row when both are missing', () => {
     const markup = render({
       target: target('twitch'),
-      account: account('twitch', { scopes: TWITCH_SCOPES })
+      account: account('twitch', { scopes: [...TWITCH_SCOPES, ...TWITCH_BITS_POINTS] })
     })
     expect(permissions(markup)).toContain(
       'Reconnect Twitch to let Orcle remove messages. Follow alerts and the sub count need it too.'
@@ -386,17 +396,32 @@ describe('DestinationCard Remove messages permission (plan 140, S5)', () => {
   it('missingPermissionsRow picks one sentence and one action', () => {
     const twitch = (scopes: string[]): ReturnType<typeof missingPermissionsRow> =>
       missingPermissionsRow('twitch', { status: 'connected', scopes })
-    expect(twitch(TWITCH_SCOPES)).toEqual({
+    expect(twitch([...TWITCH_SCOPES, ...TWITCH_BITS_POINTS])).toEqual({
       message:
         'Reconnect Twitch to let Orcle remove messages. Follow alerts and the sub count need it too.',
       action: 'Reconnect'
     })
-    expect(twitch([...TWITCH_SCOPES, ...TWITCH_AUDIENCE])).toEqual({
+    expect(twitch([...TWITCH_SCOPES, ...TWITCH_AUDIENCE, ...TWITCH_BITS_POINTS])).toEqual({
       message: 'Reconnect Twitch to let Orcle remove messages.',
       action: 'Reconnect'
     })
-    expect(twitch([...TWITCH_SCOPES, TWITCH_MODERATION])).toEqual({
+    expect(twitch([...TWITCH_SCOPES, TWITCH_MODERATION, ...TWITCH_BITS_POINTS])).toEqual({
       message: 'Follow alerts and sub count need one more Twitch permission.',
+      action: 'Reconnect Twitch'
+    })
+    // Plan 162: Power-ups and channel points ride the same single row.
+    expect(twitch(TWITCH_SCOPES)).toEqual({
+      message:
+        'Reconnect Twitch to let Orcle remove messages. Follow alerts, the sub count, Power-ups and channel points need it too.',
+      action: 'Reconnect'
+    })
+    expect(twitch([...TWITCH_SCOPES, ...TWITCH_AUDIENCE])).toEqual({
+      message:
+        'Reconnect Twitch to let Orcle remove messages. Power-ups and channel points need it too.',
+      action: 'Reconnect'
+    })
+    expect(twitch([...TWITCH_SCOPES, ...TWITCH_AUDIENCE, TWITCH_MODERATION])).toEqual({
+      message: 'Power-ups and channel points need one more Twitch permission.',
       action: 'Reconnect Twitch'
     })
     expect(twitch(TWITCH_ALL_SCOPES)).toBeNull()

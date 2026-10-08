@@ -21,6 +21,10 @@ export const TWITCH_AUDIENCE_SCOPES = [
   'channel:read:subscriptions'
 ] as const
 
+/** Twitch permissions for Power-ups paid with bits and channel point
+ * redemptions in Activity (plan 162). Read only. */
+export const TWITCH_BITS_POINTS_SCOPES = ['bits:read', 'channel:read:redemptions'] as const
+
 /** Twitch `DELETE /helix/moderation/chat`: remove one chat message (plan 140). */
 export const TWITCH_MODERATION_SCOPE = 'moderator:manage:chat_messages'
 /** Kick `DELETE /public/v1/chat/{message_id}`: remove one chat message (plan 140). */
@@ -34,7 +38,11 @@ export const YOUTUBE_FORCE_SSL_SCOPE = 'https://www.googleapis.com/auth/youtube.
  * is passed (keeping the ones the account already holds), so a path that
  * passed a subset would never grant the rest.
  */
-export const TWITCH_OPTIONAL_SCOPES = [...TWITCH_AUDIENCE_SCOPES, TWITCH_MODERATION_SCOPE] as const
+export const TWITCH_OPTIONAL_SCOPES = [
+  ...TWITCH_AUDIENCE_SCOPES,
+  TWITCH_MODERATION_SCOPE,
+  ...TWITCH_BITS_POINTS_SCOPES
+] as const
 /** Every optional Kick scope (plan 140: optional, asked for only from its Reconnect row). */
 export const KICK_OPTIONAL_SCOPES = [KICK_MODERATION_SCOPE] as const
 

@@ -103,9 +103,17 @@ export function validateChatDelivery(value: ChatDelivery): ChatDelivery {
       !['youtube', 'twitch', 'kick', 'x', 'tiktok', 'instagram', 'custom'].includes(
         entry.message.platform
       ) ||
-      !['message', 'paid', 'membership', 'follow', 'moderation', 'system', 'deleted'].includes(
-        entry.message.eventType
-      ) ||
+      ![
+        'message',
+        'paid',
+        'membership',
+        'follow',
+        'power-up',
+        'redemption',
+        'moderation',
+        'system',
+        'deleted'
+      ].includes(entry.message.eventType) ||
       (entry.message.communityGiftId !== undefined &&
         typeof entry.message.communityGiftId !== 'string') ||
       (entry.message.gift !== undefined && !['community', 'single'].includes(entry.message.gift)) ||

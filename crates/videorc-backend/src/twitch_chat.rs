@@ -25,8 +25,9 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::live_chat::{
     LiveChatEventDetails, LiveChatEventType, LiveChatMessage, LiveChatMessageFragment,
-    LiveChatProviderConnectionState, LiveChatReply, ProviderSendReceipt, SubscriptionKind,
-    live_chat_message_id, set_provider_and_emit, try_deliver_message,
+    LiveChatProviderConnectionState, LiveChatReply, PowerUpKind, ProviderSendReceipt,
+    RedemptionKind, SubscriptionKind, live_chat_message_id, set_provider_and_emit,
+    try_deliver_message,
 };
 use crate::state::AppState;
 use crate::streaming::StreamPlatform;
@@ -71,6 +72,14 @@ pub struct TwitchChatConfig {
     /// opt-in `moderator:read:followers` scope (plan 055, S6).
     #[serde(default)]
     pub follow_events: bool,
+    /// Subscribe to `channel.bits.use`: only with the opt-in `bits:read`
+    /// scope (plan 162).
+    #[serde(default)]
+    pub bits_events: bool,
+    /// Subscribe to channel point redemptions: only with the opt-in
+    /// `channel:read:redemptions` scope (plan 162).
+    #[serde(default)]
+    pub redemption_events: bool,
 }
 
 /// Send one chat message via Helix (Comments upgrade S4). Requires the
@@ -968,6 +977,30 @@ fn normalize_notification(
             timestamp,
             received_at,
         ),
+        BITS_USE_TYPE => normalize_bits_use(
+            event,
+            message_id,
+            session_id,
+            target_id,
+            timestamp,
+            received_at,
+        ),
+        CUSTOM_REDEMPTION_TYPE => normalize_custom_redemption(
+            event,
+            message_id,
+            session_id,
+            target_id,
+            timestamp,
+            received_at,
+        ),
+        AUTOMATIC_REDEMPTION_TYPE => normalize_automatic_redemption(
+            event,
+            message_id,
+            session_id,
+            target_id,
+            timestamp,
+            received_at,
+        ),
         "channel.chat.message_delete" => {
             let deleted_message_id = event["message_id"]
                 .as_str()
@@ -1098,6 +1131,235 @@ fn normalize_follow(
     Some(message)
 }
 
+/// Twitch Power-ups paid with bits, and cheers (plan 162).
+const BITS_USE_TYPE: &str = "channel.bits.use";
+/// A viewer redeemed one of the channel's own rewards (plan 162).
+const CUSTOM_REDEMPTION_TYPE: &str = "channel.channel_points_custom_reward_redemption.add";
+/// A viewer redeemed one of Twitch's automatic rewards (plan 162). Version 2:
+/// v1 still lists rewards that became Power-ups paid with bits.
+const AUTOMATIC_REDEMPTION_TYPE: &str = "channel.channel_points_automatic_reward_redemption.add";
+
+/// A subscription whose only condition is the broadcaster (plan 162).
+fn broadcaster_subscription_body(
+    subscription_type: &str,
+    version: &str,
+    broadcaster_user_id: &str,
+    session_id: &str,
+) -> Value {
+    json!({
+        "type": subscription_type,
+        "version": version,
+        "condition": {
+            "broadcaster_user_id": broadcaster_user_id,
+        },
+        "transport": {
+            "method": "websocket",
+            "session_id": session_id,
+        },
+    })
+}
+
+/// The viewer behind a bits or channel point event, as an Activity row's
+/// author. Twitch names them on every such event; "Someone" is a fallback.
+fn activity_author(message: &mut LiveChatMessage, event: &Value) -> String {
+    let name = event["user_name"]
+        .as_str()
+        .or_else(|| event["user_login"].as_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Someone")
+        .to_string();
+    message.author_id = event["user_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned);
+    message.author_name = name.clone();
+    name
+}
+
+/// What the viewer typed with a bits or channel point event, as fragments.
+fn activity_words(text: Option<&str>, fragments: &Value) -> Vec<LiveChatMessageFragment> {
+    let parsed = parse_fragments(fragments);
+    if !parsed.is_empty() {
+        return parsed;
+    }
+    text.map(str::trim)
+        .filter(|words| !words.is_empty())
+        .map(|words| {
+            vec![LiveChatMessageFragment {
+                fragment_type: "text".to_string(),
+                text: words.to_string(),
+                image_url: None,
+                zero_width: false,
+            }]
+        })
+        .unwrap_or_default()
+}
+
+fn non_empty(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+/// `channel.bits.use` as an Activity row (plan 162). A cheer is skipped: it
+/// always posts a chat message, which already makes the Cheer row (D2).
+fn normalize_bits_use(
+    event: &Value,
+    message_id: &str,
+    session_id: &str,
+    target_id: Option<&str>,
+    timestamp: Option<&str>,
+    received_at: &str,
+) -> Option<LiveChatMessage> {
+    let use_type = event["type"].as_str().unwrap_or_default();
+    if use_type == "cheer" {
+        return None;
+    }
+    let bits = event["bits"].as_u64()?;
+    let power_up = if use_type == "custom_power_up" {
+        PowerUpKind::Custom
+    } else {
+        match event["power_up"]["type"].as_str().unwrap_or_default() {
+            "celebration" => PowerUpKind::Celebration,
+            "gigantify_an_emote" => PowerUpKind::GigantifyAnEmote,
+            "message_effect" => PowerUpKind::MessageEffect,
+            _ => PowerUpKind::Custom,
+        }
+    };
+    let emote_name = non_empty(&event["power_up"]["emote"]["name"]);
+    let mut message = base_message(
+        format!("bits:{message_id}"),
+        session_id,
+        target_id,
+        timestamp,
+        received_at,
+    );
+    let name = activity_author(&mut message, event);
+    message.message_text = match (power_up, emote_name.as_deref()) {
+        (PowerUpKind::Celebration, _) => format!("{name} used a Celebration"),
+        (PowerUpKind::GigantifyAnEmote, Some(emote)) => format!("{name} gigantified {emote}"),
+        (PowerUpKind::GigantifyAnEmote, None) => format!("{name} gigantified an emote"),
+        (PowerUpKind::MessageEffect, _) => format!("{name} sent a message effect"),
+        (PowerUpKind::Custom, _) => format!("{name} used a Power-up"),
+    };
+    message.fragments = activity_words(
+        event["message"]["text"].as_str(),
+        &event["message"]["fragments"],
+    );
+    message.event_type = LiveChatEventType::PowerUp;
+    message.details = Some(LiveChatEventDetails::PowerUp {
+        bits,
+        power_up,
+        emote_name,
+    });
+    message.raw_provider_type = Some(format!("{BITS_USE_TYPE}:{use_type}"));
+    Some(message)
+}
+
+/// A custom channel point reward as an Activity row (plan 162). Keyed by the
+/// redemption id, which survives a redelivery.
+fn normalize_custom_redemption(
+    event: &Value,
+    message_id: &str,
+    session_id: &str,
+    target_id: Option<&str>,
+    timestamp: Option<&str>,
+    received_at: &str,
+) -> Option<LiveChatMessage> {
+    let redemption_id = non_empty(&event["id"]).unwrap_or_else(|| message_id.to_string());
+    let reward = &event["reward"];
+    let title = non_empty(&reward["title"]);
+    let mut message = base_message(
+        format!("redemption:{redemption_id}"),
+        session_id,
+        target_id,
+        event["redeemed_at"].as_str().or(timestamp),
+        received_at,
+    );
+    let name = activity_author(&mut message, event);
+    message.message_text = match title.as_deref() {
+        Some(title) => format!("{name} redeemed {title}"),
+        None => format!("{name} redeemed a reward"),
+    };
+    message.fragments = activity_words(event["user_input"].as_str(), &Value::Null);
+    message.event_type = LiveChatEventType::Redemption;
+    message.details = Some(LiveChatEventDetails::Redemption {
+        reward: RedemptionKind::Custom,
+        channel_points: reward["cost"].as_u64().unwrap_or(0),
+        title,
+        emote_name: None,
+    });
+    message.raw_provider_type = Some(CUSTOM_REDEMPTION_TYPE.to_string());
+    Some(message)
+}
+
+/// One of Twitch's automatic rewards as an Activity row (plan 162). Reads v2
+/// (`channel_points`, `emote`) and tolerates v1 names (`cost`,
+/// `unlocked_emote`).
+fn normalize_automatic_redemption(
+    event: &Value,
+    message_id: &str,
+    session_id: &str,
+    target_id: Option<&str>,
+    timestamp: Option<&str>,
+    received_at: &str,
+) -> Option<LiveChatMessage> {
+    let redemption_id = non_empty(&event["id"]).unwrap_or_else(|| message_id.to_string());
+    let reward_body = &event["reward"];
+    let reward = match reward_body["type"].as_str().unwrap_or_default() {
+        "send_highlighted_message" => RedemptionKind::HighlightedMessage,
+        "single_message_bypass_sub_mode" => RedemptionKind::SubOnlyMessage,
+        "random_sub_emote_unlock" => RedemptionKind::RandomEmoteUnlock,
+        "chosen_sub_emote_unlock" => RedemptionKind::ChosenEmoteUnlock,
+        "chosen_modified_sub_emote_unlock" => RedemptionKind::ModifiedEmoteUnlock,
+        _ => RedemptionKind::Other,
+    };
+    let emote_name = non_empty(&reward_body["emote"]["name"])
+        .or_else(|| non_empty(&reward_body["unlocked_emote"]["name"]));
+    let mut message = base_message(
+        format!("redemption:{redemption_id}"),
+        session_id,
+        target_id,
+        event["redeemed_at"].as_str().or(timestamp),
+        received_at,
+    );
+    let name = activity_author(&mut message, event);
+    message.message_text = match (reward, emote_name.as_deref()) {
+        (RedemptionKind::HighlightedMessage, _) => format!("{name} highlighted their message"),
+        (RedemptionKind::SubOnlyMessage, _) => format!("{name} sent a message in sub-only mode"),
+        (
+            RedemptionKind::RandomEmoteUnlock
+            | RedemptionKind::ChosenEmoteUnlock
+            | RedemptionKind::ModifiedEmoteUnlock,
+            emote,
+        ) => match emote {
+            Some(emote) => format!("{name} unlocked {emote}"),
+            None => format!("{name} unlocked an emote"),
+        },
+        _ => format!("{name} redeemed a reward"),
+    };
+    message.fragments = activity_words(
+        event["message"]["text"]
+            .as_str()
+            .or_else(|| event["user_input"].as_str()),
+        &event["message"]["fragments"],
+    );
+    message.event_type = LiveChatEventType::Redemption;
+    message.details = Some(LiveChatEventDetails::Redemption {
+        reward,
+        channel_points: reward_body["channel_points"]
+            .as_u64()
+            .or_else(|| reward_body["cost"].as_u64())
+            .unwrap_or(0),
+        title: None,
+        emote_name,
+    });
+    message.raw_provider_type = Some(AUTOMATIC_REDEMPTION_TYPE.to_string());
+    Some(message)
+}
+
 fn next_backoff_ms(current: u64) -> u64 {
     current
         .saturating_mul(2)
@@ -1119,15 +1381,33 @@ enum SubscribeError {
     Other(anyhow::Error),
 }
 
-/// Makes the chat subscriptions, and the follow subscription when `follows`.
-/// Returns whether follows are subscribed on this socket.
+/// The optional event subscriptions on top of chat: follows (plan 055) and
+/// Power-ups and channel point redemptions (plan 162). Each is held only with
+/// its opt-in scope, and a refusal never costs the chat itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ExtraEvents {
+    follows: bool,
+    bits: bool,
+    redemptions: bool,
+}
+
+impl ExtraEvents {
+    fn any_missing_from(self, live: ExtraEvents) -> bool {
+        (self.follows && !live.follows)
+            || (self.bits && !live.bits)
+            || (self.redemptions && !live.redemptions)
+    }
+}
+
+/// Makes the chat subscriptions, then whichever optional ones `wanted` names.
+/// Returns which optional ones Twitch holds on this socket.
 async fn create_subscriptions(
     client: &reqwest::Client,
     config: &TwitchChatConfig,
     access_token: &str,
     session_id: &str,
-    follows: bool,
-) -> std::result::Result<bool, SubscribeError> {
+    wanted: ExtraEvents,
+) -> std::result::Result<ExtraEvents, SubscribeError> {
     let base_url = config
         .api_base_url
         .clone()
@@ -1164,17 +1444,76 @@ async fn create_subscriptions(
             }
         }
     }
-    // Follows are extra: a refusal here never costs the chat itself.
-    Ok(follows && create_follow_subscription(client, config, access_token, session_id).await)
+    // The rest are extra: a refusal here never costs the chat itself.
+    create_extra_subscriptions(
+        client,
+        config,
+        access_token,
+        session_id,
+        wanted,
+        ExtraEvents::default(),
+    )
+    .await
+    .map_err(SubscribeError::Other)
 }
 
-/// `channel.follow` v2 on this socket. True when Twitch holds it (a 409
-/// means an earlier attempt already made it).
-async fn create_follow_subscription(
+/// Creates each optional subscription `wanted` names that `live` lacks.
+/// Returns `live` plus the ones Twitch now holds (a 409 means an earlier
+/// attempt already made it). Only a transport failure is an error.
+async fn create_extra_subscriptions(
     client: &reqwest::Client,
     config: &TwitchChatConfig,
     access_token: &str,
     session_id: &str,
+    wanted: ExtraEvents,
+    mut live: ExtraEvents,
+) -> Result<ExtraEvents> {
+    let broadcaster = config.broadcaster_user_id.as_str();
+    if wanted.follows && !live.follows {
+        live.follows = create_extra_subscription(
+            client,
+            config,
+            access_token,
+            &follow_subscription_body(broadcaster, session_id),
+        )
+        .await;
+    }
+    if wanted.bits && !live.bits {
+        live.bits = create_extra_subscription(
+            client,
+            config,
+            access_token,
+            &broadcaster_subscription_body(BITS_USE_TYPE, "1", broadcaster, session_id),
+        )
+        .await;
+    }
+    if wanted.redemptions && !live.redemptions {
+        // Both reward kinds ride one scope; the row is live when both are.
+        let custom = create_extra_subscription(
+            client,
+            config,
+            access_token,
+            &broadcaster_subscription_body(CUSTOM_REDEMPTION_TYPE, "1", broadcaster, session_id),
+        )
+        .await;
+        let automatic = create_extra_subscription(
+            client,
+            config,
+            access_token,
+            &broadcaster_subscription_body(AUTOMATIC_REDEMPTION_TYPE, "2", broadcaster, session_id),
+        )
+        .await;
+        live.redemptions = custom && automatic;
+    }
+    Ok(live)
+}
+
+/// One optional subscription on this socket. True when Twitch holds it.
+async fn create_extra_subscription(
+    client: &reqwest::Client,
+    config: &TwitchChatConfig,
+    access_token: &str,
+    body: &Value,
 ) -> bool {
     let base_url = config
         .api_base_url
@@ -1188,10 +1527,7 @@ async fn create_follow_subscription(
         .post(url)
         .bearer_auth(access_token)
         .header("Client-Id", &config.client_id)
-        .json(&follow_subscription_body(
-            &config.broadcaster_user_id,
-            session_id,
-        ))
+        .json(body)
         .send()
         .await
         .is_ok_and(|response| {
@@ -1199,32 +1535,61 @@ async fn create_follow_subscription(
         })
 }
 
-/// Whether the account now holds `moderator:read:followers`. Read from the
-/// stored account, not only the start config, so a reconnect that grants it
-/// mid-stream names the rest of this stream's follows (plan 071, S2).
-fn follow_scope_held(state: &AppState, config: &TwitchChatConfig) -> bool {
-    if config.follow_events {
-        return true;
-    }
+/// Which optional events the account now allows. Read from the stored
+/// account, not only the start config, so a reconnect that grants a scope
+/// mid-stream starts its events on the open socket (plan 071, S2; plan 162).
+fn extra_events_held(state: &AppState, config: &TwitchChatConfig) -> ExtraEvents {
+    let mut held = ExtraEvents {
+        follows: config.follow_events,
+        bits: config.bits_events,
+        redemptions: config.redemption_events,
+    };
     let crate::session_token::SessionTokenSource::Account {
         platform: StreamPlatform::Twitch,
         account_id,
     } = &config.token_source
     else {
-        return false;
+        return held;
     };
-    crate::twitch_account_credentials(state, account_id.as_deref()).is_ok_and(|credential| {
-        credential
-            .account
-            .scopes
-            .iter()
-            .any(|scope| scope == crate::oauth::TWITCH_FOLLOWERS_SCOPE)
-    })
+    if let Ok(credential) = crate::twitch_account_credentials(state, account_id.as_deref()) {
+        let holds = |wanted: &str| {
+            credential
+                .account
+                .scopes
+                .iter()
+                .any(|scope| scope == wanted)
+        };
+        held.follows |= holds(crate::oauth::TWITCH_FOLLOWERS_SCOPE);
+        held.bits |= holds(crate::oauth::TWITCH_BITS_SCOPE);
+        held.redemptions |= holds(crate::oauth::TWITCH_REDEMPTIONS_SCOPE);
+    }
+    held
 }
 
-/// How often an open socket without follows checks whether the scope
-/// arrived. Keepalives come about every 10 s; the check is a local read.
-const FOLLOW_SCOPE_RECHECK: Duration = Duration::from_secs(30);
+/// Logs the optional Power-up and redemption subscriptions Twitch refused,
+/// once per attempt: a channel without bits or channel points refuses them,
+/// and chat carries on (plan 162, D5).
+fn log_refused_extras(state: &AppState, wanted: ExtraEvents, live: ExtraEvents) {
+    if wanted.bits && !live.bits {
+        state.emit_log(
+            "warn",
+            "Twitch refused the Power-ups subscription; Activity will not list Power-ups this stream."
+                .to_string(),
+        );
+    }
+    if wanted.redemptions && !live.redemptions {
+        state.emit_log(
+            "warn",
+            "Twitch refused the channel point subscriptions; Activity will not list redemptions this stream."
+                .to_string(),
+        );
+    }
+}
+
+/// How often an open socket missing an optional subscription checks whether
+/// its scope arrived. Keepalives come about every 10 s; the check is a local
+/// read.
+const EXTRA_SCOPE_RECHECK: Duration = Duration::from_secs(30);
 
 /// Subscribes this socket, renewing a refused token once (plan 055, B2).
 async fn subscribe_socket(
@@ -1233,8 +1598,8 @@ async fn subscribe_socket(
     config: &TwitchChatConfig,
     token: &mut crate::session_token::SessionToken,
     socket_session: &str,
-) -> std::result::Result<bool, String> {
-    let follows = follow_scope_held(state, config);
+) -> std::result::Result<ExtraEvents, String> {
+    let wanted = extra_events_held(state, config);
     let access_token = token.ensure_fresh(state, client).await.to_string();
     let subscribe_failed = |error: anyhow::Error| {
         state.emit_log(
@@ -1244,8 +1609,11 @@ async fn subscribe_socket(
         "Could not subscribe to Twitch live chat. Reconnect Twitch to enable live comments."
             .to_string()
     };
-    match create_subscriptions(client, config, &access_token, socket_session, follows).await {
-        Ok(follows_live) => return Ok(follows_live),
+    match create_subscriptions(client, config, &access_token, socket_session, wanted).await {
+        Ok(live) => {
+            log_refused_extras(state, wanted, live);
+            return Ok(live);
+        }
         Err(SubscribeError::Other(error)) => return Err(subscribe_failed(error)),
         Err(SubscribeError::Unauthorized) => {}
     }
@@ -1253,12 +1621,14 @@ async fn subscribe_socket(
         return Err(TWITCH_SIGN_IN_EXPIRED.to_string());
     };
     let renewed = renewed.to_string();
-    create_subscriptions(client, config, &renewed, socket_session, follows)
+    let live = create_subscriptions(client, config, &renewed, socket_session, wanted)
         .await
         .map_err(|error| match error {
             SubscribeError::Unauthorized => TWITCH_SIGN_IN_EXPIRED.to_string(),
             SubscribeError::Other(error) => subscribe_failed(error),
-        })
+        })?;
+    log_refused_extras(state, wanted, live);
+    Ok(live)
 }
 
 /// The provider message when Twitch refuses even a renewed token.
@@ -1279,7 +1649,7 @@ async fn run_eventsub_session(
     subscribe: bool,
     seen: &mut HashSet<String>,
     avatars: &mut TwitchAvatarCache,
-    follows_live: &mut bool,
+    extras_live: &mut ExtraEvents,
 ) -> SessionOutcome {
     let (session_id, session_generation) = session_owner;
     let Ok((ws_stream, _response)) = connect_async(ws_url).await else {
@@ -1287,7 +1657,10 @@ async fn run_eventsub_session(
     };
     let (mut sink, mut stream) = ws_stream.split();
     let mut socket_session_id: Option<String> = None;
-    let mut follow_scope_checked_at = std::time::Instant::now();
+    let mut extra_scopes_checked_at = std::time::Instant::now();
+    // Power-ups and redemptions a channel refused are not asked for again on
+    // this socket; follows keep retrying, as before plan 162.
+    let mut extras_attempted = *extras_live;
 
     while let Some(frame) = stream.next().await {
         let Ok(message) = frame else {
@@ -1303,20 +1676,21 @@ async fn run_eventsub_session(
                     if subscribe {
                         match subscribe_socket(state, client, config, token, &socket_session).await
                         {
-                            Ok(follows) => {
-                                *follows_live = follows;
+                            Ok(live) => {
+                                *extras_live = live;
+                                extras_attempted = extra_events_held(state, config);
                                 crate::audience::set_named_follows(
                                     state,
                                     session_id,
                                     StreamPlatform::Twitch,
-                                    follows,
+                                    live.follows,
                                 );
                             }
                             Err(message) => return SessionOutcome::Fatal(message),
                         }
                     }
                     socket_session_id = Some(socket_session);
-                    follow_scope_checked_at = std::time::Instant::now();
+                    extra_scopes_checked_at = std::time::Instant::now();
                     set_provider_and_emit(
                         state,
                         session_id,
@@ -1416,35 +1790,8 @@ async fn run_eventsub_session(
                             .to_string(),
                     );
                 }
-                EventSubFrame::Keepalive => {
-                    // The scope can arrive mid-stream (Show who followed):
-                    // add follows to this socket without a new Go Live.
-                    if !*follows_live
-                        && let Some(socket_session) = socket_session_id.as_deref()
-                        && follow_scope_checked_at.elapsed() >= FOLLOW_SCOPE_RECHECK
-                    {
-                        follow_scope_checked_at = std::time::Instant::now();
-                        if follow_scope_held(state, config) {
-                            let access_token = token.ensure_fresh(state, client).await.to_string();
-                            if create_follow_subscription(
-                                client,
-                                config,
-                                &access_token,
-                                socket_session,
-                            )
-                            .await
-                            {
-                                *follows_live = true;
-                                crate::audience::set_named_follows(
-                                    state,
-                                    session_id,
-                                    StreamPlatform::Twitch,
-                                    true,
-                                );
-                            }
-                        }
-                    }
-                }
+                // Keepalives only pace the scope recheck below.
+                EventSubFrame::Keepalive => {}
                 EventSubFrame::Unknown => {}
             },
             Message::Ping(payload) => {
@@ -1452,6 +1799,52 @@ async fn run_eventsub_session(
             }
             Message::Close(_) => return SessionOutcome::Reconnect(None),
             _ => {}
+        }
+        // A scope can arrive mid-stream (Show who followed, the Activity
+        // reconnect): add its events to this socket without a new Go Live.
+        // Checked after every frame, not only keepalives: Twitch sends those
+        // only while the socket is quiet, so a busy chat would never recheck.
+        if let Some(socket_session) = socket_session_id.as_deref()
+            && extra_scopes_checked_at.elapsed() >= EXTRA_SCOPE_RECHECK
+        {
+            extra_scopes_checked_at = std::time::Instant::now();
+            let held = extra_events_held(state, config);
+            let wanted = ExtraEvents {
+                follows: held.follows,
+                bits: held.bits && !extras_attempted.bits,
+                redemptions: held.redemptions && !extras_attempted.redemptions,
+            };
+            if wanted.any_missing_from(*extras_live) {
+                let access_token = token.ensure_fresh(state, client).await.to_string();
+                if let Ok(live) = create_extra_subscriptions(
+                    client,
+                    config,
+                    &access_token,
+                    socket_session,
+                    wanted,
+                    *extras_live,
+                )
+                .await
+                {
+                    let newly = ExtraEvents {
+                        follows: false,
+                        bits: wanted.bits && !extras_live.bits,
+                        redemptions: wanted.redemptions && !extras_live.redemptions,
+                    };
+                    log_refused_extras(state, newly, live);
+                    if live.follows && !extras_live.follows {
+                        crate::audience::set_named_follows(
+                            state,
+                            session_id,
+                            StreamPlatform::Twitch,
+                            true,
+                        );
+                    }
+                    *extras_live = live;
+                    extras_attempted.bits |= held.bits;
+                    extras_attempted.redemptions |= held.redemptions;
+                }
+            }
         }
     }
     SessionOutcome::Reconnect(None)
@@ -1495,7 +1888,7 @@ pub async fn run_twitch_chat_connector(
     .await;
 
     let mut avatars = TwitchAvatarCache::default();
-    let mut follows_live = false;
+    let mut extras_live = ExtraEvents::default();
     loop {
         match run_eventsub_session(
             &state,
@@ -1507,7 +1900,7 @@ pub async fn run_twitch_chat_connector(
             subscribe,
             &mut seen,
             &mut avatars,
-            &mut follows_live,
+            &mut extras_live,
         )
         .await
         {
@@ -1530,7 +1923,7 @@ pub async fn run_twitch_chat_connector(
                 backoff_ms = next_backoff_ms(backoff_ms);
             }
             SessionOutcome::Fatal(message) => {
-                if follows_live {
+                if extras_live.follows {
                     // No named follows from here on: counts show again.
                     crate::audience::set_named_follows(
                         &state,
@@ -1667,6 +2060,8 @@ mod tests {
         notifications_sent: Arc<AtomicUsize>,
         replay_notifications: bool,
         frame: Arc<String>,
+        /// Subscription types the mock refuses with 403 (plan 162).
+        refused_types: Arc<Vec<&'static str>>,
     }
 
     async fn mock_eventsub_ws(
@@ -1703,9 +2098,16 @@ mod tests {
     async fn mock_subscriptions(
         State(state): State<MockTwitchServerState>,
         Json(body): Json<Value>,
-    ) -> Json<Value> {
+    ) -> (StatusCode, Json<Value>) {
+        let refused = state
+            .refused_types
+            .iter()
+            .any(|refused| body["type"] == *refused);
         state.subscriptions.lock().await.push(body);
-        Json(json!({ "data": [] }))
+        if refused {
+            return (StatusCode::FORBIDDEN, Json(json!({ "error": "Forbidden" })));
+        }
+        (StatusCode::ACCEPTED, Json(json!({ "data": [] })))
     }
 
     async fn mock_users() -> Json<Value> {
@@ -1762,6 +2164,21 @@ mod tests {
         Arc<AtomicUsize>,
         oneshot::Sender<()>,
     ) {
+        spawn_mock_twitch_server_refusing(replay_notifications, frame, Vec::new()).await
+    }
+
+    async fn spawn_mock_twitch_server_refusing(
+        replay_notifications: bool,
+        frame: String,
+        refused_types: Vec<&'static str>,
+    ) -> (
+        String,
+        String,
+        Arc<Mutex<Vec<Value>>>,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        oneshot::Sender<()>,
+    ) {
         let subscriptions = Arc::new(Mutex::new(Vec::new()));
         let socket_connections = Arc::new(AtomicUsize::new(0));
         let notifications_sent = Arc::new(AtomicUsize::new(0));
@@ -1771,6 +2188,7 @@ mod tests {
             notifications_sent: notifications_sent.clone(),
             replay_notifications,
             frame: Arc::new(frame),
+            refused_types: Arc::new(refused_types),
         };
         let app = Router::new()
             .route("/eventsub", get(mock_eventsub_ws))
@@ -2022,6 +2440,8 @@ mod tests {
             api_base_url: Some(api_base_url),
             token_source,
             follow_events: false,
+            bits_events: false,
+            redemption_events: false,
         }
     }
 
@@ -2169,16 +2589,19 @@ mod tests {
                 crate::session_token::SessionTokenSource::Fixed,
             );
             config.follow_events = follow_events;
-            let follows_live = create_subscriptions(
+            let live = create_subscriptions(
                 &reqwest::Client::new(),
                 &config,
                 "token-1",
                 "socket-1",
-                follow_events,
+                ExtraEvents {
+                    follows: follow_events,
+                    ..ExtraEvents::default()
+                },
             )
             .await
             .unwrap();
-            assert_eq!(follows_live, follow_events);
+            assert_eq!(live.follows, follow_events);
             let bodies = subscriptions.lock().await.clone();
             let follow = bodies
                 .iter()
@@ -2198,6 +2621,398 @@ mod tests {
             }
             let _ = shutdown.send(());
         }
+    }
+
+    fn bits_use_event(use_type: &str, power_up: Value) -> Value {
+        json!({
+            "user_id": "1010",
+            "user_login": "gvaste",
+            "user_name": "GVASTE",
+            "broadcaster_user_id": "broadcaster-1",
+            "broadcaster_user_login": "orcdev",
+            "broadcaster_user_name": "OrcDev",
+            "bits": 300,
+            "type": use_type,
+            "power_up": power_up,
+            "message": null
+        })
+    }
+
+    fn normalize_test(subscription_type: &str, event: &Value) -> Option<LiveChatMessage> {
+        normalize_notification(
+            subscription_type,
+            event,
+            "delivery-1",
+            Some("2026-10-07T20:17:00Z"),
+            "session-1",
+            Some("twitch"),
+            "2026-10-07T20:17:00.1Z",
+        )
+    }
+
+    // Plan 162: Power-ups paid with bits are Activity rows; a cheer is not,
+    // because its chat message already makes the Cheer row (D2).
+    #[test]
+    fn bits_use_power_ups_become_activity_rows_and_cheers_are_skipped() {
+        let celebration = normalize_test(
+            "channel.bits.use",
+            &bits_use_event(
+                "power_up",
+                json!({ "type": "celebration", "emote": null, "message_effect_id": null }),
+            ),
+        )
+        .expect("celebration row");
+        assert_eq!(celebration.event_type, LiveChatEventType::PowerUp);
+        assert_eq!(
+            celebration.details,
+            Some(LiveChatEventDetails::PowerUp {
+                bits: 300,
+                power_up: PowerUpKind::Celebration,
+                emote_name: None,
+            })
+        );
+        assert_eq!(celebration.author_name, "GVASTE");
+        assert_eq!(celebration.author_id.as_deref(), Some("1010"));
+        assert_eq!(celebration.message_text, "GVASTE used a Celebration");
+        assert_eq!(celebration.provider_message_id, "bits:delivery-1");
+        assert_eq!(
+            celebration.raw_provider_type.as_deref(),
+            Some("channel.bits.use:power_up")
+        );
+        assert!(celebration.fragments.is_empty());
+
+        let mut gigantify = bits_use_event(
+            "power_up",
+            json!({
+                "type": "gigantify_an_emote",
+                "emote": { "id": "emotesv2_a152", "name": "orcdevBONK" },
+                "message_effect_id": null
+            }),
+        );
+        gigantify["bits"] = json!(50);
+        gigantify["message"] = json!({
+            "text": "orcdevBONK",
+            "fragments": [{ "type": "emote", "text": "orcdevBONK", "emote": { "id": "emotesv2_a152" } }]
+        });
+        let gigantify = normalize_test("channel.bits.use", &gigantify).expect("gigantify row");
+        assert_eq!(gigantify.message_text, "GVASTE gigantified orcdevBONK");
+        assert_eq!(
+            gigantify.details,
+            Some(LiveChatEventDetails::PowerUp {
+                bits: 50,
+                power_up: PowerUpKind::GigantifyAnEmote,
+                emote_name: Some("orcdevBONK".to_string()),
+            })
+        );
+        assert_eq!(gigantify.fragments[0].fragment_type, "emote");
+
+        let effect = normalize_test(
+            "channel.bits.use",
+            &bits_use_event(
+                "power_up",
+                json!({ "type": "message_effect", "emote": null, "message_effect_id": "cosmic-abyss" }),
+            ),
+        )
+        .expect("message effect row");
+        assert_eq!(effect.message_text, "GVASTE sent a message effect");
+
+        let custom = normalize_test(
+            "channel.bits.use",
+            &bits_use_event("custom_power_up", Value::Null),
+        )
+        .expect("custom power-up row");
+        assert!(matches!(
+            custom.details,
+            Some(LiveChatEventDetails::PowerUp {
+                power_up: PowerUpKind::Custom,
+                ..
+            })
+        ));
+
+        let mut cheer = bits_use_event("cheer", Value::Null);
+        cheer["message"] = json!({ "text": "Cheer100 hi", "fragments": [] });
+        assert!(normalize_test("channel.bits.use", &cheer).is_none());
+    }
+
+    #[test]
+    fn a_custom_redemption_becomes_a_rewards_row_keyed_by_its_redemption_id() {
+        let event = json!({
+            "id": "17fa2df1-ad76-4804-bfa5-a40ef63efe63",
+            "broadcaster_user_id": "broadcaster-1",
+            "user_id": "1011",
+            "user_login": "von6",
+            "user_name": "Von6",
+            "user_input": "drink water orc",
+            "status": "unfulfilled",
+            "reward": {
+                "id": "92af127c",
+                "title": "Hydrate",
+                "cost": 500,
+                "prompt": "Make the streamer drink"
+            },
+            "redeemed_at": "2026-10-07T20:20:00.1Z"
+        });
+        let row = normalize_test(CUSTOM_REDEMPTION_TYPE, &event).expect("redemption row");
+        assert_eq!(row.event_type, LiveChatEventType::Redemption);
+        assert_eq!(
+            row.provider_message_id,
+            "redemption:17fa2df1-ad76-4804-bfa5-a40ef63efe63"
+        );
+        assert_eq!(row.message_text, "Von6 redeemed Hydrate");
+        assert_eq!(row.fragments[0].text, "drink water orc");
+        assert_eq!(row.published_at, "2026-10-07T20:20:00.1Z");
+        assert_eq!(
+            row.details,
+            Some(LiveChatEventDetails::Redemption {
+                reward: RedemptionKind::Custom,
+                channel_points: 500,
+                title: Some("Hydrate".to_string()),
+                emote_name: None,
+            })
+        );
+
+        let mut silent = event.clone();
+        silent["user_input"] = json!("");
+        let row = normalize_test(CUSTOM_REDEMPTION_TYPE, &silent).expect("row without words");
+        assert!(row.fragments.is_empty());
+    }
+
+    #[test]
+    fn automatic_redemptions_read_v2_and_name_the_reward() {
+        let highlighted = json!({
+            "broadcaster_user_id": "broadcaster-1",
+            "user_id": "1012",
+            "user_login": "twitchdev",
+            "user_name": "TwitchDev",
+            "id": "f024099a-e0fe-4339-9a0a-a706fb59f353",
+            "reward": { "type": "send_highlighted_message", "channel_points": 100, "emote": null },
+            "message": {
+                "text": "Hello world! VoHiYo",
+                "fragments": [
+                    { "type": "text", "text": "Hello world! ", "emote": null },
+                    { "type": "emote", "text": "VoHiYo", "emote": { "id": "81274" } }
+                ]
+            },
+            "redeemed_at": "2024-08-12T21:14:34.260398045Z"
+        });
+        let row = normalize_test(AUTOMATIC_REDEMPTION_TYPE, &highlighted).expect("row");
+        assert_eq!(row.message_text, "TwitchDev highlighted their message");
+        assert_eq!(row.fragments.len(), 2);
+        assert_eq!(
+            row.details,
+            Some(LiveChatEventDetails::Redemption {
+                reward: RedemptionKind::HighlightedMessage,
+                channel_points: 100,
+                title: None,
+                emote_name: None,
+            })
+        );
+
+        let mut unlock = highlighted.clone();
+        unlock["reward"] = json!({
+            "type": "chosen_sub_emote_unlock",
+            "channel_points": 2000,
+            "emote": { "id": "emotesv2_e7b8", "name": "orcdevLURK" }
+        });
+        unlock["message"] = Value::Null;
+        let row = normalize_test(AUTOMATIC_REDEMPTION_TYPE, &unlock).expect("unlock row");
+        assert_eq!(row.message_text, "TwitchDev unlocked orcdevLURK");
+        assert!(row.fragments.is_empty());
+
+        let mut future = unlock.clone();
+        future["reward"] = json!({ "type": "some_new_reward", "channel_points": 10 });
+        let row = normalize_test(AUTOMATIC_REDEMPTION_TYPE, &future).expect("future row");
+        assert_eq!(row.message_text, "TwitchDev redeemed a reward");
+        assert!(matches!(
+            row.details,
+            Some(LiveChatEventDetails::Redemption {
+                reward: RedemptionKind::Other,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn bits_and_redemptions_subscribe_only_with_their_scopes() {
+        for (bits, redemptions) in [(false, false), (true, false), (false, true), (true, true)] {
+            let (api_base_url, eventsub_ws_url, subscriptions, _, _, shutdown) =
+                spawn_mock_twitch_server().await;
+            let config = expiring_config(
+                api_base_url,
+                eventsub_ws_url,
+                crate::session_token::SessionTokenSource::Fixed,
+            );
+            let live = create_subscriptions(
+                &reqwest::Client::new(),
+                &config,
+                "token-1",
+                "socket-1",
+                ExtraEvents {
+                    follows: false,
+                    bits,
+                    redemptions,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!((live.bits, live.redemptions), (bits, redemptions));
+            let bodies = subscriptions.lock().await.clone();
+            let find = |kind: &str| bodies.iter().find(|body| body["type"] == kind).cloned();
+            assert_eq!(
+                bodies.len(),
+                CHAT_SUBSCRIPTION_TYPES.len() + usize::from(bits) + 2 * usize::from(redemptions)
+            );
+            for (kind, version, wanted) in [
+                (BITS_USE_TYPE, "1", bits),
+                (CUSTOM_REDEMPTION_TYPE, "1", redemptions),
+                (AUTOMATIC_REDEMPTION_TYPE, "2", redemptions),
+            ] {
+                match find(kind) {
+                    Some(body) => {
+                        assert!(wanted, "{kind} without its scope");
+                        assert_eq!(body["version"], version);
+                        assert_eq!(
+                            body["condition"],
+                            json!({ "broadcaster_user_id": "broadcaster-1" })
+                        );
+                        assert_eq!(body["transport"]["session_id"], "socket-1");
+                    }
+                    None => assert!(!wanted, "{kind} missing"),
+                }
+            }
+            let _ = shutdown.send(());
+        }
+    }
+
+    // Plan 162, D5: a channel without bits or channel points refuses those
+    // subscriptions; chat still connects and the rest stay live.
+    #[tokio::test]
+    async fn a_refused_power_up_subscription_never_costs_the_chat() {
+        let (api_base_url, eventsub_ws_url, subscriptions, _, _, shutdown) =
+            spawn_mock_twitch_server_refusing(
+                true,
+                chat_message_frame(),
+                vec![BITS_USE_TYPE, AUTOMATIC_REDEMPTION_TYPE],
+            )
+            .await;
+        let config = expiring_config(
+            api_base_url,
+            eventsub_ws_url,
+            crate::session_token::SessionTokenSource::Fixed,
+        );
+        let live = create_subscriptions(
+            &reqwest::Client::new(),
+            &config,
+            "token-1",
+            "socket-1",
+            ExtraEvents {
+                follows: true,
+                bits: true,
+                redemptions: true,
+            },
+        )
+        .await
+        .expect("chat subscriptions still succeed");
+        assert_eq!(
+            live,
+            ExtraEvents {
+                follows: true,
+                bits: false,
+                redemptions: false,
+            }
+        );
+        let bodies = subscriptions.lock().await.clone();
+        for kind in CHAT_SUBSCRIPTION_TYPES {
+            assert!(bodies.iter().any(|body| body["type"] == *kind), "{kind}");
+        }
+        let _ = shutdown.send(());
+    }
+
+    fn redemption_frame() -> String {
+        json!({
+            "metadata": {
+                "message_type": "notification",
+                "subscription_type": CUSTOM_REDEMPTION_TYPE,
+                "message_id": "delivery-redemption-1",
+                "message_timestamp": "2026-10-07T20:20:00Z"
+            },
+            "payload": {
+                "subscription": { "type": CUSTOM_REDEMPTION_TYPE },
+                "event": {
+                    "id": "redemption-1",
+                    "broadcaster_user_id": "broadcaster-1",
+                    "user_id": "987",
+                    "user_login": "coolviewer",
+                    "user_name": "CoolViewer",
+                    "user_input": "",
+                    "status": "unfulfilled",
+                    "reward": { "id": "reward-1", "title": "Hydrate", "cost": 500, "prompt": "" },
+                    "redeemed_at": "2026-10-07T20:20:00Z"
+                }
+            }
+        })
+        .to_string()
+    }
+
+    // Each new socket replays the frame: one redemption still makes one row,
+    // with the viewer's Helix avatar like any chat author.
+    #[tokio::test]
+    async fn a_redelivered_redemption_makes_one_activity_row() {
+        let (api_base_url, eventsub_ws_url, subscriptions, sockets, _, shutdown) =
+            spawn_mock_twitch_server_sending(true, redemption_frame()).await;
+        let state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session("session-1")
+            .unwrap();
+        let session_generation = {
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.start_session("session-1".to_string(), vec![twitch_provider_row()]);
+            coordinator.session_generation()
+        };
+        let mut config = expiring_config(
+            api_base_url,
+            eventsub_ws_url,
+            crate::session_token::SessionTokenSource::Fixed,
+        );
+        config.redemption_events = true;
+        let connector = tokio::spawn(run_twitch_chat_connector(
+            state.clone(),
+            "session-1".to_string(),
+            session_generation,
+            config,
+        ));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while sockets.load(Ordering::SeqCst) < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for a second socket"
+            );
+            sleep(Duration::from_millis(25)).await;
+        }
+        sleep(Duration::from_millis(250)).await;
+        connector.abort();
+        let _ = shutdown.send(());
+
+        let snapshot = current_status(&state).await;
+        let rows: Vec<_> = snapshot
+            .messages
+            .iter()
+            .filter(|message| message.event_type == LiveChatEventType::Redemption)
+            .collect();
+        assert_eq!(rows.len(), 1, "{snapshot:?}");
+        assert_eq!(rows[0].author_name, "CoolViewer");
+        assert_eq!(
+            rows[0].author_avatar_url.as_deref(),
+            Some("https://static-cdn.jtvnw.net/viewer.png")
+        );
+        assert!(
+            subscriptions
+                .lock()
+                .await
+                .iter()
+                .any(|body| body["type"] == AUTOMATIC_REDEMPTION_TYPE)
+        );
     }
 
     fn follow_frame() -> String {
@@ -2402,6 +3217,8 @@ mod tests {
                 api_base_url: Some(api_base_url),
                 token_source: Default::default(),
                 follow_events: false,
+                bits_events: false,
+                redemption_events: false,
             },
         ));
 
@@ -2471,6 +3288,8 @@ mod tests {
                 api_base_url: Some(api_base_url),
                 token_source: Default::default(),
                 follow_events: false,
+                bits_events: false,
+                redemption_events: false,
             },
         ));
 
@@ -2540,6 +3359,8 @@ mod tests {
                 api_base_url: Some(api_base_url),
                 token_source: Default::default(),
                 follow_events: false,
+                bits_events: false,
+                redemption_events: false,
             },
         ));
 

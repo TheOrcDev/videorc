@@ -62,6 +62,9 @@ const KIND_ICONS: Record<ActivityKind, AppIcon | null> = {
   // (plan 151, D5): no licensed icon is spent on it.
   'watch-streak': null,
   announcement: AnnouncementIcon,
+  'power-up': TipIcon,
+  // About one viewer, so the row shows their avatar (plan 162).
+  redemption: null,
   'destination-failed': null,
   'destination-recovered': null
 }
@@ -97,6 +100,16 @@ export function twitchNeedsFollowNames(
 ): boolean {
   const twitch = audience?.platforms.find((entry) => entry.platform === 'twitch')
   return platforms.includes('twitch') && twitch?.audienceScopes === false
+}
+
+/** Twitch sends Power-ups and channel point redemptions only once the
+ * account allows them (plan 162). */
+export function twitchNeedsBitsPoints(
+  platforms: readonly StreamPlatform[],
+  audience?: AudienceSnapshot | null
+): boolean {
+  const twitch = audience?.platforms.find((entry) => entry.platform === 'twitch')
+  return platforms.includes('twitch') && twitch?.bitsPointsScopes === false
 }
 
 /** What Activity can never show for these platforms, said plainly. */
@@ -327,7 +340,8 @@ export function ActivityPane({
   highlightFailure?: { messageId: string; reason: string } | null
   onShowOnStream?: (item: ActivityItem) => void
   onThank?: (item: ActivityItem) => void
-  /** Reconnect Twitch with its follow permission (plan 071, S2). */
+  /** Reconnect Twitch with every optional permission: follow names (plan
+   * 071, S2), Power-ups and channel points (plan 162). */
   onShowFollowNames?: () => void
   /** Auto-show celebrations on stream (plan 156): the one switch. */
   autoShow?: boolean
@@ -420,6 +434,21 @@ export function ActivityPane({
           </label>
         ) : null}
       </div>
+      {/* Plan 162: Power-ups and redemptions arrive with no row of their own
+          to carry the ask, so it stays in view until Twitch allows them. */}
+      {onShowFollowNames && twitchNeedsBitsPoints(platforms, audience) ? (
+        <div
+          className="flex shrink-0 items-center justify-between gap-2 border-b border-border px-3 py-1.5"
+          data-slot="activity-bits-points"
+        >
+          <span className="text-xs text-muted-foreground">
+            Power-ups and channel points need one more Twitch permission.
+          </span>
+          <Button className="shrink-0" size="xs" variant="outline" onClick={onShowFollowNames}>
+            Reconnect Twitch
+          </Button>
+        </div>
+      ) : null}
       <ScrollArea className="min-h-0 flex-1" type="scroll">
         {shown.length ? (
           <ol aria-label="Activity" className="flex flex-col divide-y divide-border">

@@ -1942,6 +1942,8 @@ mod tests {
             LiveChatEventType::System,
             LiveChatEventType::Membership,
             LiveChatEventType::Follow,
+            LiveChatEventType::PowerUp,
+            LiveChatEventType::Redemption,
             LiveChatEventType::Moderation,
             LiveChatEventType::Deleted,
         ] {

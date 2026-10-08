@@ -91,6 +91,12 @@ pub enum LiveChatEventType {
     /// A new follower (Twitch `channel.follow`, only with the opt-in scope).
     /// The Stream Manager lists it under Activity and never in chat.
     Follow,
+    /// A Twitch Power-up paid with bits (`channel.bits.use`, plan 162).
+    /// Activity only, like a follow: a gigantified emote's own chat message
+    /// stays an ordinary chat row.
+    PowerUp,
+    /// A Twitch channel point redemption (plan 162). Activity only.
+    Redemption,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -225,6 +231,27 @@ pub enum LiveChatEventDetails {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         channel_points_awarded: Option<u64>,
     },
+    /// A Twitch Power-up paid with bits (plan 162). `emote_name` is the
+    /// gigantified emote, when there is one.
+    #[serde(rename_all = "camelCase")]
+    PowerUp {
+        bits: u64,
+        power_up: PowerUpKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        emote_name: Option<String>,
+    },
+    /// A Twitch channel point redemption (plan 162). `title` is a custom
+    /// reward's title; automatic rewards have none and the window names them.
+    /// `emote_name` is the emote an automatic reward unlocked.
+    #[serde(rename_all = "camelCase")]
+    Redemption {
+        reward: RedemptionKind,
+        channel_points: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        emote_name: Option<String>,
+    },
     /// A new follower. `handle` is the @-mentionable login (Twitch
     /// `user_login`, X and Kick `username`) when it differs from, or is
     /// missing from, the display name (plan 071, S5).
@@ -242,6 +269,32 @@ pub enum MembershipKind {
     Milestone,
     Gift,
     GiftReceived,
+}
+
+/// Which Twitch Power-up a viewer paid bits for (`channel.bits.use`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PowerUpKind {
+    Celebration,
+    GigantifyAnEmote,
+    MessageEffect,
+    /// A Power-up the channel made itself (`custom_power_up`).
+    Custom,
+}
+
+/// Which channel point reward a viewer redeemed: the channel's own custom
+/// reward, or one of Twitch's automatic rewards.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RedemptionKind {
+    Custom,
+    HighlightedMessage,
+    SubOnlyMessage,
+    RandomEmoteUnlock,
+    ChosenEmoteUnlock,
+    ModifiedEmoteUnlock,
+    /// An automatic reward Twitch added after this build.
+    Other,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -3656,6 +3709,41 @@ fn fake_events(
                 "new_friend followed",
                 None,
             ),
+            // Plan 162: Activity-only rows, shaped as the connector makes them.
+            event(
+                "channel.bits.use:power_up",
+                "party_starter",
+                LiveChatEventType::PowerUp,
+                LiveChatEventDetails::PowerUp {
+                    bits: 300,
+                    power_up: PowerUpKind::Celebration,
+                    emote_name: None,
+                },
+                "party_starter used a Celebration",
+                None,
+            ),
+            {
+                let mut redemption = event(
+                    "channel.channel_points_custom_reward_redemption.add",
+                    "hydration_hero",
+                    LiveChatEventType::Redemption,
+                    LiveChatEventDetails::Redemption {
+                        reward: RedemptionKind::Custom,
+                        channel_points: 500,
+                        title: Some("Hydrate".to_string()),
+                        emote_name: None,
+                    },
+                    "hydration_hero redeemed Hydrate",
+                    None,
+                );
+                redemption.fragments = vec![LiveChatMessageFragment {
+                    fragment_type: "text".to_string(),
+                    text: "drink some water!".to_string(),
+                    image_url: None,
+                    zero_width: false,
+                }];
+                redemption
+            },
         ],
         StreamPlatform::Kick => vec![
             event(
@@ -4805,14 +4893,14 @@ mod tests {
         let messages = completed
             .expect("all three exact fake provider end events must arrive")
             .expect("fixture events must not lag");
-        assert_eq!(messages.len(), 14);
+        assert_eq!(messages.len(), 16);
         assert_eq!(
             messages
                 .iter()
                 .filter_map(|message| message["id"].as_str())
                 .collect::<HashSet<_>>()
                 .len(),
-            14
+            16
         );
         assert!(response.ok);
         let wire = serde_json::to_string(&response).unwrap();
@@ -4827,8 +4915,8 @@ mod tests {
         assert_eq!(
             reduced,
             serde_json::json!({
-                "status": "available", "messageCount": 14, "chatters": 7,
-                "supporters": 7, "follows": 2, "raids": 1, "bits": 1500,
+                "status": "available", "messageCount": 16, "chatters": 7,
+                "supporters": 7, "follows": 2, "raids": 1, "bits": 1800,
                 "tips": [{ "currency": "USD", "amountMicros": 5_000_000 },
                          { "currency": "EUR", "amountMicros": 2_000_000 }]
             })
@@ -4870,12 +4958,13 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(value["messageCount"], 14);
+        assert_eq!(value["messageCount"], 16);
         assert_eq!(value["chatters"], 7);
         assert_eq!(value["supporters"], 7);
         assert_eq!(value["follows"], 2);
         assert_eq!(value["raids"], 1);
-        assert_eq!(value["bits"], 1500);
+        // Plan 162: the fake Celebration's 300 bits count; Hydrate's points do not.
+        assert_eq!(value["bits"], 1800);
         assert_eq!(
             value["tips"],
             serde_json::json!([{ "currency":"USD", "amountMicros":5_000_000 }, { "currency":"EUR", "amountMicros":2_000_000 }])

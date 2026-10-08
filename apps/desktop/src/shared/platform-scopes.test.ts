@@ -7,6 +7,7 @@ import {
   KICK_MODERATION_SCOPE,
   KICK_OPTIONAL_SCOPES,
   TWITCH_AUDIENCE_SCOPES,
+  TWITCH_BITS_POINTS_SCOPES,
   TWITCH_MODERATION_SCOPE,
   TWITCH_OPTIONAL_SCOPES,
   YOUTUBE_FORCE_SSL_SCOPE,
@@ -94,11 +95,17 @@ describe('optional scope union (plan 140, S5)', () => {
     expect(TWITCH_OPTIONAL_SCOPES).toEqual([
       'moderator:read:followers',
       'channel:read:subscriptions',
-      'moderator:manage:chat_messages'
+      'moderator:manage:chat_messages',
+      'bits:read',
+      'channel:read:redemptions'
     ])
     expect(KICK_OPTIONAL_SCOPES).toEqual(['moderation:chat_message:manage'])
     // No Twitch connect path can drop the audience or the moderation grant.
-    for (const scope of [...TWITCH_AUDIENCE_SCOPES, TWITCH_MODERATION_SCOPE]) {
+    for (const scope of [
+      ...TWITCH_AUDIENCE_SCOPES,
+      TWITCH_MODERATION_SCOPE,
+      ...TWITCH_BITS_POINTS_SCOPES
+    ]) {
       expect(connectOptionalScopes('twitch')).toContain(scope)
       expect(platformConnectOptions('twitch')?.optionalScopes).toContain(scope)
       expect(permissionReconnectOptions('twitch')?.optionalScopes).toContain(scope)
@@ -145,6 +152,8 @@ describe('optional scope union (plan 140, S5)', () => {
     expect(constants.get('KICK_MODERATION_SCOPE')).toBe(KICK_MODERATION_SCOPE)
     expect(constants.get('TWITCH_FOLLOWERS_SCOPE')).toBe(TWITCH_AUDIENCE_SCOPES[0])
     expect(constants.get('TWITCH_SUBSCRIPTIONS_SCOPE')).toBe(TWITCH_AUDIENCE_SCOPES[1])
+    expect(constants.get('TWITCH_BITS_SCOPE')).toBe(TWITCH_BITS_POINTS_SCOPES[0])
+    expect(constants.get('TWITCH_REDEMPTIONS_SCOPE')).toBe(TWITCH_BITS_POINTS_SCOPES[1])
     expect(oauthSource).toContain(`"${YOUTUBE_FORCE_SSL_SCOPE}"`)
   })
 })

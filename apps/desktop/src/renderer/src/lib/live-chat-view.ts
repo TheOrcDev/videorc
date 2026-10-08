@@ -15,6 +15,7 @@ import type {
   LiveChatSnapshot,
   StreamPlatform
 } from '../../../shared/backend'
+import { isActivityOnlyEvent } from '../../../shared/backend'
 
 /** Platforms that can appear in the unified feed, in display order. */
 export const LIVE_CHAT_PLATFORMS: StreamPlatform[] = ['youtube', 'twitch', 'kick', 'x']
@@ -506,12 +507,13 @@ export function commentCanHighlight(message: LiveChatMessage): boolean {
   if (message.isDeleted || message.eventType === 'deleted' || message.eventType === 'moderation') {
     return false
   }
-  // Notices go on stream only as activity events: a sub, a gift, a raid
-  // (plan 055, S11). Plain system text stays off the card.
+  // Notices go on stream only as activity events: a sub, a gift, a raid, a
+  // Power-up or a redemption (plan 055, S11; plan 162). Plain system text
+  // stays off the card.
   if (
     message.eventType === 'system' ||
     message.eventType === 'membership' ||
-    message.eventType === 'follow'
+    isActivityOnlyEvent(message.eventType)
   ) {
     return Boolean(message.details)
   }

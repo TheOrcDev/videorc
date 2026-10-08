@@ -89,6 +89,14 @@ const celebrations: { label: string; message: LiveChatMessage }[] = [
   {
     label: 'watch-streak',
     message: row('twitch', 'w', 'membership', { kind: 'watch-streak', streakCount: 5 })
+  },
+  {
+    label: 'power-up',
+    message: row('twitch', 'p', 'power-up', {
+      kind: 'power-up',
+      bits: 300,
+      powerUp: 'celebration'
+    })
   }
 ]
 
@@ -98,6 +106,16 @@ describe('activityAutoShowEligible (plan 156, D2)', () => {
       expect(activityAutoShowEligible(message)).toBe(true)
     })
   }
+
+  it('never auto-shows a channel point redemption (plan 162)', () => {
+    const hydrate = row('twitch', 'v', 'redemption', {
+      kind: 'redemption',
+      reward: 'custom',
+      channelPoints: 500,
+      title: 'Hydrate'
+    })
+    expect(activityAutoShowEligible(hydrate)).toBe(false)
+  })
 
   it('never auto-shows an announcement', () => {
     const announcement = row('twitch', 'mod', 'system', { kind: 'announcement' }, 'Be nice')

@@ -3214,6 +3214,16 @@ async fn twitch_chat_config(
             .scopes
             .iter()
             .any(|scope| scope == oauth::TWITCH_FOLLOWERS_SCOPE),
+        bits_events: credential
+            .account
+            .scopes
+            .iter()
+            .any(|scope| scope == oauth::TWITCH_BITS_SCOPE),
+        redemption_events: credential
+            .account
+            .scopes
+            .iter()
+            .any(|scope| scope == oauth::TWITCH_REDEMPTIONS_SCOPE),
     })
 }
 
