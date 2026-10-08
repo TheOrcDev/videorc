@@ -1,5 +1,5 @@
-import { mkdir, open, readdir, rm, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, open, readdir, realpath, rm, writeFile } from 'node:fs/promises'
+import { join, sep } from 'node:path'
 
 import type { CohostAvatarState } from '../shared/backend'
 import {
@@ -10,6 +10,7 @@ import {
   golemAssetUrl,
   golemImageFormat,
   isGolemPersonaId,
+  parseGolemAssetPath,
   type GolemImageImportResult
 } from '../shared/golem-assets'
 
@@ -82,6 +83,30 @@ export async function importGolemImage(
   const url = golemAssetUrl(path)
   if (!url) throw new Error('The stored image path is not a managed asset path.')
   return { personaId, state, path, url, width, height }
+}
+
+/**
+ * The bytes of one stored image for the overlay raster (plan 164 S-C2): the
+ * path must be one `golemAssetRelativePath` produces, the file must be a
+ * regular file inside the root (symlinks resolved) and within the import
+ * cap. Null, never a throw, for anything else.
+ */
+export async function readGolemImage(
+  root: string,
+  relativePath: unknown
+): Promise<Uint8Array | null> {
+  if (typeof relativePath !== 'string') return null
+  const parsed = parseGolemAssetPath(relativePath)
+  if (!parsed) return null
+  const filePath = join(root, parsed.personaId, `${parsed.state}.${parsed.extension}`)
+  try {
+    const [resolvedRoot, resolvedFile] = await Promise.all([realpath(root), realpath(filePath)])
+    if (!resolvedFile.startsWith(resolvedRoot + sep)) return null
+    const bytes = await readImageBytes(resolvedFile)
+    return bytes.length === 0 || bytes.length > GOLEM_IMAGE_MAX_BYTES ? null : new Uint8Array(bytes)
+  } catch {
+    return null
+  }
 }
 
 /** "Start over": the persona's folder and everything in it. App-owned copies,

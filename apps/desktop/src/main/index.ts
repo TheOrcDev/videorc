@@ -1,5 +1,5 @@
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
-import { importGolemImage, removeGolemPersona } from './golem-assets'
+import { importGolemImage, readGolemImage, removeGolemPersona } from './golem-assets'
 import { globalShortcutEntries, isGlobalShortcutAction } from '../shared/global-shortcuts'
 import { normalizeAccelerator } from '../shared/accelerator'
 import { openableChatLink } from '../shared/chat-link'
@@ -14174,6 +14174,10 @@ app.whenReady().then(async () => {
     if (!isGolemPersonaId(personaId)) throw new Error('Golem removal needs a persona id.')
     await removeGolemPersona(managedGolemRoot(), personaId)
   })
+  // The overlay raster decodes the persona's own files from bytes (S-C2).
+  secureIpcHandle('golem-assets:read-image', (_event, relativePath: unknown) =>
+    readGolemImage(managedGolemRoot(), relativePath)
+  )
   secureIpcHandle('backgrounds:bundled-assets', () => bundledBackgroundAssets())
   secureIpcHandle('backgrounds:asset-exists', (_event, assetId: unknown) =>
     backgroundAssetFileExists(assetId)

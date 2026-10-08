@@ -141,6 +141,8 @@ import {
   overlayOrientationForCanvas,
   overlaySnapRect
 } from '@/lib/overlay-layout'
+import { golemOverlayKey, golemOverlayTargetPlan } from '@/lib/golem-overlay-targets'
+import type { GolemImage } from '@/lib/golem-overlay'
 import {
   autoApplyPreset,
   isShippedDefaultOutput,
@@ -235,7 +237,9 @@ import type {
   CohostSettings,
   CohostSettingsPatch,
   CohostState,
+  CohostUtteranceState,
   CohostWindowState,
+  GolemOverlaySnapshot,
   CommentHighlightAnchor,
   CommentHighlightCanvases,
   CommentHighlightCommand,
@@ -542,6 +546,11 @@ function loadCommandFailurePolicy() {
 
 function loadCaptionOverlay() {
   return import('@/lib/caption-overlay')
+}
+
+// The Golem rasterizer carries the default pack: lazy, never in the eager shell.
+function loadGolemOverlay() {
+  return import('@/lib/golem-overlay')
 }
 
 // Steady-state telemetry (surface counters, diagnostics stats) commits to
@@ -1146,6 +1155,11 @@ export type StudioContextValue = {
    * Golem sit per orientation and which outputs carry them. Backend-owned. */
   overlayLayout: OverlayLayout
   setOverlayLayout: (layout: OverlayLayout) => Promise<void>
+  /** The Golem on stream (plan 164 Phase C): which state shows and the bubble
+   * that is up (`cohost.golem.state`); null until the backend reported. */
+  golemOverlay: GolemOverlaySnapshot | null
+  /** A manual utterance (D7): the bubble shows at once with `state`. */
+  sayGolem: (text: string, state: CohostUtteranceState) => Promise<GolemOverlaySnapshot>
   cohostGate: EntitlementUiGate
   cohostActionPending: boolean
   patchCohostSettings: (patch: CohostSettingsPatch) => Promise<void>
@@ -4138,6 +4152,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // talks to the web.
   const [cohostState, setCohostState] = useState<CohostState | null>(null)
   const [cohostSettings, setCohostSettings] = useState<CohostSettings | null>(null)
+  const [golemOverlay, setGolemOverlay] = useState<GolemOverlaySnapshot | null>(null)
   const [cohostActionPending, setCohostActionPending] = useState(false)
   const cohostStateRef = useRef<CohostState | null>(null)
   const streamTitleRef = useRef<string | null>(null)
@@ -4180,11 +4195,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     let cancelled = false
     void Promise.all([
       client.request<CohostSettings>('cohost.settings.get').catch(() => null),
-      client.request<CohostState>('cohost.status').catch(() => null)
-    ]).then(([nextSettings, nextState]) => {
+      client.request<CohostState>('cohost.status').catch(() => null),
+      // An older backend has no Golem overlay (plan 164); the avatar stays off.
+      client.requestTyped('cohost.golem.status').catch(() => null)
+    ]).then(([nextSettings, nextState, nextGolem]) => {
       if (cancelled) return
       if (nextSettings) setCohostSettings(nextSettings)
       if (nextState) commitCohostState(nextState)
+      if (nextGolem) setGolemOverlay(nextGolem)
     })
     return () => {
       cancelled = true
@@ -4234,6 +4252,95 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     cohostGate.allowed,
     cohostState?.status
   ])
+  // The Golem on stream (plan 164 S-C2). The backend owns the state and the
+  // bubble; this renderer rasterizes the avatar (plus bubble) once per output
+  // canvas and pushes each PNG into the `golem_overlay` slot, like the caption
+  // bar. A push happens on every change of persona, images, state, bubble,
+  // placement or canvas, whether or not a session runs: the slot is
+  // app-global and the avatar must be on the first frame (D19). Latest wins:
+  // a stale raster never lands after a newer state.
+  const sayGolem = useCallback(
+    async (text: string, state: CohostUtteranceState): Promise<GolemOverlaySnapshot> => {
+      if (!client) throw new Error('Backend socket is not connected.')
+      const shown = await client.requestTyped('cohost.golem.say', { text, state })
+      setGolemOverlay(shown)
+      return shown
+    },
+    [client]
+  )
+  const golemPersona = cohostSettings?.persona ?? null
+  const golemTargetsKey = useMemo(
+    () =>
+      JSON.stringify(
+        golemOverlayTargetPlan({
+          streamEnabled: captureConfig.streamEnabled,
+          recordingVideo: captureConfig.video,
+          streamVideo: auxiliaryStreamOutputVideoSettings(
+            captureConfig.video,
+            captureConfig.streamEnabled ? captureConfig.streaming : undefined
+          ),
+          verticalLeg: simulcastLegLiveRequest(captureConfig)?.video,
+          layout: overlayLayout.golem
+        })
+      ),
+    [captureConfig, overlayLayout.golem]
+  )
+  const golemPushEpochRef = useRef(0)
+  const golemPushedKeyRef = useRef<string | null>(null)
+  const golemImageCacheRef = useRef(new Map<string, Promise<GolemImage>>())
+  useEffect(() => {
+    if (wsStatus !== 'connected') golemPushedKeyRef.current = null
+  }, [wsStatus])
+  useEffect(() => {
+    if (!client || wsStatus !== 'connected' || !golemPersona) return
+    const targets = JSON.parse(golemTargetsKey) as ReturnType<typeof golemOverlayTargetPlan>
+    if (targets.length === 0) return
+    const state = golemOverlay?.state ?? 'idle'
+    const bubble = golemOverlay?.bubble?.text ?? null
+    const imagesKey = JSON.stringify(golemPersona.images)
+    const key = golemOverlayKey({
+      personaId: golemPersona.id,
+      imagesKey,
+      state,
+      bubble,
+      style: golemPersona.bubbleStyle,
+      targets
+    })
+    if (key === golemPushedKeyRef.current) return
+    const epoch = ++golemPushEpochRef.current
+    const cache = golemImageCacheRef.current
+    void (async () => {
+      const golem = await loadGolemOverlay()
+      const cacheKey = `${golemPersona.id}:${imagesKey}:${state}`
+      let image = cache.get(cacheKey)
+      if (!image) {
+        image = golem.loadGolemStateImage(golemPersona, state)
+        cache.set(cacheKey, image)
+        image.catch(() => cache.delete(cacheKey))
+      }
+      const decoded = await image
+      for (const target of targets) {
+        if (epoch !== golemPushEpochRef.current) return
+        const pngBase64 = await golem.renderGolemOverlayPng({
+          image: decoded,
+          bubble,
+          style: golemPersona.bubbleStyle,
+          canvas: { width: target.canvasWidth, height: target.canvasHeight },
+          rect: target.rect
+        })
+        if (!pngBase64 || epoch !== golemPushEpochRef.current) return
+        await client.requestTyped('golem.overlay.set', {
+          target: target.target,
+          pngBase64,
+          rect: target.rect
+        })
+      }
+      if (epoch === golemPushEpochRef.current) golemPushedKeyRef.current = key
+    })().catch((error: unknown) => {
+      console.warn(`Golem overlay: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  }, [client, wsStatus, golemPersona, golemOverlay, golemTargetsKey])
+
   // Start with the live-chat session, and re-assert on a consent flip.
   // The backend applies changed consent in place and returns its confirmed
   // state; unchanged consent is idempotent. It stops itself when chat ends.
@@ -7075,6 +7182,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
       nextClient.on('cohost.state', (payload) => {
         commitCohostState(payload as CohostState)
+      }),
+      nextClient.on('cohost.golem.state', (payload) => {
+        setGolemOverlay(payload as GolemOverlaySnapshot)
       }),
       // Clip that (plan 068 D6): one toast per mark, whether it came from a
       // spoken phrase, a shortcut, a deck key, or the Stream Manager.
@@ -15301,6 +15411,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cohostSettings,
       overlayLayout,
       setOverlayLayout,
+      golemOverlay,
+      sayGolem,
       cohostGate,
       cohostActionPending,
       patchCohostSettings,
@@ -15534,6 +15646,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cohostSettings,
       overlayLayout,
       setOverlayLayout,
+      golemOverlay,
+      sayGolem,
       cohostGate,
       cohostActionPending,
       patchCohostSettings,

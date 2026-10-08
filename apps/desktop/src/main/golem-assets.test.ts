@@ -4,7 +4,12 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { golemAssetUrl, golemImageFormat, parseGolemAssetPath } from '../shared/golem-assets'
-import { importGolemImage, listGolemPersonas, removeGolemPersona } from './golem-assets'
+import {
+  importGolemImage,
+  listGolemPersonas,
+  readGolemImage,
+  removeGolemPersona
+} from './golem-assets'
 
 /** The smallest real PNG: 1×1, 8-bit RGBA, transparent (67 bytes). */
 const ONE_PIXEL_PNG = Buffer.from(
@@ -55,6 +60,22 @@ describe('golem avatar store (plan 164 S-A3)', () => {
       extension: 'png'
     })
     expect(await listGolemPersonas(base)).toEqual(['persona-1'])
+  })
+
+  it('reads a stored image back as bytes and nothing outside the root (S-C2)', async () => {
+    const base = await root()
+    const source = join(base, 'picked.png')
+    await writeFile(source, ONE_PIXEL_PNG)
+    const result = await importGolemImage(source, base, 'persona-1', 'idle', decodeOnePixel)
+    const bytes = await readGolemImage(base, result.path)
+    expect(bytes).toBeInstanceOf(Uint8Array)
+    expect(Buffer.from(bytes!)).toEqual(ONE_PIXEL_PNG)
+    // A state with no file, a path that is not a managed path, and a
+    // traversal are all null, never a throw.
+    expect(await readGolemImage(base, 'persona-1/laugh.png')).toBeNull()
+    expect(await readGolemImage(base, '../picked.png')).toBeNull()
+    expect(await readGolemImage(base, 'persona-1/idle.svg')).toBeNull()
+    expect(await readGolemImage(base, 42)).toBeNull()
   })
 
   it('rejects a 5 MB file with a named error and writes nothing', async () => {

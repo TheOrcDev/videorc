@@ -54,6 +54,7 @@ import {
   managedAvatarFileName
 } from './chat-avatar-bytes'
 import { TWITCH_GIF_MODES, twitchGifAssetUrl, type TwitchGifMode } from './chat-gif'
+import { GOLEM_IMAGE_MAX_BYTES } from './golem-assets'
 import { openableChatLink } from './chat-link'
 import { SCOPE_RECONNECT_PLATFORMS } from './platform-scopes'
 import { MAX_RELAYED_MODERATION_OPERATIONS, MODERATION_PHASES } from './chat-moderation'
@@ -96,6 +97,7 @@ export const electronInvokeApiMethods = {
   'scheduled-streams:import-thumbnail': 'importScheduledThumbnail',
   'golem-assets:import-image': 'importGolemImage',
   'golem-assets:remove': 'removeGolemPersona',
+  'golem-assets:read-image': 'readGolemImage',
   'backgrounds:asset-exists': 'backgroundAssetExists',
   'backgrounds:bundled-assets': 'getBundledBackgroundAssets',
   'avatars:cache': 'cacheChatAvatar',
@@ -455,6 +457,26 @@ const chatAvatarBytesSchema = runtimeSchema<Uint8Array | null>(
       throw new RuntimeSchemaError(
         path,
         `null or image bytes of at most ${CHAT_AVATAR_MAX_BYTES} bytes`
+      )
+    }
+    return value
+  }
+)
+/** One persona image as bytes (plan 164 S-C2): the Studio renderer decodes
+ * it for the Golem overlay raster, as the highlight card does with avatars.
+ * Null when the path names no stored file; never over the 4 MB import cap. */
+const golemImageBytesSchema = runtimeSchema<Uint8Array | null>(
+  `null or image bytes of at most ${GOLEM_IMAGE_MAX_BYTES} bytes`,
+  (value, path) => {
+    if (value === null) return null
+    if (
+      !(value instanceof Uint8Array) ||
+      value.byteLength === 0 ||
+      value.byteLength > GOLEM_IMAGE_MAX_BYTES
+    ) {
+      throw new RuntimeSchemaError(
+        path,
+        `null or image bytes of at most ${GOLEM_IMAGE_MAX_BYTES} bytes`
       )
     }
     return value
@@ -1357,6 +1379,10 @@ const specificRuntimeInvokeContracts = {
   'golem-assets:remove': invokeContract(
     tupleSchema([stringSchema({ minLength: 1, maxLength: 128 })]),
     undefinedSchema
+  ),
+  'golem-assets:read-image': invokeContract(
+    tupleSchema([stringSchema({ minLength: 1, maxLength: 256 })]),
+    golemImageBytesSchema
   ),
   'avatars:read': invokeContract(tupleSchema([boundedIdentifier]), chatAvatarBytesSchema),
   'global-shortcuts:set': invokeContract(tupleSchema([globalShortcutsSchema])),

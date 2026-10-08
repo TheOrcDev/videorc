@@ -286,7 +286,7 @@ export function GolemPersonaSection({
                 </ToggleGroupItem>
               ))}
             </ToggleGroup>
-            <GolemBubbleSample name={persona.name} style={persona.bubbleStyle} />
+            <GolemBubbleSample persona={persona} style={persona.bubbleStyle} />
           </div>
         </Field>
       </FieldGroup>

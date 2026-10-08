@@ -4303,6 +4303,10 @@ export interface VideorcApi {
   ) => Promise<GolemImageImportResult | null>
   /** "Start over": deletes the persona's managed folder. */
   removeGolemPersona: (personaId: string) => Promise<void>
+  /** The bytes of one stored persona image (`<personaId>/<state>.<ext>`) for
+   * the Golem overlay raster to decode (plan 164 S-C2); null when there is
+   * no such file. The renderer cannot fetch the managed scheme itself. */
+  readGolemImage: (relativePath: string) => Promise<Uint8Array | null>
   backgroundAssetExists: (assetId: string) => Promise<boolean>
   /** Fetch-and-cache a chat avatar from an allowlisted platform CDN; returns a
    * local videorc-asset:// URL or null (disallowed host / fetch failure). */

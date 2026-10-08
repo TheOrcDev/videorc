@@ -44,6 +44,7 @@ const api: VideorcApi = {
   importScheduledThumbnail: () => invoke('scheduled-streams:import-thumbnail'),
   importGolemImage: (personaId, state) => invoke('golem-assets:import-image', personaId, state),
   removeGolemPersona: (personaId) => invoke('golem-assets:remove', personaId),
+  readGolemImage: (relativePath) => invoke('golem-assets:read-image', relativePath),
   backgroundAssetExists: (assetId) => invoke('backgrounds:asset-exists', assetId),
   cacheChatAvatar: (url) => invoke('avatars:cache', url),
   cacheChatGif: (url) => invoke('chat-gifs:cache', url),

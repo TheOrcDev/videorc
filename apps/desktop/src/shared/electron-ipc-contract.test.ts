@@ -35,6 +35,7 @@ describe('Electron IPC contract', () => {
   it('maps every renderer-facing invoke channel to a real async API method', () => {
     expectTypeOf<ElectronInvokeMappingInvariant>().toEqualTypeOf<true>()
     // 127: plan 164 S-A3 adds the Golem avatar store pair (import, remove).
+    // 128: plan 164 S-C2 adds the Golem image bytes read for the overlay raster.
     // 124: plan 155 adds chat-gifs:cache and the GIF mode relay (push, get).
     // 121: plan 152 adds marker request/reply and capture context get/push.
     // 117: plan 151 added chat:open-link.
@@ -46,8 +47,8 @@ describe('Electron IPC contract', () => {
     // the Stream Manager Show who followed channel; plan 068 the mark-clip
     // relay pair; plan 062 the shortcut recorder arm; plan 055 the dashboard
     // push and get; plan 050 retired glass:wallpaper:get).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(127)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(127)
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(128)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(128)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
