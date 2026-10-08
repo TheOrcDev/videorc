@@ -4825,6 +4825,12 @@ export interface LiveChatAuthorAffiliation {
   url?: string
 }
 
+/**
+ * The verified check a platform shows beside an author's name: X's Premium
+ * (blue), Verified Organization (gold) or government (gray) check (plan 167).
+ */
+export type LiveChatAuthorVerified = 'blue' | 'business' | 'government'
+
 /** One normalized, SQLite-persisted chat message. `id` is the app-level dedupe key. */
 export interface LiveChatMessage {
   id: string
@@ -4837,6 +4843,8 @@ export interface LiveChatMessage {
   authorAvatarUrl?: string
   authorBadges: string[]
   authorAffiliation?: LiveChatAuthorAffiliation
+  /** X's verified check beside the name (plan 167); absent when unverified. */
+  authorVerified?: LiveChatAuthorVerified
   authorRoles: string[]
   publishedAt: string
   receivedAt: string
