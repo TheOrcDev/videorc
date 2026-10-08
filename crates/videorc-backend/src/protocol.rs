@@ -4694,6 +4694,26 @@ pub struct CohostAuthorParams {
     pub author_key: String,
 }
 
+/// `cohost.utterance.approve` / `cohost.utterance.dismiss` (plan 164 S-D2):
+/// a proposed card by its id.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostUtteranceParams {
+    pub session_id: String,
+    pub utterance_id: String,
+}
+
+/// `cohost.utterance.say` (plan 164 D7): the streamer's own line for the
+/// Golem, 1 to 200 characters; `state` defaults to `talk`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostSayParams {
+    pub session_id: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<crate::cohost::CohostUtteranceState>,
+}
+
 /// `cohost.settings.set`: every field optional; absent fields are unchanged.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -4957,6 +4977,33 @@ pub struct CohostReportGreetings {
 }
 
 /// One alert kind viewers raised, with the most distinct viewers who said it
+/// Plan 164 D10: one automatic send, written when it lands (or fails), so
+/// the report says what the Golem posted as the streamer and why.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportPost {
+    /// The utterance id.
+    pub id: String,
+    pub at: String,
+    pub trigger: crate::cohost::CohostUtteranceTriggerKind,
+    pub text: String,
+    /// The platforms the send reached, or was meant to.
+    #[serde(default)]
+    pub destinations: Vec<crate::streaming::StreamPlatform>,
+    pub result: CohostReportPostResult,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostReportPostResult {
+    Sent,
+    Partial,
+    Failed,
+}
+
+/// Posts kept per report, newest kept.
+pub const COHOST_REPORT_POSTS_CAP: usize = 200;
+
 /// at once and whether it was ever corroborated (two viewers within 60 s).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -5066,6 +5113,10 @@ pub struct CohostSessionReport {
     /// a report from before voice commands reads and writes unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commands: Option<CohostReportCommands>,
+    /// Plan 164 D10: what the Golem posted as the streamer, oldest first, at
+    /// most 200. Omitted while empty, so older reports read unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub posts: Vec<CohostReportPost>,
 }
 
 impl CohostSessionReport {
@@ -5203,7 +5254,40 @@ impl CohostSessionReport {
             (Some(base), Some(later)) => Some(base.merged_with(later)),
             (base, later) => base.or(later),
         };
+        for post in later.posts {
+            if self.posts.iter().any(|existing| existing.id == post.id) {
+                continue;
+            }
+            self.posts.push(post);
+        }
+        while self.posts.len() > COHOST_REPORT_POSTS_CAP {
+            self.posts.remove(0);
+        }
         self
+    }
+
+    /// A report that carries nothing but `post` (plan 164 D10): folded into
+    /// the session's report, or kept alone when the tick session never ran
+    /// (greetings are free). `segments: 0` says so.
+    pub fn post_only(session_id: &str, post: CohostReportPost) -> Self {
+        Self {
+            version: COHOST_SESSION_REPORT_VERSION,
+            session_id: session_id.to_string(),
+            started_at: post.at.clone(),
+            ended_at: post.at.clone(),
+            segments: 0,
+            stream_title: None,
+            messages_seen: 0,
+            shown_on_stream: 0,
+            questions: CohostReportQuestions::default(),
+            flags: CohostReportFlags::default(),
+            promises: CohostReportPromises::default(),
+            greetings: CohostReportGreetings::default(),
+            alerts: Vec::new(),
+            recap: CohostReportRecap::default(),
+            commands: None,
+            posts: vec![post],
+        }
     }
 }
 

@@ -21,9 +21,11 @@ mod clean_cut;
 mod clip_marks;
 mod cohost;
 mod cohost_ack;
+mod cohost_auto_chat;
 mod cohost_avatar;
 mod cohost_command;
 mod cohost_greetings;
+mod cohost_throttle;
 mod color;
 mod comment_highlight;
 mod compositor;
@@ -5355,6 +5357,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.command.choose"
         | "cohost.command.confirm"
         | "cohost.command.cancel"
+        | "cohost.utterance.approve"
+        | "cohost.utterance.dismiss"
+        | "cohost.utterance.say"
         | "clip.mark"
         | "session.marker.voice.configure"
         | "session.marker.create"
@@ -9320,6 +9325,47 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // Plan 164 Phase D: the Stream Manager's answers to the Golem's
+        // proposed cards, and the Say box. Never routed by the LAN listener.
+        "cohost.utterance.approve" => {
+            match serde_json::from_value::<protocol::CohostUtteranceParams>(command.params) {
+                Ok(params) => match cohost::approve_utterance(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.utterance.dismiss" => {
+            match serde_json::from_value::<protocol::CohostUtteranceParams>(command.params) {
+                Ok(params) => match cohost::dismiss_utterance(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.utterance.say" => {
+            match serde_json::from_value::<protocol::CohostSayParams>(command.params) {
+                Ok(params) => match cohost::say_utterance(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "cohost.settings.get" => {
             ServerResponse::ok(command.id, cohost::get_cohost_settings(state).await)
         }
@@ -12491,6 +12537,9 @@ async fn refresh_account_entitlements(state: &AppState) {
     // off (applied below, outside this lock). Signed out reads as off; a
     // failed read keeps the last answer.
     let mut command_parser = None;
+    // Plan 164 S-D3: the same read tells the Golem which tick contract the
+    // web speaks (4 adds the persona). Signed out reads as unknown.
+    let mut tick_version: Option<Option<u32>> = None;
     let changed = match current_account_entitlement_refresh_identity(state) {
         Ok(current) => {
             commit_account_entitlement_refresh_if_current(&prepared.identity, &current, || {
@@ -12498,6 +12547,13 @@ async fn refresh_account_entitlements(state: &AppState) {
                     PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some(false),
                     PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
                         Some(capabilities.features.cohost_command_enabled)
+                    }
+                    PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
+                };
+                tick_version = match &prepared.outcome {
+                    PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some(None),
+                    PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
+                        Some(capabilities.cohost.as_ref().and_then(|cohost| cohost.tick))
                     }
                     PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
                 };
@@ -12519,6 +12575,9 @@ async fn refresh_account_entitlements(state: &AppState) {
     drop(transition);
     if let Some(enabled) = command_parser {
         cohost::set_command_parser_capability(state, enabled).await;
+    }
+    if let Some(tick) = tick_version {
+        cohost::set_tick_capability(state, tick).await;
     }
 }
 

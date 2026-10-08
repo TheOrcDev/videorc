@@ -5690,6 +5690,18 @@ impl Database {
         Ok(true)
     }
 
+    /// Plan 164 D10: fold one automatic send into the session's report as it
+    /// lands, so the report says what the Golem posted even when the tick
+    /// session never ran (greetings are free). Same session-row rule as
+    /// `upsert_cohost_report`: `false` when the session row is gone.
+    pub fn append_cohost_report_post(
+        &self,
+        session_id: &str,
+        post: crate::protocol::CohostReportPost,
+    ) -> Result<bool> {
+        self.upsert_cohost_report(&CohostSessionReport::post_only(session_id, post))
+    }
+
     /// The saved Golem report of a session; `None` when there is none or it
     /// was written in a format this build does not read.
     pub fn get_cohost_report(&self, session_id: &str) -> Result<Option<CohostSessionReport>> {
@@ -9477,6 +9489,7 @@ mod tests {
             started_at: started_at.to_string(),
             ended_at: ended_at.to_string(),
             segments: 1,
+            posts: Vec::new(),
             stream_title: Some("Rust night".to_string()),
             messages_seen: 10,
             shown_on_stream: 1,

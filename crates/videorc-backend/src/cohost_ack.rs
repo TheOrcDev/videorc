@@ -926,6 +926,18 @@ pub(crate) fn dead_air_due(
     if last_nudge_at.is_some_and(|last| now.saturating_duration_since(last) < DEAD_AIR_NUDGE_GAP) {
         return false;
     }
+    dead_air_quiet(voice, now)
+}
+
+/// Plan 164 S-D4: banter reuses the dead-air clock (a live signal, quiet
+/// for `DEAD_AIR_SILENCE`) without the nudge's own gap or its "something is
+/// waiting" rule: the lane's cooldown and the quiet-after-send rule gate it.
+pub(crate) fn banter_due(voice: VoiceActivity, now: Instant) -> bool {
+    dead_air_quiet(voice, now)
+}
+
+/// A live microphone signal that has been quiet for `DEAD_AIR_SILENCE`.
+fn dead_air_quiet(voice: VoiceActivity, now: Instant) -> bool {
     let fresh = |at: Option<Instant>| {
         at.is_some_and(|at| now.saturating_duration_since(at) <= VOICE_FRAME_STALE)
     };

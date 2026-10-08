@@ -14,6 +14,8 @@ import type {
   CohostCommandParams,
   CohostFlagParams,
   CohostAuthorParams,
+  CohostSayParams,
+  CohostUtteranceParams,
   CohostPromiseParams,
   CohostRecapParams,
   CohostQuestionParams,
@@ -312,6 +314,9 @@ export interface BackendRpcMethodMap {
   'cohost.recap.dismiss': BackendRpcDefinition<CohostRecapParams, CohostState>
   'cohost.recap.draft': BackendRpcDefinition<CohostRecapParams, CohostState>
   'cohost.author.greeted': BackendRpcDefinition<CohostAuthorParams, CohostState>
+  'cohost.utterance.approve': BackendRpcDefinition<CohostUtteranceParams, CohostState>
+  'cohost.utterance.dismiss': BackendRpcDefinition<CohostUtteranceParams, CohostState>
+  'cohost.utterance.say': BackendRpcDefinition<CohostSayParams, CohostState>
   'cohost.command.choose': BackendRpcDefinition<CohostCommandChooseParams, CohostState>
   'cohost.command.confirm': BackendRpcDefinition<CohostCommandParams, CohostState>
   'cohost.command.cancel': BackendRpcDefinition<CohostCommandParams, CohostState>
@@ -2556,6 +2561,29 @@ const cohostCommandSchema = objectSchema(
   { allowUnknown: false }
 )
 const cohostSwitchStateSchema = enumSchema(['on', 'paused'])
+// Plan 164 D7: what the Golem said or proposes; closed shapes, kebab-case
+// enums, optional fields absent (never null).
+const cohostUtteranceStateSchema = enumSchema(['talk', 'laugh', 'think'])
+const cohostUtteranceSchema = objectSchema(
+  {
+    id: boundedString,
+    text: stringSchema({ minLength: 1, maxLength: 2000 }),
+    state: cohostUtteranceStateSchema,
+    trigger: objectSchema(
+      {
+        kind: enumSchema(['greeting', 'answer', 'banter', 'manual']),
+        eventId: optionalSchema(boundedString),
+        messageId: optionalSchema(boundedString)
+      },
+      { allowUnknown: false }
+    ),
+    destinationIds: arraySchema(boundedString, { maxLength: 16 }),
+    status: enumSchema(['proposed', 'sent', 'dismissed', 'bubble-only', 'failed']),
+    at: timestamp,
+    expiresAt: optionalSchema(timestamp)
+  },
+  { allowUnknown: false }
+)
 const cohostCommandAvailabilitySchema = objectSchema(
   { voiceCommands: cohostSwitchStateSchema, remove: cohostSwitchStateSchema },
   { allowUnknown: false }
@@ -2611,7 +2639,10 @@ const cohostStateSchema = objectSchema(
     deadAirNudge: optionalSchema(cohostDeadAirNudgeSchema),
     // Plan 140 S3: absent until a command was heard / while both switches are on.
     command: optionalSchema(cohostCommandSchema),
-    commandAvailability: optionalSchema(cohostCommandAvailabilitySchema)
+    commandAvailability: optionalSchema(cohostCommandAvailabilitySchema),
+    // Plan 164 D7: absent while empty / zero.
+    utterances: optionalSchema(arraySchema(cohostUtteranceSchema, { maxLength: 20 })),
+    autoChatSends: optionalSchema(nonNegativeInteger)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostState>
@@ -2703,6 +2734,20 @@ const cohostAuthorParamsSchema = objectSchema(
   { sessionId: boundedString, authorKey: boundedString },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostAuthorParams>
+// Plan 164 S-D2 / D7: the Stream Manager's answers to a proposed card, and
+// the Say box.
+const cohostUtteranceParamsSchema = objectSchema(
+  { sessionId: boundedString, utteranceId: boundedString },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostUtteranceParams>
+const cohostSayParamsSchema = objectSchema(
+  {
+    sessionId: boundedString,
+    text: stringSchema({ minLength: 1, maxLength: 200 }),
+    state: optionalSchema(cohostUtteranceStateSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostSayParams>
 // Plan 140 S3: answers to the card the latest voice command opened.
 const cohostCommandChooseParamsSchema = objectSchema(
   { commandId: boundedString, index: numberSchema({ integer: true, min: 0, max: 2 }) },
@@ -2831,6 +2876,18 @@ const cohostReportCommandsSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+// Plan 164 D10: what the Golem posted as the streamer.
+const cohostReportPostSchema = objectSchema(
+  {
+    id: boundedString,
+    at: timestamp,
+    trigger: enumSchema(['greeting', 'answer', 'banter', 'manual']),
+    text: stringSchema({ maxLength: 2000 }),
+    destinations: arraySchema(streamPlatformSchema, { maxLength: 7 }),
+    result: enumSchema(['sent', 'partial', 'failed'])
+  },
+  { allowUnknown: false }
+)
 const cohostSessionReportSchema = objectSchema(
   {
     version: literalSchema(1),
@@ -2847,7 +2904,8 @@ const cohostSessionReportSchema = objectSchema(
     greetings: cohostReportGreetingsSchema,
     alerts: optionalSchema(arraySchema(cohostReportAlertSchema, { maxLength: 8 })),
     recap: cohostReportRecapSchema,
-    commands: optionalSchema(cohostReportCommandsSchema)
+    commands: optionalSchema(cohostReportCommandsSchema),
+    posts: optionalSchema(arraySchema(cohostReportPostSchema, { maxLength: 200 }))
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSessionReport>
@@ -3397,6 +3455,9 @@ const runtimeContracts = {
   'cohost.recap.dismiss': { params: cohostRecapParamsSchema, result: cohostStateSchema },
   'cohost.recap.draft': { params: cohostRecapParamsSchema, result: cohostStateSchema },
   'cohost.author.greeted': { params: cohostAuthorParamsSchema, result: cohostStateSchema },
+  'cohost.utterance.approve': { params: cohostUtteranceParamsSchema, result: cohostStateSchema },
+  'cohost.utterance.dismiss': { params: cohostUtteranceParamsSchema, result: cohostStateSchema },
+  'cohost.utterance.say': { params: cohostSayParamsSchema, result: cohostStateSchema },
   'cohost.command.choose': { params: cohostCommandChooseParamsSchema, result: cohostStateSchema },
   'cohost.command.confirm': { params: cohostCommandParamsSchema, result: cohostStateSchema },
   'cohost.command.cancel': { params: cohostCommandParamsSchema, result: cohostStateSchema },
