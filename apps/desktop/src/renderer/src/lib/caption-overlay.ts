@@ -874,8 +874,9 @@ export async function renderCommentHighlightPng(params: {
   }
 
   // YouTube's official icon (plan 165): unmodified, at least 20 px tall,
-  // centred on the identity row between the avatar and the name, on the
-  // card's solid glass. Cropped to the mark's bounds inside the file.
+  // closing the identity row on the card's right edge (owner call, like the
+  // Stream Manager rows), on the card's solid glass. Cropped to the mark's
+  // bounds inside the file.
   let markLeadPx = 0
   if (layout.platformMark && params.platformMark) {
     const mark = layout.platformMark
@@ -887,7 +888,7 @@ export async function renderCommentHighlightPng(params: {
       YOUTUBE_MARK.y * scaleY,
       YOUTUBE_MARK.width * scaleX,
       YOUTUBE_MARK.height * scaleY,
-      avatarX + metrics.avatarPx + metrics.identityGapPx,
+      originX + layout.cardWidthPx - metrics.paddingPx - mark.widthPx,
       Math.round(avatarY + (metrics.avatarPx - mark.heightPx) / 2),
       mark.widthPx,
       mark.heightPx
@@ -897,7 +898,7 @@ export async function renderCommentHighlightPng(params: {
 
   // Username beside the avatar (centred on it), message below from the card's
   // left padding.
-  const nameX = avatarX + metrics.avatarPx + metrics.identityGapPx + markLeadPx
+  const nameX = avatarX + metrics.avatarPx + metrics.identityGapPx
   const textX = originX + metrics.paddingPx
   context.save()
   context.shadowColor = 'rgba(0, 0, 0, 0.45)'

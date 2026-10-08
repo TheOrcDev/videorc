@@ -252,7 +252,7 @@ export interface HighlightTokenLayout {
   lines: HighlightLine[]
   cardWidthPx: number
   cardHeightPx: number
-  /** YouTube's icon on the identity row, between avatar and name (plan 165). */
+  /** YouTube's icon closing the identity row on the right (plan 165). */
   platformMark: HighlightPlatformMarkSize | null
 }
 
@@ -303,7 +303,8 @@ export function layoutCommentHighlightTokens(params: {
   const platformMark = params.platformMark
     ? highlightPlatformMarkSize(metrics, params.platform)
     : null
-  // The mark and its gap come out of the name's share of the row.
+  // The mark and its gap (on the row's right end) come out of the name's
+  // share of the row.
   const markLeadPx = platformMark ? platformMark.widthPx + metrics.identityGapPx : 0
   const maxNameWidthPx = Math.max(0, metrics.maxNameWidthPx - markLeadPx)
   const name = fitHighlightName(

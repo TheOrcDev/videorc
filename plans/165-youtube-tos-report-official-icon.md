@@ -559,7 +559,9 @@ retention, that becomes its own plan.
     has an avatar overlay any more.
   - A second owner call ("ugly in Stream Manager"): in chat and activity rows,
     the platform mark now closes the name line on the far right, after the
-    status chips and time, so names line up beside the avatars.
+    status chips and time, so names line up beside the avatars. The
+    on-stream highlight card follows suit: the mark sits on the card's right
+    edge on the name row.
 - Badge chips (`comments-destination-status.tsx`) drop the YouTube mark and
   keep the word "YouTube", because a Badge forces 12 px.
 

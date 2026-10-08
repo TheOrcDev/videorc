@@ -292,7 +292,7 @@ describe('renderCommentHighlightCards YouTube icon (plan 165)', () => {
   // The decoded official file: the artboard, mark cropped from inside it.
   const icon = { width: 602.187, height: 515.868 } as unknown as HighlightBitmap
 
-  it('draws the official icon at 20 px or more on every leg, beside the name', async () => {
+  it('draws the official icon at 20 px or more on every leg, right of the name', async () => {
     const loadYoutubeMark = vi.fn(async () => icon)
     await renderCommentHighlightCards(
       youtube,
@@ -313,10 +313,12 @@ describe('renderCommentHighlightCards YouTube icon (plan 165)', () => {
       expect(height).toBeGreaterThanOrEqual(20)
       expect(width / height).toBeCloseTo(396 / 277.402343, 1)
     }
-    const names = calls
-      .filter((call) => call.method === 'fillText')
-      .map((call) => String(call.args[0]))
+    const nameCalls = calls.filter((call) => call.method === 'fillText')
+    const names = nameCalls.map((call) => String(call.args[0]))
     expect(names).toContain('Orc Dev')
+    // The icon closes the identity row on the right, after the name.
+    const nameX = Number(nameCalls.find((call) => call.args[0] === 'Orc Dev')?.args[1])
+    for (const { args } of marks) expect(Number(args[5])).toBeGreaterThan(nameX)
     expect(names.some((name) => name.includes('YouTube ·'))).toBe(false)
   })
 
