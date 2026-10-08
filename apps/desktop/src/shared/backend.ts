@@ -4994,6 +4994,51 @@ export interface CohostSettingsPatch {
   removeConfirm?: RemoveConfirmMode
 }
 
+// --- Overlay layout (plan 164) ---------------------------------------------
+// Where the highlight card, the caption bar and the Golem sit on each output
+// orientation and which outputs carry them. Backend-owned (`app_settings`
+// key `overlayLayout`), served by `overlays.layout.get/set`. Placement lives
+// on the Live Scene canvas and nowhere else; the Stream Manager corner menu
+// is a snap that writes the same rect.
+
+/** A normalized rect in canvas units: x/w over the width, y/h over the height. */
+export interface OverlayRect {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+export interface OverlayItemLayout {
+  horizontal: OverlayRect
+  vertical: OverlayRect
+  showOnStream: boolean
+  showInRecording: boolean
+}
+
+export const OVERLAY_ITEMS = ['highlight', 'captions', 'golem'] as const
+export type OverlayItem = (typeof OVERLAY_ITEMS)[number]
+
+export type OverlayLayout = Record<OverlayItem, OverlayItemLayout>
+
+export type OverlayOrientation = 'horizontal' | 'vertical'
+
+/** Snap presets: the four corners plus the centred bottom bar captions use. */
+export type OverlaySnap =
+  | 'top-left'
+  | 'top-right'
+  | 'bottom-left'
+  | 'bottom-right'
+  | 'bottom-center'
+
+/** Smallest side a placed rect may have (canvas units); mirrors Rust. */
+export const OVERLAY_RECT_MIN_SIZE = 0.02
+
+export interface MigrateHighlightAnchorParams {
+  anchor: CommentHighlightAnchor
+}
+// --- end overlay layout (plan 164) ------------------------------------------
+
 /** Whether Orcle hears the streamer right now (plan 068). */
 export type CohostListeningState = 'off' | 'starting' | 'on' | 'blocked'
 

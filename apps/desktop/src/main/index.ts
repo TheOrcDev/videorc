@@ -2948,6 +2948,36 @@ function saveCommentsWindowPrefs(patch: CommentsWindowPrefs): void {
   }
 }
 
+// Plan 164 (S-B1): the highlight corner now lives in the backend-owned
+// overlay layout (`overlays.layout`). The old comments-window pref is sent
+// to the backend once after the update and then deleted, so a corner the
+// streamer picked before the update survives as the highlight rect.
+async function migrateCommentsHighlightAnchorPref(): Promise<void> {
+  const prefs = loadCommentsWindowPrefs()
+  if (!('highlightAnchor' in prefs) || process.env.VIDEORC_SMOKE_OUTPUT_DIR) {
+    return
+  }
+  const anchor = normalizeCommentHighlightAnchor(prefs.highlightAnchor)
+  try {
+    await requestBackendAdmin('overlays.layout.migrate_highlight_anchor', { anchor })
+  } catch (error) {
+    logBackend(
+      'warn',
+      `Highlight corner migration did not reach the backend; it will retry next launch (${
+        error instanceof Error ? error.message : String(error)
+      }).`
+    )
+    return
+  }
+  try {
+    const { highlightAnchor: _migrated, ...rest } = loadCommentsWindowPrefs()
+    writeFileSync(commentsWindowPrefsPath(), JSON.stringify(rest))
+  } catch {
+    // A failed preference write must never break startup; the migration is
+    // idempotent and runs again next launch.
+  }
+}
+
 function commentsWindowAlwaysOnTopPreference(prefs: CommentsWindowPrefs): boolean {
   return prefs.alwaysOnTopPreferenceVersion === 1 && prefs.alwaysOnTop === true
 }
@@ -9203,6 +9233,7 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'resource.admin.resolve_screen_path',
   'resource.admin.resolve_background_path',
   'resource.admin.preview_surface_bounds',
+  'overlays.layout.migrate_highlight_anchor',
   'preview.surface.take_native_host_commands',
   'sessions.comments.list',
   'sessions.comments.totals',
@@ -9558,7 +9589,8 @@ function handleBackendStdout(text: string, runtime: BackendRuntime, bufferedText
         const adminConnection = backendAdminConnection
         backendAuthorityReady = Promise.all([
           rehydrateManagedBackgroundAssets(),
-          rehydrateScheduledThumbnails()
+          rehydrateScheduledThumbnails(),
+          migrateCommentsHighlightAnchorPref()
         ])
           .then(() => undefined)
           .catch(() => {

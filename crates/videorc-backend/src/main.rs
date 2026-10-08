@@ -64,6 +64,7 @@ mod native_preview_host;
 mod noise_cleanup;
 mod oauth;
 mod oauth_callback_page;
+mod overlay_layout;
 mod panic_hook;
 mod performance_check;
 mod pipeline;
@@ -5349,6 +5350,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.recap.draft"
         | "cohost.author.greeted"
         | "cohost.settings.set"
+        | "overlays.layout.set"
+        | "overlays.layout.migrate_highlight_anchor"
         | "cohost.command.choose"
         | "cohost.command.confirm"
         | "cohost.command.cancel"
@@ -5522,6 +5525,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "captions.test.snapshot"
         | "comments.highlight.status"
         | "comments.highlight.canvases"
+        | "overlays.layout.get"
         | "cohost.status"
         | "cohost.settings.get"
         | "cohost.report.get"
@@ -9130,6 +9134,44 @@ async fn handle_text_message_with_role(
             command.id,
             comment_highlight::comment_highlight_canvases(state).await,
         ),
+        "overlays.layout.get" => ServerResponse::ok(
+            command.id,
+            overlay_layout::load_overlay_layout(&state.database),
+        ),
+        "overlays.layout.set" => {
+            match serde_json::from_value::<overlay_layout::OverlayLayout>(command.params) {
+                Ok(layout) => match overlay_layout::set_overlay_layout(state, layout).await {
+                    Ok(saved) => ServerResponse::ok(command.id, saved),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "overlay-layout-invalid",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "overlays.layout.migrate_highlight_anchor" => {
+            match serde_json::from_value::<overlay_layout::MigrateHighlightAnchorParams>(
+                command.params,
+            ) {
+                Ok(params) => {
+                    match overlay_layout::migrate_highlight_anchor(&state.database, params) {
+                        Ok(layout) => ServerResponse::ok(command.id, layout),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "overlay-layout-storage",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "comments.highlight.set" => {
             match serde_json::from_value::<comment_highlight::SetCommentHighlightParams>(
                 command.params,

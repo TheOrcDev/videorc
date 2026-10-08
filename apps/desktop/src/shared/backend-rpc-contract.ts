@@ -22,6 +22,8 @@ import type {
   YouTubeQuotaStatus,
   CohostSettings,
   CohostSettingsPatch,
+  MigrateHighlightAnchorParams,
+  OverlayLayout,
   CohostStartParams,
   CohostState,
   CohostReportGetParams,
@@ -312,6 +314,14 @@ export interface BackendRpcMethodMap {
   'cohost.command.cancel': BackendRpcDefinition<CohostCommandParams, CohostState>
   'cohost.settings.get': BackendRpcDefinition<undefined, CohostSettings>
   'cohost.settings.set': BackendRpcDefinition<CohostSettingsPatch, CohostSettings>
+  // --- Overlay layout (plan 164) ---
+  'overlays.layout.get': BackendRpcDefinition<undefined, OverlayLayout>
+  'overlays.layout.set': BackendRpcDefinition<OverlayLayout, OverlayLayout>
+  'overlays.layout.migrate_highlight_anchor': BackendRpcDefinition<
+    MigrateHighlightAnchorParams,
+    OverlayLayout
+  >
+  // --- end overlay layout (plan 164) ---
   'cohost.report.get': BackendRpcDefinition<CohostReportGetParams, CohostReportPayload>
   'cohost.report.latest': BackendRpcDefinition<undefined, CohostReportPayload | null>
   'liveChat.emotes.get': BackendRpcDefinition<undefined, ChatEmotesSettings>
@@ -2187,6 +2197,38 @@ const cohostSettingsPatchSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSettingsPatch>
+// --- Overlay layout (plan 164) ---
+const overlayRectSchema = objectSchema(
+  {
+    x: numberSchema({ min: 0, max: 1 }),
+    y: numberSchema({ min: 0, max: 1 }),
+    w: numberSchema({ min: 0, max: 1 }),
+    h: numberSchema({ min: 0, max: 1 })
+  },
+  { allowUnknown: false }
+)
+const overlayItemLayoutSchema = objectSchema(
+  {
+    horizontal: overlayRectSchema,
+    vertical: overlayRectSchema,
+    showOnStream: booleanSchema,
+    showInRecording: booleanSchema
+  },
+  { allowUnknown: false }
+)
+const overlayLayoutSchema = objectSchema(
+  {
+    highlight: overlayItemLayoutSchema,
+    captions: overlayItemLayoutSchema,
+    golem: overlayItemLayoutSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<OverlayLayout>
+const migrateHighlightAnchorParamsSchema = objectSchema(
+  { anchor: enumSchema(['top-left', 'top-right', 'bottom-left', 'bottom-right']) },
+  { allowUnknown: false }
+) as RuntimeSchema<MigrateHighlightAnchorParams>
+// --- end overlay layout (plan 164) ---
 // Plan 089: Settings → General → "Show 7TV emotes in chat".
 const sevenTvStatusSchema = objectSchema(
   {
@@ -3290,6 +3332,14 @@ const runtimeContracts = {
   'cohost.command.cancel': { params: cohostCommandParamsSchema, result: cohostStateSchema },
   'cohost.settings.get': { params: undefinedSchema, result: cohostSettingsSchema },
   'cohost.settings.set': { params: cohostSettingsPatchSchema, result: cohostSettingsSchema },
+  // --- Overlay layout (plan 164) ---
+  'overlays.layout.get': { params: undefinedSchema, result: overlayLayoutSchema },
+  'overlays.layout.set': { params: overlayLayoutSchema, result: overlayLayoutSchema },
+  'overlays.layout.migrate_highlight_anchor': {
+    params: migrateHighlightAnchorParamsSchema,
+    result: overlayLayoutSchema
+  },
+  // --- end overlay layout (plan 164) ---
   'liveChat.emotes.get': { params: undefinedSchema, result: chatEmotesSettingsSchema },
   'liveChat.emotes.set': {
     params: chatEmotesSettingsPatchSchema,

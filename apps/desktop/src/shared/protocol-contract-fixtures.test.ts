@@ -34,6 +34,7 @@ import type {
   ModerationOperation,
   ModerationOperationParams,
   ModerationRequestParams,
+  OverlayLayout,
   PreviewSurfaceBounds,
   RecordingStatus,
   Scene,
@@ -91,6 +92,10 @@ interface HighRiskContractFixtures {
     deleteParams: BackendRpcParams<'sessions.delete'>
     deletionOperation: SessionDeletionOperation
     eventMessages: LiveChatMessage[]
+  }
+  overlayLayout: {
+    defaults: OverlayLayout
+    placed: OverlayLayout
   }
   cohost: {
     startParams: CohostStartParams
@@ -598,6 +603,34 @@ describe('shared high-risk protocol fixture', () => {
     ]) {
       expect(key in fixtures.cohost.legacyState).toBe(false)
     }
+  })
+
+  it('keeps the overlay layout wire shape identical across languages (plan 164)', () => {
+    for (const layout of [fixtures.overlayLayout.defaults, fixtures.overlayLayout.placed]) {
+      expect(validateBackendRpcResult('overlays.layout.get', layout)).toStrictEqual(layout)
+      expect(validateBackendRpcParams('overlays.layout.set', layout)).toStrictEqual(layout)
+      expect(validateBackendRpcResult('overlays.layout.set', layout)).toStrictEqual(layout)
+    }
+    expect(
+      validateBackendRpcParams('overlays.layout.migrate_highlight_anchor', { anchor: 'top-right' })
+    ).toStrictEqual({ anchor: 'top-right' })
+    expect(() =>
+      validateBackendRpcParams('overlays.layout.set', {
+        ...fixtures.overlayLayout.defaults,
+        extra: true
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcParams('overlays.layout.set', {
+        ...fixtures.overlayLayout.defaults,
+        golem: { ...fixtures.overlayLayout.defaults.golem, horizontal: { x: 2, y: 0, w: 1, h: 1 } }
+      })
+    ).toThrow()
+    // The shipped defaults: highlight bottom-left on both outputs, captions
+    // off (today's burnTarget default), the Golem bottom-right.
+    expect(fixtures.overlayLayout.defaults.highlight.showOnStream).toBe(true)
+    expect(fixtures.overlayLayout.defaults.captions.showOnStream).toBe(false)
+    expect(fixtures.overlayLayout.defaults.golem.horizontal.x).toBeCloseTo(0.7975, 6)
   })
 
   it('keeps Orcle voice commands, their answers and settings identical across languages (plan 140 S3)', () => {
