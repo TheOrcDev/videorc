@@ -39,7 +39,8 @@ const CHAT_PLATFORM_ICON: Record<StreamPlatform, AppIcon> = {
 const CHAT_PLATFORM_TINT: Record<Exclude<StreamPlatform, 'youtube'>, string> = {
   twitch: 'text-platform-twitch-ink',
   kick: 'text-platform-kick',
-  x: 'text-foreground',
+  // X's mark sets its own fill: pure black or white by theme (plan 167).
+  x: '',
   tiktok: 'text-foreground',
   instagram: 'text-platform-instagram',
   custom: 'text-muted-foreground'

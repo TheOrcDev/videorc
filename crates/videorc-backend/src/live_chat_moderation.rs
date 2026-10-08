@@ -1351,6 +1351,7 @@ mod tests {
             author_avatar_url: None,
             author_badges: Vec::new(),
             author_affiliation: None,
+            author_verified: None,
             author_roles: Vec::new(),
             published_at: now.clone(),
             received_at: now,

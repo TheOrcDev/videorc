@@ -147,12 +147,14 @@ export type CommentHighlightPlatformBadge =
       color: string
       /** Glyph colour; white unless the brand colour is too light for it. */
       ink?: string
-      glyph: 'twitch' | 'kick' | 'x' | 'dot'
+      glyph: 'twitch' | 'kick' | 'dot'
     }
   /** YouTube is never redrawn (plan 165, Google's ToS report III.F.2a): the
    * card shows YouTube's own icon file on the identity row, at least 20 px
-   * tall, instead of a badge over the avatar. */
+   * tall, instead of a badge over the avatar. X likewise shows the mark from
+   * X's partner kit there (plan 167). */
   | { label: 'YouTube'; glyph: 'youtube-icon' }
+  | { label: 'X'; glyph: 'x-mark' }
 
 /** Small stream-safe brand mark painted over the avatar. The adjacent identity
  * line carries the platform name as text, so the card never relies on color or
@@ -168,7 +170,7 @@ export function commentHighlightPlatformBadge(
     case 'kick':
       return { label: 'Kick', color: '#53FC18', ink: '#0B1A05', glyph: 'kick' }
     case 'x':
-      return { label: 'X', color: '#111111', glyph: 'x' }
+      return { label: 'X', glyph: 'x-mark' }
     case 'custom':
       return { label: 'Custom', color: '#52525B', glyph: 'dot' }
     default:
@@ -176,16 +178,16 @@ export function commentHighlightPlatformBadge(
   }
 }
 
-/** The identity line: "Twitch · name". When the card draws YouTube's own icon
- * beside the name (`markShown`), the icon is the attribution and the line is
- * just the name; if the icon could not be loaded the word stays. */
+/** The identity line: "Twitch · name". When the card draws YouTube's or X's
+ * own mark beside the name (`markShown`), the mark is the attribution and the
+ * line is just the name; if the mark could not be loaded the word stays. */
 export function commentHighlightIdentity(
   authorName: string,
   platform?: StreamPlatform,
   markShown = false
 ): string {
   const author = authorName.trim() || 'Viewer'
-  if (markShown && platform === 'youtube') return author
+  if (markShown && (platform === 'youtube' || platform === 'x')) return author
   const platformLabel = commentHighlightPlatformBadge(platform)?.label ?? null
   return platformLabel ? `${platformLabel} · ${author}` : author
 }

@@ -27,6 +27,7 @@ import {
   YOUTUBE_MARK_ASPECT,
   YOUTUBE_MARK_MIN_PX
 } from '../lib/youtube-mark'
+import { X_MARK_PATH } from '../lib/x-mark'
 
 /**
  * The props every registry icon accepts.
@@ -137,7 +138,6 @@ type _RegistryIconProps = _AssertIconProps<
     | 'Wrench'
     | 'X'
     | 'XCircle'
-    | 'XLogo'
   >
 >
 
@@ -279,7 +279,6 @@ export {
  */
 export {
   TwitchLogo as TwitchIcon,
-  XLogo as XPlatformIcon,
   TiktokLogo as TiktokIcon,
   InstagramLogo as InstagramIcon
 } from '@phosphor-icons/react'
@@ -323,6 +322,27 @@ export const YoutubeIcon: AppIcon = ({ size, weight: _weight, children, style, .
     </svg>
   )
 }
+/**
+ * X's mark (plan 167): the path from X's partner icon kit
+ * (`assets/brand/x/`), never a redrawn glyph. X's rule is one solid colour,
+ * black on light surfaces and white on dark, so it is pure black or pure
+ * white by theme, never the `foreground` token or a caller's tint (the fill
+ * classes win over an inherited `text-*`). `weight` is accepted and ignored.
+ */
+export const XPlatformIcon: AppIcon = ({ size, weight: _weight, children, ...props }) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24"
+    width={size ?? '1em'}
+    height={size ?? '1em'}
+    data-slot="platform-mark"
+    data-platform="x"
+    {...props}
+  >
+    {children}
+    <path className="fill-black dark:fill-white" d={X_MARK_PATH} />
+  </svg>
+)
 /**
  * Kick's mark (plan 063). Phosphor has no Kick logo, so this is a hand-drawn,
  * simplified version: the stepped "K" knocked out of a rounded square, drawn

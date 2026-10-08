@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { LiveChatMessage } from '@/lib/backend'
 import { renderCommentHighlightCards, type HighlightBitmap } from './caption-overlay'
+import { X_LOGO_WHITE_URL, X_VERIFIED_URL } from './x-mark'
 
 // The card is painted on an OffscreenCanvas, which the node test environment
 // lacks. A recording 2D context stands in: it measures text like the layout
@@ -330,5 +331,112 @@ describe('renderCommentHighlightCards YouTube icon (plan 165)', () => {
     expect(calls.filter((call) => call.method === 'drawImage')).toHaveLength(0)
     const names = calls.filter((call) => call.method === 'fillText').map((call) => call.args[0])
     expect(names).toContain('YouTube · Orc Dev')
+  })
+})
+
+// Plan 167: an X card shows the mark from X's partner kit on the identity
+// row (never the old stroked "×" over the avatar), and a verified author gets
+// X's own check right after the name.
+describe('renderCommentHighlightCards X mark and verified check (plan 167)', () => {
+  beforeEach(() => {
+    calls.length = 0
+    vi.stubGlobal('OffscreenCanvas', FakeOffscreenCanvas)
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  const xMessage = { ...message, platform: 'x' } as LiveChatMessage
+  const mark = { width: 300, height: 300, name: 'x-mark' } as unknown as HighlightBitmap
+  const check = { width: 300, height: 300, name: 'check' } as unknown as HighlightBitmap
+
+  it('draws X’s mark at 20 px or more on every leg, right of the name, and no avatar badge', async () => {
+    const loadBrandMark = vi.fn(async (url: string) => (url === X_LOGO_WHITE_URL ? mark : check))
+    await renderCommentHighlightCards(
+      xMessage,
+      null,
+      { width: 1280, height: 720 },
+      { width: 1080, height: 1920 },
+      { loadBrandMark, warn: vi.fn() }
+    )
+    expect(loadBrandMark).toHaveBeenCalledTimes(1)
+    expect(loadBrandMark).toHaveBeenCalledWith(X_LOGO_WHITE_URL)
+    const marks = calls.filter((call) => call.method === 'drawImage' && call.args[0] === mark)
+    expect(marks).toHaveLength(2)
+    const nameCalls = calls.filter((call) => call.method === 'fillText')
+    const nameX = Number(nameCalls.find((call) => call.args[0] === 'Orc Dev')?.args[1])
+    for (const { args } of marks) {
+      // The whole kit file (its 24 px grid), square, never cropped.
+      expect(args).toHaveLength(5)
+      const [x, , width, height] = args.slice(1).map(Number)
+      expect(height).toBeGreaterThanOrEqual(20)
+      expect(width).toBe(height)
+      expect(x).toBeGreaterThan(nameX)
+    }
+    expect(nameCalls.some((call) => String(call.args[0]).includes('X ·'))).toBe(false)
+    // No hand-drawn badge: nothing is stroked or filled as an arc.
+    expect(calls.filter((call) => call.method === 'stroke')).toHaveLength(2)
+    expect(calls.filter((call) => call.method === 'arc')).toHaveLength(2)
+  })
+
+  it('names X in words when the mark cannot load, and never redraws it', async () => {
+    await renderCommentHighlightCards(xMessage, null, { width: 1280, height: 720 }, undefined, {
+      loadBrandMark: async () => null,
+      warn: vi.fn()
+    })
+    expect(calls.filter((call) => call.method === 'drawImage')).toHaveLength(0)
+    const names = calls.filter((call) => call.method === 'fillText').map((call) => call.args[0])
+    expect(names).toContain('X · Orc Dev')
+  })
+
+  it('draws X’s own check right after the name for each verified type', async () => {
+    for (const verified of ['blue', 'business', 'government'] as const) {
+      calls.length = 0
+      const loaded: string[] = []
+      await renderCommentHighlightCards(
+        { ...xMessage, authorVerified: verified },
+        null,
+        { width: 1280, height: 720 },
+        { width: 1080, height: 1920 },
+        {
+          loadBrandMark: async (url) => {
+            loaded.push(url)
+            return url === X_LOGO_WHITE_URL ? mark : check
+          },
+          warn: vi.fn()
+        }
+      )
+      expect(loaded, verified).toEqual([X_LOGO_WHITE_URL, X_VERIFIED_URL[verified]])
+      const checks = calls.filter((call) => call.method === 'drawImage' && call.args[0] === check)
+      expect(checks, verified).toHaveLength(2)
+      const nameCall = calls.find(
+        (call) => call.method === 'fillText' && call.args[0] === 'Orc Dev'
+      )
+      const marks = calls.filter((call) => call.method === 'drawImage' && call.args[0] === mark)
+      for (const [index, { args }] of checks.entries()) {
+        const [x, , width, height] = args.slice(1).map(Number)
+        expect(width).toBe(height)
+        expect(height).toBeGreaterThanOrEqual(16)
+        expect(x).toBeGreaterThan(Number(nameCall?.args[1]))
+        // The check sits between the name and the X mark.
+        expect(x + width).toBeLessThan(Number(marks[index].args[1]))
+      }
+    }
+  })
+
+  it('shows no check for an unverified author or when the file cannot load', async () => {
+    const loadBrandMark = vi.fn(async (url: string) => (url === X_LOGO_WHITE_URL ? mark : null))
+    await renderCommentHighlightCards(
+      { ...xMessage, authorVerified: 'blue' },
+      null,
+      { width: 1280, height: 720 },
+      undefined,
+      { loadBrandMark, warn: vi.fn() }
+    )
+    expect(calls.filter((call) => call.method === 'drawImage')).toHaveLength(1)
+    calls.length = 0
+    await renderCommentHighlightCards(xMessage, null, { width: 1280, height: 720 }, undefined, {
+      loadBrandMark,
+      warn: vi.fn()
+    })
+    expect(calls.filter((call) => call.method === 'drawImage')).toHaveLength(1)
   })
 })
