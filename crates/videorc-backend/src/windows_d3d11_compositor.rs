@@ -300,6 +300,8 @@ pub(crate) enum WindowsD3d11SceneSourceKind {
     Image,
     CaptionOverlay,
     CommentHighlight,
+    /// The Golem avatar (plan 164 Phase C): between captions and the card.
+    GolemOverlay,
     SolidColor([u8; 4]),
     TestPattern,
     Unsupported(WindowsD3d11UnsupportedFeature),
@@ -322,6 +324,7 @@ impl WindowsD3d11SceneSourceKind {
             Self::Image => "image",
             Self::CaptionOverlay => "caption-overlay",
             Self::CommentHighlight => "comment-highlight",
+            Self::GolemOverlay => "golem-overlay",
             Self::SolidColor(_) => "solid-color",
             Self::TestPattern => "test-pattern",
             Self::Unsupported(feature) => feature.as_str(),

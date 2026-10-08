@@ -3840,10 +3840,13 @@ async fn start_session_with_timeline(
                 let overlays = WindowsD3d11OverlayInput {
                     captions: state.caption_overlay.clone(),
                     highlight: state.highlight_overlay.clone(),
+                    golem: state.golem_overlay.clone(),
                     caption_on_primary: session_caption_plan.primary,
                     caption_on_auxiliary: session_caption_plan.aux,
                     highlight_on_primary,
                     highlight_on_auxiliary,
+                    golem_on_primary: d3d11_overlay_plans.golem.primary,
+                    golem_on_auxiliary: d3d11_overlay_plans.golem.aux,
                 };
                 match WindowsD3d11SessionPump::start(
                     &state.windows_d3d11_media,

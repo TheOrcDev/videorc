@@ -2238,6 +2238,7 @@ mod editor_draft_tests {
             screen_frame: None,
             caption_overlay: None,
             highlight_overlay: None,
+            golem_overlay: None,
         };
         let mut via_frame = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame_with_chrome(inputs, &quads, &mut via_frame);
@@ -6386,6 +6387,16 @@ fn try_gpu_compose_with_chrome(
                 safe_inset,
             );
         }
+        if let Some(overlay) = inputs.golem_overlay {
+            push_caption_overlay_gpu_source(
+                &mut prepared_sources,
+                overlay,
+                inputs.width,
+                inputs.height,
+                4,
+                0,
+            );
+        }
         if let Some(overlay) = inputs.highlight_overlay {
             push_caption_overlay_gpu_source(
                 &mut prepared_sources,
@@ -6459,6 +6470,16 @@ fn try_gpu_compose_with_chrome(
                 inputs.height,
                 2,
                 safe_inset,
+            );
+        }
+        if let Some(overlay) = inputs.golem_overlay {
+            push_caption_overlay_gpu_source(
+                &mut prepared_sources,
+                overlay,
+                inputs.width,
+                inputs.height,
+                4,
+                0,
             );
         }
         if let Some(overlay) = inputs.highlight_overlay {
@@ -6714,6 +6735,16 @@ fn try_gpu_compose_with_chrome(
             inputs.height,
             2,
             safe_inset,
+        );
+    }
+    if let Some(overlay) = inputs.golem_overlay {
+        push_caption_overlay_gpu_source(
+            &mut prepared_sources,
+            overlay,
+            inputs.width,
+            inputs.height,
+            4,
+            0,
         );
     }
     if let Some(overlay) = inputs.highlight_overlay {
@@ -7371,8 +7402,8 @@ async fn publish_compositor_frame(
     caption_overlay_on_aux: bool,
     highlight_overlay_on_primary: bool,
     highlight_overlay_on_aux: bool,
-    _golem_overlay_on_primary: bool,
-    _golem_overlay_on_aux: bool,
+    golem_overlay_on_primary: bool,
+    golem_overlay_on_aux: bool,
 ) -> CompositorPublishResult {
     let source_fetch_started_at = Instant::now();
     let scene_snapshot_started_at = Instant::now();
@@ -7490,6 +7521,7 @@ async fn publish_compositor_frame(
     // auxiliary bars without scaling one leg's pixels onto the other.
     let caption_overlays = crate::captions::current_caption_overlays(&state.caption_overlay);
     let highlight_overlay = crate::captions::current_caption_overlay(&state.highlight_overlay);
+    let golem_overlays = crate::captions::current_caption_overlays(&state.golem_overlay);
     // The vertical leg needs its own portrait-sized card; the horizontal
     // raster is up to 60% of a landscape width and would crop.
     let simulcast_highlight_overlay = stream_output
@@ -7516,6 +7548,11 @@ async fn publish_compositor_frame(
             } else {
                 None
             },
+            golem_overlay: caption_overlay_for_output(
+                &golem_overlays,
+                crate::captions::CaptionOverlayTarget::Primary,
+                golem_overlay_on_primary,
+            ),
         };
         // GPU path for the cases it reproduces exactly; otherwise the CPU compositor.
         match try_gpu_compose_with_chrome(
@@ -7634,6 +7671,13 @@ async fn publish_compositor_frame(
             } else {
                 highlight_overlay.as_ref()
             },
+            // The Golem is rasterized per target like the caption bar (plan
+            // 164 S-C2), so the auxiliary leg always has its own raster.
+            golem_overlay: caption_overlay_for_output(
+                &golem_overlays,
+                crate::captions::CaptionOverlayTarget::Auxiliary,
+                golem_overlay_on_aux,
+            ),
         };
         let proof_store = stream_frame_store.clone();
         if let Some(aux_timings) = publish_auxiliary_compositor_frame(
@@ -7830,6 +7874,10 @@ struct CompositorRenderInputs<'a> {
     /// Comment-highlight card (Comments upgrade S2) — its own slot, composited
     /// after the caption bar; top vs bottom keeps them from overlapping.
     highlight_overlay: Option<&'a crate::captions::CaptionOverlay>,
+    /// The Golem avatar (plan 164 Phase C): composited after the caption bar
+    /// and BEFORE the highlight card, so the card wins an overlap (owner
+    /// answer 7: the most urgent thing on screen stays on top).
+    golem_overlay: Option<&'a crate::captions::CaptionOverlay>,
 }
 
 /// Full frame render: the scene, then the caption overlay topmost — applied
@@ -7850,6 +7898,9 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
                 inputs.height,
             ),
         );
+    }
+    if let Some(overlay) = inputs.golem_overlay {
+        composite_caption_overlay(overlay, inputs.width, inputs.height, bytes, 0);
     }
     if let Some(overlay) = inputs.highlight_overlay {
         composite_caption_overlay(overlay, inputs.width, inputs.height, bytes, 0);
@@ -7940,6 +7991,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
         screen_frame,
         caption_overlay: _,
         highlight_overlay: _,
+        golem_overlay: _,
     } = inputs;
     fill_yuv420p(bytes, width, height, 16, 128, 128);
 
@@ -10404,6 +10456,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                golem_overlay: None,
             },
             true,
         )
@@ -10421,6 +10474,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                golem_overlay: None,
             },
             true,
         )
@@ -10509,6 +10563,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                golem_overlay: None,
             },
             true,
         )
@@ -10637,6 +10692,7 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
+                golem_overlay: None,
             },
             true,
         )
@@ -10735,6 +10791,7 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
+                golem_overlay: None,
             },
             false,
         )
@@ -11139,6 +11196,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                golem_overlay: None,
             },
             true,
         ) {
@@ -11189,6 +11247,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                golem_overlay: None,
             },
             true,
         ) {
@@ -14218,6 +14277,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                golem_overlay: None,
             },
             &mut bytes,
         );
@@ -14296,6 +14356,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: caption,
                 highlight_overlay: None,
+                golem_overlay: None,
             }
         }
         render_compositor_yuv420p_frame(inputs(canvas_w, canvas_h, None), &mut baseline);
@@ -14389,6 +14450,7 @@ mod tests {
             screen_frame: None,
             caption_overlay: None,
             highlight_overlay: None,
+            golem_overlay: None,
         };
         let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame(base_inputs, &mut baseline);
@@ -14397,6 +14459,7 @@ mod tests {
             CompositorRenderInputs {
                 caption_overlay: Some(&caption),
                 highlight_overlay: Some(&highlight),
+                golem_overlay: None,
                 ..base_inputs
             },
             &mut with_both,
@@ -14678,10 +14741,14 @@ mod tests {
         assert_eq!((source_left, left, draw_width), (240, 0, 1920));
     }
 
-    /// S-B3.5 parity fixture: a synthetic 1280x720 scene with a 200x100 red
-    /// overlay at rect (0.1, 0.2, 0.25, 0.2) renders through CPU and Metal
-    /// and the two agree on every pixel of the overlay rect and its 2 px
-    /// border (within ±2 per channel against each path's own clean render).
+    /// Parity fixture (plan 164 S-B3.5, extended by S-C3): a synthetic
+    /// 1280x720 test-pattern scene with a 200x100 red highlight at rect
+    /// (0.1, 0.2, 0.25, 0.2) and a 200x100 green Golem at rect
+    /// (0.15, 0.25, 0.25, 0.2), overlapping the card's bottom-right, renders
+    /// through CPU and Metal; the two agree on every pixel of the two rects
+    /// and their 2 px border (within ±2 per channel against each path's own
+    /// clean render), and the card wins the overlap on both paths (owner
+    /// answer 7: the Golem blits under the highlight).
     #[cfg(target_os = "macos")]
     #[test]
     fn cpu_and_metal_blit_the_same_overlay_rect() {
@@ -14717,18 +14784,31 @@ mod tests {
             layout,
             active_screen: None,
         };
-        let rect = crate::overlay_layout::OverlayRect::new(0.1, 0.2, 0.25, 0.2);
-        let overlay = test_caption_overlay(
+        let highlight = test_caption_overlay(
             200,
             100,
             [255, 0, 0, 255],
-            OverlayPlacement::new(Some(rect), crate::captions::CaptionOverlayPosition::Top),
+            OverlayPlacement::new(
+                Some(crate::overlay_layout::OverlayRect::new(0.1, 0.2, 0.25, 0.2)),
+                crate::captions::CaptionOverlayPosition::Top,
+            ),
         );
-        let (left, top, right, bottom) = overlay_draw_rect(&overlay, 1280, 720, 0);
-        assert_eq!((left, top, right, bottom), (128, 144, 328, 244));
+        let golem = test_caption_overlay(
+            200,
+            100,
+            [0, 255, 0, 255],
+            crate::golem_overlay::golem_overlay_placement(Some(
+                crate::overlay_layout::OverlayRect::new(0.15, 0.25, 0.25, 0.2),
+            )),
+        );
+        let card = overlay_draw_rect(&highlight, 1280, 720, 0);
+        let avatar = overlay_draw_rect(&golem, 1280, 720, 0);
+        assert_eq!(card, (128, 144, 328, 244));
+        assert_eq!(avatar, (192, 180, 392, 280));
         fn inputs<'a>(
             snapshot: &'a CompositorSceneSnapshot,
             highlight: Option<&'a crate::captions::CaptionOverlay>,
+            golem: Option<&'a crate::captions::CaptionOverlay>,
             sequence: u64,
         ) -> CompositorRenderInputs<'a> {
             CompositorRenderInputs {
@@ -14742,71 +14822,112 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: highlight,
+                golem_overlay: golem,
             }
         }
         let mut cpu_clean = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
-        render_compositor_yuv420p_frame(inputs(&snapshot, None, 1), &mut cpu_clean);
+        render_compositor_yuv420p_frame(inputs(&snapshot, None, None, 1), &mut cpu_clean);
         let mut cpu = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
-        render_compositor_yuv420p_frame(inputs(&snapshot, Some(&overlay), 1), &mut cpu);
+        render_compositor_yuv420p_frame(
+            inputs(&snapshot, Some(&highlight), Some(&golem), 1),
+            &mut cpu,
+        );
         // The same sequence for every render: the test pattern animates by
         // sequence, and the border check compares each path with itself.
-        let metal_clean = try_gpu_compose(Some(&mut gpu), &inputs(&snapshot, None, 1), true)
+        let metal_clean = try_gpu_compose(Some(&mut gpu), &inputs(&snapshot, None, None, 1), true)
             .expect("clean scene renders on Metal")
             .yuv;
-        let metal = try_gpu_compose(Some(&mut gpu), &inputs(&snapshot, Some(&overlay), 1), true)
-            .expect("overlay scene renders on Metal")
-            .yuv;
+        let metal = try_gpu_compose(
+            Some(&mut gpu),
+            &inputs(&snapshot, Some(&highlight), Some(&golem), 1),
+            true,
+        )
+        .expect("overlay scene renders on Metal")
+        .yuv;
         assert_eq!(metal.len(), cpu.len());
 
         let (red_y, red_u, red_v) = rgb_to_yuv(255, 0, 0);
+        let (green_y, green_u, green_v) = rgb_to_yuv(0, 255, 0);
         let width = canvas_w as usize;
         let height = canvas_h as usize;
         let (uv_width, uv_height) = (width.div_ceil(2), height.div_ceil(2));
         let (u_start, v_start) = (width * height, width * height + uv_width * uv_height);
         let close = |a: u8, b: u8| (i16::from(a) - i16::from(b)).abs() <= 2;
+        let inside = |rect: (usize, usize, usize, usize), x: usize, y: usize| {
+            (rect.0..rect.2).contains(&x) && (rect.1..rect.3).contains(&y)
+        };
+        let (left, top) = (card.0.min(avatar.0), card.1.min(avatar.1));
+        let (right, bottom) = (card.2.max(avatar.2), card.3.max(avatar.3));
         for y in top - 2..bottom + 2 {
             for x in left - 2..right + 2 {
-                let inside = (left..right).contains(&x) && (top..bottom).contains(&y);
                 let index = y * width + x;
-                if inside {
-                    assert!(
-                        close(cpu[index], red_y),
-                        "cpu luma at {x},{y}: {}",
-                        cpu[index]
-                    );
-                    assert!(
-                        close(metal[index], red_y),
-                        "metal luma at {x},{y}: {}",
-                        metal[index]
-                    );
+                // The card is on top of the Golem where they overlap.
+                let expected = if inside(card, x, y) {
+                    Some(red_y)
+                } else if inside(avatar, x, y) {
+                    Some(green_y)
                 } else {
-                    assert!(
-                        close(cpu[index], cpu_clean[index]),
-                        "cpu border luma changed at {x},{y}"
-                    );
-                    assert!(
-                        close(metal[index], metal_clean[index]),
-                        "metal border luma changed at {x},{y}"
-                    );
+                    None
+                };
+                match expected {
+                    Some(luma) => {
+                        assert!(
+                            close(cpu[index], luma),
+                            "cpu luma at {x},{y}: {}",
+                            cpu[index]
+                        );
+                        assert!(
+                            close(metal[index], luma),
+                            "metal luma at {x},{y}: {}",
+                            metal[index]
+                        );
+                    }
+                    None => {
+                        assert!(
+                            close(cpu[index], cpu_clean[index]),
+                            "cpu border luma changed at {x},{y}"
+                        );
+                        assert!(
+                            close(metal[index], metal_clean[index]),
+                            "metal border luma changed at {x},{y}"
+                        );
+                    }
                 }
             }
         }
-        // Chroma, sampled strictly inside the overlay (half resolution).
-        for uv_y in (top + 2) / 2..(bottom - 2) / 2 {
-            for uv_x in (left + 2) / 2..(right - 2) / 2 {
-                let uv_index = uv_y * uv_width + uv_x;
-                for (plane, expected, start) in [("u", red_u, u_start), ("v", red_v, v_start)] {
-                    assert!(
-                        close(cpu[start + uv_index], expected),
-                        "cpu {plane} at {uv_x},{uv_y}"
-                    );
-                    assert!(
-                        close(metal[start + uv_index], expected),
-                        "metal {plane} at {uv_x},{uv_y}"
-                    );
+        // Chroma, sampled strictly inside each overlay's exclusive area (half
+        // resolution): the card's left part, the Golem's part below the card.
+        let chroma = |rect: (usize, usize, usize, usize), u: u8, v: u8, name: &str| {
+            for uv_y in (rect.1 + 2) / 2..(rect.3 - 2) / 2 {
+                for uv_x in (rect.0 + 2) / 2..(rect.2 - 2) / 2 {
+                    let uv_index = uv_y * uv_width + uv_x;
+                    for (plane, expected, start) in [("u", u, u_start), ("v", v, v_start)] {
+                        assert!(
+                            close(cpu[start + uv_index], expected),
+                            "cpu {name} {plane} at {uv_x},{uv_y}"
+                        );
+                        assert!(
+                            close(metal[start + uv_index], expected),
+                            "metal {name} {plane} at {uv_x},{uv_y}"
+                        );
+                    }
                 }
             }
-        }
+        };
+        chroma((card.0, card.1, avatar.0, card.3), red_u, red_v, "card");
+        chroma(
+            (avatar.0, card.3, avatar.2, avatar.3),
+            green_u,
+            green_v,
+            "golem",
+        );
+        // The overlap itself is the card's red on both paths.
+        chroma(
+            (avatar.0, avatar.1, card.2, card.3),
+            red_u,
+            red_v,
+            "overlap",
+        );
     }
 
     #[test]
@@ -14825,6 +14946,7 @@ mod tests {
             screen_frame: None,
             caption_overlay: None,
             highlight_overlay: None,
+            golem_overlay: None,
         };
         let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame(base_inputs, &mut baseline);
@@ -14850,6 +14972,7 @@ mod tests {
             render_compositor_yuv420p_frame(
                 CompositorRenderInputs {
                     highlight_overlay: Some(&highlight),
+                    golem_overlay: None,
                     ..base_inputs
                 },
                 &mut frame,
@@ -14954,6 +15077,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: Some(&overlay),
                 highlight_overlay: None,
+                golem_overlay: None,
             },
             &mut bytes,
         );
@@ -14972,6 +15096,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                golem_overlay: None,
             },
             &mut scene_only,
         );
@@ -15006,6 +15131,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: Some(&overlay),
                 highlight_overlay: None,
+                golem_overlay: None,
             },
             &mut bytes,
         );
@@ -15031,6 +15157,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                golem_overlay: None,
             },
             &mut baseline,
         );
@@ -15120,6 +15247,7 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
+                golem_overlay: None,
             },
             &mut bytes,
         );
@@ -15214,6 +15342,7 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
+                golem_overlay: None,
             },
             &mut bytes,
         );
@@ -15320,6 +15449,7 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
+                golem_overlay: None,
             },
             &mut bytes,
         );
@@ -15571,6 +15701,7 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
+                golem_overlay: None,
             },
             &mut bytes,
         );

@@ -605,6 +605,14 @@ mod runtime {
     const CAPTION_AUXILIARY_SOURCE_ID: u64 = 11;
     const HIGHLIGHT_PRIMARY_SOURCE_ID: u64 = 12;
     const HIGHLIGHT_AUXILIARY_SOURCE_ID: u64 = 13;
+    const GOLEM_PRIMARY_SOURCE_ID: u64 = 14;
+    const GOLEM_AUXILIARY_SOURCE_ID: u64 = 15;
+    /// Overlay stacking (plan 164, owner answer 7): captions, then the Golem,
+    /// then the highlight card on top. `build_windows_d3d11_scene_plan` sorts
+    /// layers by z, so the numbers are the order.
+    const CAPTION_Z_INDEX: i32 = 10;
+    const GOLEM_Z_INDEX: i32 = 11;
+    const HIGHLIGHT_Z_INDEX: i32 = 12;
 
     /// Shared committed authority only; no recording/pump back-reference.
     pub(crate) struct WindowsLiveSources {
@@ -768,10 +776,14 @@ mod runtime {
     pub(crate) struct WindowsD3d11OverlayInput {
         pub(crate) captions: CaptionOverlaySlots,
         pub(crate) highlight: CaptionOverlaySlot,
+        /// The Golem avatar, one raster per target like captions (plan 164).
+        pub(crate) golem: CaptionOverlaySlots,
         pub(crate) caption_on_primary: bool,
         pub(crate) caption_on_auxiliary: bool,
         pub(crate) highlight_on_primary: bool,
         pub(crate) highlight_on_auxiliary: bool,
+        pub(crate) golem_on_primary: bool,
+        pub(crate) golem_on_auxiliary: bool,
     }
 
     #[derive(Clone)]
@@ -1188,7 +1200,9 @@ mod runtime {
                 ));
             }
             if plan.auxiliary.is_none()
-                && (overlays.caption_on_auxiliary || overlays.highlight_on_auxiliary)
+                && (overlays.caption_on_auxiliary
+                    || overlays.highlight_on_auxiliary
+                    || overlays.golem_on_auxiliary)
             {
                 return Err(
                     "D3D11 overlay plan targets an auxiliary leg that this session did not create"
@@ -1556,6 +1570,7 @@ mod runtime {
     ) -> Result<Vec<WindowsD3d11OverlayFrame>, String> {
         let captions = current_caption_overlays(&input.captions);
         let highlight = current_caption_overlay(&input.highlight);
+        let golem = current_caption_overlays(&input.golem);
         let primary_dimensions =
             WindowsD3d11OutputDimensions::new(plan.primary.width, plan.primary.height)
                 .map_err(|error| error.to_string())?;
@@ -1571,7 +1586,7 @@ mod runtime {
         };
         let auxiliary_targets = WindowsD3d11SceneOutputTargets::AUXILIARY
             .union(WindowsD3d11SceneOutputTargets::PREVIEW);
-        let mut frames = Vec::with_capacity(4);
+        let mut frames = Vec::with_capacity(6);
 
         if input.caption_on_primary
             && let Some(caption) = captions.primary
@@ -1592,7 +1607,7 @@ mod runtime {
                 output_targets: primary_targets,
                 output_dimensions: primary_dimensions,
                 safe_inset,
-                z_index: 10,
+                z_index: CAPTION_Z_INDEX,
             });
         }
         if input.caption_on_auxiliary
@@ -1615,7 +1630,34 @@ mod runtime {
                 output_targets: auxiliary_targets,
                 output_dimensions,
                 safe_inset,
-                z_index: 10,
+                z_index: CAPTION_Z_INDEX,
+            });
+        }
+        if input.golem_on_primary
+            && let Some(overlay) = golem.primary
+        {
+            frames.push(WindowsD3d11OverlayFrame {
+                source_id: GOLEM_PRIMARY_SOURCE_ID,
+                source_kind: WindowsD3d11SceneSourceKind::GolemOverlay,
+                overlay,
+                output_targets: primary_targets,
+                output_dimensions: primary_dimensions,
+                safe_inset: 0,
+                z_index: GOLEM_Z_INDEX,
+            });
+        }
+        if input.golem_on_auxiliary
+            && let (Some(overlay), Some(output_dimensions)) =
+                (golem.auxiliary, auxiliary_dimensions)
+        {
+            frames.push(WindowsD3d11OverlayFrame {
+                source_id: GOLEM_AUXILIARY_SOURCE_ID,
+                source_kind: WindowsD3d11SceneSourceKind::GolemOverlay,
+                overlay,
+                output_targets: auxiliary_targets,
+                output_dimensions,
+                safe_inset: 0,
+                z_index: GOLEM_Z_INDEX,
             });
         }
         if input.highlight_on_primary
@@ -1628,7 +1670,7 @@ mod runtime {
                 output_targets: primary_targets,
                 output_dimensions: primary_dimensions,
                 safe_inset: 0,
-                z_index: 11,
+                z_index: HIGHLIGHT_Z_INDEX,
             });
         }
         if input.highlight_on_auxiliary
@@ -1641,7 +1683,7 @@ mod runtime {
                 output_targets: auxiliary_targets,
                 output_dimensions,
                 safe_inset: 0,
-                z_index: 11,
+                z_index: HIGHLIGHT_Z_INDEX,
             });
         }
         Ok(frames)
@@ -2781,6 +2823,194 @@ mod runtime {
                 .layers
                 .iter()
                 .all(|layer| layer.source_id == 20)
+        );
+    }
+
+    /// Plan 164 S-C3: the Golem rides its own per-target slot between the
+    /// caption bar and the highlight card on both legs, and a session with no
+    /// auxiliary leg refuses an auxiliary Golem like it refuses auxiliary
+    /// captions. Mirrored from the CPU/Metal order by reading; this is the
+    /// Windows CI gate for it.
+    #[cfg(test)]
+    #[test]
+    fn windows_overlay_frames_stack_the_golem_between_captions_and_the_card() {
+        use crate::captions::CaptionOverlayPosition;
+        use crate::overlay_layout::OverlayRect;
+        let video = super::WindowsD3d11VideoPlan {
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4500,
+        };
+        let mut plan = WindowsD3d11SessionPlan {
+            screen_id: "screen:dxgi:00000000000003f1:2".into(),
+            source_width: 1920,
+            source_height: 1080,
+            primary: video,
+            auxiliary: Some(video),
+            camera_required: false,
+            preview_required_at_startup: false,
+            primary_role: WindowsD3d11MediaRole::Record,
+            roles: [WindowsD3d11MediaRole::Record, WindowsD3d11MediaRole::Stream]
+                .into_iter()
+                .collect(),
+        };
+        let png = {
+            use base64::Engine as _;
+            let mut bytes = Vec::new();
+            image::RgbaImage::from_pixel(200, 100, image::Rgba([0, 255, 0, 255]))
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Png,
+                )
+                .unwrap();
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        };
+        let input = WindowsD3d11OverlayInput {
+            captions: crate::captions::new_caption_overlay_slots(),
+            highlight: crate::captions::new_caption_overlay_slot(),
+            golem: crate::captions::new_caption_overlay_slots(),
+            caption_on_primary: true,
+            caption_on_auxiliary: true,
+            highlight_on_primary: true,
+            highlight_on_auxiliary: true,
+            golem_on_primary: true,
+            golem_on_auxiliary: true,
+        };
+        crate::captions::install_caption_overlays(
+            &input.captions,
+            crate::captions::SetCaptionOverlayParams {
+                png_base64: png.clone(),
+                position: CaptionOverlayPosition::Bottom,
+                rect: None,
+                target: None,
+                style_revision: None,
+            },
+        )
+        .unwrap();
+        crate::captions::install_caption_overlay(
+            &input.highlight,
+            &png,
+            CaptionOverlayPosition::Top,
+        )
+        .unwrap();
+        let golem_rect = OverlayRect::new(0.15, 0.25, 0.25, 0.2);
+        crate::golem_overlay::install_golem_overlay(
+            &input.golem,
+            crate::golem_overlay::SetGolemOverlayParams {
+                png_base64: png,
+                target: None,
+                rect: Some(golem_rect),
+            },
+        )
+        .unwrap();
+        let frames = current_overlay_frames(&plan, &input).unwrap();
+        let stack = |frames: &[WindowsD3d11OverlayFrame]| {
+            frames
+                .iter()
+                .map(|frame| (frame.source_id, frame.z_index, frame.source_kind))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            stack(&frames),
+            vec![
+                (
+                    CAPTION_PRIMARY_SOURCE_ID,
+                    CAPTION_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::CaptionOverlay
+                ),
+                (
+                    CAPTION_AUXILIARY_SOURCE_ID,
+                    CAPTION_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::CaptionOverlay
+                ),
+                (
+                    GOLEM_PRIMARY_SOURCE_ID,
+                    GOLEM_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::GolemOverlay
+                ),
+                (
+                    GOLEM_AUXILIARY_SOURCE_ID,
+                    GOLEM_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::GolemOverlay
+                ),
+                (
+                    HIGHLIGHT_PRIMARY_SOURCE_ID,
+                    HIGHLIGHT_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::CommentHighlight
+                ),
+                (
+                    HIGHLIGHT_AUXILIARY_SOURCE_ID,
+                    HIGHLIGHT_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::CommentHighlight
+                ),
+            ]
+        );
+        assert!(CAPTION_Z_INDEX < GOLEM_Z_INDEX && GOLEM_Z_INDEX < HIGHLIGHT_Z_INDEX);
+        let golem_primary = &frames[2];
+        assert_eq!(
+            golem_primary.output_targets,
+            WindowsD3d11SceneOutputTargets::PRIMARY
+        );
+        assert_eq!(
+            frames[3].output_targets,
+            WindowsD3d11SceneOutputTargets::AUXILIARY
+                .union(WindowsD3d11SceneOutputTargets::PREVIEW)
+        );
+        assert_eq!(golem_primary.overlay.blit_rect(1280, 720), golem_rect);
+        assert_eq!(golem_primary.safe_inset, 0);
+        // The same geometry oracle as the CPU and Metal paths: the parity
+        // fixture's Golem lands at (192, 180).
+        let (transform, _) = super::windows_d3d11_overlay_layer_geometry(
+            (200, 100),
+            (1280, 720),
+            golem_primary.overlay.blit_rect(1280, 720),
+            0,
+        );
+        assert_eq!(transform.x, 192.0 / 1280.0);
+        assert_eq!(transform.y, 180.0 / 720.0);
+        // The scene plan keeps the stack: z sorts captions, Golem, card.
+        let scene =
+            build_scene_plan(&plan, 1, 1, None, None, &frames, None, Some((1920, 1080))).unwrap();
+        let overlay_layers = scene
+            .layers
+            .iter()
+            .filter(|layer| layer.source_id >= CAPTION_PRIMARY_SOURCE_ID)
+            .map(|layer| layer.source_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            overlay_layers,
+            vec![
+                CAPTION_PRIMARY_SOURCE_ID,
+                CAPTION_AUXILIARY_SOURCE_ID,
+                GOLEM_PRIMARY_SOURCE_ID,
+                GOLEM_AUXILIARY_SOURCE_ID,
+                HIGHLIGHT_PRIMARY_SOURCE_ID,
+                HIGHLIGHT_AUXILIARY_SOURCE_ID,
+            ]
+        );
+        // No auxiliary leg: only the primary frames remain, in the same stack
+        // (the pump's start refuses an auxiliary flag without a leg).
+        plan.auxiliary = None;
+        assert_eq!(
+            stack(&current_overlay_frames(&plan, &input).unwrap()),
+            vec![
+                (
+                    CAPTION_PRIMARY_SOURCE_ID,
+                    CAPTION_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::CaptionOverlay
+                ),
+                (
+                    GOLEM_PRIMARY_SOURCE_ID,
+                    GOLEM_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::GolemOverlay
+                ),
+                (
+                    HIGHLIGHT_PRIMARY_SOURCE_ID,
+                    HIGHLIGHT_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::CommentHighlight
+                ),
+            ]
         );
     }
 
