@@ -24,6 +24,8 @@ Every surface is captured in dark and light themes.
   (`apps/desktop/src/renderer/src/assets/brand/youtube/`), unmodified.
 - The visible mark is at least 20 px tall and never tinted.
 - No YouTube mark sits on top of a photo or avatar.
+- In the Stream Manager, every chat and activity row ends with its platform
+  mark on the far right.
 - Avatars and the other platforms' icons were enlarged to match, so the rows
   stay balanced.
 

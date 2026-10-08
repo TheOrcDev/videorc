@@ -627,7 +627,6 @@ function CommentContent({
       </Avatar>
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex min-w-0 items-center gap-1.5">
-          <ChatPlatformIcon decorative platform={message.platform} />
           {/* text-left: a highlightable row is a Button, whose centred text
               would otherwise float the name mid-row, away from the avatar. */}
           <span className="min-w-0 truncate text-left font-medium text-foreground">
@@ -672,6 +671,9 @@ function CommentContent({
               {time}
             </time>
           ) : null}
+          {/* The platform mark closes the row on the far right (owner call,
+              plan 165): 20 px, YouTube's official icon, clear of the name. */}
+          <ChatPlatformIcon className="ml-1 mr-0" decorative platform={message.platform} />
         </span>
         {message.reply ? (
           <span

@@ -268,9 +268,6 @@ function ActivityRow({
       </span>
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex min-w-0 items-baseline gap-1.5">
-          {/* The platform mark sits on the name line at 20 px, never shrunk
-              onto the avatar (plan 165: YouTube's icon may not be). */}
-          <ChatPlatformIcon className="self-center" decorative platform={item.platform} />
           <span
             className="max-w-[60%] shrink-0 truncate text-sm font-medium text-foreground"
             title={item.short ? undefined : item.line}
@@ -298,6 +295,9 @@ function ActivityRow({
           >
             {relativeTime(item.at, nowMs)}
           </time>
+          {/* The platform mark closes the row on the far right (owner call,
+              plan 165): 20 px, never shrunk onto the avatar. */}
+          <ChatPlatformIcon className="ml-1 mr-0 self-center" decorative platform={item.platform} />
         </span>
         {item.message ? (
           <span className="text-sm leading-snug break-words text-foreground select-text">

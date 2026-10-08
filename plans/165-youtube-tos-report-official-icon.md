@@ -557,6 +557,9 @@ retention, that becomes its own plan.
   - Activity avatars went from 28 px to 36 px.
   - Every platform's activity mark moved inline on the name line; no platform
     has an avatar overlay any more.
+  - A second owner call ("ugly in Stream Manager"): in chat and activity rows,
+    the platform mark now closes the name line on the far right, after the
+    status chips and time, so names line up beside the avatars.
 - Badge chips (`comments-destination-status.tsx`) drop the YouTube mark and
   keep the word "YouTube", because a Badge forces 12 px.
 

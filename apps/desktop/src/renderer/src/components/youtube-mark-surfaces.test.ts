@@ -58,7 +58,7 @@ describe('YouTube mark surfaces', () => {
     expect(markup).toContain('aria-label="YouTube"')
   })
 
-  it('a YouTube chat row leads its name with the 20 px icon', () => {
+  it('a YouTube chat row ends its name line with the 20 px icon', () => {
     const message: LiveChatMessage = {
       id: 'youtube:1',
       providerMessageId: '1',
@@ -85,12 +85,13 @@ describe('YouTube mark surfaces', () => {
     const marks = youtubeMarks(markup)
     expect(marks).toHaveLength(1)
     expect(marks[0].height).toBeGreaterThanOrEqual(20)
-    expect(markup.indexOf('data-platform="youtube"')).toBeLessThan(
+    // It closes the name line on the far right (owner call), after the name.
+    expect(markup.indexOf('data-platform="youtube"')).toBeGreaterThan(
       markup.indexOf('>AIDragonMusic<')
     )
   })
 
-  it('activity rows put the YouTube icon on the name line, never over the avatar', () => {
+  it('activity rows end the name line with the YouTube icon, never over the avatar', () => {
     const items: ActivityItem[] = [
       {
         id: 'yt',
