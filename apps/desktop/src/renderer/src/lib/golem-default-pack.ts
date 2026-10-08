@@ -1,21 +1,20 @@
 import type { CohostAvatarState, CohostPersona } from '@/lib/backend'
-import idleUrl from '@/assets/golem/default/idle.svg'
-import laughUrl from '@/assets/golem/default/laugh.svg'
-import talkUrl from '@/assets/golem/default/talk.svg'
-import thinkUrl from '@/assets/golem/default/think.svg'
+import idleUrl from '@/assets/golem/default/idle.webp'
 import { golemAssetUrl } from '../../../shared/golem-assets'
 
 /**
  * The bundled default pack (plan 164 D22): what a fresh install shows and
- * what `persona.source: 'default'` means. Placeholder art, owner to replace
- * (see the folder's README). Import this module only from lazy chunks (the
- * Golem tab, later the overlay rasterizer), never from the eager shell.
+ * what `persona.source: 'default'` means. The owner's stone golem (the
+ * master lives in `assets/brand/golem/`) is the idle image; the other states
+ * fall back to it until matching art exists (D16 allows a pack with idle
+ * only). Import this module only from lazy chunks (the Golem tab, the
+ * overlay rasterizer), never from the eager shell.
  */
 export const GOLEM_DEFAULT_PACK: Readonly<Record<CohostAvatarState, string>> = {
   idle: idleUrl,
-  talk: talkUrl,
-  laugh: laughUrl,
-  think: thinkUrl
+  talk: idleUrl,
+  laugh: idleUrl,
+  think: idleUrl
 }
 
 /**

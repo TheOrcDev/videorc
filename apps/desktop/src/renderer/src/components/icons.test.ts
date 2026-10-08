@@ -101,7 +101,7 @@ describe('semantic icon registry', () => {
     expect(html).toContain('viewBox="0 0 256 256"')
     expect(html).toContain('width="16"')
     expect(html).toContain('class="orcle"')
-    expect(html).toMatch(/<image href="[^"]*orcle-emblem-64[^"]*"/)
+    expect(html).toMatch(/<image href="[^"]*golem-emblem-64[^"]*"/)
     expect(html).toContain('preserveAspectRatio="xMidYMid meet"')
     expect(html).not.toContain('<path')
     for (const weight of ['thin', 'light', 'regular', 'duotone', 'fill', 'bold'] as const) {

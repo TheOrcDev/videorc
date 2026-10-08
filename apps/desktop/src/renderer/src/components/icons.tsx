@@ -19,7 +19,7 @@ import type { ComponentType, SVGProps } from 'react'
 
 import type * as PhosphorIcons from '@phosphor-icons/react'
 
-import orcleEmblemUrl from '../assets/orcle/orcle-emblem-64.webp'
+import orcleEmblemUrl from '../assets/golem/golem-emblem-64.webp'
 
 /**
  * The props every registry icon accepts.
@@ -139,7 +139,7 @@ type _RegistryIconProps = _AssertIconProps<
  * Navigation — one slot per sidebar destination. These are the icons the
  * 2026-08-25 semantic audit reviews first: several are placeholders inherited
  * from the pre-audit set (see the audit table in the Nucleo plan). The Orcle
- * tab's slot is `OrcleIcon`, the Orcle eye emblem, below.
+ * tab's slot is `OrcleIcon`, the Golem emblem, below.
  */
 export {
   VideoCamera as StudioIcon,
@@ -249,7 +249,7 @@ export {
 } from '@phosphor-icons/react'
 /**
  * AI, tooling and appearance. Orcle (code name `cohost`) has its own mark,
- * the real eye emblem: `OrcleIcon` below at icon size, `OrcleEmblem` larger.
+ * the real Golem artwork: `OrcleIcon` below at icon size, `OrcleEmblem` larger.
  */
 export {
   Brain as BrainIcon,
@@ -302,9 +302,9 @@ export const KickIcon: AppIcon = ({ size, weight: _weight, children, ...props })
 )
 
 /**
- * Orcle's mark (plan 149): the real Orcle eye emblem, the full-colour artwork
- * in `assets/brand/orcle/`, at icon size. The owner's call: Orcle appears as
- * its actual image everywhere, the sidebar, the Stream Manager, the Studio
+ * Golem's mark (plans 149 and 164): the owner's stone golem, the full-colour
+ * artwork in `assets/brand/golem/`, at icon size. The owner's call: it appears
+ * as its actual image everywhere, the sidebar, the Stream Manager, the Studio
  * session row, popovers and menus, never as a redrawn glyph.
  *
  * It stays an `<svg>` so every slot that sizes and lays out icons through

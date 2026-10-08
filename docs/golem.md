@@ -153,13 +153,14 @@ The persona and its images (plan 164, Phase A):
   `golem-assets:remove` deletes the folder for Start over.
 - Generation is `cohost.avatar.generate {state, prompt, style}`: accepted at
   once, the outcome arrives as `cohost.avatar.generated {requestId, state,
-  path?, opaque, error?}`. The backend posts to the web's
+path?, opaque, error?}`. The backend posts to the web's
   `/api/ai/cohost/avatar` (95 s, 8 MB) and writes the PNG into the same
   managed folder, which main hands over as `VIDEORC_MANAGED_GOLEM_ROOTS`.
   Generate is on only when `/api/ai/capabilities` reports
   `cohost.avatar.enabled`; the daily cap is the web's.
-- The bundled default pack (`assets/golem/default/`) is placeholder art the
-  owner replaces; `persona.source: 'default'` means "use it".
+- The bundled default pack (`assets/golem/default/`) is the owner's stone
+  golem (master in `assets/brand/golem/`): the idle image, with the other
+  states falling back to it; `persona.source: 'default'` means "use it".
 
 The report:
 

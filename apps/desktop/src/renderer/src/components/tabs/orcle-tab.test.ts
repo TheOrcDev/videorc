@@ -298,7 +298,7 @@ describe('Golem tab (plan 119 S2)', () => {
     expect(dialog?.textContent).toContain('Turn on Golem Live?')
     // Plan 149: Golem's emblem leads the dialog, at its large size.
     const emblem = dialog?.querySelector('[data-slot="orcle-emblem"]')
-    expect(emblem?.getAttribute('src')).toContain('orcle-emblem-112')
+    expect(emblem?.getAttribute('src')).toContain('golem-emblem-112')
     expect(emblem?.getAttribute('alt')).toBe('')
     for (const use of CLOUD_AI_USES) expect(dialog?.textContent).toContain(use)
     expect(dialog?.textContent).toContain(CLOUD_AI_KEEPS)
@@ -374,7 +374,7 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
     await render()
     const block = document.querySelector('[data-slot="orcle-live-status-block"]') as HTMLElement
     expect(block.querySelector('[data-slot="orcle-emblem"]')?.getAttribute('src')).toContain(
-      'orcle-emblem-112'
+      'golem-emblem-112'
     )
     expect(block.querySelector('#orcle-live-switch')).toBeTruthy()
     expect(document.getElementById('cohost-listen')).toBeTruthy()

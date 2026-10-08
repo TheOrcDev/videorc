@@ -6,10 +6,10 @@ import { describe, expect, it } from 'vitest'
 
 import { OrcleEmblem } from './orcle-emblem'
 
-// Plan 149: Golem's emblem ships as two trimmed WebP exports of the master in
-// `assets/brand/orcle/`. Their heights are the 2× files for 32 and 56 px.
+// Plans 149 and 164: Golem's emblem ships as two trimmed WebP exports of the
+// master in `assets/brand/golem/`. Their heights are the 2× files for 32 and 56 px.
 
-const ASSET_DIR = join(__dirname, '..', 'assets', 'orcle')
+const ASSET_DIR = join(__dirname, '..', 'assets', 'golem')
 const RENDERER_ROOT = join(__dirname, '..', '..')
 const MAX_EXPORT_BYTES = 20 * 1024
 
@@ -23,19 +23,19 @@ function webpSize(bytes: Buffer): { width: number; height: number } {
 
 describe('the Golem emblem exports', () => {
   it.each([
-    ['orcle-emblem-64.webp', 64],
-    ['orcle-emblem-112.webp', 112]
+    ['golem-emblem-64.webp', 64],
+    ['golem-emblem-112.webp', 112]
   ])('%s is a %i px tall WebP under the byte cap', (file, height) => {
     const bytes = readFileSync(join(ASSET_DIR, file))
     const size = webpSize(bytes)
     expect(size.height).toBe(height)
-    // The trimmed eye keeps its aspect (about 1.43 : 1), never squared.
-    expect(size.width / size.height).toBeGreaterThan(1.35)
-    expect(size.width / size.height).toBeLessThan(1.5)
+    // The trimmed golem keeps its aspect (about 1.11 : 1), never squared.
+    expect(size.width / size.height).toBeGreaterThan(1.05)
+    expect(size.width / size.height).toBeLessThan(1.2)
     expect(bytes.byteLength).toBeLessThanOrEqual(MAX_EXPORT_BYTES)
   })
 
-  it('never bundles the 1.5 MB master', () => {
+  it('never bundles the 1.7 MB master', () => {
     const offenders: string[] = []
     const walk = (directory: string): void => {
       for (const entry of readdirSync(directory)) {
@@ -43,7 +43,7 @@ describe('the Golem emblem exports', () => {
         if (statSync(path).isDirectory()) {
           if (entry !== 'node_modules') walk(path)
         } else if (/\.(tsx?|css|html)$/.test(entry) && !/\.test\.tsx?$/.test(entry)) {
-          if (readFileSync(path, 'utf8').includes('orcle-eye-emblem-master')) offenders.push(path)
+          if (readFileSync(path, 'utf8').includes('golem-master')) offenders.push(path)
         }
       }
     }
@@ -61,14 +61,14 @@ describe('OrcleEmblem', () => {
     expect(html).toContain('alt=""')
     expect(html).toContain('aria-hidden="true"')
     expect(html).toContain('h-8')
-    expect(html).toContain('orcle-emblem-64')
+    expect(html).toContain('golem-emblem-64')
     expect(html).toContain('draggable="false"')
   })
 
   it('uses the larger export at 56 px', () => {
     const html = markup({ size: 'lg' })
     expect(html).toContain('h-14')
-    expect(html).toContain('orcle-emblem-112')
+    expect(html).toContain('golem-emblem-112')
   })
 
   it('names itself when given alt text', () => {

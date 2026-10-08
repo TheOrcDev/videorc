@@ -1,7 +1,7 @@
 # Default Golem pack
 
-Placeholder art, owner to replace (plan 164, D22). Four vector states of a
-simple stone golem, grey tones with one LED-red eye accent. States differ by
-eyes and mouth only: `idle`, `talk`, `laugh`, `think`. Keep each file under
-8 KB: the renderer loads them into a canvas `Image`, and they ride only the
-lazy Golem chunks, never the eager renderer bundle.
+The owner's friendly stone golem (plan 164 D22; master in
+`assets/brand/golem/`). `idle.webp` is the 640 px tall export; `talk`,
+`laugh` and `think` fall back to it until matching art exists (D16). The
+renderer loads it into a canvas `Image`, and it rides only the lazy Golem
+chunks, never the eager renderer bundle. Keep any state file under 200 KB.
