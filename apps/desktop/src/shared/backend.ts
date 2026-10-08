@@ -6035,7 +6035,10 @@ export interface CohostWindowState {
 /** The Golem as the Stream Manager operates it (plan 164 S-C4). The window
  * resolves the state image itself (its own file or the bundled pack). */
 export interface CohostWindowGolem {
-  persona: Pick<CohostPersona, 'id' | 'name' | 'images' | 'bubbleStyle' | 'source'>
+  /** Plan 168 S-D3 adds `avatar` and `motion` for the header's living
+   * preview; optional so a window seeded by an older Studio still renders. */
+  persona: Pick<CohostPersona, 'id' | 'name' | 'images' | 'bubbleStyle' | 'source'> &
+    Partial<Pick<CohostPersona, 'avatar' | 'motion'>>
   state: CohostAvatarState
   /** The bubble's text while one is up. */
   bubble: string | null
@@ -6105,8 +6108,15 @@ export type CohostGolemActionCommand =
       sessionId?: string
     }
   | { requestId: string; kind: 'golem-show-on-stream'; showOnStream: boolean }
+  /** Plan 168 S-D3: a reaction chip beside the Say box; Studio routes it to
+   * `cohost.pet.react`. `reaction` is a reaction id (`[a-z0-9-]{1,40}`). */
+  | { requestId: string; kind: 'golem-react'; reaction: string }
 
-export const COHOST_GOLEM_ACTION_KINDS = ['golem-say', 'golem-show-on-stream'] as const
+export const COHOST_GOLEM_ACTION_KINDS = [
+  'golem-say',
+  'golem-show-on-stream',
+  'golem-react'
+] as const
 
 /** Correlated co-host action from the Comments window, brokered through main
  * to the main renderer (which makes the actual `cohost.*` RPC). */

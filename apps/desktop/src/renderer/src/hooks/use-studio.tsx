@@ -4641,7 +4641,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                 name: golemPersona.name,
                 images: golemPersona.images,
                 bubbleStyle: golemPersona.bubbleStyle,
-                source: golemPersona.source
+                source: golemPersona.source,
+                // Plan 168 S-D3: the header's living preview wears the same pack.
+                avatar: golemPersona.avatar,
+                motion: golemPersona.motion
               },
               state: golemOverlay?.state ?? 'idle',
               bubble: golemOverlay?.bubble?.text ?? null,
@@ -4732,6 +4735,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             text: command.text,
             state: command.state
           })
+        }
+        // Plan 168 S-D3: a reaction chip; the backend plays it on air.
+        if (command.kind === 'golem-react') {
+          await client.requestTyped('cohost.pet.react', { reaction: command.reaction })
+          return cohostStateRef.current ?? offCohostState()
         }
         if (command.kind === 'golem-show-on-stream') {
           const current = overlayLayoutRef.current

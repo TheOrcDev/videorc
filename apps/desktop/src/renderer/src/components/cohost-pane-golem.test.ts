@@ -1,11 +1,42 @@
 // @vitest-environment happy-dom
-import { act, createElement } from 'react'
+import { act, createElement, useEffect, useImperativeHandle } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { CohostPane } from '@/components/cohost-pane'
+import type { GolemPetPreviewProps } from '@/components/golem-pet-preview'
 import type { CohostState, CohostWindowGolem } from '@/lib/backend'
 import { EMPTY_COHOST_STATE } from '@/lib/cohost-view'
+
+// The living preview has its own test; here it is a stub that reports the
+// pack's reactions and records what the header asks of it (plan 168 S-D3).
+const preview = vi.hoisted(() => ({
+  reactions: ['laugh', 'proud', 'blink'] as string[],
+  react: vi.fn((_reaction: string) => true),
+  props: null as GolemPetPreviewProps | null
+}))
+vi.mock('@/components/golem-pet-preview-lazy', () => ({
+  LazyGolemPetPreview: (props: GolemPetPreviewProps) => {
+    preview.props = props
+    useImperativeHandle(props.ref, () => ({ react: preview.react }))
+    const { onLoad, packId } = props
+    useEffect(() => {
+      onLoad?.({
+        packId,
+        name: 'Pack',
+        reactions: preview.reactions,
+        gazeCount: 1,
+        frameCount: 1 + preview.reactions.length,
+        notes: []
+      })
+    }, [onLoad, packId])
+    return createElement(
+      'div',
+      { 'data-testid': 'golem-pet-preview', 'data-pack': packId },
+      props.placeholder
+    )
+  }
+}))
 
 let root: Root
 let container: HTMLDivElement
@@ -163,5 +194,60 @@ describe('CohostPane: the Golem header (plan 164 S-C4)', () => {
       container.querySelector<HTMLButtonElement>('[data-testid="golem-show-on-stream"]')?.disabled
     ).toBe(true)
     expect(sayInput().disabled).toBe(true)
+  })
+})
+
+describe('CohostPane: the living Golem header (plan 168 S-D3)', () => {
+  function chips(): HTMLButtonElement[] {
+    return [...container.querySelectorAll<HTMLButtonElement>('[data-testid="golem-reaction-chip"]')]
+  }
+
+  it('shows the worn pack at 32 px, holding the frame of the state on air', async () => {
+    await renderPane({
+      golem: golem({
+        state: 'talk',
+        persona: {
+          id: 'p-1',
+          name: 'Grum',
+          images: {},
+          bubbleStyle: 'speech',
+          source: 'default',
+          avatar: { kind: 'alive', packId: 'bundled:golem' },
+          motion: { intensity: 0.8, sleepAfterSeconds: 60, breathing: false }
+        }
+      })
+    })
+    expect(preview.props).toMatchObject({
+      personaId: 'p-1',
+      packId: 'bundled:golem',
+      size: 32,
+      pose: 'talk',
+      motion: { intensity: 0.8, sleepAfterSeconds: 60, breathing: false }
+    })
+    expect(container.querySelector('[data-slot="golem-avatar"]')?.getAttribute('data-state')).toBe(
+      'talk'
+    )
+    // An older Studio sends no avatar: the Still pack, idle not held.
+    await renderPane({ golem: golem() })
+    expect(preview.props).toMatchObject({ packId: 'still', pose: null })
+  })
+
+  it('relays a reaction chip and plays it in the preview; chips the pack lacks are off', async () => {
+    const onReact = vi.fn()
+    await renderPane({ golem: golem(), onReact })
+    expect(chips().map((chip) => [chip.textContent, chip.disabled])).toEqual([
+      ['Laugh', false],
+      ['Wave', true],
+      ['Surprised', true],
+      ['Proud', false]
+    ])
+    await act(async () => chips()[3]!.click())
+    expect(onReact).toHaveBeenCalledWith('proud')
+    expect(preview.react).toHaveBeenLastCalledWith('proud')
+  })
+
+  it('disables every chip without a relay', async () => {
+    await renderPane({ golem: golem() })
+    expect(chips().every((chip) => chip.disabled)).toBe(true)
   })
 })

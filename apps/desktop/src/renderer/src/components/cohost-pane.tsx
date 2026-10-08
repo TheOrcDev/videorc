@@ -10,6 +10,8 @@ import {
 } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
+import type { GolemPetPreviewHandle } from '@/components/golem-pet-preview'
+import { LazyGolemPetPreview } from '@/components/golem-pet-preview-lazy'
 import { CohostFlagRow } from '@/components/cohost-flag-row'
 import { CohostQuestionRow } from '@/components/cohost-question-row'
 import { CohostPresenceDot, CohostTypingDots } from '@/components/cohost-status'
@@ -34,6 +36,11 @@ import type {
   CohostWindowGolem
 } from '@/lib/backend'
 import { golemStateImageUrl } from '@/lib/golem-default-pack'
+import {
+  GOLEM_HEADER_PREVIEW_PX,
+  GOLEM_REACTION_CHIPS,
+  GOLEM_STILL_PACK_ID
+} from '@/lib/golem-pet-view'
 import { displayKeyGlyph } from '@/lib/platform'
 import { cohostEmptyStateCopy, cohostPresenceView, cohostQuestionIds } from '@/lib/cohost-presence'
 import { activeCohostSpotlight } from '@/lib/cohost-marks'
@@ -116,7 +123,8 @@ export function CohostPane({
   golem = null,
   sayPending = false,
   onSay,
-  onShowOnStreamChange
+  onShowOnStreamChange,
+  onReact
 }: {
   state: CohostState | null
   gate: EntitlementUiGate
@@ -164,12 +172,16 @@ export function CohostPane({
   onSay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
   /** `overlayLayout.golem.showOnStream`. Absent disables the switch. */
   onShowOnStreamChange?: (showOnStream: boolean) => void
+  /** A reaction chip (plan 168 S-D3): `cohost.pet.react` through Studio.
+   * Absent disables the chips. */
+  onReact?: (reaction: string) => void
 }): ReactElement | null {
   const mode = cohostPaneMode({ gate, consented, enabled })
   const header = golem ? (
     <GolemHeader
       golem={golem}
       sayPending={sayPending}
+      onReact={onReact}
       onSay={onSay}
       onShowOnStreamChange={onShowOnStreamChange}
     />
@@ -700,25 +712,34 @@ export function CohostPane({
 }
 
 /**
- * The Golem on stream (plan 164 S-C4): the state image at 32 px, the name,
- * the bubble while one is up, the Show on stream switch, and the Say box.
- * ↵ says it talking, ⌘↵ laughing (⚑ chips for states can follow). The right
- * side of the top row is free for Phase D's chat mode control. Free for
- * everyone (D6): no Premium, no consent, no live session.
+ * The Golem on stream (plan 164 S-C4, plan 168 S-D3): the living preview at
+ * 32 px (the pack it wears on stream, following the pointer in this window
+ * and holding the frame of the state on air), the name, the bubble while
+ * one is up, the Show on stream switch, and the Say box: ↵ says it talking,
+ * ⌘↵ laughing, and the reaction chips beside it play a reaction on air
+ * (each disabled when the pack has no such reaction). Free for everyone
+ * (D6): no Premium, no consent, no live session.
  */
 export function GolemHeader({
   golem,
   sayPending = false,
   onSay,
-  onShowOnStreamChange
+  onShowOnStreamChange,
+  onReact
 }: {
   golem: CohostWindowGolem
   sayPending?: boolean
   onSay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
   onShowOnStreamChange?: (showOnStream: boolean) => void
+  onReact?: (reaction: string) => void
 }): ReactElement {
   const [draft, setDraft] = useState('')
+  const previewRef = useRef<GolemPetPreviewHandle>(null)
+  // The loaded pack's reactions; null until it loads (or when it cannot).
+  const [packReactions, setPackReactions] = useState<readonly string[] | null>(null)
   const image = golemStateImageUrl(golem.persona, golem.state)
+  const avatar = golem.persona.avatar
+  const packId = avatar?.kind === 'alive' ? avatar.packId : GOLEM_STILL_PACK_ID
   const modKey = displayKeyGlyph('⌘', undefined)
   const say = (state: CohostUtteranceState): void => {
     const text = draft.trim()
@@ -726,17 +747,38 @@ export function GolemHeader({
     setDraft('')
     void onSay(text, state)
   }
+  const react = (reaction: string): void => {
+    if (!onReact) return
+    previewRef.current?.react(reaction)
+    onReact(reaction)
+  }
   return (
     <div className="@container/golem-header shrink-0" data-slot="golem-header">
       <div className="flex h-10 min-w-0 items-center gap-2 px-3">
-        <img
-          alt=""
-          className="size-8 shrink-0 rounded-chip bg-foreground/[0.04] object-contain"
-          data-slot="golem-state-image"
-          data-state={golem.state}
-          draggable={false}
-          src={image}
-        />
+        <div className="shrink-0" data-slot="golem-avatar" data-state={golem.state}>
+          <LazyGolemPetPreview
+            ref={previewRef}
+            label={golem.persona.name}
+            motion={golem.persona.motion}
+            packId={packId}
+            personaId={golem.persona.id}
+            placeholder={
+              <img
+                alt=""
+                className="size-8 rounded-chip bg-foreground/[0.04] object-contain"
+                data-slot="golem-state-image"
+                data-state={golem.state}
+                draggable={false}
+                src={image}
+              />
+            }
+            pose={golem.state === 'idle' ? null : golem.state}
+            size={GOLEM_HEADER_PREVIEW_PX}
+            stillImages={golem.persona.images}
+            onError={() => setPackReactions(null)}
+            onLoad={(info) => setPackReactions(info.reactions)}
+          />
+        </div>
         <span
           className="min-w-0 shrink truncate text-xs font-medium text-foreground"
           data-slot="golem-name"
@@ -767,27 +809,54 @@ export function GolemHeader({
         {/* Phase D's chat mode control (Off · Suggest · Auto) lands here. */}
         <span className="flex-1" />
       </div>
-      <div className="flex items-center gap-1.5 px-3 pb-2" data-slot="golem-say">
-        <Input
-          aria-label={`Say something as ${golem.persona.name}`}
-          className="h-7 text-xs"
-          disabled={!onSay}
-          maxLength={200}
-          placeholder="Say something on stream"
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key !== 'Enter') return
-            event.preventDefault()
-            say(event.metaKey || event.ctrlKey ? 'laugh' : 'talk')
-          }}
-        />
-        <Kbd className={PANE_NARROW_HIDDEN} title="Say it">
-          ↵
-        </Kbd>
-        <Kbd className={PANE_NARROW_HIDDEN} title="Say it laughing">
-          {modKey}↵
-        </Kbd>
+      <div className="flex flex-wrap items-center gap-1.5 px-3 pb-2" data-slot="golem-say">
+        <div className="flex min-w-48 flex-1 items-center gap-1.5">
+          <Input
+            aria-label={`Say something as ${golem.persona.name}`}
+            className="h-7 text-xs"
+            disabled={!onSay}
+            maxLength={200}
+            placeholder="Say something on stream"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== 'Enter') return
+              event.preventDefault()
+              say(event.metaKey || event.ctrlKey ? 'laugh' : 'talk')
+            }}
+          />
+          <Kbd className={PANE_NARROW_HIDDEN} title="Say it">
+            ↵
+          </Kbd>
+          <Kbd className={PANE_NARROW_HIDDEN} title="Say it laughing">
+            {modKey}↵
+          </Kbd>
+        </div>
+        <div
+          aria-label="React on stream"
+          className="flex shrink-0 items-center gap-1"
+          data-slot="golem-reactions"
+          role="group"
+        >
+          {GOLEM_REACTION_CHIPS.map((chip) => {
+            const available = packReactions?.includes(chip.id) ?? false
+            return (
+              <Button
+                key={chip.id}
+                data-reaction={chip.id}
+                data-testid="golem-reaction-chip"
+                disabled={!onReact || !available}
+                size="xs"
+                title={`${chip.label} on stream`}
+                type="button"
+                variant="outline"
+                onClick={() => react(chip.id)}
+              >
+                {chip.label}
+              </Button>
+            )
+          })}
+        </div>
       </div>
       <Separator />
     </div>

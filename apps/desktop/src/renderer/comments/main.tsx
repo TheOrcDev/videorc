@@ -447,6 +447,10 @@ function CommentsWindowApp(): ReactElement {
   const setGolemShowOnStream = (showOnStream: boolean): void => {
     void sendGolemAction({ kind: 'golem-show-on-stream', showOnStream })
   }
+  // Plan 168 S-D3: a reaction chip plays on air (Studio calls cohost.pet.react).
+  const reactGolem = (reaction: string): void => {
+    void sendGolemAction({ kind: 'golem-react', reaction })
+  }
 
   // Answers to Golem's voice command cards (plan 140, S6 part B). The reply
   // merges like an event: the newer command (by `at`) wins.
@@ -579,6 +583,7 @@ function CommentsWindowApp(): ReactElement {
           golemPending={golemPending}
           onGolemSay={sayGolem}
           onGolemShowOnStream={setGolemShowOnStream}
+          onGolemReact={reactGolem}
           moderationOperations={moderationOperations}
           removalAnsweringIds={removalAnsweringIds}
           removalRequestIds={removalRequestIds}

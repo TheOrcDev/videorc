@@ -287,6 +287,8 @@ export interface StreamManagerProps {
   onGolemSay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
   /** `overlayLayout.golem.showOnStream`, through the Studio relay. */
   onGolemShowOnStream?: (showOnStream: boolean) => void
+  /** A reaction chip (plan 168 S-D3), through the Studio relay. */
+  onGolemReact?: (reaction: string) => void
   /** Persisted `cohost.settings.autoChat` (plan 164 S-D6): the pane's mode
    * control and behaviour switches; unknown hides them. */
   cohostAutoChat?: CohostAutoChat
@@ -369,6 +371,7 @@ export function StreamManager({
   golemPending = false,
   onGolemSay,
   onGolemShowOnStream,
+  onGolemReact,
   cohostAutoChat,
   onCohostAutoChatChange,
   onCohostUtteranceApprove,
@@ -825,6 +828,7 @@ export function StreamManager({
             sayPending={golemPending}
             onSay={onGolemSay}
             onShowOnStreamChange={onGolemShowOnStream}
+            onReact={onGolemReact}
             expandSignal={cohostExpand}
             flash={cohostFlash}
             gate={cohostGate!}

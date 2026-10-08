@@ -7,7 +7,12 @@ import {
   removeGolemPersona,
   type GolemPetRoots
 } from './golem-assets'
-import type { GolemPetImportResult, GolemPetSummary } from '../shared/golem-pet'
+import {
+  GOLEM_REACTION_NONE,
+  isGolemReactionId,
+  type GolemPetImportResult,
+  type GolemPetSummary
+} from '../shared/golem-pet'
 import { globalShortcutEntries, isGlobalShortcutAction } from '../shared/global-shortcuts'
 import { normalizeAccelerator } from '../shared/accelerator'
 import { openableChatLink } from '../shared/chat-link'
@@ -3130,6 +3135,15 @@ function golemActionCommand(
       return new Error('Show on stream needs true or false.')
     }
     return { requestId, kind, showOnStream }
+  }
+  // Plan 168 S-D3: a reaction chip. Like the Say box it needs no live
+  // session; the backend checks the id against the worn pack.
+  if (kind === 'golem-react') {
+    const { reaction } = value as { reaction?: unknown }
+    if (!isGolemReactionId(reaction) || reaction === GOLEM_REACTION_NONE) {
+      return new Error('Golem react needs a reaction id.')
+    }
+    return { requestId, kind, reaction }
   }
   return null
 }
