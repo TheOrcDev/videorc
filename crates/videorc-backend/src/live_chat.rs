@@ -3949,14 +3949,12 @@ fn fake_message(
         author_affiliation: None,
         // Fake X chat shows each of X's checks and an unverified viewer, so
         // the dev Stream Manager and the smokes see all of them (plan 167).
-        author_verified: (platform == StreamPlatform::X)
-            .then(|| match seq % 4 {
-                0 => Some(LiveChatAuthorVerified::Blue),
-                1 => Some(LiveChatAuthorVerified::Business),
-                2 => Some(LiveChatAuthorVerified::Government),
-                _ => None,
-            })
-            .flatten(),
+        author_verified: match (platform, seq % 4) {
+            (StreamPlatform::X, 0) => Some(LiveChatAuthorVerified::Blue),
+            (StreamPlatform::X, 1) => Some(LiveChatAuthorVerified::Business),
+            (StreamPlatform::X, 2) => Some(LiveChatAuthorVerified::Government),
+            _ => None,
+        },
     }
 }
 
