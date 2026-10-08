@@ -253,26 +253,24 @@ function ActivityRow({
     >
       <span
         className={cn(
-          'relative mt-0.5 flex size-7 shrink-0 items-center justify-center',
+          'relative mt-0.5 flex size-9 shrink-0 items-center justify-center',
           !person && 'rounded-chip bg-foreground/[0.06] text-muted-foreground'
         )}
         data-slot={person ? 'activity-avatar' : 'activity-glyph'}
       >
         {person ? (
-          <AvatarCircle avatarUrl={item.authorAvatarUrl} className="size-7" name={item.name} />
+          <AvatarCircle avatarUrl={item.authorAvatarUrl} className="size-9" name={item.name} />
         ) : Icon ? (
           <Icon aria-hidden className="size-4" weight="duotone" />
         ) : (
           <StatusDot tone={item.kind === 'destination-failed' ? 'error' : 'good'} />
         )}
-        <ChatPlatformIcon
-          className="absolute -right-1 -bottom-1 size-3"
-          decorative
-          platform={item.platform}
-        />
       </span>
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex min-w-0 items-baseline gap-1.5">
+          {/* The platform mark sits on the name line at 20 px, never shrunk
+              onto the avatar (plan 165: YouTube's icon may not be). */}
+          <ChatPlatformIcon className="self-center" decorative platform={item.platform} />
           <span
             className="max-w-[60%] shrink-0 truncate text-sm font-medium text-foreground"
             title={item.short ? undefined : item.line}

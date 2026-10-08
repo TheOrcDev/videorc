@@ -619,7 +619,9 @@ function CommentContent({
 
   return (
     <>
-      <Avatar aria-hidden className="mt-0.5" size="sm">
+      {/* Sized with the 20 px platform marks (plan 165): 32 px in the compact
+          rail, 40 px (both lines) in the Stream Manager. */}
+      <Avatar aria-hidden className="mt-0.5" size={density === 'comfortable' ? 'lg' : 'default'}>
         {avatarUrl ? <AvatarImage alt="" src={avatarUrl} /> : null}
         <AvatarFallback>{monogramInitials(message.authorName)}</AvatarFallback>
       </Avatar>

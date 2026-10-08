@@ -191,7 +191,10 @@ function CommandChooser({
                 onClick={() => onAnswer({ action: 'choose', index: candidate.index })}
               >
                 <Kbd>{candidate.key}</Kbd>
-                <ChatPlatformIcon platform={candidate.platform} />
+                <ChatPlatformIcon
+                  className={candidate.platform === 'youtube' ? 'ml-1' : undefined}
+                  platform={candidate.platform}
+                />
                 <span className="shrink-0 font-medium text-foreground">{candidate.authorName}</span>
                 <span className="min-w-0 truncate text-muted-foreground">
                   {candidate.excerpt ? `“${candidate.excerpt}”` : null}

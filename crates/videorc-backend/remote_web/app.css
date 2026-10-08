@@ -203,7 +203,8 @@ main {
 
 .comment {
   display: grid;
-  grid-template-columns: 24px 1fr;
+  /* 30 px: room for YouTube's 28.55 x 20 px icon (plan 165). */
+  grid-template-columns: 30px 1fr;
   gap: 2px 12px;
   width: 100%;
   min-height: 44px;
@@ -247,7 +248,15 @@ main {
 /* Platform colour is information (which chat this came from), the only
    saturated colour on the page besides red. */
 .glyph[data-platform='youtube'] {
-  background: #e62117;
+  width: auto;
+  background: none;
+}
+/* YouTube's official icon file (plan 165): never tinted, the mark 20 px
+   tall (its width follows the mark's 1.43 aspect). */
+.youtube-icon {
+  display: block;
+  width: 28.55px;
+  height: 20px;
 }
 .glyph[data-platform='twitch'] {
   background: #9146ff;
