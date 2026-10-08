@@ -10938,7 +10938,7 @@ async function runSmokePreviewMotionCommand(
       }
       await new Promise((resolve) => setTimeout(resolve, 250))
       const open = await window.webContents.executeJavaScript(
-        `Boolean(document.querySelector('[data-slot="comment-link-menu"]'))`,
+        `Boolean(document.querySelector('[data-testid="comment-link-menu"]'))`,
         true
       )
       return { closed: open === false }
@@ -10949,7 +10949,7 @@ async function runSmokePreviewMotionCommand(
     if (params.action === 'copy') {
       const item = (await window.webContents.executeJavaScript(
         `(() => {
-          const item = Array.from(document.querySelectorAll('[data-slot="comment-link-menu"] [data-slot="context-menu-item"]'))
+          const item = Array.from(document.querySelectorAll('[data-testid="comment-link-menu"] [data-slot="context-menu-item"]'))
             .find((candidate) => candidate.textContent === 'Copy link');
           if (!item) return null;
           const box = item.getBoundingClientRect();
@@ -11018,7 +11018,7 @@ async function runSmokePreviewMotionCommand(
     }
     const menu = (await window.webContents.executeJavaScript(
       `(() => {
-        const menu = document.querySelector('[data-slot="comment-link-menu"]');
+        const menu = document.querySelector('[data-testid="comment-link-menu"]');
         if (!menu) return null;
         return {
           label: menu.querySelector('[data-slot="context-menu-label"]')?.textContent ?? null,
@@ -11193,7 +11193,7 @@ async function runSmokePreviewMotionCommand(
         // Plan 057, D2: right-click a stat and read the bar's own menu.
         let statsMenuItems = null;
         if (${JSON.stringify(openStatsMenu)}) {
-          const statsMenu = () => document.querySelector('[data-slot="stats-bar-menu"]');
+          const statsMenu = () => document.querySelector('[data-testid="stats-bar-menu"]');
           const target =
             document.querySelector('[data-stat="followers"]') ??
             document.querySelector('[data-slot="stats-bar"]');
@@ -11265,7 +11265,7 @@ async function runSmokePreviewMotionCommand(
           pausedChat: document.querySelector('button[aria-label^="Chat paused:"]')?.textContent ?? null,
           lastMessageId: rows.at(-1)?.getAttribute('data-message-id') ?? null,
           chatAtBottom: viewport ? viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 64 : null,
-          paneBadges: Object.fromEntries(Array.from(document.querySelectorAll('[data-slot="pane-tabs-narrow"] button')).map((button) => [button.textContent?.split(/(?=New|[0-9])/)[0]?.trim(), button.querySelector('[data-slot="pane-unseen"]')?.textContent ?? null])),
+          paneBadges: Object.fromEntries(Array.from(document.querySelectorAll('[data-slot="pane-tabs-narrow"] button')).map((button) => [button.textContent?.split(/(?=New|[0-9])/)[0]?.trim(), button.querySelector('[data-testid="pane-unseen"]')?.textContent ?? null])),
           text: document.body.innerText,
           messageCount: rows.length,
           composerCount: composer ? 1 : 0,
@@ -11287,7 +11287,7 @@ async function runSmokePreviewMotionCommand(
           ])),
           highlightReasons: Object.fromEntries(rows.map((row) => [
             row.getAttribute('data-message-id'),
-            row.querySelector('[data-slot="badge"][title]')?.getAttribute('title') ?? null
+            row.querySelector('[data-testid="highlight-failed"]')?.getAttribute('title') ?? null
           ]))
         };
       })()`,

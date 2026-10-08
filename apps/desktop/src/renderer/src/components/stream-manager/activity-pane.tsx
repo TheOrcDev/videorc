@@ -425,7 +425,7 @@ export function ActivityPane({
             <Switch
               aria-label="Automatically show new follows, subs, gifts, tips, rewards, raids and streaks on stream"
               checked={autoShow}
-              data-slot="activity-auto-show"
+              data-testid="activity-auto-show"
               size="sm"
               onCheckedChange={onAutoShowChange}
             />
@@ -470,7 +470,7 @@ export function ActivityPane({
         ) : (
           <Empty className="border-0 p-6">
             <EmptyHeader>
-              <EmptyDescription data-slot="activity-empty">
+              <EmptyDescription data-testid="activity-empty">
                 {items.length
                   ? 'Nothing matches this filter.'
                   : 'Follows, subs, gifts, tips and raids appear here as they happen.'}
@@ -479,7 +479,7 @@ export function ActivityPane({
               {onShowFollowNames && twitchNeedsFollowNames(platforms, audience) ? (
                 <Button
                   className="mt-2"
-                  data-slot="activity-follow-names"
+                  data-testid="activity-follow-names"
                   size="sm"
                   variant="outline"
                   onClick={onShowFollowNames}

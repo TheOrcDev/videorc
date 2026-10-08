@@ -428,7 +428,7 @@ export function DestinationCard({
             ) : null}
 
             {youtubePaused ? (
-              <Alert data-slot="youtube-quota-paused" variant="warning">
+              <Alert data-testid="youtube-quota-paused" variant="warning">
                 <WarningIcon />
                 <AlertDescription className="flex flex-col gap-2">
                   <span>{youtubeDestinationPausedMessage(youtubePaused)}</span>

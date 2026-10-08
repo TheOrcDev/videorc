@@ -331,7 +331,7 @@ try {
       row.querySelector('button[aria-label="Session actions"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
       const action = await until(() => [...document.querySelectorAll('[role="menuitem"]')].find((item) => item.textContent.trim() === 'Markers'));
       action.click();
-      const dialog = await until(() => document.querySelector('[data-slot="session-markers-dialog"]'));
+      const dialog = await until(() => document.querySelector('[data-testid="session-markers-dialog"]'));
       const video = await until(() => { const value = dialog.querySelector('video'); return value?.readyState > 0 ? value : null; });
       const marker = await until(() => [...dialog.querySelectorAll('[aria-label="Saved markers"] button')].find((item) => item.textContent.includes('Voice Shadcn New Library')));
       marker.click();

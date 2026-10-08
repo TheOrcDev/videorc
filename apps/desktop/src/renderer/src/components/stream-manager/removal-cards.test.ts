@@ -72,7 +72,7 @@ async function render(
 }
 
 const cards = (): HTMLElement[] => [
-  ...container.querySelectorAll<HTMLElement>('[data-slot="removal-card"]')
+  ...container.querySelectorAll<HTMLElement>('[data-testid="removal-card"]')
 ]
 
 function buttons(card: HTMLElement): HTMLButtonElement[] {
@@ -103,7 +103,7 @@ describe('RemovalCards (plan 140, S6)', () => {
     expect(text).toContain('toxic')
     expect(text).toContain('“this stream is trash”')
     expect(card.querySelector('[aria-label="Twitch"]')).toBeTruthy()
-    expect(buttons(card).map((button) => button.dataset.slot)).toEqual([
+    expect(buttons(card).map((button) => button.dataset.testid)).toEqual([
       'removal-confirm',
       'removal-cancel'
     ])

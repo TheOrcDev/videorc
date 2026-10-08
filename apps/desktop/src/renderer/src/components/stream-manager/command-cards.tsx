@@ -23,7 +23,7 @@ import { cn } from '@/lib/utils'
 // window listener runs in the capture phase and takes the key first.
 
 const FOCUSED_CARD =
-  '[data-slot="removal-card"], [data-slot="command-chooser"], [data-slot="command-confirm"]'
+  '[data-testid="removal-card"], [data-testid="command-chooser"], [data-testid="command-confirm"]'
 
 export type CommandAnswer =
   | { action: 'choose'; index: number }
@@ -163,7 +163,7 @@ function CommandChooser({
       aria-label="Which comment did you mean?"
       className="outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
       data-command-id={view.commandId}
-      data-slot="command-chooser"
+      data-testid="command-chooser"
       role="group"
       tabIndex={-1}
       onKeyDown={(event) => cardKeyDown(event, onAnswer, { picks: view.candidates.length })}
@@ -183,7 +183,7 @@ function CommandChooser({
             <li key={candidate.index}>
               <Button
                 className="h-auto w-full min-w-0 justify-start gap-2 px-1.5 py-1 text-left whitespace-normal"
-                data-slot="command-candidate"
+                data-testid="command-candidate"
                 size="xs"
                 title={`Pick ${candidate.authorName} (${candidate.key})`}
                 type="button"
@@ -206,7 +206,7 @@ function CommandChooser({
       </AlertDescription>
       <div className="col-start-2 mt-1 flex flex-wrap gap-1">
         <Button
-          data-slot="command-cancel"
+          data-testid="command-cancel"
           size="xs"
           title="Cancel (Esc)"
           type="button"
@@ -235,7 +235,7 @@ function CommandConfirm({
       aria-label="Show this comment on stream?"
       className="outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
       data-command-id={view.commandId}
-      data-slot="command-confirm"
+      data-testid="command-confirm"
       role="group"
       tabIndex={-1}
       onKeyDown={(event) => {
@@ -273,7 +273,7 @@ function CommandConfirm({
         data-slot="command-confirm-actions"
       >
         <Button
-          data-slot="command-show"
+          data-testid="command-show"
           disabled={view.busy}
           size="xs"
           title="Show it (Enter)"
@@ -285,7 +285,7 @@ function CommandConfirm({
           {keys ? <Kbd>↵</Kbd> : null}
         </Button>
         <Button
-          data-slot="command-cancel"
+          data-testid="command-cancel"
           disabled={view.busy}
           size="xs"
           title="Cancel (Esc)"

@@ -252,7 +252,7 @@ export function CleanCutCard({
       <PanelSection
         action={
           minutesLeft ? (
-            <Badge data-slot="clean-cut-minutes" variant="outline">
+            <Badge data-testid="clean-cut-minutes" variant="outline">
               {minutesLeft}
             </Badge>
           ) : null
@@ -274,7 +274,7 @@ export function CleanCutCard({
         </Field>
 
         {unlock ? (
-          <Alert data-slot="clean-cut-unlock">
+          <Alert data-testid="clean-cut-unlock">
             <LockIcon />
             <AlertTitle className="font-normal text-muted-foreground">{unlock.reason}</AlertTitle>
             {unlockAction ? (
@@ -362,7 +362,7 @@ export function CleanCutCard({
               {condensedBlocked && condensed && !condensed.eligible ? (
                 <GroupedList>
                   <ListRow
-                    data-slot="clean-cut-status"
+                    data-testid="clean-cut-status"
                     data-status="unavailable"
                     icon={<ClipIcon aria-hidden className="text-muted-foreground" />}
                     interactive={false}
@@ -371,7 +371,7 @@ export function CleanCutCard({
                   />
                 </GroupedList>
               ) : status.kind === 'failed' && job ? (
-                <Alert data-slot="clean-cut-status" data-status="failed" variant="destructive">
+                <Alert data-testid="clean-cut-status" data-status="failed" variant="destructive">
                   <AlertIcon />
                   <AlertTitle>
                     {mode === 'condensed' ? 'The condensed cut failed' : 'The clean cut failed'}
@@ -406,7 +406,7 @@ export function CleanCutCard({
                         selectedFacts(selected)
                       )
                     }
-                    data-slot="clean-cut-status"
+                    data-testid="clean-cut-status"
                     data-status={status.kind}
                     icon={<StatusGlyph kind={status.kind} />}
                     interactive={false}

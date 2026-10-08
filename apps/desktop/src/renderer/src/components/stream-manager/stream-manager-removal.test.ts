@@ -98,7 +98,7 @@ describe('StreamManager: a Golem removal card comes forward (plan 140, S6)', () 
     await render({ moderationOperations: [pending] })
     expect(activeTab('pane-tabs-narrow')).toBe('golem')
     expect(activeTab('pane-tabs-wide')).toBe('golem')
-    expect(container.querySelector('[data-slot="removal-card"]')).toBeTruthy()
+    expect(container.querySelector('[data-testid="removal-card"]')).toBeTruthy()
     // It never takes focus from wherever the streamer is typing.
     expect(document.activeElement).toBe(document.body)
 
@@ -106,7 +106,7 @@ describe('StreamManager: a Golem removal card comes forward (plan 140, S6)', () 
     await render({
       moderationOperations: [{ ...pending, phase: 'cancelled', updatedAt: '2020-01-01T00:00:00Z' }]
     })
-    expect(container.querySelector('[data-slot="removal-card"]')).toBeNull()
+    expect(container.querySelector('[data-testid="removal-card"]')).toBeNull()
     expect(activeTab('pane-tabs-narrow')).toBe('chat')
     expect(activeTab('pane-tabs-wide')).toBe('activity')
   })
@@ -114,7 +114,7 @@ describe('StreamManager: a Golem removal card comes forward (plan 140, S6)', () 
   it('answers the card through the Stream Manager with the operation', async () => {
     const onAnswerRemoval = vi.fn()
     await render({ moderationOperations: [pending], onAnswerRemoval })
-    const cancel = container.querySelector<HTMLButtonElement>('[data-slot="removal-cancel"]')
+    const cancel = container.querySelector<HTMLButtonElement>('[data-testid="removal-cancel"]')
     await act(async () => cancel!.click())
     expect(onAnswerRemoval).toHaveBeenCalledWith(pending, 'cancel')
   })

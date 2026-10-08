@@ -152,7 +152,7 @@ function RemovalCard({
   const confirm = (
     <Button
       key="confirm"
-      data-slot="removal-confirm"
+      data-testid="removal-confirm"
       disabled={card.busy}
       size="xs"
       title={`${card.confirmLabel} (Enter)`}
@@ -167,7 +167,7 @@ function RemovalCard({
   const cancel = (
     <Button
       key="cancel"
-      data-slot="removal-cancel"
+      data-testid="removal-cancel"
       disabled={card.busy}
       size="xs"
       title="Cancel (Esc)"
@@ -186,7 +186,7 @@ function RemovalCard({
       className="outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
       data-mode={card.mode}
       data-operation-id={card.operationId}
-      data-slot="removal-card"
+      data-testid="removal-card"
       data-topmost={topmost || undefined}
       role="group"
       tabIndex={-1}
@@ -211,7 +211,7 @@ function RemovalCard({
           <ChatPlatformIcon platform={card.platform} />
           <span className="min-w-0 truncate font-medium text-foreground">{card.authorName}</span>
           {card.reason ? (
-            <Badge className="shrink-0" data-slot="removal-card-reason" variant="outline">
+            <Badge className="shrink-0" data-testid="removal-card-reason" variant="outline">
               {card.reason}
             </Badge>
           ) : null}

@@ -149,7 +149,7 @@ describe('co-host status chip', () => {
     const listening = renderToStaticMarkup(
       createElement(CommentsDestinationStatus, { cohostState: cohost, providers })
     )
-    expect(listening).toContain('data-slot="cohost-status-chip"')
+    expect(listening).toContain('data-testid="cohost-status-chip"')
     expect(listening).toContain('Golem: listening')
     expect(listening).toContain('data-variant="success"')
 
@@ -167,13 +167,13 @@ describe('co-host status chip', () => {
     const markup = renderToStaticMarkup(
       createElement(CommentsDestinationStatus, { providers, cohostState: null })
     )
-    expect(markup).not.toContain('data-slot="cohost-status-chip"')
+    expect(markup).not.toContain('data-testid="cohost-status-chip"')
   })
 
   it('still renders the chip for a session with no chat providers at all', () => {
     const markup = renderToStaticMarkup(
       createElement(CommentsDestinationStatus, { cohostState: cohost, providers: [] })
     )
-    expect(markup).toContain('data-slot="cohost-status-chip"')
+    expect(markup).toContain('data-testid="cohost-status-chip"')
   })
 })

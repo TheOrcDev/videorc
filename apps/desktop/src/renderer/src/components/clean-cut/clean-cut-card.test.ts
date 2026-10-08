@@ -165,7 +165,7 @@ function button(label: string): HTMLButtonElement {
 }
 
 function statusRow(): HTMLElement {
-  return document.querySelector('[data-slot="clean-cut-status"]') as HTMLElement
+  return document.querySelector('[data-testid="clean-cut-status"]') as HTMLElement
 }
 
 function autoSwitch(): HTMLButtonElement {
@@ -208,7 +208,7 @@ describe('Clean cut card (plan 119 S14)', () => {
     expect(text).toContain('Clean cut')
     expect(text).toContain(CLEAN_CUT_DESCRIPTION)
     expect(text).toContain('Make a clean cut of every recording')
-    expect(document.querySelector('[data-slot="clean-cut-minutes"]')?.textContent).toBe(
+    expect(document.querySelector('[data-testid="clean-cut-minutes"]')?.textContent).toBe(
       '1,066 min left this month'
     )
     expect(autoSwitch().getAttribute('data-state')).toBe('unchecked')
@@ -250,7 +250,7 @@ describe('Clean cut card (plan 119 S14)', () => {
 
   it('asks a signed-out streamer to sign in and offers nothing to start', async () => {
     await render({ signedIn: false, entitlements: null, cut: client({ capabilities: null }) })
-    expect(document.querySelector('[data-slot="clean-cut-unlock"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="clean-cut-unlock"]')?.textContent).toContain(
       'Sign in to use Clean cut, part of Videorc Premium.'
     )
     expect(autoSwitch().disabled).toBe(true)
@@ -271,10 +271,10 @@ describe('Clean cut card (plan 119 S14)', () => {
         }
       })
     })
-    expect(document.querySelector('[data-slot="clean-cut-unlock"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="clean-cut-unlock"]')?.textContent).toContain(
       "This month's Clean cut minutes are used up."
     )
-    expect(document.querySelector('[data-slot="clean-cut-minutes"]')?.textContent).toBe(
+    expect(document.querySelector('[data-testid="clean-cut-minutes"]')?.textContent).toBe(
       'No minutes left this month'
     )
     expect(button('Review').disabled).toBe(false)
@@ -445,7 +445,7 @@ describe('Clean cut tab layout (plan 150 S7)', () => {
         capabilities: { ...AVAILABLE, available: false, reasonCode: 'provider-unconfigured' }
       })
     })
-    expect(document.querySelector('[data-slot="clean-cut-unlock"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="clean-cut-unlock"]')?.textContent).toContain(
       "Clean cut isn't set up on Videorc's side yet."
     )
     expect(autoSwitch().disabled).toBe(true)

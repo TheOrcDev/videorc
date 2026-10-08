@@ -132,7 +132,7 @@ export function SessionMarkersDialog({
         if (!open) onClose()
       }}
     >
-      <DialogContent className="max-h-[90vh] sm:max-w-3xl" data-slot="session-markers-dialog">
+      <DialogContent className="max-h-[90vh] sm:max-w-3xl" data-testid="session-markers-dialog">
         <DialogHeader>
           <DialogTitle>Markers · {session.title || 'Untitled session'}</DialogTitle>
           <DialogDescription>

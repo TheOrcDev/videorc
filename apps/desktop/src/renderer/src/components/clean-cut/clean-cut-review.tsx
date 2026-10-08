@@ -752,7 +752,7 @@ function ReviewPlaceholder({
   }
   const waiting = load.kind === 'waiting'
   return (
-    <Empty className="flex-1 gap-1 p-6" data-slot="clean-cut-review-waiting">
+    <Empty className="flex-1 gap-1 p-6" data-testid="clean-cut-review-waiting">
       <EmptyHeader>
         <EmptyTitle className="text-sm">
           {load.kind === 'loading'
@@ -786,7 +786,7 @@ function KindChips({
     <ToggleGroup
       aria-label="Kinds of cuts"
       className="flex-wrap"
-      data-slot="clean-cut-chips"
+      data-testid="clean-cut-chips"
       size="sm"
       spacing={1}
       type="multiple"

@@ -156,7 +156,7 @@ export function SessionStatusPill({
       </span>
       {wsStatus === 'connected' && sessionAlsoRecords(recording) ? (
         <Badge
-          data-slot="session-also-recording"
+          data-testid="session-also-recording"
           title="Also recording a local file"
           variant="outline"
         >

@@ -76,7 +76,7 @@ describe('CohostQuestionRow', () => {
         onSelect: () => undefined
       })
     )
-    expect(onTopic).toContain('data-slot="cohost-on-topic"')
+    expect(onTopic).toContain('data-testid="cohost-on-topic"')
     expect(onTopic).toContain('On topic')
     const plain = renderRow(
       createElement(CohostQuestionRow, {
@@ -87,7 +87,7 @@ describe('CohostQuestionRow', () => {
         onSelect: () => undefined
       })
     )
-    expect(plain).not.toContain('data-slot="cohost-on-topic"')
+    expect(plain).not.toContain('data-testid="cohost-on-topic"')
   })
 
   it('reads as one dense line: question, askers, age', () => {
@@ -165,7 +165,7 @@ describe('CohostQuestionRow spotlight', () => {
         onSelect: () => undefined
       })
     )
-    expect(markup).toContain('data-slot="cohost-talking-about"')
+    expect(markup).toContain('data-testid="cohost-talking-about"')
     expect(markup).toContain('Talking about this')
     expect(markup).toContain('data-variant="outline"')
 
@@ -352,13 +352,13 @@ describe('CohostPane', () => {
     expect(markup).toContain('data-slot="cohost-notice"')
     expect(markup).toContain('Golem requires Videorc Premium.')
     expect(markup).toContain('View Premium')
-    expect(markup).not.toContain('data-slot="cohost-pane"')
+    expect(markup).not.toContain('data-testid="cohost-pane"')
   })
 
   it('asks for cloud-AI consent instead of quietly doing nothing', () => {
     const markup = renderPane({ consented: false, onEnableConsent: () => undefined })
     expect(markup).toContain('Turn on cloud AI')
-    expect(markup).not.toContain('data-slot="cohost-pane"')
+    expect(markup).not.toContain('data-testid="cohost-pane"')
   })
 
   it('renders nothing at all when the streamer turned co-host off', () => {
@@ -370,7 +370,7 @@ describe('CohostPane', () => {
       onShowOnStream: () => undefined,
       state: state({ questions: [question({ priority: 'high' })] })
     })
-    expect(markup).toContain('data-slot="cohost-pane"')
+    expect(markup).toContain('data-testid="cohost-pane"')
     expect(markup).toContain('data-slot="cohost-actions"')
     for (const label of ['Reply', 'Show on stream', 'Answered', 'Dismiss']) {
       expect(markup).toContain(label)

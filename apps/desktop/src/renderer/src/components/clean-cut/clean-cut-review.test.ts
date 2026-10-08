@@ -475,9 +475,9 @@ describe('Clean cut review (plan 119 S14)', () => {
         }))
       })
     )
-    expect(document.querySelector('[data-slot="clean-cut-review-waiting"]')?.textContent).toContain(
-      'Transcribing 40%'
-    )
+    expect(
+      document.querySelector('[data-testid="clean-cut-review-waiting"]')?.textContent
+    ).toContain('Transcribing 40%')
     expect(current.transcript).not.toHaveBeenCalled()
   })
 })

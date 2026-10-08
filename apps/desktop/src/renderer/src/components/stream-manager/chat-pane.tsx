@@ -496,7 +496,7 @@ export function ChatPane({
             </DropdownMenuGroup>
           </DropdownMenuContent>
         </DropdownMenu>
-        <InputGroup className="h-7 min-w-28 flex-1 basis-40" data-slot="chat-search">
+        <InputGroup className="h-7 min-w-28 flex-1 basis-40" data-testid="chat-search">
           <InputGroupAddon>
             <SearchIcon />
           </InputGroupAddon>
@@ -595,7 +595,7 @@ export function ChatPane({
           <Button
             aria-label={`Chat paused: ${incomplete ? 'New chat' : `${unread} new`}. Jump to the newest`}
             className="absolute inset-x-0 bottom-2 mx-auto h-6 w-fit rounded-full px-2.5 text-xs text-foreground glass-chip hover:text-foreground"
-            data-slot="chat-paused"
+            data-testid="chat-paused"
             size="sm"
             type="button"
             variant="ghost"
@@ -789,7 +789,7 @@ export function Composer({
                 <DropdownMenuTrigger asChild>
                   <InputGroupButton
                     aria-label={`Send to: ${pickLabel}`}
-                    data-slot="chat-send-to"
+                    data-testid="chat-send-to"
                     size="xs"
                   >
                     To: {pickLabel}

@@ -273,7 +273,7 @@ describe('Golem report card (plan 119 S3)', () => {
       report: { payload: payload({ report: null }), loading: false, error: null }
     })
     expect(card().getAttribute('data-state')).toBe('orcle-off')
-    const note = document.querySelector('[data-slot="orcle-report-off"]')?.textContent
+    const note = document.querySelector('[data-testid="orcle-report-off"]')?.textContent
     expect(note).toContain('Golem was off for this stream.')
     expect(note).toContain('Turn on Golem to also catch questions.')
     expect(document.querySelector('[data-slot="orcle-report-stats"]')).toBeNull()

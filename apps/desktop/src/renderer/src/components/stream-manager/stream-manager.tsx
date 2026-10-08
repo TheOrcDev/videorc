@@ -206,7 +206,7 @@ function PaneLabel({
       {unseen.count > 0 || unseen.incomplete ? (
         <Badge
           className="h-4 px-1.5 text-[10px] tabular-nums"
-          data-slot="pane-unseen"
+          data-testid="pane-unseen"
           variant="outline"
         >
           {unseen.incomplete ? 'New' : unseen.count > 99 ? '99+' : unseen.count}

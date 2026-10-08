@@ -72,7 +72,7 @@ export function CohostStatus({
       <button
         aria-label={view.label}
         className={STATUS_TRIGGER}
-        data-slot="cohost-status"
+        data-testid="cohost-status"
         data-state-kind={view.kind}
         title={tooltip}
         type="button"
@@ -88,7 +88,7 @@ export function CohostStatus({
       <PopoverTrigger
         aria-label={view.label}
         className={STATUS_TRIGGER}
-        data-slot="cohost-status"
+        data-testid="cohost-status"
         data-state-kind={view.kind}
         title={tooltip}
       >

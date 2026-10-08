@@ -228,7 +228,7 @@ export function GolemPersonaSection({
               </SelectContent>
             </Select>
             <Button
-              data-slot="golem-generate-all"
+              data-testid="golem-generate-all"
               disabled={!canGenerate || !promptReady}
               type="button"
               onClick={runGenerateAll}
@@ -468,7 +468,7 @@ function GolemStateTile({
         {!own ? <span className="text-xs text-subtle">Default</span> : null}
       </div>
       {generating ? (
-        <Skeleton className="aspect-square w-full rounded-chip" data-slot="golem-tile-skeleton" />
+        <Skeleton className="aspect-square w-full rounded-chip" data-testid="golem-tile-skeleton" />
       ) : (
         <div className="relative aspect-square w-full overflow-hidden rounded-chip bg-muted/30">
           <img
@@ -501,7 +501,7 @@ function GolemStateTile({
         </Button>
         <Button
           className="flex-1"
-          data-slot="golem-generate"
+          data-testid="golem-generate"
           disabled={!canGenerate || generating}
           size="xs"
           type="button"

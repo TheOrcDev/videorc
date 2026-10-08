@@ -184,7 +184,7 @@ async function render({
 
 /** Plan 164 S-D6: the switch moved to Stream Manager; the tab points there. */
 function livePointer(): HTMLElement {
-  const pointer = document.querySelector('[data-slot="orcle-live-pointer"]') as HTMLElement | null
+  const pointer = document.querySelector('[data-testid="orcle-live-pointer"]') as HTMLElement | null
   expect(pointer).toBeTruthy()
   expect(document.getElementById('orcle-live-switch')).toBeNull()
   return pointer!
@@ -318,7 +318,7 @@ describe('Golem tab (plan 119 S2)', () => {
 
   it('asks a signed-out streamer to sign in', async () => {
     await render({ signedIn: false, gate: basic })
-    const unlock = document.querySelector('[data-slot="orcle-live-unlock"]')
+    const unlock = document.querySelector('[data-testid="orcle-live-unlock"]')
     expect(unlock?.textContent).toContain('Sign in to use Golem Live, part of Videorc Premium.')
     livePointer()
     await act(async () => button('Sign in').click())
@@ -327,7 +327,7 @@ describe('Golem tab (plan 119 S2)', () => {
 
   it('offers Premium to a Basic account', async () => {
     await render({ gate: basic })
-    expect(document.querySelector('[data-slot="orcle-live-unlock"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="orcle-live-unlock"]')?.textContent).toContain(
       'Golem requires Videorc Premium.'
     )
     livePointer()
@@ -377,7 +377,7 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
       'golem-emblem-112'
     )
     expect(block.querySelector('#orcle-live-switch')).toBeNull()
-    expect(block.querySelector('[data-slot="orcle-live-pointer"]')).toBeTruthy()
+    expect(block.querySelector('[data-testid="orcle-live-pointer"]')).toBeTruthy()
     expect(document.getElementById('cohost-listen')).toBeTruthy()
     // The three-column pitch is gone; Live lists what Golem does as rows.
     expect(document.querySelector('ul[aria-label="What Golem Live does"]')).toBeNull()
@@ -401,10 +401,10 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
     )
     // Plan 164 S-D5: Greetings lead the Chat tab, above Replies.
     expect(titles).toEqual(['Greetings', 'Replies', 'Moderation'])
-    expect(document.querySelector('[data-slot="orcle-tab-unlock"]')).toBeNull()
+    expect(document.querySelector('[data-testid="orcle-tab-unlock"]')).toBeNull()
 
     await render({ tab: 'chat', gate: basic })
-    expect(document.querySelector('[data-slot="orcle-tab-unlock"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="orcle-tab-unlock"]')?.textContent).toContain(
       'Golem requires Videorc Premium.'
     )
     expect((document.getElementById('cohost-notes') as HTMLTextAreaElement).disabled).toBe(true)
@@ -419,22 +419,22 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
 describe('Locked means disabled, with one reason, on every tab (plan 150, D7)', () => {
   it('gives a signed-out streamer the same sign-in reason on Live, Chat and Voice', async () => {
     await render({ signedIn: false })
-    expect(document.querySelector('[data-slot="orcle-live-unlock"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="orcle-live-unlock"]')?.textContent).toContain(
       'Sign in to use Golem Live'
     )
     expect((document.getElementById('cohost-listen') as HTMLButtonElement).disabled).toBe(true)
 
     await render({ signedIn: false, tab: 'chat' })
-    expect(document.querySelector('[data-slot="orcle-tab-unlock"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="orcle-tab-unlock"]')?.textContent).toContain(
       'Sign in to use Golem Live'
     )
     expect((document.getElementById('cohost-notes') as HTMLTextAreaElement).disabled).toBe(true)
 
     await render({ signedIn: false, tab: 'voice' })
-    expect(document.querySelector('[data-slot="orcle-tab-unlock"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="orcle-tab-unlock"]')?.textContent).toContain(
       'Sign in to use Golem Live'
     )
-    expect(document.querySelector('[data-slot="orcle-voice-commands-off"]')).toBeNull()
+    expect(document.querySelector('[data-testid="orcle-voice-commands-off"]')).toBeNull()
     expect((document.getElementById('orcle-wake-word') as HTMLButtonElement).disabled).toBe(true)
   })
 })
@@ -553,12 +553,12 @@ describe('Golem tab: Voice commands (plan 140, S6 part A)', () => {
     )
     expect(text).toContain('20 seconds')
     expect(text).toContain('At most 10 removals a minute.')
-    expect(voice.querySelector('[data-slot="orcle-voice-commands-off"]')).toBeNull()
+    expect(voice.querySelector('[data-testid="orcle-voice-commands-off"]')).toBeNull()
   })
 
   it('says to turn on Golem Live first while it is off, with a way to Live', async () => {
     await render({ tab: 'voice' })
-    const off = section().querySelector('[data-slot="orcle-voice-commands-off"]') as HTMLElement
+    const off = section().querySelector('[data-testid="orcle-voice-commands-off"]') as HTMLElement
     expect(off.textContent).toContain('Turn on Golem Live to use voice commands.')
     await act(async () => off.querySelector('button')!.click())
     expect(calls.onTabChange).toHaveBeenLastCalledWith('live')
@@ -566,10 +566,10 @@ describe('Golem tab: Voice commands (plan 140, S6 part A)', () => {
 
   it('leads with one reason when Golem is locked, and disables the settings (plan 150)', async () => {
     await render({ tab: 'voice', gate: basic })
-    expect(section().querySelector('[data-slot="orcle-tab-unlock"]')?.textContent).toContain(
+    expect(section().querySelector('[data-testid="orcle-tab-unlock"]')?.textContent).toContain(
       'Golem requires Videorc Premium.'
     )
-    expect(section().querySelector('[data-slot="orcle-voice-commands-off"]')).toBeNull()
+    expect(section().querySelector('[data-testid="orcle-voice-commands-off"]')).toBeNull()
     expect((document.getElementById('orcle-wake-word') as HTMLButtonElement).disabled).toBe(true)
   })
 

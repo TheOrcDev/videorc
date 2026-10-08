@@ -107,7 +107,7 @@ export function OrcleVoiceCommands({
         <div className="flex flex-col gap-2 border-b border-border p-gutter">
           {lead}
           {off ? (
-            <Alert data-slot="orcle-voice-commands-off">
+            <Alert data-testid="orcle-voice-commands-off">
               <InfoIcon />
               <AlertTitle className="font-normal text-muted-foreground">
                 {ORCLE_VOICE_COMMANDS_OFF}
@@ -161,7 +161,7 @@ export function OrcleVoiceCommands({
             ))}
           </GroupedList>
 
-          <FieldGroup variant="grouped" data-slot="orcle-voice-commands-settings">
+          <FieldGroup variant="grouped">
             <Field>
               <div className="flex items-center justify-between gap-3">
                 <div className="flex min-w-0 flex-col gap-0.5">

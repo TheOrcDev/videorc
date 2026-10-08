@@ -126,7 +126,7 @@ export function HighlightStatus({
       )
     case 'failed':
       return (
-        <Badge title={status.reason} variant="destructive">
+        <Badge data-testid="highlight-failed" title={status.reason} variant="destructive">
           Failed
         </Badge>
       )
@@ -149,7 +149,7 @@ export function RemovalStatus({
   if (!status) return null
   if (status.kind === 'removing') {
     return (
-      <Badge data-removal={status.kind} data-slot="removal-status" variant="secondary">
+      <Badge data-removal={status.kind} data-testid="removal-status" variant="secondary">
         <SpinnerIcon
           aria-hidden
           className="motion-safe:animate-spin"
@@ -164,7 +164,7 @@ export function RemovalStatus({
     <Badge
       className="shrink-0"
       data-removal={status.kind}
-      data-slot="removal-status"
+      data-testid="removal-status"
       title={status.detail ?? undefined}
       variant="outline"
     >
@@ -209,7 +209,7 @@ function CohostMarks({
     // Pull-up (plan 060): private to the streamer, never on stream by itself.
     return (
       <Badge
-        data-slot="cohost-comment-spotlight"
+        data-testid="cohost-comment-spotlight"
         title="Golem heard you talking about this message"
         variant="outline"
       >
@@ -221,7 +221,7 @@ function CohostMarks({
   if (!suggested) return null
   return (
     <Badge
-      data-slot="cohost-comment-suggested"
+      data-testid="cohost-comment-suggested"
       title="Golem suggests showing this message on the stream"
       variant="outline"
     >
@@ -256,7 +256,7 @@ function RoleTags({ roles }: { roles: readonly string[] }): ReactElement | null 
   return (
     <>
       {labels.map((label) => (
-        <Badge key={label} className="shrink-0" data-slot="comment-role" variant="outline">
+        <Badge key={label} className="shrink-0" data-testid="comment-role" variant="outline">
           {label}
         </Badge>
       ))}
@@ -509,7 +509,7 @@ function ChatLink({ link }: { link: ChatLinkPiece }): ReactElement {
           {link.text}
         </span>
       </ContextMenuTrigger>
-      <ContextMenuContent className="w-56" data-slot="comment-link-menu">
+      <ContextMenuContent className="w-56" data-testid="comment-link-menu">
         <ContextMenuLabel className="truncate font-normal text-subtle">
           {link.host}
         </ContextMenuLabel>
@@ -660,7 +660,7 @@ function CommentContent({
           ) : null}
           <RoleTags roles={message.authorRoles} />
           {message.firstMessage ? (
-            <Badge className="shrink-0" data-slot="comment-first-message" variant="outline">
+            <Badge className="shrink-0" data-testid="comment-first-message" variant="outline">
               <SparkleIcon aria-hidden data-icon="inline-start" weight="fill" />
               First chat
             </Badge>
@@ -668,7 +668,7 @@ function CommentContent({
           {mentioned ? (
             <Badge
               className="shrink-0"
-              data-slot="comment-mention"
+              data-testid="comment-mention"
               title="Mentions you"
               variant="secondary"
             >

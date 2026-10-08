@@ -1,6 +1,8 @@
 // @vitest-environment happy-dom
 import { act, createElement, Fragment } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
+import { compile } from 'tailwindcss'
+import { transformWithEsbuild } from 'vite'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { CohostListening, CohostSettings } from '@/lib/backend'
@@ -66,6 +68,7 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount())
   container.remove()
+  document.head.innerHTML = ''
   vi.unstubAllGlobals()
 })
 
@@ -260,5 +263,74 @@ describe('Golem hears you while you are live (plan 068)', () => {
     expect(document.querySelector('[data-slot="cohost-listen-allowance"]')?.textContent).toBe(
       'Your listening time for this month is used up.'
     )
+  })
+})
+
+/**
+ * The real Tailwind rules for every class rendered under `root`, applied to
+ * the document so `getComputedStyle` sees what the app paints. happy-dom
+ * needs three rewrites the browser does not: nesting lowered (esbuild),
+ * `:is(.group > *)` unwrapped, and the logical paddings spelled out.
+ */
+async function applyTailwind(root: Element): Promise<void> {
+  const classes = new Set<string>()
+  for (const element of [root, ...root.querySelectorAll('*')]) {
+    for (const name of element.classList) classes.add(name)
+  }
+  const compiler = await compile('@theme inline { --spacing: 0.25rem; }\n@tailwind utilities;', {})
+  const { code } = await transformWithEsbuild(compiler.build([...classes]), 'tailwind.css', {
+    loader: 'css',
+    target: 'chrome100'
+  })
+  const style = document.createElement('style')
+  style.textContent = code
+    .replace(/:is\(([^()]+)\)/g, '$1')
+    .replace(/padding-inline:\s*([^;]+);/g, 'padding-left: $1; padding-right: $1;')
+    .replace(/padding-block:\s*([^;]+);/g, 'padding-top: $1; padding-bottom: $1;')
+  document.head.append(style)
+}
+
+/** Tailwind's `calc(<spacing> * n)` in px (16 px root); NaN for anything else. */
+function px(value: string): number {
+  const match = /^calc\(([\d.]+)(px|rem) \* ([\d.]+)\)$/.exec(value.trim())
+  if (!match) return Number.NaN
+  return Number(match[1]) * (match[2] === 'rem' ? 16 : 1) * Number(match[3])
+}
+
+// Plan 168 S-00: the grouped card pads its rows by selecting the shadcn
+// `data-slot="field"`. Answers and Banter once replaced that slot with their
+// own and sat flush against the card's edges and the hairline above them.
+describe('grouped cards (plan 168 S-00)', () => {
+  it('pads Answers and Banter exactly like Reply tone and Golem notes', async () => {
+    await render(settings())
+    const replies = [...document.querySelectorAll<HTMLElement>('[data-slot="panel-section"]')].find(
+      (section) => section.querySelector('h3')?.textContent === 'Replies'
+    )!
+    const card = replies.querySelector<HTMLElement>('[data-variant="grouped"]')!
+    const rows = [...card.children] as HTMLElement[]
+    expect(rows.map((row) => row.querySelector('label')?.textContent)).toEqual([
+      'Answers',
+      'Banter',
+      'Reply tone',
+      'Golem notes'
+    ])
+    await applyTailwind(document.body)
+    for (const row of rows) {
+      const style = getComputedStyle(row)
+      expect(
+        [style.paddingLeft, style.paddingRight, style.paddingTop, style.paddingBottom].map(px)
+      ).toEqual([12, 12, 10, 10])
+    }
+  })
+
+  it('keeps the shadcn slots on every grouped card and its rows', async () => {
+    await render(settings())
+    const cards = [...document.querySelectorAll<HTMLElement>('[data-variant="grouped"]')]
+    // Listen (Live tab), Replies and Moderation (Chat tab).
+    expect(cards).toHaveLength(3)
+    for (const card of cards) {
+      expect(card.getAttribute('data-slot')).toBe('field-group')
+      for (const row of card.children) expect(row.getAttribute('data-slot')).toBe('field')
+    }
   })
 })

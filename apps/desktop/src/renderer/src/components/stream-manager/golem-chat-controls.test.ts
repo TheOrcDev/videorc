@@ -77,8 +77,8 @@ function dialog(): HTMLElement | null {
   return document.querySelector('[role="dialog"]')
 }
 
-function dialogButton(slot: string): HTMLButtonElement {
-  const button = document.querySelector(`[data-slot="${slot}"]`) as HTMLButtonElement | null
+function dialogButton(testId: string): HTMLButtonElement {
+  const button = document.querySelector(`[data-testid="${testId}"]`) as HTMLButtonElement | null
   expect(button).toBeTruthy()
   return button!
 }

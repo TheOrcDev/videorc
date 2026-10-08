@@ -235,11 +235,11 @@ describe('StreamManager removal cards (plan 140, S6)', () => {
     const orcle = markup.slice(markup.indexOf('data-slot="orcle-pane"'))
     const cards = orcle.indexOf('data-slot="removal-cards"')
     expect(cards).toBeGreaterThan(orcle.indexOf('data-slot="orcle-pane-header"'))
-    expect(cards).toBeLessThan(orcle.indexOf('data-slot="cohost-pane"'))
+    expect(cards).toBeLessThan(orcle.indexOf('data-testid="cohost-pane"'))
     expect(orcle).toContain('Remove from chat?')
     expect(orcle).toContain('spam')
     // Only the Golem pane carries cards.
-    expect(markup.match(/data-slot="removal-card"/g)).toHaveLength(1)
+    expect(markup.match(/data-testid="removal-card"/g)).toHaveLength(1)
   })
 
   it('puts what Golem heard, then the chooser, above the removal cards (part B)', () => {
@@ -265,7 +265,7 @@ describe('StreamManager removal cards (plan 140, S6)', () => {
     })
     const orcle = markup.slice(markup.indexOf('data-slot="orcle-pane"'))
     const strip = orcle.indexOf('data-slot="command-strip"')
-    const chooser = orcle.indexOf('data-slot="command-chooser"')
+    const chooser = orcle.indexOf('data-testid="command-chooser"')
     expect(strip).toBeGreaterThan(-1)
     expect(chooser).toBeGreaterThan(strip)
     expect(orcle.indexOf('data-slot="removal-cards"')).toBeGreaterThan(chooser)
@@ -294,11 +294,11 @@ describe('StreamManager removal cards (plan 140, S6)', () => {
           startedAt: '2026-10-02T10:00:00Z'
         }
       })
-    ).not.toContain('data-slot="removal-card"')
-    expect(renderWith({ onAnswerRemoval: undefined })).not.toContain('data-slot="removal-card"')
+    ).not.toContain('data-testid="removal-card"')
+    expect(renderWith({ onAnswerRemoval: undefined })).not.toContain('data-testid="removal-card"')
     expect(
       renderWith({ moderationOperations: [{ ...pending, source: 'manual', phase: 'executing' }] })
-    ).not.toContain('data-slot="removal-card"')
+    ).not.toContain('data-testid="removal-card"')
   })
 })
 

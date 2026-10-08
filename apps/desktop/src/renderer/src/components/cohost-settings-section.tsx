@@ -129,7 +129,7 @@ export function CohostListenField({
   const { cohostSettings, locked, save, error } = useCohostSettingsSave(lockedByTab)
   if (!cohostSettings) return null
   return (
-    <FieldGroup variant="grouped" data-slot="cohost-listen-field">
+    <FieldGroup variant="grouped">
       <Field>
         <div className="flex items-center justify-between gap-3">
           <div className="flex min-w-0 flex-col gap-0.5">
@@ -296,7 +296,7 @@ function CohostCooldownField({
   const [draft, setDraft] = useState(cooldown)
   useEffect(() => setDraft(cooldown), [cooldown])
   return (
-    <Field data-slot={`${id}-field`}>
+    <Field>
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 flex-col gap-0.5">
           <FieldLabel htmlFor={id}>{label}</FieldLabel>

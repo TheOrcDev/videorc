@@ -75,7 +75,7 @@ export function GolemUtteranceCards({
             <Alert
               key={utterance.id}
               aria-label="The Golem wants to post"
-              data-slot="golem-utterance-card"
+              data-testid="golem-utterance-card"
               data-utterance-id={utterance.id}
               role="group"
             >
@@ -90,7 +90,7 @@ export function GolemUtteranceCards({
                   </span>
                 ) : null}
               </AlertTitle>
-              <AlertDescription className="text-xs" data-slot="golem-utterance-text">
+              <AlertDescription className="text-xs" data-testid="golem-utterance-text">
                 {utterance.text}
               </AlertDescription>
               <div className="col-start-2 mt-1.5 flex flex-wrap gap-1">

@@ -158,7 +158,7 @@ export function OrcleTab({
     <>
       <Tabs
         className="min-h-0 flex-1 gap-0"
-        data-slot="orcle-tab"
+        data-testid="orcle-tab"
         value={current}
         onValueChange={(value) => {
           if (isOrcleTabId(value)) selectTab(value)
@@ -269,13 +269,17 @@ function useOrcleLive(): ReturnType<typeof orcleLiveView> {
  * disabled with one reason (plan 150, D7): the tab's controls render disabled
  * under it, and nothing live-looking sits beside it.
  */
-function OrcleUnlockAlert({ slot = 'orcle-live-unlock' }: { slot?: string }): ReactElement | null {
+function OrcleUnlockAlert({
+  testId = 'orcle-live-unlock'
+}: {
+  testId?: string
+}): ReactElement | null {
   const { signIn } = useVideorcAccount()
   const view = useOrcleLive()
   if (!view.unlock) return null
   const unlockAction = view.unlock.action ?? null
   return (
-    <Alert data-slot={slot}>
+    <Alert data-testid={testId}>
       <LockIcon />
       <AlertTitle className="font-normal text-muted-foreground">{view.unlock.reason}</AlertTitle>
       {unlockAction ? (
@@ -308,7 +312,7 @@ function OrcleChatTab(): ReactElement {
     <>
       {locked ? (
         <div className="border-b border-border p-gutter" data-slot="orcle-tab-lock">
-          <OrcleUnlockAlert slot="orcle-tab-unlock" />
+          <OrcleUnlockAlert testId="orcle-tab-unlock" />
         </div>
       ) : null}
       <ConfigGrid className={CONFIG_GRID_PAIR}>
@@ -327,7 +331,7 @@ function OrcleVoiceTab({ onOpenLive }: { onOpenLive: () => void }): ReactElement
   const locked = useOrcleLive().unlock !== null
   return (
     <OrcleVoiceCommands
-      lead={locked ? <OrcleUnlockAlert slot="orcle-tab-unlock" /> : null}
+      lead={locked ? <OrcleUnlockAlert testId="orcle-tab-unlock" /> : null}
       onOpenLive={onOpenLive}
     />
   )
@@ -359,7 +363,7 @@ function OrcleLiveSection(): ReactElement {
           <FieldContent>
             <FieldTitle>{golemName} joins my streams</FieldTitle>
             <OrcleLiveStatusLine status={view.status} />
-            <FieldDescription className="text-xs" data-slot="orcle-live-pointer">
+            <FieldDescription className="text-xs" data-testid="orcle-live-pointer">
               Turn it on in Stream Manager: the Golem pane&apos;s chat mode, Suggest or Auto.
             </FieldDescription>
           </FieldContent>

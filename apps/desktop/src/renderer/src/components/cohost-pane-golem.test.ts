@@ -96,12 +96,14 @@ describe('CohostPane: the Golem header (plan 164 S-C4)', () => {
     expect(container.querySelector('[data-slot="golem-bubble"]')?.textContent).toContain(
       'Welcome to the horde'
     )
-    const toggle = container.querySelector<HTMLButtonElement>('[data-slot="golem-show-on-stream"]')
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-testid="golem-show-on-stream"]'
+    )
     expect(toggle?.getAttribute('aria-checked')).toBe('true')
     // The header comes first; the AI pane follows it.
     const html = container.innerHTML
     expect(html.indexOf('data-slot="golem-header"')).toBeLessThan(
-      html.indexOf('data-slot="cohost-pane"')
+      html.indexOf('data-testid="cohost-pane"')
     )
   })
 
@@ -110,7 +112,7 @@ describe('CohostPane: the Golem header (plan 164 S-C4)', () => {
     expect(container.querySelector('[data-slot="golem-header"]')).toBeNull()
     await renderPane({ golem: golem(), enabled: false })
     expect(container.querySelector('[data-slot="golem-header"]')).toBeTruthy()
-    expect(container.querySelector('[data-slot="cohost-pane"]')).toBeNull()
+    expect(container.querySelector('[data-testid="cohost-pane"]')).toBeNull()
     // Not Premium: the header stays above the upsell line (the overlay is free).
     await renderPane({
       golem: golem(),
@@ -150,13 +152,15 @@ describe('CohostPane: the Golem header (plan 164 S-C4)', () => {
   it('relays the switch and disables it without a handler', async () => {
     const onShowOnStreamChange = vi.fn()
     await renderPane({ golem: golem({ showOnStream: false }), onShowOnStreamChange })
-    const toggle = container.querySelector<HTMLButtonElement>('[data-slot="golem-show-on-stream"]')!
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-testid="golem-show-on-stream"]'
+    )!
     expect(toggle.getAttribute('aria-checked')).toBe('false')
     await act(async () => toggle.click())
     expect(onShowOnStreamChange).toHaveBeenCalledWith(true)
     await renderPane({ golem: golem() })
     expect(
-      container.querySelector<HTMLButtonElement>('[data-slot="golem-show-on-stream"]')?.disabled
+      container.querySelector<HTMLButtonElement>('[data-testid="golem-show-on-stream"]')?.disabled
     ).toBe(true)
     expect(sayInput().disabled).toBe(true)
   })

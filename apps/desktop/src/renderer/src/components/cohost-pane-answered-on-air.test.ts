@@ -82,7 +82,7 @@ function lines(): string[] {
 describe('CohostPane: Answered on air', () => {
   it('renders nothing while no question was answered on air', async () => {
     await renderPane(state({ questions: [question('q-open', 'Which mic is that?')] }))
-    expect(document.querySelector('[data-slot="cohost-answered-on-air"]')).toBeNull()
+    expect(document.querySelector('[data-testid="cohost-answered-on-air"]')).toBeNull()
   })
 
   it('shows the newest as one line under the open questions and restores it', async () => {
@@ -99,7 +99,7 @@ describe('CohostPane: Answered on air', () => {
       onRestore
     )
     expect(lines()).toEqual(['Answered on air: When is the next stream?'])
-    const section = document.querySelector('[data-slot="cohost-answered-on-air"]')!
+    const section = document.querySelector('[data-testid="cohost-answered-on-air"]')!
     // Under the open questions, not inside the keyboard row list.
     expect(section.closest('[cmdk-root]')).toBeNull()
 
@@ -133,7 +133,7 @@ describe('CohostPane: Answered on air', () => {
         ]
       })
     )
-    const section = document.querySelector('[data-slot="cohost-answered-on-air"]')!
+    const section = document.querySelector('[data-testid="cohost-answered-on-air"]')!
     const more = [...section.querySelectorAll('button')].find(
       (button) => button.textContent === '+2'
     )!

@@ -170,7 +170,7 @@ describe('real marker composer', () => {
     await mount(create, true, providers, true)
     await type('/marker 😀 Library')
     expect(container.textContent).toContain('Local · current session')
-    expect(container.querySelector('[data-slot="chat-send-to"]')).toBeNull()
+    expect(container.querySelector('[data-testid="chat-send-to"]')).toBeNull()
     await enter()
     expect(create).toHaveBeenCalledExactlyOnceWith('😀 Library')
     expect(onSend).not.toHaveBeenCalled()

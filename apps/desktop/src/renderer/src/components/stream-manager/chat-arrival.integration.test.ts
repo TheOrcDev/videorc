@@ -160,7 +160,7 @@ const newButton = () =>
 const badge = (label: string) =>
   [...container.querySelectorAll('[data-slot="pane-tabs-narrow"] button')]
     .find((button) => button.textContent?.startsWith(label))
-    ?.querySelector('[data-slot="pane-unseen"]')?.textContent ?? '0'
+    ?.querySelector('[data-testid="pane-unseen"]')?.textContent ?? '0'
 
 for (const [owner, append] of [
   ['provider', applyLiveChatMessage],

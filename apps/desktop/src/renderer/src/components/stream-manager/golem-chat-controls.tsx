@@ -159,7 +159,7 @@ export function GolemChatControls({
                 <DialogTitle>
                   {step === 'confirm-auto' ? 'Turn on Auto?' : 'Let the Golem post as you?'}
                 </DialogTitle>
-                <DialogDescription data-slot="golem-chat-consent-sentence">
+                <DialogDescription data-testid="golem-chat-consent-sentence">
                   {step === 'confirm-auto' ? GOLEM_AUTO_CONFIRM_SENTENCE : GOLEM_CONSENT_SENTENCE}
                 </DialogDescription>
               </div>
@@ -175,11 +175,11 @@ export function GolemChatControls({
               Not now
             </Button>
             {step === 'confirm-auto' ? (
-              <Button data-slot="golem-chat-confirm-auto" type="button" onClick={confirmAuto}>
+              <Button data-testid="golem-chat-confirm-auto" type="button" onClick={confirmAuto}>
                 Turn on Auto
               </Button>
             ) : (
-              <Button data-slot="golem-chat-accept" type="button" onClick={acceptConsent}>
+              <Button data-testid="golem-chat-accept" type="button" onClick={acceptConsent}>
                 Allow
               </Button>
             )}

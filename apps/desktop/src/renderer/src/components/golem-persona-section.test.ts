@@ -110,7 +110,7 @@ function nameInput(): HTMLInputElement {
 }
 
 function generateButtons(): HTMLButtonElement[] {
-  return [...document.querySelectorAll<HTMLButtonElement>('[data-slot="golem-generate"]')]
+  return [...document.querySelectorAll<HTMLButtonElement>('[data-testid="golem-generate"]')]
 }
 
 async function type(input: HTMLInputElement | HTMLTextAreaElement, value: string): Promise<void> {
@@ -227,7 +227,7 @@ describe('GolemPersonaSection', () => {
     expect(generateButtons()).toHaveLength(4)
     expect(generateButtons().every((button) => button.disabled)).toBe(true)
     expect(
-      (document.querySelector('[data-slot="golem-generate-all"]') as HTMLButtonElement).disabled
+      (document.querySelector('[data-testid="golem-generate-all"]') as HTMLButtonElement).disabled
     ).toBe(true)
     expect(document.querySelector('[data-slot="golem-generate-hint"]')?.textContent).toBe(
       GOLEM_GENERATE_CONSENT_OFF

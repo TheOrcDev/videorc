@@ -55,7 +55,7 @@ function renderStatus(props: Partial<Parameters<typeof CohostStatus>[0]> = {}): 
 describe('CohostStatus', () => {
   it('always renders, including for an off engine', () => {
     const markup = renderStatus({ state: offCohostState(), enabled: false })
-    expect(markup).toContain('data-slot="cohost-status"')
+    expect(markup).toContain('data-testid="cohost-status"')
     expect(markup).toContain('data-state-kind="off"')
     expect(markup).toContain('Golem off')
     expect(markup).toContain('data-tone="muted"')
@@ -143,7 +143,7 @@ describe('CohostStatus', () => {
     })
     // The trigger may shrink; the label truncates, then leaves the eye only.
     expect(markup).toContain('min-w-0')
-    expect(markup).not.toMatch(/data-slot="cohost-status"[^>]*shrink-0/)
+    expect(markup).not.toMatch(/data-testid="cohost-status"[^>]*shrink-0/)
     expect(markup).toMatch(
       /class="[^"]*@max-\[330px\]\/chat-header:sr-only[^"]*"[^>]*data-slot="cohost-status-label"/
     )

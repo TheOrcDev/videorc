@@ -180,7 +180,7 @@ function ReportBody({ view }: { view: ShownReport }): ReactElement {
     <>
       <StreamLine view={view} />
       {view.note ? (
-        <Alert data-slot="orcle-report-off" role="note">
+        <Alert data-testid="orcle-report-off" role="note">
           <InfoIcon />
           <AlertTitle>{view.note.title}</AlertTitle>
           <AlertDescription className="text-xs">{view.note.hint}</AlertDescription>

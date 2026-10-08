@@ -387,7 +387,7 @@ export function CohostPane({
       <Collapsible
         ref={paneRef}
         className="@container/cohost-pane shrink-0"
-        data-slot="cohost-pane"
+        data-testid="cohost-pane"
         open={open}
         onOpenChange={setOpen}
       >
@@ -429,7 +429,7 @@ export function CohostPane({
             <Badge
               aria-label={`${presence.unreadBadge} new questions`}
               className="shrink-0 tabular-nums"
-              data-slot="cohost-unread-badge"
+              data-testid="cohost-unread-badge"
               variant="secondary"
             >
               {presence.unreadBadge} new
@@ -439,7 +439,7 @@ export function CohostPane({
             <Badge
               key={alert.kind}
               className="min-w-0 shrink"
-              data-slot="cohost-alert"
+              data-testid="cohost-alert"
               title="Several viewers said this in chat in the last two minutes."
               variant="warning"
             >
@@ -757,7 +757,7 @@ export function GolemHeader({
           <Switch
             aria-label="Show on stream"
             checked={golem.showOnStream}
-            data-slot="golem-show-on-stream"
+            data-testid="golem-show-on-stream"
             disabled={!onShowOnStreamChange}
             size="sm"
             onCheckedChange={(checked) => onShowOnStreamChange?.(checked)}
@@ -887,7 +887,7 @@ function AnsweredOnAir({
     </div>
   )
   return (
-    <Collapsible data-slot="cohost-answered-on-air">
+    <Collapsible data-testid="cohost-answered-on-air">
       <Separator />
       {line(
         newest,
@@ -1066,7 +1066,7 @@ function CohostRecapCard({
     <div className="shrink-0 p-2" data-slot="cohost-recap">
       <Alert aria-label="Recap for viewers who just arrived" role="group">
         <AlertTitle className="text-xs">Recap</AlertTitle>
-        <AlertDescription className="text-xs" data-slot="cohost-recap-text">
+        <AlertDescription className="text-xs" data-testid="cohost-recap-text">
           {recap.text}
         </AlertDescription>
         <div className="col-start-2 mt-1.5 flex flex-wrap gap-1">
