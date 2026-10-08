@@ -41,6 +41,9 @@ mod ffmpeg_work;
 mod fifo;
 mod frame_store;
 mod golem_overlay;
+// Plan 168 S-A1: the pet pack contract; the RPCs that use it land in S-A3.
+#[allow(dead_code)]
+mod golem_pet;
 mod h264_profile;
 mod host_pressure;
 mod kick;

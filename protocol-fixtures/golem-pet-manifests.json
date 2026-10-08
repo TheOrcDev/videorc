@@ -1,0 +1,617 @@
+{
+  "schemaVersion": 1,
+  "description": "Synthetic page-pet manifest v1 cases for plan 168 S-A1. Rust (golem_pet.rs) and TypeScript (shared/golem-pet.ts) both run every case: valid ones pass validateManifest and, when sheets are given, the sheet-size check; each invalid one fails with exactly its rule.",
+  "rules": [
+    "manifest-v1",
+    "frame-count",
+    "puppet-retired",
+    "legacy-layers",
+    "pivot-range",
+    "frame-id",
+    "frame-expression",
+    "sheet-name",
+    "sheet-avif",
+    "rect-square",
+    "frame-kind",
+    "gaze-range",
+    "gaze-unique",
+    "neutral-missing",
+    "cell-size",
+    "rect-limit",
+    "frame-outside-sheet",
+    "sheet-size",
+    "decoded-budget"
+  ],
+  "valid": [
+    {
+      "name": "complete character: 5 x 5 gaze grid and 12 reactions on one 3200 x 5120 atlas",
+      "manifest": {
+        "version": 1,
+        "name": "Synthetic complete character",
+        "neutral": "gaze-2-2",
+        "pivot": [0.5, 0.9],
+        "frames": [
+          { "id": "gaze-0-0", "kind": "gaze", "gaze": [-1, -1], "sheet": "mascot.webp", "rect": [0, 0, 640, 640] },
+          { "id": "gaze-1-0", "kind": "gaze", "gaze": [-0.5, -1], "sheet": "mascot.webp", "rect": [640, 0, 640, 640] },
+          { "id": "gaze-2-0", "kind": "gaze", "gaze": [0, -1], "sheet": "mascot.webp", "rect": [1280, 0, 640, 640] },
+          { "id": "gaze-3-0", "kind": "gaze", "gaze": [0.5, -1], "sheet": "mascot.webp", "rect": [1920, 0, 640, 640] },
+          { "id": "gaze-4-0", "kind": "gaze", "gaze": [1, -1], "sheet": "mascot.webp", "rect": [2560, 0, 640, 640] },
+          { "id": "gaze-0-1", "kind": "gaze", "gaze": [-1, -0.5], "sheet": "mascot.webp", "rect": [0, 640, 640, 640] },
+          { "id": "gaze-1-1", "kind": "gaze", "gaze": [-0.5, -0.5], "sheet": "mascot.webp", "rect": [640, 640, 640, 640] },
+          { "id": "gaze-2-1", "kind": "gaze", "gaze": [0, -0.5], "sheet": "mascot.webp", "rect": [1280, 640, 640, 640] },
+          { "id": "gaze-3-1", "kind": "gaze", "gaze": [0.5, -0.5], "sheet": "mascot.webp", "rect": [1920, 640, 640, 640] },
+          { "id": "gaze-4-1", "kind": "gaze", "gaze": [1, -0.5], "sheet": "mascot.webp", "rect": [2560, 640, 640, 640] },
+          { "id": "gaze-0-2", "kind": "gaze", "gaze": [-1, 0], "sheet": "mascot.webp", "rect": [0, 1280, 640, 640] },
+          { "id": "gaze-1-2", "kind": "gaze", "gaze": [-0.5, 0], "sheet": "mascot.webp", "rect": [640, 1280, 640, 640] },
+          { "id": "gaze-2-2", "kind": "gaze", "gaze": [0, 0], "sheet": "mascot.webp", "rect": [1280, 1280, 640, 640] },
+          { "id": "gaze-3-2", "kind": "gaze", "gaze": [0.5, 0], "sheet": "mascot.webp", "rect": [1920, 1280, 640, 640] },
+          { "id": "gaze-4-2", "kind": "gaze", "gaze": [1, 0], "sheet": "mascot.webp", "rect": [2560, 1280, 640, 640] },
+          { "id": "gaze-0-3", "kind": "gaze", "gaze": [-1, 0.5], "sheet": "mascot.webp", "rect": [0, 1920, 640, 640] },
+          { "id": "gaze-1-3", "kind": "gaze", "gaze": [-0.5, 0.5], "sheet": "mascot.webp", "rect": [640, 1920, 640, 640] },
+          { "id": "gaze-2-3", "kind": "gaze", "gaze": [0, 0.5], "sheet": "mascot.webp", "rect": [1280, 1920, 640, 640] },
+          { "id": "gaze-3-3", "kind": "gaze", "gaze": [0.5, 0.5], "sheet": "mascot.webp", "rect": [1920, 1920, 640, 640] },
+          { "id": "gaze-4-3", "kind": "gaze", "gaze": [1, 0.5], "sheet": "mascot.webp", "rect": [2560, 1920, 640, 640] },
+          { "id": "gaze-0-4", "kind": "gaze", "gaze": [-1, 1], "sheet": "mascot.webp", "rect": [0, 2560, 640, 640] },
+          { "id": "gaze-1-4", "kind": "gaze", "gaze": [-0.5, 1], "sheet": "mascot.webp", "rect": [640, 2560, 640, 640] },
+          { "id": "gaze-2-4", "kind": "gaze", "gaze": [0, 1], "sheet": "mascot.webp", "rect": [1280, 2560, 640, 640] },
+          { "id": "gaze-3-4", "kind": "gaze", "gaze": [0.5, 1], "sheet": "mascot.webp", "rect": [1920, 2560, 640, 640] },
+          { "id": "gaze-4-4", "kind": "gaze", "gaze": [1, 1], "sheet": "mascot.webp", "rect": [2560, 2560, 640, 640] },
+          { "id": "laugh", "kind": "reaction", "sheet": "mascot.webp", "rect": [0, 3200, 640, 640] },
+          { "id": "surprised", "kind": "reaction", "sheet": "mascot.webp", "rect": [640, 3200, 640, 640] },
+          { "id": "wink", "kind": "reaction", "sheet": "mascot.webp", "rect": [1280, 3200, 640, 640] },
+          { "id": "kiss", "kind": "reaction", "sheet": "mascot.webp", "rect": [1920, 3200, 640, 640] },
+          { "id": "blink", "kind": "reaction", "sheet": "mascot.webp", "rect": [2560, 3200, 640, 640] },
+          { "id": "sleep", "kind": "reaction", "sheet": "mascot.webp", "rect": [0, 3840, 640, 640] },
+          { "id": "worried", "kind": "reaction", "sheet": "mascot.webp", "rect": [640, 3840, 640, 640] },
+          { "id": "annoyed", "kind": "reaction", "sheet": "mascot.webp", "rect": [1280, 3840, 640, 640] },
+          { "id": "proud", "kind": "reaction", "sheet": "mascot.webp", "rect": [1920, 3840, 640, 640] },
+          { "id": "confused", "kind": "reaction", "sheet": "mascot.webp", "rect": [2560, 3840, 640, 640] },
+          { "id": "excited", "kind": "reaction", "sheet": "mascot.webp", "rect": [0, 4480, 640, 640] },
+          { "id": "calm", "kind": "reaction", "sheet": "mascot.webp", "rect": [640, 4480, 640, 640] }
+        ]
+      },
+      "sheets": { "mascot.webp": [3200, 5120] },
+      "expect": { "frames": 37, "gaze": 25, "neutral": "gaze-2-2" }
+    },
+    {
+      "name": "minimal: one neutral gaze cell",
+      "manifest": {
+        "version": 1,
+        "name": "Dot",
+        "neutral": "only",
+        "frames": [{ "id": "only", "kind": "gaze", "gaze": [0, 0], "sheet": "dot.png", "rect": [0, 0, 128, 128] }]
+      },
+      "sheets": { "dot.png": [128, 128] },
+      "expect": { "frames": 1, "gaze": 1, "neutral": "only" }
+    },
+    {
+      "name": "JavaScript number forms, falsy legacy keys, unknown fields and two sheets",
+      "manifest": {
+        "version": 1.0,
+        "name": "  Pip  ",
+        "neutral": "center",
+        "puppet": false,
+        "layers": null,
+        "thumb": "thumb.webp",
+        "frames": [
+          {
+            "id": "center",
+            "kind": "gaze",
+            "gaze": [-0.0, 0],
+            "sheet": "a.webp",
+            "rect": [0.0, 0, 256.0, 256]
+          },
+          { "id": "up", "kind": "gaze", "gaze": [0, -1], "sheet": "b.png", "rect": [0, 0, 1024, 1024] },
+          {
+            "id": "wave",
+            "kind": "reaction",
+            "gaze": [9, 9],
+            "sheet": "a.webp",
+            "rect": [256, 0, 256, 256],
+            "note": "ignored"
+          }
+        ]
+      },
+      "sheets": { "a.webp": [512, 256], "b.png": [1024, 1024] },
+      "expect": { "frames": 3, "gaze": 2, "neutral": "center" }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "version 2",
+      "rule": "manifest-v1",
+      "manifest": {
+        "version": 2,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 256, 256] }]
+      }
+    },
+    {
+      "name": "blank name",
+      "rule": "manifest-v1",
+      "manifest": {
+        "version": 1,
+        "name": "   ",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 256, 256] }]
+      }
+    },
+    {
+      "name": "no frames",
+      "rule": "manifest-v1",
+      "manifest": { "version": 1, "name": "Pip", "neutral": "center", "frames": [] }
+    },
+    { "name": "not an object", "rule": "manifest-v1", "manifest": [1] },
+    {
+      "name": "65 frames",
+      "rule": "frame-count",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {},
+          {}
+        ]
+      }
+    },
+    {
+      "name": "static two-image puppet",
+      "rule": "puppet-retired",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 256, 256] }],
+        "puppet": { "head": "head.png", "body": "body.png" }
+      }
+    },
+    {
+      "name": "legacy two-layer pack",
+      "rule": "legacy-layers",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 256, 256], "body": "body-0" }],
+        "layers": {
+          "size": 256,
+          "neck": [0.5, 0.4],
+          "bodyFrames": [{ "id": "body-0", "sheet": "pet.png", "rect": [0, 0, 256, 256] }]
+        }
+      }
+    },
+    {
+      "name": "pivot outside 0..1",
+      "rule": "pivot-range",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 256, 256] }],
+        "pivot": [0.5, 1.2]
+      }
+    },
+    {
+      "name": "null pivot",
+      "rule": "pivot-range",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 256, 256] }],
+        "pivot": null
+      }
+    },
+    {
+      "name": "duplicate frame id",
+      "rule": "frame-id",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [
+          { "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 256, 256] },
+          { "id": "center", "kind": "reaction", "sheet": "pet.png", "rect": [256, 0, 256, 256] }
+        ]
+      }
+    },
+    {
+      "name": "empty frame id",
+      "rule": "frame-id",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [
+          { "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 256, 256] },
+          { "id": "", "kind": "reaction", "sheet": "pet.png", "rect": [256, 0, 256, 256] }
+        ]
+      }
+    },
+    {
+      "name": "frame id over 64 characters",
+      "rule": "frame-id",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [
+          { "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 256, 256] },
+          {
+            "id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "kind": "reaction",
+            "sheet": "pet.png",
+            "rect": [256, 0, 256, 256]
+          }
+        ]
+      }
+    },
+    {
+      "name": "expression without layers",
+      "rule": "frame-expression",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [
+          { "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 256, 256] },
+          { "id": "laugh", "kind": "reaction", "sheet": "pet.png", "rect": [256, 0, 256, 256], "expression": true }
+        ]
+      }
+    },
+    {
+      "name": "path in sheet",
+      "rule": "sheet-name",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "sheets/pet.png", "rect": [0, 0, 256, 256] }]
+      }
+    },
+    {
+      "name": "url as sheet",
+      "rule": "sheet-name",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [
+          {
+            "id": "center",
+            "kind": "gaze",
+            "gaze": [0, 0],
+            "sheet": "https://example.com/pet.png",
+            "rect": [0, 0, 256, 256]
+          }
+        ]
+      }
+    },
+    {
+      "name": "parent step in sheet",
+      "rule": "sheet-name",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "../pet.png", "rect": [0, 0, 256, 256] }]
+      }
+    },
+    {
+      "name": "gif sheet",
+      "rule": "sheet-name",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.gif", "rect": [0, 0, 256, 256] }]
+      }
+    },
+    {
+      "name": "uppercase extension",
+      "rule": "sheet-name",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.PNG", "rect": [0, 0, 256, 256] }]
+      }
+    },
+    {
+      "name": "AVIF sheet",
+      "rule": "sheet-avif",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.avif", "rect": [0, 0, 256, 256] }]
+      }
+    },
+    {
+      "name": "non-square rect",
+      "rule": "rect-square",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 256, 255] }]
+      }
+    },
+    {
+      "name": "fractional rect",
+      "rule": "rect-square",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 256.5, 256.5] }]
+      }
+    },
+    {
+      "name": "negative rect",
+      "rule": "rect-square",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [-1, 0, 256, 256] }]
+      }
+    },
+    {
+      "name": "empty rect",
+      "rule": "rect-square",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 0, 0] }]
+      }
+    },
+    {
+      "name": "three-number rect",
+      "rule": "rect-square",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 256] }]
+      }
+    },
+    {
+      "name": "string in rect",
+      "rule": "rect-square",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, "256", 256] }]
+      }
+    },
+    {
+      "name": "unknown kind",
+      "rule": "frame-kind",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [
+          { "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 256, 256] },
+          { "id": "laugh", "kind": "pose", "sheet": "pet.png", "rect": [256, 0, 256, 256] }
+        ]
+      }
+    },
+    {
+      "name": "gaze outside -1..1",
+      "rule": "gaze-range",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [1.5, 0], "sheet": "pet.png", "rect": [0, 0, 256, 256] }]
+      }
+    },
+    {
+      "name": "gaze frame without gaze",
+      "rule": "gaze-range",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "sheet": "pet.png", "rect": [0, 0, 256, 256] }]
+      }
+    },
+    {
+      "name": "gaze as strings",
+      "rule": "gaze-range",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": ["0", "0"], "sheet": "pet.png", "rect": [0, 0, 256, 256] }]
+      }
+    },
+    {
+      "name": "duplicate gaze (-0 equals 0)",
+      "rule": "gaze-unique",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [
+          { "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 256, 256] },
+          { "id": "center-2", "kind": "gaze", "gaze": [-0.0, 0], "sheet": "pet.png", "rect": [256, 0, 256, 256] }
+        ]
+      }
+    },
+    {
+      "name": "neutral names a reaction",
+      "rule": "neutral-missing",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "laugh",
+        "frames": [
+          { "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 256, 256] },
+          { "id": "laugh", "kind": "reaction", "sheet": "pet.png", "rect": [256, 0, 256, 256] }
+        ]
+      }
+    },
+    {
+      "name": "neutral missing",
+      "rule": "neutral-missing",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 256, 256] }]
+      }
+    },
+    {
+      "name": "64 px cells",
+      "rule": "cell-size",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 64, 64] }]
+      }
+    },
+    {
+      "name": "2048 px cells",
+      "rule": "cell-size",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 2048, 2048] }]
+      }
+    },
+    {
+      "name": "rect past 8192 px",
+      "rule": "rect-limit",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [8000, 0, 256, 256] }]
+      }
+    },
+    {
+      "name": "out of bounds: rect below the sheet",
+      "rule": "frame-outside-sheet",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [
+          { "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 256, 256] },
+          { "id": "laugh", "kind": "reaction", "sheet": "pet.png", "rect": [256, 256, 256, 256] }
+        ]
+      },
+      "sheets": { "pet.png": [512, 256] }
+    },
+    {
+      "name": "out of bounds: sheet not provided",
+      "rule": "frame-outside-sheet",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [
+          { "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 256, 256] },
+          { "id": "laugh", "kind": "reaction", "sheet": "other.png", "rect": [256, 0, 256, 256] }
+        ]
+      },
+      "sheets": { "pet.png": [512, 256] }
+    },
+    {
+      "name": "sheet wider than 8192 px",
+      "rule": "sheet-size",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [{ "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 256, 256] }]
+      },
+      "sheets": { "pet.png": [9000, 256] }
+    },
+    {
+      "name": "decoded sheets over 128 MiB",
+      "rule": "decoded-budget",
+      "manifest": {
+        "version": 1,
+        "name": "Pip",
+        "neutral": "center",
+        "frames": [
+          { "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": "pet.png", "rect": [0, 0, 256, 256] },
+          { "id": "laugh", "kind": "reaction", "sheet": "big.webp", "rect": [0, 0, 1024, 1024] }
+        ]
+      },
+      "sheets": { "pet.png": [512, 256], "big.webp": [8192, 4097] }
+    }
+  ]
+}
