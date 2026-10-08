@@ -40,6 +40,7 @@ mod ffmpeg;
 mod ffmpeg_work;
 mod fifo;
 mod frame_store;
+mod golem_motion;
 mod golem_overlay;
 mod h264_profile;
 mod host_pressure;
