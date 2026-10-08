@@ -18,6 +18,7 @@ import {
   type HighlightMetrics,
   type HighlightTextMeasurer
 } from '@/lib/comment-highlight'
+import { YOUTUBE_MARK_ASPECT, YOUTUBE_MARK_MIN_PX } from '@/lib/youtube-mark'
 
 /** An emote box is this many times the text size high: a little taller than
  * the x-height-and-ascender run of a word, like the chat row's `h-5`. */
@@ -251,6 +252,28 @@ export interface HighlightTokenLayout {
   lines: HighlightLine[]
   cardWidthPx: number
   cardHeightPx: number
+  /** YouTube's icon closing the identity row on the right (plan 165). */
+  platformMark: HighlightPlatformMarkSize | null
+}
+
+export interface HighlightPlatformMarkSize {
+  widthPx: number
+  heightPx: number
+}
+
+/** YouTube's official icon on the card's identity row, in output pixels: the
+ * name's size, never under 20 px tall (Google's ToS report, III.F.2a). Null
+ * for every other platform, which keeps its badge over the avatar. The
+ * identity gap (half the text size, at least 10 px) on each side keeps the
+ * clear space brand.youtube asks for: the triangle's width, about 0.37 of the
+ * mark's height. */
+export function highlightPlatformMarkSize(
+  metrics: HighlightMetrics,
+  platform?: StreamPlatform
+): HighlightPlatformMarkSize | null {
+  if (platform !== 'youtube') return null
+  const heightPx = Math.max(YOUTUBE_MARK_MIN_PX, metrics.nameFontPx)
+  return { widthPx: Math.ceil(heightPx * YOUTUBE_MARK_ASPECT), heightPx }
 }
 
 /** The card layout with emotes: the same identity row and card sizing as
@@ -263,6 +286,8 @@ export function layoutCommentHighlightTokens(params: {
   canvasHeight?: number
   maxCardWidthPx?: number
   platform?: StreamPlatform
+  /** The painter has YouTube's icon to draw beside the name (plan 165). */
+  platformMark?: boolean
   measure: HighlightTextMeasurer
   emoteSize: HighlightEmoteSizer
 }): HighlightTokenLayout | null {
@@ -276,17 +301,24 @@ export function layoutCommentHighlightTokens(params: {
     params.measure,
     params.emoteSize
   )
+  const platformMark = params.platformMark
+    ? highlightPlatformMarkSize(metrics, params.platform)
+    : null
+  // The mark and its gap (on the row's right end) come out of the name's
+  // share of the row.
+  const markLeadPx = platformMark ? platformMark.widthPx + metrics.identityGapPx : 0
+  const maxNameWidthPx = Math.max(0, metrics.maxNameWidthPx - markLeadPx)
   const name = fitHighlightName(
-    commentHighlightIdentity(params.authorName, params.platform),
+    commentHighlightIdentity(params.authorName, params.platform, platformMark !== null),
     metrics.nameFontPx,
-    metrics.maxNameWidthPx,
+    maxNameWidthPx,
     params.measure
   )
   const nameWidth = Math.min(
     params.measure(name, metrics.nameFontPx, HIGHLIGHT_NAME_WEIGHT),
-    metrics.maxNameWidthPx
+    maxNameWidthPx
   )
-  const identityRowWidth = metrics.avatarPx + metrics.identityGapPx + nameWidth
+  const identityRowWidth = metrics.avatarPx + metrics.identityGapPx + markLeadPx + nameWidth
   const widestLine = lines.reduce((widest, line) => Math.max(widest, line.widthPx), 0)
   const contentWidth = Math.min(Math.max(identityRowWidth, widestLine), metrics.maxTextWidthPx)
   const messageHeight =
@@ -296,7 +328,8 @@ export function layoutCommentHighlightTokens(params: {
     name,
     lines,
     cardWidthPx: Math.ceil(metrics.paddingPx * 2 + contentWidth),
-    cardHeightPx: Math.ceil(metrics.paddingPx * 2 + metrics.avatarPx + messageHeight)
+    cardHeightPx: Math.ceil(metrics.paddingPx * 2 + metrics.avatarPx + messageHeight),
+    platformMark
   }
 }
 

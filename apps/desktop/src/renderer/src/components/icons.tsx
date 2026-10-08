@@ -20,6 +20,13 @@ import type { ComponentType, SVGProps } from 'react'
 import type * as PhosphorIcons from '@phosphor-icons/react'
 
 import orcleEmblemUrl from '../assets/golem/golem-emblem-64.webp'
+import {
+  YOUTUBE_ARTBOARD,
+  YOUTUBE_ICON_URL,
+  YOUTUBE_MARK,
+  YOUTUBE_MARK_ASPECT,
+  YOUTUBE_MARK_MIN_PX
+} from '../lib/youtube-mark'
 
 /**
  * The props every registry icon accepts.
@@ -131,7 +138,6 @@ type _RegistryIconProps = _AssertIconProps<
     | 'X'
     | 'XCircle'
     | 'XLogo'
-    | 'YoutubeLogo'
   >
 >
 
@@ -274,10 +280,49 @@ export {
 export {
   TwitchLogo as TwitchIcon,
   XLogo as XPlatformIcon,
-  YoutubeLogo as YoutubeIcon,
   TiktokLogo as TiktokIcon,
   InstagramLogo as InstagramIcon
 } from '@phosphor-icons/react'
+
+export { YOUTUBE_MARK_ASPECT, YOUTUBE_MARK_MIN_PX }
+
+/**
+ * YouTube's mark (plan 165): the official full-colour icon from YouTube's
+ * brand site, unmodified (`assets/brand/youtube/`), never a redrawn glyph.
+ *
+ * Like `OrcleIcon` it is an `<svg>` around an `<image>`, so `currentColor`,
+ * tint classes and hover recolours cannot reach the artwork: the red and the
+ * white triangle are YouTube's. Its height is the `size` prop, clamped to at
+ * least YOUTUBE_MARK_MIN_PX, and its width follows the mark's aspect. The
+ * size is set inline, so a caller's `size-3.5` class cannot shrink it; a
+ * surface that has no room for 20px shows the word "YouTube" instead.
+ * `weight` is accepted and ignored.
+ */
+export const YoutubeIcon: AppIcon = ({ size, weight: _weight, children, style, ...props }) => {
+  const requested = typeof size === 'number' ? size : Number.parseFloat(size ?? '')
+  const height = Math.max(YOUTUBE_MARK_MIN_PX, Number.isFinite(requested) ? requested : 0)
+  const width = Math.round(height * YOUTUBE_MARK_ASPECT * 100) / 100
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      // The viewBox crops to the mark, so the svg box IS the visible icon.
+      viewBox={`${YOUTUBE_MARK.x} ${YOUTUBE_MARK.y} ${YOUTUBE_MARK.width} ${YOUTUBE_MARK.height}`}
+      width={width}
+      height={height}
+      data-slot="platform-mark"
+      data-platform="youtube"
+      {...props}
+      style={{ ...style, width, height, flexShrink: 0 }}
+    >
+      {children}
+      <image
+        href={YOUTUBE_ICON_URL}
+        width={YOUTUBE_ARTBOARD.width}
+        height={YOUTUBE_ARTBOARD.height}
+      />
+    </svg>
+  )
+}
 /**
  * Kick's mark (plan 063). Phosphor has no Kick logo, so this is a hand-drawn,
  * simplified version: the stepped "K" knocked out of a rounded square, drawn

@@ -38,6 +38,11 @@ const REMOTE_CLIENT_JS: &str = include_str!("../remote_web/remote-client.js");
 const HMAC_JS: &str = include_str!("../remote_web/hmac.js");
 const MANIFEST: &str = include_str!("../remote_web/manifest.webmanifest");
 const ICON_SVG: &str = include_str!("../remote_web/icon.svg");
+/// YouTube's official icon, the same file the desktop app shows (plan 165,
+/// Google's ToS report III.F.2a): one copy in the repo, never redrawn.
+const YOUTUBE_ICON_SVG: &str = include_str!(
+    "../../../apps/desktop/src/renderer/src/assets/brand/youtube/youtube-icon-red.svg"
+);
 
 /// Same-origin only, no third-party requests, no framing. `ws:` is spelled
 /// out because older WebKit does not fold websockets into `'self'`.
@@ -393,6 +398,10 @@ pub fn lan_router(state: AppState) -> Router {
         .route(
             "/icon.svg",
             get(|| async { asset("image/svg+xml", ICON_SVG) }),
+        )
+        .route(
+            "/youtube-icon.svg",
+            get(|| async { asset("image/svg+xml", YOUTUBE_ICON_SVG) }),
         )
         .route("/ws", get(lan_ws_handler))
         .layer(axum::middleware::from_fn(guard_and_harden))
@@ -796,6 +805,17 @@ mod tests {
         assert!(csp.contains("frame-ancestors 'none'"));
         assert_eq!(page.headers()["cache-control"], "no-store");
         assert_eq!(page.headers()["x-content-type-options"], "nosniff");
+
+        // Plan 165: chat rows show YouTube's official icon file, unmodified.
+        let youtube_icon = client
+            .get(format!("http://{address}/youtube-icon.svg"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(youtube_icon.status(), 200);
+        assert_eq!(youtube_icon.headers()["content-type"], "image/svg+xml");
+        assert_eq!(youtube_icon.text().await.unwrap(), YOUTUBE_ICON_SVG);
+        assert!(YOUTUBE_ICON_SVG.contains("fill=\"rgb(100%, 0%, 19.999695%)\""));
 
         // Everything the loopback router serves must be structurally absent.
         for path in [

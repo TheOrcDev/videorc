@@ -173,11 +173,15 @@ describe('layoutCommentHighlight', () => {
   it('preserves platform identity on the stream card', () => {
     expect(commentHighlightIdentity('Orc Dev', 'twitch')).toBe('Twitch · Orc Dev')
     expect(commentHighlightIdentity(' ', 'x')).toBe('X · Viewer')
+    // Plan 165: YouTube is never redrawn as a badge; the card draws YouTube's
+    // own icon beside the name, and then the name stands alone.
     expect(commentHighlightPlatformBadge('youtube')).toEqual({
       label: 'YouTube',
-      color: '#FF0033',
-      glyph: 'play'
+      glyph: 'youtube-icon'
     })
+    expect(commentHighlightIdentity('Orc Dev', 'youtube')).toBe('YouTube · Orc Dev')
+    expect(commentHighlightIdentity('Orc Dev', 'youtube', true)).toBe('Orc Dev')
+    expect(commentHighlightIdentity('Orc Dev', 'twitch', true)).toBe('Twitch · Orc Dev')
     expect(commentHighlightPlatformBadge(undefined)).toBeNull()
   })
 })
