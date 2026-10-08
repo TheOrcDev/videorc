@@ -101,7 +101,8 @@ export function freshGolemPersona(id: string): CohostPersona {
     personality: '',
     bubbleStyle: 'speech',
     images: {},
-    source: 'default'
+    source: 'default',
+    avatar: { kind: 'still' }
   }
 }
 

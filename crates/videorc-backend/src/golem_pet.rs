@@ -22,6 +22,7 @@
 //! `playground/app.js` (file sizes, the per-cell transparency probe).
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -738,6 +739,551 @@ pub fn parse_sidecar(bytes: &[u8], manifest: &PetManifest) -> Result<PetSidecar,
     Ok(sidecar)
 }
 
+// --- Packs on disk (plan 168 S-A3, D3) ----------------------------------------
+
+/// A bundled pack id is `bundled:<name>`; its folder is `<bundled root>/<name>`.
+pub const GOLEM_BUNDLED_PACK_PREFIX: &str = "bundled:";
+/// `manifest.json` and `golem.json` are small; a larger one is refused.
+pub const GOLEM_PET_JSON_MAX_BYTES: u64 = 1024 * 1024;
+
+/// Where a pack id points (D3): the persona's own pack (a lowercase uuid
+/// under `<write root>/<personaId>/pets/`) or a shipped one (`bundled:<name>`
+/// under the read-only second root).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackRef {
+    User(String),
+    Bundled(String),
+}
+
+/// A pack id as the wire carries it, or `PackId` when it is neither form.
+pub fn parse_pack_id(pack_id: &str) -> Result<PackRef, PetError> {
+    if let Some(name) = pack_id.strip_prefix(GOLEM_BUNDLED_PACK_PREFIX) {
+        if (1..=40).contains(&name.len())
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        {
+            return Ok(PackRef::Bundled(name.to_string()));
+        }
+    } else if uuid::Uuid::parse_str(pack_id)
+        .is_ok_and(|uuid| uuid.hyphenated().to_string() == pack_id)
+    {
+        return Ok(PackRef::User(pack_id.to_string()));
+    }
+    Err(PetError::new(
+        PetRule::PackId,
+        "The pack id is neither a pack of this Golem nor a built-in pack.",
+    ))
+}
+
+/// A persona id names a folder: a plain token only (as `cohost.rs` checks).
+fn persona_id_ok(persona_id: &str) -> bool {
+    !persona_id.is_empty()
+        && persona_id.len() <= 128
+        && persona_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+/// The folder a pack id names under the golem roots (`roots[0]` is the
+/// write root, `roots[1]` the bundled root), canonicalized and checked to be
+/// a directory inside its root: a link that leaves the root is refused.
+pub fn pack_dir(roots: &[PathBuf], persona_id: &str, pack_id: &str) -> Result<PathBuf, PetError> {
+    if !persona_id_ok(persona_id) {
+        return Err(PetError::new(
+            PetRule::PackId,
+            "The persona id is not a plain token.",
+        ));
+    }
+    let not_found = || PetError::new(PetRule::PackNotFound, "That pack is not on this computer.");
+    let (root, dir) = match parse_pack_id(pack_id)? {
+        PackRef::User(id) => {
+            let root = roots.first().ok_or_else(not_found)?;
+            (root, root.join(persona_id).join("pets").join(id))
+        }
+        PackRef::Bundled(name) => {
+            let root = roots.get(1).ok_or_else(not_found)?;
+            (root, root.join(name))
+        }
+    };
+    let canonical = match std::fs::canonicalize(&dir) {
+        Ok(canonical) => canonical,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(not_found()),
+        Err(error) => {
+            return Err(PetError::new(
+                PetRule::PackIo,
+                format!("The pack folder could not be read: {error}"),
+            ));
+        }
+    };
+    let inside = std::fs::canonicalize(root).is_ok_and(|root| canonical.starts_with(root));
+    if !inside {
+        return Err(PetError::new(
+            PetRule::PackOutsideRoot,
+            "The pack folder is outside Videorc's Golem storage.",
+        ));
+    }
+    if !canonical.is_dir() {
+        return Err(not_found());
+    }
+    Ok(canonical)
+}
+
+/// One file of a pack folder: a regular file (never a link), at most `cap`
+/// bytes, refused (not truncated) when it grew after it was sized. `None`
+/// when it does not exist.
+fn read_pack_file(dir: &Path, name: &str, cap: u64) -> Result<Option<Vec<u8>>, PetError> {
+    use std::io::Read as _;
+    let path = dir.join(name);
+    let io_error = |error: std::io::Error| {
+        PetError::new(
+            PetRule::PackIo,
+            format!("{name} could not be read: {error}"),
+        )
+    };
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error(error)),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(PetError::new(
+            PetRule::PackIo,
+            format!("{name} is not a regular file."),
+        ));
+    }
+    let too_large = || {
+        PetError::new(
+            PetRule::FileSize,
+            format!("{name} is too large. Keep each pack file under 32 MB."),
+        )
+    };
+    if metadata.len() > cap {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    std::fs::File::open(&path)
+        .map_err(io_error)?
+        .take(cap + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_error)?;
+    if bytes.len() as u64 > cap {
+        return Err(too_large());
+    }
+    Ok(Some(bytes))
+}
+
+/// The format of a sheet by its bytes: PNG or WebP only (D1).
+fn sheet_format(name: &str, bytes: &[u8]) -> Result<image::ImageFormat, PetError> {
+    match image::guess_format(bytes) {
+        Ok(format @ (image::ImageFormat::Png | image::ImageFormat::WebP)) => Ok(format),
+        _ => Err(PetError::new(
+            PetRule::SheetFormat,
+            format!("{name} is not a PNG or WebP image."),
+        )),
+    }
+}
+
+/// The decoder limits every sheet decode uses (D4).
+fn sheet_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(GOLEM_PET_SHEET_MAX_SIDE);
+    limits.max_image_height = Some(GOLEM_PET_SHEET_MAX_SIDE);
+    limits.max_alloc = Some(GOLEM_PET_DECODED_MAX_BYTES);
+    limits
+}
+
+fn sheet_reader<'a>(
+    name: &str,
+    bytes: &'a [u8],
+) -> Result<image::ImageReader<std::io::Cursor<&'a [u8]>>, PetError> {
+    let format = sheet_format(name, bytes)?;
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
+    reader.limits(sheet_limits());
+    Ok(reader)
+}
+
+/// A sheet's size from its header, before any pixel is decoded.
+fn sheet_dimensions(name: &str, bytes: &[u8]) -> Result<(u32, u32), PetError> {
+    sheet_reader(name, bytes)?
+        .into_dimensions()
+        .map_err(|error| {
+            PetError::new(
+                PetRule::SheetDecode,
+                format!("{name} could not be read: {error}"),
+            )
+        })
+}
+
+/// A sheet decoded to RGBA, bounded by [`sheet_limits`].
+fn decode_sheet(name: &str, bytes: &[u8]) -> Result<image::RgbaImage, PetError> {
+    Ok(sheet_reader(name, bytes)?
+        .decode()
+        .map_err(|error| {
+            PetError::new(
+                PetRule::SheetDecode,
+                format!("{name} could not be decoded: {error}"),
+            )
+        })?
+        .into_rgba8())
+}
+
+/// The talk ids a pack has among `talk-a`, `talk-b` (D1: the sidecar an
+/// import writes).
+fn talk_ids_present(manifest: &PetManifest) -> Vec<String> {
+    GOLEM_PET_TALK_IDS
+        .iter()
+        .filter(|id| manifest.has_reaction(id))
+        .map(|id| id.to_string())
+        .collect()
+}
+
+/// The sidecar a pack without `golem.json` gets (D1): `page-pet-import`,
+/// `headTop` measured, the talk ids present.
+pub fn import_sidecar(
+    manifest: &PetManifest,
+    sheets: &BTreeMap<String, image::RgbaImage>,
+    created_at: Option<String>,
+) -> PetSidecar {
+    PetSidecar {
+        version: GOLEM_PET_SIDECAR_VERSION,
+        source: PetSource::PagePetImport,
+        head_top: measure_head_top(manifest, sheets).unwrap_or(0.0),
+        talk: talk_ids_present(manifest),
+        created_at,
+        reference_sha256: None,
+    }
+}
+
+/// A pack decoded into memory: the validated manifest, its sidecar and every
+/// sheet as RGBA. Built once per pack (or persona) change, never per frame;
+/// callers run the load in `spawn_blocking`.
+#[derive(Debug, Clone)]
+pub struct LoadedPack {
+    /// A uuid, `bundled:<name>`, or `still` for [`still_pack`].
+    pub pack_id: String,
+    pub manifest: PetManifest,
+    pub sidecar: PetSidecar,
+    /// Sheet name to decoded pixels; every frame's sheet is here.
+    #[allow(dead_code)] // Phase B pre-scales these into the sprite slot.
+    pub sheets: BTreeMap<String, image::RgbaImage>,
+    /// Plain sentences about fallbacks taken while loading (a missing
+    /// sidecar, a state image that did not decode), for the log.
+    #[allow(dead_code)] // Phase B logs them when it loads the active pack.
+    pub notes: Vec<String>,
+    /// `golem.json` was read from the folder (false when it was measured).
+    pub sidecar_on_disk: bool,
+}
+
+impl LoadedPack {
+    pub fn summary(&self) -> GolemPetSummary {
+        summarize(&self.pack_id, &self.manifest, &self.sidecar)
+    }
+
+    /// RGBA bytes resident for this pack.
+    #[allow(dead_code)] // Phase B's atlas budget (D5).
+    pub fn decoded_bytes(&self) -> u64 {
+        self.sheets
+            .values()
+            .map(|sheet| u64::from(sheet.width()) * u64::from(sheet.height()) * 4)
+            .sum()
+    }
+}
+
+/// Read, validate and decode the pack in `dir`: `manifest.json` (S-A1 rules),
+/// every sheet it names (PNG or WebP by their bytes, 32 MB each, 128 MB for
+/// the pack, dimensions checked from the headers before any decode, decoded
+/// under [`sheet_limits`]), the per-cell transparency check, and `golem.json`
+/// when present (measured otherwise). Blocking: run it in `spawn_blocking`.
+pub fn load_pack_dir(dir: &Path, pack_id: &str) -> Result<LoadedPack, PetError> {
+    let manifest_bytes = read_pack_file(dir, GOLEM_PET_MANIFEST_FILE, GOLEM_PET_JSON_MAX_BYTES)?
+        .ok_or_else(|| {
+            PetError::new(
+                PetRule::PackNotFound,
+                "The pack folder has no manifest.json.",
+            )
+        })?;
+    let manifest = parse_manifest(&manifest_bytes)?;
+    let mut total = manifest_bytes.len() as u64;
+
+    let mut encoded: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut sizes = BTreeMap::new();
+    for name in manifest.sheet_names() {
+        let bytes = read_pack_file(dir, &name, GOLEM_PET_FILE_MAX_BYTES)?.ok_or_else(|| {
+            PetError::new(
+                PetRule::SheetMissing,
+                format!("{name} is missing. Choose the whole pack folder."),
+            )
+        })?;
+        total += bytes.len() as u64;
+        if total > GOLEM_PET_PACK_MAX_BYTES {
+            return Err(PetError::new(
+                PetRule::PackSize,
+                "The pack is too large. Keep the pack under 128 MB.",
+            ));
+        }
+        sizes.insert(name.clone(), sheet_dimensions(&name, &bytes)?);
+        encoded.insert(name, bytes);
+    }
+    validate_sheet_sizes(&manifest, &sizes)?;
+
+    let mut sheets = BTreeMap::new();
+    for (name, bytes) in encoded {
+        let sheet = decode_sheet(&name, &bytes)?;
+        drop(bytes);
+        sheets.insert(name, sheet);
+    }
+    validate_images(&manifest, &sheets)?;
+
+    let mut notes = Vec::new();
+    let sidecar_bytes = read_pack_file(dir, GOLEM_PET_SIDECAR_FILE, GOLEM_PET_JSON_MAX_BYTES)?;
+    let sidecar_on_disk = sidecar_bytes.is_some();
+    let sidecar = match sidecar_bytes {
+        Some(bytes) => parse_sidecar(&bytes, &manifest)?,
+        None => {
+            notes.push(format!(
+                "Pack {pack_id} has no golem.json; its head top was measured."
+            ));
+            import_sidecar(&manifest, &sheets, None)
+        }
+    };
+    Ok(LoadedPack {
+        pack_id: pack_id.to_string(),
+        manifest,
+        sidecar,
+        sheets,
+        notes,
+        sidecar_on_disk,
+    })
+}
+
+/// Load a pack by id from the golem roots (`roots[0]` write, `roots[1]`
+/// bundled): the active Alive pack for Phase B's sprite slot. Blocking: run
+/// it in `spawn_blocking`.
+#[allow(dead_code)] // Phase B loads the active Alive pack with this.
+pub fn load_pack(
+    roots: &[PathBuf],
+    persona_id: &str,
+    pack_id: &str,
+) -> Result<LoadedPack, PetError> {
+    load_pack_dir(&pack_dir(roots, persona_id, pack_id)?, pack_id)
+}
+
+/// One pack as the Golem tab lists it (`cohost.pet.list`, `cohost.pet.import`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GolemPetSummary {
+    pub pack_id: String,
+    pub name: String,
+    /// The neutral cell's side in sheet pixels.
+    pub cell_size: u32,
+    pub gaze_count: u32,
+    /// Reaction ids in manifest order.
+    pub reactions: Vec<String>,
+    pub source: PetSource,
+    pub has_talk: bool,
+}
+
+pub fn summarize(pack_id: &str, manifest: &PetManifest, sidecar: &PetSidecar) -> GolemPetSummary {
+    GolemPetSummary {
+        pack_id: pack_id.to_string(),
+        name: crate::cohost::truncate_utf16(manifest.name.trim(), GOLEM_PET_TEXT_MAX)
+            .trim_end()
+            .to_string(),
+        cell_size: manifest
+            .neutral_frame()
+            .map(PetFrame::cell_size)
+            .unwrap_or_default(),
+        gaze_count: manifest.gaze_count() as u32,
+        reactions: manifest.reaction_ids(),
+        source: sidecar.source,
+        has_talk: !sidecar.talk.is_empty(),
+    }
+}
+
+/// Write `golem.json` into a pack folder: staged, then moved into place.
+fn write_sidecar(dir: &Path, sidecar: &PetSidecar) -> Result<(), PetError> {
+    let io_error = |error: std::io::Error| {
+        PetError::new(
+            PetRule::PackIo,
+            format!("golem.json could not be written: {error}"),
+        )
+    };
+    let bytes = serde_json::to_vec_pretty(sidecar).map_err(|error| {
+        PetError::new(
+            PetRule::PackIo,
+            format!("golem.json could not be written: {error}"),
+        )
+    })?;
+    let staged = dir.join(format!("{GOLEM_PET_SIDECAR_FILE}.tmp"));
+    std::fs::write(&staged, bytes).map_err(io_error)?;
+    crate::atomic_file::replace_file(&staged, &dir.join(GOLEM_PET_SIDECAR_FILE)).map_err(|error| {
+        let _ = std::fs::remove_file(&staged);
+        io_error(error)
+    })
+}
+
+/// Import a pack main copied to `<write root>/<personaId>/pets/<packId>/`
+/// (S-A3): validate and decode it (see [`load_pack_dir`]), write `golem.json`
+/// when it has none (D1), and return its summary. Blocking: run it in
+/// `spawn_blocking`. Main removes the folder on any refusal.
+pub fn import_pack(
+    roots: &[PathBuf],
+    persona_id: &str,
+    pack_id: &str,
+    created_at: String,
+) -> Result<GolemPetSummary, PetError> {
+    if !matches!(parse_pack_id(pack_id)?, PackRef::User(_)) {
+        return Err(PetError::new(
+            PetRule::PackId,
+            "Only a copied pack folder can be imported.",
+        ));
+    }
+    let dir = pack_dir(roots, persona_id, pack_id)?;
+    let mut pack = load_pack_dir(&dir, pack_id)?;
+    if !pack.sidecar_on_disk {
+        pack.sidecar.created_at = Some(created_at);
+        write_sidecar(&dir, &pack.sidecar)?;
+    }
+    Ok(pack.summary())
+}
+
+/// The manifest and sidecar of a pack folder, no pixels: what the list and
+/// the reaction check need.
+pub fn read_pack_manifest(dir: &Path) -> Result<(PetManifest, Option<PetSidecar>), PetError> {
+    let bytes = read_pack_file(dir, GOLEM_PET_MANIFEST_FILE, GOLEM_PET_JSON_MAX_BYTES)?
+        .ok_or_else(|| {
+            PetError::new(
+                PetRule::PackNotFound,
+                "The pack folder has no manifest.json.",
+            )
+        })?;
+    let manifest = parse_manifest(&bytes)?;
+    let sidecar = read_pack_file(dir, GOLEM_PET_SIDECAR_FILE, GOLEM_PET_JSON_MAX_BYTES)?
+        .map(|bytes| parse_sidecar(&bytes, &manifest))
+        .transpose()?;
+    Ok((manifest, sidecar))
+}
+
+/// A pack folder's summary and its sidecar's `createdAt`, no pixels. A pack
+/// without `golem.json` lists with the talk ids it has.
+fn summarize_dir(dir: &Path, pack_id: &str) -> Result<(Option<String>, GolemPetSummary), PetError> {
+    let (manifest, sidecar) = read_pack_manifest(dir)?;
+    let sidecar = sidecar.unwrap_or_else(|| PetSidecar {
+        version: GOLEM_PET_SIDECAR_VERSION,
+        source: PetSource::PagePetImport,
+        head_top: 0.0,
+        talk: talk_ids_present(&manifest),
+        created_at: None,
+        reference_sha256: None,
+    });
+    Ok((
+        sidecar.created_at.clone(),
+        summarize(pack_id, &manifest, &sidecar),
+    ))
+}
+
+/// The packs a persona can wear (`cohost.pet.list`): every bundled pack
+/// (sorted by name), then the persona's own (oldest first). Manifests and
+/// sidecars only, no pixels. A folder that fails its manifest or sidecar is
+/// left out and named in the second list (for the log). Blocking.
+pub fn list_packs(roots: &[PathBuf], persona_id: &str) -> (Vec<GolemPetSummary>, Vec<String>) {
+    let mut packs = Vec::new();
+    let mut skipped = Vec::new();
+    let mut folders: Vec<String> = Vec::new();
+    if let Some(bundled) = roots.get(1)
+        && let Ok(entries) = std::fs::read_dir(bundled)
+    {
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+            .collect();
+        names.sort();
+        folders.extend(
+            names
+                .into_iter()
+                .map(|name| format!("{GOLEM_BUNDLED_PACK_PREFIX}{name}")),
+        );
+    }
+    let mut own: Vec<(Option<String>, GolemPetSummary)> = Vec::new();
+    if persona_id_ok(persona_id)
+        && let Some(write) = roots.first()
+        && let Ok(entries) = std::fs::read_dir(write.join(persona_id).join("pets"))
+    {
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            match pack_dir(roots, persona_id, &name).and_then(|dir| summarize_dir(&dir, &name)) {
+                Ok(pack) => own.push(pack),
+                Err(error) => skipped.push(format!("Golem pack {name} skipped: {error}")),
+            }
+        }
+    }
+    for pack_id in folders {
+        match pack_dir(roots, persona_id, &pack_id).and_then(|dir| summarize_dir(&dir, &pack_id)) {
+            Ok((_, summary)) => packs.push(summary),
+            Err(error) => skipped.push(format!("Golem pack {pack_id} skipped: {error}")),
+        }
+    }
+    own.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.pack_id.cmp(&b.1.pack_id)));
+    packs.extend(own.into_iter().map(|(_, summary)| summary));
+    (packs, skipped)
+}
+
+/// Delete one of the persona's own packs (`cohost.pet.remove`). Built-in
+/// packs are never removed. Blocking.
+pub fn remove_pack(roots: &[PathBuf], persona_id: &str, pack_id: &str) -> Result<(), PetError> {
+    if matches!(parse_pack_id(pack_id)?, PackRef::Bundled(_)) {
+        return Err(PetError::new(
+            PetRule::PackId,
+            "Built-in packs cannot be removed.",
+        ));
+    }
+    let dir = pack_dir(roots, persona_id, pack_id)?;
+    std::fs::remove_dir_all(&dir).map_err(|error| {
+        PetError::new(
+            PetRule::PackIo,
+            format!("The pack could not be removed: {error}"),
+        )
+    })
+}
+
+// --- Persona wire (plan 168 Wire shape) -----------------------------------------
+
+/// The Golem's avatar kind (D2): `still` renders the persona's state images
+/// (as a flat pack, S-A4), `alive` a pet pack by id. A settings row from
+/// before plan 168 loads as Still.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum GolemAvatar {
+    #[default]
+    Still,
+    Alive {
+        #[serde(rename = "packId")]
+        pack_id: String,
+    },
+}
+
+/// The still pack's reaction ids: the persona's `talk`, `laugh` and `think`
+/// state images (D2, S-A4).
+pub const STILL_REACTION_IDS: [&str; 3] = ["talk", "laugh", "think"];
+
+/// The avatar as the wire may carry it: an Alive pack id must be a uuid or
+/// `bundled:<name>`. Whether the pack exists is checked where it is loaded.
+pub fn validate_avatar(avatar: &GolemAvatar) -> Result<(), String> {
+    match avatar {
+        GolemAvatar::Still => Ok(()),
+        GolemAvatar::Alive { pack_id } => parse_pack_id(pack_id)
+            .map(|_| ())
+            .map_err(|_| "The avatar's pack id is not a pack id.".to_string()),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -954,5 +1500,321 @@ pub(crate) mod tests {
             let error = parse_sidecar(bad.as_bytes(), &manifest).unwrap_err();
             assert_eq!(error.rule, PetRule::Sidecar, "{bad}");
         }
+    }
+
+    // --- Packs on disk (S-A3) -------------------------------------------------
+
+    pub(crate) const PACK_ID: &str = "0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a";
+
+    pub(crate) fn temp_roots() -> Vec<PathBuf> {
+        let base = std::env::temp_dir().join(format!("videorc-golem-pet-{}", uuid::Uuid::new_v4()));
+        let roots = vec![base.join("write"), base.join("bundled")];
+        for root in &roots {
+            std::fs::create_dir_all(root).unwrap();
+        }
+        roots
+    }
+
+    /// A small complete-character pack: two gaze cells and two reactions
+    /// (`talk-a`, `laugh`) on one 512 × 128 sheet, drawn in code.
+    pub(crate) fn synthetic_manifest(sheet: &str) -> Value {
+        serde_json::json!({
+            "version": 1,
+            "name": "Synthetic Pip",
+            "neutral": "center",
+            "pivot": [0.5, 0.9],
+            "frames": [
+                { "id": "center", "kind": "gaze", "gaze": [0, 0], "sheet": sheet, "rect": [0, 0, 128, 128] },
+                { "id": "left", "kind": "gaze", "gaze": [-1, 0], "sheet": sheet, "rect": [128, 0, 128, 128] },
+                { "id": "talk-a", "kind": "reaction", "sheet": sheet, "rect": [256, 0, 128, 128] },
+                { "id": "laugh", "kind": "reaction", "sheet": sheet, "rect": [384, 0, 128, 128] }
+            ]
+        })
+    }
+
+    /// Write `manifest` and a synthetic sheet (PNG or lossless WebP by its
+    /// extension) into `dir`.
+    pub(crate) fn write_pack(dir: &Path, manifest: &Value, sheet: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join(GOLEM_PET_MANIFEST_FILE),
+            serde_json::to_vec(manifest).unwrap(),
+        )
+        .unwrap();
+        let cells = [
+            [0, 0, 128, 128],
+            [128, 0, 128, 128],
+            [256, 0, 128, 128],
+            [384, 0, 128, 128],
+        ];
+        let image = image::DynamicImage::ImageRgba8(synthetic_sheet(512, 128, &cells));
+        let format = if sheet.ends_with(".webp") {
+            image::ImageFormat::WebP
+        } else {
+            image::ImageFormat::Png
+        };
+        image.save_with_format(dir.join(sheet), format).unwrap();
+    }
+
+    fn user_dir(roots: &[PathBuf], id: &str) -> PathBuf {
+        roots[0].join("persona-1").join("pets").join(id)
+    }
+
+    #[test]
+    fn golem_pet_import_writes_the_sidecar_lists_loads_and_removes() {
+        let roots = temp_roots();
+        write_pack(
+            &user_dir(&roots, PACK_ID),
+            &synthetic_manifest("mascot.webp"),
+            "mascot.webp",
+        );
+        write_pack(
+            &roots[1].join("golem"),
+            &synthetic_manifest("mascot.png"),
+            "mascot.png",
+        );
+
+        let summary = import_pack(
+            &roots,
+            "persona-1",
+            PACK_ID,
+            "2026-10-08T12:00:00Z".to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            summary,
+            GolemPetSummary {
+                pack_id: PACK_ID.to_string(),
+                name: "Synthetic Pip".to_string(),
+                cell_size: 128,
+                gaze_count: 2,
+                reactions: vec!["talk-a".to_string(), "laugh".to_string()],
+                source: PetSource::PagePetImport,
+                has_talk: true,
+            }
+        );
+        // D1: the sidecar is written with the measured head top.
+        let sidecar: Value = serde_json::from_slice(
+            &std::fs::read(user_dir(&roots, PACK_ID).join(GOLEM_PET_SIDECAR_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            sidecar,
+            serde_json::json!({
+                "version": 1,
+                "source": "page-pet-import",
+                "headTop": 0.1953,
+                "talk": ["talk-a"],
+                "createdAt": "2026-10-08T12:00:00Z"
+            })
+        );
+        // A second import of the same folder keeps the sidecar it has.
+        import_pack(
+            &roots,
+            "persona-1",
+            PACK_ID,
+            "2027-01-01T00:00:00Z".to_string(),
+        )
+        .unwrap();
+        let again = read_pack_manifest(&user_dir(&roots, PACK_ID))
+            .unwrap()
+            .1
+            .unwrap();
+        assert_eq!(again.created_at.as_deref(), Some("2026-10-08T12:00:00Z"));
+
+        let (packs, skipped) = list_packs(&roots, "persona-1");
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(
+            packs
+                .iter()
+                .map(|pack| pack.pack_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["bundled:golem", PACK_ID]
+        );
+        // Another persona sees the bundled pack only.
+        assert_eq!(list_packs(&roots, "persona-2").0.len(), 1);
+
+        let loaded = load_pack(&roots, "persona-1", PACK_ID).unwrap();
+        assert!(loaded.sidecar_on_disk);
+        assert_eq!(loaded.sheets["mascot.webp"].dimensions(), (512, 128));
+        assert_eq!(loaded.decoded_bytes(), 512 * 128 * 4);
+        let bundled = load_pack(&roots, "anyone", "bundled:golem").unwrap();
+        assert!(!bundled.sidecar_on_disk);
+        assert_eq!(bundled.sidecar.head_top, 0.1953);
+        assert_eq!(bundled.notes.len(), 1);
+
+        assert_eq!(
+            remove_pack(&roots, "persona-1", "bundled:golem")
+                .unwrap_err()
+                .rule,
+            PetRule::PackId
+        );
+        remove_pack(&roots, "persona-1", PACK_ID).unwrap();
+        assert!(!user_dir(&roots, PACK_ID).exists());
+        assert_eq!(
+            load_pack(&roots, "persona-1", PACK_ID).unwrap_err().rule,
+            PetRule::PackNotFound
+        );
+        let _ = std::fs::remove_dir_all(roots[0].parent().unwrap());
+    }
+
+    /// Every refusal path an import can hit, each with its rule.
+    #[test]
+    fn golem_pet_import_refuses_layered_avif_and_broken_packs() {
+        let roots = temp_roots();
+        let import =
+            |id: &str| import_pack(&roots, "persona-1", id, "2026-10-08T12:00:00Z".to_string());
+        let ids: Vec<String> = (0..12).map(|_| uuid::Uuid::new_v4().to_string()).collect();
+
+        // A legacy two-layer pack.
+        let mut layered = synthetic_manifest("mascot.png");
+        layered["layers"] =
+            serde_json::json!({ "size": 128, "neck": [0.5, 0.4], "bodyFrames": [] });
+        write_pack(&user_dir(&roots, &ids[0]), &layered, "mascot.png");
+        let error = import(&ids[0]).unwrap_err();
+        assert_eq!(error.rule, PetRule::LegacyLayers, "{error}");
+        assert!(error.message.contains("Two-layer packs"), "{error}");
+
+        // An AVIF sheet.
+        write_pack(
+            &user_dir(&roots, &ids[1]),
+            &synthetic_manifest("mascot.avif"),
+            "mascot.png",
+        );
+        let error = import(&ids[1]).unwrap_err();
+        assert_eq!(error.rule, PetRule::SheetAvif, "{error}");
+        assert!(error.message.contains("AVIF"), "{error}");
+
+        // A missing sheet.
+        write_pack(
+            &user_dir(&roots, &ids[2]),
+            &synthetic_manifest("other.png"),
+            "mascot.png",
+        );
+        assert_eq!(import(&ids[2]).unwrap_err().rule, PetRule::SheetMissing);
+
+        // A sheet whose bytes are not PNG or WebP.
+        write_pack(
+            &user_dir(&roots, &ids[3]),
+            &synthetic_manifest("mascot.png"),
+            "mascot.png",
+        );
+        std::fs::write(
+            user_dir(&roots, &ids[3]).join("mascot.png"),
+            b"GIF89a not a png",
+        )
+        .unwrap();
+        assert_eq!(import(&ids[3]).unwrap_err().rule, PetRule::SheetFormat);
+
+        // An opaque background.
+        let dir = user_dir(&roots, &ids[4]);
+        write_pack(&dir, &synthetic_manifest("mascot.png"), "mascot.png");
+        image::RgbaImage::from_pixel(512, 128, image::Rgba([10, 20, 30, 255]))
+            .save_with_format(dir.join("mascot.png"), image::ImageFormat::Png)
+            .unwrap();
+        assert_eq!(import(&ids[4]).unwrap_err().rule, PetRule::CellTransparency);
+
+        // A file over 32 MB (sparse; nothing is decoded).
+        let dir = user_dir(&roots, &ids[5]);
+        write_pack(&dir, &synthetic_manifest("mascot.png"), "mascot.png");
+        std::fs::File::create(dir.join("mascot.png"))
+            .unwrap()
+            .set_len(GOLEM_PET_FILE_MAX_BYTES + 1)
+            .unwrap();
+        assert_eq!(import(&ids[5]).unwrap_err().rule, PetRule::FileSize);
+
+        // A sheet smaller than its rects.
+        let dir = user_dir(&roots, &ids[6]);
+        write_pack(&dir, &synthetic_manifest("mascot.png"), "mascot.png");
+        image::DynamicImage::ImageRgba8(synthetic_sheet(384, 128, &[[0, 0, 128, 128]]))
+            .save_with_format(dir.join("mascot.png"), image::ImageFormat::Png)
+            .unwrap();
+        assert_eq!(
+            import(&ids[6]).unwrap_err().rule,
+            PetRule::FrameOutsideSheet
+        );
+
+        // A broken sidecar.
+        let dir = user_dir(&roots, &ids[7]);
+        write_pack(&dir, &synthetic_manifest("mascot.png"), "mascot.png");
+        std::fs::write(
+            dir.join(GOLEM_PET_SIDECAR_FILE),
+            br#"{"version":1,"source":"x"}"#,
+        )
+        .unwrap();
+        assert_eq!(import(&ids[7]).unwrap_err().rule, PetRule::Sidecar);
+
+        // No manifest at all, an unknown id, a bundled id.
+        std::fs::create_dir_all(user_dir(&roots, &ids[8])).unwrap();
+        assert_eq!(import(&ids[8]).unwrap_err().rule, PetRule::PackNotFound);
+        assert_eq!(import(&ids[9]).unwrap_err().rule, PetRule::PackNotFound);
+        assert_eq!(import("bundled:golem").unwrap_err().rule, PetRule::PackId);
+        assert_eq!(import("../escape").unwrap_err().rule, PetRule::PackId);
+        assert_eq!(
+            import(&PACK_ID.to_uppercase()).unwrap_err().rule,
+            PetRule::PackId
+        );
+
+        // A pack folder that is a link to a folder outside the roots.
+        #[cfg(unix)]
+        {
+            let outside = roots[0].parent().unwrap().join("outside");
+            write_pack(&outside, &synthetic_manifest("mascot.png"), "mascot.png");
+            std::os::unix::fs::symlink(&outside, user_dir(&roots, &ids[10])).unwrap();
+            assert_eq!(import(&ids[10]).unwrap_err().rule, PetRule::PackOutsideRoot);
+            // A sheet that is a link is never read either.
+            let dir = user_dir(&roots, &ids[11]);
+            write_pack(&dir, &synthetic_manifest("mascot.png"), "mascot.png");
+            std::fs::remove_file(dir.join("mascot.png")).unwrap();
+            std::os::unix::fs::symlink(outside.join("mascot.png"), dir.join("mascot.png")).unwrap();
+            assert_eq!(import(&ids[11]).unwrap_err().rule, PetRule::PackIo);
+        }
+
+        // Nothing refused was given a sidecar.
+        for id in &ids[..8] {
+            assert!(!user_dir(&roots, id).join(GOLEM_PET_SIDECAR_FILE).exists() || id == &ids[7]);
+        }
+        // The list reads manifests and sidecars only (main removes a refused
+        // copy): it skips the folders those refuse, and names them.
+        let (packs, skipped) = list_packs(&roots, "persona-1");
+        for id in [&ids[0], &ids[1], &ids[7], &ids[8]] {
+            assert!(packs.iter().all(|pack| &pack.pack_id != id), "{id}");
+            assert!(
+                skipped.iter().any(|note| note.contains(id.as_str())),
+                "{skipped:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(roots[0].parent().unwrap());
+    }
+
+    #[test]
+    fn golem_pet_pack_ids_are_uuids_or_bundled_names() {
+        assert_eq!(
+            parse_pack_id(PACK_ID).unwrap(),
+            PackRef::User(PACK_ID.to_string())
+        );
+        assert_eq!(
+            parse_pack_id("bundled:golem").unwrap(),
+            PackRef::Bundled("golem".to_string())
+        );
+        for bad in [
+            "",
+            "bundled:",
+            "bundled:Golem",
+            "bundled:../x",
+            "{0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a}",
+            "0b1e9f0e6c8a4c559a3f3f6d2b1c4e5a",
+            "urn:uuid:0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a",
+        ] {
+            assert_eq!(
+                parse_pack_id(bad).unwrap_err().rule,
+                PetRule::PackId,
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            pack_dir(&temp_roots(), "../x", PACK_ID).unwrap_err().rule,
+            PetRule::PackId
+        );
     }
 }

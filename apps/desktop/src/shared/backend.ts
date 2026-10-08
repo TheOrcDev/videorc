@@ -3,6 +3,7 @@ import type { LiveDashboardState } from './live-dashboard'
 import type { GlobalShortcutAction } from './global-shortcuts'
 import type { BackgroundImportResult } from './background-import'
 import type { TwitchGifMode } from './chat-gif'
+import type { GolemAvatar, GolemPetImportResult } from './golem-pet'
 export type { BackgroundImportResult } from './background-import'
 export type { TwitchGifMode } from './chat-gif'
 
@@ -4311,6 +4312,10 @@ export interface VideorcApi {
    * sheet, for the living preview (Phase D). `packId` is a uuid or
    * `bundled:<name>`; null when there is no such file. */
   readGolemPetFile: (personaId: string, packId: string, file: string) => Promise<Uint8Array | null>
+  /** Picks a page-pet pack folder, copies its pack files into the persona's
+   * `pets/<uuid>/` and registers it with the backend (plan 168 S-A3); null
+   * when the picker was cancelled. Throws the backend's reason on refusal. */
+  importGolemPetFolder: (personaId: string) => Promise<GolemPetImportResult | null>
   backgroundAssetExists: (assetId: string) => Promise<boolean>
   /** Fetch-and-cache a chat avatar from an allowlisted platform CDN; returns a
    * local videorc-asset:// URL or null (disallowed host / fetch failure). */
@@ -5048,6 +5053,8 @@ export interface CohostPersona {
   bubbleStyle: CohostBubbleStyle
   images: Partial<Record<CohostAvatarState, string>>
   source: CohostPersonaSource
+  /** Still or Alive (plan 168 D2). The backend always sends it. */
+  avatar: GolemAvatar
 }
 
 /** The chat posting mode (plan 164 D4). */
@@ -5254,6 +5261,46 @@ export interface OverlayTargetsInfo {
   auxiliary: OverlayTargetInfo
 }
 // --- end Golem overlay (plan 164) -----------------------------------------
+
+// --- Golem pets (plan 168, Phase A) ---
+// The persona's pet packs (D1 to D4): page-pet manifest v1 folders under the
+// managed golem roots. The pack contract and its validators live in
+// `./golem-pet`; these are the RPC shapes.
+export type {
+  GolemAvatar,
+  GolemPetImportResult,
+  GolemPetSource,
+  GolemPetSummary
+} from './golem-pet'
+
+/** `cohost.pet.import` (main only, after it copied the folder): the folder
+ * as `<personaId>/pets/<packId>` under the write root. */
+export interface CohostPetImportParams {
+  folderToken: string
+}
+
+/** `cohost.pet.remove`: one of the persona's own packs (never `bundled:`). */
+export interface CohostPetRemoveParams {
+  packId: string
+}
+
+/** The removed id and the settings after it: the persona is Still again
+ * when the removed pack was the one it wore. */
+export interface CohostPetRemoved {
+  packId: string
+  settings: CohostSettings
+}
+
+/** `cohost.pet.react`: a reaction id of the active pack (the still pack's
+ * are `talk`, `laugh`, `think`). Phase C plays it on air. */
+export interface CohostPetReactParams {
+  reaction: string
+}
+
+export interface CohostPetReactAccepted {
+  reaction: string
+}
+// --- end Golem pets (plan 168, Phase A) ---
 
 /** Whether Golem hears the streamer right now (plan 068). */
 export type CohostListeningState = 'off' | 'starting' | 'on' | 'blocked'

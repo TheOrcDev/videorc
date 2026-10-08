@@ -580,7 +580,8 @@
         "personality": "Cheerful goblin merchant",
         "bubbleStyle": "shout",
         "images": { "idle": "persona-fixture/idle.png", "laugh": "persona-fixture/laugh.webp" },
-        "source": "uploaded"
+        "source": "uploaded",
+        "avatar": { "kind": "alive", "packId": "0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a" }
       },
       "autoChat": {
         "mode": "suggest",
@@ -617,7 +618,8 @@
         "personality": "",
         "bubbleStyle": "speech",
         "images": {},
-        "source": "default"
+        "source": "default",
+        "avatar": { "kind": "still" }
       },
       "autoChat": {
         "mode": "off",
@@ -1544,5 +1546,29 @@
         "showInRecording": true
       }
     }
+  },
+  "golemPets": {
+    "summary": {
+      "packId": "0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a",
+      "name": "Synthetic Pip",
+      "cellSize": 640,
+      "gazeCount": 25,
+      "reactions": ["laugh", "surprised", "talk-a", "talk-b", "wave"],
+      "source": "page-pet-import",
+      "hasTalk": true
+    },
+    "bundledSummary": {
+      "packId": "bundled:golem",
+      "name": "Golem",
+      "cellSize": 640,
+      "gazeCount": 25,
+      "reactions": ["laugh"],
+      "source": "videorc-creator",
+      "hasTalk": false
+    },
+    "importParams": { "folderToken": "default/pets/0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a" },
+    "removeParams": { "packId": "0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a" },
+    "reactParams": { "reaction": "laugh" },
+    "reactAccepted": { "reaction": "laugh" }
   }
 }

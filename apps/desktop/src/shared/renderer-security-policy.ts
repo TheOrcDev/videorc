@@ -52,6 +52,8 @@ export const IPC_INVOKE_ROLES = {
   // Plan 168: pet pack files for the living preview in the Golem tab and the
   // Stream Manager's Golem pane (Phase D); read-only, managed roots only.
   'golem-pets:read': MAIN_AND_COMMENTS,
+  // Plan 168 S-A3: Import pack… in the Golem tab (Studio renderer only).
+  'golem-pets:import-folder': MAIN_ONLY,
   'backgrounds:bundled-assets': MAIN_ONLY,
   'backgrounds:asset-exists': MAIN_ONLY,
   // The detached Comments window renders the same chat rows as Studio; without

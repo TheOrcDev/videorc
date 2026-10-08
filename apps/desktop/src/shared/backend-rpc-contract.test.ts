@@ -2151,7 +2151,8 @@ describe('backend RPC contract', () => {
         personality: '',
         bubbleStyle: 'speech',
         images: {},
-        source: 'default'
+        source: 'default',
+        avatar: { kind: 'still' }
       },
       autoChat: {
         mode: 'off',
@@ -2523,7 +2524,8 @@ describe('backend RPC contract', () => {
         personality: '',
         bubbleStyle: 'speech',
         images: {},
-        source: 'default'
+        source: 'default',
+        avatar: { kind: 'still' }
       },
       autoChat: {
         mode: 'off',

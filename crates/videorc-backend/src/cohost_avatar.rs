@@ -367,6 +367,7 @@ mod tests {
                 ..CohostPersonaImages::default()
             },
             source: CohostPersonaSource::Generated,
+            ..CohostPersona::default()
         }
     }
 

@@ -33,6 +33,7 @@ use crate::cohost_command::{
     CommandKind, CommandSession, CommandTarget, DetectContext, DetectedCommand, is_command_word,
 };
 use crate::comment_highlight::{CommentHighlightPhase, CommentHighlightState};
+pub use crate::golem_pet::GolemAvatar;
 use crate::live_chat::{
     LiveChatEventType, LiveChatMessage, LiveChatMessageFragment, comments_destination_id,
 };
@@ -589,6 +590,10 @@ pub struct CohostPersona {
     pub images: CohostPersonaImages,
     #[serde(default)]
     pub source: CohostPersonaSource,
+    /// Still or Alive (plan 168 D2). `default` so a row from before plan 168
+    /// loads as Still.
+    #[serde(default)]
+    pub avatar: GolemAvatar,
 }
 
 impl Default for CohostPersona {
@@ -600,6 +605,7 @@ impl Default for CohostPersona {
             bubble_style: CohostBubbleStyle::Speech,
             images: CohostPersonaImages::default(),
             source: CohostPersonaSource::Default,
+            avatar: GolemAvatar::Still,
         }
     }
 }
@@ -851,6 +857,7 @@ pub(crate) fn validate_persona(persona: &CohostPersona) -> Result<CohostPersona,
             ));
         }
     }
+    crate::golem_pet::validate_avatar(&valid.avatar)?;
     Ok(valid)
 }
 
@@ -13400,6 +13407,9 @@ mod tests {
                     ..CohostPersonaImages::default()
                 },
                 source: CohostPersonaSource::Uploaded,
+                avatar: GolemAvatar::Alive {
+                    pack_id: "0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a".to_string(),
+                },
             }),
             auto_chat: Some(CohostAutoChat {
                 mode: CohostAutoChatMode::Suggest,
@@ -13433,6 +13443,13 @@ mod tests {
         assert_eq!(json["persona"]["images"]["idle"], "p-1/idle.png");
         // Absent states are omitted, never null (the renderer contract).
         assert!(json["persona"]["images"].get("talk").is_none());
+        // Plan 168 D2: the avatar rides as a tagged object.
+        assert_eq!(
+            json["persona"]["avatar"],
+            serde_json::json!({ "kind": "alive", "packId": "0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a" })
+        );
+        // A row from before plan 168 loads Still.
+        assert_eq!(loaded.persona.avatar, GolemAvatar::Still);
         assert_eq!(json["autoChat"]["mode"], "suggest");
         assert_eq!(
             json["autoChat"]["greetings"]["templates"][0]["kind"],
@@ -13477,6 +13494,28 @@ mod tests {
         assert!(validate_persona(&bad_path).is_err());
         bad_path.images.idle = Some("p-1/idle.png".to_string());
         assert!(validate_persona(&bad_path).is_ok());
+        // Plan 168: an Alive avatar names a uuid or a bundled pack.
+        for good in ["0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a", "bundled:golem"] {
+            bad_path.avatar = GolemAvatar::Alive {
+                pack_id: good.to_string(),
+            };
+            assert!(validate_persona(&bad_path).is_ok(), "{good}");
+        }
+        for bad in [
+            "../x",
+            "bundled:",
+            "0B1E9F0E-6C8A-4C55-9A3F-3F6D2B1C4E5A",
+            "",
+        ] {
+            bad_path.avatar = GolemAvatar::Alive {
+                pack_id: bad.to_string(),
+            };
+            assert_eq!(
+                validate_persona(&bad_path).unwrap_err(),
+                "The avatar's pack id is not a pack id.",
+                "{bad}"
+            );
+        }
         let refused = CohostSettings::validated_patch(CohostSettingsPatch {
             persona: Some(persona("", "")),
             ..CohostSettingsPatch::default()

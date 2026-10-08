@@ -46,6 +46,7 @@ const api: VideorcApi = {
   removeGolemPersona: (personaId) => invoke('golem-assets:remove', personaId),
   readGolemImage: (relativePath) => invoke('golem-assets:read-image', relativePath),
   readGolemPetFile: (personaId, packId, file) => invoke('golem-pets:read', personaId, packId, file),
+  importGolemPetFolder: (personaId) => invoke('golem-pets:import-folder', personaId),
   backgroundAssetExists: (assetId) => invoke('backgrounds:asset-exists', assetId),
   cacheChatAvatar: (url) => invoke('avatars:cache', url),
   cacheChatGif: (url) => invoke('chat-gifs:cache', url),

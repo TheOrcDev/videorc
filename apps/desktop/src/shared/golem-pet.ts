@@ -407,3 +407,31 @@ export function measureGolemPetHeadTop(
   }
   return null
 }
+
+// --- Store wire (plan 168 S-A3) ------------------------------------------------
+
+/** The Golem's avatar kind (D2): Still renders the persona's state images,
+ * Alive a pet pack (a uuid of the persona's own, or `bundled:<name>`). */
+export type GolemAvatar = { kind: 'still' } | { kind: 'alive'; packId: string }
+
+/** One pack the persona can wear (`cohost.pet.list`, `cohost.pet.import`). */
+export interface GolemPetSummary {
+  /** A uuid for the persona's own packs, `bundled:<name>` for shipped ones. */
+  packId: string
+  name: string
+  /** The neutral cell's side in sheet pixels. */
+  cellSize: number
+  gazeCount: number
+  /** Reaction ids in manifest order. */
+  reactions: string[]
+  source: GolemPetSource
+  /** The sidecar names talk frames (D12). */
+  hasTalk: boolean
+}
+
+/** What main's folder import hands back: the stored pack and the files in
+ * the chosen folder that were not copied (not a pack file, or a link). */
+export interface GolemPetImportResult {
+  pack: GolemPetSummary
+  skippedFiles: string[]
+}

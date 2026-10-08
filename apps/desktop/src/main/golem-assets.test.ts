@@ -27,6 +27,7 @@ import {
 } from '../shared/golem-assets'
 import {
   importGolemImage,
+  importGolemPetFolder,
   listGolemPersonas,
   readGolemImage,
   readGolemPetFile,
@@ -269,5 +270,109 @@ describe('golem pet pack store (plan 168 S-A2)', () => {
     const builder = readFileSync(join(desktop, 'electron-builder.yml'), 'utf8')
     expect(builder).toMatch(/- from: resources\/golem\n\s+to: golem-assets\/bundled\n/)
     expect(existsSync(join(desktop, 'resources', 'golem'))).toBe(true)
+  })
+})
+
+describe('golem pet folder import (plan 168 S-A3)', () => {
+  const PACK = '0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a'
+  const summary = {
+    packId: PACK,
+    name: 'Synthetic Pip',
+    cellSize: 128,
+    gazeCount: 2,
+    reactions: ['laugh'],
+    source: 'page-pet-import' as const,
+    hasTalk: false
+  }
+
+  /** A picked folder: pack files, files that are not, and a link. */
+  async function pickedFolder(): Promise<string> {
+    const source = await root()
+    await writeFile(join(source, 'manifest.json'), '{"version":1}')
+    await writeFile(join(source, 'mascot.webp'), Buffer.from('RIFF0000WEBP'))
+    await writeFile(join(source, 'build-report.json'), '{}')
+    await writeFile(join(source, 'gaze-review.json'), '{}')
+    await writeFile(join(source, '.DS_Store'), 'x')
+    await mkdir(join(source, 'sources'))
+    await writeFile(join(source, 'sources', 'pilot.png'), ONE_PIXEL_PNG)
+    await writeFile(join(source, 'sources', 'notes.txt'), 'x')
+    await mkdir(join(source, 'extra'))
+    await writeFile(join(source, 'extra', 'other.png'), ONE_PIXEL_PNG)
+    const outside = await root()
+    await writeFile(join(outside, 'secret.png'), ONE_PIXEL_PNG)
+    await symlink(join(outside, 'secret.png'), join(source, 'linked.png'))
+    return source
+  }
+
+  it('copies the pack files, skips the rest and registers the folder token', async () => {
+    const base = await root()
+    const source = await pickedFolder()
+    const tokens: string[] = []
+    const result = await importGolemPetFolder(
+      source,
+      base,
+      'persona-1',
+      async (token) => {
+        tokens.push(token)
+        return summary
+      },
+      () => PACK
+    )
+    expect(tokens).toEqual([`persona-1/pets/${PACK}`])
+    expect(result).toEqual({
+      pack: summary,
+      skippedFiles: ['.DS_Store', 'extra', 'gaze-review.json', 'linked.png', 'sources/notes.txt']
+    })
+    const folder = join(base, 'persona-1', 'pets', PACK)
+    expect((await readdir(folder)).sort()).toEqual([
+      'build-report.json',
+      'manifest.json',
+      'mascot.webp',
+      'sources'
+    ])
+    expect(await readdir(join(folder, 'sources'))).toEqual(['pilot.png'])
+    expect(await readFile(join(folder, 'manifest.json'), 'utf8')).toBe('{"version":1}')
+  })
+
+  it('removes the copy when the backend refuses the pack', async () => {
+    const base = await root()
+    const source = await pickedFolder()
+    await expect(
+      importGolemPetFolder(
+        source,
+        base,
+        'persona-1',
+        async () => {
+          throw new Error('Two-layer packs (separate head and body) are not supported.')
+        },
+        () => PACK
+      )
+    ).rejects.toThrow('Two-layer packs')
+    expect(await readdir(join(base, 'persona-1', 'pets'))).toEqual([])
+  })
+
+  it('refuses a folder without a manifest, an oversize file and a bad persona', async () => {
+    const base = await root()
+    const register = async (): Promise<typeof summary> => summary
+    const empty = await root()
+    await writeFile(join(empty, 'mascot.webp'), Buffer.from('RIFF0000WEBP'))
+    await expect(importGolemPetFolder(empty, base, 'p', register)).rejects.toThrow(
+      'it has no manifest.json'
+    )
+    const huge = await root()
+    await writeFile(join(huge, 'manifest.json'), '{}')
+    await writeFile(join(huge, 'mascot.webp'), '')
+    await truncate(join(huge, 'mascot.webp'), GOLEM_PET_FILE_MAX_BYTES + 1)
+    await expect(importGolemPetFolder(huge, base, 'p', register)).rejects.toThrow(
+      'Keep each file under 32 MB and the pack under 128 MB.'
+    )
+    await expect(importGolemPetFolder(huge, base, '../p', register)).rejects.toThrow(
+      'The persona id is not a plain token.'
+    )
+    await expect(
+      importGolemPetFolder(await pickedFolder(), base, 'p', register, () => 'not-a-uuid')
+    ).rejects.toThrow('The pack id is not a uuid.')
+    // Nothing was created for any refusal.
+    expect(await listGolemPersonas(base)).toEqual([])
   })
 })

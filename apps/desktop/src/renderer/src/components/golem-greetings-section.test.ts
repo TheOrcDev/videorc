@@ -31,7 +31,8 @@ function settings(templates: CohostGreetingTemplate[]): CohostSettings {
       personality: '',
       bubbleStyle: 'speech',
       images: {},
-      source: 'default'
+      source: 'default',
+      avatar: { kind: 'still' }
     },
     autoChat: {
       mode: 'off',

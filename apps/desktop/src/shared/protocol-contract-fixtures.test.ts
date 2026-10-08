@@ -43,6 +43,13 @@ import type {
   SessionDeletionOperation,
   SessionChatTotals
 } from './backend'
+import type {
+  CohostPetImportParams,
+  CohostPetReactAccepted,
+  CohostPetReactParams,
+  CohostPetRemoveParams,
+  GolemPetSummary
+} from './backend'
 import { normalizeSessionCommentsListParams } from './backend'
 import {
   validateBackendEventPayload,
@@ -96,6 +103,14 @@ interface HighRiskContractFixtures {
   overlayLayout: {
     defaults: OverlayLayout
     placed: OverlayLayout
+  }
+  golemPets: {
+    summary: GolemPetSummary
+    bundledSummary: GolemPetSummary
+    importParams: CohostPetImportParams
+    removeParams: CohostPetRemoveParams
+    reactParams: CohostPetReactParams
+    reactAccepted: CohostPetReactAccepted
   }
   cohost: {
     startParams: CohostStartParams
@@ -748,7 +763,8 @@ describe('shared high-risk protocol fixture', () => {
       personality: '',
       bubbleStyle: 'speech',
       images: {},
-      source: 'default'
+      source: 'default',
+      avatar: { kind: 'still' }
     })
     expect(fixtures.cohost.settings.autoChat).toStrictEqual({
       mode: 'off',
@@ -1058,5 +1074,75 @@ describe('shared high-risk protocol fixture', () => {
       })
     )
     expect(snapshot.messages).toStrictEqual(fixtures.comments.eventMessages)
+  })
+})
+
+describe('Golem pets wire (plan 168, Phase A)', () => {
+  const pets = fixtures.golemPets
+
+  it('validates the pet RPCs exactly as the backend round-trips them', () => {
+    expect(validateBackendRpcParams('cohost.pet.list', undefined)).toBeUndefined()
+    expect(
+      validateBackendRpcResult('cohost.pet.list', [pets.bundledSummary, pets.summary])
+    ).toStrictEqual([pets.bundledSummary, pets.summary])
+    expect(validateBackendRpcParams('cohost.pet.import', pets.importParams)).toStrictEqual(
+      pets.importParams
+    )
+    expect(validateBackendRpcResult('cohost.pet.import', pets.summary)).toStrictEqual(pets.summary)
+    expect(validateBackendRpcParams('cohost.pet.remove', pets.removeParams)).toStrictEqual(
+      pets.removeParams
+    )
+    const removed = { packId: pets.removeParams.packId, settings: fixtures.cohost.settings }
+    expect(validateBackendRpcResult('cohost.pet.remove', removed)).toStrictEqual(removed)
+    expect(validateBackendRpcParams('cohost.pet.react', pets.reactParams)).toStrictEqual(
+      pets.reactParams
+    )
+    expect(validateBackendRpcResult('cohost.pet.react', pets.reactAccepted)).toStrictEqual(
+      pets.reactAccepted
+    )
+  })
+
+  it('refuses unknown fields, bad pack ids and out-of-bounds summaries', () => {
+    expect(() =>
+      validateBackendRpcParams('cohost.pet.import', { ...pets.importParams, path: '/tmp/x' })
+    ).toThrow('cohost.pet.import')
+    for (const packId of ['bundled:', '../x', pets.summary.packId.toUpperCase(), 'golem']) {
+      expect(() => validateBackendRpcParams('cohost.pet.remove', { packId })).toThrow(
+        'cohost.pet.remove'
+      )
+    }
+    expect(() =>
+      validateBackendRpcResult('cohost.pet.import', { ...pets.summary, cellSize: 64 })
+    ).toThrow('cohost.pet.import')
+    expect(() =>
+      validateBackendRpcResult('cohost.pet.import', { ...pets.summary, source: 'web' })
+    ).toThrow('cohost.pet.import')
+    expect(() => validateBackendRpcParams('cohost.pet.react', { reaction: '' })).toThrow(
+      'cohost.pet.react'
+    )
+  })
+
+  it('carries the persona avatar: still by default, alive by pack id, nothing else', () => {
+    expect(fixtures.cohost.settings.persona.avatar).toStrictEqual({ kind: 'still' })
+    expect(fixtures.cohost.settingsPatch.persona?.avatar).toStrictEqual({
+      kind: 'alive',
+      packId: pets.summary.packId
+    })
+    const persona = fixtures.cohost.settingsPatch.persona!
+    for (const avatar of [
+      null,
+      { kind: 'alive' },
+      { kind: 'alive', packId: 'bundled:Golem' },
+      { kind: 'still', packId: pets.summary.packId },
+      { kind: 'animated' }
+    ]) {
+      expect(() =>
+        validateBackendRpcParams('cohost.settings.set', { persona: { ...persona, avatar } })
+      ).toThrow('cohost.settings.set')
+    }
+    const { avatar: _avatar, ...withoutAvatar } = persona
+    expect(() =>
+      validateBackendRpcParams('cohost.settings.set', { persona: withoutAvatar })
+    ).toThrow('cohost.settings.set')
   })
 })

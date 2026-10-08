@@ -41,9 +41,8 @@ mod ffmpeg_work;
 mod fifo;
 mod frame_store;
 mod golem_overlay;
-// Plan 168 S-A1: the pet pack contract; the RPCs that use it land in S-A3.
-#[allow(dead_code)]
 mod golem_pet;
+mod golem_pet_store;
 mod h264_profile;
 mod host_pressure;
 mod kick;
@@ -5362,6 +5361,9 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "overlays.layout.migrate_highlight_anchor"
         | "cohost.avatar.generate"
         | "golem.overlay.set"
+        | "cohost.pet.import"
+        | "cohost.pet.remove"
+        | "cohost.pet.react"
         | "cohost.command.choose"
         | "cohost.command.confirm"
         | "cohost.command.cancel"
@@ -5542,6 +5544,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.status"
         | "cohost.settings.get"
         | "cohost.golem.status"
+        | "cohost.pet.list"
         | "cohost.report.get"
         | "cohost.report.latest"
         | "ai.capabilities.get"
@@ -9450,6 +9453,47 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // --- Golem pets (plan 168, Phase A) ---
+        "cohost.pet.list" => match golem_pet_store::list(state).await {
+            Ok(packs) => ServerResponse::ok(command.id, packs),
+            Err(error) => ServerResponse::error(command.id, error.code, error.message),
+        },
+        "cohost.pet.import" => {
+            match serde_json::from_value::<golem_pet_store::CohostPetImportParams>(command.params) {
+                Ok(params) => match golem_pet_store::import(state, params).await {
+                    Ok(summary) => ServerResponse::ok(command.id, summary),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.pet.remove" => {
+            match serde_json::from_value::<golem_pet_store::CohostPetRemoveParams>(command.params) {
+                Ok(params) => match golem_pet_store::remove(state, params).await {
+                    Ok(removed) => ServerResponse::ok(command.id, removed),
+                    Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.pet.react" => {
+            match serde_json::from_value::<golem_pet_store::CohostPetReactParams>(command.params) {
+                Ok(params) => {
+                    match golem_pet_store::request_reaction(state, &params.reaction).await {
+                        Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                        Err(error) => ServerResponse::error(command.id, error.code, error.message),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // --- end Golem pets (plan 168, Phase A) ---
         "cohost.settings.set" => {
             match serde_json::from_value::<protocol::CohostSettingsPatch>(command.params) {
                 Ok(patch) => match cohost::set_cohost_settings(state, patch).await {

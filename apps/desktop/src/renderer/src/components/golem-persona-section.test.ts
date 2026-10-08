@@ -53,6 +53,7 @@ function settings(overrides: Partial<CohostSettings['persona']> = {}): CohostSet
       bubbleStyle: 'speech',
       images: {},
       source: 'default',
+      avatar: { kind: 'still' },
       ...overrides
     },
     autoChat: {
