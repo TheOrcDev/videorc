@@ -261,10 +261,13 @@ describe('Golem tab strip (plan 150)', () => {
 })
 
 describe('Golem tab (plan 119 S2)', () => {
-  it('introduces Golem Live with its switch, its status and its three powers', async () => {
+  it('leads with the creation screen, then the switch, its status and its powers', async () => {
     await render()
     const text = document.body.textContent ?? ''
-    expect(text).toContain('Golem Live')
+    // Plan 164 S-A4: the creation screen leads the first tab.
+    expect(document.querySelector('[data-slot="golem-header"]')).toBeTruthy()
+    expect(document.getElementById('golem-name')).toBeTruthy()
+    expect(text).toContain('Joins my streams')
     expect(text).toContain('Alpha')
     expect(text).toContain('Golem joins my streams')
     for (const power of ORCLE_LIVE_POWERS) {

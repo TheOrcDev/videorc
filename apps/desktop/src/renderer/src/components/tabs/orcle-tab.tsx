@@ -11,6 +11,7 @@ import {
   OrcleModerationSection,
   OrcleRepliesSection
 } from '@/components/cohost-settings-section'
+import { GolemPersonaSection } from '@/components/golem-persona-section'
 import { OrcleEmblem } from '@/components/orcle-emblem'
 import { OrcleReportCard } from '@/components/orcle-report-card'
 import { OrcleVoiceCommands } from '@/components/orcle-voice-commands'
@@ -178,13 +179,19 @@ export function OrcleTab({
           data-slot="orcle-scroll"
         >
           <TabsContent className="flex flex-1 flex-col" value="live">
-            <ConfigGrid className={CONFIG_GRID_PAIR}>
-              <OrcleLiveSection />
-              <div className="flex flex-col">
-                <OrcleLivePowers onSelectTab={selectTab} />
-                <CloudAiSection />
-              </div>
-            </ConfigGrid>
+            {/* Plan 164 S-A4: the creation screen leads; the old Live switch
+                and Cloud AI stay at the bottom until Stream Manager takes the
+                switch (S-D6). */}
+            <PageStack>
+              <GolemPersonaSection />
+              <ConfigGrid className={CONFIG_GRID_PAIR}>
+                <OrcleLiveSection />
+                <div className="flex flex-col">
+                  <OrcleLivePowers onSelectTab={selectTab} />
+                  <CloudAiSection />
+                </div>
+              </ConfigGrid>
+            </PageStack>
           </TabsContent>
           <TabsContent className="flex flex-1 flex-col" value="chat">
             <OrcleChatTab />
@@ -326,10 +333,11 @@ function OrcleVoiceTab({ onOpenLive }: { onOpenLive: () => void }): ReactElement
  * whether Golem hears you, which is part of what turning it on means.
  */
 function OrcleLiveSection(): ReactElement {
-  const { runtimeInfo, setOrcleLive } = useStudioCore()
+  const { cohostSettings, runtimeInfo, setOrcleLive } = useStudioCore()
   const { openCommentsWindow } = useStudioShell()
   const [pending, setPending] = useState(false)
   const view = useOrcleLive()
+  const golemName = cohostSettings?.persona.name ?? 'Golem'
   const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
   const shiftKey = displayKeyGlyph('⇧', runtimeInfo?.platform)
 
@@ -349,14 +357,14 @@ function OrcleLiveSection(): ReactElement {
   return (
     <PanelSection
       action={<Badge variant="outline">Alpha</Badge>}
-      description="Golem reads your chat and hears you while you stream. It never posts on its own."
-      title="Golem Live"
+      description="Your Golem reads your chat and hears you while you stream. It posts only in the modes you turn on; everything is off by default."
+      title="Joins my streams"
     >
       <div className="flex items-center gap-3" data-slot="orcle-live-status-block">
         <OrcleEmblem size="lg" />
         <Field className="min-w-0 flex-1" orientation="horizontal">
           <FieldContent>
-            <FieldLabel htmlFor="orcle-live-switch">Golem joins my streams</FieldLabel>
+            <FieldLabel htmlFor="orcle-live-switch">{golemName} joins my streams</FieldLabel>
             <OrcleLiveStatusLine status={view.status} />
           </FieldContent>
           <Switch

@@ -3322,6 +3322,17 @@ export interface AiCapabilities {
     modes?: string[]
     workflowKind?: string
   }
+  /** The Golem routes (plan 164): the tick contract the web speaks and
+   * whether avatar generation is on, with today's remaining count. Older
+   * servers omit the block: Generate stays off. */
+  cohost?: {
+    tick?: number
+    avatar?: {
+      enabled: boolean
+      remainingToday: number
+      dailyLimit: number
+    }
+  }
   entitlement: {
     checkedAt: string
     cloudAi: boolean
