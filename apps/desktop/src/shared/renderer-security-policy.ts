@@ -44,6 +44,9 @@ export const IPC_INVOKE_ROLES = {
   'screens:pick-image': MAIN_ONLY,
   'backgrounds:import-image': MAIN_ONLY,
   'scheduled-streams:import-thumbnail': MAIN_ONLY,
+  // The Golem's avatar images (plan 164 S-A3): the Studio renderer only.
+  'golem-assets:import-image': MAIN_ONLY,
+  'golem-assets:remove': MAIN_ONLY,
   'backgrounds:bundled-assets': MAIN_ONLY,
   'backgrounds:asset-exists': MAIN_ONLY,
   // The detached Comments window renders the same chat rows as Studio; without

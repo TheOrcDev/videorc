@@ -94,6 +94,8 @@ export const electronInvokeApiMethods = {
   'screens:pick-image': 'pickScreenImage',
   'backgrounds:import-image': 'importBackgroundImage',
   'scheduled-streams:import-thumbnail': 'importScheduledThumbnail',
+  'golem-assets:import-image': 'importGolemImage',
+  'golem-assets:remove': 'removeGolemPersona',
   'backgrounds:asset-exists': 'backgroundAssetExists',
   'backgrounds:bundled-assets': 'getBundledBackgroundAssets',
   'avatars:cache': 'cacheChatAvatar',
@@ -1330,6 +1332,32 @@ const specificRuntimeInvokeContracts = {
   'resource:trash-session-deletion': invokeContract(tupleSchema([boundedIdentifier])),
   'system:check-directory': invokeContract(tupleSchema([boundedIdentifier])),
   'backgrounds:asset-exists': invokeContract(tupleSchema([boundedIdentifier])),
+  // The Golem's avatar images (plan 164 S-A3): a plain persona id and a
+  // state in; the stored relative path and its managed URL out, or null when
+  // the picker was cancelled.
+  'golem-assets:import-image': invokeContract(
+    tupleSchema([
+      stringSchema({ minLength: 1, maxLength: 128 }),
+      enumSchema(['idle', 'talk', 'laugh', 'think'])
+    ]),
+    nullableSchema(
+      objectSchema(
+        {
+          personaId: stringSchema({ minLength: 1, maxLength: 128 }),
+          state: enumSchema(['idle', 'talk', 'laugh', 'think']),
+          path: stringSchema({ minLength: 1, maxLength: 256 }),
+          url: stringSchema({ minLength: 1, maxLength: 512 }),
+          width: numberSchema({ integer: true, min: 1 }),
+          height: numberSchema({ integer: true, min: 1 })
+        },
+        { allowUnknown: false }
+      )
+    )
+  ),
+  'golem-assets:remove': invokeContract(
+    tupleSchema([stringSchema({ minLength: 1, maxLength: 128 })]),
+    undefinedSchema
+  ),
   'avatars:read': invokeContract(tupleSchema([boundedIdentifier]), chatAvatarBytesSchema),
   'global-shortcuts:set': invokeContract(tupleSchema([globalShortcutsSchema])),
   'shortcut-recorder:set-armed': invokeContract(

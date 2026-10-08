@@ -1,4 +1,5 @@
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
+import { importGolemImage, removeGolemPersona } from './golem-assets'
 import { globalShortcutEntries, isGlobalShortcutAction } from '../shared/global-shortcuts'
 import { normalizeAccelerator } from '../shared/accelerator'
 import { openableChatLink } from '../shared/chat-link'
@@ -258,6 +259,7 @@ import {
   type DeferredPermissionRestartState
 } from './deferred-permission-restart'
 import { isPathInsideAnyRoot } from './managed-asset-paths'
+import { isGolemAvatarState, isGolemPersonaId, parseGolemAssetPath } from '../shared/golem-assets'
 import {
   managedImageDecodeScript,
   normalizeManagedImageDecodeResult
@@ -8842,6 +8844,9 @@ function startBackendWithRegistryLock(): void {
         : '',
       VIDEORC_MANAGED_BACKGROUND_ROOTS: managedBackgroundRoots().join(delimiter),
       VIDEORC_MANAGED_THUMBNAIL_ROOT: join(app.getPath('userData'), 'scheduled-thumbnails'),
+      // The Golem's avatar images (plan 164 S-A3): uploads land here through
+      // main, generated images through the backend (S-A6).
+      VIDEORC_MANAGED_GOLEM_ROOTS: managedGolemRoot(),
       // Debug smoke/test RPCs are a second, explicit capability boundary in
       // addition to the admin backend credential. Release builds compile the
       // handlers out regardless of this value.
@@ -13341,6 +13346,46 @@ function resolveManagedBackgroundFile(fileName: string): string | null {
   return null
 }
 
+// --- Golem avatar images (plan 164 S-A3) --------------------------------------
+// `userData/golem-assets/<personaId>/<state>.<ext>`, served under the `golem`
+// host by the relative path the persona stores. Exactly one folder and one
+// file; anything else is not found.
+function managedGolemRoot(): string {
+  return join(app.getPath('userData'), 'golem-assets')
+}
+
+function resolveManagedGolemFile(relativePath: string): string | null {
+  const parsed = parseGolemAssetPath(relativePath)
+  if (!parsed) return null
+  return resolveRegularFileInsideRoot(
+    join(managedGolemRoot(), parsed.personaId),
+    `${parsed.state}.${parsed.extension}`
+  )
+}
+
+async function pickGolemImage(personaId: unknown, state: unknown) {
+  if (!isGolemPersonaId(personaId) || !isGolemAvatarState(state)) {
+    throw new Error('Golem image import needs a persona id and a state.')
+  }
+  const options: Electron.OpenDialogOptions = {
+    title: `Choose the ${state} image`,
+    properties: ['openFile'],
+    filters: [
+      {
+        name: state === 'idle' ? 'PNG, WebP or JPEG' : 'PNG or WebP with transparency',
+        extensions: state === 'idle' ? ['png', 'webp', 'jpg', 'jpeg'] : ['png', 'webp']
+      }
+    ]
+  }
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options)
+  if (result.canceled || !result.filePaths[0]) return null
+  return importGolemImage(result.filePaths[0], managedGolemRoot(), personaId, state, (bytes) =>
+    nativeImage.createFromBuffer(bytes).getSize()
+  )
+}
+
 // --- Chat avatar cache (Comments window upgrade S1) ----------------------------
 // Renderers never hot-link platform CDNs: main fetches each avatar once from
 // an allowlisted host (avatar-cache.ts policy), stores it here, and serves it
@@ -13574,7 +13619,9 @@ function registerManagedAssetProtocol(): void {
               ? resolveManagedAvatarFile(fileName)
               : url.host === 'screen'
                 ? resolveManagedScreenFile(fileName)
-                : null
+                : url.host === 'golem'
+                  ? resolveManagedGolemFile(fileName)
+                  : null
       if (!resolved) {
         return new Response('Not found', { status: 404 })
       }
@@ -14083,6 +14130,15 @@ app.whenReady().then(async () => {
   )
   secureIpcHandle('backgrounds:import-image', () => importBackgroundImage())
   secureIpcHandle('scheduled-streams:import-thumbnail', () => pickScheduledThumbnail())
+  // The Golem's avatar images (plan 164 S-A3): the picker, then the sniffed
+  // copy into the persona's folder; Start over removes the folder.
+  secureIpcHandle('golem-assets:import-image', (_event, personaId: unknown, state: unknown) =>
+    pickGolemImage(personaId, state)
+  )
+  secureIpcHandle('golem-assets:remove', async (_event, personaId: unknown) => {
+    if (!isGolemPersonaId(personaId)) throw new Error('Golem removal needs a persona id.')
+    await removeGolemPersona(managedGolemRoot(), personaId)
+  })
   secureIpcHandle('backgrounds:bundled-assets', () => bundledBackgroundAssets())
   secureIpcHandle('backgrounds:asset-exists', (_event, assetId: unknown) =>
     backgroundAssetFileExists(assetId)

@@ -4279,6 +4279,14 @@ export interface VideorcApi {
   // managed asset (Assets Tab plan, slice A4).
   importBackgroundImage: () => Promise<BackgroundImportResult | null>
   importScheduledThumbnail: () => Promise<ScheduledThumbnail | null>
+  /** Picks a PNG/WebP (JPEG for idle) and copies it into the persona's
+   * managed folder (plan 164 S-A3); null when the picker was cancelled. */
+  importGolemImage: (
+    personaId: string,
+    state: CohostAvatarState
+  ) => Promise<GolemImageImportResult | null>
+  /** "Start over": deletes the persona's managed folder. */
+  removeGolemPersona: (personaId: string) => Promise<void>
   backgroundAssetExists: (assetId: string) => Promise<boolean>
   /** Fetch-and-cache a chat avatar from an allowlisted platform CDN; returns a
    * local videorc-asset:// URL or null (disallowed host / fetch failure). */
@@ -6149,6 +6157,19 @@ export interface ScheduledStreamCapabilities {
   accounts: PlatformAccount[]
   audienceEditable: false
 }
+/** What `importGolemImage` hands back (plan 164 S-A3): the relative path the
+ * persona stores and the managed URL the tile shows. */
+export interface GolemImageImportResult {
+  personaId: string
+  state: CohostAvatarState
+  /** `<personaId>/<state>.<ext>`, the value `persona.images[state]` stores. */
+  path: string
+  /** `videorc-asset://golem/<personaId>/<state>.<ext>`. */
+  url: string
+  width: number
+  height: number
+}
+
 export interface ScheduledThumbnail {
   id: string
   previewUrl: string
