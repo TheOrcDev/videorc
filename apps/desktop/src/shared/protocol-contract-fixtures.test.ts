@@ -660,6 +660,53 @@ describe('shared high-risk protocol fixture', () => {
       wakeWordRequired: true,
       removeConfirm: 'countdown'
     })
+    // Plan 164 S-A2: the persona and the automatic chat block ride the
+    // settings (defaults: the bundled pack, everything automatic off) and
+    // the patch (whole objects). Absent images are omitted, never null.
+    expect(fixtures.cohost.settings.persona).toStrictEqual({
+      id: 'default',
+      name: 'Golem',
+      personality: '',
+      bubbleStyle: 'speech',
+      images: {},
+      source: 'default'
+    })
+    expect(fixtures.cohost.settings.autoChat).toStrictEqual({
+      mode: 'off',
+      greetings: { enabled: false, templates: [] },
+      answers: { enabled: false, cooldownSeconds: 20 },
+      banter: { enabled: false, cooldownSeconds: 240 }
+    })
+    expect(fixtures.cohost.settingsPatch.persona?.images).toStrictEqual({
+      idle: 'persona-fixture/idle.png',
+      laugh: 'persona-fixture/laugh.webp'
+    })
+    expect(fixtures.cohost.settingsPatch.autoChat?.greetings.templates[0]).toMatchObject({
+      kind: 'follow',
+      platform: 'twitch',
+      state: 'laugh'
+    })
+    expect(() =>
+      validateBackendRpcParams('cohost.settings.set', {
+        persona: { ...fixtures.cohost.settingsPatch.persona, images: { idle: null } }
+      })
+    ).toThrow('cohost.settings.set')
+    expect(() =>
+      validateBackendRpcParams('cohost.settings.set', {
+        autoChat: {
+          ...fixtures.cohost.settingsPatch.autoChat,
+          greetings: {
+            enabled: true,
+            templates: [
+              {
+                ...fixtures.cohost.settingsPatch.autoChat!.greetings.templates[0],
+                kind: 'hype-train'
+              }
+            ]
+          }
+        }
+      })
+    ).toThrow('cohost.settings.set')
     // The report counts commands; the minimal report has none (never null).
     expect(fixtures.cohost.report.commands).toStrictEqual({
       highlighted: 3,

@@ -2144,7 +2144,21 @@ describe('backend RPC contract', () => {
       rules: ['No spoilers'],
       listen: false,
       wakeWordRequired: false,
-      removeConfirm: 'confirm'
+      removeConfirm: 'confirm',
+      persona: {
+        id: 'default',
+        name: 'Golem',
+        personality: '',
+        bubbleStyle: 'speech',
+        images: {},
+        source: 'default'
+      },
+      autoChat: {
+        mode: 'off',
+        greetings: { enabled: false, templates: [] },
+        answers: { enabled: false, cooldownSeconds: 20 },
+        banter: { enabled: false, cooldownSeconds: 240 }
+      }
     }
     expect(validateBackendRpcResult('cohost.settings.get', settings)).toEqual(settings)
     expect(validateBackendRpcParams('cohost.settings.set', { listen: true })).toEqual({
@@ -2502,7 +2516,21 @@ describe('backend RPC contract', () => {
       rules: [],
       listen: true,
       wakeWordRequired: true,
-      removeConfirm: 'countdown'
+      removeConfirm: 'countdown',
+      persona: {
+        id: 'default',
+        name: 'Golem',
+        personality: '',
+        bubbleStyle: 'speech',
+        images: {},
+        source: 'default'
+      },
+      autoChat: {
+        mode: 'off',
+        greetings: { enabled: false, templates: [] },
+        answers: { enabled: false, cooldownSeconds: 20 },
+        banter: { enabled: false, cooldownSeconds: 240 }
+      }
     }
     expect(validateBackendRpcResult('cohost.settings.get', settings)).toEqual(settings)
     const withoutWakeWord: Record<string, unknown> = { ...settings }

@@ -20,6 +20,8 @@ import type {
   ChatEmotesSettings,
   ChatEmotesSettingsPatch,
   YouTubeQuotaStatus,
+  CohostAutoChat,
+  CohostPersona,
   CohostSettings,
   CohostSettingsPatch,
   CohostStartParams,
@@ -2156,6 +2158,77 @@ const cohostToneSchema = enumSchema(['friendly', 'short', 'professional'])
 const cohostNotesSchema = stringSchema({ maxLength: 4000 })
 // The backend normalises rules to these caps before it stores or sends them.
 const cohostRulesSchema = arraySchema(stringSchema({ maxLength: 120 }), { maxLength: 10 })
+// Plan 164 S-A2: the persona and the automatic chat block. Both sides
+// validate the same bounds; image paths and template ids are plain strings
+// the backend checks for shape.
+const cohostPersonaImagePathSchema = stringSchema({ minLength: 1, maxLength: 256 })
+const cohostPersonaSchema = objectSchema(
+  {
+    id: stringSchema({ minLength: 1, maxLength: 128 }),
+    name: stringSchema({ minLength: 1, maxLength: 24 }),
+    personality: stringSchema({ maxLength: 1200 }),
+    bubbleStyle: enumSchema(['speech', 'thought', 'shout']),
+    images: objectSchema(
+      {
+        idle: optionalSchema(cohostPersonaImagePathSchema),
+        talk: optionalSchema(cohostPersonaImagePathSchema),
+        laugh: optionalSchema(cohostPersonaImagePathSchema),
+        think: optionalSchema(cohostPersonaImagePathSchema)
+      },
+      { allowUnknown: false }
+    ),
+    source: enumSchema(['default', 'uploaded', 'generated'])
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostPersona>
+const cohostGreetingTemplateSchema = objectSchema(
+  {
+    id: stringSchema({ minLength: 1, maxLength: 128 }),
+    kind: enumSchema([
+      'follow',
+      'sub',
+      'resub',
+      'sub-gift',
+      'community-sub-gift',
+      'membership',
+      'cheer',
+      'kicks',
+      'super-chat',
+      'super-sticker',
+      'raid',
+      'watch-streak',
+      'power-up',
+      'redemption'
+    ]),
+    platform: optionalSchema(enumSchema(['twitch', 'youtube', 'kick', 'x'])),
+    text: stringSchema({ minLength: 1, maxLength: 200 }),
+    state: enumSchema(['talk', 'laugh', 'think']),
+    enabled: booleanSchema
+  },
+  { allowUnknown: false }
+)
+const cohostCooldownBehaviourSchema = objectSchema(
+  {
+    enabled: booleanSchema,
+    cooldownSeconds: numberSchema({ integer: true, min: 1, max: 3600 })
+  },
+  { allowUnknown: false }
+)
+const cohostAutoChatSchema = objectSchema(
+  {
+    mode: enumSchema(['off', 'suggest', 'auto']),
+    greetings: objectSchema(
+      {
+        enabled: booleanSchema,
+        templates: arraySchema(cohostGreetingTemplateSchema, { maxLength: 60 })
+      },
+      { allowUnknown: false }
+    ),
+    answers: cohostCooldownBehaviourSchema,
+    banter: cohostCooldownBehaviourSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostAutoChat>
 const cohostSettingsSchema = objectSchema(
   {
     enabled: booleanSchema,
@@ -2168,7 +2241,10 @@ const cohostSettingsSchema = objectSchema(
     listen: booleanSchema,
     // Plan 140 S3: voice commands. The backend always sends both.
     wakeWordRequired: booleanSchema,
-    removeConfirm: enumSchema(['confirm', 'countdown'])
+    removeConfirm: enumSchema(['confirm', 'countdown']),
+    // Plan 164 S-A2: the backend always sends both.
+    persona: cohostPersonaSchema,
+    autoChat: cohostAutoChatSchema
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSettings>
@@ -2183,7 +2259,9 @@ const cohostSettingsPatchSchema = objectSchema(
     rules: optionalSchema(arraySchema(stringSchema({ maxLength: 2000 }), { maxLength: 100 })),
     listen: optionalSchema(booleanSchema),
     wakeWordRequired: optionalSchema(booleanSchema),
-    removeConfirm: optionalSchema(enumSchema(['confirm', 'countdown']))
+    removeConfirm: optionalSchema(enumSchema(['confirm', 'countdown'])),
+    persona: optionalSchema(cohostPersonaSchema),
+    autoChat: optionalSchema(cohostAutoChatSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSettingsPatch>

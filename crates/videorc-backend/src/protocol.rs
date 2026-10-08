@@ -4720,6 +4720,12 @@ pub struct CohostSettingsPatch {
     /// How a voice removal is confirmed (plan 140 S3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remove_confirm: Option<crate::live_chat_moderation::RemoveConfirmMode>,
+    /// The whole persona (plan 164 S-A2); the engine validates and trims it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<crate::cohost::CohostPersona>,
+    /// The whole automatic chat block (plan 164 S-A2), validated likewise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_chat: Option<crate::cohost::CohostAutoChat>,
 }
 
 /// `cohost.command.choose` (plan 140 S3): pick one comment from the chooser
