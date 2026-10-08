@@ -141,13 +141,18 @@ export interface HighlightLayout {
   cardHeightPx: number
 }
 
-export interface CommentHighlightPlatformBadge {
-  label: string
-  color: string
-  /** Glyph colour; white unless the brand colour is too light for it. */
-  ink?: string
-  glyph: 'play' | 'twitch' | 'kick' | 'x' | 'dot'
-}
+export type CommentHighlightPlatformBadge =
+  | {
+      label: string
+      color: string
+      /** Glyph colour; white unless the brand colour is too light for it. */
+      ink?: string
+      glyph: 'twitch' | 'kick' | 'x' | 'dot'
+    }
+  /** YouTube is never redrawn (plan 165, Google's ToS report III.F.2a): the
+   * card shows YouTube's own icon file on the identity row, at least 20 px
+   * tall, instead of a badge over the avatar. */
+  | { label: 'YouTube'; glyph: 'youtube-icon' }
 
 /** Small stream-safe brand mark painted over the avatar. The adjacent identity
  * line carries the platform name as text, so the card never relies on color or
@@ -157,7 +162,7 @@ export function commentHighlightPlatformBadge(
 ): CommentHighlightPlatformBadge | null {
   switch (platform) {
     case 'youtube':
-      return { label: 'YouTube', color: '#FF0033', glyph: 'play' }
+      return { label: 'YouTube', glyph: 'youtube-icon' }
     case 'twitch':
       return { label: 'Twitch', color: '#9146FF', glyph: 'twitch' }
     case 'kick':
@@ -171,8 +176,16 @@ export function commentHighlightPlatformBadge(
   }
 }
 
-export function commentHighlightIdentity(authorName: string, platform?: StreamPlatform): string {
+/** The identity line: "Twitch · name". When the card draws YouTube's own icon
+ * beside the name (`markShown`), the icon is the attribution and the line is
+ * just the name; if the icon could not be loaded the word stays. */
+export function commentHighlightIdentity(
+  authorName: string,
+  platform?: StreamPlatform,
+  markShown = false
+): string {
   const author = authorName.trim() || 'Viewer'
+  if (markShown && platform === 'youtube') return author
   const platformLabel = commentHighlightPlatformBadge(platform)?.label ?? null
   return platformLabel ? `${platformLabel} · ${author}` : author
 }

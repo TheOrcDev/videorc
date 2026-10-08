@@ -140,14 +140,52 @@ function messageText(message) {
   return (message.fragments ?? []).map((fragment) => fragment.text).join('')
 }
 
+// Up to two initials, as the desktop's monogram avatar (chat-avatar.tsx).
+function initials(name) {
+  const words = (name ?? '').trim().split(/\s+/).filter(Boolean)
+  return (
+    words
+      .slice(0, 2)
+      .map((word) => [...word][0].toUpperCase())
+      .join('') || '?'
+  )
+}
+
+// The platform mark closes the row on the far right. YouTube rows carry
+// YouTube's official icon file, unmodified and 20 px tall (plan 165, Google's
+// ToS report III.F.2a). Other platforms keep a letter tile.
+function platformGlyph(platform) {
+  if (platform === 'youtube') {
+    const glyph = el('span', 'glyph')
+    glyph.dataset.platform = 'youtube'
+    // The viewBox crops the file to the mark's own bounds, so the 20 px box
+    // is the visible icon (the same framing as the desktop's YoutubeIcon).
+    const svg = 'http://www.w3.org/2000/svg'
+    const icon = document.createElementNS(svg, 'svg')
+    icon.setAttribute('viewBox', '102.6875 119.167969 396 277.402343')
+    icon.setAttribute('class', 'youtube-icon')
+    icon.setAttribute('role', 'img')
+    icon.setAttribute('aria-label', 'YouTube')
+    const image = document.createElementNS(svg, 'image')
+    image.setAttribute('href', '/youtube-icon.svg')
+    image.setAttribute('width', '602.187')
+    image.setAttribute('height', '515.868')
+    icon.append(image)
+    glyph.append(icon)
+    return glyph
+  }
+  const glyph = el('span', 'glyph', (platform ?? '?').slice(0, 1).toUpperCase())
+  glyph.dataset.platform = platform ?? ''
+  return glyph
+}
+
 function buildRow(message) {
   const row = el('button', 'comment')
   row.type = 'button'
   row.setAttribute('role', 'listitem')
   row.dataset.id = message.id
   row.dataset.kind = message.eventType ?? 'message'
-  const glyph = el('span', 'glyph', (message.platform ?? '?').slice(0, 1).toUpperCase())
-  glyph.dataset.platform = message.platform ?? ''
+  const glyph = platformGlyph(message.platform)
   const meta = el('span', 'meta')
   meta.append(el('span', 'author', message.authorName ?? ''))
   const role = (message.authorRoles ?? []).find((value) =>
@@ -155,7 +193,9 @@ function buildRow(message) {
   )
   if (role) meta.append(el('span', 'role', role === 'moderator' ? 'mod' : 'host'))
   if (message.amountText) meta.append(el('span', 'amount', message.amountText))
-  row.append(glyph, meta, el('span', 'text', messageText(message)))
+  const avatar = el('span', 'avatar', initials(message.authorName))
+  avatar.setAttribute('aria-hidden', 'true')
+  row.append(avatar, meta, glyph, el('span', 'text', messageText(message)))
   if (message.isDeleted) row.dataset.deleted = 'true'
   return row
 }

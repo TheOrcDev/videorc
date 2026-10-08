@@ -4,7 +4,8 @@ import { cn } from '@/lib/utils'
 
 /**
  * The shared row (plan 050, D4): every icon + title + meta list renders
- * through this one anatomy. A 20 px icon tile, the primary title, inline
+ * through this one anatomy. A 20 px icon tile (larger for platform marks,
+ * and YouTube's official icon is never clipped: plan 165), the primary title, inline
  * secondary context, optional alias chips, spring space, then right-aligned
  * status icons and a secondary meta label. 32 px, or 28 px when compact.
  * Selection is the theme's accent block.
@@ -58,7 +59,7 @@ export function ListRow({
       {icon ? (
         <span
           data-slot="list-row-icon"
-          className="flex size-5 shrink-0 items-center justify-center overflow-hidden rounded-[5px] [&_svg:not([class*='size-'])]:size-4"
+          className="flex min-h-5 min-w-5 shrink-0 items-center justify-center overflow-hidden rounded-[5px] has-data-[slot=platform-mark]:overflow-visible has-data-[slot=platform-mark]:rounded-none [&_svg:not([class*='size-'])]:size-4"
         >
           {icon}
         </span>

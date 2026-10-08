@@ -177,7 +177,11 @@ export function CommentsDestinationStatus({
                 title={failure.reason}
                 variant="destructive"
               >
-                <ChatPlatformIcon decorative platform={failure.platform} />
+                {/* A Badge forces its icons to 12 px: YouTube's mark may not
+                    shrink (plan 165), so its chip names it in words only. */}
+                {failure.platform === 'youtube' ? null : (
+                  <ChatPlatformIcon decorative platform={failure.platform} />
+                )}
                 {CHAT_PLATFORM_LABELS[failure.platform]}: {failure.reason}
               </Badge>
             ))}
@@ -199,7 +203,9 @@ export function CommentsDestinationStatus({
           title={providerBadgeTitle(provider)}
           variant={providerBadgeVariant(provider.state)}
         >
-          <ChatPlatformIcon decorative platform={provider.platform} />
+          {provider.platform === 'youtube' ? null : (
+            <ChatPlatformIcon decorative platform={provider.platform} />
+          )}
           {CHAT_PLATFORM_LABELS[provider.platform]}
           <span aria-hidden>·</span>
           {providerBadgeLabel(provider)}

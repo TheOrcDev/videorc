@@ -277,3 +277,58 @@ describe('renderCommentHighlightCards images (plan 095, S3)', () => {
     expect(readImage).not.toHaveBeenCalled()
   })
 })
+
+// Plan 165 (Google's YouTube API ToS report, III.F.2a): a YouTube card shows
+// YouTube's own icon on the identity row, at least 20 output pixels tall, and
+// never a redrawn badge.
+describe('renderCommentHighlightCards YouTube icon (plan 165)', () => {
+  beforeEach(() => {
+    calls.length = 0
+    vi.stubGlobal('OffscreenCanvas', FakeOffscreenCanvas)
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  const youtube = { ...message, platform: 'youtube' } as LiveChatMessage
+  // The decoded official file: the artboard, mark cropped from inside it.
+  const icon = { width: 602.187, height: 515.868 } as unknown as HighlightBitmap
+
+  it('draws the official icon at 20 px or more on every leg, right of the name', async () => {
+    const loadYoutubeMark = vi.fn(async () => icon)
+    await renderCommentHighlightCards(
+      youtube,
+      null,
+      { width: 1280, height: 720 },
+      { width: 1080, height: 1920 },
+      { loadYoutubeMark, warn: vi.fn() }
+    )
+    expect(loadYoutubeMark).toHaveBeenCalledTimes(1)
+    const marks = calls.filter((call) => call.method === 'drawImage' && call.args[0] === icon)
+    expect(marks).toHaveLength(2)
+    for (const { args } of marks) {
+      // Source crop is the mark's bounds inside the file.
+      expect(args.slice(1, 5).map((value) => Math.round(Number(value)))).toEqual([
+        103, 119, 396, 277
+      ])
+      const [width, height] = [Number(args[7]), Number(args[8])]
+      expect(height).toBeGreaterThanOrEqual(20)
+      expect(width / height).toBeCloseTo(396 / 277.402343, 1)
+    }
+    const nameCalls = calls.filter((call) => call.method === 'fillText')
+    const names = nameCalls.map((call) => String(call.args[0]))
+    expect(names).toContain('Orc Dev')
+    // The icon closes the identity row on the right, after the name.
+    const nameX = Number(nameCalls.find((call) => call.args[0] === 'Orc Dev')?.args[1])
+    for (const { args } of marks) expect(Number(args[5])).toBeGreaterThan(nameX)
+    expect(names.some((name) => name.includes('YouTube ·'))).toBe(false)
+  })
+
+  it('names YouTube in words when the icon cannot load, and never redraws it', async () => {
+    await renderCommentHighlightCards(youtube, null, { width: 1280, height: 720 }, undefined, {
+      loadYoutubeMark: async () => null,
+      warn: vi.fn()
+    })
+    expect(calls.filter((call) => call.method === 'drawImage')).toHaveLength(0)
+    const names = calls.filter((call) => call.method === 'fillText').map((call) => call.args[0])
+    expect(names).toContain('YouTube · Orc Dev')
+  })
+})

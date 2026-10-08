@@ -253,23 +253,18 @@ function ActivityRow({
     >
       <span
         className={cn(
-          'relative mt-0.5 flex size-7 shrink-0 items-center justify-center',
+          'relative mt-0.5 flex size-9 shrink-0 items-center justify-center',
           !person && 'rounded-chip bg-foreground/[0.06] text-muted-foreground'
         )}
         data-slot={person ? 'activity-avatar' : 'activity-glyph'}
       >
         {person ? (
-          <AvatarCircle avatarUrl={item.authorAvatarUrl} className="size-7" name={item.name} />
+          <AvatarCircle avatarUrl={item.authorAvatarUrl} className="size-9" name={item.name} />
         ) : Icon ? (
           <Icon aria-hidden className="size-4" weight="duotone" />
         ) : (
           <StatusDot tone={item.kind === 'destination-failed' ? 'error' : 'good'} />
         )}
-        <ChatPlatformIcon
-          className="absolute -right-1 -bottom-1 size-3"
-          decorative
-          platform={item.platform}
-        />
       </span>
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex min-w-0 items-baseline gap-1.5">
@@ -300,6 +295,9 @@ function ActivityRow({
           >
             {relativeTime(item.at, nowMs)}
           </time>
+          {/* The platform mark closes the row on the far right (owner call,
+              plan 165): 20 px, never shrunk onto the avatar. */}
+          <ChatPlatformIcon className="ml-1 mr-0 self-center" decorative platform={item.platform} />
         </span>
         {item.message ? (
           <span className="text-sm leading-snug break-words text-foreground select-text">

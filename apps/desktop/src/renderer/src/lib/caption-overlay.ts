@@ -17,6 +17,7 @@ import {
   type HighlightEmoteSizer
 } from '@/lib/comment-highlight-layout'
 import { activityItems } from '@/lib/stream-activity'
+import { YOUTUBE_ARTBOARD, YOUTUBE_ICON_URL, YOUTUBE_MARK } from '@/lib/youtube-mark'
 import type { CaptionStyleId, LiveChatMessageFragment } from '@/lib/backend'
 import { COMMENTS_HIGHLIGHT_TIMING_CONTRACT } from '../../../shared/comments-command-timing'
 
@@ -523,6 +524,27 @@ export interface HighlightCardImageDeps {
   warn?: (message: string) => void
   /** Every image for one card pair must decode within this slice. */
   deadlineMs?: number
+  /** Loads YouTube's official icon for the identity row (plan 165). */
+  loadYoutubeMark?: () => Promise<HighlightBitmap | null>
+}
+
+let youtubeMarkImage: Promise<HighlightBitmap | null> | null = null
+
+/** YouTube's official icon file, decoded once per renderer. Drawn straight
+ * from the vector file so it is sharp at every output size; null (logged) if
+ * it cannot load, and the card then names YouTube in words instead. */
+function loadYoutubeMarkImage(): Promise<HighlightBitmap | null> {
+  youtubeMarkImage ??= (async () => {
+    const image = new Image()
+    image.src = YOUTUBE_ICON_URL
+    await image.decode()
+    return image
+  })().catch((error: unknown) => {
+    console.warn(`Highlight card: YouTube icon did not load (${describeImageFailure(error)}).`)
+    youtubeMarkImage = null
+    return null
+  })
+  return youtubeMarkImage
 }
 
 const defaultHighlightImageReader: HighlightImageReader = (localUrl) =>
@@ -632,6 +654,10 @@ export async function renderCommentHighlightCards(
     deadlineMs: imageDeps.deadlineMs ?? COMMENTS_HIGHLIGHT_TIMING_CONTRACT.avatarFetchMs
   }
   const warn = imageDeps.warn ?? ((line: string) => console.warn(line))
+  const youtubeMark =
+    message.platform === 'youtube'
+      ? await (imageDeps.loadYoutubeMark ?? loadYoutubeMarkImage)().catch(() => null)
+      : null
   const text = commentHighlightCardText(message)
   const fragments = commentHighlightCardFragments(message)
   const tokens = highlightTokens(text, fragments)
@@ -672,7 +698,8 @@ export async function renderCommentHighlightCards(
       emotes,
       canvasWidth: canvas.width,
       canvasHeight: canvas.height,
-      platform: message.platform
+      platform: message.platform,
+      platformMark: youtubeMark
     })
   const [pngBase64, verticalPngBase64] = await Promise.all([
     render(stream),
@@ -695,6 +722,9 @@ export async function renderCommentHighlightPng(params: {
   /** Omitted = landscape. A portrait canvas gets the vertical-leg card. */
   canvasHeight?: number
   platform?: import('@/lib/backend').StreamPlatform
+  /** YouTube's official icon (plan 165); omitted = the card names YouTube in
+   * words. Drawn on the identity row, never over the avatar. */
+  platformMark?: HighlightBitmap | null
 }): Promise<string | null> {
   // Q8 (plan 022): use-studio already imports comment-highlight statically, so
   // the dynamic import here never split a chunk (Vite warned) — import it
@@ -708,7 +738,12 @@ export async function renderCommentHighlightPng(params: {
     const bitmap = params.emotes?.get(url)
     return bitmap ? { width: bitmap.width, height: bitmap.height } : null
   }
-  const layout = layoutCommentHighlightTokens({ ...params, measure, emoteSize })
+  const layout = layoutCommentHighlightTokens({
+    ...params,
+    platformMark: Boolean(params.platformMark),
+    measure,
+    emoteSize
+  })
   if (!layout) {
     return null
   }
@@ -785,7 +820,7 @@ export async function renderCommentHighlightPng(params: {
   // Platform glyph: compact brand-colored badge over the avatar. The identity
   // line also spells out the platform, preserving meaning in monochrome.
   const platformBadge = commentHighlightPlatformBadge(params.platform)
-  if (platformBadge) {
+  if (platformBadge && platformBadge.glyph !== 'youtube-icon') {
     const badgeSize = Math.max(12, Math.round(metrics.avatarPx * 0.42))
     const badgeX = avatarX + metrics.avatarPx - badgeSize * 0.84
     const badgeY = avatarY + metrics.avatarPx - badgeSize * 0.84
@@ -804,14 +839,7 @@ export async function renderCommentHighlightPng(params: {
     context.lineJoin = 'round'
     const centerX = badgeX + badgeSize / 2
     const centerY = badgeY + badgeSize / 2
-    if (platformBadge.glyph === 'play') {
-      context.beginPath()
-      context.moveTo(centerX - badgeSize * 0.12, centerY - badgeSize * 0.2)
-      context.lineTo(centerX + badgeSize * 0.2, centerY)
-      context.lineTo(centerX - badgeSize * 0.12, centerY + badgeSize * 0.2)
-      context.closePath()
-      context.fill()
-    } else if (platformBadge.glyph === 'x') {
+    if (platformBadge.glyph === 'x') {
       context.beginPath()
       context.moveTo(centerX - badgeSize * 0.18, centerY - badgeSize * 0.22)
       context.lineTo(centerX + badgeSize * 0.18, centerY + badgeSize * 0.22)
@@ -845,6 +873,29 @@ export async function renderCommentHighlightPng(params: {
     context.restore()
   }
 
+  // YouTube's official icon (plan 165): unmodified, at least 20 px tall,
+  // closing the identity row on the card's right edge (owner call, like the
+  // Stream Manager rows), on the card's solid glass. Cropped to the mark's
+  // bounds inside the file.
+  let markLeadPx = 0
+  if (layout.platformMark && params.platformMark) {
+    const mark = layout.platformMark
+    const scaleX = params.platformMark.width / YOUTUBE_ARTBOARD.width
+    const scaleY = params.platformMark.height / YOUTUBE_ARTBOARD.height
+    context.drawImage(
+      params.platformMark,
+      YOUTUBE_MARK.x * scaleX,
+      YOUTUBE_MARK.y * scaleY,
+      YOUTUBE_MARK.width * scaleX,
+      YOUTUBE_MARK.height * scaleY,
+      originX + layout.cardWidthPx - metrics.paddingPx - mark.widthPx,
+      Math.round(avatarY + (metrics.avatarPx - mark.heightPx) / 2),
+      mark.widthPx,
+      mark.heightPx
+    )
+    markLeadPx = mark.widthPx + metrics.identityGapPx
+  }
+
   // Username beside the avatar (centred on it), message below from the card's
   // left padding.
   const nameX = avatarX + metrics.avatarPx + metrics.identityGapPx
@@ -857,7 +908,12 @@ export async function renderCommentHighlightPng(params: {
   context.textBaseline = 'middle'
   context.font = canvasFont(metrics.nameFontPx, HIGHLIGHT_NAME_WEIGHT)
   context.fillStyle = '#F5F5F7'
-  context.fillText(layout.name, nameX, avatarY + metrics.avatarPx / 2 + 1, metrics.maxNameWidthPx)
+  context.fillText(
+    layout.name,
+    nameX,
+    avatarY + metrics.avatarPx / 2 + 1,
+    Math.max(1, metrics.maxNameWidthPx - markLeadPx)
+  )
   context.textBaseline = 'top'
   context.font = canvasFont(metrics.textFontPx, HIGHLIGHT_TEXT_WEIGHT)
   context.fillStyle = 'rgba(244, 244, 245, 0.92)'

@@ -1,4 +1,5 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -7,7 +8,17 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
-import { CameraIcon, StudioIcon, BrainIcon, KickIcon, OrcleIcon, type AppIconProps } from './icons'
+import {
+  CameraIcon,
+  StudioIcon,
+  BrainIcon,
+  KickIcon,
+  OrcleIcon,
+  YOUTUBE_MARK_ASPECT,
+  YOUTUBE_MARK_MIN_PX,
+  YoutubeIcon,
+  type AppIconProps
+} from './icons'
 
 describe('semantic icon registry', () => {
   it('keeps optional glyph modules outside the initial chunk through the actual registry', async () => {
@@ -108,5 +119,53 @@ describe('semantic icon registry', () => {
       expect(markup(weight)).toBe(html)
     }
     expect(renderToStaticMarkup(createElement(OrcleIcon))).toContain('width="1em"')
+  })
+  // Plan 165 (Google's ToS report, III.F.2a): the YouTube mark is YouTube's
+  // own file, unmodified, and never drawn shorter than 20px.
+  it('draws YouTube as the official icon file, never smaller than 20px', async () => {
+    const markup = (props: AppIconProps = {}): string =>
+      renderToStaticMarkup(createElement(YoutubeIcon, props))
+    const html = markup({ className: 'size-3.5 text-platform-youtube', weight: 'fill' })
+    expect(html).toMatch(/^<svg /)
+    // Vite inlines the small file as a data URI; either way it is the official art.
+    const href = /<image href="([^"]+)"/.exec(html)?.[1] ?? ''
+    const image = decodeURIComponent(href.replaceAll('&#x27;', "'"))
+    expect(
+      image.includes('youtube-icon-red') ||
+        (image.includes("fill='rgb(100%, 0%, 19.999695%)'") &&
+          image.includes("fill='rgb(100%, 100%, 100%)'"))
+    ).toBe(true)
+    expect(html).not.toContain('<path')
+    expect(html).not.toContain('currentColor')
+    expect(html).toContain('data-slot="platform-mark"')
+    // The viewBox is the mark's own bounds, so the box height is the mark height.
+    expect(html).toContain('viewBox="102.6875 119.167969 396 277.402343"')
+    expect(html).toContain('height:20px')
+    expect(html).toContain(`width:${Math.round(20 * YOUTUBE_MARK_ASPECT * 100) / 100}px`)
+    // A smaller request clamps up; a larger one is honoured.
+    expect(markup({ size: 12 })).toContain(`height="${YOUTUBE_MARK_MIN_PX}"`)
+    expect(markup({ size: '14' })).toContain(`height="${YOUTUBE_MARK_MIN_PX}"`)
+    expect(markup({ size: 32 })).toContain('height="32"')
+    for (const weight of ['thin', 'light', 'regular', 'duotone', 'bold'] as const) {
+      expect(markup({ className: 'size-3.5 text-platform-youtube', weight })).toBe(html)
+    }
+  })
+
+  it('ships the YouTube icon byte-for-byte as recorded in its README', async () => {
+    const folder = new URL('../assets/brand/youtube/', import.meta.url)
+    const svg = await readFile(new URL('youtube-icon-red.svg', folder))
+    const readme = await readFile(new URL('README.md', folder), 'utf8')
+    const sha256 = createHash('sha256').update(svg).digest('hex')
+    expect(readme).toMatch(new RegExp(`Shipped sha256\\s*\\|\\s*\`${sha256}\``))
+    const text = svg.toString('utf8')
+    // YouTube Red #FF0033 and a white triangle, nothing else.
+    expect(text.match(/<path /g)).toHaveLength(2)
+    expect(text).toContain('fill="rgb(100%, 0%, 19.999695%)"')
+    expect(text).toContain('fill="rgb(100%, 100%, 100%)"')
+  })
+
+  it('never re-exports a Phosphor glyph as the YouTube mark', async () => {
+    const source = await readFile(new URL('./icons.tsx', import.meta.url), 'utf8')
+    expect(source).not.toMatch(/\bYoutubeLogo\b/)
   })
 })
