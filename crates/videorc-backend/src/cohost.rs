@@ -19168,6 +19168,107 @@ mod tests {
         }
     }
 
+    #[test]
+    fn banter_rides_a_v4_session_on_dead_air_and_the_mode_gates_it() {
+        let start = Instant::now();
+        let (mut engine, generation) =
+            running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        // A live microphone, quiet for 40 s.
+        let at = start + Duration::from_secs(30);
+        let prepared = engine
+            .prepare_banter(generation, true, quiet_voice(at), at)
+            .expect("banter is due");
+        assert_eq!(prepared.request.intent, Some(CohostTickIntent::Banter));
+        assert!(prepared.request.messages.is_empty());
+        assert_eq!(prepared.request.transcript, None);
+        assert!(prepared.request.persona.is_some());
+        // Nothing else leaves while it is in flight.
+        assert!(engine.prepare_tick(generation, true, true, at).is_err());
+        assert!(
+            engine
+                .prepare_banter(generation, true, quiet_voice(at), at)
+                .is_none()
+        );
+        let pass = engine.apply_banter_result(
+            generation,
+            Ok(CohostTickResponse {
+                banter: Some(crate::videorc_api::CohostTickBanter {
+                    text: " Chat, the keyboard is louder than the game. ".to_string(),
+                    mood: Some(CohostTickMood::Thinking),
+                }),
+                ..CohostTickResponse::default()
+            }),
+            at + Duration::from_secs(1),
+            "2026-08-22T10:00:31Z",
+        );
+        assert_eq!(pass.send.len(), 1);
+        assert_eq!(
+            pass.send[0].text,
+            "Chat, the keyboard is louder than the game."
+        );
+        assert_eq!(pass.send[0].state, CohostUtteranceState::Think);
+        assert_eq!(
+            pass.send[0].trigger.kind,
+            CohostUtteranceTriggerKind::Banter
+        );
+        assert!(
+            pass.send[0].destination_ids.is_empty(),
+            "every writable destination"
+        );
+        // The lane is free again, and the cooldown holds the next one.
+        let later = at + Duration::from_secs(5);
+        engine.note_messages(&messages("session-1", 0..5));
+        assert!(
+            engine
+                .prepare_tick(generation, true, true, later + Duration::from_secs(10))
+                .is_ok()
+        );
+        assert!(
+            engine
+                .prepare_banter(generation, true, quiet_voice(later), later)
+                .is_none()
+        );
+
+        // Off: never. v3: never. Not signed in or not Premium: never.
+        let (mut engine, generation) = running_engine_with(CohostAutoChatMode::Off, Some(4), start);
+        assert!(
+            engine
+                .prepare_banter(generation, true, quiet_voice(at), at)
+                .is_none()
+        );
+        let (mut engine, generation) = running_engine_with(CohostAutoChatMode::Auto, None, start);
+        assert!(
+            engine
+                .prepare_banter(generation, true, quiet_voice(at), at)
+                .is_none()
+        );
+        let (mut engine, generation) =
+            running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        assert!(
+            engine
+                .prepare_banter(generation, false, quiet_voice(at), at)
+                .is_none()
+        );
+        // A banter failure frees the lane without pausing the session.
+        let prepared = engine
+            .prepare_banter(generation, true, quiet_voice(at), at)
+            .unwrap();
+        let pass = engine.apply_banter_result(
+            prepared.generation,
+            Err(server_error(502, "ai-gateway-error", "upstream")),
+            at + Duration::from_secs(1),
+            "2026-08-22T10:00:31Z",
+        );
+        assert!(pass.send.is_empty());
+        assert_eq!(pass.log.len(), 1);
+        assert_eq!(engine.snapshot().status, CohostStatus::Listening);
+        engine.note_messages(&messages("session-1", 0..5));
+        assert!(
+            engine
+                .prepare_tick(generation, true, true, at + Duration::from_secs(10))
+                .is_ok()
+        );
+    }
 
     #[test]
     fn a_proposed_card_is_refused_once_the_mode_is_off() {
