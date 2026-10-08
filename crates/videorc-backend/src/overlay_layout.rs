@@ -269,7 +269,7 @@ impl Default for OverlayLayout {
                 false,
                 false,
             ),
-            golem: snapped_item(OverlayItem::Golem, OverlaySnap::BottomRight, true, true),
+            golem: snapped_item(OverlayItem::Golem, OverlaySnap::BottomRight, false, false),
         }
     }
 }
@@ -938,6 +938,10 @@ mod tests {
     fn session_plans_apply_the_shared_leg_fallback_and_flag_split_needs() {
         let mut layout = OverlayLayout::default();
         layout.highlight.show_in_recording = false;
+        // The Golem is opt-in: both switches ship off.
+        assert!(!layout.golem.show_on_stream && !layout.golem.show_in_recording);
+        layout.golem.show_on_stream = true;
+        layout.golem.show_in_recording = true;
         let shared = shape(true, true, OverlayAuxLeg::None);
         let plans = overlay_session_plans(shared, &layout);
         assert_eq!(
@@ -973,7 +977,7 @@ mod tests {
         let mut layout = OverlayLayout::default();
         assert!(overlay_start_notices(shape(true, true, OverlayAuxLeg::None), &layout).is_empty());
         layout.highlight.show_in_recording = false;
-        layout.golem.show_on_stream = false;
+        layout.golem.show_in_recording = true;
         layout.captions.show_on_stream = true;
         // A split leg honours everything.
         assert!(

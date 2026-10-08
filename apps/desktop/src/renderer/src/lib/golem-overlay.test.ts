@@ -263,7 +263,8 @@ describe('renderGolemOverlayPng snapshots (D17)', () => {
 })
 
 describe('golemOverlayTargetPlan', () => {
-  const layout = DEFAULT_OVERLAY_LAYOUT.golem
+  // The shipped default is opt-in (both switches off); these plans need it on.
+  const layout = { ...DEFAULT_OVERLAY_LAYOUT.golem, showOnStream: true, showInRecording: true }
   const recording = { width: 1920, height: 1080 }
   const stream = { width: 1280, height: 720 }
 

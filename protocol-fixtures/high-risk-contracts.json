@@ -1520,8 +1520,8 @@
       "golem": {
         "horizontal": { "x": 0.7975, "y": 0.64, "w": 0.18, "h": 0.32 },
         "vertical": { "x": 0.608889, "y": 0.6, "w": 0.32, "h": 0.18 },
-        "showOnStream": true,
-        "showInRecording": true
+        "showOnStream": false,
+        "showInRecording": false
       }
     },
     "placed": {

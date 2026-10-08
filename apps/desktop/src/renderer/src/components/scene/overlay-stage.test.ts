@@ -25,7 +25,7 @@ describe('overlay stage helpers', () => {
     expect(overlayItemFromStageId(null)).toBeNull()
     const layout: OverlayLayout = {
       ...DEFAULT_OVERLAY_LAYOUT,
-      golem: { ...DEFAULT_OVERLAY_LAYOUT.golem, showInRecording: false }
+      golem: { ...DEFAULT_OVERLAY_LAYOUT.golem, showOnStream: true, showInRecording: false }
     }
     const items = overlayStageItems(layout, 'vertical')
     expect(items.map((item) => item.item)).toEqual(['highlight', 'captions', 'golem'])

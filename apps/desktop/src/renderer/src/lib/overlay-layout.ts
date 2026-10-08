@@ -116,7 +116,7 @@ function snappedItem(
 export const DEFAULT_OVERLAY_LAYOUT: OverlayLayout = {
   highlight: snappedItem('highlight', 'bottom-left', true, true),
   captions: snappedItem('captions', 'bottom-center', false, false),
-  golem: snappedItem('golem', 'bottom-right', true, true)
+  golem: snappedItem('golem', 'bottom-right', false, false)
 }
 
 export function cloneOverlayLayout(layout: OverlayLayout): OverlayLayout {
