@@ -1762,6 +1762,7 @@ mod tests {
             author_avatar_url: None,
             author_badges: Vec::new(),
             author_affiliation: None,
+            author_verified: None,
             author_roles: Vec::new(),
             published_at: "2026-10-01T00:00:00Z".to_string(),
             received_at: "2026-10-01T00:00:00Z".to_string(),

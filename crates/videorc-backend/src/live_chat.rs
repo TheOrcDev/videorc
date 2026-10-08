@@ -340,6 +340,47 @@ pub struct LiveChatAuthorAffiliation {
     pub url: Option<String>,
 }
 
+/// The verified check a platform shows beside an author's name: X's Premium
+/// (blue), Verified Organization (gold) or government (gray) check (plan 167).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LiveChatAuthorVerified {
+    Blue,
+    Business,
+    Government,
+}
+
+impl LiveChatAuthorVerified {
+    /// X's `verified_type`. `none`, empty and unknown values show no check:
+    /// never a check X did not send.
+    pub fn from_x_verified_type(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "blue" => Some(Self::Blue),
+            "business" => Some(Self::Business),
+            "government" => Some(Self::Government),
+            _ => None,
+        }
+    }
+
+    /// The stored word, the same as the wire value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Blue => "blue",
+            Self::Business => "business",
+            Self::Government => "government",
+        }
+    }
+
+    pub fn from_stored(value: &str) -> Option<Self> {
+        match value {
+            "blue" => Some(Self::Blue),
+            "business" => Some(Self::Business),
+            "government" => Some(Self::Government),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
@@ -361,6 +402,9 @@ pub struct LiveChatMessage {
     /// The organization badge next to the author's name (X affiliation).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author_affiliation: Option<LiveChatAuthorAffiliation>,
+    /// The verified check next to the author's name (X `verified_type`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_verified: Option<LiveChatAuthorVerified>,
     #[serde(default)]
     pub author_roles: Vec<String>,
     pub published_at: String,
@@ -1326,6 +1370,7 @@ impl LiveChatCoordinator {
                 message.author_avatar_url = existing.author_avatar_url.clone();
                 message.author_badges = existing.author_badges.clone();
                 message.author_affiliation = existing.author_affiliation.clone();
+                message.author_verified = existing.author_verified;
                 message.author_roles = existing.author_roles.clone();
                 message.published_at = existing.published_at.clone();
                 message.received_at = existing.received_at.clone();
@@ -3902,6 +3947,16 @@ fn fake_message(
         reply: None,
         first_message: false,
         author_affiliation: None,
+        // Fake X chat shows each of X's checks and an unverified viewer, so
+        // the dev Stream Manager and the smokes see all of them (plan 167).
+        author_verified: (platform == StreamPlatform::X)
+            .then(|| match seq % 4 {
+                0 => Some(LiveChatAuthorVerified::Blue),
+                1 => Some(LiveChatAuthorVerified::Business),
+                2 => Some(LiveChatAuthorVerified::Government),
+                _ => None,
+            })
+            .flatten(),
     }
 }
 
@@ -7136,6 +7191,7 @@ mod tests {
             reply: None,
             first_message: false,
             author_affiliation: None,
+            author_verified: None,
         };
         assert_eq!(message.id, "session-1:youtube:target-1:abc123");
         let json = serde_json::to_value(&message).unwrap();
