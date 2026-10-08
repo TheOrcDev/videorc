@@ -415,17 +415,17 @@ export function ActivityPane({
             </ToggleGroup>
           ) : null}
         </div>
-        {/* Auto-show (plan 156): new follows, subs, gifts, tips, raids and
-            streaks pop onto the stream as the highlight card, hands-free.
+        {/* Auto-show (plan 156): new follows, subs, gifts, tips, rewards,
+            raids and streaks pop onto the stream as the highlight card, hands-free.
             Manual picks always win; the switch only feeds an idle slot. */}
         {onAutoShowChange ? (
           <label
             className="ml-auto flex h-6 shrink-0 items-center gap-1.5 text-xs text-muted-foreground select-none"
-            title="Automatically show new follows, subs, gifts, tips, raids and streaks on stream for a few seconds"
+            title="Automatically show new follows, subs, gifts, tips, rewards, raids and streaks on stream for a few seconds"
           >
             Auto-show
             <Switch
-              aria-label="Automatically show new follows, subs, gifts, tips, raids and streaks on stream"
+              aria-label="Automatically show new follows, subs, gifts, tips, rewards, raids and streaks on stream"
               checked={autoShow}
               data-slot="activity-auto-show"
               size="sm"

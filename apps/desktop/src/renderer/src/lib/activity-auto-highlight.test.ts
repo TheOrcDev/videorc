@@ -97,6 +97,17 @@ const celebrations: { label: string; message: LiveChatMessage }[] = [
       bits: 300,
       powerUp: 'celebration'
     })
+  },
+  // Plan 163: channel point redemptions auto-show like tips.
+  {
+    label: 'redemption',
+    message: row('twitch', 'v', 'redemption', {
+      kind: 'redemption',
+      reward: 'custom',
+      channelPoints: 500,
+      title: 'Hydrate',
+      pointsName: 'Orc Gold'
+    })
   }
 ]
 
@@ -106,16 +117,6 @@ describe('activityAutoShowEligible (plan 156, D2)', () => {
       expect(activityAutoShowEligible(message)).toBe(true)
     })
   }
-
-  it('never auto-shows a channel point redemption (plan 162)', () => {
-    const hydrate = row('twitch', 'v', 'redemption', {
-      kind: 'redemption',
-      reward: 'custom',
-      channelPoints: 500,
-      title: 'Hydrate'
-    })
-    expect(activityAutoShowEligible(hydrate)).toBe(false)
-  })
 
   it('never auto-shows an announcement', () => {
     const announcement = row('twitch', 'mod', 'system', { kind: 'announcement' }, 'Be nice')

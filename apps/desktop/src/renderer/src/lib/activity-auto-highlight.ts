@@ -22,9 +22,11 @@ export const AUTO_SHOW_ACTIVITY_KINDS: ReadonlySet<string> = new Set([
   'super-sticker',
   'raid',
   'watch-streak',
-  // Plan 162: Power-ups are bits. Channel point redemptions stay off: a
-  // Hydrate reward can fire every few minutes.
-  'power-up'
+  // Plan 162: Power-ups are bits. Plan 163: channel point redemptions show
+  // too, on the owner's call; AUTO_SHOW_MAX_PENDING keeps a run of them to a
+  // rolling sample.
+  'power-up',
+  'redemption'
 ])
 
 /** A hype train shows a rolling sample, never a backlog (plan 156, D4). */
