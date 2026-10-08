@@ -1,4 +1,12 @@
-import { CameraIcon, DisplayIcon, ExternalLinkIcon, PreviewIcon } from '@/components/icons'
+import {
+  CameraIcon,
+  CaptionsIcon,
+  ChatIcon,
+  DisplayIcon,
+  ExternalLinkIcon,
+  OrcleIcon,
+  PreviewIcon
+} from '@/components/icons'
 import {
   useCallback,
   useEffect,
@@ -7,6 +15,7 @@ import {
   useReducer,
   useRef,
   useState,
+  type ElementType,
   type ReactElement
 } from 'react'
 
@@ -18,6 +27,7 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type {
   CameraShape,
   EffectiveSceneBackground,
+  OverlayItem,
   Scene,
   SceneEditorDraftParams,
   SceneSource
@@ -29,6 +39,7 @@ import {
   type EditorDraftSample
 } from '@/lib/editor-draft-channel'
 import { cn } from '@/lib/utils'
+import { overlayStageId, type OverlayDraft, type OverlayStageItem } from './overlay-stage'
 import {
   StageEdits,
   StageGesture,
@@ -80,6 +91,26 @@ type ActiveGesture = {
   clientX: number
   clientY: number
   moved: boolean
+  /** Set while the pointer owns an overlay item instead of a scene source. */
+  overlay?: OverlayItem
+}
+
+/** Overlay items on the canvas (plan 164, D15): placed like sources, committed
+ * through `overlays.layout.set` by the owner of `onCommit`. */
+export interface StageOverlays {
+  items: OverlayStageItem[]
+  selectedItem: OverlayItem | null
+  /** The released rect, shown until the committed layout echoes it. */
+  draft: OverlayDraft | null
+  editable: boolean
+  onSelect: (item: OverlayItem) => void
+  onCommit: (item: OverlayItem, rect: StageRect) => void
+}
+
+const OVERLAY_ICONS: Record<OverlayItem, ElementType> = {
+  highlight: ChatIcon,
+  captions: CaptionsIcon,
+  golem: OrcleIcon
 }
 type StageGhost = GhostResult & { sourceId: string }
 
@@ -124,10 +155,13 @@ export function SceneStage({
   onTogglePreview,
   onCommitTransform,
   onSnapCorner,
-  onRequestFreeform
+  onRequestFreeform,
+  overlays
 }: {
   scene: Scene | null
   selectedSourceId: string | null
+  /** Overlay items drawn after the sources; absent on canvases that place none. */
+  overlays?: StageOverlays
   background?: EffectiveSceneBackground | null
   previewOpen: boolean
   /** The docked surface is showing over the canvas: hit-only mode. */
@@ -232,7 +266,11 @@ export function SceneStage({
   useLayoutEffect(() => {
     channel.enabled = draftEnabled
   }, [channel, draftEnabled])
-  const phase = ghost ? 'dragging' : edits.draft || externalPending ? 'pending' : 'idle'
+  const phase = ghost
+    ? 'dragging'
+    : edits.draft || overlays?.draft || externalPending
+      ? 'pending'
+      : 'idle'
   useLayoutEffect(() => {
     onBusyChange?.(phase !== 'idle')
   }, [onBusyChange, phase])
@@ -260,11 +298,15 @@ export function SceneStage({
     cameraShape,
     cameraAspectLocked
   ])
+  // The one selected thing on the stage: a scene source or an overlay item.
+  const selectedOverlayItem = overlays?.selectedItem ?? null
+  const selectedStageId =
+    selectedSourceId ?? (selectedOverlayItem ? overlayStageId(selectedOverlayItem) : null)
   useLayoutEffect(() => {
-    if (gestureRef.current && gestureRef.current.motion.sourceId !== selectedSourceId)
+    if (gestureRef.current && gestureRef.current.motion.sourceId !== selectedStageId)
       cancelGesture()
     if (edits.draft && edits.draft.sourceId !== selectedSourceId) edits.invalidate()
-  }, [cancelGesture, edits, selectedSourceId])
+  }, [cancelGesture, edits, selectedSourceId, selectedStageId])
   useEffect(() => {
     mountedRef.current = true
     const svg = svgRef.current
@@ -329,7 +371,9 @@ export function SceneStage({
       transform: ghost.rect,
       chrome: {
         selected: ghost.rect,
-        handles: resizeEnabled && Boolean(source && editable(source)),
+        handles: gesture.overlay
+          ? Boolean(overlays?.editable)
+          : resizeEnabled && Boolean(source && editable(source)),
         ...(kind !== 'move' ? { activeHandle: kind } : {}),
         guides: ghost.guides,
         scale: chromeScale(gesture.motion.pixels.width),
@@ -338,6 +382,14 @@ export function SceneStage({
     }
   }
   const selectedSource = sources.find((source) => source.id === selectedSourceId)
+  const overlayItems = overlays?.items ?? []
+  const displayedOverlay = (entry: OverlayStageItem): StageRect =>
+    ghost?.sourceId === entry.stageId
+      ? ghost.rect
+      : overlays?.draft?.item === entry.item
+        ? overlays.draft.rect
+        : entry.rect
+  const selectedOverlay = overlayItems.find((entry) => entry.item === selectedOverlayItem)
   // The idle selection on the live canvas: hold a chrome-only draft for the
   // selected source so its frame and handles stay on the real picture between
   // gestures. Keyed on the DISPLAYED rect minus the ghost (a gesture suspends
@@ -347,17 +399,26 @@ export function SceneStage({
   // replace it and let the picture snap back. When the committed scene lands
   // the rect changes, and the hold follows it.
   const ownCommitPending = edits.draft?.sourceId === selectedSourceId
-  const heldId = draftEnabled && selectedSource ? selectedSource.id : null
+  // A selected overlay item holds the same chrome-only draft under its own
+  // stage id: the backend draws the frame and handles on the live picture
+  // and, knowing no such source, moves nothing (plan 164).
+  const heldId = draftEnabled
+    ? (selectedSource?.id ?? (selectedOverlay ? selectedOverlay.stageId : null))
+    : null
   const heldRect = selectedSource
     ? edits.draft?.sourceId === selectedSource.id
       ? edits.draft.rect
       : selectedSource.transform
-    : null
+    : selectedOverlay
+      ? displayedOverlay(selectedOverlay)
+      : null
   const heldX = heldRect?.x ?? 0
   const heldY = heldRect?.y ?? 0
   const heldWidth = heldRect?.width ?? 0
   const heldHeight = heldRect?.height ?? 0
-  const heldHandles = Boolean(selectedSource && resizeEnabled && editable(selectedSource))
+  const heldHandles = selectedSource
+    ? Boolean(resizeEnabled && editable(selectedSource))
+    : Boolean(selectedOverlay && overlays?.editable)
   const heldScale = chromeScale(pixelScale * STAGE_W)
   const heldSlotWidth = pixelScale * STAGE_W
   useEffect(() => {
@@ -445,6 +506,65 @@ export function SceneStage({
     channel.begin(source.id)
     channel.sample(draftOf(gestureRef.current, { rect: initial, guides: [] }))
   }
+  /** Grab an overlay item: the same pointer ownership and ghost maths as a
+   * source, snapping to sources and the other items, released as ONE
+   * `overlays.layout.set` by the owner (never a scene commit). */
+  const beginOverlayGesture = (
+    entry: OverlayStageItem,
+    kind: 'move' | StageHandleId,
+    event: React.PointerEvent<Element>
+  ): void => {
+    if (!overlays) return
+    if (event.button !== 0 || !event.isPrimary || gestureRef.current || externalPending) return
+    overlays.onSelect(entry.item)
+    if (!overlays.editable) return
+    const svg = svgRef.current
+    const matrix = svg?.getScreenCTM()
+    if (!svg || !matrix) return
+    const mapping = {
+      a: matrix.a,
+      b: matrix.b,
+      c: matrix.c,
+      d: matrix.d,
+      e: matrix.e,
+      f: matrix.f,
+      width: STAGE_W,
+      height: stageH
+    }
+    const point = stagePoint(mapping, event.clientX, event.clientY)
+    if (!point) return
+    event.preventDefault()
+    const initial = { ...displayedOverlay(entry) }
+    const motion = new StageGesture(
+      entry.stageId,
+      event.pointerId,
+      kind,
+      initial,
+      point,
+      stagePixelSize(mapping),
+      stageSnapTargets([
+        ...sources.map(displayed),
+        ...overlayItems.filter((other) => other.item !== entry.item).map(displayedOverlay)
+      ]),
+      effectiveSnap,
+      false,
+      false
+    )
+    motion.sample(point, event)
+    gestureRef.current = {
+      motion,
+      mapping,
+      initial,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      moved: false,
+      overlay: entry.item
+    }
+    svg.setPointerCapture(event.pointerId)
+    setGhost({ sourceId: entry.stageId, rect: initial, guides: [] })
+    channel.begin(entry.stageId)
+    channel.sample(draftOf(gestureRef.current, { rect: initial, guides: [] }))
+  }
   const flushSample = (
     sample: {
       clientX: number
@@ -493,6 +613,13 @@ export function SceneStage({
       return
     }
     const changed = gesture.moved && !sameStageRect(final.rect, gesture.initial)
+    if (gesture.overlay) {
+      // No scene revision will end this draft: clear it with the gesture and
+      // let the hold (the selected item's frame) take over on the live picture.
+      cancelGesture()
+      if (changed) overlays?.onCommit(gesture.overlay, final.rect)
+      return
+    }
     const corner =
       changed && gesture.motion.kind === 'move' && onSnapCorner ? snapCornerOf(final.rect) : null
     // The draft's last frame and the commit carry the same rounded rect, and
@@ -536,12 +663,13 @@ export function SceneStage({
           className="min-w-0 flex-wrap"
           size="sm"
           type="single"
-          value={selectedSourceId ?? ''}
+          value={selectedStageId ?? ''}
           onValueChange={(value) => {
-            if (value) {
-              cancelGesture()
-              onSelectSource(value)
-            }
+            if (!value) return
+            cancelGesture()
+            const overlay = overlayItems.find((entry) => entry.stageId === value)
+            if (overlay) overlays?.onSelect(overlay.item)
+            else onSelectSource(value)
           }}
         >
           {sources.map((source) => (
@@ -559,6 +687,21 @@ export function SceneStage({
               <span className="max-w-44 truncate">{source.name}</span>
             </ToggleGroupItem>
           ))}
+          {overlayItems.map((entry) => {
+            const Icon = OVERLAY_ICONS[entry.item]
+            return (
+              <ToggleGroupItem
+                key={entry.stageId}
+                aria-label={`Select ${entry.label}`}
+                data-videorc-stage-overlay-chip={entry.item}
+                title={entry.badge ? `${entry.label} (${entry.badge})` : entry.label}
+                value={entry.stageId}
+              >
+                <Icon data-icon="inline-start" />
+                <span className="max-w-44 truncate">{entry.label}</span>
+              </ToggleGroupItem>
+            )
+          })}
         </ToggleGroup>
       </div>
       <Separator />
@@ -710,6 +853,81 @@ export function SceneStage({
                   </g>
                 )
               })}
+              {/* Overlay items (plan 164, D15): a second item layer after the
+                  sources. Dashed hairline rects with a label chip; a
+                  "stream only" / "recording only" badge when the item's two
+                  output switches differ. Hidden under the live surface like
+                  every painted element; the hit targets stay. */}
+              {overlayItems.map((entry) => {
+                const rect = displayedOverlay(entry)
+                const labelPx = 11 / pixelScale
+                const padPx = 4 / pixelScale
+                const chipH = 16 / pixelScale
+                return (
+                  <g
+                    key={entry.stageId}
+                    data-videorc-stage-overlay={entry.item}
+                    className={
+                      overlays?.editable ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'
+                    }
+                    onClick={(event) => {
+                      if (event.button === 0 && !externalPending) overlays?.onSelect(entry.item)
+                    }}
+                    onPointerDown={(event) => beginOverlayGesture(entry, 'move', event)}
+                  >
+                    <rect
+                      data-videorc-stage-overlay-bounds
+                      x={rect.x * STAGE_W}
+                      y={rect.y * stageH}
+                      width={rect.width * STAGE_W}
+                      height={rect.height * stageH}
+                      fill="transparent"
+                    />
+                    <rect
+                      className={cn(
+                        'fill-none stroke-foreground/30',
+                        selectedOverlayItem === entry.item && 'stroke-foreground/60',
+                        liveSurface && 'invisible'
+                      )}
+                      pointerEvents="none"
+                      strokeDasharray="4 3"
+                      strokeWidth={1}
+                      vectorEffect="non-scaling-stroke"
+                      x={rect.x * STAGE_W}
+                      y={rect.y * stageH}
+                      width={rect.width * STAGE_W}
+                      height={rect.height * stageH}
+                    />
+                    <g
+                      className={cn(liveSurface && 'invisible')}
+                      pointerEvents="none"
+                      transform={`translate(${rect.x * STAGE_W + padPx} ${rect.y * stageH + padPx})`}
+                    >
+                      <text
+                        className="fill-foreground/80"
+                        data-videorc-stage-overlay-label
+                        dominantBaseline="middle"
+                        fontSize={labelPx}
+                        fontWeight={600}
+                        x={padPx}
+                        y={chipH / 2}
+                      >
+                        {entry.label}
+                        {entry.badge ? (
+                          <tspan
+                            className="fill-muted-foreground"
+                            data-videorc-stage-overlay-badge={entry.badge}
+                            dx={padPx}
+                            fontWeight={400}
+                          >
+                            {entry.badge}
+                          </tspan>
+                        ) : null}
+                      </text>
+                    </g>
+                  </g>
+                )
+              })}
               {ghost?.guides.map((guide) => (
                 <line
                   key={`${guide.axis}-${guide.position}`}
@@ -734,6 +952,16 @@ export function SceneStage({
                 enabled={resizeEnabled && editable(selectedSource)}
                 hitOnly={liveSurface}
                 onHandle={(handle, event) => beginGesture(selectedSource, handle, event)}
+              />
+            ) : selectedOverlay ? (
+              <StageSelection
+                rect={displayedOverlay(selectedOverlay)}
+                activeHandle={activeHandle}
+                stageH={stageH}
+                scale={pixelScale}
+                enabled={Boolean(overlays?.editable)}
+                hitOnly={liveSurface}
+                onHandle={(handle, event) => beginOverlayGesture(selectedOverlay, handle, event)}
               />
             ) : null}
             {/* Keep the edge hit targets within a reserved, unobstructed gutter. */}
@@ -767,7 +995,7 @@ export function SceneStage({
             <span className="truncate" data-videorc-stage-live-hint title={liveHint}>
               {liveHint}
             </span>
-          ) : dragEnabled ? (
+          ) : dragEnabled || overlays?.editable ? (
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <span className="inline-flex items-center gap-1.5">
                 <Kbd>Shift</Kbd>

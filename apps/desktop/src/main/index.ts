@@ -2993,9 +2993,12 @@ function commentsHighlightAnchor(): CommentHighlightAnchor {
   return commentsHighlightAnchorValue
 }
 
+// Plan 164: the corner is a snap into the backend-owned overlay layout, which
+// the Studio renderer writes when this state reaches it. Main keeps the pick
+// in memory for the menu only and never persists it again (the one-time
+// migration above moved the last saved pick into the layout).
 function setCommentsWindowHighlightAnchor(anchor: unknown): CommentsWindowState {
   commentsHighlightAnchorValue = normalizeCommentHighlightAnchor(anchor)
-  saveCommentsWindowPrefs({ highlightAnchor: commentsHighlightAnchorValue })
   emitCommentsWindowState()
   return commentsWindowState()
 }

@@ -36,6 +36,7 @@ import type {
 import { type EntitlementUiGate } from '@/lib/entitlement-ui'
 import type { GoLiveCaptionsReadiness } from '@/lib/captions-preflight'
 import { softwareStreamAdvice, type SoftwareStreamAdvice } from '@/lib/go-live-output'
+import { OVERLAY_ITEM_LABELS, overlayStartNotices } from '@/lib/overlay-layout'
 import { outputLabel } from '@/lib/performance-check'
 import { YOUTUBE_STREAM_KEY_LINK_LABEL, YOUTUBE_STREAM_KEY_URL } from '@/lib/youtube-quota-copy'
 
@@ -76,8 +77,28 @@ export function GoLiveConfirmationDialog({
     captureConfig,
     performanceCheck,
     streamOutputTopologyPreflight,
-    streamSharedEncodeFallbackVideo
+    streamSharedEncodeFallbackVideo,
+    overlayLayout
   } = useStudioCore()
+  // D13 (plan 164): every overlay switch pair this session cannot honour,
+  // said before start. The auxiliary leg is the topology's, never an
+  // overlay's: the vertical leg when simulcast is armed, a split stream leg
+  // when the output check proved one, else the one shared encode.
+  const overlayNotices = overlayStartNotices(
+    {
+      recordEnabled: captureConfig.recordEnabled,
+      streamEnabled: true,
+      auxLeg: simulcastArmed(captureConfig)
+        ? 'vertical-simulcast'
+        : captureConfig.recordEnabled &&
+            !streamSharedEncodeFallbackVideo &&
+            (streamOutputTopologyPreflight.state !== 'ready' ||
+              streamOutputTopologyPreflight.result.outputRoles.includes('stream'))
+          ? 'stream'
+          : 'none'
+    },
+    overlayLayout
+  )
   // What the finished check and this computer's measurement say about the
   // stream as configured, before anything starts.
   const streamPerformanceAdvice =
@@ -316,6 +337,20 @@ export function GoLiveConfirmationDialog({
               recordEnabled={captureConfig.recordEnabled}
               sharedVideo={streamSharedEncodeFallbackVideo}
             />
+
+            {overlayNotices.length ? (
+              <ul className="grid gap-1 text-xs text-subtle" data-videorc-go-live-overlay-notices>
+                {overlayNotices.map((notice) => (
+                  <li key={notice.item} data-videorc-go-live-overlay-notice={notice.item}>
+                    <span className="font-medium text-foreground">
+                      {OVERLAY_ITEM_LABELS[notice.item]}
+                    </span>
+                    {' · '}
+                    {notice.notice}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
 
             {partialSetup ? (
               <div className="flex flex-col gap-2 rounded-row border border-warning/35 bg-warning/10 p-3">
