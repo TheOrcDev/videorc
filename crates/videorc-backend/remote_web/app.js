@@ -153,7 +153,9 @@ function initials(name) {
 
 // The platform mark closes the row on the far right. YouTube rows carry
 // YouTube's official icon file, unmodified and 20 px tall (plan 165, Google's
-// ToS report III.F.2a). Other platforms keep a letter tile.
+// ToS report III.F.2a). X rows carry X's mark from its partner kit, white on
+// the black tile like X's own app-icon lockup (plan 167). Other platforms
+// keep a letter tile.
 function platformGlyph(platform) {
   if (platform === 'youtube') {
     const glyph = el('span', 'glyph')
@@ -174,9 +176,37 @@ function platformGlyph(platform) {
     glyph.append(icon)
     return glyph
   }
+  if (platform === 'x') {
+    const glyph = el('span', 'glyph')
+    glyph.dataset.platform = 'x'
+    const icon = el('img', 'x-mark')
+    icon.src = '/x-logo.svg'
+    icon.alt = 'X'
+    icon.draggable = false
+    glyph.append(icon)
+    return glyph
+  }
   const glyph = el('span', 'glyph', (platform ?? '?').slice(0, 1).toUpperCase())
   glyph.dataset.platform = platform ?? ''
   return glyph
+}
+
+// X's own verified checks (plan 167), X's kit files. The projection sends a
+// word; anything but these three shows no check.
+const VERIFIED_CHECKS = {
+  blue: 'Verified on X',
+  business: 'Verified organization on X',
+  government: 'Government account on X'
+}
+
+function verifiedCheck(verified) {
+  if (!Object.prototype.hasOwnProperty.call(VERIFIED_CHECKS, verified)) return null
+  const check = el('img', 'verified')
+  check.src = `/x-verified-${verified}.svg`
+  check.alt = VERIFIED_CHECKS[verified]
+  check.title = VERIFIED_CHECKS[verified]
+  check.draggable = false
+  return check
 }
 
 function buildRow(message) {
@@ -188,6 +218,8 @@ function buildRow(message) {
   const glyph = platformGlyph(message.platform)
   const meta = el('span', 'meta')
   meta.append(el('span', 'author', message.authorName ?? ''))
+  const check = verifiedCheck(message.authorVerified)
+  if (check) meta.append(check)
   const role = (message.authorRoles ?? []).find((value) =>
     ['owner', 'broadcaster', 'moderator'].includes(value)
   )

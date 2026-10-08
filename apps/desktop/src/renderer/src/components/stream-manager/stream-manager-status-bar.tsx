@@ -137,8 +137,10 @@ export function StreamManagerStatusBar({
       ? { anchor: highlightAnchor, onChange: onHighlightAnchorChange }
       : null
   return (
+    // 32 px, not the shared 26: the platform icons are 20 px (YouTube's
+    // minimum, plan 165) and need room above and below inside the border.
     <StatusBar
-      className="gap-2"
+      className="h-8 gap-2"
       leading={
         // The clip keeps chips that cannot shrink off the controls at narrow
         // widths. The padding (cancelled by the negative margin) is the status

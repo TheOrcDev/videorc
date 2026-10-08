@@ -9733,6 +9733,7 @@ mod tests {
             reply: None,
             first_message: false,
             author_affiliation: None,
+            author_verified: None,
         }
     }
 
@@ -16298,6 +16299,7 @@ mod tests {
             reply: None,
             first_message: false,
             author_affiliation: None,
+            author_verified: None,
         }
     }
 

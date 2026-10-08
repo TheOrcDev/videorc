@@ -1276,6 +1276,7 @@ mod tests {
             reply: None,
             first_message: first,
             author_affiliation: None,
+            author_verified: None,
         }
     }
 

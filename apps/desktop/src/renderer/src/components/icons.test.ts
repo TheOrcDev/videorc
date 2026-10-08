@@ -16,9 +16,11 @@ import {
   OrcleIcon,
   YOUTUBE_MARK_ASPECT,
   YOUTUBE_MARK_MIN_PX,
+  XPlatformIcon,
   YoutubeIcon,
   type AppIconProps
 } from './icons'
+import { X_MARK_PATH } from '../lib/x-mark'
 
 describe('semantic icon registry', () => {
   it('keeps optional glyph modules outside the initial chunk through the actual registry', async () => {
@@ -162,6 +164,54 @@ describe('semantic icon registry', () => {
     expect(text.match(/<path /g)).toHaveLength(2)
     expect(text).toContain('fill="rgb(100%, 0%, 19.999695%)"')
     expect(text).toContain('fill="rgb(100%, 100%, 100%)"')
+  })
+
+  // Plan 167: X's mark is the path from X's partner icon kit, pure black or
+  // white by theme, never a tint and never a Phosphor glyph.
+  it('draws X with the partner kit path in one solid colour', async () => {
+    const markup = (props: AppIconProps = {}): string =>
+      renderToStaticMarkup(createElement(XPlatformIcon, props))
+    const html = markup({ className: 'size-5 text-foreground', weight: 'fill' })
+    const kitFile = await readFile(
+      new URL('../assets/brand/x/x-logo-white.svg', import.meta.url),
+      'utf8'
+    )
+    const kitPath = /<path d="([^"]+)"/.exec(kitFile)?.[1]
+    expect(kitPath).toBe(X_MARK_PATH)
+    expect(html.match(/<path /g)).toHaveLength(1)
+    expect(html).toContain(`d="${X_MARK_PATH}"`)
+    expect(html).toContain('class="fill-black dark:fill-white"')
+    expect(html).toContain('viewBox="0 0 24 24"')
+    expect(html).toContain('data-platform="x"')
+    expect(html).not.toContain('currentColor')
+    for (const weight of ['thin', 'light', 'regular', 'duotone', 'bold'] as const) {
+      expect(markup({ className: 'size-5 text-foreground', weight })).toBe(html)
+    }
+  })
+
+  it('ships the X kit files byte-for-byte as recorded in their README', async () => {
+    const folder = new URL('../assets/brand/x/', import.meta.url)
+    const readme = await readFile(new URL('README.md', folder), 'utf8')
+    const files = [
+      'x-logo-white.svg',
+      'x-logo-lockup-white-on-black.svg',
+      'x-logo-lockup-black-on-white.svg',
+      'verified-premium-blue.svg',
+      'verified-business-gold.svg',
+      'verified-government-gray.svg'
+    ]
+    for (const file of files) {
+      const sha256 = createHash('sha256')
+        .update(await readFile(new URL(file, folder)))
+        .digest('hex')
+      const row = readme.split('\n').find((line) => line.startsWith(`| \`${file}\``))
+      expect(row, file).toContain(`\`${sha256}\``)
+    }
+  })
+
+  it('never re-exports a Phosphor glyph as the X mark', async () => {
+    const source = await readFile(new URL('./icons.tsx', import.meta.url), 'utf8')
+    expect(source).not.toMatch(/\bXLogo\b/)
   })
 
   it('never re-exports a Phosphor glyph as the YouTube mark', async () => {

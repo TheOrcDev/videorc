@@ -16,8 +16,9 @@ use uuid::Uuid;
 
 use crate::diagnostics::permission_pane_for_log;
 use crate::live_chat::{
-    CommentsSendOperation, CommentsSendOperationPhase, LiveChatEventDetails, LiveChatEventType,
-    LiveChatMessage, LiveChatMessageFragment, MembershipKind, SubscriptionKind,
+    CommentsSendOperation, CommentsSendOperationPhase, LiveChatAuthorVerified,
+    LiveChatEventDetails, LiveChatEventType, LiveChatMessage, LiveChatMessageFragment,
+    MembershipKind, SubscriptionKind,
 };
 use crate::live_chat_moderation::{ModerationOperation, ModerationPhase};
 use crate::process_job::output_owned_std_with_timeout;
@@ -3482,7 +3483,7 @@ impl Database {
                          author_name, author_avatar_url, author_badges_json, author_roles_json,
                          published_at, received_at, message_text, fragments_json, event_type,
                          amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message,
-                         author_affiliation_json FROM live_chat_messages WHERE id = ?1",
+                         author_affiliation_json, author_verified FROM live_chat_messages WHERE id = ?1",
                         params![message.id], live_chat_message_from_row,
                     )?);
                     continue;
@@ -3494,8 +3495,8 @@ impl Database {
                     author_name, author_avatar_url, author_badges_json, author_roles_json,
                     published_at, received_at, message_text, fragments_json, event_type,
                     amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message,
-                    author_affiliation_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+                    author_affiliation_json, author_verified
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
                  ON CONFLICT(id) DO UPDATE SET
                     target_id = excluded.target_id,
                     author_id = excluded.author_id,
@@ -3514,7 +3515,8 @@ impl Database {
                     details_json = excluded.details_json,
                     reply_json = excluded.reply_json,
                     first_message = excluded.first_message,
-                    author_affiliation_json = excluded.author_affiliation_json",
+                    author_affiliation_json = excluded.author_affiliation_json,
+                    author_verified = excluded.author_verified",
                 params![
                     message.id,
                     message.session_id,
@@ -3546,6 +3548,7 @@ impl Database {
                         .as_ref()
                         .map(serde_json::to_string)
                         .transpose()?,
+                    message.author_verified.map(LiveChatAuthorVerified::as_str),
                 ],
             )?;
             update_chat_totals(&transaction, message, owner.is_none())?;
@@ -3646,7 +3649,7 @@ impl Database {
                         author_name, author_avatar_url, author_badges_json, author_roles_json,
                         published_at, received_at, message_text, fragments_json, event_type,
                         amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message,
-                        author_affiliation_json
+                        author_affiliation_json, author_verified
                  FROM live_chat_messages
                  WHERE session_id = ?1
                    AND (received_at < ?2 OR (received_at = ?2 AND id < ?3))
@@ -3665,7 +3668,7 @@ impl Database {
                         author_name, author_avatar_url, author_badges_json, author_roles_json,
                         published_at, received_at, message_text, fragments_json, event_type,
                         amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message,
-                        author_affiliation_json
+                        author_affiliation_json, author_verified
                  FROM live_chat_messages
                  WHERE session_id = ?1
                  ORDER BY received_at DESC, id DESC
@@ -3918,7 +3921,7 @@ impl Database {
                     author_name, author_avatar_url, author_badges_json, author_roles_json,
                     published_at, received_at, message_text, fragments_json, event_type,
                     amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message,
-                    author_affiliation_json
+                    author_affiliation_json, author_verified
              FROM live_chat_messages WHERE id = ?1",
             params![id],
             live_chat_message_from_row,
@@ -7108,6 +7111,13 @@ impl Database {
             "author_affiliation_json",
             "author_affiliation_json TEXT",
         )?;
+        // Plan 167: the author's verified check (X `verified_type`).
+        ensure_column(
+            &conn,
+            "live_chat_messages",
+            "author_verified",
+            "author_verified TEXT",
+        )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_live_chat_messages_platform_author
                  ON live_chat_messages(platform, author_id)",
@@ -7320,7 +7330,7 @@ impl Database {
                     author_name, author_avatar_url, author_badges_json, author_roles_json,
                     published_at, received_at, message_text, fragments_json, event_type,
                     amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message,
-                    author_affiliation_json
+                    author_affiliation_json, author_verified
              FROM live_chat_messages
              WHERE session_id = ?1
              ORDER BY received_at ASC, id ASC",
@@ -7882,6 +7892,11 @@ fn live_chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveC
         author_affiliation: row
             .get::<_, Option<String>>(21)?
             .and_then(|json| serde_json::from_str(&json).ok()),
+        // An unknown stored word shows no check, never a load failure.
+        author_verified: row
+            .get::<_, Option<String>>(22)?
+            .as_deref()
+            .and_then(LiveChatAuthorVerified::from_stored),
     };
     // Kick rows stored before plan 085 hold the raw `[emote:<id>:<name>]`
     // tokens and no fragments; a rehydrated session still shows the images.
@@ -9888,6 +9903,7 @@ mod tests {
             reply: None,
             first_message: false,
             author_affiliation: None,
+            author_verified: None,
         }
     }
 
@@ -10481,6 +10497,56 @@ mod tests {
         assert_eq!(messages[1].reply, None);
         assert!(!messages[1].first_message);
         assert_eq!(messages[1].author_affiliation, None);
+    }
+
+    /// Plan 167: X's verified check survives a reload, each kind and none.
+    #[test]
+    fn live_chat_author_verified_round_trips() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("session-verified"))
+            .unwrap();
+        let kinds = [
+            Some(LiveChatAuthorVerified::Blue),
+            Some(LiveChatAuthorVerified::Business),
+            Some(LiveChatAuthorVerified::Government),
+            None,
+        ];
+        for (index, kind) in kinds.iter().enumerate() {
+            let mut message = sample_live_chat_message("session-verified", index as u32 + 1);
+            message.author_verified = *kind;
+            database.save_live_chat_message(&message).unwrap();
+        }
+        let messages = database
+            .list_live_chat_messages("session-verified")
+            .unwrap();
+        let stored: Vec<_> = messages
+            .iter()
+            .map(|message| message.author_verified)
+            .collect();
+        assert_eq!(stored, kinds);
+        let fetched = database
+            .get_live_chat_message(&messages[1].id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fetched.author_verified,
+            Some(LiveChatAuthorVerified::Business)
+        );
+
+        // An unknown stored word degrades to no check, never a load failure.
+        database
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE live_chat_messages SET author_verified = 'gold' WHERE id = ?1",
+                params![messages[0].id],
+            )
+            .unwrap();
+        let messages = database
+            .list_live_chat_messages("session-verified")
+            .unwrap();
+        assert_eq!(messages[0].author_verified, None);
     }
 
     #[test]

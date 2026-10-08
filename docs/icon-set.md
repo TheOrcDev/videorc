@@ -21,7 +21,7 @@ The registry names icons by **meaning**, not by shape: call sites ask for
   variants, two pins, two locks and two spinners — nobody could have answered
   "which icons does Videorc use?" without a grep.
 
-Today (plan 119, 2026-10-04): **91 semantic slots over 87 glyphs**. Seven of the glyphs sit outside the Nucleo count: six platform brand marks (`KickIcon` is a hand-drawn inline SVG, plan 063; `YoutubeIcon` is YouTube's official icon file, plan 165; the other four come from Phosphor) and `OrcleIcon`, Orcle's own mark, hand-drawn from the app logo (plan 119). The Stream Manager adds seven slots in its own registry, `components/stream-manager/activity-icons.tsx`: six activity slots (plan 055: follow, supporter, gift, tip, raid, announcement) and the stats bar's viewer count (plan 057). The shared registry ships in every window's eager chunk, and these are only drawn in the Stream Manager. They count toward the same ceiling. Four slots share a glyph
+Today (plan 119, 2026-10-04): **91 semantic slots over 87 glyphs**. Seven of the glyphs sit outside the Nucleo count: six platform brand marks (`KickIcon` is a hand-drawn inline SVG, plan 063; `YoutubeIcon` is YouTube's official icon file, plan 165; `XPlatformIcon` is the path from X's partner kit, plan 167; the other three come from Phosphor) and `OrcleIcon`, Orcle's own mark, hand-drawn from the app logo (plan 119). The Stream Manager adds seven slots in its own registry, `components/stream-manager/activity-icons.tsx`: six activity slots (plan 055: follow, supporter, gift, tip, raid, announcement) and the stats bar's viewer count (plan 057). The shared registry ships in every window's eager chunk, and these are only drawn in the Stream Manager. They count toward the same ceiling. Four slots share a glyph
 (`StudioIcon`/`CameraIcon`, `SourcesIcon`/`DisplayIcon`, `AssetsIcon`/`ImageIcon`,
 `OutputIcon`/`RecordIcon`) — those are exactly the places the audit below
 expects to diverge.
@@ -152,6 +152,11 @@ Videorc's own mark. `TwitchIcon`, `TiktokIcon`, `InstagramIcon`, `KickIcon`,
 `XPlatformIcon` and `YoutubeIcon` are third-party brand marks with their own
 trademark rules, and the design language keeps app/source marks as the only
 full-colour icons on screen.
+
+`XPlatformIcon` is the X mark from X's partner icon kit
+(`assets/brand/x/`, plan 167): the kit's path drawn inline, pure black in
+light mode and pure white in dark, never a tint. The destination tile is the
+kit's rounded-square lockup, and X's verified checks are the kit's files.
 
 `YoutubeIcon` is YouTube's official icon file
 (`assets/brand/youtube/youtube-icon-red.svg`, plan 165, Google's YouTube API
