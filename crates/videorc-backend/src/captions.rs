@@ -15,6 +15,7 @@ use serde::Serialize;
 use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::audio::AudioFrame;
+use crate::overlay_layout::{OverlayAuxLeg, overlay_leg_plan};
 use crate::process_job::spawn_owned_tokio;
 use crate::state::AppState;
 use crate::videorc_api::{
@@ -627,11 +628,14 @@ impl CaptionBurnTarget {
     }
 }
 
-/// Per-leg overlay plan for a session shape (pure; unit-tested matrix).
-/// The primary leg is the source recording whenever recording is enabled and
-/// therefore always stays clean. A captioned stream in a combined session uses
-/// the auxiliary leg, forcing a same-profile split when profiles otherwise
-/// match. `captioned_copy` is fulfilled after finalization from the clean source.
+/// Per-leg caption plan for a session shape, a thin wrapper over the one
+/// overlay leg plan (`overlay_layout::overlay_leg_plan`, plan 164 D12).
+/// Captions map `burnTarget` onto the two switches with one caption-only
+/// rule: the source recording is never a LIVE burn target. `Recording`
+/// means a post-recording `(captioned)` copy, so the live plan runs with
+/// `show_in_recording = false` and `captioned_copy` is fulfilled after
+/// finalization from the clean source. A captioned stream in a combined
+/// session therefore needs the auxiliary leg (`force_same_profile_split`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CaptionOverlayLegPlan {
     pub primary: bool,
@@ -645,40 +649,7 @@ pub fn caption_overlay_leg_plan(
     stream_enabled: bool,
     target: CaptionBurnTarget,
 ) -> CaptionOverlayLegPlan {
-    let none = CaptionOverlayLegPlan {
-        primary: false,
-        aux: false,
-        force_same_profile_split: false,
-        captioned_copy: false,
-    };
-    if target == CaptionBurnTarget::Off {
-        return none;
-    }
-    match (record_enabled, stream_enabled) {
-        (false, false) => none,
-        // Record only: preserve the clean source and fulfill Recording with a
-        // post-recording copy.
-        (true, false) => CaptionOverlayLegPlan {
-            primary: false,
-            aux: false,
-            force_same_profile_split: false,
-            captioned_copy: target.requests_captioned_copy(),
-        },
-        // Stream only: the primary leg IS the stream.
-        (false, true) => CaptionOverlayLegPlan {
-            primary: target.burns_stream(),
-            aux: false,
-            force_same_profile_split: false,
-            captioned_copy: false,
-        },
-        // Record + stream: primary = clean source recording, aux = stream.
-        (true, true) => CaptionOverlayLegPlan {
-            primary: false,
-            aux: target.burns_stream(),
-            force_same_profile_split: target.burns_stream(),
-            captioned_copy: target.requests_captioned_copy(),
-        },
-    }
+    caption_overlay_leg_plan_with_vertical_leg(record_enabled, stream_enabled, target, false)
 }
 
 /// `caption_overlay_leg_plan` for a session that may run the dual-orientation
@@ -694,51 +665,48 @@ pub fn caption_overlay_leg_plan_with_vertical_leg(
     target: CaptionBurnTarget,
     vertical_leg: bool,
 ) -> CaptionOverlayLegPlan {
-    if vertical_leg && stream_enabled && target.burns_stream() {
-        return CaptionOverlayLegPlan {
-            primary: true,
-            aux: true,
-            force_same_profile_split: false,
-            captioned_copy: false,
-        };
+    let aux_leg = if vertical_leg {
+        OverlayAuxLeg::VerticalSimulcast
+    } else {
+        OverlayAuxLeg::None
+    };
+    let live = overlay_leg_plan(
+        record_enabled,
+        stream_enabled,
+        aux_leg,
+        target.burns_stream(),
+        false,
+    );
+    CaptionOverlayLegPlan {
+        primary: live.primary,
+        aux: live.aux,
+        force_same_profile_split: live.needs_split,
+        captioned_copy: record_enabled && target.requests_captioned_copy() && !live.primary,
     }
-    caption_overlay_leg_plan(record_enabled, stream_enabled, target)
 }
 
 /// What a session's auxiliary compositor leg carries, as far as the
-/// comment-highlight card is concerned.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HighlightAuxLeg {
-    /// One leg: the primary carries every output.
-    None,
-    /// A split horizontal stream leg beside a clean recording.
-    Stream,
-    /// The dual-orientation vertical leg. Horizontal viewers ride the primary
-    /// leg with the recording, so the primary burns the card too.
-    VerticalSimulcast,
-}
+/// comment-highlight card is concerned. The same enum serves every overlay.
+pub use crate::overlay_layout::OverlayAuxLeg as HighlightAuxLeg;
 
-/// Per-leg plan for the comment-highlight overlay (Comments upgrade S2). The
-/// highlight is a STREAM-facing feature: it burns on every leg viewers watch —
-/// the aux leg when the session runs a split stream leg, the primary leg when
-/// that leg carries the (horizontal) stream, and BOTH with a vertical
-/// simulcast leg. Record-only sessions never burn a highlight. (When
-/// record+stream share one leg, viewers and the recording share pixels; the
-/// highlight lands on both — stated in the UI.)
+/// Per-leg plan for the comment-highlight overlay with the pre-plan-164
+/// switches (`showOnStream: true, showInRecording: false`): it burns on every
+/// leg viewers watch, and when record+stream share one leg it lands on both
+/// (the D13 shared-leg fallback). Sessions read the streamer's switches
+/// through `overlay_layout::overlay_session_plans`; this wrapper keeps the
+/// shipped default reachable for callers without a layout.
 pub fn highlight_overlay_leg_plan(
     record_enabled: bool,
     stream_enabled: bool,
     aux_leg: HighlightAuxLeg,
 ) -> (bool, bool) {
-    if !stream_enabled {
-        return (false, false);
-    }
-    let _ = record_enabled;
-    match aux_leg {
-        HighlightAuxLeg::None => (true, false),
-        HighlightAuxLeg::Stream => (false, true),
-        HighlightAuxLeg::VerticalSimulcast => (true, true),
-    }
+    let plan = overlay_leg_plan(record_enabled, stream_enabled, aux_leg, true, false);
+    let plan = if plan.needs_split {
+        plan.shared_leg_fallback()
+    } else {
+        plan
+    };
+    (plan.primary, plan.aux)
 }
 
 /// `Recording.mp4` → `Recording (captioned).mp4`.

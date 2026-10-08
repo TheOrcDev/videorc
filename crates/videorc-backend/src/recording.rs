@@ -3647,6 +3647,10 @@ async fn start_session_with_timeline(
         None
     };
     let session_caption_plan = caption_leg_plan(&params);
+    // Plan 164: the highlight card and the Golem follow the streamer's
+    // per-output switches in the backend-owned overlay layout; captions keep
+    // `burnTarget` (derived from the same switches by the renderer).
+    let overlay_layout = crate::overlay_layout::load_overlay_layout(&state.database);
     // A new session must never inherit a composited caption bar. The overlay
     // slot is app-global and the renderer's stop-time clear is best-effort
     // (fire-and-forget, and a closed renderer never sends it) — clearing here
@@ -3807,18 +3811,24 @@ async fn start_session_with_timeline(
                 None
             }
             WindowsD3d11SessionSelection::Candidate(plan) => {
-                let (highlight_on_primary, highlight_on_auxiliary) =
-                    crate::captions::highlight_overlay_leg_plan(
-                        params.output.record_enabled,
-                        params.output.stream_enabled,
+                let d3d11_overlay_plans = crate::overlay_layout::overlay_session_plans(
+                    crate::overlay_layout::OverlaySessionShape {
+                        record_enabled: params.output.record_enabled,
+                        stream_enabled: params.output.stream_enabled,
                         // The D3D11 path refuses simulcast sessions above, so
                         // its auxiliary is always a split stream leg.
-                        if plan.auxiliary.is_some() {
-                            crate::captions::HighlightAuxLeg::Stream
+                        aux_leg: if plan.auxiliary.is_some() {
+                            crate::overlay_layout::OverlayAuxLeg::Stream
                         } else {
-                            crate::captions::HighlightAuxLeg::None
+                            crate::overlay_layout::OverlayAuxLeg::None
                         },
-                    );
+                    },
+                    &overlay_layout,
+                );
+                let (highlight_on_primary, highlight_on_auxiliary) = (
+                    d3d11_overlay_plans.highlight.primary,
+                    d3d11_overlay_plans.highlight.aux,
+                );
                 let overlays = WindowsD3d11OverlayInput {
                     captions: state.caption_overlay.clone(),
                     highlight: state.highlight_overlay.clone(),
@@ -4100,11 +4110,14 @@ async fn start_session_with_timeline(
     } else {
         None
     };
-    let highlight_overlay_plan = crate::captions::highlight_overlay_leg_plan(
-        params.output.record_enabled,
-        params.output.stream_enabled,
-        highlight_aux_leg(encoder_bridge_stream_output.as_ref()),
-    );
+    let overlay_session_shape = crate::overlay_layout::OverlaySessionShape {
+        record_enabled: params.output.record_enabled,
+        stream_enabled: params.output.stream_enabled,
+        aux_leg: highlight_aux_leg(encoder_bridge_stream_output.as_ref()),
+    };
+    let overlay_plans =
+        crate::overlay_layout::overlay_session_plans(overlay_session_shape, &overlay_layout);
+    let highlight_overlay_plan = (overlay_plans.highlight.primary, overlay_plans.highlight.aux);
     let comment_highlight_vertical_canvas = comment_highlight_vertical_canvas(
         encoder_bridge_stream_output.as_ref(),
         highlight_overlay_plan,
@@ -4114,9 +4127,26 @@ async fn start_session_with_timeline(
             session = %session_id,
             primary = highlight_overlay_plan.0,
             aux = highlight_overlay_plan.1,
+            golem_primary = overlay_plans.golem.primary,
+            golem_aux = overlay_plans.golem.aux,
             vertical_canvas = ?comment_highlight_vertical_canvas,
-            "comment highlight leg plan"
+            "overlay leg plan"
         );
+    }
+    // D13: every switch pair this session cannot honour is said out loud
+    // (the Go Live sheet already showed the same sentence before start).
+    if use_encoder_bridge {
+        for notice in
+            crate::overlay_layout::overlay_start_notices(overlay_session_shape, &overlay_layout)
+        {
+            let _ = emit_health_event(
+                &state,
+                Some(&session_id),
+                HealthLevel::Info,
+                "overlay-start-notice",
+                &notice.notice,
+            );
+        }
     }
     #[cfg(target_os = "windows")]
     let (direct_d3d11_recording_source, direct_d3d11_camera_overlay) = if !use_windows_d3d11_media
@@ -20261,13 +20291,13 @@ fn comment_highlight_available(use_encoder_bridge: bool, leg_plan: (bool, bool))
 
 fn highlight_aux_leg(
     stream_output: Option<&CompositorAuxiliaryOutput>,
-) -> crate::captions::HighlightAuxLeg {
+) -> crate::overlay_layout::OverlayAuxLeg {
     match stream_output {
-        None => crate::captions::HighlightAuxLeg::None,
+        None => crate::overlay_layout::OverlayAuxLeg::None,
         Some(output) if output.composes_simulcast_scene => {
-            crate::captions::HighlightAuxLeg::VerticalSimulcast
+            crate::overlay_layout::OverlayAuxLeg::VerticalSimulcast
         }
-        Some(_) => crate::captions::HighlightAuxLeg::Stream,
+        Some(_) => crate::overlay_layout::OverlayAuxLeg::Stream,
     }
 }
 
