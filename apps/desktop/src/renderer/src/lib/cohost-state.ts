@@ -1,4 +1,6 @@
 import type {
+  CohostAutoChat,
+  CohostAutoChatRelayPatch,
   CohostErrorDetail,
   CohostQuestion,
   CohostReason,
@@ -17,6 +19,32 @@ import type {
  */
 export function orcleLiveSettingsPatch(on: boolean): CohostSettingsPatch {
   return on ? { enabled: true, listen: true } : { enabled: false }
+}
+
+/** The stored `autoChat` when none has been loaded yet: everything off. */
+export const DEFAULT_COHOST_AUTO_CHAT: CohostAutoChat = {
+  mode: 'off',
+  greetings: { enabled: false, templates: [] },
+  answers: { enabled: false, cooldownSeconds: 20 },
+  banter: { enabled: false, cooldownSeconds: 240 }
+}
+
+/**
+ * The Stream Manager's mode control and behaviour switches (plan 164 S-D6)
+ * change only those fields: the templates and cooldowns the Golem tab holds
+ * ride along unchanged, so the save never drops them.
+ */
+export function mergeAutoChatRelayPatch(
+  current: CohostAutoChat | null,
+  patch: CohostAutoChatRelayPatch
+): CohostAutoChat {
+  const base = current ?? DEFAULT_COHOST_AUTO_CHAT
+  return {
+    mode: patch.mode ?? base.mode,
+    greetings: { ...base.greetings, enabled: patch.greetings ?? base.greetings.enabled },
+    answers: { ...base.answers, enabled: patch.answers ?? base.answers.enabled },
+    banter: { ...base.banter, enabled: patch.banter ?? base.banter.enabled }
+  }
 }
 
 /**

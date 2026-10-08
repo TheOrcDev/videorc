@@ -277,9 +277,10 @@ describe('Voice commands (plan 140, S6 part A)', () => {
     expect(orcleVoicePhrasesLabel(['Yes', 'Do it', 'No'], 2)).toBe('“Yes”, “Do it”')
   })
 
-  it('keeps the promises plain: never on its own, 20 seconds, 10 a minute, free removal', () => {
+  it('keeps the promises plain: posts only in your modes, 20 seconds, 10 a minute, free removal', () => {
+    // Plan 164 D4 replaced "never acts on its own" with the per-mode promise.
     expect(COHOST_ACTS_ON_ASK_COPY).toBe(
-      'Golem never acts on its own. It removes a comment only when you tell it to.'
+      'The Golem posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to.'
     )
     expect(ORCLE_REMOVAL_LIMITS).toContain('20 seconds')
     expect(ORCLE_REMOVAL_LIMITS).toContain('At most 10 removals a minute.')

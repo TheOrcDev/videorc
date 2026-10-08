@@ -33,7 +33,7 @@ await new Promise(r => setTimeout(r, 2500))
 // plan 150), or the run fails at the end.
 const pages = [
   { tab: 'studio' },
-  { tab: 'ai', name: 'orcle', mustShow: '#orcle-live-switch' },
+  { tab: 'ai', name: 'orcle', mustShow: '[data-slot="orcle-live-status"]' },
   { tab: 'sources' },
   { tab: 'layout' },
   { tab: 'streaming' },

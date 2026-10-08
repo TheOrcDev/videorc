@@ -375,11 +375,12 @@ describe('CohostPane', () => {
     for (const label of ['Reply', 'Show on stream', 'Answered', 'Dismiss']) {
       expect(markup).toContain(label)
     }
-    // Plan 140: Golem can now remove a comment, but only when asked.
+    // Plan 140: Golem can remove a comment, but only when asked; plan 164 D4:
+    // it posts only in the modes you turn on.
     expect(markup).not.toContain('Nothing sends without you.')
-    expect(markup).toContain('Golem never acts on its own.')
+    expect(markup).toContain('Posts only in the modes you turn on.')
     expect(markup).toContain(
-      'title="Golem never acts on its own. It removes a comment only when you tell it to."'
+      'title="The Golem posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to."'
     )
   })
 

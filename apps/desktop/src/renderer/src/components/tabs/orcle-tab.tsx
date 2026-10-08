@@ -11,6 +11,7 @@ import {
   OrcleModerationSection,
   OrcleRepliesSection
 } from '@/components/cohost-settings-section'
+import { GolemGreetingsSection } from '@/components/golem-greetings-section'
 import { GolemPersonaSection } from '@/components/golem-persona-section'
 import { OrcleEmblem } from '@/components/orcle-emblem'
 import { OrcleReportCard } from '@/components/orcle-report-card'
@@ -39,6 +40,7 @@ import {
 import { Kbd } from '@/components/ui/kbd'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { GOLEM_POSTS_PROMISE } from '@/lib/golem-auto-chat-view'
 import { useVideorcAccount } from '@/hooks/use-account'
 import { useCleanCut } from '@/hooks/use-clean-cut'
 import {
@@ -295,9 +297,10 @@ function OrcleUnlockAlert({ slot = 'orcle-live-unlock' }: { slot?: string }): Re
 }
 
 /**
- * The Chat tab (plan 150): Replies beside Moderation. When Golem is locked,
- * one alert above both columns says why and every field under it is
- * disabled (D7), the same reason Live shows.
+ * The Chat tab (plan 150): Greetings (plan 164 S-D5, free) and Replies
+ * beside Moderation. When Golem is locked, one alert above both columns says
+ * why and every Premium field under it is disabled (D7), the same reason
+ * Live shows; the greetings stay editable.
  */
 function OrcleChatTab(): ReactElement {
   const locked = useOrcleLive().unlock !== null
@@ -309,7 +312,10 @@ function OrcleChatTab(): ReactElement {
         </div>
       ) : null}
       <ConfigGrid className={CONFIG_GRID_PAIR}>
-        <OrcleRepliesSection locked={locked} />
+        <div className="flex flex-col">
+          <GolemGreetingsSection />
+          <OrcleRepliesSection locked={locked} />
+        </div>
         <OrcleModerationSection locked={locked} />
       </ConfigGrid>
     </>
@@ -328,57 +334,41 @@ function OrcleVoiceTab({ onOpenLive }: { onOpenLive: () => void }): ReactElement
 }
 
 /**
- * The Live tab's left column (plan 150): Golem's emblem beside the one switch
- * and its status, then why it is locked, the Stream Manager while live, and
- * whether Golem hears you, which is part of what turning it on means.
+ * The Live tab's left column (plan 150): Golem's emblem beside its status,
+ * then why it is locked, the Stream Manager, and whether Golem hears you.
+ * The switch moved to Stream Manager (plan 164 S-D6): the chat mode there
+ * is what turns the Golem on, so this column points at it.
  */
 function OrcleLiveSection(): ReactElement {
-  const { cohostSettings, runtimeInfo, setOrcleLive } = useStudioCore()
+  const { cohostSettings, runtimeInfo } = useStudioCore()
   const { openCommentsWindow } = useStudioShell()
-  const [pending, setPending] = useState(false)
   const view = useOrcleLive()
   const golemName = cohostSettings?.persona.name ?? 'Golem'
   const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
   const shiftKey = displayKeyGlyph('⇧', runtimeInfo?.platform)
 
-  // Without consent, on only opens the consent dialog: nothing is written
-  // until the streamer accepts it there.
-  const turn = (on: boolean): void => {
-    setPending(true)
-    void setOrcleLive(on)
-      .catch((error: unknown) =>
-        toast.error('Could not change Golem Live', {
-          description: error instanceof Error ? error.message : undefined
-        })
-      )
-      .finally(() => setPending(false))
-  }
-
   return (
     <PanelSection
       action={<Badge variant="outline">Alpha</Badge>}
-      description="Your Golem reads your chat and hears you while you stream. It posts only in the modes you turn on; everything is off by default."
+      description={`Your Golem reads your chat and hears you while you stream. ${GOLEM_POSTS_PROMISE}`}
       title="Joins my streams"
     >
       <div className="flex items-center gap-3" data-slot="orcle-live-status-block">
         <OrcleEmblem size="lg" />
         <Field className="min-w-0 flex-1" orientation="horizontal">
           <FieldContent>
-            <FieldLabel htmlFor="orcle-live-switch">{golemName} joins my streams</FieldLabel>
+            <FieldTitle>{golemName} joins my streams</FieldTitle>
             <OrcleLiveStatusLine status={view.status} />
+            <FieldDescription className="text-xs" data-slot="orcle-live-pointer">
+              Turn it on in Stream Manager: the Golem pane&apos;s chat mode, Suggest or Auto.
+            </FieldDescription>
           </FieldContent>
-          <Switch
-            checked={view.checked}
-            disabled={view.switchDisabled || pending}
-            id="orcle-live-switch"
-            onCheckedChange={turn}
-          />
         </Field>
       </div>
 
       <OrcleUnlockAlert />
 
-      {view.streamManager && runtimeInfo?.commentsWindowEnabled !== false ? (
+      {runtimeInfo?.commentsWindowEnabled !== false ? (
         <Button
           className="w-fit"
           type="button"

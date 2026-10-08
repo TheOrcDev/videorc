@@ -8,6 +8,7 @@ import { removeMessagesReconnectStarted } from '@/components/stream-manager/remo
 import { WindowFrame } from '@/components/window-frame'
 import type {
   CohostActionKind,
+  CohostAutoChatRelayPatch,
   CohostQuestion,
   CohostState,
   CohostWindowState,
@@ -453,6 +454,29 @@ function CommentsWindowApp(): ReactElement {
       )
   }
 
+  // Plan 164 S-D6: the pane's mode control and behaviour switches. The
+  // mode is the pane's enable: Suggest or Auto turns the Golem on (the same
+  // {enabled, listen} save as the switch), Off turns it off; a behaviour
+  // switch keeps `enabled` as it is. The templates and cooldowns live in
+  // the Golem tab and ride along untouched (Studio merges the block).
+  const setGolemAutoChat = (patch: CohostAutoChatRelayPatch): void => {
+    const enabled = patch.mode === undefined ? cohost.enabled : patch.mode !== 'off'
+    void window.videorc
+      ?.sendCohostEnable?.({
+        requestId: crypto.randomUUID(),
+        enabled,
+        ...(enabled && patch.mode !== undefined ? { listen: true } : {}),
+        autoChat: patch
+      })
+      .then((state) => state && setCohost(state))
+      .catch((error) =>
+        toast.error(
+          error instanceof Error ? error.message : 'Could not change the Golem chat mode.',
+          { id: 'cohost-auto-chat' }
+        )
+      )
+  }
+
   const showQuestionOnStream = (question: CohostQuestion): void => {
     const messageId = cohostHighlightMessageId(question)
     if (!messageId) return
@@ -501,6 +525,14 @@ function CommentsWindowApp(): ReactElement {
           cohostEnabled={cohost.enabled}
           cohostGate={cohostGate}
           cohostListen={cohost.listen}
+          cohostAutoChat={cohost.autoChat}
+          onCohostAutoChatChange={setGolemAutoChat}
+          onCohostUtteranceApprove={(utterance) =>
+            void sendCohostAction('approve-utterance')(utterance.id)
+          }
+          onCohostUtteranceDismiss={(utterance) =>
+            void sendCohostAction('dismiss-utterance')(utterance.id)
+          }
           cohostNudgeDismissedForever={cohostNudgeDismissed}
           cohostStarting={cohostStarting}
           cohostState={cohost.state}

@@ -5,6 +5,7 @@ import type {
   CohostReportChat,
   CohostReportCommands,
   CohostReportPayload,
+  CohostReportPost,
   CohostReportQuestion,
   CohostReportQuestions,
   CohostSessionReport,
@@ -154,6 +155,17 @@ export interface OrcleReportCommandsView {
   counts: OrcleReportCommandCount[]
 }
 
+/** One line the Golem posted as you (plan 164 D10). */
+export interface OrcleReportPostRow {
+  id: string
+  trigger: string
+  text: string
+  platforms: StreamPlatform[]
+  result: 'sent' | 'partial' | 'failed'
+  resultLabel: string
+  at: string | null
+}
+
 export type OrcleReportView =
   | { kind: 'empty'; message: string }
   | {
@@ -174,6 +186,8 @@ export type OrcleReportView =
       alerts: OrcleReportAlertRow[]
       /** Plan 140 S3: null when no voice command was counted (or Golem was off). */
       commands: OrcleReportCommandsView | null
+      /** Plan 164 D10: what the Golem posted as you, oldest first. */
+      posts: OrcleReportPostRow[]
     }
 
 export interface OrcleReportViewInput {
@@ -439,7 +453,8 @@ export function orcleReportView({
       missed: [],
       promises: [],
       alerts: [],
-      commands: null
+      commands: null,
+      posts: []
     }
   }
   return {
@@ -469,8 +484,30 @@ export function orcleReportView({
         alert.peakViewers === 1 ? '1 viewer' : `${formatReportCount(alert.peakViewers)} viewers`,
       at: streamOffsetLabel(alert.firstSeenAt, startedAt)
     })),
-    commands: reportCommands(report.commands)
+    commands: reportCommands(report.commands),
+    posts: (report.posts ?? []).map((post) => ({
+      id: post.id,
+      trigger: POST_TRIGGER_LABELS[post.trigger],
+      text: post.text,
+      platforms: uniquePlatforms(post.destinations),
+      result: post.result,
+      resultLabel: POST_RESULT_LABELS[post.result],
+      at: streamOffsetLabel(post.at, startedAt)
+    }))
   }
+}
+
+const POST_TRIGGER_LABELS: Record<CohostReportPost['trigger'], string> = {
+  greeting: 'Greeting',
+  answer: 'Answer',
+  banter: 'Banter',
+  manual: 'Say'
+}
+
+const POST_RESULT_LABELS: Record<CohostReportPost['result'], string> = {
+  sent: 'Posted',
+  partial: 'Posted in part',
+  failed: 'Not sent'
 }
 
 // --- Lists and the switcher -----------------------------------------------------

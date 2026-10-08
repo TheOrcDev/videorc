@@ -467,6 +467,7 @@ import type {
   CaptionsUpdate,
   CaptionsWindowState,
   CohostActionCommand,
+  CohostAutoChatRelayPatch,
   CohostCommandRelayCommand,
   CohostEnableCommand,
   CohostState,
@@ -3054,6 +3055,28 @@ function assertLiveCommentsCommandSession(sessionId: unknown): asserts sessionId
   ) {
     throw new Error('Chat commands are available only for the selected live session.')
   }
+}
+
+/**
+ * The Stream Manager's `autoChat` relay block (plan 164 S-D6): a partial of
+ * the mode and the three switches. `undefined` when absent, `false` when
+ * malformed, else the validated block.
+ */
+function cohostAutoChatRelayPatch(value: unknown): CohostAutoChatRelayPatch | undefined | false {
+  if (value === undefined) return undefined
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const block = value as Record<string, unknown>
+  const patch: CohostAutoChatRelayPatch = {}
+  if (block.mode !== undefined) {
+    if (block.mode !== 'off' && block.mode !== 'suggest' && block.mode !== 'auto') return false
+    patch.mode = block.mode
+  }
+  for (const key of ['greetings', 'answers', 'banter'] as const) {
+    if (block[key] === undefined) continue
+    if (typeof block[key] !== 'boolean') return false
+    patch[key] = block[key]
+  }
+  return patch
 }
 
 function commentsCommandRequestId(value: unknown): string {
@@ -14420,6 +14443,21 @@ app.whenReady().then(async () => {
       ) {
         return Promise.reject(new Error('Golem action requires a known kind and target id.'))
       }
+      // Plan 164 D7: the Say box carries its line; nothing else may.
+      if (command.kind === 'say-utterance') {
+        if (
+          typeof command.text !== 'string' ||
+          !command.text.trim() ||
+          command.text.trim().length > 200
+        ) {
+          return Promise.reject(new Error('Golem say requires 1 to 200 characters.'))
+        }
+        if (command.state !== undefined && !['talk', 'laugh', 'think'].includes(command.state)) {
+          return Promise.reject(new Error('Golem say requires a known avatar state.'))
+        }
+      } else if (command.text !== undefined || command.state !== undefined) {
+        return Promise.reject(new Error('Only Golem say carries text.'))
+      }
       assertLiveCommentsCommandSession(command.sessionId)
       return commentsCommandBroker.request(requestId, () => {
         if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
@@ -14484,13 +14522,19 @@ app.whenReady().then(async () => {
       if (command.listen !== undefined && typeof command.listen !== 'boolean') {
         return Promise.reject(new Error('Golem listening must be a boolean.'))
       }
+      // Plan 164 S-D6: the mode and the three switches, nothing else.
+      const autoChat = cohostAutoChatRelayPatch(command.autoChat)
+      if (autoChat === false) {
+        return Promise.reject(new Error('Golem chat mode must be off, suggest or auto.'))
+      }
       return commentsCommandBroker.request(requestId, () => {
         if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
         sendElectronEvent(mainWindow.webContents, 'comments-window:cohost-enable-request', {
           requestId,
           enabled: command.enabled,
           ...(command.grantConsent === true ? { grantConsent: true } : {}),
-          ...(typeof command.listen === 'boolean' ? { listen: command.listen } : {})
+          ...(typeof command.listen === 'boolean' ? { listen: command.listen } : {}),
+          ...(autoChat ? { autoChat } : {})
         })
         return true
       })

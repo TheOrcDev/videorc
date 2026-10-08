@@ -182,10 +182,12 @@ async function render({
   })
 }
 
-function liveSwitch(): HTMLButtonElement {
-  const control = document.getElementById('orcle-live-switch') as HTMLButtonElement | null
-  expect(control).toBeTruthy()
-  return control!
+/** Plan 164 S-D6: the switch moved to Stream Manager; the tab points there. */
+function livePointer(): HTMLElement {
+  const pointer = document.querySelector('[data-slot="orcle-live-pointer"]') as HTMLElement | null
+  expect(pointer).toBeTruthy()
+  expect(document.getElementById('orcle-live-switch')).toBeNull()
+  return pointer!
 }
 
 function button(label: string): HTMLButtonElement {
@@ -261,7 +263,7 @@ describe('Golem tab strip (plan 150)', () => {
 })
 
 describe('Golem tab (plan 119 S2)', () => {
-  it('leads with the creation screen, then the switch, its status and its powers', async () => {
+  it('leads with the creation screen, then its status and its powers', async () => {
     await render()
     const text = document.body.textContent ?? ''
     // Plan 164 S-A4: the creation screen leads the first tab.
@@ -274,21 +276,19 @@ describe('Golem tab (plan 119 S2)', () => {
       expect(text).toContain(power.title)
       expect(text).toContain(power.description)
     }
-    expect(liveSwitch().getAttribute('data-state')).toBe('unchecked')
+    expect(livePointer().textContent).toContain('Turn it on in Stream Manager')
     expect(statusLine().getAttribute('data-status')).toBe('off')
-    // The Stream Manager waits for a stream.
-    expect(text).not.toContain('Open Stream Manager')
+    // Plan 164 S-D6: the Stream Manager is where the Golem is turned on, so
+    // the way there is always offered.
+    expect(text).toContain('Open Stream Manager')
   })
 
-  it('turns Golem Live on and off through the one switch', async () => {
+  it('has no switch of its own any more: the Stream Manager mode turns Golem on', async () => {
     await render()
-    await act(async () => liveSwitch().click())
-    expect(calls.setOrcleLive).toHaveBeenLastCalledWith(true)
-
+    livePointer()
+    expect(calls.setOrcleLive).not.toHaveBeenCalled()
     await render({ cohost: settings({ enabled: true, listen: true }) })
     expect(statusLine().textContent).toContain('On, joins your next stream')
-    await act(async () => liveSwitch().click())
-    expect(calls.setOrcleLive).toHaveBeenLastCalledWith(false)
     expect(calls.patchCohostSettings).not.toHaveBeenCalled()
   })
 
@@ -316,11 +316,11 @@ describe('Golem tab (plan 119 S2)', () => {
     expect(document.querySelector('[role="dialog"]')).toBeNull()
   })
 
-  it('asks a signed-out streamer to sign in and keeps the switch off', async () => {
+  it('asks a signed-out streamer to sign in', async () => {
     await render({ signedIn: false, gate: basic })
     const unlock = document.querySelector('[data-slot="orcle-live-unlock"]')
     expect(unlock?.textContent).toContain('Sign in to use Golem Live, part of Videorc Premium.')
-    expect(liveSwitch().disabled).toBe(true)
+    livePointer()
     await act(async () => button('Sign in').click())
     expect(calls.signIn).toHaveBeenCalledTimes(1)
   })
@@ -330,7 +330,7 @@ describe('Golem tab (plan 119 S2)', () => {
     expect(document.querySelector('[data-slot="orcle-live-unlock"]')?.textContent).toContain(
       'Golem requires Videorc Premium.'
     )
-    expect(liveSwitch().disabled).toBe(true)
+    livePointer()
     await act(async () => button('View Premium').click())
     expect(calls.openOAuthUrl).toHaveBeenCalledWith('https://www.videorc.com/premium')
   })
@@ -370,13 +370,14 @@ describe('Golem tab (plan 119 S2)', () => {
 })
 
 describe('Live and Chat tabs (plan 150 S3, S4)', () => {
-  it('leads Live with the emblem beside the switch, and listening under it', async () => {
+  it('leads Live with the emblem beside the status, and listening under it', async () => {
     await render()
     const block = document.querySelector('[data-slot="orcle-live-status-block"]') as HTMLElement
     expect(block.querySelector('[data-slot="orcle-emblem"]')?.getAttribute('src')).toContain(
       'orcle-emblem-112'
     )
-    expect(block.querySelector('#orcle-live-switch')).toBeTruthy()
+    expect(block.querySelector('#orcle-live-switch')).toBeNull()
+    expect(block.querySelector('[data-slot="orcle-live-pointer"]')).toBeTruthy()
     expect(document.getElementById('cohost-listen')).toBeTruthy()
     // The three-column pitch is gone; Live lists what Golem does as rows.
     expect(document.querySelector('ul[aria-label="What Golem Live does"]')).toBeNull()
@@ -393,12 +394,13 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
     expect(calls.onTabChange).toHaveBeenLastCalledWith('chat')
   })
 
-  it('splits Chat into Replies and Moderation, and leads with one reason when locked', async () => {
+  it('splits Chat into Greetings, Replies and Moderation, and leads with one reason when locked', async () => {
     await render({ tab: 'chat' })
     const titles = [...document.querySelectorAll('[data-slot="panel-section"] h3')].map(
       (heading) => heading.textContent
     )
-    expect(titles).toEqual(['Replies', 'Moderation'])
+    // Plan 164 S-D5: Greetings lead the Chat tab, above Replies.
+    expect(titles).toEqual(['Greetings', 'Replies', 'Moderation'])
     expect(document.querySelector('[data-slot="orcle-tab-unlock"]')).toBeNull()
 
     await render({ tab: 'chat', gate: basic })
@@ -406,6 +408,11 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
       'Golem requires Videorc Premium.'
     )
     expect((document.getElementById('cohost-notes') as HTMLTextAreaElement).disabled).toBe(true)
+    // Greetings are free (plan 164 D6): editable under the same lock.
+    expect((document.getElementById('golem-greetings-enabled') as HTMLButtonElement).disabled).toBe(
+      false
+    )
+    expect((document.getElementById('cohost-answers') as HTMLButtonElement).disabled).toBe(true)
   })
 })
 
@@ -542,7 +549,7 @@ describe('Golem tab: Voice commands (plan 140, S6 part A)', () => {
     expect(text).toContain('“Golem, highlight the comment from coders X”')
     expect(text).toContain('“This one is toxic. Remove it from our chat.”')
     expect(text).toContain(
-      'Golem never acts on its own. It removes a comment only when you tell it to.'
+      'The Golem posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to.'
     )
     expect(text).toContain('20 seconds')
     expect(text).toContain('At most 10 removals a minute.')

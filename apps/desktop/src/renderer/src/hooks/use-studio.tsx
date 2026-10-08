@@ -220,6 +220,8 @@ import type {
   CohostFlagParams,
   CohostPromiseParams,
   CohostQuestion,
+  CohostSayParams,
+  CohostUtteranceParams,
   CohostQuestionParams,
   CohostRecapParams,
   CohostSettings,
@@ -403,6 +405,7 @@ import {
   cohostErrorToast,
   cohostHighlightMessageId,
   cohostStoppedToast,
+  mergeAutoChatRelayPatch,
   orcleLiveSettingsPatch
 } from '@/lib/cohost-state'
 import { entitlementDisabledReason } from '@/lib/entitlements'
@@ -4020,6 +4023,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // talks to the web.
   const [cohostState, setCohostState] = useState<CohostState | null>(null)
   const [cohostSettings, setCohostSettings] = useState<CohostSettings | null>(null)
+  const cohostSettingsRef = useRef(cohostSettings)
+  cohostSettingsRef.current = cohostSettings
   const [cohostActionPending, setCohostActionPending] = useState(false)
   const cohostStateRef = useRef<CohostState | null>(null)
   const streamTitleRef = useRef<string | null>(null)
@@ -4213,13 +4218,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         | 'cohost.promise.dismiss'
         | 'cohost.recap.dismiss'
         | 'cohost.recap.draft'
-        | 'cohost.author.greeted',
+        | 'cohost.author.greeted'
+        | 'cohost.utterance.approve'
+        | 'cohost.utterance.dismiss'
+        | 'cohost.utterance.say',
       params:
         | CohostQuestionParams
         | CohostFlagParams
         | CohostPromiseParams
         | CohostRecapParams
         | CohostAuthorParams
+        | CohostUtteranceParams
+        | CohostSayParams
     ): Promise<CohostState> => {
       if (!client) throw new Error('Backend socket is not connected.')
       setCohostActionPending(true)
@@ -4398,6 +4408,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // re-derives Premium or consent, it renders what the main renderer resolved.
   // Presence is unconditional: before the engine reports (or when it is off)
   // the relay carries the off shape, never null.
+  const cohostAutoChat = cohostSettings?.autoChat
   const cohostWindowState = useMemo<CohostWindowState>(
     () => ({
       state: cohostState ?? offCohostState(),
@@ -4406,9 +4417,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       upgradeUrl: (cohostGate.allowed ? undefined : cohostGate.upgradeUrl) ?? null,
       consented: aiConsent,
       enabled: cohostEnabled,
-      listen: cohostListen
+      listen: cohostListen,
+      ...(cohostAutoChat ? { autoChat: cohostAutoChat } : {})
     }),
-    [aiConsent, cohostEnabled, cohostGate, cohostListen, cohostState]
+    [aiConsent, cohostAutoChat, cohostEnabled, cohostGate, cohostListen, cohostState]
   )
 
   const cohostWindowStateRef = useRef(cohostWindowState)
@@ -4428,16 +4440,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       void (async () => {
         if (command.grantConsent === true) setAiConsent(true)
         if (!client) throw new Error('Backend socket is not connected.')
-        const next = await client.request<CohostSettings>(
-          'cohost.settings.set',
-          orcleLiveSettingsPatch(command.enabled)
-        )
+        // Plan 164 S-D6: the Stream Manager's mode control and behaviour
+        // switches ride the same save, merged into the stored block so the
+        // templates and cooldowns stay.
+        const autoChat = command.autoChat
+          ? mergeAutoChatRelayPatch(cohostSettingsRef.current?.autoChat ?? null, command.autoChat)
+          : null
+        const next = await client.request<CohostSettings>('cohost.settings.set', {
+          ...orcleLiveSettingsPatch(command.enabled),
+          ...(autoChat ? { autoChat } : {})
+        })
         setCohostSettings(next)
         return {
           ...cohostWindowStateRef.current,
           consented: command.grantConsent === true || cohostWindowStateRef.current.consented,
           enabled: next.enabled,
-          listen: next.listen === true
+          listen: next.listen === true,
+          autoChat: next.autoChat
         } satisfies CohostWindowState
       })()
         .then(async (state) => {
@@ -4486,6 +4505,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           return runCohostAction('cohost.author.greeted', {
             sessionId: command.sessionId,
             authorKey: command.targetId
+          })
+        }
+        // Plan 164 S-D2 / D7: the Golem's proposed cards and the Say box.
+        if (command.kind === 'approve-utterance' || command.kind === 'dismiss-utterance') {
+          return runCohostAction(
+            command.kind === 'approve-utterance'
+              ? 'cohost.utterance.approve'
+              : 'cohost.utterance.dismiss',
+            { sessionId: command.sessionId, utteranceId: command.targetId }
+          )
+        }
+        if (command.kind === 'say-utterance') {
+          return runCohostAction('cohost.utterance.say', {
+            sessionId: command.sessionId,
+            text: command.text ?? '',
+            ...(command.state ? { state: command.state } : {})
           })
         }
         const method =
