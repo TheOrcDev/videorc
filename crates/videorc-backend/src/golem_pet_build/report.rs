@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::pack::FrameKind;
+use crate::golem_pet::PetFrameKind;
 
 pub const ANCHOR_POLICY: &str = "lower-body-bottom";
 pub const SCALE_POLICY: &str = "neutral-height-and-reaction-full-height-v1";
@@ -50,7 +50,7 @@ pub struct NeutralReport {
 #[serde(rename_all = "camelCase")]
 pub struct CellReport {
     pub id: String,
-    pub kind: FrameKind,
+    pub kind: PetFrameKind,
     /// Sheet key, e.g. `gaze-level` or `reactions-a`.
     pub sheet: String,
     pub sheet_sha256: String,

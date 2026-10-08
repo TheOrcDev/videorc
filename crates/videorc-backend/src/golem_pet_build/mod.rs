@@ -54,14 +54,16 @@ pub use cut::SourceBox;
 pub use isolate::LOOSE_PIECE_JOIN_PX;
 #[allow(unused_imports)]
 pub use pack::{
-    ATLAS_COLUMNS, ATLAS_FILE, FrameKind, MANIFEST_FILE, PROVENANCE_FILE, PetFrame, PetManifest,
-    PetSidecar, REPORT_FILE, SIDECAR_FILE, SIDECAR_SOURCE_CREATOR,
+    ATLAS_COLUMNS, ATLAS_FILE, MANIFEST_FILE, PROVENANCE_FILE, REPORT_FILE, SIDECAR_FILE,
 };
 #[allow(unused_imports)]
 pub use register::{MAX_ROOT_DRIFT_BOTTOM_PX, MAX_ROOT_DRIFT_X_PX, MIN_MARGIN_PX};
 #[allow(unused_imports)]
 pub use report::{BuildReport, CellReport, NeutralReport, Provenance};
 
+use crate::golem_pet::{
+    GOLEM_PET_SIDECAR_VERSION, PetFrameKind, PetManifest, PetSidecar, PetSource,
+};
 use isolate::IsolateFailure;
 use register::{ExtractFailure, ExtractedCell, RegisterFailure, Registration};
 
@@ -963,8 +965,8 @@ pub fn build_pack(
         let labels = sheet.kind.cell_labels();
         for (index, cell) in cells.iter().enumerate() {
             let (kind, gaze) = match sheet.kind {
-                SheetKind::Gaze { row } => (FrameKind::Gaze, Some(gaze_point(index, row))),
-                _ => (FrameKind::Reaction, None),
+                SheetKind::Gaze { row } => (PetFrameKind::Gaze, Some(gaze_point(index, row))),
+                _ => (PetFrameKind::Reaction, None),
             };
             atlas_cells.push(pack::AtlasCell {
                 id: labels[index].clone(),
@@ -987,7 +989,7 @@ pub fn build_pack(
         version: 1,
         name: name.to_string(),
         neutral: neutral.clone(),
-        pivot: [target[0] / f64::from(size), target[1] / f64::from(size)],
+        pivot: Some([target[0] / f64::from(size), target[1] / f64::from(size)]),
         frames,
     };
     let neutral_image = registered
@@ -1005,16 +1007,16 @@ pub fn build_pack(
         })?;
     let created_at = input.created_at.to_rfc3339_opts(SecondsFormat::Secs, true);
     let sidecar = PetSidecar {
-        version: 1,
-        source: SIDECAR_SOURCE_CREATOR.to_string(),
+        version: GOLEM_PET_SIDECAR_VERSION,
+        source: PetSource::VideorcCreator,
         head_top: round_to(pack::head_top(neutral_image), 4),
         talk: TALK_IDS
             .iter()
             .filter(|id| manifest.frames.iter().any(|frame| frame.id == **id))
             .map(|id| id.to_string())
             .collect(),
-        created_at: created_at.clone(),
-        reference_sha256: reference_sha256.clone(),
+        created_at: Some(created_at.clone()),
+        reference_sha256: Some(reference_sha256.clone()),
     };
     let mut cell_reports = Vec::with_capacity(manifest.frames.len());
     let mut frame_index = 0usize;
@@ -1371,81 +1373,17 @@ mod tests {
         build_pack(&fixture.input, &fixture.dir.join("pack"), |_| {})
     }
 
-    /// The page-pet manifest v1 rules (`runtime/manifest.js`) this output
-    /// must satisfy. Test-only: Phase A ships `golem_pet::validate_manifest`
-    /// and `builder_output_passes_manifest_rules` switches to it.
-    fn validate_manifest_rules(manifest: &PetManifest, atlas: (u32, u32)) -> Result<(), String> {
-        if manifest.version != 1 {
-            return Err("version must be 1".into());
-        }
-        if manifest.name.trim().is_empty() {
-            return Err("name must not be empty".into());
-        }
-        if manifest.frames.is_empty() {
-            return Err("frames must not be empty".into());
-        }
-        if manifest
-            .pivot
-            .iter()
-            .any(|n| !n.is_finite() || !(0.0..=1.0).contains(n))
-        {
-            return Err("pivot must be normalised".into());
-        }
-        let mut ids = std::collections::HashSet::new();
-        let mut points = std::collections::HashSet::new();
-        for frame in &manifest.frames {
-            if frame.id.is_empty() || !ids.insert(frame.id.as_str()) {
-                return Err(format!("frame ids must be unique: {}", frame.id));
-            }
-            let (stem, extension) = frame
-                .sheet
-                .rsplit_once('.')
-                .ok_or_else(|| format!("sheet needs an extension: {}", frame.sheet))?;
-            if stem.is_empty()
-                || !stem
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-                || !["png", "webp", "avif"].contains(&extension)
-            {
-                return Err(format!(
-                    "sheet must be a local png/webp/avif name: {}",
-                    frame.sheet
-                ));
-            }
-            let [x, y, w, h] = frame.rect;
-            if w == 0 || w != h {
-                return Err(format!("{}: rect must be a non-empty square", frame.id));
-            }
-            if x + w > atlas.0 || y + h > atlas.1 {
-                return Err(format!("{}: rect outside the sheet", frame.id));
-            }
-            match frame.kind {
-                FrameKind::Gaze => {
-                    let gaze = frame
-                        .gaze
-                        .ok_or_else(|| format!("{}: gaze frame without gaze", frame.id))?;
-                    if gaze.iter().any(|n| !n.is_finite() || n.abs() > 1.0) {
-                        return Err(format!("{}: gaze outside -1..1", frame.id));
-                    }
-                    if !points.insert(format!("{},{}", gaze[0], gaze[1])) {
-                        return Err(format!("{}: duplicate gaze point", frame.id));
-                    }
-                }
-                FrameKind::Reaction => {
-                    if frame.gaze.is_some() {
-                        return Err(format!("{}: reaction with gaze", frame.id));
-                    }
-                }
-            }
-        }
-        if !manifest
-            .frames
-            .iter()
-            .any(|frame| frame.id == manifest.neutral && frame.kind == FrameKind::Gaze)
-        {
-            return Err("neutral must name a gaze frame".into());
-        }
-        Ok(())
+    /// The pack contract's own rules (plan 168 S-A1): the manifest as JSON
+    /// through [`crate::golem_pet::validate_manifest`] (page-pet manifest v1
+    /// plus D1 and D4), then every rect inside the atlas.
+    fn validate_pack_rules(
+        manifest: &PetManifest,
+        atlas: (u32, u32),
+    ) -> Result<PetManifest, crate::golem_pet::PetError> {
+        let parsed = crate::golem_pet::validate_manifest(&serde_json::to_value(manifest).unwrap())?;
+        let sizes = BTreeMap::from([(ATLAS_FILE.to_string(), atlas)]);
+        crate::golem_pet::validate_sheet_sizes(&parsed, &sizes)?;
+        Ok(parsed)
     }
 
     #[test]
@@ -1459,7 +1397,7 @@ mod tests {
         assert_eq!((outcome.atlas_width, outcome.atlas_height), (640, 1024));
         assert_eq!(outcome.manifest.frames.len(), 40);
         assert_eq!(outcome.manifest.neutral, "gaze-2-2");
-        assert_eq!(outcome.manifest.pivot, [0.5, 115.0 / 128.0]);
+        assert_eq!(outcome.manifest.pivot, Some([0.5, 115.0 / 128.0]));
         let ids: Vec<&str> = outcome
             .manifest
             .frames
@@ -1484,7 +1422,7 @@ mod tests {
         assert_eq!(frame("gaze-4-4").gaze, Some([1.0, 1.0]));
         assert_eq!(frame("gaze-2-2").rect, [256, 256, 128, 128]);
         assert_eq!(frame("wave").rect, [512, 896, 128, 128]);
-        assert_eq!(frame("wave").kind, FrameKind::Reaction);
+        assert_eq!(frame("wave").kind, PetFrameKind::Reaction);
         assert_eq!(frame("wave").gaze, None);
         assert!(
             outcome
@@ -1496,12 +1434,15 @@ mod tests {
 
         // Sidecar.
         assert_eq!(outcome.sidecar.version, 1);
-        assert_eq!(outcome.sidecar.source, SIDECAR_SOURCE_CREATOR);
+        assert_eq!(outcome.sidecar.source, PetSource::VideorcCreator);
         assert_eq!(outcome.sidecar.talk, vec!["talk-a", "talk-b"]);
-        assert_eq!(outcome.sidecar.created_at, "2026-10-08T12:00:00Z");
         assert_eq!(
-            outcome.sidecar.reference_sha256,
-            fixture.input.reference.sha256
+            outcome.sidecar.created_at.as_deref(),
+            Some("2026-10-08T12:00:00Z")
+        );
+        assert_eq!(
+            outcome.sidecar.reference_sha256.as_deref(),
+            Some(fixture.input.reference.sha256.as_str())
         );
         // The neutral stands 0.65 of the cell tall on the 0.9 pivot.
         let expected_head_top = (115.0 - 128.0 * 0.65) / 128.0;
@@ -1666,46 +1607,55 @@ mod tests {
 
     #[test]
     fn builder_output_passes_manifest_rules() {
+        use crate::golem_pet::{PetRule, load_pack_dir, parse_sidecar};
         let fixture = plain_fixture("rules");
         let outcome = build(&fixture).unwrap();
-        validate_manifest_rules(
-            &outcome.manifest,
-            (outcome.atlas_width, outcome.atlas_height),
-        )
-        .unwrap();
-        // The validator itself catches the rules it claims to check.
+        let atlas = (outcome.atlas_width, outcome.atlas_height);
+        assert_eq!(
+            validate_pack_rules(&outcome.manifest, atlas).unwrap(),
+            outcome.manifest
+        );
+
+        // The files on disk are the contract's own JSON, byte for byte: the
+        // canonical types parse them and serialize them back identically.
+        let out_dir = fixture.dir.join("pack");
+        let manifest_bytes = std::fs::read(out_dir.join(MANIFEST_FILE)).unwrap();
+        let parsed = crate::golem_pet::parse_manifest(&manifest_bytes).unwrap();
+        let mut reserialized = serde_json::to_vec_pretty(&parsed).unwrap();
+        reserialized.push(b'\n');
+        assert_eq!(reserialized, manifest_bytes);
+        let sidecar_bytes = std::fs::read(out_dir.join(SIDECAR_FILE)).unwrap();
+        let sidecar = parse_sidecar(&sidecar_bytes, &parsed).unwrap();
+        let mut reserialized = serde_json::to_vec_pretty(&sidecar).unwrap();
+        reserialized.push(b'\n');
+        assert_eq!(reserialized, sidecar_bytes);
+
+        // The whole folder loads as a pack: decoded, every cell transparent
+        // around a character, the sidecar read from disk.
+        let loaded = load_pack_dir(&out_dir, "built").unwrap();
+        assert_eq!(loaded.manifest, outcome.manifest);
+        assert_eq!(loaded.sidecar, outcome.sidecar);
+        assert!(loaded.sidecar_on_disk);
+
+        // The contract's validator catches each rule by name.
+        let rule = |manifest: &PetManifest, atlas: (u32, u32)| {
+            validate_pack_rules(manifest, atlas).unwrap_err().rule
+        };
         let mut broken = outcome.manifest.clone();
         broken.frames[1].id = broken.frames[0].id.clone();
-        assert!(
-            validate_manifest_rules(&broken, (640, 1024))
-                .unwrap_err()
-                .contains("unique")
-        );
+        assert_eq!(rule(&broken, atlas), PetRule::FrameId);
         let mut broken = outcome.manifest.clone();
         broken.frames[3].gaze = broken.frames[2].gaze;
-        assert!(
-            validate_manifest_rules(&broken, (640, 1024))
-                .unwrap_err()
-                .contains("duplicate gaze")
-        );
+        assert_eq!(rule(&broken, atlas), PetRule::GazeUnique);
         let mut broken = outcome.manifest.clone();
         broken.neutral = "wave".into();
-        assert!(
-            validate_manifest_rules(&broken, (640, 1024))
-                .unwrap_err()
-                .contains("neutral")
-        );
+        assert_eq!(rule(&broken, atlas), PetRule::NeutralMissing);
         let mut broken = outcome.manifest.clone();
         broken.frames[0].rect = [0, 0, 128, 64];
-        assert!(
-            validate_manifest_rules(&broken, (640, 1024))
-                .unwrap_err()
-                .contains("square")
-        );
-        assert!(
-            validate_manifest_rules(&outcome.manifest, (640, 1000))
-                .unwrap_err()
-                .contains("outside")
+        assert_eq!(rule(&broken, atlas), PetRule::RectSquare);
+        assert_eq!(
+            rule(&outcome.manifest, (640, 1000)),
+            PetRule::FrameOutsideSheet
         );
     }
 
@@ -1755,7 +1705,7 @@ mod tests {
                 .filter(|c| c.sheet != "gaze-up1")
                 .all(|c| !c.isolated)
         );
-        validate_manifest_rules(
+        validate_pack_rules(
             &outcome.manifest,
             (outcome.atlas_width, outcome.atlas_height),
         )
