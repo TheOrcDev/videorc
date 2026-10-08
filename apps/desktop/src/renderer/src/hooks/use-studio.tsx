@@ -239,7 +239,6 @@ import type {
   CohostSettings,
   CohostSettingsPatch,
   CohostState,
-  CohostUtteranceState,
   CohostWindowState,
   GolemOverlaySnapshot,
   CommentHighlightAnchor,
@@ -1161,8 +1160,6 @@ export type StudioContextValue = {
   /** The Golem on stream (plan 164 Phase C): which state shows and the bubble
    * that is up (`cohost.golem.state`); null until the backend reported. */
   golemOverlay: GolemOverlaySnapshot | null
-  /** A manual utterance (D7): the bubble shows at once with `state`. */
-  sayGolem: (text: string, state: CohostUtteranceState) => Promise<GolemOverlaySnapshot>
   cohostGate: EntitlementUiGate
   cohostActionPending: boolean
   patchCohostSettings: (patch: CohostSettingsPatch) => Promise<void>
@@ -4264,15 +4261,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // placement or canvas, whether or not a session runs: the slot is
   // app-global and the avatar must be on the first frame (D19). Latest wins:
   // a stale raster never lands after a newer state.
-  const sayGolem = useCallback(
-    async (text: string, state: CohostUtteranceState): Promise<GolemOverlaySnapshot> => {
-      if (!client) throw new Error('Backend socket is not connected.')
-      const shown = await client.requestTyped('cohost.golem.say', { text, state })
-      setGolemOverlay(shown)
-      return shown
-    },
-    [client]
-  )
   const golemPersona = cohostSettings?.persona ?? null
   const golemTargetsKey = useMemo(
     () =>
@@ -4734,11 +4722,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const off = window.videorc?.onCohostActionRequest?.((command: CohostActionCommand) => {
       void (async () => {
         if (!client) throw new Error('Backend socket is not connected.')
-        // The Golem's own actions (plan 164 S-C4): the bubble and the output
-        // switch. Neither touches the engine; the reply is the current state.
+        // The Golem's own actions (plan 164 S-C4): the Say box and the output
+        // switch. The Say box is one utterance (D7): it posts per the chat
+        // mode when the window named its live session, and bubbles at once
+        // when the Golem is on some output. The backend owns the bubble.
         if (command.kind === 'golem-say') {
-          await sayGolem(command.text, command.state)
-          return cohostStateRef.current ?? offCohostState()
+          return runCohostAction('cohost.utterance.say', {
+            ...(command.sessionId ? { sessionId: command.sessionId } : {}),
+            text: command.text,
+            state: command.state
+          })
         }
         if (command.kind === 'golem-show-on-stream') {
           const current = overlayLayoutRef.current
@@ -4819,7 +4812,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         })
     })
     return off
-  }, [client, runCohostAction, sayGolem, setOverlayLayout])
+  }, [client, runCohostAction, setOverlayLayout])
 
   const refreshAiReadinessForClient = useCallback(
     async (
@@ -15491,7 +15484,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       overlayLayout,
       setOverlayLayout,
       golemOverlay,
-      sayGolem,
       cohostGate,
       cohostActionPending,
       patchCohostSettings,
@@ -15726,7 +15718,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       overlayLayout,
       setOverlayLayout,
       golemOverlay,
-      sayGolem,
       cohostGate,
       cohostActionPending,
       patchCohostSettings,

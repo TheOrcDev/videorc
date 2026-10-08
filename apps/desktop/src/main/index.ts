@@ -3092,7 +3092,11 @@ function golemActionCommand(
   if (!value || typeof value !== 'object' || !('kind' in value)) return null
   const { kind } = value as { kind: unknown }
   if (kind === 'golem-say') {
-    const { text, state } = value as { text?: unknown; state?: unknown }
+    const { text, state, sessionId } = value as {
+      text?: unknown
+      state?: unknown
+      sessionId?: unknown
+    }
     const trimmed = typeof text === 'string' ? text.trim() : ''
     if (!trimmed || [...trimmed].length > 200) {
       return new Error('Say something between 1 and 200 characters.')
@@ -3100,7 +3104,17 @@ function golemActionCommand(
     if (state !== 'talk' && state !== 'laugh' && state !== 'think') {
       return new Error('Golem say needs a state: talk, laugh or think.')
     }
-    return { requestId, kind, text: trimmed, state }
+    if (sessionId === undefined) {
+      return { requestId, kind, text: trimmed, state }
+    }
+    // D7: a named session must be the selected live one, like any chat
+    // command; the line may be posted there per the chat mode.
+    try {
+      assertLiveCommentsCommandSession(sessionId)
+    } catch (error) {
+      return error instanceof Error ? error : new Error(String(error))
+    }
+    return { requestId, kind, text: trimmed, state, sessionId }
   }
   if (kind === 'golem-show-on-stream') {
     const { showOnStream } = value as { showOnStream?: unknown }

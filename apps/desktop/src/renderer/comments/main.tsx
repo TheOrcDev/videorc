@@ -418,9 +418,11 @@ function CommentsWindowApp(): ReactElement {
         .finally(() => setCohostActionPending(false))
     }
 
-  // The Golem's own actions (plan 164 S-C4): a manual utterance for the
-  // bubble and the Show on stream switch. Not chat commands, so no session
-  // is needed; Studio makes the call and the window state push follows.
+  // The Golem's own actions (plan 164 S-C4): the Say box and the Show on
+  // stream switch. Not chat commands, so no session is required; the Say box
+  // names the live session when there is one so the line can also be posted
+  // per the chat mode (D7). Studio makes the call and the window state push
+  // follows.
   const [golemPending, setGolemPending] = useState(false)
   const sendGolemAction = (command: GolemActionBody): Promise<void> => {
     const send = window.videorc?.sendCohostAction
@@ -436,7 +438,12 @@ function CommentsWindowApp(): ReactElement {
       .finally(() => setGolemPending(false))
   }
   const sayGolem = (text: string, state: CohostUtteranceState): Promise<void> =>
-    sendGolemAction({ kind: 'golem-say', text, state })
+    sendGolemAction({
+      kind: 'golem-say',
+      text,
+      state,
+      ...(live && snapshot.sessionId ? { sessionId: snapshot.sessionId } : {})
+    })
   const setGolemShowOnStream = (showOnStream: boolean): void => {
     void sendGolemAction({ kind: 'golem-show-on-stream', showOnStream })
   }

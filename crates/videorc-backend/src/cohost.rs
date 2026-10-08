@@ -7163,6 +7163,12 @@ async fn send_automatic(state: &AppState, utterance: CohostUtterance) {
     };
     let trigger = utterance.trigger.kind;
     let manual = trigger == CohostUtteranceTriggerKind::Manual;
+    // D18: an answer on its way to chat is a pending answer; the Golem may
+    // think while it travels (never over a bubble; settled if it fails).
+    if trigger == CohostUtteranceTriggerKind::Answer && crate::golem_overlay::overlay_enabled(state)
+    {
+        crate::golem_overlay::think(state).await;
+    }
     // The mode is the one gate every send passes, decided at send time (D4):
     // Auto for anything automatic, Suggest or Auto for an approved card.
     let mode_allows = match mode {
@@ -7308,6 +7314,21 @@ async fn send_automatic(state: &AppState, utterance: CohostUtterance) {
         engine.mark_utterance(&utterance.id, status);
         engine.snapshot()
     };
+    // D7: the words that reached chat reach the bubble as they land. A manual
+    // line bubbled when it was typed (`say_utterance`), so it is not shown
+    // twice; an answer that went nowhere stops thinking.
+    if status == CohostUtteranceStatus::Sent {
+        if !manual {
+            let landed = CohostUtterance {
+                status,
+                text: text.clone(),
+                ..utterance.clone()
+            };
+            crate::golem_overlay::show_for_utterance(state, &landed).await;
+        }
+    } else if trigger == CohostUtteranceTriggerKind::Answer {
+        crate::golem_overlay::settle(state).await;
+    }
     let post = crate::protocol::CohostReportPost {
         id: utterance.id.clone(),
         at: now_iso,
@@ -7350,6 +7371,9 @@ async fn fail_utterance(
         engine.mark_utterance(&utterance.id, CohostUtteranceStatus::Failed);
         engine.snapshot()
     };
+    if utterance.trigger.kind == CohostUtteranceTriggerKind::Answer {
+        crate::golem_overlay::settle(state).await;
+    }
     if let Some(session_id) = state.cohost.lock().await.auto_chat_session_id() {
         let _ = state.database.append_cohost_report_post(
             &session_id,
@@ -7414,42 +7438,60 @@ pub async fn dismiss_utterance(
     Ok(snapshot)
 }
 
-/// `cohost.utterance.say` (D7): the streamer's own line. In Auto it goes to
-/// every writable destination like any utterance; otherwise it is
-/// bubble-only. Needs the active live-chat session (the lane follows it).
+/// `cohost.utterance.say` (D7): the streamer's own line, one utterance that
+/// both posts and bubbles. In Auto, with the live-chat session named, it goes
+/// to every writable destination like any utterance; otherwise (Off, Suggest,
+/// or no chat session: an empty `sessionId`) it is bubble-only. Either way
+/// the bubble shows at once when the Golem is on some output (Phase C's
+/// `show_bubble`); a named session must be the active one (the lane follows
+/// it).
 pub async fn say_utterance(
     state: &AppState,
     params: crate::protocol::CohostSayParams,
 ) -> Result<CohostState, CohostError> {
     let text = params.text.trim().to_string();
-    if params.session_id.trim().is_empty()
-        || text.is_empty()
-        || text.chars().count() > COHOST_GREETING_TEXT_MAX_CHARS
-    {
+    if text.is_empty() || text.chars().count() > COHOST_GREETING_TEXT_MAX_CHARS {
         return Err(CohostError::InvalidParams);
     }
-    let chat_session_id = state
-        .live_chat
-        .lock()
-        .await
-        .session_id()
-        .map(str::to_string);
-    if chat_session_id.as_deref() != Some(params.session_id.as_str()) {
-        return Err(CohostError::SessionMismatch);
-    }
+    let session_id = params.session_id.trim();
+    let session_id = if session_id.is_empty() {
+        None
+    } else {
+        let chat_session_id = state
+            .live_chat
+            .lock()
+            .await
+            .session_id()
+            .map(str::to_string);
+        if chat_session_id.as_deref() != Some(session_id) {
+            return Err(CohostError::SessionMismatch);
+        }
+        Some(session_id.to_string())
+    };
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     let (utterance, send, snapshot) = {
         let mut engine = state.cohost.lock().await;
-        engine.follow_auto_chat_session(&params.session_id);
-        let (utterance, send) = engine.say(
+        if let Some(session_id) = session_id.as_deref() {
+            engine.follow_auto_chat_session(session_id);
+        }
+        let (mut utterance, mut send) = engine.say(
             &text,
             params.state.unwrap_or_default(),
             Instant::now(),
             &chrono::Utc::now().to_rfc3339(),
         );
+        if send && session_id.is_none() {
+            // Auto mode without a chat session: nowhere to post, so the line
+            // is bubble-only rather than a send that fails.
+            send = false;
+            utterance.status = CohostUtteranceStatus::BubbleOnly;
+            engine.mark_utterance(&utterance.id, CohostUtteranceStatus::BubbleOnly);
+        }
         (utterance, send, engine.snapshot())
     };
     emit_state(state, &snapshot, &lifecycle_delivery);
+    drop(lifecycle_delivery);
+    crate::golem_overlay::show_for_utterance(state, &utterance).await;
     if send {
         let task_state = state.clone();
         tokio::spawn(async move {
@@ -19310,5 +19352,96 @@ mod tests {
         engine.register_golem_operation("op-golem");
         assert!(engine.is_golem_operation("op-golem"));
         assert!(!engine.is_golem_operation("op-streamer"));
+    }
+
+    /// Plan 164 D7: the Say box with the chat mode off and the Golem on an
+    /// output is one bubble-only utterance, never a send; with both output
+    /// switches off the utterance is recorded and nothing is shown; a named
+    /// session that is not the live one is refused.
+    #[tokio::test]
+    async fn say_with_the_mode_off_and_the_overlay_on_is_a_bubble_never_a_send() {
+        let state = test_state();
+        let mut rx = state.events.subscribe();
+        let mut layout = crate::overlay_layout::load_overlay_layout(&state.database);
+        layout.golem.show_on_stream = true;
+        crate::overlay_layout::save_overlay_layout(&state.database, &layout).unwrap();
+        assert_eq!(
+            state.cohost.lock().await.auto_chat_mode(),
+            CohostAutoChatMode::Off
+        );
+        let shown = say_utterance(
+            &state,
+            crate::protocol::CohostSayParams {
+                session_id: String::new(),
+                text: "  Hello   horde ".to_string(),
+                state: Some(CohostUtteranceState::Laugh),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(shown.utterances.len(), 1);
+        let said = &shown.utterances[0];
+        assert_eq!(said.status, CohostUtteranceStatus::BubbleOnly);
+        assert_eq!(said.trigger.kind, CohostUtteranceTriggerKind::Manual);
+        assert_eq!(said.text, "Hello   horde");
+        assert_eq!(shown.auto_chat_sends, 0);
+        let first = rx.recv().await.unwrap();
+        assert_eq!(first.event, COHOST_STATE_EVENT);
+        let bubble = rx.recv().await.unwrap();
+        assert_eq!(bubble.event, crate::golem_overlay::GOLEM_STATE_EVENT);
+        assert_eq!(bubble.payload["state"], "laugh");
+        assert_eq!(bubble.payload["bubble"]["text"], "Hello horde");
+        assert_eq!(
+            crate::golem_overlay::status(&state)
+                .await
+                .bubble
+                .unwrap()
+                .text,
+            "Hello horde"
+        );
+        assert_eq!(state.cohost.lock().await.auto_chat_session_id(), None);
+
+        // A named session that is not live is refused before anything moves.
+        let refused = say_utterance(
+            &state,
+            crate::protocol::CohostSayParams {
+                session_id: "session-nope".to_string(),
+                text: "x".to_string(),
+                state: None,
+            },
+        )
+        .await;
+        assert!(matches!(refused, Err(CohostError::SessionMismatch)));
+        assert!(rx.try_recv().is_err());
+
+        // Both output switches off: the utterance is kept, the bubble is not.
+        layout.golem.show_on_stream = false;
+        crate::overlay_layout::save_overlay_layout(&state.database, &layout).unwrap();
+        crate::golem_overlay::clear(&state).await;
+        assert_eq!(
+            rx.recv().await.unwrap().event,
+            crate::golem_overlay::GOLEM_STATE_EVENT
+        );
+        let shown = say_utterance(
+            &state,
+            crate::protocol::CohostSayParams {
+                session_id: String::new(),
+                text: "Quiet one".to_string(),
+                state: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(shown.utterances.len(), 2);
+        assert_eq!(
+            shown.utterances[1].status,
+            CohostUtteranceStatus::BubbleOnly
+        );
+        assert_eq!(rx.recv().await.unwrap().event, COHOST_STATE_EVENT);
+        assert!(
+            rx.try_recv().is_err(),
+            "no bubble with the Golem on no output"
+        );
+        assert_eq!(crate::golem_overlay::status(&state).await.bubble, None);
     }
 }

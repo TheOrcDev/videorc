@@ -31,7 +31,6 @@ import type {
   CohostSettingsPatch,
   MigrateHighlightAnchorParams,
   OverlayLayout,
-  CohostGolemSayParams,
   GolemOverlaySnapshot,
   OverlayTargetsInfo,
   SetGolemOverlayParams,
@@ -342,7 +341,6 @@ export interface BackendRpcMethodMap {
   >
   // --- Golem overlay (plan 164) ---
   'cohost.golem.status': BackendRpcDefinition<undefined, GolemOverlaySnapshot>
-  'cohost.golem.say': BackendRpcDefinition<CohostGolemSayParams, GolemOverlaySnapshot>
   'golem.overlay.set': BackendRpcDefinition<SetGolemOverlayParams, OverlayTargetsInfo>
   // --- end Golem overlay (plan 164) ---
   'cohost.report.get': BackendRpcDefinition<CohostReportGetParams, CohostReportPayload>
@@ -2799,7 +2797,7 @@ const cohostUtteranceParamsSchema = objectSchema(
 ) as RuntimeSchema<CohostUtteranceParams>
 const cohostSayParamsSchema = objectSchema(
   {
-    sessionId: boundedString,
+    sessionId: optionalSchema(boundedString),
     text: stringSchema({ minLength: 1, maxLength: 200 }),
     state: optionalSchema(cohostUtteranceStateSchema)
   },
@@ -3047,13 +3045,6 @@ const golemOverlaySnapshotSchema = objectSchema(
   },
   { allowUnknown: false }
 ) as RuntimeSchema<GolemOverlaySnapshot>
-const cohostGolemSayParamsSchema = objectSchema(
-  {
-    text: stringSchema({ minLength: 1, maxLength: 200 }),
-    state: enumSchema(['talk', 'laugh', 'think'])
-  },
-  { allowUnknown: false }
-) as RuntimeSchema<CohostGolemSayParams>
 const overlayTargetInfoSchema = objectSchema(
   {
     active: booleanSchema,
@@ -3578,7 +3569,6 @@ const runtimeContracts = {
   },
   // --- Golem overlay (plan 164) ---
   'cohost.golem.status': { params: undefinedSchema, result: golemOverlaySnapshotSchema },
-  'cohost.golem.say': { params: cohostGolemSayParamsSchema, result: golemOverlaySnapshotSchema },
   'golem.overlay.set': { params: setGolemOverlayParamsSchema, result: overlayTargetsInfoSchema },
   // --- end Golem overlay (plan 164) ---
   'liveChat.emotes.get': { params: undefinedSchema, result: chatEmotesSettingsSchema },

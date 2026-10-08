@@ -403,7 +403,7 @@ function GreetingEditor({
         </Button>
       </div>
       <p className="text-xs text-muted-foreground" data-slot="golem-greeting-preview">
-        <span className="text-subtle">Preview:</span> {preview || '—'}
+        <span className="text-subtle">Preview:</span> {preview || '…'}
       </p>
       {draftWarnings.map((warning) => (
         <p

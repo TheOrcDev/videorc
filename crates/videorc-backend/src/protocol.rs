@@ -4708,6 +4708,10 @@ pub struct CohostUtteranceParams {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostSayParams {
+    /// The live-chat session the line may be posted to. Empty or absent:
+    /// no session, so the line is bubble-only (the overlay is free; the Say
+    /// box works while recording without chat).
+    #[serde(default)]
     pub session_id: String,
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

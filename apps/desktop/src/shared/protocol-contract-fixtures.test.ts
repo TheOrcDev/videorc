@@ -642,7 +642,6 @@ describe('shared high-risk protocol fixture', () => {
     }
     for (const snapshot of [idle, talking]) {
       expect(validateBackendRpcResult('cohost.golem.status', snapshot)).toStrictEqual(snapshot)
-      expect(validateBackendRpcResult('cohost.golem.say', snapshot)).toStrictEqual(snapshot)
       expect(validateBackendEventPayload('cohost.golem.state', snapshot)).toStrictEqual(snapshot)
     }
     // The bubble is null or whole, never absent, and no field rides along.
@@ -653,13 +652,15 @@ describe('shared high-risk protocol fixture', () => {
       validateBackendEventPayload('cohost.golem.state', { ...idle, bubble: { text: 'x' } })
     ).toThrow()
     expect(() => validateBackendEventPayload('cohost.golem.state', { ...idle, extra: 1 })).toThrow()
-    const say = { text: 'Hello horde', state: 'talk' }
-    expect(validateBackendRpcParams('cohost.golem.say', say)).toStrictEqual(say)
+    // The Say box is one utterance (`cohost.utterance.say`): a session when
+    // the line may be posted, none when it is bubble-only.
+    const say = { sessionId: 'session-1', text: 'Hello horde', state: 'talk' }
+    expect(validateBackendRpcParams('cohost.utterance.say', say)).toStrictEqual(say)
+    const bubbleOnly = { text: 'Hello horde' }
+    expect(validateBackendRpcParams('cohost.utterance.say', bubbleOnly)).toStrictEqual(bubbleOnly)
+    expect(() => validateBackendRpcParams('cohost.utterance.say', { text: '' })).toThrow()
     expect(() =>
-      validateBackendRpcParams('cohost.golem.say', { text: '', state: 'talk' })
-    ).toThrow()
-    expect(() =>
-      validateBackendRpcParams('cohost.golem.say', { text: 'x', state: 'idle' })
+      validateBackendRpcParams('cohost.utterance.say', { text: 'x', state: 'idle' })
     ).toThrow()
     const set = {
       target: 'auxiliary',

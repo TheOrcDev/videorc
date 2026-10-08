@@ -5358,7 +5358,6 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "overlays.layout.set"
         | "overlays.layout.migrate_highlight_anchor"
         | "cohost.avatar.generate"
-        | "cohost.golem.say"
         | "golem.overlay.set"
         | "cohost.command.choose"
         | "cohost.command.confirm"
@@ -9417,19 +9416,6 @@ async fn handle_text_message_with_role(
         }
         // --- Golem overlay (plan 164 Phase C) ---
         "cohost.golem.status" => ServerResponse::ok(command.id, golem_overlay::status(state).await),
-        "cohost.golem.say" => {
-            match serde_json::from_value::<golem_overlay::GolemSayParams>(command.params) {
-                Ok(params) => match golem_overlay::say(state, params).await {
-                    Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
-                    Err(error) => {
-                        ServerResponse::error(command.id, error.code(), error.to_string())
-                    }
-                },
-                Err(error) => {
-                    ServerResponse::error(command.id, "invalid-params", error.to_string())
-                }
-            }
-        }
         "golem.overlay.set" => {
             match serde_json::from_value::<golem_overlay::SetGolemOverlayParams>(command.params) {
                 Ok(params) => {

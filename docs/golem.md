@@ -87,9 +87,16 @@ For developers:
   lane: mode, proposals, answers, banter, the Say box), and the send path in
   `cohost.rs` (`send_automatic`, the pump that releases held greetings).
 - RPCs: `cohost.utterance.approve` / `cohost.utterance.dismiss`
-  `{sessionId, utteranceId}` and `cohost.utterance.say {sessionId, text,
+  `{sessionId, utteranceId}` and `cohost.utterance.say {sessionId?, text,
 state?}` (mutations). `cohost.state` gains `utterances[]` and
   `autoChatSends`.
+- The bubble (D7/D18): every utterance meets the Golem on stream in
+  `golem_overlay::show_for_utterance`: a `sent` utterance bubbles as it
+  lands, a `bubble-only` one and the Say box bubble at once, an answer on
+  its way to chat may show `think`; nothing shows while the Golem's
+  `showOnStream` and `showInRecording` are both off. The Say box is one
+  utterance: `cohost.utterance.say` without a `sessionId` (no live chat) is
+  bubble-only; with the live session it posts per the chat mode too.
 - Tick v4: the desktop sends `promptVersion: 4` with `persona {name,
 personality}` only when `/api/ai/capabilities` reports `cohost.tick: 4`;
   otherwise v3 goes out exactly as before. v4 replies carry `addressed` and

@@ -5218,13 +5218,6 @@ export interface GolemOverlaySnapshot {
   bubble: GolemBubble | null
 }
 
-/** `cohost.golem.say`: a manual utterance from the Stream Manager's Say box
- * (D7). The backend trims the text and clips it to 200 characters. */
-export interface CohostGolemSayParams {
-  text: string
-  state: CohostUtteranceState
-}
-
 /** `golem.overlay.set`: the renderer's raster of the avatar (and bubble) for
  * one output canvas, blitted inside `rect` (the Golem's placed rect for that
  * canvas orientation). Mirrors `captions.overlay.set`. */
@@ -5886,9 +5879,13 @@ export interface CohostUtteranceParams {
   utteranceId: string
 }
 
-/** `cohost.utterance.say` (plan 164 D7): the streamer's own line, 1 to 200 characters. */
+/** `cohost.utterance.say` (plan 164 D7): the streamer's own line, 1 to 200
+ * characters. One utterance that both posts (in Auto, to the named live-chat
+ * session) and bubbles at once (when the Golem is on some output). Without a
+ * session (recording with no chat, Off, Suggest) it is bubble-only. */
 export interface CohostSayParams {
-  sessionId: string
+  /** The live live-chat session; omitted or empty = no session, bubble-only. */
+  sessionId?: string
   text: string
   /** Defaults to `talk`. */
   state?: CohostUtteranceState
@@ -6018,10 +6015,11 @@ export const COHOST_ACTION_KINDS: readonly CohostActionKind[] = [
   'say-utterance'
 ]
 
-/** The Golem's own actions from the Stream Manager (plan 164 S-C4): a manual
- * utterance for the bubble (D7) and the Show on stream switch. Not chat
- * commands, so they need no live session: the bubble goes to the overlay and
- * the switch to the overlay layout. Studio makes the matching call. */
+/** The Golem's own actions from the Stream Manager (plan 164 S-C4): the Say
+ * box (D7) and the Show on stream switch. Not chat commands, so they need no
+ * live session: Studio routes `golem-say` to `cohost.utterance.say` (one
+ * utterance that posts per the chat mode when a live session is named, and
+ * bubbles) and the switch to the overlay layout. */
 export type CohostGolemActionCommand =
   | {
       requestId: string
@@ -6029,6 +6027,8 @@ export type CohostGolemActionCommand =
       /** 1 to 200 characters. */
       text: string
       state: CohostUtteranceState
+      /** The live session the line may be posted to; absent = bubble-only. */
+      sessionId?: string
     }
   | { requestId: string; kind: 'golem-show-on-stream'; showOnStream: boolean }
 
