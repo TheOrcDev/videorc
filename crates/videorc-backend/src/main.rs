@@ -41,6 +41,9 @@ mod ffmpeg_work;
 mod fifo;
 mod frame_store;
 mod golem_overlay;
+// Plan 168 Phase F (S-F1 to S-F3): the pet builder. Phase F wires the RPCs.
+#[allow(dead_code)]
+mod golem_pet_build;
 mod h264_profile;
 mod host_pressure;
 mod kick;
