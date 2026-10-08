@@ -399,6 +399,43 @@ mark by eye in light and dark.
 | S6    | videorcweb checks, by eye                                             |
 | S7    | full desktop gates, owner by-eye in both themes                       |
 
-## As built
+## As built (2026-10-08, branch `plan-167-x-partner-kit`)
 
-(Fill in after execution.)
+The owner said "execute the entire plan", so D1–D5 went in as recommended.
+
+- **S1** `44460e08`: kit files byte-for-byte in `assets/brand/x/` with a
+  README of hashes. `XPlatformIcon` is the kit path with
+  `fill-black dark:fill-white`; Phosphor's `XLogo` is gone from the registry.
+  `PlatformGlyph` shows the lockup pair (`dark:hidden` / `hidden dark:block`).
+  `lib/x-mark.ts` holds the path, URLs and check labels. The shared
+  `LiveChatAuthorVerified` TS type landed in this commit too.
+- **S2** `7b06a668` (+ `fix` commit for clippy): `RelayAuthor.verified_type`
+  as raw JSON, `LiveChatAuthorVerified` enum, `author_verified` column,
+  `authorVerified` on the LAN whitelist. Fake X chat rows cycle
+  blue/business/government/none by `seq % 4`; no rows were added.
+  - Deviation: the SQL upsert writes `excluded.author_verified`, exactly
+    like `author_affiliation_json` (the plan said "keeps the stored one"; the
+    affiliation code it copies does not). The in-memory deletion path keeps
+    it, as it keeps the affiliation.
+- **S3** `46650d85`: `VerifiedCheck` (16 px `<img>`) between the name and the
+  affiliation logo. Tests in `components/x-mark-surfaces.test.ts`.
+- **S4** `5ceafb00`: one cached `loadBrandMarkImage(url)` loader for
+  YouTube's icon, X's mark and the checks (`loadBrandMark` test hook).
+  X's mark closes the identity row (square, ≥ 20 px); the stroked "×"
+  branch is deleted. The check is ≥ 16 px after the name; both leave the
+  name less room via the layout.
+- **S5** `47a27123`: `/x-logo.svg` and `/x-verified-{blue,business,government}.svg`
+  on the LAN router, `include_str!` of the same files.
+  - **Leak argument for the new LAN routes** (AGENTS.md rule): each route
+    returns one compile-time constant, a public brand SVG from X's kit. They
+    read no state, take no input, carry no user data, ids or URLs, and sit
+    behind the same `guard_and_harden` layer as `/youtube-icon.svg`.
+- **S6** videorcweb `db41f12f` on `plan-167-x-kit-web`: `X_PATH` is the kit
+  path, plus `tests/x-brand-mark.test.ts`.
+
+Gates (desktop): typecheck, lint (one pre-existing warning in
+`use-studio.tsx`, also on main), format:check, 313 test files / 3,441 tests,
+build, `check:renderer-assets` (eager JS 1,838,786 → 1,844,775 raw,
+363,135 → 364,763 gzip), `cargo fmt --check`, clippy `-D warnings`,
+targeted cargo tests (x_chat, live_chat, storage, remote_lan,
+remote_lan_server). Smokes: see the PR.
