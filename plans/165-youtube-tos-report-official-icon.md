@@ -568,18 +568,23 @@ retention, that becomes its own plan.
 **S4:**
 
 - The highlight card draws the official file at 20 px or more (output
-  pixels) between the avatar and the name, and the name loses its
+  pixels) on the right edge of the name row, and the name loses its
   "YouTube ·" prefix.
 - If the file fails to load, the card falls back to the words, never to a
   redrawn mark.
 - The phone remote serves the same file at `/youtube-icon.svg`
-  (`include_str!` of the one copy) and shows it at 20 px in place of the
-  letter tile.
+  (`include_str!` of the one copy).
+- Phone remote rows (owner call) are: initials avatar · name and message ·
+  platform mark on the far right. YouTube's mark is 20 px; the others keep
+  their letter tiles.
+- The avatar is the desktop's monogram. The LAN projection still sends no
+  avatar URLs and the page's CSP allows no remote images, so photos would
+  need an authenticated LAN image route, which was not built.
 
 **S5:**
 
-- Before and after screenshots are in
-  `docs/acceptance/2026-10-08-youtube-branding/`.
+- Before and after screenshots were taken but are kept out of the repo
+  (owner call). The owner holds them for the reply to Google.
 - The reply notes are in `docs/compliance/youtube-tos-report-v1-reply.md`.
 - The Studio chat rail no longer exists, and the Orcle tab shows no platform
   marks, so neither was captured.

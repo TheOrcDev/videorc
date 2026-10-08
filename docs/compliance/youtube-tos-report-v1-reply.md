@@ -94,18 +94,18 @@ icon file**, unmodified, with the visible mark **at least 20 px tall**.
 | Surface Google flagged / same defect                      | Before                                     | After                                                        |
 | --------------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------ |
 | Livestream → Destinations: YouTube, YouTube Vertical rows | 9.6 px redrawn glyph on a red-tinted tile  | Official icon, 20 px, on the row surface                     |
-| Stream Manager chat rows (the "red dot")                  | 9.6 px redrawn glyph, red tint             | Official icon, 20 px, before the author name                 |
+| Stream Manager chat rows (the "red dot")                  | 9.6 px redrawn glyph, red tint             | Official icon, 20 px, on the far right of the row            |
 | Stream Manager chat platform filter                       | 9.6 px redrawn glyph                       | Official icon, 20 px                                         |
 | Stream Manager activity pane filter                       | 9.6 px redrawn glyph                       | Official icon, 20 px                                         |
-| Stream Manager activity rows                              | 8.3 px glyph laid over the viewer's avatar | Official icon, 20 px, on the name line (not over the avatar) |
+| Stream Manager activity rows                              | 8.3 px glyph laid over the viewer's avatar | Official icon, 20 px, on the far right (not over the avatar) |
 | Stream Manager status bar, chat chips                     | 9.6 px redrawn glyph                       | Official icon, 20 px                                         |
 | Chat status badges                                        | 8.3 px glyph (badge forces 12 px)          | The word "YouTube" (no icon)                                 |
 | Upcoming streams, schedule dialog, Orcle tab, menus       | 9.6 px redrawn glyph                       | Official icon, 20 px                                         |
-| Highlight card shown on the stream                        | Hand-drawn red circle with a play triangle | Official icon, 20 px or more in output pixels                |
-| Phone remote (LAN) chat rows                              | Letter "Y" on a red tile                   | Official icon, 20 px                                         |
+| Highlight card shown on the stream                        | Hand-drawn red circle with a play triangle | Official icon, 20 px or more in output pixels, on the right  |
+| Phone remote (LAN) chat rows                              | Letter "Y" on a red tile                   | Official icon, 20 px, on the far right                       |
 
-The screenshots are attached to the PR. Every flagged surface is shown before
-and after, in dark and light.
+The owner holds the before and after screenshots (every flagged surface, in
+dark and light) for the reply. They are not in the repo.
 
 **Not covered here:** the videorc.com website icon (the report's third
 screenshot) is a separate website fix.

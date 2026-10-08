@@ -140,8 +140,20 @@ function messageText(message) {
   return (message.fragments ?? []).map((fragment) => fragment.text).join('')
 }
 
-// YouTube rows carry YouTube's official icon file, unmodified and 20 px tall
-// (plan 165, Google's ToS report III.F.2a). Other platforms keep a letter tile.
+// Up to two initials, as the desktop's monogram avatar (chat-avatar.tsx).
+function initials(name) {
+  const words = (name ?? '').trim().split(/\s+/).filter(Boolean)
+  return (
+    words
+      .slice(0, 2)
+      .map((word) => [...word][0].toUpperCase())
+      .join('') || '?'
+  )
+}
+
+// The platform mark closes the row on the far right. YouTube rows carry
+// YouTube's official icon file, unmodified and 20 px tall (plan 165, Google's
+// ToS report III.F.2a). Other platforms keep a letter tile.
 function platformGlyph(platform) {
   if (platform === 'youtube') {
     const glyph = el('span', 'glyph')
@@ -181,7 +193,9 @@ function buildRow(message) {
   )
   if (role) meta.append(el('span', 'role', role === 'moderator' ? 'mod' : 'host'))
   if (message.amountText) meta.append(el('span', 'amount', message.amountText))
-  row.append(glyph, meta, el('span', 'text', messageText(message)))
+  const avatar = el('span', 'avatar', initials(message.authorName))
+  avatar.setAttribute('aria-hidden', 'true')
+  row.append(avatar, meta, glyph, el('span', 'text', messageText(message)))
   if (message.isDeleted) row.dataset.deleted = 'true'
   return row
 }
