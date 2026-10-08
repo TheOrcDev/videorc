@@ -28,11 +28,14 @@ use crate::cohost_ack::{
     AuthorLedger, DeadAirLane, GreetedHow, dead_air_due, dead_air_text, match_candidates,
     name_forms_match, name_match_forms, name_tokens,
 };
+use crate::cohost_auto_chat::{AnswerCandidate, AutoChatLane, AutoChatPass};
 use crate::cohost_command::{
     CommandKind, CommandSession, CommandTarget, DetectContext, DetectedCommand, is_command_word,
 };
 use crate::comment_highlight::{CommentHighlightPhase, CommentHighlightState};
-use crate::live_chat::{LiveChatEventType, LiveChatMessage, LiveChatMessageFragment};
+use crate::live_chat::{
+    LiveChatEventType, LiveChatMessage, LiveChatMessageFragment, comments_destination_id,
+};
 use crate::live_chat_moderation::{
     ModerationOperation, ModerationOutcomeCode, ModerationPhase, ModerationRefusal,
     ModerationRequest, ModerationSource, RemoveConfirmMode,
@@ -54,9 +57,10 @@ use crate::twitch_chat::gif_title;
 use crate::videorc_api::{
     COHOST_COMMAND_MAX_CANDIDATES, COHOST_SPOTLIGHT_MAX_BODY_BYTES, CohostApiError,
     CohostApiErrorKind, CohostCommandCandidate, CohostCommandRequest, CohostCommandResponse,
-    CohostSpotlightCandidate, CohostSpotlightRequest, CohostSpotlightResponse, CohostTickMessage,
-    CohostTickOpenPromise, CohostTickOpenQuestion, CohostTickPromise, CohostTickQuestion,
-    CohostTickRequest, CohostTickResponse, VideorcApiClient,
+    CohostSpotlightCandidate, CohostSpotlightRequest, CohostSpotlightResponse, CohostTickIntent,
+    CohostTickMessage, CohostTickMood, CohostTickOpenPromise, CohostTickOpenQuestion,
+    CohostTickPersona, CohostTickPromise, CohostTickQuestion, CohostTickRequest,
+    CohostTickResponse, VideorcApiClient,
 };
 
 pub const COHOST_STATE_EVENT: &str = "cohost.state";
@@ -67,7 +71,10 @@ pub const COHOST_REPORT_SAVED_EVENT: &str = "cohost.report.saved";
 /// step down `COHOST_PROMPT_VERSION_LADDER` (3 → 2 → 1) until it ends
 /// (server rollback); a rejected v1 tick is a real failure.
 pub const COHOST_PROMPT_VERSION: u32 = 3;
-pub const COHOST_PROMPT_VERSION_LADDER: [u32; 3] = [3, 2, 1];
+pub const COHOST_PROMPT_VERSION_LADDER: [u32; 4] = [4, 3, 2, 1];
+/// Persona, per-question `addressed`/`mood` and banter (plan 164 S-D3): a
+/// session starts on it only when `/capabilities` reported `cohost.tick: 4`.
+pub(crate) const COHOST_PROMPT_VERSION_PERSONA_MIN: u32 = 4;
 /// `rules` ride every version from v2 on, whatever the pinned version.
 const COHOST_PROMPT_VERSION_RULES_MIN: u32 = 2;
 /// Transcript, summary, promises, recap, on-topic (plan 068 D7).
@@ -102,6 +109,8 @@ const TICK_OPEN_PROMISES_CAP: usize = 20;
 const PROMISE_TEXT_MAX_CHARS: usize = 160;
 const TOPIC_MAX_CHARS: usize = 60;
 pub(crate) const RECAP_MAX_CHARS: usize = 140;
+/// v4 banter line cap (plan 164 S-D4).
+const BANTER_TEXT_MAX_CHARS: usize = 120;
 /// Renderer contract bounds (`cohostQuestionSchema`), in UTF-16 units.
 const QUESTION_TEXT_MAX_UNITS: usize = 2000;
 const QUESTION_ASKER_MAX_UNITS: usize = 512;
@@ -607,7 +616,7 @@ pub enum CohostAutoChatMode {
 
 /// The activity kinds a greeting template answers (plan 164). Closed: an
 /// unknown kind is refused at the wire, never stored.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "kebab-case")]
 pub enum CohostActivityTemplateKind {
     Follow,
@@ -644,6 +653,62 @@ pub enum CohostUtteranceState {
     Talk,
     Laugh,
     Think,
+}
+
+/// What made the Golem speak (plan 164 D7).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostUtteranceTriggerKind {
+    Greeting,
+    Answer,
+    Banter,
+    Manual,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostUtteranceTrigger {
+    pub kind: CohostUtteranceTriggerKind,
+    /// The Activity row a greeting answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    /// The chat row an answer replies to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+}
+
+/// Where an utterance stands (plan 164 D7). `proposed` waits for the
+/// streamer (Suggest) or for the send (Auto); `sent` landed on at least one
+/// destination; `failed` reached none (the log says why); `dismissed` was
+/// declined or expired; `bubble-only` never goes to chat.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostUtteranceStatus {
+    Proposed,
+    Sent,
+    Dismissed,
+    BubbleOnly,
+    Failed,
+}
+
+/// One thing the Golem said or wants to say (plan 164 D7), on `cohost.state`
+/// for the Stream Manager's cards and Phase C's bubble.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostUtterance {
+    pub id: String,
+    pub text: String,
+    pub state: CohostUtteranceState,
+    pub trigger: CohostUtteranceTrigger,
+    /// Where a send goes; empty means every writable destination (banter,
+    /// the Say box), resolved when it is sent.
+    #[serde(default)]
+    pub destination_ids: Vec<String>,
+    pub status: CohostUtteranceStatus,
+    pub at: String,
+    /// Present while `proposed` in Suggest mode: the card leaves then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
 /// A greeting written by the user, with `{name}`-style fields resolved in
@@ -715,6 +780,18 @@ impl Default for CohostAutoChat {
             greetings: CohostGreetingsSettings::default(),
             answers: default_answers(),
             banter: default_banter(),
+        }
+    }
+}
+
+/// Mood → avatar state (plan 164 D18, Phase A note): amused → laugh,
+/// thinking → think, neutral (or unknown) → talk.
+pub(crate) fn utterance_state_for_mood(mood: Option<CohostTickMood>) -> CohostUtteranceState {
+    match mood {
+        Some(CohostTickMood::Amused) => CohostUtteranceState::Laugh,
+        Some(CohostTickMood::Thinking) => CohostUtteranceState::Think,
+        Some(CohostTickMood::Neutral | CohostTickMood::Unknown) | None => {
+            CohostUtteranceState::Talk
         }
     }
 }
@@ -1348,6 +1425,17 @@ pub struct CohostState {
     /// The voice-command kill switches; omitted while both are on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_availability: Option<CohostCommandAvailability>,
+    /// Plan 164 D7: what the Golem said or proposes this chat session,
+    /// oldest first, at most 20. Omitted while empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub utterances: Vec<CohostUtterance>,
+    /// Plan 164 D10: automatic sends this chat session. Omitted while zero.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub auto_chat_sends: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl CohostState {
@@ -1383,6 +1471,8 @@ impl CohostState {
             dead_air_nudge: None,
             command: None,
             command_availability: None,
+            utterances: Vec::new(),
+            auto_chat_sends: 0,
         }
     }
 }
@@ -1409,6 +1499,12 @@ pub enum CohostError {
     /// Plan 164 S-A2: the automatic chat settings on a patch are out of bounds.
     #[error("{0}")]
     InvalidAutoChat(String),
+    /// Plan 164 D4: a send was asked for while the chat mode is off.
+    #[error("The Golem's chat mode is off. Turn on Suggest or Auto in Stream Manager.")]
+    AutoChatOff,
+    /// Plan 164 S-D2: the card to approve is gone, answered or expired.
+    #[error("{0}")]
+    UtteranceUnavailable(&'static str),
 }
 
 impl CohostError {
@@ -1422,6 +1518,8 @@ impl CohostError {
             Self::Storage(_) => "cohost-settings-storage-failed",
             Self::InvalidPersona(_) => "cohost-persona-invalid",
             Self::InvalidAutoChat(_) => "cohost-auto-chat-invalid",
+            Self::AutoChatOff => "cohost-auto-chat-off",
+            Self::UtteranceUnavailable(_) => "cohost-utterance-unavailable",
         }
     }
 }
@@ -1885,6 +1983,12 @@ struct CohostSession {
     /// Removal operations voice commands created this session, for the
     /// report: each terminal outcome is counted once.
     command_operations: HashMap<String, CommandOperationTrack>,
+    /// Plan 164 S-D3: tick replies the viewer asked the Golem for by name,
+    /// new this tick, waiting for the auto-chat lane to route them.
+    answer_candidates: Vec<AnswerCandidate>,
+    /// Plan 164 S-D4: a banter request is outstanding (it shares the tick's
+    /// `in_flight`, so the two never overlap).
+    banter_in_flight: bool,
 }
 
 /// What the engine remembers about one chat row it noted.
@@ -1903,6 +2007,9 @@ struct KnownMessage {
     noted_at: Instant,
     /// Plan 140 S3: the platform a command card names.
     platform: StreamPlatform,
+    /// Plan 164 S-D3: the comments destination the row came from, where an
+    /// automatic answer goes.
+    destination_id: String,
     /// A Twitch notification row that arrived as a message: voice commands
     /// never target it (it has no deletable id).
     notification: bool,
@@ -2754,6 +2861,8 @@ impl CohostSession {
             report: ReportLedger::default(),
             command: None,
             command_operations: HashMap::new(),
+            answer_candidates: Vec::new(),
+            banter_in_flight: false,
         }
     }
 
@@ -2817,6 +2926,9 @@ impl CohostSession {
                 dismissed: self.report.recap_dismissed,
             },
             commands: (!self.report.commands.is_empty()).then(|| self.report.commands.clone()),
+            // Plan 164 D10: posts are written as they land (`append_post`),
+            // never rebuilt here; the merge keeps them.
+            posts: Vec::new(),
         }
     }
 
@@ -2848,10 +2960,6 @@ impl CohostSession {
         // Plan 140 S3: a card a voice command opened closes with what was
         // heard; the caller cancels its removal.
         self.abandon_command(COMMAND_SIGNED_OUT, &chrono::Utc::now().to_rfc3339())
-    }
-
-    fn snapshot(&self) -> CohostState {
-        self.snapshot_at(Instant::now())
     }
 
     fn snapshot_at(&self, now: Instant) -> CohostState {
@@ -2895,6 +3003,8 @@ impl CohostSession {
             command: self.command.as_ref().map(|record| record.wire.clone()),
             // The engine sets the kill switches; the session never knows them.
             command_availability: None,
+            utterances: Vec::new(),
+            auto_chat_sends: 0,
         }
     }
 
@@ -3078,6 +3188,10 @@ impl CohostSession {
                     at: mapped.at.clone(),
                     noted_at: now,
                     platform: message.platform,
+                    destination_id: comments_destination_id(
+                        message.platform,
+                        message.target_id.as_deref(),
+                    ),
                     notification: message
                         .raw_provider_type
                         .as_deref()
@@ -3178,7 +3292,62 @@ impl CohostSession {
             transcript,
             summary,
             open_promises,
+            persona: self.tick_persona(settings),
+            intent: None,
         }
+    }
+
+    /// v4 (plan 164 S-D3): the persona rides only on v4; a v3 body stays
+    /// byte-identical to what a v3 desktop sends.
+    fn tick_persona(&self, settings: &CohostSettings) -> Option<CohostTickPersona> {
+        (self.prompt_version >= COHOST_PROMPT_VERSION_PERSONA_MIN).then(|| CohostTickPersona {
+            name: settings.persona.name.clone(),
+            personality: settings.persona.personality.clone(),
+        })
+    }
+
+    fn speaks_v4(&self) -> bool {
+        self.prompt_version >= COHOST_PROMPT_VERSION_PERSONA_MIN
+    }
+
+    /// A banter request (plan 164 S-D4): the v4 tick shape with
+    /// `intent: banter`, no chat and no transcript. The pending delta stays
+    /// for the next real tick; `in_flight` is shared so they never overlap.
+    fn build_banter_request(
+        &mut self,
+        settings: &CohostSettings,
+        now: Instant,
+    ) -> CohostTickRequest {
+        self.tick_seq = self.tick_seq.saturating_add(1);
+        self.last_tick_at = Some(now);
+        self.in_flight = true;
+        self.banter_in_flight = true;
+        CohostTickRequest {
+            client_version: DESKTOP_CLIENT_VERSION.to_string(),
+            session_client_id: self.session_id.clone(),
+            tick_seq: self.tick_seq,
+            prompt_version: self.prompt_version,
+            consent_to_process_chat: self.consent,
+            tone: settings.tone,
+            notes: settings.notes.clone(),
+            rules: Some(settings.rules.clone()),
+            stream_title: self.stream_title.clone(),
+            open_questions: Vec::new(),
+            messages: Vec::new(),
+            dropped_messages: 0,
+            transcript: None,
+            summary: (!self.summary.is_empty()).then(|| self.summary.clone()),
+            open_promises: None,
+            persona: self.tick_persona(settings),
+            intent: Some(CohostTickIntent::Banter),
+        }
+    }
+
+    /// The banter request answered (or failed): the lane is free again. A
+    /// failure is logged by the caller and never pauses the session.
+    fn finish_banter(&mut self) {
+        self.banter_in_flight = false;
+        self.in_flight = false;
     }
 
     /// Merge a successful tick. `questions` is the full open set: existing ids
@@ -3429,6 +3598,25 @@ impl CohostSession {
             }
             if self.counted_question_ids.insert(incoming.id.clone()) {
                 self.questions_total = self.questions_total.saturating_add(1);
+            }
+            // Plan 164 S-D3: a NEW question the viewer addressed to the Golem
+            // by name, with a drafted reply, is an answer candidate once.
+            if existing.is_none()
+                && incoming.addressed
+                && !incoming.suggested_reply.trim().is_empty()
+            {
+                let message_id = message_ids.first().cloned();
+                let destination_id = message_id
+                    .as_deref()
+                    .and_then(|id| self.known.get(id))
+                    .map(|known| known.destination_id.clone());
+                self.answer_candidates.push(AnswerCandidate {
+                    question_id: incoming.id.clone(),
+                    message_id,
+                    destination_id,
+                    text: truncate_utf16(&incoming.suggested_reply, QUESTION_TEXT_MAX_UNITS),
+                    state: utterance_state_for_mood(incoming.mood),
+                });
             }
             let question = CohostQuestion {
                 id: incoming.id,
@@ -5799,6 +5987,13 @@ pub struct CohostEngine {
     command_availability: Option<CohostCommandAvailability>,
     /// The cloud command parser (plan 140 S8).
     command_parser: CommandParserLane,
+    /// Plan 164 Phase D: greetings, answers, banter and the Say box. Engine
+    /// wide, following the live-chat session: greetings are free and never
+    /// need the tick session.
+    auto_chat: AutoChatLane,
+    /// `cohost.tick` from the last capability read (plan 164 S-D3): a new
+    /// session speaks v4 (persona, moods, banter) only when the web said 4.
+    web_tick_version: Option<u32>,
 }
 
 impl CohostEngine {
@@ -5814,6 +6009,23 @@ impl CohostEngine {
             auto_highlight_generation: 0,
             command_availability: None,
             command_parser: CommandParserLane::default(),
+            auto_chat: AutoChatLane::default(),
+            web_tick_version: None,
+        }
+    }
+
+    /// `cohost.tick` from the capability read (plan 164 S-D3).
+    pub(crate) fn set_web_tick_version(&mut self, version: Option<u32>) {
+        self.web_tick_version = version;
+    }
+
+    /// The tick contract a new session starts on: v4 only when the web
+    /// reported it, else the pinned v3 (sent exactly as before).
+    fn initial_prompt_version(&self) -> u32 {
+        if self.web_tick_version >= Some(COHOST_PROMPT_VERSION_PERSONA_MIN) {
+            COHOST_PROMPT_VERSION_PERSONA_MIN
+        } else {
+            COHOST_PROMPT_VERSION
         }
     }
 
@@ -5929,12 +6141,19 @@ impl CohostEngine {
     }
 
     pub fn snapshot(&self) -> CohostState {
+        self.snapshot_with_lane(Instant::now())
+    }
+
+    fn snapshot_with_lane(&self, now: Instant) -> CohostState {
         let mut state = self
             .session
             .as_ref()
-            .map(CohostSession::snapshot)
+            .map(|session| session.snapshot_at(now))
             .unwrap_or_else(CohostState::off);
         state.command_availability = self.command_availability;
+        // Plan 164 D7: the lane rides every state, tick session or not.
+        state.utterances = self.auto_chat.snapshot(now);
+        state.auto_chat_sends = self.auto_chat.sends();
         state
     }
 
@@ -6110,13 +6329,11 @@ impl CohostEngine {
         now: Instant,
     ) -> u64 {
         self.generation = self.generation.wrapping_add(1);
-        self.session = Some(CohostSession::new(
-            session_id,
-            self.generation,
-            consent,
-            stream_title,
-            now,
-        ));
+        let prompt_version = self.initial_prompt_version();
+        let mut session =
+            CohostSession::new(session_id, self.generation, consent, stream_title, now);
+        session.prompt_version = prompt_version;
+        self.session = Some(session);
         self.generation
     }
 
@@ -6491,6 +6708,206 @@ impl CohostEngine {
             .is_ok_and(|session| session.own_send_delivered(text, question_id, now))
     }
 
+    // --- Automatic chat (plan 164 Phase D) ----------------------------------
+
+    /// Activity rows just delivered: greetings, by the mode (D4) and the
+    /// throttle (D9). Runs with or without a tick session.
+    pub(crate) fn note_activity(
+        &mut self,
+        messages: &[LiveChatMessage],
+        now: Instant,
+        now_iso: &str,
+    ) -> AutoChatPass {
+        self.auto_chat
+            .note_activity(&self.settings.auto_chat, messages, now, now_iso)
+    }
+
+    /// The pump's pass over the held greeting buckets.
+    pub(crate) fn drain_auto_chat(&mut self, now: Instant, now_iso: &str) -> AutoChatPass {
+        self.auto_chat.drain(&self.settings.auto_chat, now, now_iso)
+    }
+
+    pub(crate) fn auto_chat_next_due(&self) -> Option<Instant> {
+        self.auto_chat.next_due()
+    }
+
+    pub(crate) fn auto_chat_pump_armed(&self) -> bool {
+        self.auto_chat.pump_armed()
+    }
+
+    pub(crate) fn set_auto_chat_pump_armed(&mut self, armed: bool) {
+        self.auto_chat.set_pump_armed(armed);
+    }
+
+    /// The answer candidates the last tick produced (S-D3), routed by the
+    /// lane: the answers switch, its cooldown, the limiter, then the mode.
+    pub(crate) fn route_answer_candidates(
+        &mut self,
+        generation: u64,
+        now: Instant,
+        now_iso: &str,
+    ) -> AutoChatPass {
+        let candidates = match self.session.as_mut() {
+            Some(session) if session.generation == generation => {
+                std::mem::take(&mut session.answer_candidates)
+            }
+            _ => Vec::new(),
+        };
+        let mut merged = AutoChatPass::default();
+        for candidate in candidates {
+            let pass =
+                self.auto_chat
+                    .route_answer(&self.settings.auto_chat, candidate, now, now_iso);
+            merged.send.extend(pass.send);
+            merged.propose.extend(pass.propose);
+            merged.log.extend(pass.log);
+        }
+        merged
+    }
+
+    /// A banter request (S-D4), when its time came: the switch and cooldowns
+    /// (lane), a v4 session that is listening with nothing in flight, the
+    /// signed-in Premium preconditions, and a live microphone quiet for the
+    /// dead-air stretch. Marks the request as made.
+    pub(crate) fn prepare_banter(
+        &mut self,
+        generation: u64,
+        signed_in_premium: bool,
+        voice: VoiceActivity,
+        now: Instant,
+    ) -> Option<PreparedTick> {
+        if !signed_in_premium || !self.auto_chat.banter_allowed(&self.settings.auto_chat, now) {
+            return None;
+        }
+        let settings = self.settings.clone();
+        let session = self.session.as_mut()?;
+        if session.generation != generation
+            || session.status != CohostStatus::Listening
+            || !session.consent
+            || !session.speaks_v4()
+            || session.in_flight
+            || session.next_attempt_at.is_some_and(|at| now < at)
+        {
+            return None;
+        }
+        if !crate::cohost_ack::banter_due(voice, now) {
+            return None;
+        }
+        self.auto_chat.note_banter_requested(now);
+        Some(PreparedTick {
+            request: session.build_banter_request(&settings, now),
+            generation,
+        })
+    }
+
+    /// The banter answer: one line to every writable destination, by the
+    /// mode. A failure only frees the lane; the next real tick reports it.
+    pub(crate) fn apply_banter_result(
+        &mut self,
+        generation: u64,
+        result: Result<CohostTickResponse, CohostApiError>,
+        now: Instant,
+        now_iso: &str,
+    ) -> AutoChatPass {
+        let mut pass = AutoChatPass::default();
+        let Some(session) = self.session.as_mut() else {
+            return pass;
+        };
+        if session.generation != generation || !session.banter_in_flight {
+            return pass;
+        }
+        session.finish_banter();
+        match result {
+            Ok(response) => {
+                let Some(banter) = response.banter else {
+                    pass.log
+                        .push("Golem banter: the server returned no line.".to_string());
+                    return pass;
+                };
+                let text = truncate_utf16(banter.text.trim(), BANTER_TEXT_MAX_CHARS);
+                let state = utterance_state_for_mood(banter.mood);
+                pass = self.auto_chat.route_banter(
+                    &self.settings.auto_chat,
+                    &text,
+                    state,
+                    now,
+                    now_iso,
+                );
+            }
+            Err(error) => pass.log.push(format!(
+                "Golem banter failed ({}): {}",
+                error.detail.code,
+                error.message()
+            )),
+        }
+        pass
+    }
+
+    /// `cohost.utterance.approve` (S-D2): the card to send, or why not. The
+    /// mode is checked here too: off refuses even an approved card (D4).
+    pub(crate) fn approve_utterance(
+        &mut self,
+        utterance_id: &str,
+        now: Instant,
+    ) -> Result<CohostUtterance, CohostError> {
+        if self.settings.auto_chat.mode == CohostAutoChatMode::Off {
+            return Err(CohostError::AutoChatOff);
+        }
+        self.auto_chat
+            .approve(utterance_id, now)
+            .map_err(|refusal| CohostError::UtteranceUnavailable(refusal.message()))
+    }
+
+    pub(crate) fn dismiss_utterance(&mut self, utterance_id: &str) -> bool {
+        self.auto_chat.dismiss(utterance_id)
+    }
+
+    /// The Say box (D7): the utterance, and whether it goes to chat.
+    pub(crate) fn say(
+        &mut self,
+        text: &str,
+        state: CohostUtteranceState,
+        now: Instant,
+        now_iso: &str,
+    ) -> (CohostUtterance, bool) {
+        self.auto_chat
+            .say(&self.settings.auto_chat, text, state, now, now_iso)
+    }
+
+    pub(crate) fn mark_utterance(
+        &mut self,
+        utterance_id: &str,
+        status: CohostUtteranceStatus,
+    ) -> bool {
+        self.auto_chat.mark(utterance_id, status)
+    }
+
+    pub(crate) fn register_golem_operation(&mut self, operation_id: &str) {
+        self.auto_chat.register_operation(operation_id);
+    }
+
+    pub(crate) fn is_golem_operation(&self, operation_id: &str) -> bool {
+        self.auto_chat.is_own_operation(operation_id)
+    }
+
+    pub(crate) fn note_automatic_sent(&mut self, now: Instant) {
+        self.auto_chat.note_sent(now);
+    }
+
+    /// The live-chat session the lane follows (for the Say box and the pump).
+    pub(crate) fn auto_chat_session_id(&self) -> Option<String> {
+        self.auto_chat.session_id().map(str::to_string)
+    }
+
+    pub(crate) fn follow_auto_chat_session(&mut self, session_id: &str) -> bool {
+        self.auto_chat.follow_session(session_id)
+    }
+
+    /// Whether the chat mode allows a send right now (re-read at send time).
+    pub(crate) fn auto_chat_mode(&self) -> CohostAutoChatMode {
+        self.settings.auto_chat.mode
+    }
+
     fn session_for_mut(&mut self, session_id: &str) -> Result<&mut CohostSession, CohostError> {
         match self.session.as_mut() {
             Some(session) if session.session_id == session_id => Ok(session),
@@ -6541,6 +6958,505 @@ impl CohostEngine {
         }
         Ok(session.resolve_flag(message_id))
     }
+}
+
+// --- Automatic chat (plan 164 Phase D) ------------------------------------------------
+//
+// The lane decides (`cohost_auto_chat`); this is the side of it that touches
+// the app: the live-chat coordinator (which destinations can be written to),
+// the YouTube breaker (plan 094), the stream targets (plan 161), the send
+// itself (`live_chat::send_live_chat_message`, with a Golem-owned
+// `operationId`), the report (`cohost_reports`, as each send lands) and the
+// pump that releases held greetings. Every send re-reads the mode first:
+// `off` never posts, whatever was decided before.
+
+/// `cohost.tick` from the capability read (plan 164 S-D3).
+pub(crate) async fn set_tick_capability(state: &AppState, tick: Option<u32>) {
+    state.cohost.lock().await.set_web_tick_version(tick);
+}
+
+/// Whether a `liveChat.send` operation is the Golem's own (D10): its
+/// delivery never reads as "the streamer replied".
+pub(crate) async fn is_golem_operation(state: &AppState, operation_id: &str) -> bool {
+    state.cohost.lock().await.is_golem_operation(operation_id)
+}
+
+/// Act on a lane pass: log its lines, publish proposals, spawn its sends and
+/// arm the pump for what it held. `lifecycle_delivery` orders the state emit
+/// with chat delivery when the caller holds the fence; the pump takes one.
+async fn apply_auto_chat_pass(
+    state: &AppState,
+    pass: AutoChatPass,
+    lifecycle_delivery: Option<&OwnedMutexGuard<()>>,
+) {
+    if let Some(due) = pass.schedule {
+        arm_auto_chat_pump(state, due).await;
+    }
+    publish_auto_chat_pass(state, pass, lifecycle_delivery).await;
+}
+
+/// The pass minus the pump: logs, proposals, sends. The pump itself calls
+/// this (it owns its own schedule).
+async fn publish_auto_chat_pass(
+    state: &AppState,
+    pass: AutoChatPass,
+    lifecycle_delivery: Option<&OwnedMutexGuard<()>>,
+) {
+    for line in &pass.log {
+        state.emit_log("info", line.clone());
+    }
+    if pass.changed() {
+        for utterance in &pass.propose {
+            state.emit_log(
+                "info",
+                format!(
+                    "Golem proposes ({}): {}",
+                    utterance_trigger_label(utterance.trigger.kind),
+                    utterance.text
+                ),
+            );
+        }
+        let snapshot = state.cohost.lock().await.snapshot();
+        match lifecycle_delivery {
+            Some(guard) => emit_state(state, &snapshot, guard),
+            None => {
+                let guard = state.live_chat_persistence.begin_delivery().await;
+                emit_state(state, &snapshot, &guard);
+            }
+        }
+    }
+    for utterance in pass.send {
+        let state = state.clone();
+        tokio::spawn(async move {
+            send_automatic(&state, utterance).await;
+        });
+    }
+}
+
+fn utterance_trigger_label(kind: CohostUtteranceTriggerKind) -> &'static str {
+    match kind {
+        CohostUtteranceTriggerKind::Greeting => "greeting",
+        CohostUtteranceTriggerKind::Answer => "answer",
+        CohostUtteranceTriggerKind::Banter => "banter",
+        CohostUtteranceTriggerKind::Manual => "say",
+    }
+}
+
+/// Arm the pump that releases held greetings at `due` (one task at a time).
+async fn arm_auto_chat_pump(state: &AppState, due: Instant) {
+    {
+        let mut engine = state.cohost.lock().await;
+        if engine.auto_chat_pump_armed() {
+            return;
+        }
+        engine.set_auto_chat_pump_armed(true);
+    }
+    let state = state.clone();
+    tokio::spawn(async move {
+        let mut next = Some(due);
+        while let Some(due) = next {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(due)).await;
+            let pass = {
+                let mut engine = state.cohost.lock().await;
+                engine.drain_auto_chat(Instant::now(), &chrono::Utc::now().to_rfc3339())
+            };
+            next = pass.schedule;
+            publish_auto_chat_pass(&state, pass, None).await;
+            if next.is_none() {
+                let mut engine = state.cohost.lock().await;
+                next = engine.auto_chat_next_due();
+                if next.is_none() {
+                    engine.set_auto_chat_pump_armed(false);
+                }
+            }
+        }
+    });
+}
+
+/// The destinations an automatic send may reach right now (D9): the
+/// utterance's own, or every write-ready one when it names none; minus
+/// YouTube while the plan 094 breaker is open or the budget sheds sends, and
+/// minus any platform whose stream target is `failed` (plan 161). Returns
+/// the ids and the reasons for what was dropped.
+async fn automatic_send_destinations(
+    state: &AppState,
+    session_id: &str,
+    wanted: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let providers: Vec<crate::live_chat::LiveChatProviderState> = {
+        let coordinator = state.live_chat.lock().await;
+        if coordinator.session_id() != Some(session_id) {
+            return (Vec::new(), vec!["the chat session ended".to_string()]);
+        }
+        coordinator.providers().to_vec()
+    };
+    let youtube_blocked = crate::youtube_quota::paused_until(state).is_some()
+        || crate::youtube_quota::budget_refuses(state, crate::youtube_quota::BudgetCall::ChatSend)
+            .is_some();
+    let failed_platforms: Vec<StreamPlatform> =
+        match crate::recording::current_stream_targets_snapshot(state).await {
+            Ok(snapshot) => snapshot
+                .targets
+                .iter()
+                .filter(|target| target.state == crate::streaming::StreamTargetState::Failed)
+                .map(|target| target.platform)
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+    let mut ids = Vec::new();
+    let mut skipped = Vec::new();
+    for provider in providers {
+        if !wanted.is_empty() && !wanted.contains(&provider.id) {
+            continue;
+        }
+        if provider.write != crate::live_chat::CommentsWriteState::Ready {
+            skipped.push(format!("{} is not writable", provider.id));
+            continue;
+        }
+        if provider.platform == StreamPlatform::Youtube && youtube_blocked {
+            skipped.push(format!(
+                "{} skipped: YouTube calls are paused by the quota breaker",
+                provider.id
+            ));
+            continue;
+        }
+        if failed_platforms.contains(&provider.platform) {
+            skipped.push(format!(
+                "{} skipped: its stream destination failed",
+                provider.id
+            ));
+            continue;
+        }
+        ids.push(provider.id);
+    }
+    (ids, skipped)
+}
+
+/// The text as the strictest reached platform takes it (D8): X 140, Kick
+/// 500, the rest 200 characters. Clipped with an ellipsis, never silently.
+fn clip_for_platforms(text: &str, platforms: &[StreamPlatform]) -> (String, bool) {
+    let cap = platforms
+        .iter()
+        .map(|platform| match platform {
+            StreamPlatform::X => crate::x_live::X_CHAT_MESSAGE_MAX_CHARS,
+            StreamPlatform::Kick => 200,
+            _ => 200,
+        })
+        .min()
+        .unwrap_or(200);
+    let count = text.chars().count();
+    if count <= cap {
+        return (text.to_string(), false);
+    }
+    let head: String = text.chars().take(cap.saturating_sub(1)).collect();
+    (format!("{}…", head.trim_end()), true)
+}
+
+/// Send one utterance as the streamer (D3, D10): a Golem-owned
+/// `operationId`, the mode re-read, the destinations filtered, the text
+/// clipped, the outcome on the utterance, the state and the report.
+async fn send_automatic(state: &AppState, utterance: CohostUtterance) {
+    let now_iso = chrono::Utc::now().to_rfc3339();
+    let (session_id, mode) = {
+        let engine = state.cohost.lock().await;
+        (engine.auto_chat_session_id(), engine.auto_chat_mode())
+    };
+    let trigger = utterance.trigger.kind;
+    let manual = trigger == CohostUtteranceTriggerKind::Manual;
+    // The mode is the one gate every send passes, decided at send time (D4):
+    // Auto for anything automatic, Suggest or Auto for an approved card.
+    let mode_allows = match mode {
+        CohostAutoChatMode::Off => false,
+        CohostAutoChatMode::Suggest => {
+            utterance.status == CohostUtteranceStatus::Proposed && !manual
+        }
+        CohostAutoChatMode::Auto => true,
+    };
+    let session_id = match (session_id, mode_allows) {
+        (Some(session_id), true) => session_id,
+        (None, _) => {
+            fail_utterance(state, &utterance, "no live chat session", &now_iso).await;
+            return;
+        }
+        (Some(_), false) => {
+            fail_utterance(
+                state,
+                &utterance,
+                "the chat mode does not allow it",
+                &now_iso,
+            )
+            .await;
+            return;
+        }
+    };
+    let (destination_ids, skipped) =
+        automatic_send_destinations(state, &session_id, &utterance.destination_ids).await;
+    for reason in &skipped {
+        state.emit_log("info", format!("Golem send: {reason}."));
+    }
+    if destination_ids.is_empty() {
+        fail_utterance(
+            state,
+            &utterance,
+            "no destination can take it right now",
+            &now_iso,
+        )
+        .await;
+        return;
+    }
+    let platforms: Vec<StreamPlatform> = {
+        let coordinator = state.live_chat.lock().await;
+        coordinator
+            .providers()
+            .iter()
+            .filter(|provider| destination_ids.contains(&provider.id))
+            .map(|provider| provider.platform)
+            .collect()
+    };
+    let (text, clipped) = clip_for_platforms(&utterance.text, &platforms);
+    if clipped {
+        state.emit_log(
+            "info",
+            format!(
+                "Golem clipped a {} to the platform cap: {text}",
+                utterance_trigger_label(trigger)
+            ),
+        );
+    }
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    state
+        .cohost
+        .lock()
+        .await
+        .register_golem_operation(&operation_id);
+    let result = crate::live_chat::send_live_chat_message(
+        state,
+        crate::live_chat::CommentsSendParams {
+            operation_id,
+            session_id: session_id.clone(),
+            text: text.clone(),
+            in_reply_to_question_id: None,
+            destination_ids: Some(destination_ids),
+        },
+    )
+    .await;
+    let (status, outcome) = match &result {
+        Ok(operation) => match operation.phase {
+            crate::live_chat::CommentsSendOperationPhase::Sent => (
+                CohostUtteranceStatus::Sent,
+                crate::protocol::CohostReportPostResult::Sent,
+            ),
+            crate::live_chat::CommentsSendOperationPhase::Partial => (
+                CohostUtteranceStatus::Sent,
+                crate::protocol::CohostReportPostResult::Partial,
+            ),
+            _ => (
+                CohostUtteranceStatus::Failed,
+                crate::protocol::CohostReportPostResult::Failed,
+            ),
+        },
+        Err(_) => (
+            CohostUtteranceStatus::Failed,
+            crate::protocol::CohostReportPostResult::Failed,
+        ),
+    };
+    match &result {
+        Ok(operation) if status == CohostUtteranceStatus::Sent => state.emit_log(
+            "info",
+            format!(
+                "Golem posted ({}) to {}: {text}",
+                utterance_trigger_label(trigger),
+                operation
+                    .destinations
+                    .iter()
+                    .filter(|d| d.phase == crate::live_chat::DestinationDeliveryPhase::Sent)
+                    .map(|d| d.destination_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ),
+        Ok(operation) => state.emit_log(
+            "warn",
+            format!(
+                "Golem send ({}) reached no destination: {}",
+                utterance_trigger_label(trigger),
+                operation
+                    .destinations
+                    .iter()
+                    .map(|d| format!(
+                        "{} {}",
+                        d.destination_id,
+                        d.reason.clone().unwrap_or_default()
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        ),
+        Err(error) => state.emit_log(
+            "warn",
+            format!(
+                "Golem send ({}) failed: {error}",
+                utterance_trigger_label(trigger)
+            ),
+        ),
+    }
+    let snapshot = {
+        let mut engine = state.cohost.lock().await;
+        if status == CohostUtteranceStatus::Sent {
+            engine.note_automatic_sent(Instant::now());
+        }
+        engine.mark_utterance(&utterance.id, status);
+        engine.snapshot()
+    };
+    let post = crate::protocol::CohostReportPost {
+        id: utterance.id.clone(),
+        at: now_iso,
+        trigger,
+        text,
+        destinations: platforms,
+        result: outcome,
+    };
+    match state.database.append_cohost_report_post(&session_id, post) {
+        Ok(true) => {}
+        Ok(false) => state.emit_log(
+            "info",
+            "Golem report post skipped: the session row is gone.".to_string(),
+        ),
+        Err(error) => state.emit_log(
+            "warn",
+            format!("Golem report post could not be saved: {error}"),
+        ),
+    }
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    emit_state(state, &snapshot, &lifecycle_delivery);
+}
+
+async fn fail_utterance(
+    state: &AppState,
+    utterance: &CohostUtterance,
+    reason: &str,
+    now_iso: &str,
+) {
+    state.emit_log(
+        "warn",
+        format!(
+            "Golem did not send ({}): {reason}: {}",
+            utterance_trigger_label(utterance.trigger.kind),
+            utterance.text
+        ),
+    );
+    let snapshot = {
+        let mut engine = state.cohost.lock().await;
+        engine.mark_utterance(&utterance.id, CohostUtteranceStatus::Failed);
+        engine.snapshot()
+    };
+    if let Some(session_id) = state.cohost.lock().await.auto_chat_session_id() {
+        let _ = state.database.append_cohost_report_post(
+            &session_id,
+            crate::protocol::CohostReportPost {
+                id: utterance.id.clone(),
+                at: now_iso.to_string(),
+                trigger: utterance.trigger.kind,
+                text: utterance.text.clone(),
+                destinations: Vec::new(),
+                result: crate::protocol::CohostReportPostResult::Failed,
+            },
+        );
+    }
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    emit_state(state, &snapshot, &lifecycle_delivery);
+}
+
+/// `cohost.utterance.approve` (S-D2): the Stream Manager sends a proposed
+/// card. The send runs on its own task; the reply is the state with the
+/// card still `proposed` until the send lands.
+pub async fn approve_utterance(
+    state: &AppState,
+    params: crate::protocol::CohostUtteranceParams,
+) -> Result<CohostState, CohostError> {
+    if params.session_id.trim().is_empty() || params.utterance_id.trim().is_empty() {
+        return Err(CohostError::InvalidParams);
+    }
+    let (utterance, snapshot) = {
+        let mut engine = state.cohost.lock().await;
+        if engine.auto_chat_session_id().as_deref() != Some(params.session_id.as_str()) {
+            return Err(CohostError::SessionMismatch);
+        }
+        let utterance = engine.approve_utterance(&params.utterance_id, Instant::now())?;
+        (utterance, engine.snapshot())
+    };
+    let task_state = state.clone();
+    tokio::spawn(async move {
+        send_automatic(&task_state, utterance).await;
+    });
+    Ok(snapshot)
+}
+
+/// `cohost.utterance.dismiss` (S-D2).
+pub async fn dismiss_utterance(
+    state: &AppState,
+    params: crate::protocol::CohostUtteranceParams,
+) -> Result<CohostState, CohostError> {
+    if params.session_id.trim().is_empty() || params.utterance_id.trim().is_empty() {
+        return Err(CohostError::InvalidParams);
+    }
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    let mut engine = state.cohost.lock().await;
+    if engine.auto_chat_session_id().as_deref() != Some(params.session_id.as_str()) {
+        return Err(CohostError::SessionMismatch);
+    }
+    let changed = engine.dismiss_utterance(&params.utterance_id);
+    let snapshot = engine.snapshot();
+    drop(engine);
+    if changed {
+        emit_state(state, &snapshot, &lifecycle_delivery);
+    }
+    Ok(snapshot)
+}
+
+/// `cohost.utterance.say` (D7): the streamer's own line. In Auto it goes to
+/// every writable destination like any utterance; otherwise it is
+/// bubble-only. Needs the active live-chat session (the lane follows it).
+pub async fn say_utterance(
+    state: &AppState,
+    params: crate::protocol::CohostSayParams,
+) -> Result<CohostState, CohostError> {
+    let text = params.text.trim().to_string();
+    if params.session_id.trim().is_empty()
+        || text.is_empty()
+        || text.chars().count() > COHOST_GREETING_TEXT_MAX_CHARS
+    {
+        return Err(CohostError::InvalidParams);
+    }
+    let chat_session_id = state
+        .live_chat
+        .lock()
+        .await
+        .session_id()
+        .map(str::to_string);
+    if chat_session_id.as_deref() != Some(params.session_id.as_str()) {
+        return Err(CohostError::SessionMismatch);
+    }
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    let (utterance, send, snapshot) = {
+        let mut engine = state.cohost.lock().await;
+        engine.follow_auto_chat_session(&params.session_id);
+        let (utterance, send) = engine.say(
+            &text,
+            params.state.unwrap_or_default(),
+            Instant::now(),
+            &chrono::Utc::now().to_rfc3339(),
+        );
+        (utterance, send, engine.snapshot())
+    };
+    emit_state(state, &snapshot, &lifecycle_delivery);
+    if send {
+        let task_state = state.clone();
+        tokio::spawn(async move {
+            send_automatic(&task_state, utterance).await;
+        });
+    }
+    Ok(snapshot)
 }
 
 // --- AppState integration ------------------------------------------------------------
@@ -8070,6 +8986,13 @@ pub(crate) async fn note_messages_under_lifecycle_fence(
     if messages.is_empty() {
         return;
     }
+    // Plan 164 Phase D: greetings run with or without the tick session. The
+    // sends are spawned, never awaited under the delivery fence.
+    let auto_chat = {
+        let mut engine = state.cohost.lock().await;
+        engine.note_activity(messages, Instant::now(), &chrono::Utc::now().to_rfc3339())
+    };
+    apply_auto_chat_pass(state, auto_chat, Some(lifecycle_delivery)).await;
     let snapshot = {
         let mut engine = state.cohost.lock().await;
         if engine.session.is_none() {
@@ -8453,6 +9376,33 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
         }
         emit_state(state, &snapshot, &lifecycle_delivery);
     }
+    // Plan 164 S-D4: banter on dead air, on the tick lane (never two
+    // requests in flight), only on a v4 session.
+    let banter = state.cohost.lock().await.prepare_banter(
+        generation,
+        token.is_some() && premium,
+        voice,
+        Instant::now(),
+    );
+    if let Some(prepared) = banter {
+        drop(lifecycle_delivery);
+        let Some(token) = token.as_ref() else {
+            return true;
+        };
+        let result = match VideorcApiClient::new() {
+            Ok(client) => client.post_cohost_tick(token, &prepared.request).await,
+            Err(error) => Err(CohostApiError::network(error.to_string())),
+        };
+        let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+        let pass = state.cohost.lock().await.apply_banter_result(
+            prepared.generation,
+            result,
+            Instant::now(),
+            &chrono::Utc::now().to_rfc3339(),
+        );
+        apply_auto_chat_pass(state, pass, Some(&lifecycle_delivery)).await;
+        return true;
+    }
     let prepared = {
         let mut engine = state.cohost.lock().await;
         let prepared = engine.prepare_tick(generation, token.is_some(), premium, Instant::now());
@@ -8534,15 +9484,11 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
         )),
     };
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
-    let snapshot = {
+    let (snapshot, answers) = {
         let mut engine = state.cohost.lock().await;
-        let applied = engine.apply_tick_result(
-            prepared.generation,
-            dropped,
-            result,
-            Instant::now(),
-            &chrono::Utc::now().to_rfc3339(),
-        );
+        let now = Instant::now();
+        let now_iso = chrono::Utc::now().to_rfc3339();
+        let applied = engine.apply_tick_result(prepared.generation, dropped, result, now, &now_iso);
         if !applied {
             state.emit_log(
                 "warn",
@@ -8550,12 +9496,15 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
             );
             return false;
         }
-        engine.snapshot()
+        // Plan 164 S-D3: replies the viewer asked the Golem for by name.
+        let answers = engine.route_answer_candidates(prepared.generation, now, &now_iso);
+        (engine.snapshot(), answers)
     };
     if let Some((level, message)) = log {
         state.emit_log(level, message);
     }
     emit_state(state, &snapshot, &lifecycle_delivery);
+    apply_auto_chat_pass(state, answers, Some(&lifecycle_delivery)).await;
     true
 }
 
@@ -8830,6 +9779,8 @@ mod tests {
             suggested_reply: "Keychron Q1!".to_string(),
             from_notes: true,
             on_topic: false,
+            addressed: false,
+            mood: None,
         }
     }
 
@@ -18015,5 +18966,349 @@ mod tests {
             state_command(&state).await.kind,
             CohostCommandKind::Highlight
         );
+    }
+
+    // --- Plan 164 Phase D: automatic chat at the engine level ---------------------
+
+    fn auto_chat_settings(mode: CohostAutoChatMode) -> CohostAutoChat {
+        CohostAutoChat {
+            mode,
+            greetings: CohostGreetingsSettings {
+                enabled: true,
+                templates: vec![CohostGreetingTemplate {
+                    id: "t-follow".to_string(),
+                    kind: CohostActivityTemplateKind::Follow,
+                    platform: None,
+                    text: "Welcome {name}!".to_string(),
+                    state: CohostUtteranceState::Talk,
+                    enabled: true,
+                }],
+            },
+            answers: CohostCooldownBehaviour {
+                enabled: true,
+                cooldown_seconds: 20,
+            },
+            banter: CohostCooldownBehaviour {
+                enabled: true,
+                cooldown_seconds: 240,
+            },
+        }
+    }
+
+    fn running_engine_with(
+        mode: CohostAutoChatMode,
+        web_tick: Option<u32>,
+        now: Instant,
+    ) -> (CohostEngine, u64) {
+        let mut settings = enabled_settings();
+        settings.auto_chat = auto_chat_settings(mode);
+        let mut engine = CohostEngine::new(settings);
+        engine.set_web_tick_version(web_tick);
+        let generation = engine.start_session(
+            "session-1".to_string(),
+            true,
+            Some("Rust night".into()),
+            now,
+        );
+        (engine, generation)
+    }
+
+    fn quiet_voice(now: Instant) -> VoiceActivity {
+        VoiceActivity {
+            last_voice_at: Some(now - Duration::from_secs(40)),
+            last_frame_at: Some(now),
+            last_signal_at: Some(now),
+            live_since: Some(now - Duration::from_secs(120)),
+        }
+    }
+
+    fn addressed_question(message_id: &str) -> CohostTickQuestion {
+        CohostTickQuestion {
+            addressed: true,
+            mood: Some(CohostTickMood::Amused),
+            ..question("q_addr", &[message_id])
+        }
+    }
+
+    #[test]
+    fn a_v3_web_never_sends_the_persona_and_a_v4_web_does() {
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine_with(CohostAutoChatMode::Off, None, start);
+        engine.note_messages(&messages("session-1", 0..5));
+        let prepared = engine
+            .prepare_tick(generation, true, true, start + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(prepared.request.prompt_version, 3);
+        assert_eq!(prepared.request.persona, None);
+        assert_eq!(prepared.request.intent, None);
+        let body = serde_json::to_value(&prepared.request).unwrap();
+        assert!(
+            body.get("persona").is_none(),
+            "a v3 body stays byte-identical"
+        );
+        assert!(body.get("intent").is_none());
+
+        let (mut engine, generation) = running_engine_with(CohostAutoChatMode::Off, Some(4), start);
+        engine.note_messages(&messages("session-1", 0..5));
+        let prepared = engine
+            .prepare_tick(generation, true, true, start + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(prepared.request.prompt_version, 4);
+        assert_eq!(
+            prepared.request.persona,
+            Some(CohostTickPersona {
+                name: "Golem".to_string(),
+                personality: String::new(),
+            })
+        );
+        // A web that rolled back: the ladder steps to v3 and the persona leaves.
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Err(server_error(
+                400,
+                "prompt-version-unsupported",
+                "promptVersion 4 is not supported."
+            )),
+            start + Duration::from_secs(2),
+            "2026-08-22T10:00:02Z",
+        ));
+        let retried = engine
+            .prepare_tick(generation, true, true, start + Duration::from_secs(11))
+            .unwrap();
+        assert_eq!(retried.request.prompt_version, 3);
+        assert_eq!(retried.request.persona, None);
+        // A web that reports a lower tick version keeps v3 for a new session.
+        let (mut engine, generation) = running_engine_with(CohostAutoChatMode::Off, Some(3), start);
+        engine.note_messages(&messages("session-1", 0..5));
+        let prepared = engine
+            .prepare_tick(generation, true, true, start + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(prepared.request.prompt_version, 3);
+        assert_eq!(prepared.request.persona, None);
+    }
+
+    #[test]
+    fn an_addressed_question_is_answered_in_auto_proposed_in_suggest_and_ignored_off() {
+        let start = Instant::now();
+        let rows = messages("session-1", 0..5);
+        let run = |mode: CohostAutoChatMode, addressed: bool| {
+            let (mut engine, generation) = running_engine_with(mode, Some(4), start);
+            engine.note_messages(&rows);
+            let prepared = engine
+                .prepare_tick(generation, true, true, start + Duration::from_secs(1))
+                .unwrap();
+            assert_eq!(prepared.request.prompt_version, 4);
+            let mut tick_question = addressed_question(&rows[0].id);
+            tick_question.addressed = addressed;
+            assert!(engine.apply_tick_result(
+                generation,
+                0,
+                Ok(response(vec![tick_question])),
+                start + Duration::from_secs(2),
+                "2026-08-22T10:00:02Z",
+            ));
+            let pass = engine.route_answer_candidates(
+                generation,
+                start + Duration::from_secs(2),
+                "2026-08-22T10:00:02Z",
+            );
+            (engine, pass)
+        };
+        let (engine, auto) = run(CohostAutoChatMode::Auto, true);
+        assert_eq!(auto.send.len(), 1, "{auto:?}");
+        assert!(auto.propose.is_empty());
+        let answer = &auto.send[0];
+        assert_eq!(answer.text, "Keychron Q1!");
+        assert_eq!(
+            answer.state,
+            CohostUtteranceState::Laugh,
+            "amused reads as laugh"
+        );
+        assert_eq!(answer.trigger.kind, CohostUtteranceTriggerKind::Answer);
+        assert_eq!(
+            answer.trigger.message_id.as_deref(),
+            Some(rows[0].id.as_str())
+        );
+        assert_eq!(answer.destination_ids, vec!["twitch".to_string()]);
+        assert_eq!(engine.snapshot().utterances.len(), 1);
+
+        let (_, suggest) = run(CohostAutoChatMode::Suggest, true);
+        assert!(suggest.send.is_empty());
+        assert_eq!(suggest.propose.len(), 1);
+        assert_eq!(suggest.propose[0].status, CohostUtteranceStatus::Proposed);
+
+        let (engine, off) = run(CohostAutoChatMode::Off, true);
+        assert_eq!(off, AutoChatPass::default());
+        assert!(engine.snapshot().utterances.is_empty());
+
+        // An unaddressed question stays a suggestion in the pane (S-D3).
+        let (_, unaddressed) = run(CohostAutoChatMode::Auto, false);
+        assert_eq!(unaddressed, AutoChatPass::default());
+        // The same question on a later tick is not answered twice.
+        let (mut engine, generation) =
+            running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        for tick in 1..=2u64 {
+            // Fresh chat each tick, past the idle interval.
+            engine.note_messages(&messages(
+                "session-1",
+                (tick as u32 - 1) * 5..tick as u32 * 5,
+            ));
+            let at = start + Duration::from_secs(tick * 30);
+            engine.prepare_tick(generation, true, true, at).unwrap();
+            assert!(engine.apply_tick_result(
+                generation,
+                0,
+                Ok(response(vec![addressed_question(&rows[0].id)])),
+                at,
+                "2026-08-22T10:00:02Z",
+            ));
+            let pass = engine.route_answer_candidates(generation, at, "2026-08-22T10:00:02Z");
+            assert_eq!(pass.send.len(), usize::from(tick == 1));
+        }
+    }
+
+    #[test]
+    fn banter_rides_a_v4_session_on_dead_air_and_the_mode_gates_it() {
+        let start = Instant::now();
+        let (mut engine, generation) =
+            running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        // A live microphone, quiet for 40 s.
+        let at = start + Duration::from_secs(30);
+        let prepared = engine
+            .prepare_banter(generation, true, quiet_voice(at), at)
+            .expect("banter is due");
+        assert_eq!(prepared.request.intent, Some(CohostTickIntent::Banter));
+        assert!(prepared.request.messages.is_empty());
+        assert_eq!(prepared.request.transcript, None);
+        assert!(prepared.request.persona.is_some());
+        // Nothing else leaves while it is in flight.
+        assert!(engine.prepare_tick(generation, true, true, at).is_err());
+        assert!(
+            engine
+                .prepare_banter(generation, true, quiet_voice(at), at)
+                .is_none()
+        );
+        let pass = engine.apply_banter_result(
+            generation,
+            Ok(CohostTickResponse {
+                banter: Some(crate::videorc_api::CohostTickBanter {
+                    text: " Chat, the keyboard is louder than the game. ".to_string(),
+                    mood: Some(CohostTickMood::Thinking),
+                }),
+                ..CohostTickResponse::default()
+            }),
+            at + Duration::from_secs(1),
+            "2026-08-22T10:00:31Z",
+        );
+        assert_eq!(pass.send.len(), 1);
+        assert_eq!(
+            pass.send[0].text,
+            "Chat, the keyboard is louder than the game."
+        );
+        assert_eq!(pass.send[0].state, CohostUtteranceState::Think);
+        assert_eq!(
+            pass.send[0].trigger.kind,
+            CohostUtteranceTriggerKind::Banter
+        );
+        assert!(
+            pass.send[0].destination_ids.is_empty(),
+            "every writable destination"
+        );
+        // The lane is free again, and the cooldown holds the next one.
+        let later = at + Duration::from_secs(5);
+        engine.note_messages(&messages("session-1", 0..5));
+        assert!(
+            engine
+                .prepare_tick(generation, true, true, later + Duration::from_secs(10))
+                .is_ok()
+        );
+        assert!(
+            engine
+                .prepare_banter(generation, true, quiet_voice(later), later)
+                .is_none()
+        );
+
+        // Off: never. v3: never. Not signed in or not Premium: never.
+        let (mut engine, generation) = running_engine_with(CohostAutoChatMode::Off, Some(4), start);
+        assert!(
+            engine
+                .prepare_banter(generation, true, quiet_voice(at), at)
+                .is_none()
+        );
+        let (mut engine, generation) = running_engine_with(CohostAutoChatMode::Auto, None, start);
+        assert!(
+            engine
+                .prepare_banter(generation, true, quiet_voice(at), at)
+                .is_none()
+        );
+        let (mut engine, generation) =
+            running_engine_with(CohostAutoChatMode::Auto, Some(4), start);
+        assert!(
+            engine
+                .prepare_banter(generation, false, quiet_voice(at), at)
+                .is_none()
+        );
+        // A banter failure frees the lane without pausing the session.
+        let prepared = engine
+            .prepare_banter(generation, true, quiet_voice(at), at)
+            .unwrap();
+        let pass = engine.apply_banter_result(
+            prepared.generation,
+            Err(server_error(502, "ai-gateway-error", "upstream")),
+            at + Duration::from_secs(1),
+            "2026-08-22T10:00:31Z",
+        );
+        assert!(pass.send.is_empty());
+        assert_eq!(pass.log.len(), 1);
+        assert_eq!(engine.snapshot().status, CohostStatus::Listening);
+        engine.note_messages(&messages("session-1", 0..5));
+        assert!(
+            engine
+                .prepare_tick(generation, true, true, at + Duration::from_secs(10))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_proposed_card_is_refused_once_the_mode_is_off() {
+        let start = Instant::now();
+        let (mut engine, _) = running_engine_with(CohostAutoChatMode::Suggest, None, start);
+        let mut follow =
+            crate::live_chat::fake_events_for_tests("session-1", StreamPlatform::Twitch, None)
+                .into_iter()
+                .find(|row| row.raw_provider_type.as_deref() == Some("follow"))
+                .unwrap();
+        follow.published_at = chrono::Utc::now().to_rfc3339();
+        let pass = engine.note_activity(&[follow], start, &chrono::Utc::now().to_rfc3339());
+        assert_eq!(pass.propose.len(), 1);
+        let id = pass.propose[0].id.clone();
+        assert_eq!(engine.auto_chat_session_id().as_deref(), Some("session-1"));
+        engine.settings.auto_chat.mode = CohostAutoChatMode::Off;
+        assert_eq!(
+            engine.approve_utterance(&id, start + Duration::from_secs(1)),
+            Err(CohostError::AutoChatOff)
+        );
+        engine.settings.auto_chat.mode = CohostAutoChatMode::Suggest;
+        let approved = engine
+            .approve_utterance(&id, start + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(approved.text, "Welcome new_friend!");
+        assert!(engine.mark_utterance(&id, CohostUtteranceStatus::Sent));
+        assert_eq!(
+            engine.approve_utterance(&id, start),
+            Err(CohostError::UtteranceUnavailable(
+                "That Golem card was already answered."
+            ))
+        );
+        let state = engine.snapshot();
+        assert_eq!(state.utterances[0].status, CohostUtteranceStatus::Sent);
+        assert_eq!(state.auto_chat_sends, 0, "counted only when a send lands");
+        engine.note_automatic_sent(start);
+        assert_eq!(engine.snapshot().auto_chat_sends, 1);
+        // Golem operations are its own, never the streamer's reply.
+        engine.register_golem_operation("op-golem");
+        assert!(engine.is_golem_operation("op-golem"));
+        assert!(!engine.is_golem_operation("op-streamer"));
     }
 }

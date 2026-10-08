@@ -5606,6 +5606,13 @@ export interface CohostState {
   command?: CohostCommand
   /** Plan 140 S3: the voice-command kill switches; absent while both are on. */
   commandAvailability?: CohostCommandAvailability
+  /**
+   * Plan 164 D7: what the Golem said or proposes this chat session, oldest
+   * first, at most 20; absent while empty (never null).
+   */
+  utterances?: CohostUtterance[]
+  /** Plan 164 D10: automatic sends this chat session; absent while zero. */
+  autoChatSends?: number
 }
 
 /**
@@ -5757,6 +5764,22 @@ export interface CohostSessionReport {
   recap: CohostReportRecap
   /** Plan 140 S3: voice commands; absent when none was counted (and in older reports). */
   commands?: CohostReportCommands
+  /** Plan 164 D10: what the Golem posted as you, oldest first, at most 200; absent while empty. */
+  posts?: CohostReportPost[]
+}
+
+export type CohostReportPostResult = 'sent' | 'partial' | 'failed'
+
+/** One automatic send in the report (plan 164 D10). */
+export interface CohostReportPost {
+  /** The utterance id. */
+  id: string
+  at: string
+  trigger: CohostUtteranceTriggerKind
+  text: string
+  /** The platforms the send reached, or was meant to. */
+  destinations: StreamPlatform[]
+  result: CohostReportPostResult
 }
 
 export interface CohostReportChatPlatformCount {
@@ -5857,6 +5880,53 @@ export interface CohostAuthorParams {
   authorKey: string
 }
 
+/** `cohost.utterance.approve` / `cohost.utterance.dismiss` (plan 164 S-D2). */
+export interface CohostUtteranceParams {
+  sessionId: string
+  utteranceId: string
+}
+
+/** `cohost.utterance.say` (plan 164 D7): the streamer's own line, 1 to 200 characters. */
+export interface CohostSayParams {
+  sessionId: string
+  text: string
+  /** Defaults to `talk`. */
+  state?: CohostUtteranceState
+}
+
+/** What made the Golem speak (plan 164 D7). */
+export type CohostUtteranceTriggerKind = 'greeting' | 'answer' | 'banter' | 'manual'
+
+export interface CohostUtteranceTrigger {
+  kind: CohostUtteranceTriggerKind
+  /** The Activity row a greeting answers. */
+  eventId?: string
+  /** The chat row an answer replies to. */
+  messageId?: string
+}
+
+/**
+ * Where an utterance stands (plan 164 D7). `proposed` waits for the
+ * streamer (Suggest) or for the send (Auto); `sent` landed on at least one
+ * destination; `failed` reached none; `dismissed` was declined or expired;
+ * `bubble-only` never goes to chat.
+ */
+export type CohostUtteranceStatus = 'proposed' | 'sent' | 'dismissed' | 'bubble-only' | 'failed'
+
+/** One thing the Golem said or wants to say (plan 164 D7). */
+export interface CohostUtterance {
+  id: string
+  text: string
+  state: CohostUtteranceState
+  trigger: CohostUtteranceTrigger
+  /** Where a send goes; empty means every writable destination. */
+  destinationIds: string[]
+  status: CohostUtteranceStatus
+  at: string
+  /** Present while `proposed` in Suggest mode: the card leaves then. */
+  expiresAt?: string
+}
+
 /**
  * What the detached Comments window needs to render the Co-host segment. The
  * MAIN renderer owns the backend socket, the entitlement snapshot and the
@@ -5879,6 +5949,12 @@ export interface CohostWindowState {
    * without it (smokes); the window then never offers the listening card.
    */
   listen?: boolean
+  /**
+   * Persisted `cohost.settings.autoChat` (plan 164 S-D6): the mode control
+   * and the three behaviour switches render it. Absent from a relay seeded
+   * without it (smokes); the window then shows the controls off.
+   */
+  autoChat?: CohostAutoChat
   /** The Golem on stream (plan 164 Phase C): what the pane's header shows
    * and operates. Absent from a relay seeded without it (older Studio,
    * smokes); the window then shows no header. */
@@ -5922,6 +5998,9 @@ export type CohostActionKind =
   | 'recap-dismiss'
   | 'recap-draft'
   | 'author-greeted'
+  | 'approve-utterance'
+  | 'dismiss-utterance'
+  | 'say-utterance'
 
 /** Every action kind the relay accepts; main validates against it. */
 export const COHOST_ACTION_KINDS: readonly CohostActionKind[] = [
@@ -5933,7 +6012,10 @@ export const COHOST_ACTION_KINDS: readonly CohostActionKind[] = [
   'promise-dismiss',
   'recap-dismiss',
   'recap-draft',
-  'author-greeted'
+  'author-greeted',
+  'approve-utterance',
+  'dismiss-utterance',
+  'say-utterance'
 ]
 
 /** The Golem's own actions from the Stream Manager (plan 164 S-C4): a manual
@@ -5981,8 +6063,14 @@ export interface CohostSessionActionCommand {
   kind: CohostActionKind
   /** Question id for question actions; the flagged message id for flags; the
    * promise id for promise actions; the session id again for recap actions
-   * (they have no target of their own); the author key for `author-greeted`. */
+   * (they have no target of their own); the author key for `author-greeted`;
+   * the utterance id for `approve-utterance` / `dismiss-utterance`; the
+   * session id again for `say-utterance`. */
   targetId: string
+  /** `say-utterance` (plan 164 D7): the line, 1 to 200 characters. */
+  text?: string
+  /** `say-utterance`: the avatar state; defaults to `talk`. */
+  state?: CohostUtteranceState
 }
 
 export type CohostActionCommand = CohostSessionActionCommand | CohostGolemActionCommand
@@ -5999,6 +6087,20 @@ export interface CohostEnableCommand {
   grantConsent?: boolean
   /** Also set `cohost.settings.listen` in the same save (plan 068 D3). */
   listen?: boolean
+  /**
+   * Plan 164 S-D6: the Stream Manager's mode control and behaviour switches.
+   * A partial block; the Studio renderer merges it into the stored
+   * `autoChat` (templates and cooldowns stay) in the same save.
+   */
+  autoChat?: CohostAutoChatRelayPatch
+}
+
+/** The part of `autoChat` the Stream Manager may change (plan 164 S-D6). */
+export interface CohostAutoChatRelayPatch {
+  mode?: CohostAutoChatMode
+  greetings?: boolean
+  answers?: boolean
+  banter?: boolean
 }
 
 // Live captions (captions.* RPCs + events; premium cloud-AI feature).

@@ -101,8 +101,8 @@ export function CohostStatus({
             Golem
           </PopoverTitle>
           <PopoverDescription>
-            Groups the questions your chat is repeating and drafts a reply for each. Nothing sends
-            without you.
+            Groups the questions your chat is repeating and drafts a reply for each. It posts only
+            in the modes you turn on.
           </PopoverDescription>
         </PopoverHeader>
         {!gate.allowed ? (

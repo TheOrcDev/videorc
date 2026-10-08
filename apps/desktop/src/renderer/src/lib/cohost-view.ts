@@ -53,8 +53,8 @@ export const COHOST_CHAT_CONSENT_SENTENCE = 'Golem reads live chat with Videorc 
  * and the pane hint's tooltip; the pane's action bar shows its first half.
  */
 export const COHOST_ACTS_ON_ASK_COPY =
-  'Golem never acts on its own. It removes a comment only when you tell it to.'
-export const COHOST_ACTS_ON_ASK_HINT = 'Golem never acts on its own.'
+  'The Golem posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to.'
+export const COHOST_ACTS_ON_ASK_HINT = 'Posts only in the modes you turn on.'
 
 /** The flag row's "Remove from chat" key (plan 140, S6): ⌫ alone dismisses. */
 export const COHOST_REMOVE_FLAGGED_KEY = '⇧⌫'

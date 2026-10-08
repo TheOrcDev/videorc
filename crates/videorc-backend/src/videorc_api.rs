@@ -183,6 +183,51 @@ pub struct CohostTickRequest {
     /// `invalid-request`, so the desktop caps).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_promises: Option<Vec<CohostTickOpenPromise>>,
+    /// v4 (plan 164 S-D3): the user's creature. Absent below v4, so a v3 body
+    /// stays byte-identical to what a v3 desktop sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<CohostTickPersona>,
+    /// v4: `banter` asks for one short line on dead air (S-D4); absent means
+    /// a normal tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<CohostTickIntent>,
+}
+
+/// v4: the persona the prompt speaks as (plan 164).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickPersona {
+    pub name: String,
+    pub personality: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostTickIntent {
+    Tick,
+    Banter,
+}
+
+/// v4: the mood a reply is said in (plan 164 D18); unknown values read as
+/// neutral.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostTickMood {
+    #[default]
+    Neutral,
+    Amused,
+    Thinking,
+    #[serde(other)]
+    Unknown,
+}
+
+/// v4: the one banter line (≤ 120 chars) a `banter` request returns.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickBanter {
+    pub text: String,
+    #[serde(default)]
+    pub mood: Option<CohostTickMood>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -264,6 +309,21 @@ pub struct CohostTickResponse {
     /// v3: a recap for viewers who asked what they missed (≤ 140 chars).
     #[serde(default)]
     pub recap: Option<String>,
+    /// v4 (plan 164 S-D4): the banter line, only on an `intent: banter`
+    /// request. An unreadable one is dropped, never the whole tick.
+    #[serde(default, deserialize_with = "lenient_item")]
+    pub banter: Option<CohostTickBanter>,
+}
+
+/// One optional item the desktop drops when it does not fit, like
+/// `lenient_items` for arrays.
+fn lenient_item<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 /// `lenient_items` for an array the desktop must tell apart from an absent
@@ -316,6 +376,12 @@ pub struct CohostTickQuestion {
     /// v3: the question is about what the streamer is talking about.
     #[serde(default)]
     pub on_topic: bool,
+    /// v4 (plan 164 S-D3): the viewer named the Golem or used `@<name>`.
+    #[serde(default)]
+    pub addressed: bool,
+    /// v4: the mood the drafted reply is said in.
+    #[serde(default)]
+    pub mood: Option<CohostTickMood>,
 }
 
 /// v3 promise as the server returns it. An unknown trigger kind lands on

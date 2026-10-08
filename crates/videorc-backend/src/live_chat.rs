@@ -1243,6 +1243,12 @@ impl LiveChatCoordinator {
     /// True once a session has been started (or left a transcript) — drives whether
     /// `current_status` returns the live view versus the setup-time capability snapshot.
     /// The active chat session id, if a session is running.
+    /// The session's destinations as last installed (plan 164 Phase D reads
+    /// their write state).
+    pub(crate) fn providers(&self) -> &[LiveChatProviderState] {
+        &self.providers
+    }
+
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
     }
@@ -2663,10 +2669,14 @@ async fn execute_send_live_chat_message(
         .save_chat_send_operation(&operation)
         .map_err(|error| format!("Could not persist send result: {error}"))?;
     state.emit_event("liveChat.sendOperation", operation.clone());
+    // Plan 164 D10: a Golem send is the streamer's account, so its echo is
+    // theirs (noted above), but it is never "the streamer replied": no
+    // question closes and nobody is greeted by it.
     if matches!(
         operation.phase,
         CommentsSendOperationPhase::Sent | CommentsSendOperationPhase::Partial
-    ) {
+    ) && !crate::cohost::is_golem_operation(state, &operation.id).await
+    {
         crate::cohost::note_own_send_delivered(
             state,
             &operation.session_id,
@@ -3593,6 +3603,16 @@ async fn run_fake_connector(
         "Live chat ended.",
     )
     .await;
+}
+
+/// The fake activity rows for the greeting tests (plan 164 S-D1).
+#[cfg(test)]
+pub(crate) fn fake_events_for_tests(
+    session_id: &str,
+    platform: StreamPlatform,
+    target_id: Option<&str>,
+) -> Vec<LiveChatMessage> {
+    fake_events(session_id, platform, target_id)
 }
 
 /// Build one deterministic fake message. Shared by the fake connector and the unit tests.

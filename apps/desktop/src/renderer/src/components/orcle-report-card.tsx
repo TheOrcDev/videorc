@@ -189,6 +189,31 @@ function ReportBody({ view }: { view: ShownReport }): ReactElement {
         <ReportStats stats={view.stats} />
       )}
       <ReportCommands commands={view.commands} />
+      {/* Plan 164 D10: what the Golem posted as you, every line. */}
+      <ReportList
+        id="posts"
+        items={view.posts}
+        label="Posted as you"
+        render={(post) => (
+          <ListRow
+            key={post.id}
+            className="select-text"
+            context={<span title={post.text}>{post.text}</span>}
+            data-post-result={post.result}
+            interactive={false}
+            meta={
+              <span className="flex items-center gap-1.5">
+                {post.platforms.map((platform) => (
+                  <ChatPlatformIcon key={platform} platform={platform} />
+                ))}
+                <span>{post.resultLabel}</span>
+                {post.at ? <span className="tabular-nums">{post.at}</span> : null}
+              </span>
+            }
+            title={post.trigger}
+          />
+        )}
+      />
       {/* Plan 150: what needs you (questions, promises) beside what happened
           (moments, alerts), two columns at lg when both sides have rows. */}
       <div

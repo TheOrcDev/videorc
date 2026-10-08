@@ -17,6 +17,8 @@ import {
 import { toast } from '@/lib/toast'
 
 import { CohostListenPrompt, CohostPane } from '@/components/cohost-pane'
+import { GolemChatControls } from '@/components/stream-manager/golem-chat-controls'
+import { GolemUtteranceCards } from '@/components/stream-manager/golem-utterance-cards'
 import { CohostListeningIndicator, CohostStatus } from '@/components/cohost-status'
 import { ActivityPane } from '@/components/stream-manager/activity-pane'
 import {
@@ -33,6 +35,8 @@ import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useTrafficLightGutter } from '@/components/window-frame'
 import type {
+  CohostAutoChat,
+  CohostAutoChatRelayPatch,
   CohostFlag,
   CohostPromise,
   CohostQuestion,
@@ -40,6 +44,7 @@ import type {
   CohostState,
   CohostUtteranceState,
   CohostWindowGolem,
+  CohostUtterance,
   CommentHighlightAnchor,
   CommentHighlightState,
   CommentsHistoryStats,
@@ -282,6 +287,13 @@ export interface StreamManagerProps {
   onGolemSay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
   /** `overlayLayout.golem.showOnStream`, through the Studio relay. */
   onGolemShowOnStream?: (showOnStream: boolean) => void
+  /** Persisted `cohost.settings.autoChat` (plan 164 S-D6): the pane's mode
+   * control and behaviour switches; unknown hides them. */
+  cohostAutoChat?: CohostAutoChat
+  onCohostAutoChatChange?: (patch: CohostAutoChatRelayPatch) => void
+  /** The Golem's proposed cards (plan 164 S-D2): Send and Dismiss. */
+  onCohostUtteranceApprove?: (utterance: CohostUtterance) => void
+  onCohostUtteranceDismiss?: (utterance: CohostUtterance) => void
   /** Golem Live's one switch (plan 119), from the status popover and the
    * nudge: on means Golem reads chat and hears you, off only stops it. */
   onCohostEnable?: (enabled: boolean) => void
@@ -357,6 +369,10 @@ export function StreamManager({
   golemPending = false,
   onGolemSay,
   onGolemShowOnStream,
+  cohostAutoChat,
+  onCohostAutoChatChange,
+  onCohostUtteranceApprove,
+  onCohostUtteranceDismiss,
   onCohostEnable,
   onCohostListenOn,
   onCohostNudgeDismiss,
@@ -738,6 +754,26 @@ export function StreamManager({
           onUpgrade={onCohostUpgrade}
         />
       </div>
+      {/* Plan 164 S-D6: the chat mode and the three behaviours. The pane's
+          enable is the mode: Off means the Golem does not join. */}
+      {cohostPresent && cohostAutoChat && onCohostAutoChatChange ? (
+        <GolemChatControls
+          autoChat={cohostAutoChat}
+          consented={cohostConsented}
+          gate={cohostGate!}
+          onChange={onCohostAutoChatChange}
+        />
+      ) : null}
+      {/* Plan 164 S-D2: what the Golem wants to post as you (Suggest), and
+          the last lines it said. */}
+      {live && onCohostUtteranceApprove && onCohostUtteranceDismiss ? (
+        <GolemUtteranceCards
+          pending={cohostActionPending}
+          utterances={shownCohostState?.utterances ?? []}
+          onApprove={onCohostUtteranceApprove}
+          onDismiss={onCohostUtteranceDismiss}
+        />
+      ) : null}
       {/* Plan 140, S6: what Golem heard and did, what waits for an answer
           (the chooser, "show it anyway?"), then what Golem is about to remove
           because you asked, and how to stop it. Above the scroll, so none of
