@@ -53,6 +53,24 @@ const COHOST_COMMAND_AUTHOR_MAX_CHARS: usize = 120;
 const COHOST_COMMAND_TEXT_MAX_CHARS: usize = 500;
 const COHOST_COMMAND_ID_MAX_CHARS: usize = 200;
 const WINDOWS_PILOT_UPDATE_TOKEN_PATH: &str = "/api/desktop/updates/windows-pilot-token";
+// --- Golem pets (plan 168, Phase F) ---
+/// The pet routes (videorc-web PR #75): the client timeouts the web side
+/// names. A build session is a quick row; identity is one vision call; a
+/// sheet is one image edit (the route's own budget is 150 s).
+pub(crate) const COHOST_PET_BUILDS_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(15);
+pub(crate) const COHOST_PET_IDENTITY_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(60);
+pub(crate) const COHOST_PET_SHEET_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(155);
+const COHOST_PET_BUILDS_PATH: &str = "/api/ai/cohost/pet/builds";
+const COHOST_PET_IDENTITY_PATH: &str = "/api/ai/cohost/pet/identity";
+const COHOST_PET_SHEET_PATH: &str = "/api/ai/cohost/pet/sheet";
+/// A build session and the identity notes are small; a sheet is a PNG of up
+/// to 1536 x 1024 as base64, refused unread above this.
+const COHOST_PET_SMALL_RESPONSE_MAX_BYTES: usize = 256 * 1024;
+pub(crate) const COHOST_PET_SHEET_MAX_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
+// --- end Golem pets (plan 168, Phase F) ---
 /// Bounded well inside the provider-mutation RPC envelope: an update check must
 /// never wait on a slow web edge for long.
 pub(crate) const WINDOWS_PILOT_UPDATE_TOKEN_TIMEOUT: std::time::Duration =
@@ -552,6 +570,67 @@ pub struct CohostAvatarResponse {
     #[serde(default)]
     pub opaque: bool,
 }
+
+// --- Golem pets (plan 168, Phase F) ---
+
+/// `POST /api/ai/cohost/pet/builds`: one creation's server-side session.
+/// Nothing is metered when it opens.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostPetBuildSession {
+    pub build_id: String,
+    pub sheets_allowed: u32,
+    pub redos_allowed: u32,
+    pub pilots_allowed: u32,
+    /// ISO 8601, 24 h after the session opened.
+    pub expires_at: String,
+}
+
+/// `POST /api/ai/cohost/pet/identity`: the reference as base64 PNG.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostPetIdentityRequest {
+    pub build_id: String,
+    pub reference: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostPetIdentityResponse {
+    pub notes: crate::golem_pet_create::GolemPetIdentityNotes,
+}
+
+/// `POST /api/ai/cohost/pet/sheet`: one generated sheet, an edit of the
+/// reference with the identity notes. `row` rides with `gaze` only.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostPetSheetRequest {
+    pub build_id: String,
+    pub kind: crate::golem_pet_create::GolemPetSheetKindName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row: Option<crate::golem_pet_build::GazeRow>,
+    pub reference: String,
+    pub notes: crate::golem_pet_create::GolemPetIdentityNotes,
+    pub redo: bool,
+}
+
+/// The route's answer: the sheet (returned even when it came back opaque)
+/// and what is left of this creation's allowance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostPetSheetResponse {
+    pub png_base64: String,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    #[serde(default)]
+    pub opaque: bool,
+    pub sheets_remaining: u32,
+    pub redos_remaining: u32,
+}
+
+// --- end Golem pets (plan 168, Phase F) ---
 
 // --- Golem command parser wire types (plan 140 S8, contract part E) ---
 
@@ -1318,6 +1397,133 @@ impl VideorcApiClient {
         ))
     }
 
+    // --- Golem pets (plan 168, Phase F) ---
+
+    /// Open a pet build session (`POST /api/ai/cohost/pet/builds`).
+    pub async fn post_cohost_pet_build(
+        &self,
+        bearer_token: &str,
+    ) -> std::result::Result<CohostPetBuildSession, CohostApiError> {
+        self.post_cohost_pet_json(
+            COHOST_PET_BUILDS_PATH,
+            bearer_token,
+            &serde_json::json!({}),
+            COHOST_PET_BUILDS_TIMEOUT,
+            COHOST_PET_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// Read the reference's identity notes (`POST /api/ai/cohost/pet/identity`).
+    pub async fn post_cohost_pet_identity(
+        &self,
+        bearer_token: &str,
+        request: &CohostPetIdentityRequest,
+    ) -> std::result::Result<CohostPetIdentityResponse, CohostApiError> {
+        self.post_cohost_pet_json(
+            COHOST_PET_IDENTITY_PATH,
+            bearer_token,
+            request,
+            COHOST_PET_IDENTITY_TIMEOUT,
+            COHOST_PET_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// Generate one sheet (`POST /api/ai/cohost/pet/sheet`).
+    pub async fn post_cohost_pet_sheet(
+        &self,
+        bearer_token: &str,
+        request: &CohostPetSheetRequest,
+    ) -> std::result::Result<CohostPetSheetResponse, CohostApiError> {
+        self.post_cohost_pet_json(
+            COHOST_PET_SHEET_PATH,
+            bearer_token,
+            request,
+            COHOST_PET_SHEET_TIMEOUT,
+            COHOST_PET_SHEET_MAX_RESPONSE_BYTES,
+        )
+        .await
+    }
+
+    /// One pet route call with the avatar route's pattern: bearer JSON, the
+    /// route's own timeout, the body capped before it is parsed, and the
+    /// tick's failure mapping (code first, then status; `Retry-After` kept).
+    async fn post_cohost_pet_json<Req: Serialize + ?Sized, Resp: DeserializeOwned>(
+        &self,
+        path: &str,
+        bearer_token: &str,
+        request: &Req,
+        timeout: std::time::Duration,
+        max_bytes: usize,
+    ) -> std::result::Result<Resp, CohostApiError> {
+        let response = self
+            .http
+            .post(self.endpoint(path))
+            .bearer_auth(bearer_token)
+            .json(request)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|error| CohostApiError::from_transport_within(error, timeout))?;
+        let status = response.status();
+        if status.is_success() {
+            let too_large = || {
+                CohostApiError::malformed_response(
+                    status.as_u16(),
+                    "The response is larger than this route ever sends.",
+                )
+            };
+            if response
+                .content_length()
+                .is_some_and(|length| length > max_bytes as u64)
+            {
+                return Err(too_large());
+            }
+            let body = response.bytes().await.map_err(|error| {
+                if error.is_timeout() {
+                    return CohostApiError::from_transport_within(error, timeout);
+                }
+                CohostApiError::malformed_response(
+                    status.as_u16(),
+                    format!("Could not read the response: {error}"),
+                )
+            })?;
+            if body.len() > max_bytes {
+                return Err(too_large());
+            }
+            return serde_json::from_slice(&body).map_err(|error| {
+                CohostApiError::malformed_response(
+                    status.as_u16(),
+                    format!("Could not read the response: {error}"),
+                )
+            });
+        }
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let (code, message) = read_error_code_and_message(response).await;
+        Err(classify_cohost_failure(
+            status.as_u16(),
+            &code,
+            message,
+            retry_after.as_deref(),
+        ))
+    }
+
+    /// A client for a local fake web (tests only).
+    #[cfg(test)]
+    pub(crate) fn for_base_url(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    // --- end Golem pets (plan 168, Phase F) ---
+
     /// Fetch safe client-facing AI quota metadata for the signed-in user.
     pub async fn get_ai_quota(&self, bearer_token: &str) -> Result<AiQuotaStatus> {
         self.get_bearer_json("/api/ai/quota", bearer_token).await
@@ -2049,6 +2255,42 @@ mod tests {
         let avatar = cohost.avatar.unwrap();
         assert!(avatar.enabled);
         assert_eq!((avatar.remaining_today, avatar.daily_limit), (23, 24));
+        assert!(
+            cohost.pet.is_none(),
+            "servers before plan 168 omit the pet block"
+        );
+    }
+
+    #[test]
+    fn ai_capabilities_cohost_pet_block_parses_and_round_trips() {
+        let without: AiCapabilities = serde_json::from_str(
+            r#"{"entitlement":{"checkedAt":"2026-06-15T12:00:00.000Z","cloudAi":true,"expiresAt":"2026-06-15T12:05:00.000Z","isPremium":true,"subscriptionStatus":"active","tier":"premium"},"features":{"cloudAiEnabled":true,"gatewayConfigured":true,"modelTestingEnabled":true,"multipartAudioJobsEnabled":true,"objectBackedJobsEnabled":false,"transcriptJobsEnabled":true,"uploadTicketsEnabled":false},"generatedAt":"2026-06-15T12:30:00.000Z","limits":{"dailyJobs":25,"maxAudioBytes":null,"maxAudioMegabytes":null,"maxOutputTokens":null,"maxTranscriptCharacters":90000,"monthlyJobs":600},"models":{"allowedTextModelCount":2,"allowedTextModelsConfigured":true,"defaultTextModel":null,"fallbackTextModels":[]},"objectStorage":{"deleteConfigured":false,"downloadConfigured":false,"provider":null,"providerError":null,"proofConfigured":false,"proofTtlMs":null,"uploadConfigured":false},"readiness":{"access":{"cloudAiEntitled":true,"globallyDisabled":false},"gateway":{"configError":null,"configured":true},"objectStorage":{"deleteConfigError":null,"downloadConfigError":null,"proofConfigError":null,"providerError":null,"uploadConfigError":null},"transcription":{"configError":null,"configured":true}},"transcription":{"configured":true,"configError":null,"maxAudioBytes":null,"maxAudioMegabytes":null,"requestTimeoutMs":65000},"workflow":{"inputModes":[],"kind":"post-recording-publish-pack","outputs":[]}}"#,
+        )
+        .unwrap();
+        let mut value = serde_json::to_value(&without).unwrap();
+        value["cohost"] = serde_json::json!({
+            "tick": 4,
+            "pet": { "enabled": true, "creationsRemainingThisMonth": 2, "monthlyLimit": 3 }
+        });
+        let with: AiCapabilities = serde_json::from_value(value.clone()).unwrap();
+        let pet = with.cohost.clone().unwrap().pet.unwrap();
+        assert!(pet.enabled);
+        assert_eq!(
+            (pet.creations_remaining_this_month, pet.monthly_limit),
+            (2, 3)
+        );
+        // The proxy hands the renderer the same block, field for field.
+        assert_eq!(
+            serde_json::to_value(&with).unwrap()["cohost"]["pet"],
+            value["cohost"]["pet"]
+        );
+        // Basic: the block is present and off.
+        value["cohost"]["pet"] = serde_json::json!({ "enabled": false, "creationsRemainingThisMonth": 0, "monthlyLimit": 0 });
+        let basic: AiCapabilities = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            basic.cohost.unwrap().pet.unwrap(),
+            crate::protocol::AiCapabilitiesPet::default()
+        );
     }
 
     #[test]

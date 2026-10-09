@@ -3338,6 +3338,13 @@ export interface AiCapabilities {
       remainingToday: number
       dailyLimit: number
     }
+    /** Pet creation (plan 168 Phase F): Basic is `{ enabled: false, 0, 0 }`;
+     * older servers omit it and the creator stays off. */
+    pet?: {
+      enabled: boolean
+      creationsRemainingThisMonth: number
+      monthlyLimit: number
+    }
   }
   entitlement: {
     checkedAt: string
@@ -5316,6 +5323,40 @@ export interface CohostPetReactAccepted {
   reaction: string
 }
 // --- end Golem pets (plan 168, Phase A) ---
+
+// --- Golem pets (plan 168, Phase F) ---
+// The creator (S-F4): the wire lives in `./golem-pet-creator`.
+export type {
+  CohostPetBuildIdParams,
+  CohostPetIdentityParams,
+  CohostPetSaveParams,
+  CohostPetSheetGenerateParams,
+  GolemPetBuildFailure,
+  GolemPetBuildProgressEvent,
+  GolemPetBuildProgressStep,
+  GolemPetCreation,
+  GolemPetCreationAccepted,
+  GolemPetCreationBuild,
+  GolemPetCreationSource,
+  GolemPetCreationStatus,
+  GolemPetCreationStep,
+  GolemPetCreatorError,
+  GolemPetGazeRow,
+  GolemPetIdentityNotes,
+  GolemPetIdentityReadEvent,
+  GolemPetReference,
+  GolemPetSheetGeneratedEvent,
+  GolemPetSheetKey,
+  GolemPetSheetKindName
+} from './golem-pet-creator'
+
+/** What `cohost.pet.save` hands back: the saved pack and the settings with
+ * the persona now Alive in it. */
+export interface CohostPetSaved {
+  pack: import('./golem-pet').GolemPetSummary
+  settings: CohostSettings
+}
+// --- end Golem pets (plan 168, Phase F) ---
 
 /** Whether Golem hears the streamer right now (plan 068). */
 export type CohostListeningState = 'off' | 'starting' | 'on' | 'blocked'

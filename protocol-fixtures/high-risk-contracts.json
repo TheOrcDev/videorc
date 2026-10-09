@@ -1575,5 +1575,152 @@
     "removeParams": { "packId": "0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a" },
     "reactParams": { "reaction": "laugh" },
     "reactAccepted": { "reaction": "laugh" }
+  },
+  "golemPetCreator": {
+    "status": {
+      "creation": {
+        "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
+        "step": "build",
+        "createdAt": "2026-10-09T10:00:00Z",
+        "expiresAt": "2026-10-10T10:00:00Z",
+        "expired": false,
+        "sheetsAllowed": 9,
+        "redosAllowed": 6,
+        "pilotsAllowed": 3,
+        "sheetsRemaining": 7,
+        "redosRemaining": 6,
+        "pilotsUsed": 1,
+        "reference": {
+          "sheet": "reference",
+          "version": 1,
+          "file": "sources/reference-v1.png",
+          "sha256": "3b4e0f6a9c2d1e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f",
+          "opaque": false,
+          "createdAt": "2026-10-09T10:00:05Z"
+        },
+        "notes": {
+          "palette": ["stone grey", "moss green"],
+          "materials": ["granite"],
+          "proportions": "Short legs, a heavy round body and a small head.",
+          "asymmetric": [{ "feature": "a crack over the eye", "side": "left" }]
+        },
+        "pilot": {
+          "sheet": "pilot",
+          "version": 1,
+          "file": "sources/pilot-v1.png",
+          "sha256": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+          "opaque": false,
+          "referenceVersion": 1,
+          "createdAt": "2026-10-09T10:01:00Z"
+        },
+        "pilotAccepted": true,
+        "sheets": [
+          {
+            "sheet": "gaze-up2",
+            "version": 1,
+            "file": "sources/gaze-up2-v1.png",
+            "sha256": "aa11bb22cc33dd44ee55ff6600112233445566778899aabbccddeeff00112233",
+            "opaque": false,
+            "referenceVersion": 1,
+            "createdAt": "2026-10-09T10:03:00Z"
+          },
+          {
+            "sheet": "gaze-up1",
+            "version": 2,
+            "file": "sources/gaze-up1-v2.png",
+            "sha256": "aa11bb22cc33dd44ee55ff6600112233445566778899aabbccddeeff00112233",
+            "opaque": true,
+            "referenceVersion": 1,
+            "createdAt": "2026-10-09T10:05:00Z"
+          }
+        ],
+        "build": {
+          "state": "failed",
+          "fresh": false,
+          "finishedAt": "2026-10-09T10:06:00Z",
+          "error": {
+            "code": "margin-too-small",
+            "message": "gaze-up1, gaze-0-1: the pose needs more room than the cell gives (4.5 px of margin, 8 needed); the builder never shrinks a pose. Generate the sheet again with the pose closer to the body",
+            "sheet": "gaze-up1",
+            "cell": "gaze-0-1"
+          }
+        },
+        "running": { "job": "sheet", "sheet": "gaze-level" }
+      }
+    },
+    "statusNone": { "creation": null },
+    "identityParams": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90", "reference": { "kind": "persona-idle" } },
+    "identityUploadParams": {
+      "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
+      "reference": { "kind": "upload", "imageBase64": "iVBORw0KGgo=" }
+    },
+    "sheetParams": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90", "kind": "gaze", "row": "level", "redo": true },
+    "pilotParams": {
+      "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
+      "kind": "pilot",
+      "redo": false,
+      "notes": {
+          "palette": ["stone grey", "moss green"],
+          "materials": ["granite"],
+          "proportions": "Short legs, a heavy round body and a small head.",
+          "asymmetric": [{ "feature": "a crack over the eye", "side": "left" }]
+        }
+    },
+    "buildParams": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90" },
+    "saveParams": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90", "name": "Pebble" },
+    "accepted": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90", "sheet": "gaze-level" },
+    "identityRead": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90", "notes": {
+          "palette": ["stone grey", "moss green"],
+          "materials": ["granite"],
+          "proportions": "Short legs, a heavy round body and a small head.",
+          "asymmetric": [{ "feature": "a crack over the eye", "side": "left" }]
+        } },
+    "sheetGenerated": {
+      "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
+      "sheet": "gaze-level",
+      "version": 2,
+      "opaque": false,
+      "sheetsRemaining": 6,
+      "redosRemaining": 5
+    },
+    "sheetFailed": {
+      "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
+      "sheet": "pilot",
+      "opaque": false,
+      "error": {
+        "code": "pet-pilot-daily-limit",
+        "message": "Today's pilots are used up. Try again tomorrow."
+      }
+    },
+    "buildProgress": {
+      "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
+      "step": "cutting",
+      "sheet": "gaze-up2",
+      "done": 1,
+      "total": 19
+    },
+    "buildFailed": {
+      "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
+      "step": "failed",
+      "sheet": "gaze-up1",
+      "cell": "gaze-0-1",
+      "done": 0,
+      "total": 0,
+      "error": "gaze-up1, gaze-0-1: the cell is empty",
+      "code": "cell-empty"
+    },
+    "savedPack": {
+      "packId": "7d3c9b2a-1e4f-4a6b-8c5d-9e0f1a2b3c4d",
+      "name": "Pebble",
+      "cellSize": 640,
+      "gazeCount": 25,
+      "reactions": [
+        "laugh", "surprised", "wink", "kiss", "blink", "sleep",
+        "worried", "annoyed", "proud", "confused", "excited", "calm",
+        "talk-a", "talk-b", "wave"
+      ],
+      "source": "videorc-creator",
+      "hasTalk": true
+    }
   }
 }

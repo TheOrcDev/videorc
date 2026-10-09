@@ -47,18 +47,12 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-// Re-exported for Phase F's RPC layer; nothing in the binary reads them yet.
-#[allow(unused_imports)]
 pub use cut::SourceBox;
-#[allow(unused_imports)]
-pub use isolate::LOOSE_PIECE_JOIN_PX;
-#[allow(unused_imports)]
-pub use pack::{
-    ATLAS_COLUMNS, ATLAS_FILE, MANIFEST_FILE, PROVENANCE_FILE, REPORT_FILE, SIDECAR_FILE,
-};
-#[allow(unused_imports)]
-pub use register::{MAX_ROOT_DRIFT_BOTTOM_PX, MAX_ROOT_DRIFT_X_PX, MIN_MARGIN_PX};
-#[allow(unused_imports)]
+#[cfg(test)]
+use isolate::LOOSE_PIECE_JOIN_PX;
+pub use pack::{ATLAS_FILE, MANIFEST_FILE, PROVENANCE_FILE, REPORT_FILE, SIDECAR_FILE};
+#[cfg(test)]
+use register::{MAX_ROOT_DRIFT_BOTTOM_PX, MAX_ROOT_DRIFT_X_PX, MIN_MARGIN_PX};
 pub use report::{BuildReport, CellReport, NeutralReport, Provenance};
 
 use crate::golem_pet::{
@@ -104,14 +98,6 @@ pub enum GazeRow {
 }
 
 impl GazeRow {
-    pub const ALL: [GazeRow; 5] = [
-        GazeRow::Up2,
-        GazeRow::Up1,
-        GazeRow::Level,
-        GazeRow::Down1,
-        GazeRow::Down2,
-    ];
-
     /// Row index in the atlas and in the gaze ids (`gaze-<col>-<row>`).
     pub fn index(self) -> usize {
         match self {
@@ -120,16 +106,6 @@ impl GazeRow {
             GazeRow::Level => 2,
             GazeRow::Down1 => 3,
             GazeRow::Down2 => 4,
-        }
-    }
-
-    pub fn key(self) -> &'static str {
-        match self {
-            GazeRow::Up2 => "up2",
-            GazeRow::Up1 => "up1",
-            GazeRow::Level => "level",
-            GazeRow::Down1 => "down1",
-            GazeRow::Down2 => "down2",
         }
     }
 
@@ -193,11 +169,6 @@ impl SheetKind {
             SheetKind::ReactionsA | SheetKind::ReactionsB => (3, 2),
             SheetKind::Extras => (3, 1),
         }
-    }
-
-    pub fn cell_count(self) -> usize {
-        let (cols, rows) = self.grid();
-        cols * rows
     }
 
     /// The sheet key used in errors, reports and provenance.
@@ -311,6 +282,9 @@ pub struct BuildOutcome {
     pub atlas_height: u32,
 }
 
+// The cut boxes of one sheet (`cut_preview`) are not on the wire: the
+// wizard reviews the built atlas. Only the builder's tests read them today.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CutMethod {
@@ -322,6 +296,7 @@ pub enum CutMethod {
 }
 
 /// One cell for the review UI, in the coordinates of the sheet file.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CellBox {
@@ -633,6 +608,7 @@ fn cut_or_isolate(kind: SheetKind, image: RgbaImage) -> Result<CutSheet, BuildEr
 /// the sheet file, labelled with their frame ids (pose names for the
 /// pilot). Falls back to component separation exactly as the build does,
 /// so a sheet that previews is a sheet that cuts.
+#[cfg(test)]
 pub fn cut_preview(sheet: &SheetInput) -> Result<Vec<CellBox>, BuildError> {
     let image = load_sheet(sheet)?;
     let cut = cut_or_isolate(sheet.kind, image)?;
@@ -1119,21 +1095,21 @@ pub fn build_pack(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use image::Rgba;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const CELL_W: u32 = 160;
-    const CELL_H: u32 = 300;
+    pub(crate) const CELL_H: u32 = 300;
     const FIGURE_HEIGHT: i32 = 220;
-    const TEST_CELL_SIZE: u32 = 128;
+    pub(crate) const TEST_CELL_SIZE: u32 = 128;
 
     /// A simple silhouette: two leg blocks, an ellipse body, a round head
     /// (offset per gaze), an optional arm to the right at leg height, and
     /// an optional stray dot below the feet.
     #[derive(Clone)]
-    struct Figure {
+    pub(crate) struct Figure {
         cx: i32,
         baseline: i32,
         height: i32,
@@ -1145,7 +1121,7 @@ mod tests {
     }
 
     impl Figure {
-        fn at(cx: i32, baseline: i32, color: [u8; 3]) -> Self {
+        pub(crate) fn at(cx: i32, baseline: i32, color: [u8; 3]) -> Self {
             Figure {
                 cx,
                 baseline,
@@ -1173,7 +1149,7 @@ mod tests {
         }
     }
 
-    fn draw_figure(image: &mut RgbaImage, f: &Figure) {
+    pub(crate) fn draw_figure(image: &mut RgbaImage, f: &Figure) {
         let ink = Rgba([f.color[0], f.color[1], f.color[2], 255]);
         let h = f64::from(f.height);
         let rx = (0.12 * h).round() as i32;
@@ -1260,7 +1236,7 @@ mod tests {
     }
 
     /// Draw a whole sheet of `kind`, letting `tweak` edit each figure.
-    fn sheet_image(
+    pub(crate) fn sheet_image(
         kind: SheetKind,
         cell_h: u32,
         mut tweak: impl FnMut(usize, &mut Figure),
