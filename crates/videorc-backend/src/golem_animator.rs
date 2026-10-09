@@ -601,7 +601,11 @@ impl GolemAnimator {
             self.playing = None;
         }
 
-        // Sleep (D13).
+        // Sleep (D13). A pack without a sleep cell never sleeps (it was
+        // swapped for one while the pet slept: it is simply awake).
+        if self.asleep && atlas.cell(SLEEP_ID).is_none() {
+            self.asleep = false;
+        }
         let sleep_after = f64::from(self.settings.motion.sleep_after_seconds);
         if !self.asleep
             && sleep_after > 0.0

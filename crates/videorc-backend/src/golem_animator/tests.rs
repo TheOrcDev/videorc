@@ -958,6 +958,18 @@ fn sleep_after_0_never_sleeps_and_a_pack_without_sleep_stays_awake() {
 }
 
 #[test]
+fn a_pack_without_sleep_worn_while_asleep_is_simply_awake() {
+    let atlas = alive();
+    let still = still();
+    let mut session = Session::new(&atlas, settings(0.45, 30, true));
+    session.run(0.0, 31.0, 10.0);
+    assert!(session.animator.is_asleep());
+    session.atlas = &still;
+    assert_eq!(session.cell(31.1), "idle");
+    assert!(!session.animator.is_asleep());
+}
+
+#[test]
 fn a_reaction_while_asleep_wakes_it_first() {
     let atlas = alive();
     let mut session = Session::new(&atlas, settings(0.45, 30, true));
