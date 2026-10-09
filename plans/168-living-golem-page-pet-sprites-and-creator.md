@@ -41,16 +41,16 @@
   (builder port) with the wizard UI on `opus-4.8`. G owner + orchestrator.
   Every UI slice follows `.claude/skills/videorc-design/SKILL.md`.
 
-| Phase                                                        | PR   | Status  |
-| ------------------------------------------------------------ | ---- | ------- |
-| 0: Golem settings spacing (ships first)                      | none | PLANNED |
-| A: Pet pack format, storage, import, still packs             | none | PLANNED |
-| B: Sprite layer in CPU, Metal and D3D11                      | none | PLANNED |
-| C: The animator: gaze, reactions, talk, blink, sleep, motion | none | PLANNED |
-| D: Living preview and settings in the app                    | none | PLANNED |
-| E: Web: pet build sessions, sheet generation, allowance      | none | PLANNED |
-| F: The creator: Rust builder and the wizard                  | none | PLANNED |
-| G: Our default Golem made with the creator                   | none | PLANNED |
+| Phase                                                        | PR  | Status                                                                 |
+| ------------------------------------------------------------ | --- | ---------------------------------------------------------------------- |
+| 0: Golem settings spacing (ships first)                      |     | DONE in #647                                                           |
+| A: Pet pack format, storage, import, still packs             |     | DONE in #647                                                           |
+| B: Sprite layer in CPU, Metal and D3D11                      |     | DONE in #647 (D3D11 first runs in Windows CI)                          |
+| C: The animator: gaze, reactions, talk, blink, sleep, motion |     | DONE in #647                                                           |
+| D: Living preview and settings in the app                    |     | DONE in #647 (Stream Manager header by-eye owed)                       |
+| E: Web: pet build sessions, sheet generation, allowance      |     | DONE in web #75 (not deployed; S-E1 probe owed)                        |
+| F: The creator: Rust builder and the wizard                  |     | DONE in #647 (a real creation owed)                                    |
+| G: Our default Golem made with the creator                   |     | PARTIAL: docs and credit done; the pack itself is BLOCKED on the owner |
 
 ## The owner's ask (2026-10-08)
 
