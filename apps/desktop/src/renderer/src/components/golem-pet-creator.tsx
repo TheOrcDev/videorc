@@ -7,7 +7,6 @@ import {
   CrosshairIcon,
   ImageIcon,
   RefreshIcon,
-  SparkleIcon,
   SpinnerIcon,
   UploadIcon
 } from '@/components/icons'
@@ -40,7 +39,6 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { LazyGolemPetPreview } from '@/components/golem-pet-preview-lazy'
-import { generateThroughClient } from '@/hooks/use-golem-avatar'
 import {
   useGolemPetCreator,
   useGolemPetCreatorConnection,
@@ -51,14 +49,7 @@ import {
 import { useStudioCore } from '@/hooks/use-studio'
 import type { CohostPersona, GolemPetCreation, GolemPetReference } from '@/lib/backend'
 import { golemStateImageUrl } from '@/lib/golem-default-pack'
-import {
-  GOLEM_AVATAR_STYLE_LABELS,
-  GOLEM_AVATAR_STYLES,
-  GOLEM_PROMPT_MAX_CHARS,
-  golemGenerateAvailability,
-  withGolemImage,
-  type GolemAvatarStyle
-} from '@/lib/golem-persona-view'
+import { useGolemPetCreatorOptions } from '@/lib/golem-pet-creator-nav'
 import {
   GOLEM_PET_CREATOR_STEPS,
   GOLEM_PET_NONE_LEFT,
@@ -97,7 +88,7 @@ import {
 // The marks survive closing and reopening the wizard in one app session.
 const reviewMarksByBuild = new Map<string, GolemPetReviewMarks>()
 
-type ReferenceSource = 'persona' | 'upload' | 'generate'
+type ReferenceSource = 'persona' | 'upload'
 
 interface PrimaryAction {
   label: string
@@ -108,8 +99,8 @@ interface PrimaryAction {
 
 /**
  * The Golem pet creator (plan 168 S-F5): a sub-view of the Golem tab that
- * turns one picture into an Alive Golem. Reference (the persona's idle image,
- * an upload, or a generated one; the identity notes as editable sentences),
+ * turns one picture into an Alive Golem. Reference (the persona's idle image
+ * or an upload; the identity notes as editable sentences),
  * Pilot (four poses, made again at most three times), Build (eight sheets,
  * one at a time, then the pack built on this computer), Review (every row
  * marked "Looks right"; a redo clears that row's mark) and Save (named; the
@@ -118,6 +109,12 @@ interface PrimaryAction {
  *
  * Premium, cloud AI consent and a web that offers pet creation gate it;
  * when one is missing, one Alert names it and the controls are disabled.
+ *
+ * Plan 169 D11: the look panel's Make it Alive opens it with the kept look
+ * as the reference (`persona-idle`, selected at the Reference step, its
+ * "Read my Golem" focused) and the look's description shown beside it. The
+ * identity call takes no description, so it is context for the streamer,
+ * not sent.
  */
 export function GolemPetCreator({
   onClose,
@@ -172,6 +169,7 @@ export function GolemPetCreator({
   const parsedNotes = draft ? golemPetNotesFromDraft(draft) : null
   const notes = parsedNotes && 'notes' in parsedNotes ? parsedNotes.notes : null
 
+  const openOptions = useGolemPetCreatorOptions()
   const [source, setSource] = useState<ReferenceSource>('persona')
   const [upload, setUpload] = useState<{ name: string; url: string; base64: string } | null>(null)
   const [choosingPicture, setChoosingPicture] = useState(false)
@@ -237,6 +235,22 @@ export function GolemPetCreator({
   // ⌘↵ continues, wherever the focus is inside the window.
   const primaryRef = useRef(primary)
   primaryRef.current = primary
+  // Opened from the look (D11): the kept look is the reference, so its
+  // "Read my Golem" takes the focus once it can run.
+  const primaryButtonRef = useRef<HTMLButtonElement>(null)
+  const focusedFromLook = useRef(false)
+  const readyToRead =
+    openOptions.reference === 'persona-idle' &&
+    step === 'reference' &&
+    !creation &&
+    !state.loading &&
+    primary?.testId === 'golem-pet-read' &&
+    !primary.disabled
+  useEffect(() => {
+    if (!readyToRead || focusedFromLook.current) return
+    focusedFromLook.current = true
+    primaryButtonRef.current?.focus()
+  }, [readyToRead])
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey)) return
@@ -332,19 +346,12 @@ export function GolemPetCreator({
           </div>
         ) : step === 'reference' && !showNotes ? (
           <ReferenceStep
-            client={client}
             disabled={controlsOff || working}
             identityError={state.identityError}
+            lookNotes={openOptions.reference === 'persona-idle' ? openOptions.notes : undefined}
             persona={persona}
             source={source}
             upload={upload}
-            onGenerated={async (path) => {
-              if (!persona) return
-              await patchCohostSettings({
-                persona: withGolemImage(persona, 'idle', path, 'generated')
-              })
-              setSource('persona')
-            }}
             onSource={setSource}
             onUpload={setUpload}
           />
@@ -411,6 +418,7 @@ export function GolemPetCreator({
         ) : null}
         {primary ? (
           <Button
+            ref={primaryButtonRef}
             className="ml-auto"
             data-testid={primary.testId}
             disabled={primary.disabled}
@@ -707,39 +715,27 @@ function AtlasCell({
 // --- Steps ---------------------------------------------------------------------
 
 function ReferenceStep({
-  client,
   persona,
   source,
   upload,
   disabled,
   identityError,
+  lookNotes,
   onSource,
-  onUpload,
-  onGenerated
+  onUpload
 }: {
-  client: GolemPetCreatorClient | null
   persona: CohostPersona | null
   source: ReferenceSource
   upload: { name: string; url: string; base64: string } | null
   disabled: boolean
   identityError: string | null
+  /** The look's description when Make it Alive opened the creator (D11). */
+  lookNotes?: string
   onSource: (source: ReferenceSource) => void
   onUpload: (upload: { name: string; url: string; base64: string } | null) => void
-  onGenerated: (path: string) => Promise<void>
 }): ReactElement {
-  const { account, aiCapabilities, aiConsent, cohostGate } = useStudioCore()
   const fileInput = useRef<HTMLInputElement>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
-  const [prompt, setPrompt] = useState('')
-  const [style, setStyle] = useState<GolemAvatarStyle>('cartoon')
-  const [generating, setGenerating] = useState(false)
-  const [generateError, setGenerateError] = useState<string | null>(null)
-  const avatar = golemGenerateAvailability({
-    signedIn: account?.status === 'signed-in',
-    gate: cohostGate,
-    consented: aiConsent,
-    capabilities: aiCapabilities
-  })
   const preview =
     source === 'upload'
       ? (upload?.url ?? null)
@@ -765,25 +761,6 @@ function ReferenceStep({
     })
     if (upload) URL.revokeObjectURL(upload.url)
     onUpload({ name: file.name, url: URL.createObjectURL(file), base64 })
-  }
-
-  const generate = async (): Promise<void> => {
-    if (!client || !persona || !prompt.trim()) return
-    setGenerating(true)
-    setGenerateError(null)
-    try {
-      const result = await generateThroughClient(client, {
-        personaId: persona.id,
-        state: 'idle',
-        prompt: prompt.trim(),
-        style
-      })
-      await onGenerated(result.path)
-    } catch (error) {
-      setGenerateError(error instanceof Error ? error.message : 'Generation failed.')
-    } finally {
-      setGenerating(false)
-    }
   }
 
   return (
@@ -823,14 +800,22 @@ function ReferenceStep({
             <ToggleGroupItem className="px-3 text-xs" value="upload">
               Upload
             </ToggleGroupItem>
-            <ToggleGroupItem className="px-3 text-xs" value="generate">
-              Generate
-            </ToggleGroupItem>
           </ToggleGroup>
           {source === 'persona' ? (
-            <p className="text-xs text-muted-foreground">
-              The idle picture from your Golem&apos;s looks.
-            </p>
+            <div className="flex flex-col gap-1">
+              <p className="text-xs text-muted-foreground">
+                The idle picture from your Golem&apos;s look. To make a new look, use Create my
+                Golem in the Avatar section first.
+              </p>
+              {lookNotes ? (
+                <p
+                  className="text-xs text-muted-foreground select-text"
+                  data-testid="golem-pet-look-notes"
+                >
+                  Your look: &ldquo;{lookNotes}&rdquo;
+                </p>
+              ) : null}
+            </div>
           ) : null}
           {source === 'upload' ? (
             <div className="flex flex-wrap items-center gap-2">
@@ -867,60 +852,9 @@ function ReferenceStep({
               />
             </div>
           ) : null}
-          {source === 'generate' ? (
-            <div className="flex flex-col gap-2">
-              <div className="flex flex-wrap items-center gap-2">
-                <Input
-                  aria-label="Describe your Golem"
-                  className="min-w-48 flex-1"
-                  disabled={disabled || !avatar.allowed || generating}
-                  maxLength={GOLEM_PROMPT_MAX_CHARS}
-                  placeholder="A small stone golem with glowing eyes…"
-                  value={prompt}
-                  onChange={(event) => setPrompt(event.target.value)}
-                />
-                <Select
-                  disabled={disabled || !avatar.allowed || generating}
-                  value={style}
-                  onValueChange={(next) => setStyle(next as GolemAvatarStyle)}
-                >
-                  <SelectTrigger aria-label="Style" className="w-28">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      {GOLEM_AVATAR_STYLES.map((preset) => (
-                        <SelectItem key={preset} value={preset}>
-                          {GOLEM_AVATAR_STYLE_LABELS[preset]}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-                <Button
-                  disabled={disabled || !avatar.allowed || generating || !prompt.trim()}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                  onClick={() => void generate()}
-                >
-                  {generating ? (
-                    <SpinnerIcon className="animate-spin" data-icon="inline-start" />
-                  ) : (
-                    <SparkleIcon data-icon="inline-start" />
-                  )}
-                  Generate
-                </Button>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                {avatar.reason ??
-                  "Replaces your Golem's idle picture, then the creation starts from it."}
-              </p>
-            </div>
-          ) : null}
-          {uploadError || generateError || identityError ? (
+          {uploadError || identityError ? (
             <p className="text-xs text-destructive" data-testid="golem-pet-reference-error">
-              {uploadError ?? generateError ?? identityError}
+              {uploadError ?? identityError}
             </p>
           ) : null}
         </div>

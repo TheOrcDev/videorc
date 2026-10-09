@@ -36,11 +36,16 @@ and points at Stream Manager; it has no switch of its own any more.
   chat and in voice.
 - **Personality** (up to 1,200 characters), free text. Three example chips
   fill it. The personality rides every cloud tick with the name.
-- **Looks**: four state tiles, Idle, Talking, Laughing, Thinking. Each tile
-  takes an upload (PNG or WebP with alpha, JPEG for idle only, 4 MB) or a
-  generated image (Premium + Cloud AI). "Generate all" makes the idle image
-  first, then the other three as edits of it, so the character stays the
-  same. A failed state leaves its tile empty and never blocks saving.
+- **Your Golem's look** (plan 169, the Avatar section's Still panel):
+  describe the Golem, add a picture for inspiration (a pet, a logo, a
+  sketch), or both, and **Create my Golem** (⌘↵, Premium + Cloud AI, 4 of
+  the day's images). The web draws the idle character in the house look and
+  talk, laugh and think as edits of it. The set is a draft until **Keep
+  this look**; **Try again** makes a new character, **Discard** drops it,
+  and **Redo** (R on a focused tile) remakes talk, laugh or think from the
+  draft's idle (1 image). No per-state uploads any more; pictures uploaded
+  before plan 169 stay until a look is kept. **Make it Alive** opens the
+  Alive creator with the kept look as its reference.
 - **Bubble**: speech, thought or shout, with a live sample.
 - **Start over** deletes the persona folder and starts a fresh persona id.
 
@@ -137,7 +142,7 @@ or the settings.
 
 **Create** opens the creator:
 
-1. **Reference**: your idle image, an upload or a generated picture. A vision
+1. **Reference**: your idle image or an upload. A vision
    model writes identity notes (palette, materials, proportions, and which
    side each asymmetric feature is on); you can correct them.
 2. **Pilot**: four poses (front, left, right, laugh) to check the character
@@ -425,21 +430,30 @@ The persona and its images (Phase A):
   out-of-bounds persona with `cohost-persona-invalid` and bad templates with
   `cohost-auto-chat-invalid` (`cohost.rs::validate_persona` /
   `validate_auto_chat`).
-- Uploads go through main (`golem-assets:import-image(personaId, state)`):
-  sniffed PNG/WebP (JPEG for idle), 4 MB, copied to
-  `userData/golem-assets/<personaId>/`, served as
-  `videorc-asset://golem/<personaId>/<state>.<ext>`. `golem-assets:remove`
-  deletes the folder for Start over. `golem-assets:read-image` hands the
-  bytes to the overlay rasterizer.
-- Generation is `cohost.avatar.generate {state, prompt, style}`: accepted at
-  once with `{requestId, state}`, the outcome arrives as
-  `cohost.avatar.generated {requestId, state, path?, opaque, error?}`. The
-  backend posts to the web's `/api/ai/cohost/avatar` and writes the PNG into
-  the managed folder main hands over as `VIDEORC_MANAGED_GOLEM_ROOTS`; the
-  renderer then patches `persona.images[state]` (one writer of the persona).
-  One generation at a time per process (`cohost-avatar-busy`). Generate is
-  on only when `/api/ai/capabilities` reports `cohost.avatar.enabled`, with
-  `remainingToday` and `dailyLimit` from the web.
+- Persona pictures live in `userData/golem-assets/<personaId>/` (the
+  managed folder main hands the backend as `VIDEORC_MANAGED_GOLEM_ROOTS`),
+  served as `videorc-asset://golem/<path>`: `<state>.<ext>` (uploads from
+  before plan 169) or `<state>-<tag>.png` (a kept look; the tag is the
+  draft's first 8 hex digits, so each kept look has its own paths and no
+  surface shows a cached picture). `golem-assets:remove` deletes the folder
+  for Start over; `golem-assets:read-image` hands persona picture bytes to
+  the overlay rasterizer.
+- The look (plan 169, `cohost_avatar.rs`): `cohost.avatar.create
+  {description?, inspirationBase64?}` (the picture at most 3 MB decoded,
+  under Vercel's request cap; the renderer fits it within 1024 px) and
+  `cohost.avatar.redo {requestId, state}` answer `{requestId}` at once; the
+  backend posts to the web's `/api/ai/cohost/avatar/set` (190 s, 40 MB
+  response cap) on its own task and reports `cohost.avatar.progress
+  {requestId, state, phase: working | done | failed, path?, error?}` and
+  `cohost.avatar.draft {requestId, images, failed}`. The set lands in
+  `<personaId>/drafts/<requestId>/<state>.png` (one draft per persona, replaced
+  only by a create that succeeded); `cohost.avatar.keep {requestId}` moves it
+  into the persona folder, saves `images` and `source: generated` and returns
+  the settings; `cohost.avatar.discard {requestId}` deletes it;
+  `cohost.avatar.draft.get` offers a draft left on disk (and the job running)
+  after a restart. One job at a time per process (`cohost-avatar-busy`).
+  Create is on only when `/api/ai/capabilities` reports
+  `cohost.avatar.enabled` with at least 4 `remainingToday` (Redo needs 1).
 - The bundled default pack is `lib/golem-default-pack.ts` (lazy chunks only,
   never the eager shell): the owner's stone golem in all four states
   (masters in `assets/brand/golem/`). The backend's Still pack embeds the

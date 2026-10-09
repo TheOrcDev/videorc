@@ -18,7 +18,7 @@
 //! never run on the websocket mutation lane (10 s deadline): each RPC checks
 //! what it can at once, answers with an acceptance, and the outcome arrives
 //! as an event (`cohost.pet.identity.read`, `cohost.pet.sheet.generated`,
-//! `cohost.pet.build.progress`), as `cohost.avatar.generate` does. One job
+//! `cohost.pet.build.progress`), as the Golem look's RPCs do. One job
 //! runs at a time per process. `cohost.pet.save` moves the built pack to
 //! `<root>/<personaId>/pets/<packId>/` and switches the persona to Alive;
 //! `cohost.pet.creation.cancel` removes the creation folder, and a job still

@@ -5365,7 +5365,11 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.settings.set"
         | "overlays.layout.set"
         | "overlays.layout.migrate_highlight_anchor"
-        | "cohost.avatar.generate"
+        // Plan 169 D9: create and redo answer at once; the web call runs on
+        // its own task and reports by event. Discard removes one folder.
+        | "cohost.avatar.create"
+        | "cohost.avatar.redo"
+        | "cohost.avatar.discard"
         | "golem.overlay.set"
         | "golem.overlay.clear"
         | "cohost.pet.import"
@@ -5479,6 +5483,11 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
             max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
         }),
 
+        // Plan 169 D8: a keep moves the draft's pictures and saves the persona.
+        "cohost.avatar.keep" => Some(Mutation {
+            max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
+        }),
+
         // Plan 168 S-F4: a save decodes the built atlas once and moves the pack.
         "cohost.pet.save" => Some(Mutation {
             max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
@@ -5569,6 +5578,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.golem.status"
         | "cohost.pet.list"
         | "cohost.pet.creation.status"
+        | "cohost.avatar.draft.get"
         | "cohost.report.get"
         | "cohost.report.latest"
         | "ai.capabilities.get"
@@ -9483,9 +9493,11 @@ async fn handle_text_message_with_role(
         }
         // --- end Golem pets (plan 168, Phase B) ---
         // --- end Golem overlay ---
-        "cohost.avatar.generate" => {
-            match serde_json::from_value::<protocol::CohostAvatarGenerateParams>(command.params) {
-                Ok(params) => match cohost_avatar::generate(state.clone(), params).await {
+        // --- Golem look (plan 169 Phase B) ---
+        "cohost.avatar.create" => {
+            match serde_json::from_value::<cohost_avatar::CohostAvatarCreateParams>(command.params)
+            {
+                Ok(params) => match cohost_avatar::create(state, params).await {
                     Ok(accepted) => ServerResponse::ok(command.id, accepted),
                     Err(refusal) => {
                         ServerResponse::error(command.id, refusal.code, refusal.message)
@@ -9496,6 +9508,54 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        "cohost.avatar.redo" => {
+            match serde_json::from_value::<cohost_avatar::CohostAvatarRedoParams>(command.params) {
+                Ok(params) => match cohost_avatar::redo(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.avatar.keep" => {
+            match serde_json::from_value::<cohost_avatar::CohostAvatarRequestIdParams>(
+                command.params,
+            ) {
+                Ok(params) => match cohost_avatar::keep(state, params).await {
+                    Ok(settings) => ServerResponse::ok(command.id, settings),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.avatar.discard" => {
+            match serde_json::from_value::<cohost_avatar::CohostAvatarRequestIdParams>(
+                command.params,
+            ) {
+                Ok(params) => match cohost_avatar::discard(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.avatar.draft.get" => match cohost_avatar::draft_status(state).await {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(refusal) => ServerResponse::error(command.id, refusal.code, refusal.message),
+        },
+        // --- end Golem look (plan 169 Phase B) ---
         // --- Golem pets (plan 168, Phase A) ---
         "cohost.pet.list" => match golem_pet_store::list(state).await {
             Ok(packs) => ServerResponse::ok(command.id, packs),

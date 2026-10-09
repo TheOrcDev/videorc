@@ -4308,12 +4308,6 @@ export interface VideorcApi {
   // managed asset (Assets Tab plan, slice A4).
   importBackgroundImage: () => Promise<BackgroundImportResult | null>
   importScheduledThumbnail: () => Promise<ScheduledThumbnail | null>
-  /** Picks a PNG/WebP (JPEG for idle) and copies it into the persona's
-   * managed folder (plan 164 S-A3); null when the picker was cancelled. */
-  importGolemImage: (
-    personaId: string,
-    state: CohostAvatarState
-  ) => Promise<GolemImageImportResult | null>
   /** "Start over": deletes the persona's managed folder. */
   removeGolemPersona: (personaId: string) => Promise<void>
   /** The bytes of one stored persona image (`<personaId>/<state>.<ext>`) for
@@ -5150,33 +5144,78 @@ export interface CohostAutoChat {
   banter: CohostCooldownBehaviour
 }
 
-/** The generation style presets the web route takes (plan 164 S-A4). */
-export type CohostAvatarStyle = 'cartoon' | 'pixel' | 'painted' | 'sticker'
+// --- Golem look (plan 169 D8, D9) ---
 
-/** `cohost.avatar.generate` (plan 164 S-A6): accepted at once; the outcome
- * is the `cohost.avatar.generated` event. */
-export interface CohostAvatarGenerateParams {
-  state: CohostAvatarState
+/** `cohost.avatar.create`: a description, an inspiration picture (base64
+ * WebP, JPEG or PNG, at most 3 MB decoded) or both. Accepted at once; the set arrives as
+ * `cohost.avatar.progress` and `cohost.avatar.draft` events. */
+export interface CohostAvatarCreateParams {
   /** 1 to 600 characters. */
-  prompt: string
-  style: CohostAvatarStyle
+  description?: string
+  inspirationBase64?: string
 }
 
-export interface CohostAvatarGenerateAccepted {
+/** The states a draft can redo; idle has no Redo (Try again makes a new character). */
+export type CohostAvatarRedoState = Exclude<CohostAvatarState, 'idle'>
+
+/** `cohost.avatar.redo`: one state of the draft, made again from its idle. */
+export interface CohostAvatarRedoParams {
   requestId: string
-  state: CohostAvatarState
+  state: CohostAvatarRedoState
 }
 
-/** `cohost.avatar.generated`: `path` (the relative asset path the persona
- * stores) on success, `error` (the web's code and the tile's line) otherwise.
- * Each is absent, never null. */
-export interface CohostAvatarGeneratedEvent {
+/** `cohost.avatar.keep` and `cohost.avatar.discard`. */
+export interface CohostAvatarRequestIdParams {
+  requestId: string
+}
+
+/** What create and redo answer at once: the id their events carry. */
+export interface CohostAvatarAccepted {
+  requestId: string
+}
+
+/** Why one picture failed: the web's code and the tile's line. */
+export interface CohostAvatarErrorDetail {
+  code: string
+  message: string
+}
+
+export type CohostAvatarPhase = 'working' | 'done' | 'failed'
+
+/** `cohost.avatar.progress`: one state's step. `path` (the draft picture,
+ * relative to the golem root) on `done`, `error` on `failed`. */
+export interface CohostAvatarProgressEvent {
   requestId: string
   state: CohostAvatarState
+  phase: CohostAvatarPhase
   path?: string
-  /** The model returned no alpha; the tile says so. */
-  opaque: boolean
-  error?: { code: string; message: string }
+  error?: CohostAvatarErrorDetail
+}
+
+/** A draft look (`cohost.avatar.draft`): the pictures it holds
+ * (`<personaId>/drafts/<requestId>/<state>.png`) and why any other state is
+ * missing. Idle is always there. */
+export interface CohostAvatarDraft {
+  requestId: string
+  images: Partial<Record<CohostAvatarState, string>>
+  failed: Partial<Record<CohostAvatarState, CohostAvatarErrorDetail>>
+}
+
+export type CohostAvatarJobKind = 'create' | 'redo'
+
+/** The look job running now (one at a time per process). */
+export interface CohostAvatarRunning {
+  requestId: string
+  kind: CohostAvatarJobKind
+  /** The state a redo remakes. */
+  state?: CohostAvatarState
+}
+
+/** `cohost.avatar.draft.get` and `cohost.avatar.discard`: the active
+ * Golem's draft (one left on disk is offered again) and the running job. */
+export interface CohostAvatarDraftStatus {
+  draft?: CohostAvatarDraft
+  running?: CohostAvatarRunning
 }
 
 /** `cohost.settings.set`: absent fields are unchanged. */
@@ -6584,19 +6623,6 @@ export interface ScheduledStreamCapabilities {
   accounts: PlatformAccount[]
   audienceEditable: false
 }
-/** What `importGolemImage` hands back (plan 164 S-A3): the relative path the
- * persona stores and the managed URL the tile shows. */
-export interface GolemImageImportResult {
-  personaId: string
-  state: CohostAvatarState
-  /** `<personaId>/<state>.<ext>`, the value `persona.images[state]` stores. */
-  path: string
-  /** `videorc-asset://golem/<personaId>/<state>.<ext>`. */
-  url: string
-  width: number
-  height: number
-}
-
 export interface ScheduledThumbnail {
   id: string
   previewUrl: string

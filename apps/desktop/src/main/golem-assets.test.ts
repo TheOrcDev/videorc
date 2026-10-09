@@ -18,15 +18,14 @@ import {
   GOLEM_PET_FILE_MAX_BYTES,
   golemAssetUrl,
   golemBundledPackName,
-  golemImageFormat,
   golemPackRelativePath,
   isGolemPackId,
   isGolemPetFileName,
   parseGolemAssetPath,
+  parseGolemDraftPath,
   parseGolemPackPath
 } from '../shared/golem-assets'
 import {
-  importGolemImage,
   importGolemPetFolder,
   listGolemPersonas,
   readGolemImage,
@@ -41,15 +40,6 @@ const ONE_PIXEL_PNG = Buffer.from(
   'base64'
 )
 
-/** A JPEG SOI + SOF0 with dimensions, padded to `size` bytes. */
-function jpegHeader(width: number, height: number, size = 64): Buffer {
-  const bytes = Buffer.alloc(size)
-  Buffer.from([255, 216, 255, 192, 0, 17, 8]).copy(bytes)
-  bytes.writeUInt16BE(height, 7)
-  bytes.writeUInt16BE(width, 9)
-  return bytes
-}
-
 const roots: string[] = []
 async function root(): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), 'golem-assets-'))
@@ -60,110 +50,120 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true })))
 })
 
-const decodeOnePixel = (): { width: number; height: number } => ({ width: 1, height: 1 })
+/** A stored persona image, as the backend writes a kept look (plan 169). */
+async function storeImage(base: string, personaId: string, file: string): Promise<string> {
+  await mkdir(join(base, personaId), { recursive: true })
+  await writeFile(join(base, personaId, file), ONE_PIXEL_PNG)
+  return `${personaId}/${file}`
+}
 
-describe('golem avatar store (plan 164 S-A3)', () => {
-  it('imports a 1×1 PNG into the persona folder and resolves a protocol URL', async () => {
+describe('golem avatar store (plan 164 S-A3, plan 169 D8)', () => {
+  it('resolves a persona image to a protocol URL and lists the persona', async () => {
     const base = await root()
-    const source = join(base, 'picked.png')
-    await writeFile(source, ONE_PIXEL_PNG)
-    const result = await importGolemImage(source, base, 'persona-1', 'laugh', decodeOnePixel)
-    expect(result).toEqual({
+    const path = await storeImage(base, 'persona-1', 'laugh.png')
+    expect(golemAssetUrl(path)).toBe('videorc-asset://golem/persona-1/laugh.png')
+    expect(parseGolemAssetPath(path)).toEqual({
       personaId: 'persona-1',
       state: 'laugh',
-      path: 'persona-1/laugh.png',
-      url: 'videorc-asset://golem/persona-1/laugh.png',
-      width: 1,
-      height: 1
-    })
-    expect(await readFile(join(base, 'persona-1', 'laugh.png'))).toEqual(ONE_PIXEL_PNG)
-    expect(golemAssetUrl(result.path)).toBe(result.url)
-    expect(parseGolemAssetPath(result.path)).toEqual({
-      personaId: 'persona-1',
-      state: 'laugh',
-      extension: 'png'
+      extension: 'png',
+      file: 'laugh.png'
     })
     expect(await listGolemPersonas(base)).toEqual(['persona-1'])
   })
 
+  it('takes a kept look by its tagged name, and reads it back (plan 169)', async () => {
+    const base = await root()
+    const path = await storeImage(base, 'persona-1', 'idle-3f2a1c4e.png')
+    expect(parseGolemAssetPath(path)).toEqual({
+      personaId: 'persona-1',
+      state: 'idle',
+      extension: 'png',
+      file: 'idle-3f2a1c4e.png'
+    })
+    expect(golemAssetUrl(path)).toBe('videorc-asset://golem/persona-1/idle-3f2a1c4e.png')
+    expect(Buffer.from((await readGolemImage(base, path))!)).toEqual(ONE_PIXEL_PNG)
+    for (const bad of [
+      'persona-1/idle-3F2A1C4E.png',
+      'persona-1/idle-3f2a.png',
+      'persona-1/idle-3f2a1c4e9.png',
+      'persona-1/idler.png',
+      'persona-1/idle-../x.png'
+    ]) {
+      expect(parseGolemAssetPath(bad)).toBeNull()
+    }
+  })
+
   it('reads a stored image back as bytes and nothing outside the root (S-C2)', async () => {
     const base = await root()
-    const source = join(base, 'picked.png')
-    await writeFile(source, ONE_PIXEL_PNG)
-    const result = await importGolemImage(source, base, 'persona-1', 'idle', decodeOnePixel)
-    const bytes = await readGolemImage(base, result.path)
+    const path = await storeImage(base, 'persona-1', 'idle.png')
+    const bytes = await readGolemImage(base, path)
     expect(bytes).toBeInstanceOf(Uint8Array)
     expect(Buffer.from(bytes!)).toEqual(ONE_PIXEL_PNG)
-    // A state with no file, a path that is not a managed path, and a
-    // traversal are all null, never a throw.
+    // A state with no file, a path that is not a managed path, a traversal
+    // and a draft picture are all null, never a throw.
     expect(await readGolemImage(base, 'persona-1/laugh.png')).toBeNull()
     expect(await readGolemImage(base, '../picked.png')).toBeNull()
     expect(await readGolemImage(base, 'persona-1/idle.svg')).toBeNull()
     expect(await readGolemImage(base, 42)).toBeNull()
+    expect(
+      await readGolemImage(base, 'persona-1/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/idle.png')
+    ).toBeNull()
   })
 
-  it('rejects a 5 MB file with a named error and writes nothing', async () => {
+  it('refuses an image over the read cap', async () => {
     const base = await root()
-    const source = join(base, 'huge.png')
+    await mkdir(join(base, 'p'), { recursive: true })
     const huge = Buffer.alloc(5 * 1024 * 1024)
     ONE_PIXEL_PNG.copy(huge)
-    await writeFile(source, huge)
-    await expect(
-      importGolemImage(source, base, 'persona-1', 'idle', decodeOnePixel)
-    ).rejects.toThrow('Choose an image smaller than 4 MB.')
-    await expect(readdir(join(base, 'persona-1'))).rejects.toThrow()
-  })
-
-  it('takes a JPEG for idle only, and refuses bytes that are not an image', async () => {
-    const base = await root()
-    const source = join(base, 'photo.jpg')
-    await writeFile(source, jpegHeader(640, 480))
-    const idle = await importGolemImage(source, base, 'p', 'idle', () => ({
-      width: 640,
-      height: 480
-    }))
-    expect(idle.path).toBe('p/idle.jpg')
-    await expect(
-      importGolemImage(source, base, 'p', 'talk', () => ({ width: 640, height: 480 }))
-    ).rejects.toThrow('A JPEG has no transparency.')
-    const text = join(base, 'notes.png')
-    await writeFile(text, Buffer.from('<svg/>'))
-    await expect(importGolemImage(text, base, 'p', 'idle', decodeOnePixel)).rejects.toThrow(
-      'Choose a PNG, WebP or JPEG image.'
-    )
-    expect(() => golemImageFormat(new Uint8Array(0), 'idle')).toThrow('Choose an image file.')
-  })
-
-  it('keeps one file per state: a PNG upload replaces an earlier JPEG', async () => {
-    const base = await root()
-    const jpeg = join(base, 'photo.jpg')
-    await writeFile(jpeg, jpegHeader(2, 2))
-    await importGolemImage(jpeg, base, 'p', 'idle', () => ({ width: 2, height: 2 }))
-    const png = join(base, 'art.png')
-    await writeFile(png, ONE_PIXEL_PNG)
-    const replaced = await importGolemImage(png, base, 'p', 'idle', decodeOnePixel)
-    expect(replaced.path).toBe('p/idle.png')
-    expect((await readdir(join(base, 'p'))).sort()).toEqual(['idle.png'])
+    await writeFile(join(base, 'p', 'idle.png'), huge)
+    expect(await readGolemImage(base, 'p/idle.png')).toBeNull()
   })
 
   it('refuses an id that is not a plain token, and removes a whole persona', async () => {
     const base = await root()
-    const source = join(base, 'picked.png')
-    await writeFile(source, ONE_PIXEL_PNG)
-    await expect(
-      importGolemImage(source, base, '../escape', 'idle', decodeOnePixel)
-    ).rejects.toThrow('The persona id is not a plain token.')
-    await importGolemImage(source, base, 'p', 'idle', decodeOnePixel)
+    await storeImage(base, 'p', 'idle.png')
     await removeGolemPersona(base, 'p')
     expect(await listGolemPersonas(base)).toEqual([])
     await expect(removeGolemPersona(base, 'p')).resolves.toBeUndefined()
     await expect(removeGolemPersona(base, 'a/b')).rejects.toThrow()
+    await expect(removeGolemPersona(base, '../escape')).rejects.toThrow(
+      'The persona id is not a plain token.'
+    )
   })
 
   it('never resolves a path that reaches outside the managed root', () => {
     for (const path of ['../idle.png', 'p/../x/idle.png', '/p/idle.png', 'p/idle.svg', 'p/idle']) {
       expect(parseGolemAssetPath(path)).toBeNull()
       expect(golemAssetUrl(path)).toBeNull()
+    }
+  })
+
+  it("serves a draft look's pictures by their own path rule (plan 169 D8)", () => {
+    const id = '3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8'
+    const draft = `persona-1/drafts/${id}/talk.png`
+    expect(parseGolemDraftPath(draft)).toEqual({
+      personaId: 'persona-1',
+      requestId: id,
+      state: 'talk'
+    })
+    // Never a persona image: the persona stores `<id>/<state>.<ext>` only.
+    expect(parseGolemAssetPath(draft)).toBeNull()
+    expect(golemAssetUrl(draft)).toBe(`videorc-asset://golem/${draft}`)
+    // A redone pose keeps its path; the panel versions the URL.
+    expect(golemAssetUrl(`${draft}?v=2`)).toBe(`videorc-asset://golem/${draft}?v=2`)
+    expect(golemAssetUrl('persona-1/talk.png?v=2')).toBeNull()
+    for (const bad of [
+      `persona-1/drafts/${id}/talk.webp`,
+      `persona-1/drafts/${id.toUpperCase()}/talk.png`,
+      `persona-1/drafts/${id}/../talk.png`,
+      `persona-1/drafts/x/talk.png`,
+      `persona-1/drafts/${id}/failed.json`,
+      `../drafts/${id}/idle.png`,
+      `persona-1/drafts/.staging-${id}/idle.png`,
+      `${draft}?v=x`
+    ]) {
+      expect(parseGolemDraftPath(bad)).toBeNull()
+      expect(golemAssetUrl(bad)).toBeNull()
     }
   })
 })

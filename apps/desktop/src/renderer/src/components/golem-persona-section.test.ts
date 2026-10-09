@@ -3,20 +3,12 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { AiCapabilities, CohostSettings } from '@/lib/backend'
-import {
-  GOLEM_GENERATE_CONSENT_OFF,
-  GOLEM_GENERATE_NOT_AVAILABLE,
-  GOLEM_GENERATE_QUOTA,
-  GOLEM_NAME_REQUIRED,
-  golemGenerateAvailability,
-  golemNameToSave,
-  withGolemImage
-} from '@/lib/golem-persona-view'
+import type { CohostSettings } from '@/lib/backend'
+import { GOLEM_NAME_REQUIRED, golemNameToSave } from '@/lib/golem-persona-view'
 
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 
-import { GolemPersonaSection, GolemStillLooks } from './golem-persona-section'
+import { GolemPersonaSection } from './golem-persona-section'
 
 const mocked = vi.hoisted(() => ({ core: {} as Record<string, unknown> }))
 vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
@@ -24,16 +16,9 @@ vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
 let root: Root
 let container: HTMLDivElement
 const patchCohostSettings = vi.fn(async () => undefined)
-const importGolemImage = vi.fn(async () => null)
 const removeGolemPersona = vi.fn(async () => undefined)
 
 const premium: EntitlementUiGate = { allowed: true }
-const basic: EntitlementUiGate = {
-  allowed: false,
-  featureId: 'live-cohost',
-  reason: 'Golem requires Videorc Premium.',
-  upgradeUrl: 'https://www.videorc.com/premium'
-}
 
 function settings(overrides: Partial<CohostSettings['persona']> = {}): CohostSettings {
   return {
@@ -67,16 +52,11 @@ function settings(overrides: Partial<CohostSettings['persona']> = {}): CohostSet
   }
 }
 
-const avatarOn = {
-  cohost: { tick: 4, avatar: { enabled: true, remainingToday: 24, dailyLimit: 24 } }
-} as unknown as AiCapabilities
-
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   patchCohostSettings.mockClear()
-  importGolemImage.mockClear()
   removeGolemPersona.mockClear()
-  Object.assign(window, { videorc: { importGolemImage, removeGolemPersona } })
+  Object.assign(window, { videorc: { removeGolemPersona } })
   container = document.createElement('div')
   document.body.append(container)
   root = createRoot(container)
@@ -93,29 +73,21 @@ async function render({
   cohost = settings(),
   gate = premium as Record<string, unknown>,
   signedIn = true,
-  consented = true,
-  capabilities = avatarOn as AiCapabilities | null,
-  // Plan 168 S-D2: the four state tiles are the Avatar section's Still panel.
-  component = GolemPersonaSection as typeof GolemPersonaSection | typeof GolemStillLooks
+  consented = true
 } = {}): Promise<void> {
   mocked.core = {
     account: signedIn ? { status: 'signed-in' } : { status: 'signed-out' },
-    aiCapabilities: capabilities,
     aiConsent: consented,
     cohostGate: gate,
     cohostSettings: cohost,
     patchCohostSettings,
     runtimeInfo: { platform: 'darwin' }
   }
-  await act(async () => root.render(createElement(component)))
+  await act(async () => root.render(createElement(GolemPersonaSection)))
 }
 
 function nameInput(): HTMLInputElement {
   return document.getElementById('golem-name') as HTMLInputElement
-}
-
-function generateButtons(): HTMLButtonElement[] {
-  return [...document.querySelectorAll<HTMLButtonElement>('[data-testid="golem-generate"]')]
 }
 
 async function type(input: HTMLInputElement | HTMLTextAreaElement, value: string): Promise<void> {
@@ -138,50 +110,11 @@ async function blur(input: HTMLElement): Promise<void> {
   })
 }
 
-describe('golemNameToSave and availability (plan 164 S-A4)', () => {
+describe('golemNameToSave (plan 164 S-A4)', () => {
   it('trims the name and refuses empty or overlong ones', () => {
     expect(golemNameToSave('  Grum ')).toBe('Grum')
     expect(golemNameToSave('   ')).toBeNull()
     expect(golemNameToSave('n'.repeat(25))).toBeNull()
-  })
-
-  it('names the one reason Generate is off, in the order a streamer fixes them', () => {
-    const on = { signedIn: true, gate: premium, consented: true, capabilities: avatarOn }
-    expect(golemGenerateAvailability(on)).toEqual({ allowed: true, reason: null, remaining: 24 })
-    expect(golemGenerateAvailability({ ...on, signedIn: false }).reason).toBe(
-      'Sign in to generate images.'
-    )
-    expect(golemGenerateAvailability({ ...on, gate: basic }).reason).toBe(basic.reason)
-    expect(golemGenerateAvailability({ ...on, consented: false }).reason).toBe(
-      GOLEM_GENERATE_CONSENT_OFF
-    )
-    expect(golemGenerateAvailability({ ...on, capabilities: null }).reason).toBe(
-      GOLEM_GENERATE_NOT_AVAILABLE
-    )
-    expect(
-      golemGenerateAvailability({
-        ...on,
-        capabilities: { cohost: { tick: 3 } } as AiCapabilities
-      }).reason
-    ).toBe(GOLEM_GENERATE_NOT_AVAILABLE)
-    expect(
-      golemGenerateAvailability({
-        ...on,
-        capabilities: {
-          cohost: { avatar: { enabled: true, remainingToday: 0, dailyLimit: 24 } }
-        } as AiCapabilities
-      }).reason
-    ).toBe(GOLEM_GENERATE_QUOTA)
-  })
-
-  it('sets and clears a state image and tracks the source', () => {
-    const persona = settings().persona
-    const uploaded = withGolemImage(persona, 'laugh', 'default/laugh.png', 'uploaded')
-    expect(uploaded.images).toEqual({ laugh: 'default/laugh.png' })
-    expect(uploaded.source).toBe('uploaded')
-    const cleared = withGolemImage(uploaded, 'laugh', null, 'uploaded')
-    expect(cleared.images).toEqual({})
-    expect(cleared.source).toBe('default')
   })
 })
 
@@ -201,60 +134,6 @@ describe('GolemPersonaSection', () => {
     expect(patchCohostSettings).toHaveBeenLastCalledWith({
       persona: { ...settings().persona, name: 'Grum the Goblin' }
     })
-  })
-
-  it('shows four state tiles with the bundled pack and lets each upload', async () => {
-    await render({ component: GolemStillLooks })
-    const tiles = [...document.querySelectorAll<HTMLElement>('[data-slot="golem-tile"]')]
-    expect(tiles.map((tile) => tile.dataset.state)).toEqual(['idle', 'talk', 'laugh', 'think'])
-    expect(document.body.textContent).toContain('Idle')
-    expect(document.body.textContent).toContain('Laughing')
-    importGolemImage.mockResolvedValueOnce({
-      personaId: 'default',
-      state: 'laugh',
-      path: 'default/laugh.png',
-      url: 'videorc-asset://golem/default/laugh.png',
-      width: 1,
-      height: 1
-    } as never)
-    const upload = [...tiles[2]!.querySelectorAll('button')].find((button) =>
-      button.textContent?.includes('Upload')
-    )!
-    await act(async () => upload.click())
-    expect(importGolemImage).toHaveBeenCalledWith('default', 'laugh')
-    expect(patchCohostSettings).toHaveBeenLastCalledWith({
-      persona: { ...settings().persona, images: { laugh: 'default/laugh.png' }, source: 'uploaded' }
-    })
-  })
-
-  it('disables Generate without cloud-AI consent and says so once under the tiles', async () => {
-    await render({ consented: false, component: GolemStillLooks })
-    expect(generateButtons()).toHaveLength(4)
-    expect(generateButtons().every((button) => button.disabled)).toBe(true)
-    expect(
-      (document.querySelector('[data-testid="golem-generate-all"]') as HTMLButtonElement).disabled
-    ).toBe(true)
-    expect(document.querySelector('[data-slot="golem-generate-hint"]')?.textContent).toBe(
-      GOLEM_GENERATE_CONSENT_OFF
-    )
-  })
-
-  it('says "Not available yet" when the web does not offer avatar generation', async () => {
-    await render({ capabilities: null, component: GolemStillLooks })
-    expect(generateButtons().every((button) => button.disabled)).toBe(true)
-    expect(document.querySelector('[data-slot="golem-generate-hint"]')?.textContent).toBe(
-      GOLEM_GENERATE_NOT_AVAILABLE
-    )
-  })
-
-  it('enables Generate once a prompt is typed, and counts what is left today', async () => {
-    await render({ component: GolemStillLooks })
-    expect(generateButtons().every((button) => button.disabled)).toBe(true)
-    expect(document.querySelector('[data-slot="golem-generate-hint"]')?.textContent).toBe(
-      '24 generations left today'
-    )
-    await type(document.getElementById('golem-prompt') as HTMLInputElement, 'a stone golem')
-    expect(generateButtons().every((button) => !button.disabled)).toBe(true)
   })
 
   it('saves the bubble style on change and shows its sample', async () => {
