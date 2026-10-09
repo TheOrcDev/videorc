@@ -280,12 +280,7 @@ import {
   parseGolemLibraryPosePath
 } from '../shared/golem-assets'
 import type { GolemDeepLinkNavigation } from '../shared/electron-ipc-contract'
-import {
-  createFocusSyncGate,
-  parseGolemDeepLink,
-  runGolemDeepLink,
-  type GolemDeepLink
-} from './golem-deep-link'
+import { parseGolemDeepLink, runGolemDeepLink, type GolemDeepLink } from './golem-deep-link'
 import {
   managedImageDecodeScript,
   normalizeManagedImageDecodeResult
@@ -3945,9 +3940,8 @@ function restoreCaptionsWindowOnLaunch(): void {
   }
 }
 
-app.on('browser-window-focus', (_event, window) => {
+app.on('browser-window-focus', () => {
   void setNativePreviewSurfacesVisible(true)
-  if (window === mainWindow) syncGolemLibraryOnFocus()
 })
 
 function previewWindowIsOpenForSurface(): boolean {
@@ -8318,7 +8312,6 @@ function sendOAuthCallback(envelope: OAuthCallbackEnvelope): void {
 // The shell opens the Golem tab (and the creator) on `golem:deep-link`; main
 // focuses the window and drives the library over its admin channel.
 let pendingGolemNavigation: GolemDeepLinkNavigation | null = null
-const golemFocusSyncGate = createFocusSyncGate()
 
 function sendGolemNavigation(navigation: GolemDeepLinkNavigation): void {
   if (
@@ -8355,14 +8348,6 @@ function handleGolemDeepLink(link: GolemDeepLink): void {
   }).catch((error) => {
     logBackend('warn', `Golem deep link failed: ${errorMessage(error)}`)
   })
-}
-
-/** D12: focusing the main window syncs the library, at most once a minute. */
-function syncGolemLibraryOnFocus(): void {
-  if (!backendAdminConnection || !golemFocusSyncGate()) return
-  void requestBackendAdmin('cohost.library.sync', { reason: 'focus' }, 10_000).catch(
-    () => undefined
-  )
 }
 
 function flushOAuthCallbackUrls(): void {
@@ -9411,7 +9396,7 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'overlays.layout.migrate_highlight_anchor',
   // Plan 168 S-A3: register a pet pack folder main just copied.
   'cohost.pet.import',
-  // Plan 170 D12, D18: the focus sync and the videorc://golem deep link.
+  // Plan 170 D18: the videorc://golem deep link syncs, uses and polls.
   'cohost.library.get',
   'cohost.library.sync',
   'cohost.library.use',

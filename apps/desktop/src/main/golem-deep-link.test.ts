@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { createFocusSyncGate, parseGolemDeepLink, runGolemDeepLink } from './golem-deep-link'
+import { parseGolemDeepLink, runGolemDeepLink } from './golem-deep-link'
 
 const AVATAR = '7c9e6679-7425-40de-944b-e07fc1ee9a51'
 
@@ -97,17 +97,5 @@ describe('runGolemDeepLink', () => {
       'failed'
     )
     expect(slow.shown).toEqual([false])
-  })
-})
-
-describe('createFocusSyncGate', () => {
-  it('lets a focus sync through at most once a minute', () => {
-    let now = 1_000
-    const gate = createFocusSyncGate(60_000, () => now)
-    expect(gate()).toBe(true)
-    now += 59_000
-    expect(gate()).toBe(false)
-    now += 1_000
-    expect(gate()).toBe(true)
   })
 })

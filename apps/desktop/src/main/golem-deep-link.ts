@@ -105,14 +105,3 @@ export async function runGolemDeepLink(
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
-
-/** A focus sync at most once a minute (D12); the backend throttles too. */
-export function createFocusSyncGate(intervalMs = 60_000, now: () => number = Date.now) {
-  let last = Number.NEGATIVE_INFINITY
-  return (): boolean => {
-    const at = now()
-    if (at - last < intervalMs) return false
-    last = at
-    return true
-  }
-}

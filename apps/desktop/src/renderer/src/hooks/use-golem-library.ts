@@ -149,8 +149,7 @@ export function createGolemLibraryController(client: GolemLibraryClient): GolemL
 /**
  * One controller per client, its state as React state. Pass the panel's own
  * client (`useGolemLookClient()` from `use-golem-look`), or null while the
- * backend is not connected. Mounting it syncs the library (`reason: 'tab'`),
- * so callers do not sync on mount themselves.
+ * backend is not connected.
  */
 export function useGolemLibrary(client: GolemLibraryClient | null): {
   state: GolemLibraryViewState
@@ -161,9 +160,7 @@ export function useGolemLibrary(client: GolemLibraryClient | null): {
     if (!client) return
     const next = createGolemLibraryController(client)
     setController(next)
-    // D12: opening the Golem tab (where the library mounts) syncs it; the
-    // backend coalesces a sync already queued.
-    void next.refresh().then(() => next.sync('tab'))
+    void next.refresh()
     return () => {
       next.dispose()
       setController(null)

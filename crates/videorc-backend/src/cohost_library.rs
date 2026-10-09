@@ -790,7 +790,10 @@ where
     Fut: std::future::Future<Output = Result<(), CohostAvatarErrorDetail>> + Send + 'static,
 {
     let state = state.clone();
-    state.golem_library.jobs_pending.fetch_add(1, Ordering::AcqRel);
+    state
+        .golem_library
+        .jobs_pending
+        .fetch_add(1, Ordering::AcqRel);
     tokio::spawn(async move {
         let shared = state.golem_library.clone();
         let _turn = shared.jobs.lock().await;
