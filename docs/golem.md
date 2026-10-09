@@ -21,11 +21,11 @@ platforms you stream to (D3). There is no bot account.
 
 ## Where things live
 
-| Place                                     | Job                                                                                                                                                  |
-| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Golem tab** (sidebar, under Studio, ⌘9) | Creates. Name, personality, looks, bubble style, greeting templates, the Answers and Banter switches, Cloud AI consent, voice commands, reports.     |
-| **Stream Manager** (⇧⌘J, the Golem pane)  | Operates. The chat mode (Off, Suggest, Auto), the three behaviour switches, Suggest cards, the Say box, the Show on stream switch, questions, flags. |
-| **Live Scene** (Studio → Scene canvas)    | Places. Where the Golem sits on each orientation, and whether it is on the stream and in the recording. See [overlays.md](overlays.md).              |
+| Place                                     | Job                                                                                                                                                                                   |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Golem tab** (sidebar, under Studio, ⌘9) | Creates. Name, personality, avatar (Still or Alive), reactions, motion, bubble style, greeting templates, the Answers and Banter switches, Cloud AI consent, voice commands, reports. |
+| **Stream Manager** (⇧⌘J, the Golem pane)  | Operates. The chat mode (Off, Suggest, Auto), the three behaviour switches, Suggest cards, the Say box, the Show on stream switch, questions, flags.                                  |
+| **Live Scene** (Studio → Scene canvas)    | Places. Where the Golem sits on each orientation, and whether it is on the stream and in the recording. See [overlays.md](overlays.md).                                               |
 
 Each control has one home. The Golem tab shows the status of the chat mode
 and points at Stream Manager; it has no switch of its own any more.
@@ -52,6 +52,89 @@ laugh and think fall back to it until matching art exists. The avatar
 generation cap is the web's (24 a day); the image model is a web
 environment variable, never hardcoded in the desktop.
 
+## Still and Alive (plan 168)
+
+The Avatar section of the Golem tab picks how the Golem looks:
+
+- **Still** is the four state images above. It is free.
+- **Alive** is a pet pack: one transparent sprite atlas with 25 drawn look
+  directions (a 5 × 5 grid of head turns) plus reactions (laugh, surprised,
+  wink, kiss, blink, sleep, worried, annoyed, proud, confused, excited, calm,
+  and Videorc's talk-a, talk-b and wave). The format is
+  [page-pet](https://github.com/gvastethecreator/page-pet-skill)'s manifest
+  v1, unchanged; see [third-party/page-pet.md](third-party/page-pet.md).
+
+The preview in the tab is the real pet: it follows your pointer across the
+window, reacts when you click it, blinks, breathes and falls asleep. Packs:
+
+- **Import pack…** (I) takes any complete-character page-pet pack folder
+  (`manifest.json` plus its PNG or WebP sheets). Importing is free. Two-layer
+  legacy packs and AVIF sheets are refused with the reason. Guards: 32 MB per
+  file, 128 MB per pack, at most 64 frames, sheets up to 8192 px.
+- **Create** makes your own Alive Golem from your reference picture (Premium,
+  see below).
+- **Remove** deletes the worn pack and switches back to Still. The bundled
+  pack cannot be removed.
+
+### Reactions and Motion
+
+**Reactions** maps what happens on stream to a reaction of the pack, each
+editable, each with a Try button:
+
+| Trigger                                                 | Default reaction |
+| ------------------------------------------------------- | ---------------- |
+| Follow                                                  | wave, else proud |
+| Sub, resub, membership                                  | excited          |
+| Sub gift, community gift                                | excited          |
+| Cheer, bits, kicks, Super Chat, Super Sticker, Power-up | surprised        |
+| Raid                                                    | surprised        |
+| Watch streak                                            | proud            |
+| Redemption                                              | wink             |
+| A destination fails                                     | none             |
+
+A greeting template can name its own reaction, and it wins. A reaction the
+pack lacks falls back down the list, then to a small motion-only hop.
+Moderation flags never react on air.
+
+**Motion** (0 to 1, default 0.45) scales every bounce, squash and tilt; 0
+keeps the drawn poses and drops all movement. **Sleep after** (Never, 1, 3, 5
+or 10 minutes, default 3) puts the Golem to sleep with no chat, activity or
+lines; anything wakes it with a surprised start. **Breathing** (on by
+default) is a slow squash between events so it never looks frozen.
+
+### On stream
+
+The pet is drawn by the backend into the program video at the output frame
+rate, on every leg, with page-pet's motion (ported, without GSAP). It looks
+at the viewer by default, glances at the highlight card when one shows,
+looks up while an answer is on its way, cycles its talk frames while its
+bubble is up, blinks every few seconds and plays the reaction you mapped for
+each event. Each orientation computes its own gaze, so the pet looks toward
+the card wherever the card sits on that leg. The "nothing bounces" rule for
+scene and camera motion does not apply to the Golem: it is a character.
+
+### Creating an Alive Golem (Premium)
+
+**Create** opens the creator:
+
+1. **Reference**: your idle image, an upload or a generated picture. A vision
+   model writes identity notes (palette, materials, proportions, and which
+   side each asymmetric feature is on); you can correct them.
+2. **Pilot**: four poses (front, left, right, laugh) to check the character
+   holds. Redo up to three times.
+3. **Build**: eight sheets are generated in the cloud (five look-direction
+   strips, two reaction sheets, one talk and wave strip), then cut, aligned
+   on the feet and packed on this computer.
+4. **Review**: the 25 look directions in their grid with an arrow for the
+   intended direction, the reactions below, and the live pet beside them.
+   Mark each row "Looks right" or redo it. Saving needs every row marked.
+5. **Save**: name the pack; the Golem becomes Alive.
+
+Allowance: 3 creations per calendar month, each with 9 sheets and 6 redos;
+pilots are capped at 3 per creation and 6 a day. Abandoning at the pilot
+costs no creation; failed generations never count. The sources stay on this
+computer.
+
 ## Free and Premium
 
 | Feature                                          | Needs                                  |
@@ -63,15 +146,18 @@ environment variable, never hardcoded in the desktop.
 | Answers                                          | Premium + Cloud AI consent             |
 | Banter                                           | Premium + Cloud AI consent             |
 | Generated avatar images                          | Premium + Cloud AI consent + daily cap |
+| Alive: importing a pack, the pet on stream       | Nothing                                |
+| Alive: creating your own pet                     | Premium + Cloud AI consent + 3 a month |
 | Questions, flags, promises, voice commands       | Premium + Cloud AI consent (as before) |
 
 (D6, owner decision 2026-10-08.)
 
 ## The Golem on stream
 
-The avatar is an image per state plus a comic bubble above it, drawn into a
-rect you place on the Live Scene canvas. States: `idle`, `talk`, `laugh`,
-`think`. The image swaps; there is no animation.
+A Still avatar is an image per state; an Alive avatar is a pet pack (see
+above). Either way the comic bubble sits above its head, inside a rect you
+place on the Live Scene canvas. Still states are `idle`, `talk`, `laugh` and
+`think`; the image swaps and a reaction gives it a small hop.
 
 - A bubble stays for `max(2.5 s, 60 ms × characters)`, capped at 10 s, wraps
   to at most four lines at the rect's width, and is always the light variant
@@ -278,6 +364,8 @@ What Cloud AI covers (`CLOUD_AI_USES`, one list everywhere):
 - Golem replies in chat as you: with Answers or Banter on, its replies are
   drafted by Videorc's cloud AI and posted on your own account, only in the
   modes you turn on.
+- Creating an Alive Golem: your reference picture and its description go
+  to Videorc's cloud AI; the pictures are kept on this computer.
 - Clean cut uploads a recording's audio, never the video, in short chunks
   for a word-by-word transcript, and sends its sentences to Videorc's cloud
   AI to find retakes. Neither is kept on Videorc servers after the job
