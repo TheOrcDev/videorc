@@ -148,6 +148,13 @@ export function buildRecordingStudioGateSteps({
         args: ['smoke:comment-highlight-stream']
       },
       {
+        // Plan 168 S-C5: the animated Golem pet on a real recording (follow
+        // reaction, gaze at the card, talk frames, Motion on and off, sleep).
+        label: 'living Golem pet recording artifact smoke',
+        command: 'pnpm',
+        args: ['smoke:golem-pet']
+      },
+      {
         label: 'detached Comments command relay probe',
         command: 'pnpm',
         args: ['probe:comments-window']
