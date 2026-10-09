@@ -4328,6 +4328,15 @@ export interface VideorcApi {
    * `pets/<uuid>/` and registers it with the backend (plan 168 S-A3); null
    * when the picker was cancelled. Throws the backend's reason on refusal. */
   importGolemPetFolder: (personaId: string) => Promise<GolemPetImportResult | null>
+  /** One file of a pet creation (plan 168 S-F5): a stored source
+   * (`sources/<sheet>-v<n>.png`) or the build's `pack/mascot.webp` and
+   * `pack/manifest.json`, from `<personaId>/creations/<buildId>/` under the
+   * write root; null when there is no such file. */
+  readGolemCreationFile: (
+    personaId: string,
+    buildId: string,
+    file: string
+  ) => Promise<Uint8Array | null>
   backgroundAssetExists: (assetId: string) => Promise<boolean>
   /** Fetch-and-cache a chat avatar from an allowlisted platform CDN; returns a
    * local videorc-asset:// URL or null (disallowed host / fetch failure). */

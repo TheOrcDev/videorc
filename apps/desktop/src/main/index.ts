@@ -4,6 +4,7 @@ import {
   importGolemPetFolder,
   readGolemImage,
   readGolemPetFile,
+  readGolemCreationFile,
   removeGolemPersona,
   type GolemPetRoots
 } from './golem-assets'
@@ -14317,6 +14318,12 @@ app.whenReady().then(async () => {
   // persona's packs or the bundled root; null for anything else.
   secureIpcHandle('golem-pets:read', (_event, personaId: unknown, packId: unknown, file: unknown) =>
     readGolemPetFile(golemPetRoots(), personaId, packId, file)
+  )
+  // Plan 168 S-F5: one file of the persona's creation for the creator wizard.
+  secureIpcHandle(
+    'golem-pets:read-creation',
+    (_event, personaId: unknown, buildId: unknown, file: unknown) =>
+      readGolemCreationFile(managedGolemRoot(), personaId, buildId, file)
   )
   secureIpcHandle('backgrounds:bundled-assets', () => bundledBackgroundAssets())
   secureIpcHandle('backgrounds:asset-exists', (_event, assetId: unknown) =>

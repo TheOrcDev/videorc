@@ -13,6 +13,7 @@ import {
 } from '@/components/cohost-settings-section'
 import { GolemGreetingsSection } from '@/components/golem-greetings-section'
 import { GolemPersonaSection } from '@/components/golem-persona-section'
+import { GolemPetCreator } from '@/components/golem-pet-creator'
 import { OrcleEmblem } from '@/components/orcle-emblem'
 import { OrcleReportCard } from '@/components/orcle-report-card'
 import { OrcleVoiceCommands } from '@/components/orcle-voice-commands'
@@ -62,6 +63,7 @@ import { cn } from '@/lib/utils'
 import { openVideorcWebLink } from '@/lib/videorc-web-links'
 import type { CleanCutTabRequest } from '@/lib/clean-cut-events'
 import { ORCLE_TABS, isOrcleTabId, type OrcleTabId } from '@/lib/orcle-tabs'
+import { closeGolemPetCreator, useGolemPetCreatorOpen } from '@/lib/golem-pet-creator-nav'
 import { sessionIsLive } from '../../../../shared/capture-state'
 
 // The review is the heaviest part of Clean cut (player, transcript editor):
@@ -153,6 +155,7 @@ export function OrcleTab({
       ? { sessionId: cleanCutRequest.sessionId, nonce: cleanCutRequest.nonce }
       : null
   const openLibrarySession = onOpenLibrarySession ?? (() => undefined)
+  const creatorOpen = useGolemPetCreatorOpen()
 
   return (
     <>
@@ -184,7 +187,8 @@ export function OrcleTab({
             {/* Plan 164 S-A4: the creation screen leads; the old Live switch
                 and Cloud AI stay at the bottom until Stream Manager takes the
                 switch (S-D6). */}
-            <PageStack>
+            {creatorOpen ? <GolemPetCreator onClose={closeGolemPetCreator} /> : null}
+            <PageStack className={creatorOpen ? 'hidden' : undefined}>
               <GolemPersonaSection />
               <ConfigGrid className={CONFIG_GRID_PAIR}>
                 <OrcleLiveSection />

@@ -31,6 +31,7 @@ import {
   listGolemPersonas,
   readGolemImage,
   readGolemPetFile,
+  readGolemCreationFile,
   removeGolemPersona
 } from './golem-assets'
 
@@ -374,5 +375,45 @@ describe('golem pet folder import (plan 168 S-A3)', () => {
     ).rejects.toThrow('The pack id is not a uuid.')
     // Nothing was created for any refusal.
     expect(await listGolemPersonas(base)).toEqual([])
+  })
+})
+
+describe('golem creation files for the creator wizard (plan 168 S-F5)', () => {
+  const BUILD = '5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90'
+
+  it('reads sources and the build, and nothing else of the creation', async () => {
+    const write = await root()
+    const folder = join(write, 'p', 'creations', BUILD)
+    await mkdir(join(folder, 'sources'), { recursive: true })
+    await mkdir(join(folder, 'pack'), { recursive: true })
+    await writeFile(join(folder, 'sources', 'gaze-level-v2.png'), ONE_PIXEL_PNG)
+    await writeFile(join(folder, 'pack', 'mascot.webp'), ONE_PIXEL_PNG)
+    await writeFile(join(folder, 'pack', 'manifest.json'), '{"version":1}')
+    await writeFile(join(folder, 'build-state.json'), '{}')
+    await writeFile(join(folder, 'pack', 'golem.json'), '{}')
+    expect(await readGolemCreationFile(write, 'p', BUILD, 'sources/gaze-level-v2.png')).toEqual(
+      new Uint8Array(ONE_PIXEL_PNG)
+    )
+    expect(await readGolemCreationFile(write, 'p', BUILD, 'pack/mascot.webp')).not.toBeNull()
+    const manifest = await readGolemCreationFile(write, 'p', BUILD, 'pack/manifest.json')
+    expect(Buffer.from(manifest!).toString()).toBe('{"version":1}')
+    // The state file, other pack files, other personas and ids, traversal.
+    expect(await readGolemCreationFile(write, 'p', BUILD, 'build-state.json')).toBeNull()
+    expect(await readGolemCreationFile(write, 'p', BUILD, 'pack/golem.json')).toBeNull()
+    expect(await readGolemCreationFile(write, 'q', BUILD, 'pack/mascot.webp')).toBeNull()
+    expect(await readGolemCreationFile(write, '../p', BUILD, 'pack/mascot.webp')).toBeNull()
+    expect(await readGolemCreationFile(write, 'p', '../creations', 'pack/mascot.webp')).toBeNull()
+    expect(await readGolemCreationFile(write, 'p', BUILD, 'sources/../build-state.json')).toBeNull()
+    expect(await readGolemCreationFile(write, 'p', BUILD, 'sources/missing-v1.png')).toBeNull()
+  })
+
+  it('refuses a link that leaves the root', async () => {
+    const write = await root()
+    const outside = await root()
+    const sources = join(write, 'p', 'creations', BUILD, 'sources')
+    await mkdir(sources, { recursive: true })
+    await writeFile(join(outside, 'secret.png'), ONE_PIXEL_PNG)
+    await symlink(join(outside, 'secret.png'), join(sources, 'pilot-v1.png'))
+    expect(await readGolemCreationFile(write, 'p', BUILD, 'sources/pilot-v1.png')).toBeNull()
   })
 })
