@@ -6734,6 +6734,7 @@ impl Database {
         conn.execute_batch(
             "
             PRAGMA foreign_keys = ON;
+            PRAGMA secure_delete = ON;
             CREATE TABLE IF NOT EXISTS scheduled_stream_events (
                 id TEXT PRIMARY KEY, provider TEXT NOT NULL, account_id TEXT NOT NULL,
                 provider_event_id TEXT, start_utc TEXT NOT NULL, revision INTEGER NOT NULL,
@@ -13221,6 +13222,80 @@ mod tests {
         );
         drop(database);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn session_delete_erases_chat_bytes_after_reopening_database() {
+        let (database, database_path) = file_database();
+        for id in ["delete-private-chat", "keep-chat"] {
+            let mut session = sample_session(id);
+            session.output_path = None;
+            database.create_session(&session).unwrap();
+            database
+                .finish_session(id, "completed", None, None, None)
+                .unwrap();
+        }
+        let text_marker = "private-chat-erasure-regression-marker";
+        let author_marker = "private-viewer-erasure-regression-marker";
+        let messages = (0..64)
+            .map(|seq| {
+                let mut message = sample_live_chat_message("delete-private-chat", seq);
+                // Span overflow and freelist pages, not just space in one leaf.
+                message.message_text = text_marker.repeat(256);
+                message.fragments[0].text = text_marker.to_string();
+                message.author_id = Some(author_marker.to_string());
+                message.author_name = author_marker.to_string();
+                message
+            })
+            .collect::<Vec<_>>();
+        database.save_live_chat_messages(&messages).unwrap();
+        let kept_message = sample_live_chat_message("keep-chat", 1);
+        database.save_live_chat_message(&kept_message).unwrap();
+        drop(database);
+
+        let contains = |bytes: &[u8], marker: &str| {
+            bytes
+                .windows(marker.len())
+                .any(|window| window == marker.as_bytes())
+        };
+        let before = std::fs::read(&database_path).unwrap();
+        for marker in [text_marker, author_marker] {
+            assert!(contains(&before, marker), "fixture must persist {marker}");
+        }
+
+        let database = Database::open_file_for_tests(&database_path);
+        let operation = database
+            .prepare_session_deletions(&["delete-private-chat".to_string()])
+            .unwrap()
+            .remove(0);
+        assert!(
+            database
+                .complete_session_deletion(&operation.operation_id, &[])
+                .unwrap()
+                .deleted
+        );
+        assert!(
+            database
+                .list_live_chat_messages("delete-private-chat")
+                .unwrap()
+                .is_empty()
+        );
+        drop(database);
+
+        let after = std::fs::read(&database_path).unwrap();
+        for marker in [text_marker, author_marker] {
+            assert!(
+                !contains(&after, marker),
+                "deleted chat still contains {marker}"
+            );
+        }
+        let database = Database::open_file_for_tests(&database_path);
+        assert_eq!(
+            database.list_live_chat_messages("keep-chat").unwrap(),
+            vec![kept_message]
+        );
+        drop(database);
+        std::fs::remove_dir_all(database_path.parent().unwrap()).unwrap();
     }
 
     #[test]
