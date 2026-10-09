@@ -114,6 +114,25 @@ each event. Each orientation computes its own gaze, so the pet looks toward
 the card wherever the card sits on that leg. The "nothing bounces" rule for
 scene and camera motion does not apply to the Golem: it is a character.
 
+### Test your Golem (plan 169)
+
+**Test** under the preview (T while the Avatar section has focus) opens the
+Golem big on a neutral stage, Still or Alive, to see each state as viewers
+do:
+
+- **States** (1 to 4): Idle lives (blinks, breathes, sleeps); Talking runs
+  the stream's talk cycle (the pack's talk frames, else the Still talk
+  picture with a bob); Laughing laughs into the laugh picture and holds it;
+  Thinking holds the think picture, or an Alive pack looks up-left. A pack
+  without a drawing falls back like the stream does, and a line says so.
+- **Reactions**: every reaction of the pack, plus Hop, played over the held
+  state.
+- **Show the bubble** (on by default): the stream's own bubble with a sample
+  line, at its stream proportions, over the head while Talking.
+
+It is a sandbox in the window: nothing goes to the stream, chat, the backend
+or the settings.
+
 ### Creating an Alive Golem (Premium)
 
 **Create** opens the creator:
