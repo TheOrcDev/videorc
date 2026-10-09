@@ -5249,9 +5249,11 @@ export interface GolemOverlaySnapshot {
   bubble: GolemBubble | null
 }
 
-/** `golem.overlay.set`: the renderer's raster of the avatar (and bubble) for
- * one output canvas, blitted inside `rect` (the Golem's placed rect for that
- * canvas orientation). Mirrors `captions.overlay.set`. */
+/** `golem.overlay.set`: the renderer's raster of the bubble for one output
+ * canvas (plan 168 D16: the bubble only, its tail tip on the bitmap's
+ * bottom-centre; the backend draws the pet and anchors the bubble above its
+ * head). `rect` is the Golem's placed rect for that canvas orientation, the
+ * width the bubble wraps to. Mirrors `captions.overlay.set`. */
 export interface SetGolemOverlayParams {
   target: OverlayTarget
   pngBase64: string
@@ -5316,6 +5318,14 @@ export interface CohostPetReactAccepted {
   reaction: string
 }
 // --- end Golem pets (plan 168, Phase A) ---
+
+// --- Golem pets (plan 168, Phase B) ---
+/** `golem.overlay.clear`: the bubble ended; drop its raster from one target,
+ * or from both without a target. */
+export interface ClearGolemOverlayParams {
+  target?: OverlayTarget
+}
+// --- end Golem pets (plan 168, Phase B) ---
 
 /** Whether Golem hears the streamer right now (plan 068). */
 export type CohostListeningState = 'off' | 'starting' | 'on' | 'blocked'

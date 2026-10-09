@@ -43,6 +43,7 @@ import type {
   GolemOverlaySnapshot,
   OverlayTargetsInfo,
   SetGolemOverlayParams,
+  ClearGolemOverlayParams,
   CohostStartParams,
   CohostState,
   CohostReportGetParams,
@@ -364,6 +365,9 @@ export interface BackendRpcMethodMap {
   'cohost.pet.remove': BackendRpcDefinition<CohostPetRemoveParams, CohostPetRemoved>
   'cohost.pet.react': BackendRpcDefinition<CohostPetReactParams, CohostPetReactAccepted>
   // --- end Golem pets (plan 168, Phase A) ---
+  // --- Golem pets (plan 168, Phase B) ---
+  'golem.overlay.clear': BackendRpcDefinition<ClearGolemOverlayParams, OverlayTargetsInfo>
+  // --- end Golem pets (plan 168, Phase B) ---
   'cohost.report.get': BackendRpcDefinition<CohostReportGetParams, CohostReportPayload>
   'cohost.report.latest': BackendRpcDefinition<undefined, CohostReportPayload | null>
   'liveChat.emotes.get': BackendRpcDefinition<undefined, ChatEmotesSettings>
@@ -3184,6 +3188,12 @@ const setGolemOverlayParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<SetGolemOverlayParams>
 // --- end Golem overlay (plan 164) ---
+// --- Golem pets (plan 168, Phase B) ---
+const clearGolemOverlayParamsSchema = objectSchema(
+  { target: optionalSchema(enumSchema(['primary', 'auxiliary'])) },
+  { allowUnknown: false }
+) as RuntimeSchema<ClearGolemOverlayParams>
+// --- end Golem pets (plan 168, Phase B) ---
 
 const scheduledMutationSchema = objectSchema(
   {
@@ -3698,6 +3708,12 @@ const runtimeContracts = {
     result: cohostPetReactionSchema as RuntimeSchema<CohostPetReactAccepted>
   },
   // --- end Golem pets (plan 168, Phase A) ---
+  // --- Golem pets (plan 168, Phase B) ---
+  'golem.overlay.clear': {
+    params: clearGolemOverlayParamsSchema,
+    result: overlayTargetsInfoSchema
+  },
+  // --- end Golem pets (plan 168, Phase B) ---
   'liveChat.emotes.get': { params: undefinedSchema, result: chatEmotesSettingsSchema },
   'liveChat.emotes.set': {
     params: chatEmotesSettingsPatchSchema,

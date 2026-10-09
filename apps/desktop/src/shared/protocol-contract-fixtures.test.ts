@@ -692,6 +692,15 @@ describe('shared high-risk protocol fixture', () => {
       auxiliary: { active: false, width: 0, height: 0, revision: 0, styleRevision: 0 }
     }
     expect(validateBackendRpcResult('golem.overlay.set', info)).toStrictEqual(info)
+    // Plan 168 S-B1: the bubble's raster is cleared when it ends, one target
+    // or both; nothing else rides along.
+    expect(validateBackendRpcParams('golem.overlay.clear', {})).toStrictEqual({})
+    expect(validateBackendRpcParams('golem.overlay.clear', { target: 'primary' })).toStrictEqual({
+      target: 'primary'
+    })
+    expect(() => validateBackendRpcParams('golem.overlay.clear', { target: 'vertical' })).toThrow()
+    expect(() => validateBackendRpcParams('golem.overlay.clear', { rect: null })).toThrow()
+    expect(validateBackendRpcResult('golem.overlay.clear', info)).toStrictEqual(info)
   })
 
   it('keeps Golem voice commands, their answers and settings identical across languages (plan 140 S3)', () => {

@@ -4128,6 +4128,17 @@ async fn start_session_with_timeline(
     };
     let overlay_plans =
         crate::overlay_layout::overlay_session_plans(overlay_session_shape, &overlay_layout);
+    // Plan 168 S-B1: the pet's atlases start building now (off this task),
+    // so the session's first frame already has the Golem.
+    if use_encoder_bridge {
+        state.golem_sprite.prepare(&golem_sprite_legs(
+            overlay_plans.golem,
+            (params.output.video.width, params.output.video.height),
+            encoder_bridge_stream_output
+                .as_ref()
+                .map(|output| (output.width, output.height)),
+        ));
+    }
     let highlight_overlay_plan = (overlay_plans.highlight.primary, overlay_plans.highlight.aux);
     let comment_highlight_vertical_canvas = comment_highlight_vertical_canvas(
         encoder_bridge_stream_output.as_ref(),
@@ -20363,6 +20374,25 @@ pub async fn apply_overlay_layout_to_active_session(
 /// backend never acknowledges a card that no output draws.
 fn comment_highlight_available(use_encoder_bridge: bool, leg_plan: (bool, bool)) -> bool {
     use_encoder_bridge && (leg_plan.0 || leg_plan.1)
+}
+
+/// The legs (and their canvases) the Golem's pet draws on in a session
+/// (plan 168 S-B1), for `GolemSpriteSlot::prepare`.
+fn golem_sprite_legs(
+    plan: crate::overlay_layout::OverlayLegPlan,
+    primary: (u32, u32),
+    auxiliary: Option<(u32, u32)>,
+) -> Vec<(crate::golem_sprite::GolemSpriteLeg, (u32, u32))> {
+    let mut legs = Vec::with_capacity(2);
+    if plan.primary {
+        legs.push((crate::golem_sprite::GolemSpriteLeg::Primary, primary));
+    }
+    if plan.aux
+        && let Some(auxiliary) = auxiliary
+    {
+        legs.push((crate::golem_sprite::GolemSpriteLeg::Auxiliary, auxiliary));
+    }
+    legs
 }
 
 fn highlight_aux_leg(

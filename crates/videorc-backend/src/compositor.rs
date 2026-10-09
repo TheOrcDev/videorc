@@ -2239,6 +2239,7 @@ mod editor_draft_tests {
             caption_overlay: None,
             highlight_overlay: None,
             golem_overlay: None,
+            golem_leg: None,
         };
         let mut via_frame = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame_with_chrome(inputs, &quads, &mut via_frame);
@@ -7527,6 +7528,30 @@ async fn publish_compositor_frame(
     let simulcast_highlight_overlay = stream_output
         .filter(|output| output.composes_simulcast_scene)
         .and_then(|_| crate::captions::current_caption_overlay(&state.simulcast_highlight_overlay));
+    // Plan 168 S-B1: the pet on each leg that carries the Golem, drawn from
+    // the sprite slot once per composed frame at `published_at` (both legs
+    // share the clock; the atlas is built off this thread).
+    let golem_now = if golem_overlay_on_primary || golem_overlay_on_aux {
+        state.golem_sprite.clock_seconds(published_at)
+    } else {
+        0.0
+    };
+    let primary_golem = golem_overlay_on_primary.then(|| {
+        golem_leg_frame(
+            state,
+            crate::golem_sprite::GolemSpriteLeg::Primary,
+            (width, height),
+            golem_now,
+            caption_overlay_for_output(
+                &caption_overlays,
+                crate::captions::CaptionOverlayTarget::Primary,
+                caption_overlay_on_primary,
+            ),
+            highlight_overlay
+                .as_ref()
+                .filter(|_| highlight_overlay_on_primary),
+        )
+    });
     let mut bytes;
     {
         let inputs = CompositorRenderInputs {
@@ -7553,6 +7578,7 @@ async fn publish_compositor_frame(
                 crate::captions::CaptionOverlayTarget::Primary,
                 golem_overlay_on_primary,
             ),
+            golem_leg: primary_golem.as_ref(),
         };
         // GPU path for the cases it reproduces exactly; otherwise the CPU compositor.
         match try_gpu_compose_with_chrome(
@@ -7642,6 +7668,27 @@ async fn publish_compositor_frame(
         } else {
             snapshot.as_ref()
         };
+        let aux_highlight_overlay = if !highlight_overlay_on_aux {
+            None
+        } else if stream_output.composes_simulcast_scene {
+            simulcast_highlight_overlay.as_ref()
+        } else {
+            highlight_overlay.as_ref()
+        };
+        let aux_golem = golem_overlay_on_aux.then(|| {
+            golem_leg_frame(
+                state,
+                crate::golem_sprite::GolemSpriteLeg::Auxiliary,
+                (stream_output.width.max(1), stream_output.height.max(1)),
+                golem_now,
+                caption_overlay_for_output(
+                    &caption_overlays,
+                    crate::captions::CaptionOverlayTarget::Auxiliary,
+                    caption_overlay_on_aux,
+                ),
+                aux_highlight_overlay,
+            )
+        });
         let inputs = CompositorRenderInputs {
             sequence,
             width: stream_output.width.max(1),
@@ -7664,20 +7711,16 @@ async fn publish_compositor_frame(
                 crate::captions::CaptionOverlayTarget::Auxiliary,
                 caption_overlay_on_aux,
             ),
-            highlight_overlay: if !highlight_overlay_on_aux {
-                None
-            } else if stream_output.composes_simulcast_scene {
-                simulcast_highlight_overlay.as_ref()
-            } else {
-                highlight_overlay.as_ref()
-            },
-            // The Golem is rasterized per target like the caption bar (plan
-            // 164 S-C2), so the auxiliary leg always has its own raster.
+            highlight_overlay: aux_highlight_overlay,
+            // The bubble is rasterized per target like the caption bar (plan
+            // 164 S-C2), so the auxiliary leg always has its own raster; the
+            // pet has its own atlas per leg (plan 168 D5).
             golem_overlay: caption_overlay_for_output(
                 &golem_overlays,
                 crate::captions::CaptionOverlayTarget::Auxiliary,
                 golem_overlay_on_aux,
             ),
+            golem_leg: aux_golem.as_ref(),
         };
         let proof_store = stream_frame_store.clone();
         if let Some(aux_timings) = publish_auxiliary_compositor_frame(
@@ -7874,10 +7917,15 @@ struct CompositorRenderInputs<'a> {
     /// Comment-highlight card (Comments upgrade S2) — its own slot, composited
     /// after the caption bar; top vs bottom keeps them from overlapping.
     highlight_overlay: Option<&'a crate::captions::CaptionOverlay>,
-    /// The Golem avatar (plan 164 Phase C): composited after the caption bar
-    /// and BEFORE the highlight card, so the card wins an overlap (owner
-    /// answer 7: the most urgent thing on screen stays on top).
+    /// The Golem's bubble raster (plan 168 D16; plan 164 Phase C's avatar
+    /// raster before): composited after the pet and BEFORE the highlight
+    /// card, so the card wins an overlap (owner answer 7: the most urgent
+    /// thing on screen stays on top).
     golem_overlay: Option<&'a crate::captions::CaptionOverlay>,
+    /// The Golem's pet on this leg and where its bubble anchors (plan 168
+    /// S-B1): the pet draws after the caption bar, then the bubble (D9).
+    /// `None` blits a bubble inside its own rect (tests, no pet frame).
+    golem_leg: Option<&'a crate::golem_sprite::GolemLegFrame>,
 }
 
 /// Full frame render: the scene, then the caption overlay topmost — applied
@@ -7900,11 +7948,90 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
         );
     }
     if let Some(overlay) = inputs.golem_overlay {
-        composite_caption_overlay(overlay, inputs.width, inputs.height, bytes, 0);
+        let layout = golem_bubble_layout(overlay, inputs.golem_leg, inputs.width, inputs.height);
+        composite_overlay_at(overlay, inputs.width, inputs.height, bytes, layout);
     }
     if let Some(overlay) = inputs.highlight_overlay {
         composite_caption_overlay(overlay, inputs.width, inputs.height, bytes, 0);
     }
+}
+
+/// Where the Golem's bubble lands: above the pet's head on a leg that has a
+/// pet frame (plan 168 D16), else inside its own rect like any overlay. The
+/// tuple of `overlay_layout::overlay_blit_layout`; shared by CPU and Metal.
+fn golem_bubble_layout(
+    overlay: &crate::captions::CaptionOverlay,
+    golem_leg: Option<&crate::golem_sprite::GolemLegFrame>,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> (usize, usize, usize, usize) {
+    match golem_leg {
+        Some(leg) => crate::golem_sprite::golem_bubble_blit_layout(
+            overlay.width as usize,
+            overlay.height as usize,
+            canvas_width.max(1) as usize,
+            canvas_height.max(1) as usize,
+            leg.bubble_anchor,
+        ),
+        None => crate::overlay_layout::overlay_blit_layout(
+            overlay.width as usize,
+            overlay.height as usize,
+            canvas_width.max(1) as usize,
+            canvas_height.max(1) as usize,
+            overlay.blit_rect(canvas_width, canvas_height),
+            0,
+        ),
+    }
+}
+
+/// An overlay's blit on a canvas in canvas pixels `[x, y, w, h]`: the gaze
+/// targets plan 168 Phase C reads per leg.
+fn overlay_canvas_rect(
+    overlay: &crate::captions::CaptionOverlay,
+    canvas_width: u32,
+    canvas_height: u32,
+    safe_inset: usize,
+) -> [f32; 4] {
+    let (_, left, top, width) = crate::overlay_layout::overlay_blit_layout(
+        overlay.width as usize,
+        overlay.height as usize,
+        canvas_width.max(1) as usize,
+        canvas_height.max(1) as usize,
+        overlay.blit_rect(canvas_width, canvas_height),
+        safe_inset,
+    );
+    let height = (overlay.height as usize).min(canvas_height.max(1) as usize);
+    [left as f32, top as f32, width as f32, height as f32]
+}
+
+/// The Golem on one leg for this frame (plan 168 S-B1): the pet's draw from
+/// the sprite slot plus the gaze targets Phase C reads, the highlight card's
+/// and the caption bar's blits on this canvas.
+fn golem_leg_frame(
+    state: &AppState,
+    leg: crate::golem_sprite::GolemSpriteLeg,
+    canvas: (u32, u32),
+    now_seconds: f64,
+    caption: Option<&crate::captions::CaptionOverlay>,
+    highlight: Option<&crate::captions::CaptionOverlay>,
+) -> crate::golem_sprite::GolemLegFrame {
+    let (width, height) = canvas;
+    state
+        .golem_sprite
+        .leg_frame(crate::golem_sprite::GolemLegRequest {
+            leg,
+            canvas,
+            now_seconds,
+            highlight_rect: highlight.map(|overlay| overlay_canvas_rect(overlay, width, height, 0)),
+            caption_rect: caption.map(|overlay| {
+                overlay_canvas_rect(
+                    overlay,
+                    width,
+                    height,
+                    caption_overlay_safe_inset(Some(overlay), highlight, width, height),
+                )
+            }),
+        })
 }
 
 /// `render_compositor_yuv420p_frame` plus the editor chrome quads blended
@@ -7992,6 +8119,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
         caption_overlay: _,
         highlight_overlay: _,
         golem_overlay: _,
+        golem_leg: _,
     } = inputs;
     fill_yuv420p(bytes, width, height, 16, 128, 128);
 
@@ -8698,6 +8826,27 @@ fn composite_caption_overlay(
     dest: &mut [u8],
     safe_inset: usize,
 ) {
+    let layout = crate::overlay_layout::overlay_blit_layout(
+        overlay.width as usize,
+        overlay.height as usize,
+        canvas_width.max(1) as usize,
+        canvas_height.max(1) as usize,
+        overlay.blit_rect(canvas_width.max(1), canvas_height.max(1)),
+        safe_inset,
+    );
+    composite_overlay_at(overlay, canvas_width, canvas_height, dest, layout);
+}
+
+/// Straight-alpha blit of an overlay bitmap at a layout from
+/// `overlay_blit_layout` (or `golem_bubble_blit_layout`): `(source_left,
+/// dest_left, dest_top, draw_width)`, rows cut at the canvas height.
+fn composite_overlay_at(
+    overlay: &crate::captions::CaptionOverlay,
+    canvas_width: u32,
+    canvas_height: u32,
+    dest: &mut [u8],
+    layout: (usize, usize, usize, usize),
+) {
     let canvas_width = canvas_width.max(1) as usize;
     let canvas_height = canvas_height.max(1) as usize;
     if dest.len() < raw_yuv420p_len(canvas_width as u32, canvas_height as u32) {
@@ -8710,14 +8859,7 @@ fn composite_caption_overlay(
     }
 
     let draw_height = overlay_height.min(canvas_height);
-    let (source_left, dest_left, dest_top, draw_width) = crate::overlay_layout::overlay_blit_layout(
-        overlay_width,
-        overlay_height,
-        canvas_width,
-        canvas_height,
-        overlay.blit_rect(canvas_width as u32, canvas_height as u32),
-        safe_inset,
-    );
+    let (source_left, dest_left, dest_top, draw_width) = layout;
 
     let y_len = canvas_width * canvas_height;
     let uv_width = canvas_width.div_ceil(2);
@@ -10457,6 +10599,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             true,
         )
@@ -10475,6 +10618,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             true,
         )
@@ -10564,6 +10708,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             true,
         )
@@ -10693,6 +10838,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             true,
         )
@@ -10792,6 +10938,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             false,
         )
@@ -11197,6 +11344,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             true,
         ) {
@@ -11248,6 +11396,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             true,
         ) {
@@ -14278,6 +14427,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             &mut bytes,
         );
@@ -14357,6 +14507,7 @@ mod tests {
                 caption_overlay: caption,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             }
         }
         render_compositor_yuv420p_frame(inputs(canvas_w, canvas_h, None), &mut baseline);
@@ -14451,6 +14602,7 @@ mod tests {
             caption_overlay: None,
             highlight_overlay: None,
             golem_overlay: None,
+            golem_leg: None,
         };
         let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame(base_inputs, &mut baseline);
@@ -14460,6 +14612,7 @@ mod tests {
                 caption_overlay: Some(&caption),
                 highlight_overlay: Some(&highlight),
                 golem_overlay: None,
+                golem_leg: None,
                 ..base_inputs
             },
             &mut with_both,
@@ -14823,6 +14976,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: highlight,
                 golem_overlay: golem,
+                golem_leg: None,
             }
         }
         let mut cpu_clean = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
@@ -14947,6 +15101,7 @@ mod tests {
             caption_overlay: None,
             highlight_overlay: None,
             golem_overlay: None,
+            golem_leg: None,
         };
         let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame(base_inputs, &mut baseline);
@@ -14973,6 +15128,7 @@ mod tests {
                 CompositorRenderInputs {
                     highlight_overlay: Some(&highlight),
                     golem_overlay: None,
+                    golem_leg: None,
                     ..base_inputs
                 },
                 &mut frame,
@@ -15078,6 +15234,7 @@ mod tests {
                 caption_overlay: Some(&overlay),
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             &mut bytes,
         );
@@ -15097,6 +15254,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             &mut scene_only,
         );
@@ -15132,6 +15290,7 @@ mod tests {
                 caption_overlay: Some(&overlay),
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             &mut bytes,
         );
@@ -15158,6 +15317,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             &mut baseline,
         );
@@ -15248,6 +15408,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             &mut bytes,
         );
@@ -15343,6 +15504,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             &mut bytes,
         );
@@ -15450,6 +15612,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             &mut bytes,
         );
@@ -15702,6 +15865,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             &mut bytes,
         );

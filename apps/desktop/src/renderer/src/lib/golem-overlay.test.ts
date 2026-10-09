@@ -6,9 +6,11 @@ import {
   GOLEM_BUBBLE_MAX_LINES,
   type GolemImage,
   golemOverlayMetrics,
+  layoutGolemBubble,
   layoutGolemOverlay,
   loadGolemStateImage,
   paintGolemOverlay,
+  renderGolemBubblePng,
   renderGolemOverlayPng,
   shoutBubblePoints,
   wrapGolemBubbleText
@@ -262,6 +264,76 @@ describe('renderGolemOverlayPng snapshots (D17)', () => {
   })
 })
 
+describe('the bubble alone for the stream (plan 168 D16)', () => {
+  beforeEach(() => {
+    calls.length = 0
+    vi.stubGlobal('OffscreenCanvas', FakeOffscreenCanvas)
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  for (const style of STYLES) {
+    it(`cuts the ${style} layout at the tail's tip plus its gap, centred`, () => {
+      const params = {
+        text: 'Welcome to the horde',
+        style,
+        canvasWidth: 1920,
+        canvasHeight: 1080,
+        rectWidthPx: 346,
+        measure
+      }
+      const full = layoutGolemOverlay(params)
+      const bubble = layoutGolemBubble(params)!
+      expect(bubble.height).toBe(full.avatar.y)
+      expect(bubble.width).toBe(full.width)
+      // The bitmap's bottom-centre is where the tail points (the backend
+      // puts it on the pet's head).
+      expect(full.avatar.x + full.metrics.avatarPx / 2).toBe(bubble.width / 2)
+      if (style === 'speech') {
+        expect(bubble.tail[2]!.y + bubble.metrics.gapPx).toBe(bubble.height)
+      }
+      for (const dot of bubble.thoughtDots) {
+        expect(dot.cy + dot.r).toBeLessThanOrEqual(bubble.height)
+      }
+    })
+  }
+
+  it('is nothing without text', () => {
+    expect(
+      layoutGolemBubble({
+        text: null,
+        style: 'speech',
+        canvasWidth: 1920,
+        canvasHeight: 1080,
+        rectWidthPx: 346,
+        measure
+      })
+    ).toBeNull()
+  })
+
+  it('paints the bubble and never the avatar', async () => {
+    const png = await renderGolemBubblePng({
+      bubble: 'Welcome to the horde, Ana!',
+      style: 'speech',
+      canvas: { width: 1920, height: 1080 },
+      rect: DEFAULT_OVERLAY_LAYOUT.golem.horizontal
+    })
+    expect(png).toBeTruthy()
+    expect(calls.some((call) => call.startsWith('drawImage('))).toBe(false)
+    expect(calls.filter((call) => call.startsWith('fillText(')).length).toBeGreaterThan(0)
+    // The first canvas is the text measurer's 1x1 probe; the last is the bitmap.
+    const canvas = calls.filter((call) => call.startsWith('canvas ')).at(-1)
+    const layout = layoutGolemBubble({
+      text: 'Welcome to the horde, Ana!',
+      style: 'speech',
+      canvasWidth: 1920,
+      canvasHeight: 1080,
+      rectWidthPx: Math.floor(DEFAULT_OVERLAY_LAYOUT.golem.horizontal.w * 1920),
+      measure
+    })!
+    expect(canvas).toBe(`canvas ${layout.width}x${layout.height}`)
+  })
+})
+
 describe('golemOverlayTargetPlan', () => {
   // The shipped default is opt-in (both switches off); these plans need it on.
   const layout = { ...DEFAULT_OVERLAY_LAYOUT.golem, showOnStream: true, showInRecording: true }
@@ -319,18 +391,11 @@ describe('golemOverlayTargetPlan', () => {
       streamVideo: stream,
       layout
     })
-    const base = {
-      personaId: 'p',
-      imagesKey: 'a',
-      state: 'idle' as const,
-      bubble: null,
-      style: 'speech' as const,
-      targets
-    }
+    const base = { bubble: null, style: 'speech' as const, targets }
     expect(golemOverlayKey(base)).toBe(golemOverlayKey({ ...base }))
     expect(golemOverlayKey(base)).not.toBe(golemOverlayKey({ ...base, bubble: 'hi' }))
-    expect(golemOverlayKey(base)).not.toBe(golemOverlayKey({ ...base, state: 'talk' }))
-    expect(golemOverlayKey(base)).not.toBe(golemOverlayKey({ ...base, imagesKey: 'b' }))
+    expect(golemOverlayKey(base)).not.toBe(golemOverlayKey({ ...base, style: 'shout' }))
+    expect(golemOverlayKey(base)).not.toBe(golemOverlayKey({ ...base, targets: [] }))
   })
 })
 

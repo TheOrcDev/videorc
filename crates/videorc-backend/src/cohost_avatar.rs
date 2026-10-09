@@ -276,6 +276,11 @@ pub async fn generate(
     tokio::spawn(async move {
         let outcome = run_generation(&root, &persona, avatar_state, prompt, style, &token).await;
         GENERATION_BUSY.store(false, Ordering::Release);
+        if outcome.is_ok() {
+            // Plan 168 S-B1: a regenerated image keeps its path; the still
+            // pet on stream re-reads it.
+            state.golem_sprite.invalidate();
+        }
         let event = match outcome {
             Ok((path, opaque)) => CohostAvatarGeneratedEvent {
                 request_id,

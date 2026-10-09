@@ -142,7 +142,6 @@ import {
   overlaySnapRect
 } from '@/lib/overlay-layout'
 import { golemOverlayKey, golemOverlayTargetPlan } from '@/lib/golem-overlay-targets'
-import type { GolemImage } from '@/lib/golem-overlay'
 import {
   autoApplyPreset,
   isShippedDefaultOutput,
@@ -550,7 +549,7 @@ function loadCaptionOverlay() {
   return import('@/lib/caption-overlay')
 }
 
-// The Golem rasterizer carries the default pack: lazy, never in the eager shell.
+// The Golem's bubble rasterizer: lazy, never in the eager shell.
 function loadGolemOverlay() {
   return import('@/lib/golem-overlay')
 }
@@ -4254,13 +4253,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     cohostGate.allowed,
     cohostState?.status
   ])
-  // The Golem on stream (plan 164 S-C2). The backend owns the state and the
-  // bubble; this renderer rasterizes the avatar (plus bubble) once per output
-  // canvas and pushes each PNG into the `golem_overlay` slot, like the caption
-  // bar. A push happens on every change of persona, images, state, bubble,
-  // placement or canvas, whether or not a session runs: the slot is
-  // app-global and the avatar must be on the first frame (D19). Latest wins:
-  // a stale raster never lands after a newer state.
+  // The Golem on stream (plan 164 S-C2, plan 168 S-B1). The backend owns the
+  // state and the bubble and draws the pet itself from its atlas; this
+  // renderer rasterizes the bubble only, once per output canvas, and pushes
+  // each PNG into the `golem_overlay` slot (the backend anchors it above the
+  // pet's head), or clears the slot when the bubble ends. A push happens on
+  // every change of bubble, style, placement or canvas, whether or not a
+  // session runs: the slot is app-global. Latest wins: a stale raster never
+  // lands after a newer state.
   const golemPersona = cohostSettings?.persona ?? null
   const golemTargetsKey = useMemo(
     () =>
@@ -4280,7 +4280,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   const golemPushEpochRef = useRef(0)
   const golemPushedKeyRef = useRef<string | null>(null)
-  const golemImageCacheRef = useRef(new Map<string, Promise<GolemImage>>())
   useEffect(() => {
     if (wsStatus !== 'connected') golemPushedKeyRef.current = null
   }, [wsStatus])
@@ -4288,45 +4287,31 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (!client || wsStatus !== 'connected' || !golemPersona) return
     const targets = JSON.parse(golemTargetsKey) as ReturnType<typeof golemOverlayTargetPlan>
     if (targets.length === 0) return
-    const state = golemOverlay?.state ?? 'idle'
     const bubble = golemOverlay?.bubble?.text ?? null
-    const imagesKey = JSON.stringify(golemPersona.images)
-    const key = golemOverlayKey({
-      personaId: golemPersona.id,
-      imagesKey,
-      state,
-      bubble,
-      style: golemPersona.bubbleStyle,
-      targets
-    })
+    const style = golemPersona.bubbleStyle
+    const key = golemOverlayKey({ bubble, style, targets })
     if (key === golemPushedKeyRef.current) return
     const epoch = ++golemPushEpochRef.current
-    const cache = golemImageCacheRef.current
     void (async () => {
-      const golem = await loadGolemOverlay()
-      const cacheKey = `${golemPersona.id}:${imagesKey}:${state}`
-      let image = cache.get(cacheKey)
-      if (!image) {
-        image = golem.loadGolemStateImage(golemPersona, state)
-        cache.set(cacheKey, image)
-        image.catch(() => cache.delete(cacheKey))
-      }
-      const decoded = await image
-      for (const target of targets) {
-        if (epoch !== golemPushEpochRef.current) return
-        const pngBase64 = await golem.renderGolemOverlayPng({
-          image: decoded,
-          bubble,
-          style: golemPersona.bubbleStyle,
-          canvas: { width: target.canvasWidth, height: target.canvasHeight },
-          rect: target.rect
-        })
-        if (!pngBase64 || epoch !== golemPushEpochRef.current) return
-        await client.requestTyped('golem.overlay.set', {
-          target: target.target,
-          pngBase64,
-          rect: target.rect
-        })
+      if (bubble === null) {
+        await client.requestTyped('golem.overlay.clear', {})
+      } else {
+        const golem = await loadGolemOverlay()
+        for (const target of targets) {
+          if (epoch !== golemPushEpochRef.current) return
+          const pngBase64 = await golem.renderGolemBubblePng({
+            bubble,
+            style,
+            canvas: { width: target.canvasWidth, height: target.canvasHeight },
+            rect: target.rect
+          })
+          if (!pngBase64 || epoch !== golemPushEpochRef.current) return
+          await client.requestTyped('golem.overlay.set', {
+            target: target.target,
+            pngBase64,
+            rect: target.rect
+          })
+        }
       }
       if (epoch === golemPushEpochRef.current) golemPushedKeyRef.current = key
     })().catch((error: unknown) => {

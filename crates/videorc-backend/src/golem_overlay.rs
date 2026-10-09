@@ -1,9 +1,11 @@
 //! The Golem on stream (plan 164, Phase C): the avatar's state machine and its
-//! comic bubble, and the per-target PNG slot the compositor blits.
+//! comic bubble, and the per-target bubble slot the compositor blits.
 //!
-//! The renderer rasterizes the avatar (state image plus bubble) per output
-//! canvas and pushes it through `golem.overlay.set`; the backend owns WHICH
-//! state shows and for how long. Every bubble, manual (the Say box through
+//! Since plan 168 Phase B the backend draws the pet itself (`golem_sprite`);
+//! the renderer rasterizes the bubble only, per output canvas, and pushes it
+//! through `golem.overlay.set` (`golem.overlay.clear` when it ends). The
+//! compositor anchors the bubble above the pet's head (D16). The backend owns
+//! WHICH state shows and for how long. Every bubble, manual (the Say box through
 //! `cohost.utterance.say`) or automatic (Phase D's greetings, answers and
 //! banter), enters through [`show_bubble`], which is the one way a bubble
 //! appears; [`show_for_utterance`] is the gate in front of it (which statuses
@@ -294,13 +296,20 @@ pub async fn show_bubble(
         let generation = golem.show_bubble(text, state, duration, Utc::now());
         (golem.snapshot(), generation)
     };
-    app.emit_event(GOLEM_STATE_EVENT, snapshot.clone());
+    publish_state(app, snapshot.clone());
     let app = app.clone();
     tokio::spawn(async move {
         tokio::time::sleep(duration).await;
         expire_bubble(&app, generation).await;
     });
     Ok(snapshot)
+}
+
+/// Tell every window, and the pet on stream (plan 168 S-B1: until Phase C's
+/// animator the sprite shows the state's cell).
+fn publish_state(app: &AppState, snapshot: GolemOverlaySnapshot) {
+    app.golem_sprite.set_avatar_state(snapshot.state);
+    app.emit_event(GOLEM_STATE_EVENT, snapshot);
 }
 
 async fn expire_bubble(app: &AppState, generation: u64) {
@@ -311,7 +320,7 @@ async fn expire_bubble(app: &AppState, generation: u64) {
         }
         golem.snapshot()
     };
-    app.emit_event(GOLEM_STATE_EVENT, snapshot);
+    publish_state(app, snapshot);
 }
 
 /// `idle` → `think` while an answer is pending (D18): the send path calls
@@ -324,7 +333,7 @@ pub async fn think(app: &AppState) -> GolemOverlaySnapshot {
         (golem.snapshot(), changed)
     };
     if changed {
-        app.emit_event(GOLEM_STATE_EVENT, snapshot.clone());
+        publish_state(app, snapshot.clone());
     }
     snapshot
 }
@@ -338,7 +347,7 @@ pub async fn settle(app: &AppState) -> GolemOverlaySnapshot {
         (golem.snapshot(), changed)
     };
     if changed {
-        app.emit_event(GOLEM_STATE_EVENT, snapshot.clone());
+        publish_state(app, snapshot.clone());
     }
     snapshot
 }
@@ -352,17 +361,19 @@ pub async fn clear(app: &AppState) -> GolemOverlaySnapshot {
         (golem.snapshot(), changed)
     };
     if changed {
-        app.emit_event(GOLEM_STATE_EVENT, snapshot.clone());
+        publish_state(app, snapshot.clone());
     }
     snapshot
 }
 
-// --- The PNG slot ------------------------------------------------------------------
+// --- The bubble slot ----------------------------------------------------------------
 
 /// `golem.overlay.set { target, pngBase64, rect }`: the renderer's raster of
-/// the avatar (and bubble) for one output canvas, blitted inside `rect`. A
-/// push without a rect lands on the Golem's default corner for the canvas
-/// orientation.
+/// the bubble for one output canvas (plan 168 D16: the bubble only, its tail
+/// tip on the bitmap's bottom-centre). `rect` is the Golem's rect the bubble
+/// was wrapped for; the compositor anchors the bitmap above the pet's head,
+/// or, where no pet frame exists (tests, older callers), inside `rect` (a push
+/// without one lands on the Golem's default corner).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetGolemOverlayParams {
@@ -371,6 +382,15 @@ pub struct SetGolemOverlayParams {
     pub target: Option<CaptionOverlayTarget>,
     #[serde(default)]
     pub rect: Option<OverlayRect>,
+}
+
+/// `golem.overlay.clear { target? }`: the bubble ended; both targets without
+/// one.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClearGolemOverlayParams {
+    #[serde(default)]
+    pub target: Option<CaptionOverlayTarget>,
 }
 
 pub fn golem_overlay_placement(rect: Option<OverlayRect>) -> OverlayPlacement {
@@ -383,6 +403,7 @@ pub fn golem_overlay_placement(rect: Option<OverlayRect>) -> OverlayPlacement {
     )
 }
 
+#[cfg(test)]
 pub fn install_golem_overlay(
     slots: &CaptionOverlaySlots,
     params: SetGolemOverlayParams,
@@ -392,6 +413,43 @@ pub fn install_golem_overlay(
         &params.png_base64,
         params.target,
         golem_overlay_placement(params.rect),
+    )
+}
+
+/// `golem.overlay.set`: decode the bubble off the async runtime (like the
+/// highlight card), then one bounded swap into the slot.
+pub async fn set_golem_overlay(
+    slots: &CaptionOverlaySlots,
+    params: SetGolemOverlayParams,
+) -> anyhow::Result<CaptionOverlayTargetsInfo> {
+    let SetGolemOverlayParams {
+        png_base64,
+        target,
+        rect,
+    } = params;
+    let prepared =
+        tokio::task::spawn_blocking(move || crate::captions::prepare_caption_overlay(&png_base64))
+            .await
+            .map_err(|error| anyhow::anyhow!("Golem bubble preparation stopped: {error}"))??;
+    Ok(crate::captions::install_prepared_overlay_targets(
+        slots,
+        prepared,
+        target,
+        golem_overlay_placement(rect),
+    ))
+}
+
+/// `golem.overlay.clear`: drop the bubble raster of one target, or both.
+pub fn clear_golem_overlay(
+    slots: &CaptionOverlaySlots,
+    params: ClearGolemOverlayParams,
+) -> anyhow::Result<CaptionOverlayTargetsInfo> {
+    crate::captions::clear_caption_overlays(
+        slots,
+        crate::captions::ClearCaptionOverlayParams {
+            target: params.target,
+            style_revision: None,
+        },
     )
 }
 
@@ -600,6 +658,68 @@ mod tests {
         let slots = crate::captions::new_caption_overlay_slots();
         assert!(install_golem_overlay(&slots, params).is_err());
         assert!(!crate::captions::caption_overlay_targets_metadata(&slots).active);
+    }
+
+    fn bubble_png(width: u32, height: u32) -> String {
+        use base64::Engine as _;
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            width,
+            height,
+            image::Rgba([250, 250, 251, 255]),
+        ))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .expect("test png encodes");
+        base64::engine::general_purpose::STANDARD.encode(png)
+    }
+
+    /// Plan 168 S-B1: the bubble decodes off the async runtime, lands in its
+    /// target, and `golem.overlay.clear` drops it (one target or both).
+    #[tokio::test]
+    async fn the_bubble_is_set_off_the_runtime_and_cleared_per_target() {
+        let slots = crate::captions::new_caption_overlay_slots();
+        let info = set_golem_overlay(
+            &slots,
+            SetGolemOverlayParams {
+                png_base64: bubble_png(40, 20),
+                target: None,
+                rect: Some(OverlayRect::new(0.7, 0.6, 0.2, 0.3)),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(info.primary.active && info.auxiliary.active);
+        assert_eq!((info.primary.width, info.primary.height), (40, 20));
+        assert!(
+            set_golem_overlay(
+                &slots,
+                SetGolemOverlayParams {
+                    png_base64: "AAAA".to_string(),
+                    target: None,
+                    rect: None,
+                },
+            )
+            .await
+            .is_err(),
+            "a bad payload is refused and the bubble stays"
+        );
+        let cleared = clear_golem_overlay(
+            &slots,
+            ClearGolemOverlayParams {
+                target: Some(CaptionOverlayTarget::Auxiliary),
+            },
+        )
+        .unwrap();
+        assert!(cleared.primary.active && !cleared.auxiliary.active);
+        let cleared = clear_golem_overlay(&slots, ClearGolemOverlayParams::default()).unwrap();
+        assert!(!cleared.active);
+        let params: ClearGolemOverlayParams =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(params.target, None);
+        assert!(
+            serde_json::from_value::<ClearGolemOverlayParams>(serde_json::json!({ "x": 1 }))
+                .is_err()
+        );
     }
 
     fn test_app() -> (
