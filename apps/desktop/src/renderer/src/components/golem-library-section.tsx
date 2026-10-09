@@ -9,7 +9,7 @@ import {
   SpinnerIcon,
   SyncIcon
 } from '@/components/icons'
-import { lazy, Suspense, useEffect, useRef, useState, type ReactElement } from 'react'
+import { lazy, Suspense, useEffect, useState, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertTitle } from '@/components/ui/alert'
@@ -70,9 +70,6 @@ import {
 // the picture prep load the first time it opens.
 const GolemOnboarding = lazy(() => import('@/components/golem-onboarding'))
 
-/** Window focus syncs the library at most this often (plan 170 D12). */
-const FOCUS_SYNC_INTERVAL_MS = 60_000
-
 type EditTarget = { kind: 'rename' | 'personality' | 'delete'; card: GolemLibraryCard }
 
 /**
@@ -104,24 +101,14 @@ export function GolemLibrarySection({
   const library = state.library
   const view = golemLibraryView({ library, persona })
 
-  // Opening the Golem tab syncs; so does focusing the window while it is
-  // open, at most once a minute. A refused automatic sync stays quiet.
+  // Opening the Golem tab syncs (window focus syncs from the shell, plan 170
+  // D12). A refused automatic sync stays quiet.
   const [quietProblem, setQuietProblem] = useState<GolemLibraryProblem | null>(null)
-  const lastSyncRef = useRef(0)
   useEffect(() => {
     if (!controller) return
-    const sync = (reason: 'tab' | 'focus'): void => {
-      lastSyncRef.current = Date.now()
-      void controller.sync(reason).then((accepted) => {
-        if (!accepted) setQuietProblem(controller.getState().problem)
-      })
-    }
-    sync('tab')
-    const onFocus = (): void => {
-      if (Date.now() - lastSyncRef.current >= FOCUS_SYNC_INTERVAL_MS) sync('focus')
-    }
-    window.addEventListener('focus', onFocus)
-    return () => window.removeEventListener('focus', onFocus)
+    void controller.sync('tab').then((accepted) => {
+      if (!accepted) setQuietProblem(controller.getState().problem)
+    })
   }, [controller])
   const problem = state.problem && state.problem !== quietProblem ? state.problem.message : null
 

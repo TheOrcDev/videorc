@@ -562,6 +562,8 @@ function loadGolemOverlay() {
 // still commit immediately via the significant-change fast path.
 const TELEMETRY_UI_COMMIT_INTERVAL_MS = 1000
 const SIGNED_IN_ENTITLEMENT_REFRESH_INTERVAL_MS = 5 * 60_000
+/** Window focus syncs the Golem library at most this often (plan 170 D12). */
+const GOLEM_LIBRARY_FOCUS_SYNC_MS = 60_000
 // Main and the renderer hear the idle status on separate sockets. A short settle
 // keeps the post-capture replay from racing Main into a second deferral.
 const ACCOUNT_REFRESH_IDLE_REPLAY_DELAY_MS = 1_000
@@ -8189,6 +8191,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     refreshEntitlementsForClient,
     wsStatus
   ])
+
+  // Plan 170 D12: the Golem library follows the account when the window is
+  // focused, at most once a minute (the Golem tab also syncs as it opens; the
+  // backend syncs at launch and never applies a choice while live). A sync the
+  // backend refuses changes nothing; the Golem tab shows the library's state.
+  const golemLibrarySyncAtRef = useRef(0)
+  const golemLibrarySignedIn = account?.status === 'signed-in'
+  useEffect(() => {
+    if (!client || wsStatus !== 'connected' || !golemLibrarySignedIn) return
+    const syncOnFocus = (): void => {
+      const now = Date.now()
+      if (now - golemLibrarySyncAtRef.current < GOLEM_LIBRARY_FOCUS_SYNC_MS) return
+      golemLibrarySyncAtRef.current = now
+      void client.requestTyped('cohost.library.sync', { reason: 'focus' }).catch(() => undefined)
+    }
+    window.addEventListener('focus', syncOnFocus)
+    return () => window.removeEventListener('focus', syncOnFocus)
+  }, [client, golemLibrarySignedIn, wsStatus])
 
   // Main defers account maintenance while capture is active. When the session
   // goes idle, replay exactly one deferred refresh so a purchase or avatar
