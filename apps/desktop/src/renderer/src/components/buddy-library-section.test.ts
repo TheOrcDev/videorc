@@ -13,7 +13,7 @@ import type {
 } from '@/lib/backend'
 import { BUDDY_INVITATION_STORAGE_KEY } from '@/lib/buddy-library-view'
 import { BUDDY_LIBRARY_COPY } from '@/lib/buddy-onboarding-copy'
-import { BUDDY_OFFICIAL_CATALOG } from '../../../shared/buddy-library'
+import { BUDDY_OFFICIAL_CATALOG, officialAliveFallback } from '../../../shared/buddy-library'
 
 import { BuddyLibrarySection } from './buddy-library-section'
 
@@ -50,14 +50,18 @@ function entry(id: string, name: string): BuddyLibraryEntry {
       talk: null,
       laugh: null,
       think: null
-    }
+    },
+    alive: null
   }
 }
 
 function library(patch: Partial<BuddyLibraryState> = {}): BuddyLibraryState {
   return {
     signedIn: true,
-    official: BUDDY_OFFICIAL_CATALOG.map(({ description: _description, ...rest }) => rest),
+    official: BUDDY_OFFICIAL_CATALOG.map(({ description: _description, alive, ...rest }) => ({
+      ...rest,
+      alive: officialAliveFallback({ alive })
+    })),
     mine: [entry(GRUM, 'Grum'), entry(PEBBLE, 'Pebble')],
     activeAvatarId: GRUM,
     serverActiveAvatarId: null,
@@ -105,6 +109,7 @@ function fakeBackend(initial: BuddyLibraryState = library(), refuseSync = false)
       case 'cohost.library.use':
       case 'cohost.library.update':
       case 'cohost.library.delete':
+      case 'cohost.library.saveToLibrary':
         return { accepted: true }
       case 'cohost.avatar.draft.get':
         return {}
@@ -165,10 +170,14 @@ async function settle(): Promise<void> {
   }
 }
 
-async function render(client: BuddyLookClient, cohost: CohostSettings = settings()): Promise<void> {
+async function render(
+  client: BuddyLookClient,
+  cohost: CohostSettings = settings(),
+  aiCapabilities: AiCapabilities | null = null
+): Promise<void> {
   mocked.core = {
     account: { status: 'signed-in' },
-    aiCapabilities: null,
+    aiCapabilities,
     aiConsent: true,
     cohostGate: { allowed: true },
     cohostSettings: cohost,
@@ -378,6 +387,104 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
     )
     await settle()
     expect(mocked.openCreator).toHaveBeenCalledWith({ reference: 'persona-idle' })
+  })
+
+  it('says Alive on Buddies that move, and keeps Make it Alive for the rest (plan 172 D12)', async () => {
+    const PACK = '0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a'
+    const states = ['bundled', 'downloaded', 'available', 'none', 'none'] as const
+    await render(
+      fakeBackend(
+        library({
+          official: library().official.map((entry, index) => ({ ...entry, alive: states[index]! })),
+          mine: [
+            { ...entry(GRUM, 'Grum'), alive: { packId: PACK, cellSize: 640 } },
+            entry(PEBBLE, 'Pebble')
+          ]
+        })
+      ).client
+    )
+    const tagged = (id: string) =>
+      card(id).querySelector('[data-testid="buddy-library-alive-tag"]')?.textContent ?? null
+    expect(
+      ['official:golem', 'official:orc', 'official:goblin', 'official:pirate', GRUM, PEBBLE].map(
+        tagged
+      )
+    ).toEqual([
+      BUDDY_LIBRARY_COPY.alive,
+      BUDDY_LIBRARY_COPY.alive,
+      BUDDY_LIBRARY_COPY.alive,
+      null,
+      BUDDY_LIBRARY_COPY.alive,
+      null
+    ])
+    // An alive official Buddy has nothing more to offer; one without a pack does.
+    expect(card('official:orc').querySelector('[data-testid="buddy-library-more"]')).toBeNull()
+    const labels = (items: HTMLElement[]) => items.map((item) => item.textContent?.trim())
+    expect(labels(await openMenu('official:pirate'))).toEqual(['Make it Alive'])
+    await act(async () =>
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    )
+    await settle()
+    expect(labels(await openMenu(GRUM))).toEqual(['Rename', 'Edit personality', 'Delete'])
+    await act(async () =>
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    )
+    await settle()
+    expect(labels(await openMenu(PEBBLE))).toContain('Make it Alive')
+  })
+
+  it('says what a pack or import job is doing while it runs', async () => {
+    const backend = fakeBackend(
+      library({ busy: { kind: 'alive-download', avatarId: 'official:orc' } })
+    )
+    await render(backend.client)
+    expect(byTestId('buddy-library-busy')?.textContent).toBe("Downloading Golmar's moves.")
+    expect(card('official:orc').dataset.busy).toBe('true')
+    await act(async () =>
+      backend.emit(
+        'cohost.library.changed',
+        library({ busy: { kind: 'alive-upload', avatarId: GRUM } })
+      )
+    )
+    await settle()
+    expect(byTestId('buddy-library-busy')?.textContent).toBe("Saving Grum's moves to your library.")
+    await act(async () =>
+      backend.emit(
+        'cohost.library.changed',
+        library({ activeAvatarId: null, busy: { kind: 'import' } })
+      )
+    )
+    await settle()
+    expect(byTestId('buddy-library-busy')?.textContent).toBe('Saving Buddy to your library.')
+    await act(async () => backend.emit('cohost.library.changed', library()))
+    await settle()
+    expect(byTestId('buddy-library-busy')).toBeNull()
+  })
+
+  it('offers Save to my library for a Buddy made only here (plan 172 D10)', async () => {
+    const keeps = {
+      cohost: { buddyLibrary: { enabled: true, count: 2, limit: 30, alive: true } }
+    } as unknown as AiCapabilities
+    const own = settings({
+      name: 'Mossback',
+      source: 'uploaded',
+      images: { idle: 'default/idle-0a0a0a0a.png' }
+    })
+    const backend = fakeBackend(library({ activeAvatarId: null }))
+    await render(backend.client, own, keeps)
+    const offer = byTestId('buddy-library-local-only')!
+    expect(offer.textContent).toContain('Mossback is only on this computer.')
+    await click(byTestId('buddy-library-save-to-library'))
+    expect(backend.calls('cohost.library.saveToLibrary')).toEqual([undefined])
+    // Not for a linked Buddy, nor when the web cannot keep it.
+    await act(async () => root.unmount())
+    root = createRoot(container)
+    await render(fakeBackend(library({ activeAvatarId: GRUM })).client, own, keeps)
+    expect(byTestId('buddy-library-local-only')).toBeNull()
+    await act(async () => root.unmount())
+    root = createRoot(container)
+    await render(fakeBackend(library({ activeAvatarId: null })).client, own, null)
+    expect(byTestId('buddy-library-local-only')).toBeNull()
   })
 
   it('Make it Alive on the active Buddy opens the creator at once', async () => {

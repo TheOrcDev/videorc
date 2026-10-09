@@ -23,16 +23,18 @@ import {
   BUDDY_ONBOARDING_STEP4,
   BUDDY_ONBOARDING_STEP_TITLES
 } from '@/lib/buddy-onboarding-copy'
-import { BUDDY_OFFICIAL_CATALOG } from '../../../shared/buddy-library'
+import { BUDDY_OFFICIAL_CATALOG, officialAliveFallback } from '../../../shared/buddy-library'
 
 import { BuddyOnboarding } from './buddy-onboarding'
 
 const mocked = vi.hoisted(() => ({
   core: {} as Record<string, unknown>,
   signIn: vi.fn(),
-  openLink: vi.fn()
+  openLink: vi.fn(),
+  openCreator: vi.fn()
 }))
 vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
+vi.mock('@/lib/buddy-pet-creator-nav', () => ({ openBuddyPetCreator: mocked.openCreator }))
 vi.mock('@/hooks/use-account', () => ({ useVideorcAccount: () => ({ signIn: mocked.signIn }) }))
 vi.mock('@/lib/videorc-web-links', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/videorc-web-links')>()),
@@ -85,7 +87,10 @@ function settings(): CohostSettings {
 function library(patch: Partial<BuddyLibraryState> = {}): BuddyLibraryState {
   return {
     signedIn: true,
-    official: BUDDY_OFFICIAL_CATALOG.map(({ description: _description, ...rest }) => rest),
+    official: BUDDY_OFFICIAL_CATALOG.map(({ description: _description, alive, ...rest }) => ({
+      ...rest,
+      alive: officialAliveFallback({ alive })
+    })),
     mine: [],
     activeAvatarId: 'official:golem',
     serverActiveAvatarId: null,
@@ -563,6 +568,34 @@ describe('BuddyOnboarding (plan 170 D14, D15)', () => {
     expect(patchCohostSettings).toHaveBeenCalledWith({ persona: backend.kept.persona })
     expect(libraryController.refresh).toHaveBeenCalledOnce()
     expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it('Make it Alive keeps the Buddy, then opens the Alive creator with it (plan 172 D12)', async () => {
+    mocked.openCreator.mockClear()
+    const backend = fakeBackend({ draft: draft(LIBRARY_AVATAR) })
+    const libraryController = fakeLibraryController()
+    await render({ client: backend.client, libraryController })
+    const footer = [
+      ...document.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="buddy-onboarding-use"], [data-testid="buddy-onboarding-make-alive"]'
+      )
+    ]
+    // Secondary, right after "Use as my Buddy".
+    expect(footer.map((button) => button.dataset.testid)).toEqual([
+      'buddy-onboarding-use',
+      'buddy-onboarding-make-alive'
+    ])
+    expect(footer[1]!.textContent).toBe(BUDDY_ONBOARDING_STEP4.makeAlive)
+    expect(mocked.openCreator).not.toHaveBeenCalled()
+    await click(byTestId('buddy-onboarding-make-alive'))
+    expect(backend.requestTyped).toHaveBeenCalledWith(
+      'cohost.avatar.keep',
+      { requestId: DRAFT },
+      { timeoutMs: 35_000 }
+    )
+    expect(patchCohostSettings).toHaveBeenCalledWith({ persona: backend.kept.persona })
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+    expect(mocked.openCreator).toHaveBeenCalledWith({ reference: 'persona-idle' })
   })
 
   it('says nothing about the library for a draft an older web made, and Discard goes back', async () => {

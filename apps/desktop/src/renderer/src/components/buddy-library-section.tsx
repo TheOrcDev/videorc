@@ -7,7 +7,8 @@ import {
   SignInIcon,
   SparkleIcon,
   SpinnerIcon,
-  SyncIcon
+  SyncIcon,
+  UploadIcon
 } from '@/components/icons'
 import { lazy, Suspense, useEffect, useState, type ReactElement } from 'react'
 
@@ -41,6 +42,8 @@ import { useStudioCore } from '@/hooks/use-studio'
 import type { BuddyLookPicture } from '@/lib/buddy-look-view'
 import {
   buddyInvitationVisible,
+  buddyLibraryBusyLine,
+  buddyLibrarySaveOffer,
   buddyLibraryView,
   buddyOnboardingName,
   buddyTextLength,
@@ -55,6 +58,7 @@ import {
   BUDDY_ONBOARDING_GATES,
   BUDDY_ONBOARDING_STEP3,
   buddyLibraryDeleteTitle,
+  buddyLibraryLocalOnly,
   buddyLibraryPickedElsewhere,
   buddyOnboardingCounter
 } from '@/lib/buddy-onboarding-copy'
@@ -77,11 +81,14 @@ type EditTarget = { kind: 'rename' | 'personality' | 'delete'; card: BuddyLibrar
  * Videorc's official five (free, bundled, work signed out) and the Buddies
  * made by you on videorc.com or here, newest first, the active one badged.
  * Use makes one the Buddy (name, personality, about you and its four
- * poses); Rename, Edit personality and Delete act on your own; Make it
- * Alive uses it, then opens the Alive creator with it. New Buddy opens the
- * four-step onboarding. The first launch with the untouched default Buddy
- * leads with a one-line invitation into it. Nothing toasts: the badge and
- * the look are the confirmation.
+ * poses, and its alive pack when it has one); Rename, Edit personality and
+ * Delete act on your own; a Buddy that moves says "Alive" (plan 172 D12),
+ * and Make it Alive on one that does not uses it, then opens the Alive
+ * creator with it. A Buddy made only on this computer offers "Save to my
+ * library" (D10). New Buddy opens the four-step onboarding. The first
+ * launch with the untouched default Buddy leads with a one-line invitation
+ * into it. Nothing toasts: the badge and the look are the confirmation; a
+ * pack or Buddy on its way says so in one line.
  */
 export function BuddyLibrarySection({
   client: injectedClient,
@@ -92,7 +99,7 @@ export function BuddyLibrarySection({
   /** Tests inject the onboarding's picture prep. */
   preparePicture?: (file: File) => Promise<BuddyLookPicture>
 }): ReactElement {
-  const { cohostSettings } = useStudioCore()
+  const { aiCapabilities, cohostSettings } = useStudioCore()
   const { signIn } = useVideorcAccount()
   const connected = useBuddyLookClient()
   const client = injectedClient !== undefined ? injectedClient : connected
@@ -100,6 +107,12 @@ export function BuddyLibrarySection({
   const persona = cohostSettings?.persona ?? null
   const library = state.library
   const view = buddyLibraryView({ library, persona })
+  const busyLine = buddyLibraryBusyLine(library, persona?.name ?? null)
+  const saveOffer = buddyLibrarySaveOffer({
+    library,
+    persona,
+    capabilities: aiCapabilities ?? null
+  })
 
   // Opening the Buddy tab syncs (window focus syncs from the shell, plan 170
   // D12). A refused automatic sync stays quiet.
@@ -214,6 +227,38 @@ export function BuddyLibrarySection({
               </div>
             </div>
           </Alert>
+        ) : null}
+
+        {saveOffer ? (
+          <Alert data-testid="buddy-library-local-only">
+            <UploadIcon />
+            <div className="col-start-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+              <AlertTitle className="min-w-0 flex-1 font-normal text-foreground">
+                {buddyLibraryLocalOnly(saveOffer.name)}
+              </AlertTitle>
+              <Button
+                data-testid="buddy-library-save-to-library"
+                disabled={working}
+                size="xs"
+                type="button"
+                variant="outline"
+                onClick={() => void controller?.saveToLibrary()}
+              >
+                {BUDDY_LIBRARY_COPY.saveToLibrary}
+              </Button>
+            </div>
+          </Alert>
+        ) : null}
+
+        {busyLine ? (
+          <div
+            className="flex items-center gap-2 text-xs text-muted-foreground"
+            data-testid="buddy-library-busy"
+            role="status"
+          >
+            <SpinnerIcon aria-hidden className="size-3.5 shrink-0 animate-spin" />
+            <span className="min-w-0 truncate">{busyLine}</span>
+          </div>
         ) : null}
 
         {view.pickedElsewhere ? (
@@ -408,6 +453,15 @@ function BuddyCard({
         ) : (
           <Skeleton className="size-full rounded-none" />
         )}
+        {card.alive ? (
+          <Badge
+            className="absolute top-1.5 left-1.5"
+            data-testid="buddy-library-alive-tag"
+            variant="outline"
+          >
+            {BUDDY_LIBRARY_COPY.alive}
+          </Badge>
+        ) : null}
         {card.busy ? (
           <SpinnerIcon
             aria-hidden
@@ -439,57 +493,61 @@ function BuddyCard({
             {BUDDY_LIBRARY_COPY.use}
           </Button>
         )}
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              aria-label={`More for ${card.name}`}
-              data-testid="buddy-library-more"
-              disabled={disabled}
-              size="icon-xs"
-              type="button"
-              variant="ghost"
-            >
-              <MoreIcon className="size-4" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="min-w-44">
-            {card.kind === 'mine' ? (
-              <>
-                <DropdownMenuItem
-                  data-testid="buddy-library-rename"
-                  onSelect={() => onEdit({ kind: 'rename', card })}
-                >
-                  <EditIcon />
-                  {BUDDY_LIBRARY_COPY.rename}
+        {card.kind === 'mine' || card.canMakeAlive ? (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                aria-label={`More for ${card.name}`}
+                data-testid="buddy-library-more"
+                disabled={disabled}
+                size="icon-xs"
+                type="button"
+                variant="ghost"
+              >
+                <MoreIcon className="size-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="min-w-44">
+              {card.kind === 'mine' ? (
+                <>
+                  <DropdownMenuItem
+                    data-testid="buddy-library-rename"
+                    onSelect={() => onEdit({ kind: 'rename', card })}
+                  >
+                    <EditIcon />
+                    {BUDDY_LIBRARY_COPY.rename}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    data-testid="buddy-library-edit-personality"
+                    onSelect={() => onEdit({ kind: 'personality', card })}
+                  >
+                    <NoteIcon />
+                    {BUDDY_LIBRARY_COPY.editPersonality}
+                  </DropdownMenuItem>
+                </>
+              ) : null}
+              {card.canMakeAlive ? (
+                <DropdownMenuItem data-testid="buddy-library-alive" onSelect={onAlive}>
+                  <SparkleIcon />
+                  {BUDDY_LIBRARY_COPY.makeAlive}
                 </DropdownMenuItem>
-                <DropdownMenuItem
-                  data-testid="buddy-library-edit-personality"
-                  onSelect={() => onEdit({ kind: 'personality', card })}
-                >
-                  <NoteIcon />
-                  {BUDDY_LIBRARY_COPY.editPersonality}
-                </DropdownMenuItem>
-              </>
-            ) : null}
-            <DropdownMenuItem data-testid="buddy-library-alive" onSelect={onAlive}>
-              <SparkleIcon />
-              {BUDDY_LIBRARY_COPY.makeAlive}
-            </DropdownMenuItem>
-            {card.kind === 'mine' ? (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  data-testid="buddy-library-delete"
-                  variant="destructive"
-                  onSelect={() => onEdit({ kind: 'delete', card })}
-                >
-                  <DeleteIcon />
-                  {BUDDY_LIBRARY_COPY.delete}
-                </DropdownMenuItem>
-              </>
-            ) : null}
-          </DropdownMenuContent>
-        </DropdownMenu>
+              ) : null}
+              {card.kind === 'mine' ? (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    data-testid="buddy-library-delete"
+                    variant="destructive"
+                    onSelect={() => onEdit({ kind: 'delete', card })}
+                  >
+                    <DeleteIcon />
+                    {BUDDY_LIBRARY_COPY.delete}
+                  </DropdownMenuItem>
+                </>
+              ) : null}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : null}
       </div>
     </div>
   )

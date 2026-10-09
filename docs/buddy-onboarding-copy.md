@@ -81,6 +81,8 @@ Progress label: `Step {n} of 4`. Buttons: `Back`, `Next`, `Skip for now`
 - Done: "Saved to your library."
 - Actions: "Use as my Buddy", "Redo" (talk, laugh and think only), web only
   "Open in Videorc" and "Download Videorc"
+- App only, a secondary action after "Use as my Buddy": "Make it Alive" (it
+  uses the Buddy, then opens the Alive creator with it; plan 172 D12)
 - A pose that failed: "This pose did not come out. Redo it."
 
 Gates and errors (step 4 and the library):
@@ -115,3 +117,13 @@ Gates and errors (step 4 and the library):
   this computer): "{name} was picked on videorc.com." Action "Use"
 - First-launch invitation (app, default Buddy untouched): "Make this Buddy
   your own, or pick another." Action "Start"
+
+Alive Buddies (app, plan 172 D10, D12):
+
+- A card whose Buddy moves shows the tag "Alive": every official Buddy with
+  a pack (it ships with the app or downloads the first time it is used),
+  and yours that have one. Yours without one keep "Make it Alive".
+- A Buddy made only on this computer (signed in): "{name} is only on this
+  computer." Action "Save to my library"
+- While a pack or a Buddy is on its way: "Downloading {name}'s moves.",
+  "Saving {name}'s moves to your library.", "Saving {name} to your library."

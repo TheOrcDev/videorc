@@ -9,7 +9,9 @@ import {
   buddyCreateFailureLine,
   buddyCreateGate,
   buddyInvitationVisible,
+  buddyLibraryBusyLine,
   buddyLibraryIsFull,
+  buddyLibrarySaveOffer,
   buddyLibraryView,
   buddyOnboardingAllowanceLine,
   buddyOnboardingCanAdvance,
@@ -20,7 +22,7 @@ import {
   writeBuddyInvitationDismissed,
   type BuddyOnboardingInput
 } from './buddy-library-view'
-import { BUDDY_OFFICIAL_CATALOG } from '../../../shared/buddy-library'
+import { BUDDY_OFFICIAL_CATALOG, officialAliveFallback } from '../../../shared/buddy-library'
 
 const MINE = '7c9e6679-7425-40de-944b-e07fc1ee9a51'
 const OLDER = '0b6f1c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d'
@@ -39,14 +41,18 @@ function entry(id: string, name: string): BuddyLibraryEntry {
       talk: null,
       laugh: null,
       think: null
-    }
+    },
+    alive: null
   }
 }
 
 function library(patch: Partial<BuddyLibraryState> = {}): BuddyLibraryState {
   return {
     signedIn: true,
-    official: BUDDY_OFFICIAL_CATALOG.map(({ description: _description, ...rest }) => rest),
+    official: BUDDY_OFFICIAL_CATALOG.map(({ description: _description, alive, ...rest }) => ({
+      ...rest,
+      alive: officialAliveFallback({ alive })
+    })),
     mine: [entry(MINE, 'Grum'), entry(OLDER, 'Pebble')],
     activeAvatarId: MINE,
     serverActiveAvatarId: null,
@@ -65,7 +71,7 @@ const free: EntitlementUiGate = {
 }
 function caps(
   remainingToday = 24,
-  buddyLibrary?: { enabled: boolean; count: number; limit: number },
+  buddyLibrary?: { enabled: boolean; count: number; limit: number; alive?: boolean },
   enabled = true
 ): Pick<AiCapabilities, 'cohost'> {
   return {
@@ -159,6 +165,89 @@ describe('buddyLibraryView (plan 170 D16)', () => {
         persona: null
       }).error
     ).toBe('Could not reach Videorc.')
+  })
+
+  it('says Alive for Buddies that move and offers Make it Alive for the rest (plan 172 D12)', () => {
+    const states = ['bundled', 'downloaded', 'available', 'none'] as const
+    const view = buddyLibraryView({
+      library: library({
+        official: library()
+          .official.slice(0, 4)
+          .map((entry, index) => ({
+            ...entry,
+            alive: states[index]!
+          })),
+        mine: [
+          {
+            ...entry(MINE, 'Grum'),
+            alive: { packId: '0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a', cellSize: 640 }
+          },
+          entry(OLDER, 'Pebble')
+        ]
+      }),
+      persona: null
+    })
+    expect(view.official.map((card) => [card.alive, card.canMakeAlive])).toEqual([
+      [true, false],
+      [true, false],
+      [true, false],
+      [false, true]
+    ])
+    expect(view.mine?.map((card) => [card.name, card.alive, card.canMakeAlive])).toEqual([
+      ['Grum', true, false],
+      ['Pebble', false, true]
+    ])
+    // Before the backend answers, the catalog says what it can.
+    const early = buddyLibraryView({ library: null, persona: null })
+    expect(early.official.map((card) => card.alive)).toEqual(
+      BUDDY_OFFICIAL_CATALOG.map((entry) => entry.alive !== null)
+    )
+  })
+
+  it('names what a pack or import job is doing, and nothing for the others', () => {
+    expect(
+      buddyLibraryBusyLine(
+        library({ busy: { kind: 'alive-download', avatarId: 'official:orc' } }),
+        'Buddy'
+      )
+    ).toBe("Downloading Golmar's moves.")
+    expect(
+      buddyLibraryBusyLine(library({ busy: { kind: 'alive-upload', avatarId: MINE } }), 'Grum')
+    ).toBe("Saving Grum's moves to your library.")
+    expect(buddyLibraryBusyLine(library({ busy: { kind: 'import' } }), 'Mossback')).toBe(
+      'Saving Mossback to your library.'
+    )
+    expect(buddyLibraryBusyLine(library({ busy: { kind: 'sync' } }), 'Grum')).toBeNull()
+    expect(
+      buddyLibraryBusyLine(library({ busy: { kind: 'use', avatarId: MINE } }), 'Grum')
+    ).toBeNull()
+    expect(buddyLibraryBusyLine(null, 'Grum')).toBeNull()
+  })
+
+  it('offers Save to my library only for a Buddy made here, signed in, when the web keeps it', () => {
+    const own = {
+      name: ' Mossback ',
+      images: { idle: 'default/idle-0a0a0a0a.png' }
+    }
+    const localOnly = library({ activeAvatarId: null })
+    const keeps = caps(24, { enabled: true, count: 2, limit: 30, alive: true })
+    expect(
+      buddyLibrarySaveOffer({ library: localOnly, persona: own, capabilities: keeps })
+    ).toEqual({ name: 'Mossback' })
+    // Linked, the default, signed out, not listed yet, no idle, or a web
+    // without alive storage: no offer.
+    for (const [state, persona, capabilities] of [
+      [library({ activeAvatarId: MINE }), own, keeps],
+      [library({ activeAvatarId: 'official:golem' }), own, keeps],
+      [library({ activeAvatarId: null, signedIn: false, mine: null }), own, keeps],
+      [library({ activeAvatarId: null, mine: null }), own, keeps],
+      [localOnly, { ...own, images: {} }, keeps],
+      [localOnly, { ...own, libraryAvatarId: MINE }, keeps],
+      [localOnly, own, caps(24, { enabled: true, count: 2, limit: 30 })],
+      [localOnly, own, null]
+    ] as const) {
+      expect(buddyLibrarySaveOffer({ library: state, persona, capabilities })).toBeNull()
+    }
   })
 
   it('is full at the limit, by the web count first', () => {

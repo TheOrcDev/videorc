@@ -16,7 +16,7 @@ export interface BuddyLibraryProblem {
   message: string
 }
 
-export type BuddyLibraryPending = 'sync' | 'use' | 'update' | 'delete'
+export type BuddyLibraryPending = 'sync' | 'use' | 'update' | 'delete' | 'import'
 
 export interface BuddyLibraryViewState {
   /** The first `cohost.library.get` has not answered yet. */
@@ -65,6 +65,9 @@ export interface BuddyLibraryController {
   update: (params: CohostLibraryUpdateParams) => Promise<boolean>
   /** `cohost.library.delete`: one of the account's own avatars. */
   remove: (avatarId: string) => Promise<boolean>
+  /** `cohost.library.saveToLibrary` (plan 172 D10): the Buddy made only on
+   * this computer joins the library, then sends its own pack. */
+  saveToLibrary: () => Promise<boolean>
   dispose: () => void
 }
 
@@ -137,6 +140,12 @@ export function createBuddyLibraryController(client: BuddyLibraryClient): BuddyL
     remove: (avatarId) =>
       accept('delete', () =>
         client.requestTyped('cohost.library.delete', { avatarId }, { timeoutMs: ACCEPT_TIMEOUT_MS })
+      ),
+    saveToLibrary: () =>
+      accept('import', () =>
+        client.requestTyped('cohost.library.saveToLibrary', undefined, {
+          timeoutMs: ACCEPT_TIMEOUT_MS
+        })
       ),
     dispose: () => {
       disposed = true

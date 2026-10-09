@@ -137,9 +137,15 @@ export const BUDDY_MOTION_TICKS: readonly { label: string; value: number }[] = [
   { label: 'Lively', value: 1 }
 ]
 
+/** A pack Videorc ships: bundled with the app, or an official one it
+ * downloaded (plan 172 D4). Never removed, never the persona's own. */
+export function isBuddyShippedPack(packId: string): boolean {
+  return packId.startsWith('bundled:') || packId.startsWith('official:')
+}
+
 /** "Imported", "Made in Videorc", or "Built in" for a pack Videorc ships. */
 export function buddyPetSourceLabel(pack: Pick<BuddyPetSummary, 'packId' | 'source'>): string {
-  if (pack.packId.startsWith('bundled:')) return 'Built in'
+  if (isBuddyShippedPack(pack.packId)) return 'Built in'
   if (pack.source === 'videorc-creator') return 'Made in Videorc'
   if (pack.source === 'page-pet-import') return 'Imported'
   return 'Still'
@@ -153,7 +159,7 @@ export function buddyPetPosesLabel(pack: Pick<BuddyPetSummary, 'gazeCount' | 're
 
 /** The pack an Alive switch wears first: the persona's own, else the one Videorc ships. */
 export function buddyFirstPack(packs: readonly BuddyPetSummary[]): BuddyPetSummary | null {
-  return packs.find((pack) => !pack.packId.startsWith('bundled:')) ?? packs[0] ?? null
+  return packs.find((pack) => !isBuddyShippedPack(pack.packId)) ?? packs[0] ?? null
 }
 
 // --- Create (Phase F's creator, D20) -----------------------------------------

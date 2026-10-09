@@ -19,6 +19,7 @@ import {
   buddyPetCreateAvailability,
   buddyPetPosesLabel,
   buddyPetSourceLabel,
+  isBuddyShippedPack,
   buddyReactionLabel,
   buddySleepChoices,
   buddySleepLabel,
@@ -106,6 +107,13 @@ describe('Motion and pack copy', () => {
     )
     expect(buddyPetSourceLabel({ packId: 'x', source: 'videorc-creator' })).toBe('Made in Videorc')
     expect(buddyPetSourceLabel({ packId: 'x', source: 'page-pet-import' })).toBe('Imported')
+    // Plan 172 D4: an official pack is Videorc's too.
+    expect(buddyPetSourceLabel({ packId: 'official:orc', source: 'videorc-creator' })).toBe(
+      'Built in'
+    )
+    expect(isBuddyShippedPack('official:orc')).toBe(true)
+    expect(isBuddyShippedPack('bundled:buddy')).toBe(true)
+    expect(isBuddyShippedPack('0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a')).toBe(false)
   })
 })
 

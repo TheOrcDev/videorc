@@ -88,6 +88,8 @@ export const BUDDY_ONBOARDING_STEP4 = {
   poseLabels: { idle: 'Idle', talk: 'Talk', laugh: 'Laugh', think: 'Think' },
   done: 'Saved to your library.',
   use: 'Use as my Buddy',
+  /** App only, after "Use as my Buddy" (plan 172 D12). */
+  makeAlive: 'Make it Alive',
   redo: 'Redo',
   poseFailed: 'This pose did not come out. Redo it.'
 } as const
@@ -120,7 +122,11 @@ export const BUDDY_LIBRARY_COPY = {
   cancel: 'Cancel',
   signedOut: 'Sign in to see the Buddies you made on videorc.com.',
   invitation: 'Make this Buddy your own, or pick another.',
-  invitationAction: 'Start'
+  invitationAction: 'Start',
+  /** Plan 172 D12: the tag on a card whose Buddy moves. */
+  alive: 'Alive',
+  /** Plan 172 D10: a Buddy made only on this computer joins the library. */
+  saveToLibrary: 'Save to my library'
 } as const
 
 // --- Filled-in strings --------------------------------------------------------
@@ -148,6 +154,26 @@ export function buddyLibraryDeleteTitle(name: string): string {
 /** "Grum was picked on videorc.com." */
 export function buddyLibraryPickedElsewhere(name: string): string {
   return `${name} was picked on videorc.com.`
+}
+
+/** "Mossback is only on this computer." (plan 172 D10) */
+export function buddyLibraryLocalOnly(name: string): string {
+  return `${name} is only on this computer.`
+}
+
+/** "Downloading Golmar's moves." (plan 172 D4, D10) */
+export function buddyLibraryAliveDownloading(name: string): string {
+  return `Downloading ${name}'s moves.`
+}
+
+/** "Saving Grum's moves to your library." (plan 172 D10) */
+export function buddyLibraryAliveUploading(name: string): string {
+  return `Saving ${name}'s moves to your library.`
+}
+
+/** "Saving Mossback to your library." (plan 172 D10) */
+export function buddyLibraryImporting(name: string): string {
+  return `Saving ${name} to your library.`
 }
 
 /** "12/600": a field's counter. */

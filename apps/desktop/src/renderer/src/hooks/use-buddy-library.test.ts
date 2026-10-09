@@ -40,6 +40,7 @@ function fakeClient(initial: BuddyLibraryState = library()) {
       case 'cohost.library.use':
       case 'cohost.library.update':
       case 'cohost.library.delete':
+      case 'cohost.library.saveToLibrary':
         return { accepted: true }
       default:
         throw new Error(`unexpected ${method}`)
@@ -90,11 +91,16 @@ describe('createBuddyLibraryController (plan 170 D12, D13)', () => {
     expect(await controller.use('official:orc')).toBe(true)
     expect(await controller.update({ avatarId: AVATAR, name: 'Grum' })).toBe(true)
     expect(await controller.remove(AVATAR)).toBe(true)
+    // Plan 172 D10: Save to my library takes no params.
+    const saving = controller.saveToLibrary()
+    expect(controller.getState().pending).toBe('import')
+    expect(await saving).toBe(true)
     expect(fake.requestTyped.mock.calls.map(([method, params]) => [method, params])).toEqual([
       ['cohost.library.sync', { reason: 'tab' }],
       ['cohost.library.use', { avatarId: 'official:orc' }],
       ['cohost.library.update', { avatarId: AVATAR, name: 'Grum' }],
-      ['cohost.library.delete', { avatarId: AVATAR }]
+      ['cohost.library.delete', { avatarId: AVATAR }],
+      ['cohost.library.saveToLibrary', undefined]
     ])
     expect(controller.getState().pending).toBeNull()
     controller.dispose()

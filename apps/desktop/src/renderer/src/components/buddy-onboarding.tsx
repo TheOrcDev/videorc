@@ -69,6 +69,7 @@ import {
   type BuddyLookPicture
 } from '@/lib/buddy-look-view'
 import { BUDDY_OFFICIAL_ART } from '@/lib/buddy-official-art'
+import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import { BUDDY_STILL_PACK_ID } from '@/lib/buddy-pet-view'
 import {
   BUDDY_ONBOARDING_BUTTONS,
@@ -136,8 +137,10 @@ export interface BuddyOnboardingProps {
  * five, what it does), describe it (and an optional picture), give it a
  * personality, then create it. Step 4 is plan 169's look flow on the
  * account library: the four poses fill in, Redo remakes talk, laugh or
- * think, and "Use as my Buddy" keeps it. A full-height sheet over the Buddy
- * tab; what was typed survives closing it until a Buddy is used.
+ * think, and "Use as my Buddy" keeps it; "Make it Alive" (plan 172 D12)
+ * keeps it too, then opens the Alive creator with it. A full-height sheet
+ * over the Buddy tab; what was typed survives closing it until a Buddy is
+ * used.
  */
 export function BuddyOnboarding({
   open,
@@ -237,9 +240,12 @@ export function BuddyOnboarding({
     setActionError(null)
     void lookController.create(buddyOnboardingCreateParams(input, picture?.prepared.base64 ?? null))
   }
-  const keepAsMyBuddy = async (): Promise<void> => {
+  /** Keep the draft as the Buddy; with `alive`, then open the Alive creator
+   * with its idle as the reference and the description as notes. */
+  const keepAsMyBuddy = async (alive = false): Promise<void> => {
     if (!lookController || !look.draft || lookBusy) return
     setActionError(null)
+    const description = input.description.trim()
     const settings = await lookController.keep()
     if (!settings) return
     try {
@@ -254,6 +260,12 @@ export function BuddyOnboarding({
     setPicture(null)
     setInput(EMPTY_BUDDY_ONBOARDING_INPUT)
     onOpenChange(false)
+    if (alive) {
+      openBuddyPetCreator({
+        reference: 'persona-idle',
+        ...(description ? { notes: description } : {})
+      })
+    }
   }
   const pickOfficial = async (card: BuddyLibraryCard): Promise<void> => {
     if (!libraryController) return
@@ -451,15 +463,27 @@ export function BuddyOnboarding({
                 </Button>
               </>
             ) : look.draft && !creating ? (
-              <Button
-                data-testid="buddy-onboarding-use"
-                disabled={!lookController || lookBusy}
-                type="button"
-                onClick={() => void keepAsMyBuddy()}
-              >
-                {BUDDY_ONBOARDING_STEP4.use}
-                <Kbd className="ml-0.5">{modKey}↵</Kbd>
-              </Button>
+              <>
+                <Button
+                  data-testid="buddy-onboarding-use"
+                  disabled={!lookController || lookBusy}
+                  type="button"
+                  onClick={() => void keepAsMyBuddy()}
+                >
+                  {BUDDY_ONBOARDING_STEP4.use}
+                  <Kbd className="ml-0.5">{modKey}↵</Kbd>
+                </Button>
+                <Button
+                  data-testid="buddy-onboarding-make-alive"
+                  disabled={!lookController || lookBusy}
+                  type="button"
+                  variant="outline"
+                  onClick={() => void keepAsMyBuddy(true)}
+                >
+                  <SparkleIcon data-icon="inline-start" />
+                  {BUDDY_ONBOARDING_STEP4.makeAlive}
+                </Button>
+              </>
             ) : (
               <Button
                 data-testid="buddy-onboarding-create"

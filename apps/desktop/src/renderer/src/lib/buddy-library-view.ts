@@ -8,7 +8,10 @@ import type { EntitlementUiGate } from './entitlement-ui'
 import {
   BUDDY_ONBOARDING_GATES,
   BUDDY_ONBOARDING_STEP_COUNT,
+  buddyLibraryAliveDownloading,
+  buddyLibraryAliveUploading,
   buddyLibraryFullLine,
+  buddyLibraryImporting,
   buddyOnboardingAllowance
 } from './buddy-onboarding-copy'
 import { BUDDY_GENERATE_NOT_AVAILABLE } from './buddy-persona-view'
@@ -21,6 +24,7 @@ import {
   BUDDY_LIBRARY_NAME_MAX_CHARS,
   BUDDY_LIBRARY_PERSONALITY_MAX_CHARS,
   BUDDY_OFFICIAL_CATALOG,
+  officialAliveFallback,
   officialBuddy,
   type BuddyLibraryId,
   type BuddyOfficialEntry,
@@ -46,8 +50,17 @@ export interface BuddyLibraryCard {
   slug: BuddyOfficialSlug | null
   idleUrl: string | null
   active: boolean
-  /** A library job acts on this card now (use, delete, update). */
+  /** A library job acts on this card now (use, delete, update, a pack moving). */
   busy: boolean
+  /**
+   * Plan 172 D12: the card says "Alive" (an official Buddy whose pack ships,
+   * was downloaded, or downloads on use; one of yours with a pack) instead
+   * of offering Make it Alive.
+   */
+  alive: boolean
+  /** Make it Alive is offered: one of yours without a pack, or an official
+   * one whose pack has not shipped yet. */
+  canMakeAlive: boolean
 }
 
 export interface BuddyLibraryView {
@@ -91,8 +104,73 @@ function officialCard(
     slug: entry.slug,
     idleUrl: null,
     active: entry.id === activeId,
-    busy: entry.id === busyId
+    busy: entry.id === busyId,
+    alive: entry.alive !== 'none',
+    canMakeAlive: entry.alive === 'none'
   }
+}
+
+/** Before the backend answers: the catalog, its pack states as the catalog implies them. */
+const CATALOG_OFFICIAL_ENTRIES: readonly BuddyOfficialEntry[] = BUDDY_OFFICIAL_CATALOG.map(
+  ({ description: _description, alive, ...entry }) => ({
+    ...entry,
+    alive: officialAliveFallback({ alive })
+  })
+)
+
+/**
+ * The line a pack or import job shows while it runs (plan 172): whose moves
+ * download or upload, or which Buddy is being saved to the library; null
+ * for the other jobs (their card spinner says enough).
+ */
+export function buddyLibraryBusyLine(
+  library: Pick<BuddyLibraryState, 'busy' | 'official' | 'mine'> | null,
+  personaName: string | null
+): string | null {
+  const busy = library?.busy
+  if (!busy) return null
+  const nameOf = (id: BuddyLibraryId | undefined): string | null => {
+    if (!id) return null
+    return (
+      library.official.find((entry) => entry.id === id)?.name ??
+      officialBuddy(id)?.name ??
+      library.mine?.find((entry) => entry.id === id)?.name ??
+      null
+    )
+  }
+  const name = nameOf(busy.avatarId) ?? personaName ?? 'Buddy'
+  switch (busy.kind) {
+    case 'alive-download':
+      return buddyLibraryAliveDownloading(name)
+    case 'alive-upload':
+      return buddyLibraryAliveUploading(name)
+    case 'import':
+      return buddyLibraryImporting(personaName ?? name)
+    default:
+      return null
+  }
+}
+
+/**
+ * "Save to my library" (plan 172 D10): the Buddy is one made only on this
+ * computer (the library knows it is not linked), the streamer is signed in,
+ * the web keeps imports (`buddyLibrary.alive`), and no job runs. Null when
+ * it is not offered; otherwise the Buddy's name for the line.
+ */
+export function buddyLibrarySaveOffer({
+  library,
+  persona,
+  capabilities
+}: {
+  library: Pick<BuddyLibraryState, 'signedIn' | 'activeAvatarId' | 'busy' | 'mine'> | null
+  persona: Pick<CohostPersona, 'name' | 'libraryAvatarId' | 'images'> | null
+  capabilities: Pick<AiCapabilities, 'cohost'> | null
+}): { name: string } | null {
+  if (!library || !persona || !library.signedIn || library.mine === null) return null
+  if (library.activeAvatarId !== null || persona.libraryAvatarId) return null
+  if (!persona.images.idle) return null
+  if (capabilities?.cohost?.buddyLibrary?.alive !== true) return null
+  return { name: persona.name.trim() || 'Buddy' }
 }
 
 /**
@@ -110,7 +188,7 @@ export function buddyLibraryView({
   const activeId = library ? library.activeAvatarId : buddyPersonaLibraryId(persona)
   const busyId = library?.busy?.avatarId ?? null
   const officialEntries: readonly BuddyOfficialEntry[] =
-    library && library.official.length > 0 ? library.official : BUDDY_OFFICIAL_CATALOG
+    library && library.official.length > 0 ? library.official : CATALOG_OFFICIAL_ENTRIES
   const mine =
     library?.mine?.map(
       (entry): BuddyLibraryCard => ({
@@ -122,7 +200,9 @@ export function buddyLibraryView({
         slug: null,
         idleUrl: entry.poses.idle,
         active: entry.id === activeId,
-        busy: entry.id === busyId
+        busy: entry.id === busyId,
+        alive: entry.alive !== null,
+        canMakeAlive: entry.alive === null
       })
     ) ?? null
   const serverId = library?.serverActiveAvatarId ?? null

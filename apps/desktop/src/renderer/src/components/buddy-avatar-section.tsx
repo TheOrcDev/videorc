@@ -37,6 +37,7 @@ import {
   buddyPetCreateAvailability,
   buddyPetPosesLabel,
   buddyPetSourceLabel,
+  isBuddyShippedPack,
   type BuddyPetCreateAvailability
 } from '@/lib/buddy-pet-view'
 import { ipcErrorMessage } from '@/lib/ipc-error-message'
@@ -497,7 +498,7 @@ function AlivePanel({
             <span className="flex-1" />
             <Button
               data-testid="buddy-pack-remove"
-              disabled={!wornPack || wornPack.packId.startsWith('bundled:')}
+              disabled={!wornPack || isBuddyShippedPack(wornPack.packId)}
               type="button"
               variant="ghost"
               onClick={() => {

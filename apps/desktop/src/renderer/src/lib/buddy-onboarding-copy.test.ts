@@ -11,8 +11,12 @@ import {
   BUDDY_ONBOARDING_STEP3,
   BUDDY_ONBOARDING_STEP4,
   BUDDY_ONBOARDING_STEP_TITLES,
+  buddyLibraryAliveDownloading,
+  buddyLibraryAliveUploading,
   buddyLibraryDeleteTitle,
   buddyLibraryFullLine,
+  buddyLibraryImporting,
+  buddyLibraryLocalOnly,
   buddyLibraryPickedElsewhere,
   buddyOnboardingAllowance,
   buddyOnboardingCounter,
@@ -77,5 +81,14 @@ describe('buddy onboarding copy (plan 170 D14)', () => {
     expect(buddyLibraryPickedElsewhere('Nib')).toBe('Nib was picked on videorc.com.')
     expect(doc).toContain('`{count}/600`')
     expect(buddyOnboardingCounter(12, 600)).toBe('12/600')
+    // Plan 172: Save to my library and the pack jobs.
+    expect(doc).toContain('"{name} is only on this computer."')
+    expect(buddyLibraryLocalOnly('Mossback')).toBe('Mossback is only on this computer.')
+    expect(doc).toContain(`"Downloading {name}'s moves."`)
+    expect(buddyLibraryAliveDownloading('Golmar')).toBe("Downloading Golmar's moves.")
+    expect(doc).toContain(`"Saving {name}'s moves to your library."`)
+    expect(buddyLibraryAliveUploading('Grum')).toBe("Saving Grum's moves to your library.")
+    expect(doc).toContain('"Saving {name} to your library."')
+    expect(buddyLibraryImporting('Mossback')).toBe('Saving Mossback to your library.')
   })
 })
