@@ -23,13 +23,13 @@
   (`.claude/skills/videorc-design/SKILL.md`); E orchestrator. Model lane:
   `opus` (Fable credits are out; owner may top up).
 
-| Phase                                            | Where        | Status  |
-| ------------------------------------------------ | ------------ | ------- |
-| A: House look + one-call set route               | web #75      | PLANNED |
-| B: Create / redo / keep / discard in the backend | desktop #647 | PLANNED |
-| C: The "Your Golem's look" panel                 | desktop #647 | PLANNED |
-| D: "Test your Golem" modal                       | desktop #647 | PLANNED |
-| E: Gates, captures, docs, push                   | both         | PLANNED |
+| Phase                                            | Where        | Status                                                  |
+| ------------------------------------------------ | ------------ | ------------------------------------------------------- |
+| A: House look + one-call set route               | web #75      | DONE in #75 (`7c81f524`..`912b32b4`); live probe passed |
+| B: Create / redo / keep / discard in the backend | desktop #647 | DONE in #647                                            |
+| C: The "Your Golem's look" panel                 | desktop #647 | DONE in #647                                            |
+| D: "Test your Golem" modal                       | desktop #647 | DONE in #647 (states-only scope)                        |
+| E: Gates, captures, docs, push                   | both         | DONE; a live create owes web #75 deployed               |
 
 ## The owner's ask (2026-10-09)
 
