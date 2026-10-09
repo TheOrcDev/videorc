@@ -93,7 +93,8 @@ Gates and errors (step 4 and the library):
   room."
 - Failed: "Your Golem could not be drawn. Nothing was used from your
   allowance. Try again."
-- App, Cloud AI off: "Turn on Cloud AI in Settings to create a Golem."
+- App, Cloud AI off: "Allow cloud AI to create a Golem." Action "Allow cloud
+  AI" (the app's existing consent label)
 
 ## Library
 
@@ -104,6 +105,9 @@ Gates and errors (step 4 and the library):
   "New Golem"
 - Empty "Made by you": "Golems you create show up here, on videorc.com and in
   the app."
+- Rename and Edit personality dialogs: action "Save"
+- A library change that failed without a message from the server: "Something
+  went wrong. Try again."
 - Delete confirm: title "Delete {name}?"; body "Its pictures are removed
   from your Videorc account."; actions "Delete" and "Cancel"
 - Signed out (app): "Sign in to see the Golems you made on videorc.com."

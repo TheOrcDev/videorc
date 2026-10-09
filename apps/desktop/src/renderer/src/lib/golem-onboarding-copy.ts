@@ -101,7 +101,7 @@ export const GOLEM_ONBOARDING_GATES = {
   startFromOurs: 'Start from one of ours',
   allowanceUsed: "You've used today's images. You get more tomorrow.",
   failed: 'Your Golem could not be drawn. Nothing was used from your allowance. Try again.',
-  cloudAiOff: 'Turn on Cloud AI in Settings to create a Golem.'
+  cloudAiOff: 'Allow cloud AI to create a Golem.'
 } as const
 
 export const GOLEM_LIBRARY_COPY = {

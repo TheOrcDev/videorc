@@ -319,7 +319,7 @@ describe('step 4 gates (plan 170 D15)', () => {
     })
     expect(golemCreateGate({ ...allowed, consented: false })).toEqual({
       kind: 'cloud-ai',
-      line: 'Turn on Cloud AI in Settings to create a Golem.',
+      line: 'Allow cloud AI to create a Golem.',
       actions: ['allow-cloud-ai']
     })
     expect(
