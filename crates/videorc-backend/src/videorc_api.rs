@@ -40,11 +40,13 @@ pub(crate) const COHOST_SPOTLIGHT_MAX_BODY_BYTES: usize = 32 * 1024;
 pub(crate) const COHOST_COMMAND_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(2_500);
 const COHOST_COMMAND_PATH: &str = "/api/ai/cohost/command";
-/// Plan 164 S-A6: the route's own `maxDuration` is 90 s, so the client
-/// waits 95 (S-A5). A generated PNG over 8 MB is refused unread.
-pub(crate) const COHOST_AVATAR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(95);
-const COHOST_AVATAR_PATH: &str = "/api/ai/cohost/avatar";
-pub(crate) const COHOST_AVATAR_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024 + 64 * 1024;
+/// Plan 169 D4, D7: the set route's own `maxDuration` is 180 s (an idle,
+/// then three edits of it in parallel), so the client waits 190. Four PNGs
+/// as base64 stay well under 40 MB; a larger body is refused unread.
+pub(crate) const COHOST_AVATAR_SET_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(190);
+const COHOST_AVATAR_SET_PATH: &str = "/api/ai/cohost/avatar/set";
+pub(crate) const COHOST_AVATAR_SET_MAX_RESPONSE_BYTES: usize = 40 * 1024 * 1024;
 /// The route's limits (contract part E).
 pub(crate) const COHOST_COMMAND_MAX_BODY_BYTES: usize = 16 * 1024;
 pub(crate) const COHOST_COMMAND_MAX_CANDIDATES: usize = 20;
@@ -547,28 +549,78 @@ pub struct CohostSpotlightMatch {
     pub answered: Option<f64>,
 }
 
-// --- Golem avatar wire types (plan 164 S-A5, S-A6) ---
+// --- Golem look wire types (plan 169 D4, D5) ---
 
-/// `POST /api/ai/cohost/avatar`: one state image. `baseImage` is the idle
-/// PNG/WebP as base64 for the other states, so the character stays
-/// consistent (D21); absent for idle.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// `POST /api/ai/cohost/avatar/set`. A create carries a description, an
+/// inspiration picture (base64 PNG, JPEG or WebP, at most 3 MB decoded) or
+/// both; a redo carries `redo` (talk, laugh or think) and `base` (the
+/// draft's idle PNG) and neither of the others. The route is strict.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct CohostAvatarRequest {
-    pub prompt: String,
-    pub style: crate::cohost_avatar::CohostAvatarStyle,
-    pub state: crate::cohost::CohostAvatarState,
+pub struct CohostAvatarSetRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_image: Option<String>,
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspiration: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redo: Option<crate::cohost::CohostAvatarState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
 }
 
-/// The route's answer: a PNG, returned even when the model gave no alpha.
+/// One delivered picture: a PNG, returned even when the model gave no alpha.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostAvatarResponse {
     pub png_base64: String,
     #[serde(default)]
     pub opaque: bool,
+}
+
+/// The pictures a set delivered, per state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarSetImages {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle: Option<CohostAvatarResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub talk: Option<CohostAvatarResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub laugh: Option<CohostAvatarResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub think: Option<CohostAvatarResponse>,
+}
+
+impl CohostAvatarSetImages {
+    pub fn get(&self, state: crate::cohost::CohostAvatarState) -> Option<&CohostAvatarResponse> {
+        use crate::cohost::CohostAvatarState;
+        match state {
+            CohostAvatarState::Idle => self.idle.as_ref(),
+            CohostAvatarState::Talk => self.talk.as_ref(),
+            CohostAvatarState::Laugh => self.laugh.as_ref(),
+            CohostAvatarState::Think => self.think.as_ref(),
+        }
+    }
+}
+
+/// Why the web left one state out of a set (its slot was released).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CohostAvatarSetFailure {
+    pub code: String,
+    pub message: String,
+}
+
+/// The set route's 200: the pictures it made and why any other state is
+/// missing. A failed idle fails the whole call (an error envelope), so a
+/// 200 always carries idle on a create.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarSetResponse {
+    #[serde(default)]
+    pub images: CohostAvatarSetImages,
+    #[serde(default)]
+    pub failed:
+        std::collections::BTreeMap<crate::cohost::CohostAvatarState, CohostAvatarSetFailure>,
 }
 
 // --- Golem pets (plan 168, Phase F) ---
@@ -1333,68 +1385,23 @@ impl VideorcApiClient {
         ))
     }
 
-    /// One avatar generation (plan 164 S-A6): the tick's failure mapping, a
-    /// 95 s timeout and an 8 MB cap on the body read before it is parsed.
-    pub async fn post_cohost_avatar(
+    /// One Golem look call (plan 169 D4, D5): a whole set, or one state
+    /// redone from the draft's idle. Bearer JSON, a 190 s timeout, a 40 MB cap
+    /// on the body read before it is parsed, and the tick's failure mapping
+    /// (code first, then status; `Retry-After` kept for the quota hint).
+    pub async fn post_cohost_avatar_set(
         &self,
         bearer_token: &str,
-        request: &CohostAvatarRequest,
-    ) -> std::result::Result<CohostAvatarResponse, CohostApiError> {
-        let response = self
-            .http
-            .post(self.endpoint(COHOST_AVATAR_PATH))
-            .bearer_auth(bearer_token)
-            .json(request)
-            .timeout(COHOST_AVATAR_TIMEOUT)
-            .send()
-            .await
-            .map_err(|error| CohostApiError::from_transport_within(error, COHOST_AVATAR_TIMEOUT))?;
-
-        let status = response.status();
-        if status.is_success() {
-            if response
-                .content_length()
-                .is_some_and(|length| length > COHOST_AVATAR_MAX_RESPONSE_BYTES as u64)
-            {
-                return Err(CohostApiError::malformed_response(
-                    status.as_u16(),
-                    "The generated image is over 8 MB.",
-                ));
-            }
-            let body = response.bytes().await.map_err(|error| {
-                if error.is_timeout() {
-                    return CohostApiError::from_transport_within(error, COHOST_AVATAR_TIMEOUT);
-                }
-                CohostApiError::malformed_response(
-                    status.as_u16(),
-                    format!("Could not read the generated image: {error}"),
-                )
-            })?;
-            if body.len() > COHOST_AVATAR_MAX_RESPONSE_BYTES {
-                return Err(CohostApiError::malformed_response(
-                    status.as_u16(),
-                    "The generated image is over 8 MB.",
-                ));
-            }
-            return serde_json::from_slice(&body).map_err(|error| {
-                CohostApiError::malformed_response(
-                    status.as_u16(),
-                    format!("Could not read the avatar response: {error}"),
-                )
-            });
-        }
-        let retry_after = response
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
-        let (code, message) = read_error_code_and_message(response).await;
-        Err(classify_cohost_failure(
-            status.as_u16(),
-            &code,
-            message,
-            retry_after.as_deref(),
-        ))
+        request: &CohostAvatarSetRequest,
+    ) -> std::result::Result<CohostAvatarSetResponse, CohostApiError> {
+        self.post_cohost_pet_json(
+            COHOST_AVATAR_SET_PATH,
+            bearer_token,
+            request,
+            COHOST_AVATAR_SET_TIMEOUT,
+            COHOST_AVATAR_SET_MAX_RESPONSE_BYTES,
+        )
+        .await
     }
 
     // --- Golem pets (plan 168, Phase F) ---
@@ -1446,9 +1453,10 @@ impl VideorcApiClient {
         .await
     }
 
-    /// One pet route call with the avatar route's pattern: bearer JSON, the
-    /// route's own timeout, the body capped before it is parsed, and the
-    /// tick's failure mapping (code first, then status; `Retry-After` kept).
+    /// One bearer JSON call to a Golem route (the pet routes and the look's
+    /// set route): the route's own timeout, the body capped before it is
+    /// parsed, and the tick's failure mapping (code first, then status;
+    /// `Retry-After` kept).
     async fn post_cohost_pet_json<Req: Serialize + ?Sized, Resp: DeserializeOwned>(
         &self,
         path: &str,

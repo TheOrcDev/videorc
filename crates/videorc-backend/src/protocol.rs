@@ -4752,25 +4752,8 @@ pub struct CohostSettingsPatch {
     pub auto_chat: Option<crate::cohost::CohostAutoChat>,
 }
 
-/// `cohost.avatar.generate` (plan 164 S-A6): one state image from a
-/// description and a style. The call is accepted at once; the outcome is the
-/// `cohost.avatar.generated` event.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CohostAvatarGenerateParams {
-    pub state: crate::cohost::CohostAvatarState,
-    pub prompt: String,
-    pub style: crate::cohost_avatar::CohostAvatarStyle,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CohostAvatarGenerateAccepted {
-    pub request_id: String,
-    pub state: crate::cohost::CohostAvatarState,
-}
-
-/// Why one generation failed, in the web's code and the tile's words.
+/// Why a Golem look picture failed (plan 169), in the web's code and the
+/// tile's words.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostAvatarErrorDetail {
@@ -4789,23 +4772,6 @@ impl CohostAvatarErrorDetail {
     pub fn new_owned(code: String, message: String) -> Self {
         Self { code, message }
     }
-}
-
-/// `cohost.avatar.generated` (plan 164 S-A6): `path` is the relative asset
-/// path the persona stores (`<personaId>/<state>.png`) on success, `error`
-/// the one line the tile shows otherwise. Each is absent, never null.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CohostAvatarGeneratedEvent {
-    pub request_id: String,
-    pub state: crate::cohost::CohostAvatarState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    /// The model returned no alpha (S-A5); the tile says so.
-    #[serde(default)]
-    pub opaque: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<CohostAvatarErrorDetail>,
 }
 
 /// `cohost.command.choose` (plan 140 S3): pick one comment from the chooser

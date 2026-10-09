@@ -1,35 +1,58 @@
-//! The Golem's avatar generation (plan 164 S-A6, D21).
+//! The Golem's look (plan 169 Phase B, D8, D9; plan 164 S-A6 before it).
 //!
-//! `cohost.avatar.generate` accepts one request and answers at once; the
-//! web call (up to 95 s) runs on its own task so the websocket mutation lane
-//! and its 10 s deadline never wait on a model. The outcome arrives as the
-//! `cohost.avatar.generated` event: the stored relative path for the persona
-//! to keep, whether the model returned an opaque image, or one error the
-//! tile shows. The desktop never calls a model itself: videorc-web owns the
-//! model id (`VIDEORC_AI_AVATAR_IMAGE_MODEL`) and the daily cap.
+//! One click makes the whole set: `cohost.avatar.create` sends a description
+//! and/or an inspiration picture to videorc-web's
+//! `POST /api/ai/cohost/avatar/set`, which draws the idle character in the
+//! house style and talk, laugh and think as edits of it. The desktop never
+//! calls a model itself: videorc-web owns the model, the house look and the
+//! daily image cap (each delivered image counts; a set needs 4 left).
 //!
-//! Images land in the managed golem-assets root main hands over as
-//! `VIDEORC_MANAGED_GOLEM_ROOTS` (S-A3): `<root>/<personaId>/<state>.png`,
-//! the folder uploads use, so one persona is one folder. The idle image is
-//! generated first and the other states are edits of it (the renderer
-//! sequences them); for a non-idle state the persona's current idle image
-//! rides along as the base when it is a PNG or WebP under the root.
+//! Every RPC answers at once (the websocket mutation lane's 10 s rule); the
+//! web call (up to 190 s) runs on its own task and reports by event:
+//! `cohost.avatar.progress` per state (`working`, then `done` or `failed`)
+//! and `cohost.avatar.draft` with the whole draft. The web answers a set in
+//! one response, so a create marks idle `working` and then reports all four
+//! states together. One job runs at a time per process
+//! (`cohost-avatar-busy`).
+//!
+//! A new look never overwrites the current one until it is kept (D8). The set
+//! lands in `<root>/<personaId>/drafts/<requestId>/<state>.png`, one draft
+//! per persona: a create replaces the draft once it succeeded, so a failed
+//! one leaves the earlier draft (or nothing) as it was.
+//! `cohost.avatar.keep` moves the draft into `<personaId>/<state>-<tag>.png`
+//! (the tag is the draft's first 8 hex digits, so a kept look never reuses an
+//! earlier look's path and nothing shows a cached picture) and patches the
+//! persona; `cohost.avatar.discard` deletes it;
+//! `cohost.avatar.redo` remakes talk, laugh or think from the draft's idle;
+//! `cohost.avatar.draft.get` offers a draft left on disk again (after a
+//! restart). Nothing is written outside the managed golem root.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-use crate::cohost::{CohostAvatarState, CohostPersona};
-use crate::protocol::{CohostAvatarErrorDetail, CohostAvatarGeneratedEvent};
+use crate::cohost::{
+    CohostAvatarState, CohostPersona, CohostPersonaImages, CohostPersonaSource, CohostSettings,
+};
+use crate::protocol::{CohostAvatarErrorDetail, CohostSettingsPatch};
 use crate::state::AppState;
-use crate::videorc_api::{CohostApiError, CohostAvatarRequest, VideorcApiClient};
+use crate::videorc_api::{
+    CohostApiError, CohostApiErrorKind, CohostAvatarSetRequest, CohostAvatarSetResponse,
+    VideorcApiClient,
+};
 
-pub const COHOST_AVATAR_GENERATED_EVENT: &str = "cohost.avatar.generated";
-/// The web route's prompt bound (S-A5): 1 to 600 UTF-16 units.
-pub const COHOST_AVATAR_PROMPT_MAX_CHARS: usize = 600;
-/// A base image rides as base64 and must decode under 4 MB (S-A5).
-pub const COHOST_AVATAR_BASE_IMAGE_MAX_BYTES: usize = 4 * 1024 * 1024;
+pub const COHOST_AVATAR_PROGRESS_EVENT: &str = "cohost.avatar.progress";
+pub const COHOST_AVATAR_DRAFT_EVENT: &str = "cohost.avatar.draft";
+/// The web route's description bound (D4): 1 to 600 UTF-16 units.
+pub const COHOST_AVATAR_DESCRIPTION_MAX_CHARS: usize = 600;
+/// An inspiration picture or a redo's base rides as base64 and must decode
+/// to at most 3 MB: Vercel refuses a request body over 4.5 MB before the
+/// route runs, and base64 adds a third (plan 169 Phase A).
+pub const COHOST_AVATAR_IMAGE_IN_MAX_BYTES: usize = 3 * 1024 * 1024;
 /// A generated PNG is refused above this before it is written (S-A6).
 pub const COHOST_AVATAR_PNG_MAX_BYTES: usize = 8 * 1024 * 1024;
 const COHOST_AVATAR_MAX_PIXELS: u64 = 20_000_000;
@@ -37,54 +60,295 @@ const COHOST_AVATAR_MAX_PIXELS: u64 = 20_000_000;
 /// The tile hints the plan names (S-A5, S-A6) for the web's error codes.
 pub const COHOST_AVATAR_QUOTA_HINT: &str = "Daily avatar limit reached";
 pub const COHOST_AVATAR_UNAVAILABLE_HINT: &str = "Not available yet";
+/// A state the web did not deliver and that names no reason.
+pub const COHOST_AVATAR_NOT_MADE: &str = "This picture was not made. Redo it.";
 
-/// One generation at a time per process: a second request while one runs
-/// is refused instead of queued, so a tile never shows two outcomes.
-static GENERATION_BUSY: AtomicBool = AtomicBool::new(false);
+/// Another look job is running.
+pub const COHOST_AVATAR_BUSY: &str = "cohost-avatar-busy";
+/// The request breaks a rule (the message says which).
+pub const COHOST_AVATAR_INVALID: &str = "cohost-avatar-invalid";
+/// A picture to send (the inspiration, or a redo's base) is over 3 MB.
+pub const COHOST_AVATAR_PICTURE_TOO_LARGE: &str = "cohost-avatar-picture-too-large";
+/// No draft with that request id for the active Golem.
+pub const COHOST_AVATAR_DRAFT_NONE: &str = "cohost-avatar-draft-none";
+/// This process has no golem root (bare `cargo run`).
+pub const COHOST_AVATAR_ROOT_UNCONFIGURED: &str = "cohost-avatar-root-unconfigured";
+/// A file under the golem root could not be read or written.
+pub const COHOST_AVATAR_STORE_FAILED: &str = "cohost-avatar-store-failed";
+/// The draft was discarded while its redo ran; the result was dropped.
+pub const COHOST_AVATAR_CANCELLED: &str = "cohost-avatar-cancelled";
+/// The web delivered no picture for a state and named no reason.
+pub const COHOST_AVATAR_NOT_MADE_CODE: &str = "avatar-not-made";
 
-/// The style presets the web route takes (⚑ plan 164 S-A4).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum CohostAvatarStyle {
-    Cartoon,
-    Pixel,
-    Painted,
-    Sticker,
+const DRAFTS_DIR: &str = "drafts";
+const STAGING_PREFIX: &str = ".staging-";
+const FAILED_FILE: &str = "failed.json";
+const FAILED_MAX_BYTES: u64 = 64 * 1024;
+const PERSONA_IMAGE_EXTENSIONS: [&str; 3] = ["png", "webp", "jpg"];
+
+// --- Wire types -----------------------------------------------------------------
+
+/// `cohost.avatar.create`: at least one of the two. The picture is a PNG,
+/// JPEG or WebP of at most 3 MB (the renderer fits it within 1024 px).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CohostAvatarCreateParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspiration_base64: Option<String>,
 }
 
-/// Why `cohost.avatar.generate` was refused before anything was sent.
+/// `cohost.avatar.redo`: one of talk, laugh or think, from the draft's idle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CohostAvatarRedoParams {
+    pub request_id: String,
+    pub state: CohostAvatarState,
+}
+
+/// `cohost.avatar.keep` and `cohost.avatar.discard`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CohostAvatarRequestIdParams {
+    pub request_id: String,
+}
+
+/// What `create` and `redo` answer at once: the request id their events
+/// carry (a redo carries its draft's id).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarAccepted {
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostAvatarPhase {
+    Working,
+    Done,
+    Failed,
+}
+
+/// `cohost.avatar.progress`: one state's step. `path` (the draft file,
+/// relative to the golem root) on `done`, `error` on `failed`; each is
+/// absent, never null.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarProgressEvent {
+    pub request_id: String,
+    pub state: CohostAvatarState,
+    pub phase: CohostAvatarPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<CohostAvatarErrorDetail>,
+}
+
+/// A draft look (the `cohost.avatar.draft` event and `draft.get`): the
+/// relative path of each state the draft holds, and why each other state is
+/// missing. Idle is always there: without it there is no draft.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarDraft {
+    pub request_id: String,
+    pub images: CohostPersonaImages,
+    #[serde(default)]
+    pub failed: BTreeMap<CohostAvatarState, CohostAvatarErrorDetail>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostAvatarJobKind {
+    Create,
+    Redo,
+}
+
+/// The job running now, so a Golem tab opened mid-run shows it working.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarRunning {
+    pub request_id: String,
+    pub kind: CohostAvatarJobKind,
+    /// The state a redo remakes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<CohostAvatarState>,
+}
+
+/// `cohost.avatar.draft.get` and `cohost.avatar.discard`: the active
+/// Golem's draft and the running job, each absent when there is none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarDraftStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<CohostAvatarDraft>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running: Option<CohostAvatarRunning>,
+}
+
+/// Why a look RPC was refused before anything was sent or changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CohostAvatarRefusal {
-    pub code: &'static str,
+    pub code: String,
     pub message: String,
 }
 
 impl CohostAvatarRefusal {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    fn new(code: &str, message: impl Into<String>) -> Self {
         Self {
-            code,
+            code: code.to_string(),
             message: message.into(),
         }
     }
 }
 
-/// The prompt as the route takes it, or why it cannot be sent.
-pub(crate) fn shape_prompt(prompt: &str) -> Result<String, CohostAvatarRefusal> {
-    let prompt = prompt.trim();
-    if prompt.is_empty() {
-        return Err(CohostAvatarRefusal::new(
-            "cohost-avatar-prompt-empty",
-            "Describe your Golem first.",
-        ));
+// --- Process state: the one running job -------------------------------------------
+
+struct RunningJob {
+    id: u64,
+    request_id: String,
+    kind: CohostAvatarJobKind,
+    state: Option<CohostAvatarState>,
+    cancelled: Arc<AtomicBool>,
+}
+
+/// The running job's slot, and the lock every write to (or removal of) a
+/// draft folder and every keep holds.
+#[derive(Default)]
+pub(crate) struct AvatarShared {
+    job: Mutex<Option<RunningJob>>,
+    next_job: AtomicU64,
+    commit: Mutex<()>,
+}
+
+static PROCESS_AVATAR: LazyLock<Arc<AvatarShared>> =
+    LazyLock::new(|| Arc::new(AvatarShared::default()));
+
+/// Holds the slot; dropping it frees the slot (when it still holds this job:
+/// a discard frees it early and a new job may have taken it).
+struct JobGuard {
+    shared: Arc<AvatarShared>,
+    id: u64,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Drop for JobGuard {
+    fn drop(&mut self) {
+        let mut slot = self.shared.job.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.as_ref().is_some_and(|job| job.id == self.id) {
+            *slot = None;
+        }
     }
-    let units: usize = prompt.chars().map(char::len_utf16).sum();
-    if units > COHOST_AVATAR_PROMPT_MAX_CHARS {
-        return Err(CohostAvatarRefusal::new(
-            "cohost-avatar-prompt-too-long",
-            format!("The description is at most {COHOST_AVATAR_PROMPT_MAX_CHARS} characters."),
-        ));
+}
+
+impl AvatarShared {
+    fn begin(
+        self: &Arc<Self>,
+        request_id: &str,
+        kind: CohostAvatarJobKind,
+        state: Option<CohostAvatarState>,
+    ) -> Result<JobGuard, CohostAvatarRefusal> {
+        let mut slot = self.job.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_some() {
+            return Err(CohostAvatarRefusal::new(
+                COHOST_AVATAR_BUSY,
+                "Your Golem's look is already being made. Wait for it to finish.",
+            ));
+        }
+        let id = self.next_job.fetch_add(1, Ordering::Relaxed);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        *slot = Some(RunningJob {
+            id,
+            request_id: request_id.to_string(),
+            kind,
+            state,
+            cancelled: cancelled.clone(),
+        });
+        Ok(JobGuard {
+            shared: self.clone(),
+            id,
+            cancelled,
+        })
     }
-    Ok(prompt.to_string())
+
+    fn running(&self) -> Option<CohostAvatarRunning> {
+        let slot = self.job.lock().unwrap_or_else(|e| e.into_inner());
+        slot.as_ref().map(|job| CohostAvatarRunning {
+            request_id: job.request_id.clone(),
+            kind: job.kind,
+            state: job.state,
+        })
+    }
+
+    /// Flag the job for `request_id` (if any) as cancelled and free the slot.
+    fn cancel(&self, request_id: &str) {
+        let mut slot = self.job.lock().unwrap_or_else(|e| e.into_inner());
+        if slot
+            .as_ref()
+            .is_some_and(|job| job.request_id == request_id)
+            && let Some(job) = slot.take()
+        {
+            job.cancelled.store(true, Ordering::Release);
+        }
+    }
+}
+
+// --- The environment ----------------------------------------------------------------
+
+/// What a look call needs from the process: the write root, the web client
+/// and the account. Tests build their own with a fake web.
+#[derive(Clone)]
+pub(crate) struct AvatarEnv {
+    root: Option<PathBuf>,
+    api: Option<VideorcApiClient>,
+    token: Option<String>,
+    premium: bool,
+    shared: Arc<AvatarShared>,
+}
+
+impl AvatarEnv {
+    fn process() -> Self {
+        Self {
+            root: managed_golem_root(),
+            api: VideorcApiClient::new().ok(),
+            token: crate::account::stored_session_token(),
+            premium: crate::cohost::premium_entitled(),
+            shared: PROCESS_AVATAR.clone(),
+        }
+    }
+
+    fn root(&self) -> Result<PathBuf, CohostAvatarRefusal> {
+        self.root.clone().ok_or_else(|| {
+            CohostAvatarRefusal::new(
+                COHOST_AVATAR_ROOT_UNCONFIGURED,
+                "The Golem's image folder is not configured.",
+            )
+        })
+    }
+
+    /// The web client and bearer token, refused before anything is sent
+    /// when the account is Basic or signed out.
+    fn web(&self) -> Result<(VideorcApiClient, String), CohostAvatarRefusal> {
+        if !self.premium {
+            return Err(CohostAvatarRefusal::new(
+                "premium-required",
+                "Making your Golem's look requires Videorc Premium.",
+            ));
+        }
+        let Some(token) = self.token.clone() else {
+            return Err(CohostAvatarRefusal::new(
+                "signed-out",
+                "Sign in to make your Golem's look.",
+            ));
+        };
+        let Some(api) = self.api.clone() else {
+            return Err(CohostAvatarRefusal::new(
+                "network",
+                "Could not start the Videorc web client.",
+            ));
+        };
+        Ok((api, token))
+    }
 }
 
 /// The first configured golem-assets root: where every image is written.
@@ -94,10 +358,7 @@ pub(crate) fn managed_golem_root() -> Option<PathBuf> {
         .next()
 }
 
-/// `<personaId>/<state>.png`, the value the persona stores.
-pub(crate) fn avatar_relative_path(persona_id: &str, state: CohostAvatarState) -> String {
-    format!("{persona_id}/{}.png", state.as_str())
-}
+// --- Paths -----------------------------------------------------------------------------
 
 fn persona_id_ok(persona_id: &str) -> bool {
     !persona_id.is_empty()
@@ -107,414 +368,1006 @@ fn persona_id_ok(persona_id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
-/// The persona's idle image as the route's `baseImage` (base64), for a
-/// non-idle state: only a stored `<personaId>/idle.(png|webp)` under the
-/// root, at most 4 MB. A JPEG idle (no alpha) or a missing one means no
-/// base: the state is generated from the prompt alone, never refused.
-pub(crate) fn base_image_for(
-    root: &Path,
-    persona: &CohostPersona,
-    state: CohostAvatarState,
-) -> Option<String> {
-    use base64::Engine as _;
-    if state == CohostAvatarState::Idle {
-        return None;
-    }
-    let relative = persona.images.idle.as_deref()?;
-    let (folder, file) = relative.split_once('/')?;
-    if folder != persona.id || !persona_id_ok(folder) {
-        return None;
-    }
-    if !matches!(file, "idle.png" | "idle.webp") {
-        return None;
-    }
-    let path = root.join(folder).join(file);
-    let bytes = std::fs::read(path).ok()?;
-    if bytes.is_empty() || bytes.len() > COHOST_AVATAR_BASE_IMAGE_MAX_BYTES {
-        return None;
-    }
-    Some(base64::engine::general_purpose::STANDARD.encode(bytes))
+/// A request id names a draft folder: a lowercase hyphenated uuid only.
+pub(crate) fn request_id_ok(request_id: &str) -> bool {
+    uuid::Uuid::parse_str(request_id).is_ok_and(|uuid| uuid.hyphenated().to_string() == request_id)
 }
 
-/// The route's PNG, checked and written as `<root>/<personaId>/<state>.png`:
-/// valid base64, at most 8 MB, a PNG that decodes under 20 megapixels. A
-/// state keeps one file, so an earlier `.webp` or `.jpg` upload for it goes.
-pub(crate) fn store_avatar_png(
-    root: &Path,
+fn drafts_dir(root: &Path, persona_id: &str) -> PathBuf {
+    root.join(persona_id).join(DRAFTS_DIR)
+}
+
+fn draft_dir(root: &Path, persona_id: &str, request_id: &str) -> PathBuf {
+    drafts_dir(root, persona_id).join(request_id)
+}
+
+/// `<personaId>/drafts/<requestId>/<state>.png`, relative to the root.
+pub(crate) fn draft_relative_path(
     persona_id: &str,
+    request_id: &str,
     state: CohostAvatarState,
-    png_base64: &str,
-) -> Result<String, CohostAvatarErrorDetail> {
-    use base64::Engine as _;
-    if !persona_id_ok(persona_id) {
-        return Err(CohostAvatarErrorDetail::new(
-            "cohost-avatar-persona-invalid",
-            "The persona id is not a plain token.",
+) -> String {
+    format!(
+        "{persona_id}/{DRAFTS_DIR}/{request_id}/{}.png",
+        state.as_str()
+    )
+}
+
+/// `<state>-<tag>.png`: a kept picture's file name. The tag is the draft's
+/// first 8 hex digits, so each kept look has its own paths.
+fn kept_file_name(request_id: &str, state: CohostAvatarState) -> String {
+    let tag = request_id.get(..8).unwrap_or(request_id);
+    format!("{}-{tag}.png", state.as_str())
+}
+
+/// `<personaId>/<state>-<tag>.png`, the value a kept look stores.
+pub(crate) fn avatar_relative_path(
+    persona_id: &str,
+    request_id: &str,
+    state: CohostAvatarState,
+) -> String {
+    format!("{persona_id}/{}", kept_file_name(request_id, state))
+}
+
+/// Whether `file` is one of a state's pictures in the persona folder: an
+/// upload or an earlier look (`<state>.<ext>`, `<state>-<8 hex>.<ext>`).
+fn is_state_picture(file: &str, state: CohostAvatarState) -> bool {
+    let Some(rest) = file.strip_prefix(state.as_str()) else {
+        return false;
+    };
+    let Some((stem, extension)) = rest.rsplit_once('.') else {
+        return false;
+    };
+    PERSONA_IMAGE_EXTENSIONS.contains(&extension)
+        && (stem.is_empty()
+            || stem.strip_prefix('-').is_some_and(|tag| {
+                tag.len() == 8
+                    && tag
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            }))
+}
+
+const ALL_STATES: [CohostAvatarState; 4] = [
+    CohostAvatarState::Idle,
+    CohostAvatarState::Talk,
+    CohostAvatarState::Laugh,
+    CohostAvatarState::Think,
+];
+
+fn set_image(images: &mut CohostPersonaImages, state: CohostAvatarState, path: Option<String>) {
+    match state {
+        CohostAvatarState::Idle => images.idle = path,
+        CohostAvatarState::Talk => images.talk = path,
+        CohostAvatarState::Laugh => images.laugh = path,
+        CohostAvatarState::Think => images.think = path,
+    }
+}
+
+fn image_of(images: &CohostPersonaImages, state: CohostAvatarState) -> Option<String> {
+    match state {
+        CohostAvatarState::Idle => images.idle.clone(),
+        CohostAvatarState::Talk => images.talk.clone(),
+        CohostAvatarState::Laugh => images.laugh.clone(),
+        CohostAvatarState::Think => images.think.clone(),
+    }
+}
+
+fn store_error(what: &str, error: impl std::fmt::Display) -> CohostAvatarErrorDetail {
+    CohostAvatarErrorDetail::new(COHOST_AVATAR_STORE_FAILED, format!("{what}: {error}"))
+}
+
+fn not_made() -> CohostAvatarErrorDetail {
+    CohostAvatarErrorDetail::new(COHOST_AVATAR_NOT_MADE_CODE, COHOST_AVATAR_NOT_MADE)
+}
+
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file())
+}
+
+/// Write `bytes` to `dir/name` through a staged file. The folder must exist:
+/// a discarded draft's folder is never recreated by a late write.
+fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), CohostAvatarErrorDetail> {
+    use std::io::Write as _;
+    let destination = dir.join(name);
+    let staged = dir.join(format!("{name}.partial"));
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&staged)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        crate::atomic_file::replace_file(&staged, &destination)
+    })();
+    result.map_err(|error| {
+        let _ = std::fs::remove_file(&staged);
+        store_error(&format!("Could not save {name}"), error)
+    })
+}
+
+fn read_failed(dir: &Path) -> BTreeMap<CohostAvatarState, CohostAvatarErrorDetail> {
+    use std::io::Read as _;
+    let Ok(file) = std::fs::File::open(dir.join(FAILED_FILE)) else {
+        return BTreeMap::new();
+    };
+    let mut bytes = Vec::new();
+    if file
+        .take(FAILED_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() as u64 > FAILED_MAX_BYTES
+    {
+        return BTreeMap::new();
+    }
+    serde_json::from_slice(&bytes).unwrap_or_default()
+}
+
+fn write_failed(
+    dir: &Path,
+    failed: &BTreeMap<CohostAvatarState, CohostAvatarErrorDetail>,
+) -> Result<(), CohostAvatarErrorDetail> {
+    let bytes = serde_json::to_vec(failed)
+        .map_err(|error| store_error("Could not save the draft", error))?;
+    write_atomic(dir, FAILED_FILE, &bytes)
+}
+
+/// The draft in `dir` as the wire shows it, or None when it has no idle
+/// picture (no character, no draft). A state without a picture is failed:
+/// with the reason the web gave when it was made, else a generic one.
+fn read_draft_dir(dir: &Path, persona_id: &str, request_id: &str) -> Option<CohostAvatarDraft> {
+    if !is_regular_file(&dir.join("idle.png")) {
+        return None;
+    }
+    let mut images = CohostPersonaImages::default();
+    let mut recorded = read_failed(dir);
+    let mut failed = BTreeMap::new();
+    for state in ALL_STATES {
+        if is_regular_file(&dir.join(format!("{}.png", state.as_str()))) {
+            set_image(
+                &mut images,
+                state,
+                Some(draft_relative_path(persona_id, request_id, state)),
+            );
+        } else {
+            failed.insert(state, recorded.remove(&state).unwrap_or_else(not_made));
+        }
+    }
+    Some(CohostAvatarDraft {
+        request_id: request_id.to_string(),
+        images,
+        failed,
+    })
+}
+
+/// The persona's draft: the newest readable one (there is at most one in
+/// normal use; staging folders and anything that is not a draft are skipped).
+fn find_draft(root: &Path, persona_id: &str) -> Option<CohostAvatarDraft> {
+    let entries = std::fs::read_dir(drafts_dir(root, persona_id)).ok()?;
+    let mut best: Option<(std::time::SystemTime, CohostAvatarDraft)> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !request_id_ok(&name) || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Some(draft) = read_draft_dir(&entry.path(), persona_id, &name) else {
+            continue;
+        };
+        let modified = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        if best.as_ref().is_none_or(|(newest, _)| modified > *newest) {
+            best = Some((modified, draft));
+        }
+    }
+    best.map(|(_, draft)| draft)
+}
+
+/// Remove the drafts folder when nothing is left in it.
+fn remove_drafts_dir_if_empty(root: &Path, persona_id: &str) {
+    let dir = drafts_dir(root, persona_id);
+    if std::fs::read_dir(&dir).is_ok_and(|mut entries| entries.next().is_none()) {
+        let _ = std::fs::remove_dir(&dir);
+    }
+}
+
+// --- Input and output checks ------------------------------------------------------------
+
+/// The description as the route takes it: trimmed, empty as none, at most
+/// 600 UTF-16 units.
+pub(crate) fn shape_description(
+    description: Option<&str>,
+) -> Result<Option<String>, CohostAvatarRefusal> {
+    let Some(description) = description.map(str::trim).filter(|text| !text.is_empty()) else {
+        return Ok(None);
+    };
+    let units: usize = description.chars().map(char::len_utf16).sum();
+    if units > COHOST_AVATAR_DESCRIPTION_MAX_CHARS {
+        return Err(CohostAvatarRefusal::new(
+            COHOST_AVATAR_INVALID,
+            format!("The description is at most {COHOST_AVATAR_DESCRIPTION_MAX_CHARS} characters."),
         ));
+    }
+    Ok(Some(description.to_string()))
+}
+
+/// The inspiration picture as the route takes it (base64): a PNG, JPEG or
+/// WebP, at most 3 MB decoded, under 20 megapixels by its header.
+pub(crate) fn shape_inspiration(
+    inspiration: Option<&str>,
+) -> Result<Option<String>, CohostAvatarRefusal> {
+    let Some(encoded) = inspiration.map(str::trim).filter(|text| !text.is_empty()) else {
+        return Ok(None);
+    };
+    let refuse = |message: &str| CohostAvatarRefusal::new(COHOST_AVATAR_INVALID, message);
+    let too_large = || {
+        CohostAvatarRefusal::new(
+            COHOST_AVATAR_PICTURE_TOO_LARGE,
+            "The picture is over 3 MB. Choose a smaller one.",
+        )
+    };
+    if encoded.len() > COHOST_AVATAR_IMAGE_IN_MAX_BYTES.div_ceil(3) * 4 + 4 {
+        return Err(too_large());
     }
     let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| refuse("The picture could not be read."))?;
+    if bytes.len() > COHOST_AVATAR_IMAGE_IN_MAX_BYTES {
+        return Err(too_large());
+    }
+    if bytes.is_empty() {
+        return Err(refuse("The picture could not be read."));
+    }
+    if !matches!(
+        image::guess_format(&bytes).ok(),
+        Some(image::ImageFormat::Png | image::ImageFormat::Jpeg | image::ImageFormat::WebP)
+    ) {
+        return Err(refuse("Choose a PNG, JPEG or WebP picture."));
+    }
+    let (width, height) = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|reader| reader.into_dimensions().ok())
+        .ok_or_else(|| refuse("The picture could not be read."))?;
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > COHOST_AVATAR_MAX_PIXELS
+    {
+        return Err(refuse("The picture is empty or over 20 megapixels."));
+    }
+    Ok(Some(encoded.to_string()))
+}
+
+/// A generated PNG, checked before it is written: valid base64, at most
+/// 8 MB, a PNG that decodes under 20 megapixels.
+pub(crate) fn generated_png(png_base64: &str) -> Result<Vec<u8>, CohostAvatarErrorDetail> {
+    let unreadable =
+        |message: &str| CohostAvatarErrorDetail::new("avatar-image-unreadable", message);
+    let bytes = base64::engine::general_purpose::STANDARD
         .decode(png_base64.trim())
-        .map_err(|_| {
-            CohostAvatarErrorDetail::new(
-                "avatar-image-unreadable",
-                "The generated image could not be read.",
-            )
-        })?;
+        .map_err(|_| unreadable("The generated image could not be read."))?;
     if bytes.is_empty() || bytes.len() > COHOST_AVATAR_PNG_MAX_BYTES {
-        return Err(CohostAvatarErrorDetail::new(
-            "avatar-image-unreadable",
-            "The generated image is empty or over 8 MB.",
-        ));
+        return Err(unreadable("The generated image is empty or over 8 MB."));
     }
     if image::guess_format(&bytes).ok() != Some(image::ImageFormat::Png) {
-        return Err(CohostAvatarErrorDetail::new(
-            "avatar-image-unreadable",
-            "The generated image is not a PNG.",
-        ));
+        return Err(unreadable("The generated image is not a PNG."));
     }
     let (width, height) = image::load_from_memory(&bytes)
         .map(|decoded| (u64::from(decoded.width()), u64::from(decoded.height())))
-        .map_err(|_| {
-            CohostAvatarErrorDetail::new(
-                "avatar-image-unreadable",
-                "The generated image could not be decoded.",
-            )
-        })?;
+        .map_err(|_| unreadable("The generated image could not be decoded."))?;
     if width == 0 || height == 0 || width * height > COHOST_AVATAR_MAX_PIXELS {
-        return Err(CohostAvatarErrorDetail::new(
-            "avatar-image-unreadable",
-            "The generated image has an unusable size.",
-        ));
+        return Err(unreadable("The generated image has an unusable size."));
     }
-    let folder = root.join(persona_id);
-    std::fs::create_dir_all(&folder).map_err(|error| {
-        CohostAvatarErrorDetail::new(
-            "cohost-avatar-store-failed",
-            format!("Could not create the Golem's image folder: {error}"),
-        )
-    })?;
-    let file = folder.join(format!("{}.png", state.as_str()));
-    std::fs::write(&file, &bytes).map_err(|error| {
-        CohostAvatarErrorDetail::new(
-            "cohost-avatar-store-failed",
-            format!("Could not save the generated image: {error}"),
-        )
-    })?;
-    for other in ["webp", "jpg"] {
-        let _ = std::fs::remove_file(folder.join(format!("{}.{other}", state.as_str())));
-    }
-    Ok(avatar_relative_path(persona_id, state))
+    Ok(bytes)
 }
 
-/// The one line a tile shows for a failed call (S-A5 codes, S-A6 copy).
+/// "3 h 20 min", "45 min": how long until the daily cap resets.
+fn reset_in(after: std::time::Duration) -> String {
+    let minutes = after.as_secs().div_ceil(60).max(1);
+    match (minutes / 60, minutes % 60) {
+        (0, minutes) => format!("{minutes} min"),
+        (hours, 0) => format!("{hours} h"),
+        (hours, minutes) => format!("{hours} h {minutes} min"),
+    }
+}
+
+/// The one line a tile shows for a failed web call (S-A5 codes, S-A6 copy,
+/// plan 169's anchor code). The web's code is kept.
 pub(crate) fn tile_error(error: &CohostApiError) -> CohostAvatarErrorDetail {
     let code = error.detail.code.as_str();
     let message = match code {
-        "quota-exhausted" => COHOST_AVATAR_QUOTA_HINT.to_string(),
+        "quota-exhausted" => match error.kind {
+            CohostApiErrorKind::QuotaExhausted {
+                retry_after: Some(after),
+            } => format!("{COHOST_AVATAR_QUOTA_HINT}. More in {}.", reset_in(after)),
+            _ => COHOST_AVATAR_QUOTA_HINT.to_string(),
+        },
         "avatar-model-unconfigured"
         | "avatar-disabled"
+        | "avatar-style-anchor-missing"
         | "cohost-disabled"
         | "ai-gateway-not-configured" => COHOST_AVATAR_UNAVAILABLE_HINT.to_string(),
-        "unauthorized" => "Sign in again to generate images.".to_string(),
-        "premium-required" => "Generating images requires Videorc Premium.".to_string(),
+        "unauthorized" => "Sign in again to make your Golem's look.".to_string(),
+        "premium-required" => "Making your Golem's look requires Videorc Premium.".to_string(),
+        "ai-user-disabled" => "Cloud AI is turned off for this account.".to_string(),
         "avatar-timeout" | "timeout" => "The model took too long. Try again.".to_string(),
+        "network" => "Could not reach Videorc. Check your connection and try again.".to_string(),
         _ => error.detail.message.clone(),
     };
     CohostAvatarErrorDetail::new_owned(error.detail.code.clone(), message)
 }
 
-/// Accept one generation and run it on its own task (see the module doc).
-/// Refused before anything is sent when the prompt is out of bounds, the
-/// account is Basic or signed out, no managed root is configured, or one is
-/// already running.
-pub async fn generate(
-    state: AppState,
-    params: crate::protocol::CohostAvatarGenerateParams,
-) -> Result<crate::protocol::CohostAvatarGenerateAccepted, CohostAvatarRefusal> {
-    let prompt = shape_prompt(&params.prompt)?;
-    if !crate::cohost::premium_entitled() {
-        return Err(CohostAvatarRefusal::new(
-            "premium-required",
-            "Generating images requires Videorc Premium.",
-        ));
-    }
-    let Some(root) = managed_golem_root() else {
-        return Err(CohostAvatarRefusal::new(
-            "cohost-avatar-root-unconfigured",
-            "The Golem's image folder is not configured.",
-        ));
-    };
-    let Some(token) = crate::account::stored_session_token() else {
-        return Err(CohostAvatarRefusal::new(
-            "signed-out",
-            "Sign in to generate images.",
-        ));
-    };
+/// Why the web left a state out of a set it answered.
+fn web_failure(
+    response: &CohostAvatarSetResponse,
+    state: CohostAvatarState,
+) -> CohostAvatarErrorDetail {
+    response
+        .failed
+        .get(&state)
+        .map(|failure| {
+            CohostAvatarErrorDetail::new_owned(failure.code.clone(), failure.message.clone())
+        })
+        .unwrap_or_else(not_made)
+}
+
+// --- Shared helpers ------------------------------------------------------------------------
+
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, CohostAvatarErrorDetail> + Send + 'static,
+) -> Result<T, CohostAvatarErrorDetail> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| store_error("The look job stopped", error))?
+}
+
+async fn active_persona(state: &AppState) -> Result<CohostPersona, CohostAvatarRefusal> {
     let persona = state.cohost.lock().await.settings().persona.clone();
     if !persona_id_ok(&persona.id) {
         return Err(CohostAvatarRefusal::new(
-            "cohost-avatar-persona-invalid",
+            COHOST_AVATAR_INVALID,
             "The persona id is not a plain token.",
         ));
     }
-    if GENERATION_BUSY
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
+    Ok(persona)
+}
+
+fn refusal_of(detail: CohostAvatarErrorDetail) -> CohostAvatarRefusal {
+    CohostAvatarRefusal {
+        code: detail.code,
+        message: detail.message,
+    }
+}
+
+fn emit_progress(
+    state: &AppState,
+    request_id: &str,
+    avatar_state: CohostAvatarState,
+    phase: CohostAvatarPhase,
+    path: Option<String>,
+    error: Option<CohostAvatarErrorDetail>,
+) {
+    state.emit_event(
+        COHOST_AVATAR_PROGRESS_EVENT,
+        CohostAvatarProgressEvent {
+            request_id: request_id.to_string(),
+            state: avatar_state,
+            phase,
+            path,
+            error,
+        },
+    );
+}
+
+// --- cohost.avatar.create ---------------------------------------------------------------------
+
+/// `cohost.avatar.create`: accept one set and make it on its own task.
+/// Refused before anything is sent when the input is out of bounds, the
+/// account is Basic or signed out, no root is configured, or a job runs.
+pub async fn create(
+    state: &AppState,
+    params: CohostAvatarCreateParams,
+) -> Result<CohostAvatarAccepted, CohostAvatarRefusal> {
+    create_in(state, AvatarEnv::process(), params).await
+}
+
+async fn create_in(
+    state: &AppState,
+    env: AvatarEnv,
+    params: CohostAvatarCreateParams,
+) -> Result<CohostAvatarAccepted, CohostAvatarRefusal> {
+    let description = shape_description(params.description.as_deref())?;
+    let inspiration = {
+        let raw = params.inspiration_base64;
+        tokio::task::spawn_blocking(move || shape_inspiration(raw.as_deref()))
+            .await
+            .map_err(|error| CohostAvatarRefusal::new(COHOST_AVATAR_INVALID, error.to_string()))??
+    };
+    if description.is_none() && inspiration.is_none() {
         return Err(CohostAvatarRefusal::new(
-            "cohost-avatar-busy",
-            "An image is already being generated.",
+            COHOST_AVATAR_INVALID,
+            "Describe your Golem or add a picture first.",
         ));
     }
-    let request_id = uuid::Uuid::new_v4().to_string();
-    let accepted = crate::protocol::CohostAvatarGenerateAccepted {
-        request_id: request_id.clone(),
-        state: params.state,
+    let root = env.root()?;
+    let (api, token) = env.web()?;
+    let persona = active_persona(state).await?;
+    let request_id = uuid::Uuid::new_v4().hyphenated().to_string();
+    let guard = env
+        .shared
+        .begin(&request_id, CohostAvatarJobKind::Create, None)?;
+    let request = CohostAvatarSetRequest {
+        description,
+        inspiration,
+        redo: None,
+        base: None,
     };
-    let avatar_state = params.state;
-    let style = params.style;
+    let job = SetJob {
+        state: state.clone(),
+        root,
+        persona_id: persona.id,
+        request_id: request_id.clone(),
+        api,
+        token,
+        shared: env.shared.clone(),
+    };
     tokio::spawn(async move {
-        let outcome = run_generation(&root, &persona, avatar_state, prompt, style, &token).await;
-        GENERATION_BUSY.store(false, Ordering::Release);
-        if outcome.is_ok() {
-            // Plan 168 S-B1: a regenerated image keeps its path; the still
-            // pet on stream re-reads it.
-            state.golem_sprite.invalidate();
+        job.run_create(&request).await;
+        drop(guard);
+    });
+    Ok(CohostAvatarAccepted { request_id })
+}
+
+/// What a running create or redo carries onto its task.
+struct SetJob {
+    state: AppState,
+    root: PathBuf,
+    persona_id: String,
+    request_id: String,
+    api: VideorcApiClient,
+    token: String,
+    shared: Arc<AvatarShared>,
+}
+
+impl SetJob {
+    fn progress(
+        &self,
+        avatar_state: CohostAvatarState,
+        phase: CohostAvatarPhase,
+        path: Option<String>,
+        error: Option<CohostAvatarErrorDetail>,
+    ) {
+        emit_progress(
+            &self.state,
+            &self.request_id,
+            avatar_state,
+            phase,
+            path,
+            error,
+        );
+    }
+
+    async fn run_create(&self, request: &CohostAvatarSetRequest) {
+        let idle = CohostAvatarState::Idle;
+        self.progress(idle, CohostAvatarPhase::Working, None, None);
+        let fail = |error: CohostAvatarErrorDetail| {
+            self.state.emit_log(
+                "warn",
+                format!("Golem look failed ({}): {}", error.code, error.message),
+            );
+            self.progress(idle, CohostAvatarPhase::Failed, None, Some(error));
+        };
+        let response = match self.api.post_cohost_avatar_set(&self.token, request).await {
+            Ok(response) => response,
+            Err(error) => return fail(tile_error(&error)),
+        };
+        let stored = {
+            let root = self.root.clone();
+            let persona_id = self.persona_id.clone();
+            let request_id = self.request_id.clone();
+            let shared = self.shared.clone();
+            blocking(move || store_set(&root, &persona_id, &request_id, &response, &shared)).await
+        };
+        let draft = match stored {
+            Ok(draft) => draft,
+            Err(error) => return fail(error),
+        };
+        for avatar_state in ALL_STATES {
+            let path = image_of(&draft.images, avatar_state);
+            let phase = if path.is_some() {
+                CohostAvatarPhase::Done
+            } else {
+                CohostAvatarPhase::Failed
+            };
+            let error = draft.failed.get(&avatar_state).cloned();
+            self.progress(avatar_state, phase, path, error);
         }
-        let event = match outcome {
-            Ok((path, opaque)) => CohostAvatarGeneratedEvent {
-                request_id,
-                state: avatar_state,
-                path: Some(path),
-                opaque,
-                error: None,
-            },
+        self.state.emit_log(
+            "info",
+            format!(
+                "Golem look drafted: {} of 4 pictures made; nothing changes until it is kept.",
+                ALL_STATES.len() - draft.failed.len()
+            ),
+        );
+        self.state.emit_event(COHOST_AVATAR_DRAFT_EVENT, draft);
+    }
+
+    async fn run_redo(
+        &self,
+        avatar_state: CohostAvatarState,
+        request: &CohostAvatarSetRequest,
+        cancelled: Arc<AtomicBool>,
+    ) {
+        self.progress(avatar_state, CohostAvatarPhase::Working, None, None);
+        let dir = draft_dir(&self.root, &self.persona_id, &self.request_id);
+        let outcome = match self.api.post_cohost_avatar_set(&self.token, request).await {
+            Err(error) => Err(tile_error(&error)),
+            Ok(response) => {
+                let dir = dir.clone();
+                let shared = self.shared.clone();
+                blocking(move || store_redo(&dir, avatar_state, &response, &shared, &cancelled))
+                    .await
+            }
+        };
+        match outcome {
+            Ok(()) => self.progress(
+                avatar_state,
+                CohostAvatarPhase::Done,
+                Some(draft_relative_path(
+                    &self.persona_id,
+                    &self.request_id,
+                    avatar_state,
+                )),
+                None,
+            ),
             Err(error) => {
-                state.emit_log(
+                self.state.emit_log(
                     "warn",
                     format!(
-                        "Golem avatar generation for {} failed ({}): {}",
+                        "Golem look redo of {} failed ({}): {}",
                         avatar_state.as_str(),
                         error.code,
                         error.message
                     ),
                 );
-                CohostAvatarGeneratedEvent {
-                    request_id,
-                    state: avatar_state,
-                    path: None,
-                    opaque: false,
-                    error: Some(error),
-                }
+                self.progress(avatar_state, CohostAvatarPhase::Failed, None, Some(error));
             }
-        };
-        state.emit_event(COHOST_AVATAR_GENERATED_EVENT, event);
-    });
-    Ok(accepted)
+        }
+        let persona_id = self.persona_id.clone();
+        let request_id = self.request_id.clone();
+        let draft = blocking(move || Ok(read_draft_dir(&dir, &persona_id, &request_id)))
+            .await
+            .ok()
+            .flatten();
+        if let Some(draft) = draft {
+            self.state.emit_event(COHOST_AVATAR_DRAFT_EVENT, draft);
+        }
+    }
 }
 
-async fn run_generation(
+/// Write a set as the persona's one draft: into a staging folder first, then
+/// renamed into place under the commit lock, where every earlier draft goes.
+/// A set without a usable idle writes nothing.
+fn store_set(
     root: &Path,
-    persona: &CohostPersona,
-    state: CohostAvatarState,
-    prompt: String,
-    style: CohostAvatarStyle,
-    token: &str,
-) -> Result<(String, bool), CohostAvatarErrorDetail> {
-    let request = CohostAvatarRequest {
-        prompt,
-        style,
-        state,
-        base_image: base_image_for(root, persona, state),
-    };
-    let client = VideorcApiClient::new().map_err(|error| {
-        CohostAvatarErrorDetail::new_owned("network".to_string(), error.to_string())
-    })?;
-    let response = client
-        .post_cohost_avatar(token, &request)
+    persona_id: &str,
+    request_id: &str,
+    response: &CohostAvatarSetResponse,
+    shared: &AvatarShared,
+) -> Result<CohostAvatarDraft, CohostAvatarErrorDetail> {
+    let mut pictures = BTreeMap::new();
+    let mut failed = BTreeMap::new();
+    for state in ALL_STATES {
+        match response.images.get(state) {
+            Some(image) => match generated_png(&image.png_base64) {
+                Ok(bytes) => {
+                    pictures.insert(state, bytes);
+                }
+                Err(error) => {
+                    failed.insert(state, error);
+                }
+            },
+            None => {
+                failed.insert(state, web_failure(response, state));
+            }
+        }
+    }
+    if !pictures.contains_key(&CohostAvatarState::Idle) {
+        return Err(failed
+            .remove(&CohostAvatarState::Idle)
+            .unwrap_or_else(not_made));
+    }
+    let drafts = drafts_dir(root, persona_id);
+    let staging = drafts.join(format!("{STAGING_PREFIX}{request_id}"));
+    let written = (|| {
+        std::fs::create_dir_all(&staging)
+            .map_err(|error| store_error("Could not create the draft folder", error))?;
+        for (state, bytes) in &pictures {
+            write_atomic(&staging, &format!("{}.png", state.as_str()), bytes)?;
+        }
+        write_failed(&staging, &failed)
+    })();
+    if let Err(error) = written {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    let _lock = shared.commit.lock().unwrap_or_else(|e| e.into_inner());
+    let destination = drafts.join(request_id);
+    if let Err(error) = std::fs::rename(&staging, &destination) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(store_error("Could not save the draft", error));
+    }
+    // One draft per persona: the new one replaces every earlier draft.
+    if let Ok(entries) = std::fs::read_dir(&drafts) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy() == request_id {
+                continue;
+            }
+            let path = entry.path();
+            let removed = if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            if let Err(error) = removed {
+                tracing::warn!(%error, "an earlier Golem look draft could not be removed");
+            }
+        }
+    }
+    read_draft_dir(&destination, persona_id, request_id)
+        .ok_or_else(|| store_error("Could not read the draft back", "idle.png is missing"))
+}
+
+// --- cohost.avatar.redo -------------------------------------------------------------------------
+
+/// `cohost.avatar.redo`: remake talk, laugh or think of the draft from its
+/// idle (one image off the daily cap). Accepted at once; the outcome is a
+/// `cohost.avatar.progress` for that state and the updated draft.
+pub async fn redo(
+    state: &AppState,
+    params: CohostAvatarRedoParams,
+) -> Result<CohostAvatarAccepted, CohostAvatarRefusal> {
+    redo_in(state, AvatarEnv::process(), params).await
+}
+
+async fn redo_in(
+    state: &AppState,
+    env: AvatarEnv,
+    params: CohostAvatarRedoParams,
+) -> Result<CohostAvatarAccepted, CohostAvatarRefusal> {
+    if params.state == CohostAvatarState::Idle {
+        return Err(CohostAvatarRefusal::new(
+            COHOST_AVATAR_INVALID,
+            "Idle has no Redo: Try again makes a new character.",
+        ));
+    }
+    if !request_id_ok(&params.request_id) {
+        return Err(CohostAvatarRefusal::new(
+            COHOST_AVATAR_INVALID,
+            "The request id is not a draft id.",
+        ));
+    }
+    let root = env.root()?;
+    let (api, token) = env.web()?;
+    let persona = active_persona(state).await?;
+    let base = {
+        let idle = draft_dir(&root, &persona.id, &params.request_id).join("idle.png");
+        blocking(move || {
+            if !is_regular_file(&idle) {
+                return Err(CohostAvatarErrorDetail::new(
+                    COHOST_AVATAR_DRAFT_NONE,
+                    "That draft is not on this computer any more.",
+                ));
+            }
+            let bytes = std::fs::read(&idle)
+                .map_err(|error| store_error("Could not read the draft", error))?;
+            if bytes.is_empty() || bytes.len() > COHOST_AVATAR_IMAGE_IN_MAX_BYTES {
+                return Err(CohostAvatarErrorDetail::new(
+                    COHOST_AVATAR_PICTURE_TOO_LARGE,
+                    "The draft's idle picture is over 3 MB, too large to redo from. Try again instead.",
+                ));
+            }
+            Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+        })
         .await
-        .map_err(|error| tile_error(&error))?;
-    let path = store_avatar_png(root, &persona.id, state, &response.png_base64)?;
-    Ok((path, response.opaque))
+        .map_err(refusal_of)?
+    };
+    let guard = env.shared.begin(
+        &params.request_id,
+        CohostAvatarJobKind::Redo,
+        Some(params.state),
+    )?;
+    let request = CohostAvatarSetRequest {
+        description: None,
+        inspiration: None,
+        redo: Some(params.state),
+        base: Some(base),
+    };
+    let job = SetJob {
+        state: state.clone(),
+        root,
+        persona_id: persona.id,
+        request_id: params.request_id.clone(),
+        api,
+        token,
+        shared: env.shared.clone(),
+    };
+    let avatar_state = params.state;
+    tokio::spawn(async move {
+        let cancelled = guard.cancelled.clone();
+        job.run_redo(avatar_state, &request, cancelled).await;
+        drop(guard);
+    });
+    Ok(CohostAvatarAccepted {
+        request_id: params.request_id,
+    })
+}
+
+/// A redo's picture into the draft, under the commit lock: dropped when the
+/// draft was discarded or replaced while the web worked. A state the web
+/// could not remake keeps its earlier picture; one that had none records
+/// why.
+fn store_redo(
+    dir: &Path,
+    state: CohostAvatarState,
+    response: &CohostAvatarSetResponse,
+    shared: &AvatarShared,
+    cancelled: &AtomicBool,
+) -> Result<(), CohostAvatarErrorDetail> {
+    let picture = match response.images.get(state) {
+        Some(image) => generated_png(&image.png_base64),
+        None => Err(web_failure(response, state)),
+    };
+    let _lock = shared.commit.lock().unwrap_or_else(|e| e.into_inner());
+    if cancelled.load(Ordering::Acquire) || !dir.is_dir() {
+        return Err(CohostAvatarErrorDetail::new(
+            COHOST_AVATAR_CANCELLED,
+            "The draft was discarded, so its redo was dropped.",
+        ));
+    }
+    let file = format!("{}.png", state.as_str());
+    let mut failed = read_failed(dir);
+    match picture {
+        Ok(bytes) => {
+            write_atomic(dir, &file, &bytes)?;
+            failed.remove(&state);
+            write_failed(dir, &failed)
+        }
+        Err(error) => {
+            if !is_regular_file(&dir.join(&file)) {
+                failed.insert(state, error.clone());
+                write_failed(dir, &failed)?;
+            }
+            Err(error)
+        }
+    }
+}
+
+// --- cohost.avatar.keep / discard / draft.get ------------------------------------------------------
+
+/// `cohost.avatar.keep`: the draft becomes the Golem's look. Its pictures
+/// move to `<personaId>/<state>-<tag>.png`; a state the draft does not have
+/// loses its old picture too (it was a different character), so it falls
+/// back to the new idle. The persona's images and `source: generated` are
+/// saved and the settings returned; the earlier pictures go only once the
+/// persona points at the new ones.
+pub async fn keep(
+    state: &AppState,
+    params: CohostAvatarRequestIdParams,
+) -> Result<CohostSettings, CohostAvatarRefusal> {
+    keep_in(state, AvatarEnv::process(), params).await
+}
+
+async fn keep_in(
+    state: &AppState,
+    env: AvatarEnv,
+    params: CohostAvatarRequestIdParams,
+) -> Result<CohostSettings, CohostAvatarRefusal> {
+    if !request_id_ok(&params.request_id) {
+        return Err(CohostAvatarRefusal::new(
+            COHOST_AVATAR_INVALID,
+            "The request id is not a draft id.",
+        ));
+    }
+    if env
+        .shared
+        .running()
+        .is_some_and(|job| job.request_id == params.request_id)
+    {
+        return Err(CohostAvatarRefusal::new(
+            COHOST_AVATAR_BUSY,
+            "A picture of this draft is being remade. Wait for it to finish.",
+        ));
+    }
+    let root = env.root()?;
+    let persona = active_persona(state).await?;
+    let (kept, stale) = {
+        let root = root.clone();
+        let persona_id = persona.id.clone();
+        let request_id = params.request_id.clone();
+        let shared = env.shared.clone();
+        blocking(move || move_draft_into_place(&root, &persona_id, &request_id, &shared))
+            .await
+            .map_err(refusal_of)?
+    };
+    // The latest persona is read again: only its images and source change.
+    let mut next = active_persona(state).await?;
+    if next.id != persona.id {
+        return Err(CohostAvatarRefusal::new(
+            COHOST_AVATAR_INVALID,
+            "Your Golem changed while its look was kept.",
+        ));
+    }
+    let mut images = CohostPersonaImages::default();
+    for avatar_state in kept {
+        set_image(
+            &mut images,
+            avatar_state,
+            Some(avatar_relative_path(
+                &persona.id,
+                &params.request_id,
+                avatar_state,
+            )),
+        );
+    }
+    next.images = images;
+    next.source = CohostPersonaSource::Generated;
+    let settings = crate::cohost::set_cohost_settings(
+        state,
+        CohostSettingsPatch {
+            persona: Some(next),
+            ..CohostSettingsPatch::default()
+        },
+    )
+    .await
+    .map_err(|error| {
+        CohostAvatarRefusal::new(
+            error.code(),
+            format!("The pictures were kept, but your Golem could not be saved: {error}"),
+        )
+    })?;
+    // The persona wears the new pictures: the earlier ones (an older look,
+    // uploads from before plan 169) go now.
+    let _ = blocking(move || {
+        for file in stale {
+            if let Err(error) = std::fs::remove_file(&file) {
+                tracing::warn!(%error, "an earlier Golem picture could not be removed");
+            }
+        }
+        Ok(())
+    })
+    .await;
+    // Plan 168 S-B1: the still pet on stream re-reads the persona's images.
+    state.golem_sprite.invalidate();
+    state.emit_log("info", "Golem look kept.");
+    Ok(settings)
+}
+
+/// The keep's file work, under the commit lock: the draft's pictures move
+/// into the persona folder under their kept names. Returns the states kept
+/// and the earlier pictures to remove once the persona points at the new.
+fn move_draft_into_place(
+    root: &Path,
+    persona_id: &str,
+    request_id: &str,
+    shared: &AvatarShared,
+) -> Result<(Vec<CohostAvatarState>, Vec<PathBuf>), CohostAvatarErrorDetail> {
+    let _lock = shared.commit.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = draft_dir(root, persona_id, request_id);
+    if !is_regular_file(&dir.join("idle.png")) {
+        return Err(CohostAvatarErrorDetail::new(
+            COHOST_AVATAR_DRAFT_NONE,
+            "That draft is not on this computer any more.",
+        ));
+    }
+    let folder = root.join(persona_id);
+    let mut kept = Vec::new();
+    let mut kept_names = Vec::new();
+    for state in ALL_STATES {
+        let source = dir.join(format!("{}.png", state.as_str()));
+        if is_regular_file(&source) {
+            let name = kept_file_name(request_id, state);
+            crate::atomic_file::replace_file(&source, &folder.join(&name))
+                .map_err(|error| store_error("Could not keep the new look", error))?;
+            kept.push(state);
+            kept_names.push(name);
+        }
+    }
+    let stale = std::fs::read_dir(&folder)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .filter(|file| {
+                    !kept_names.contains(file)
+                        && ALL_STATES
+                            .iter()
+                            .any(|state| is_state_picture(file, *state))
+                })
+                .map(|file| folder.join(file))
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Err(error) = std::fs::remove_dir_all(&dir) {
+        tracing::warn!(%error, "the kept Golem look draft folder could not be removed");
+    }
+    remove_drafts_dir_if_empty(root, persona_id);
+    Ok((kept, stale))
+}
+
+/// `cohost.avatar.discard`: delete the draft (a redo still running for it
+/// drops its result). Discarding a draft that is gone is a no-op.
+pub async fn discard(
+    state: &AppState,
+    params: CohostAvatarRequestIdParams,
+) -> Result<CohostAvatarDraftStatus, CohostAvatarRefusal> {
+    discard_in(state, AvatarEnv::process(), params).await
+}
+
+async fn discard_in(
+    state: &AppState,
+    env: AvatarEnv,
+    params: CohostAvatarRequestIdParams,
+) -> Result<CohostAvatarDraftStatus, CohostAvatarRefusal> {
+    if !request_id_ok(&params.request_id) {
+        return Err(CohostAvatarRefusal::new(
+            COHOST_AVATAR_INVALID,
+            "The request id is not a draft id.",
+        ));
+    }
+    let root = env.root()?;
+    let persona = active_persona(state).await?;
+    env.shared.cancel(&params.request_id);
+    {
+        let persona_id = persona.id.clone();
+        let request_id = params.request_id.clone();
+        let shared = env.shared.clone();
+        blocking(move || {
+            let _lock = shared.commit.lock().unwrap_or_else(|e| e.into_inner());
+            match std::fs::remove_dir_all(draft_dir(&root, &persona_id, &request_id)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(store_error("Could not delete the draft", error)),
+            }
+            remove_drafts_dir_if_empty(&root, &persona_id);
+            Ok(())
+        })
+        .await
+        .map_err(refusal_of)?;
+    }
+    state.emit_log("info", "Golem look draft discarded.");
+    draft_status_in(state, env).await
+}
+
+/// `cohost.avatar.draft.get`: the active Golem's draft (a draft left on disk
+/// by an earlier run is offered again) and the job running now.
+pub async fn draft_status(
+    state: &AppState,
+) -> Result<CohostAvatarDraftStatus, CohostAvatarRefusal> {
+    draft_status_in(state, AvatarEnv::process()).await
+}
+
+async fn draft_status_in(
+    state: &AppState,
+    env: AvatarEnv,
+) -> Result<CohostAvatarDraftStatus, CohostAvatarRefusal> {
+    let running = env.shared.running();
+    let Some(root) = env.root else {
+        return Ok(CohostAvatarDraftStatus {
+            draft: None,
+            running,
+        });
+    };
+    let persona = state.cohost.lock().await.settings().persona.clone();
+    if !persona_id_ok(&persona.id) {
+        return Ok(CohostAvatarDraftStatus {
+            draft: None,
+            running,
+        });
+    }
+    let draft = blocking(move || Ok(find_draft(&root, &persona.id)))
+        .await
+        .map_err(refusal_of)?;
+    Ok(CohostAvatarDraftStatus { draft, running })
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::cohost::CohostErrorDetail;
-    use crate::cohost::{CohostPersonaImages, CohostPersonaSource};
-    use crate::videorc_api::CohostApiErrorKind;
-    use base64::Engine as _;
-
-    fn png_bytes(width: u32, height: u32) -> Vec<u8> {
-        let image = image::RgbaImage::from_pixel(width, height, image::Rgba([0, 0, 0, 0]));
-        let mut png = Vec::new();
-        image::DynamicImage::ImageRgba8(image)
-            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-            .unwrap();
-        png
-    }
-
-    fn temp_root() -> PathBuf {
-        let root = std::env::temp_dir().join(format!("videorc-golem-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        root
-    }
-
-    fn persona(id: &str, idle: Option<&str>) -> CohostPersona {
-        CohostPersona {
-            id: id.to_string(),
-            name: "Grum".to_string(),
-            personality: String::new(),
-            bubble_style: Default::default(),
-            images: CohostPersonaImages {
-                idle: idle.map(str::to_string),
-                ..CohostPersonaImages::default()
-            },
-            source: CohostPersonaSource::Generated,
-            ..CohostPersona::default()
-        }
-    }
-
-    #[test]
-    fn prompt_is_trimmed_and_bounded() {
-        assert_eq!(shape_prompt("  a stone golem  ").unwrap(), "a stone golem");
-        assert_eq!(
-            shape_prompt("   ").unwrap_err().code,
-            "cohost-avatar-prompt-empty"
-        );
-        assert_eq!(
-            shape_prompt(&"p".repeat(601)).unwrap_err().code,
-            "cohost-avatar-prompt-too-long"
-        );
-        assert!(shape_prompt(&"p".repeat(600)).is_ok());
-    }
-
-    #[test]
-    fn stores_a_png_under_the_persona_folder_and_drops_an_older_upload_for_that_state() {
-        let root = temp_root();
-        std::fs::create_dir_all(root.join("p-1")).unwrap();
-        std::fs::write(root.join("p-1").join("laugh.webp"), b"old").unwrap();
-        let encoded = base64::engine::general_purpose::STANDARD.encode(png_bytes(2, 2));
-        let path = store_avatar_png(&root, "p-1", CohostAvatarState::Laugh, &encoded).unwrap();
-        assert_eq!(path, "p-1/laugh.png");
-        assert!(root.join("p-1").join("laugh.png").is_file());
-        assert!(!root.join("p-1").join("laugh.webp").exists());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn refuses_what_is_not_a_small_png_before_writing() {
-        let root = temp_root();
-        let not_base64 = store_avatar_png(&root, "p", CohostAvatarState::Idle, "***").unwrap_err();
-        assert_eq!(not_base64.code, "avatar-image-unreadable");
-        let jpeg = base64::engine::general_purpose::STANDARD.encode([0xff, 0xd8, 0xff, 0xe0]);
-        assert_eq!(
-            store_avatar_png(&root, "p", CohostAvatarState::Idle, &jpeg)
-                .unwrap_err()
-                .message,
-            "The generated image is not a PNG."
-        );
-        let escaped = base64::engine::general_purpose::STANDARD.encode(png_bytes(1, 1));
-        assert_eq!(
-            store_avatar_png(&root, "../p", CohostAvatarState::Idle, &escaped)
-                .unwrap_err()
-                .code,
-            "cohost-avatar-persona-invalid"
-        );
-        assert!(!root.join("p").exists());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn the_idle_image_rides_as_the_base_for_other_states_only() {
-        let root = temp_root();
-        std::fs::create_dir_all(root.join("p")).unwrap();
-        std::fs::write(root.join("p").join("idle.png"), png_bytes(1, 1)).unwrap();
-        let with_idle = persona("p", Some("p/idle.png"));
-        assert!(base_image_for(&root, &with_idle, CohostAvatarState::Idle).is_none());
-        let base = base_image_for(&root, &with_idle, CohostAvatarState::Talk).unwrap();
-        assert_eq!(
-            base64::engine::general_purpose::STANDARD
-                .decode(base)
-                .unwrap(),
-            png_bytes(1, 1)
-        );
-        // Another persona's folder, a JPEG idle (no alpha) and a missing
-        // idle all mean "no base", never a refusal.
-        assert!(
-            base_image_for(
-                &root,
-                &persona("p", Some("q/idle.png")),
-                CohostAvatarState::Talk
-            )
-            .is_none()
-        );
-        assert!(
-            base_image_for(
-                &root,
-                &persona("p", Some("p/idle.jpg")),
-                CohostAvatarState::Talk
-            )
-            .is_none()
-        );
-        assert!(base_image_for(&root, &persona("p", None), CohostAvatarState::Talk).is_none());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn web_error_codes_become_the_tile_hints_the_plan_names() {
-        let error = |code: &str, message: &str| CohostApiError {
-            kind: CohostApiErrorKind::GatewayError,
-            detail: CohostErrorDetail::new(code, message, Some(500)),
-        };
-        assert_eq!(
-            tile_error(&error("quota-exhausted", "x")).message,
-            COHOST_AVATAR_QUOTA_HINT
-        );
-        for code in [
-            "avatar-model-unconfigured",
-            "avatar-disabled",
-            "cohost-disabled",
-            "ai-gateway-not-configured",
-        ] {
-            assert_eq!(
-                tile_error(&error(code, "x")).message,
-                COHOST_AVATAR_UNAVAILABLE_HINT,
-                "{code}"
-            );
-        }
-        let passthrough = tile_error(&error("ai-gateway-error", "The model said no."));
-        assert_eq!(passthrough.code, "ai-gateway-error");
-        assert_eq!(passthrough.message, "The model said no.");
-    }
-
-    #[test]
-    fn avatar_request_wire_shape_matches_the_route() {
-        let request = CohostAvatarRequest {
-            prompt: "a golem".to_string(),
-            style: CohostAvatarStyle::Sticker,
-            state: CohostAvatarState::Laugh,
-            base_image: Some("AAAA".to_string()),
-        };
-        let json = serde_json::to_value(&request).unwrap();
-        assert_eq!(json["prompt"], "a golem");
-        assert_eq!(json["style"], "sticker");
-        assert_eq!(json["state"], "laugh");
-        assert_eq!(json["baseImage"], "AAAA");
-        let idle = CohostAvatarRequest {
-            base_image: None,
-            ..request
-        };
-        assert!(
-            serde_json::to_value(&idle)
-                .unwrap()
-                .get("baseImage")
-                .is_none()
-        );
-        let response: crate::videorc_api::CohostAvatarResponse =
-            serde_json::from_str(r#"{"pngBase64":"AAAA"}"#).unwrap();
-        assert!(!response.opaque);
-        assert_eq!(response.png_base64, "AAAA");
-    }
-}
+mod tests;

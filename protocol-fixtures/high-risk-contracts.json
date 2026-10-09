@@ -1722,5 +1722,53 @@
       "source": "videorc-creator",
       "hasTalk": true
     }
+  },
+  "golemLook": {
+    "createParams": {
+      "description": "A grumpy stone golem with a mossy back",
+      "inspirationBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    },
+    "createDescriptionParams": { "description": "A grumpy stone golem with a mossy back" },
+    "redoParams": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8", "state": "laugh" },
+    "requestIdParams": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8" },
+    "accepted": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8" },
+    "progressWorking": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8", "state": "idle", "phase": "working" },
+    "progressDone": {
+      "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8",
+      "state": "talk",
+      "phase": "done",
+      "path": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/talk.png"
+    },
+    "progressFailed": {
+      "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8",
+      "state": "think",
+      "phase": "failed",
+      "error": { "code": "avatar-timeout", "message": "The model took too long. Try again." }
+    },
+    "draft": {
+      "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8",
+      "images": {
+        "idle": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/idle.png",
+        "talk": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/talk.png",
+        "laugh": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/laugh.png"
+      },
+      "failed": {
+        "think": { "code": "ai-gateway-error", "message": "The image model failed. Try again." }
+      }
+    },
+    "status": {
+      "draft": {
+        "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8",
+        "images": {
+          "idle": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/idle.png",
+          "talk": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/talk.png",
+          "laugh": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/laugh.png",
+          "think": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/think.png"
+        },
+        "failed": {}
+      },
+      "running": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8", "kind": "redo", "state": "think" }
+    },
+    "statusNone": {}
   }
 }
