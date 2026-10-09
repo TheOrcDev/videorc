@@ -65,7 +65,7 @@ export function removalKeyAnswer(
  * only while nothing else has focus, so a digit typed in the composer or the
  * search field is always just a digit. Null to leave the key alone.
  */
-export function orcleCardPickIndex(
+export function golemCardPickIndex(
   event: Parameters<typeof removalKeyAnswer>[0],
   activeElement: Element | null,
   body: Element | null,

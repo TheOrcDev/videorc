@@ -29,7 +29,7 @@ vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
   useStudioRecordingState: () => mocked.recording
 }))
-vi.mock('@/hooks/use-orcle-report', () => ({ useOrcleReport: () => mocked.report }))
+vi.mock('@/hooks/use-golem-report', () => ({ useGolemReport: () => mocked.report }))
 vi.mock('@tanstack/react-virtual', () => ({
   useVirtualizer: (options: {
     count: number

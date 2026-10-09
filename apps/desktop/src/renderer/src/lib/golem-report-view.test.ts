@@ -18,14 +18,14 @@ import {
   missedQuestions,
   momentKind,
   newestStreamedSessionId,
-  ORCLE_REPORT_DESCRIPTION,
-  ORCLE_REPORT_EMPTY,
-  ORCLE_REPORT_LIST_CAP,
-  ORCLE_REPORT_NEXT_STREAM,
-  ORCLE_REPORT_OFF,
-  ORCLE_REPORT_SWITCHER_LIMIT,
-  ORCLE_REPORT_TURN_ON,
-  orcleReportView,
+  GOLEM_REPORT_DESCRIPTION,
+  GOLEM_REPORT_EMPTY,
+  GOLEM_REPORT_LIST_CAP,
+  GOLEM_REPORT_NEXT_STREAM,
+  GOLEM_REPORT_OFF,
+  GOLEM_REPORT_SWITCHER_LIMIT,
+  GOLEM_REPORT_TURN_ON,
+  golemReportView,
   questionTally,
   reportAlertLabel,
   reportCommands,
@@ -34,7 +34,7 @@ import {
   reportSessionChoice,
   reportSessionOptions,
   streamOffsetLabel
-} from './orcle-report-view'
+} from './golem-report-view'
 
 function question(overrides: Partial<CohostReportQuestion> = {}): CohostReportQuestion {
   return {
@@ -174,17 +174,17 @@ function session(overrides: Partial<SessionSummary> = {}): SessionSummary {
 
 describe('Golem report copy (plan 119 S3)', () => {
   it("says what the report holds in the website's words", () => {
-    expect(ORCLE_REPORT_DESCRIPTION).toBe(
+    expect(GOLEM_REPORT_DESCRIPTION).toBe(
       'Golem saves a short report on your computer: questions caught and missed, flags, promises, first-timers greeted, and the moments you marked by saying clip that.'
     )
-    expect(ORCLE_REPORT_EMPTY).toBe('The report appears here after your first stream with Golem.')
-    expect(ORCLE_REPORT_TURN_ON).toBe('Turn on Golem to also catch questions.')
+    expect(GOLEM_REPORT_EMPTY).toBe('The report appears here after your first stream with Golem.')
+    expect(GOLEM_REPORT_TURN_ON).toBe('Turn on Golem to also catch questions.')
     for (const copy of [
-      ORCLE_REPORT_DESCRIPTION,
-      ORCLE_REPORT_EMPTY,
-      ORCLE_REPORT_OFF,
-      ORCLE_REPORT_TURN_ON,
-      ORCLE_REPORT_NEXT_STREAM
+      GOLEM_REPORT_DESCRIPTION,
+      GOLEM_REPORT_EMPTY,
+      GOLEM_REPORT_OFF,
+      GOLEM_REPORT_TURN_ON,
+      GOLEM_REPORT_NEXT_STREAM
     ]) {
       expect(copy).not.toContain('—')
       expect(copy).not.toMatch(/co-host|publish/i)
@@ -329,7 +329,7 @@ describe('moments', () => {
 
 describe('report view', () => {
   it('builds the full card from a saved report', () => {
-    const view = orcleReportView({ payload: payload(), session: SESSION, orcleOn: true })
+    const view = golemReportView({ payload: payload(), session: SESSION, golemOn: true })
     expect(view.kind).toBe('report')
     if (view.kind !== 'report') return
     expect(view.sessionId).toBe('stream-1')
@@ -374,10 +374,10 @@ describe('report view', () => {
   })
 
   it('names and times the stream from the report alone when the Library row is not loaded', () => {
-    const view = orcleReportView({
+    const view = golemReportView({
       payload: payload({ report: report({ streamTitle: undefined }) }),
       session: null,
-      orcleOn: true
+      golemOn: true
     })
     if (view.kind !== 'report') throw new Error(view.kind)
     expect(view.title).toBe('Untitled stream')
@@ -385,23 +385,23 @@ describe('report view', () => {
     expect(view.duration).toBe('1 hour and 29 minutes')
     expect(view.promises[0].at).toBe('4:30')
 
-    const named = orcleReportView({
+    const named = golemReportView({
       payload: payload({ report: report({ streamTitle: '  ' }) }),
       session: SESSION,
-      orcleOn: true
+      golemOn: true
     })
     if (named.kind !== 'report') throw new Error(named.kind)
     expect(named.title).toBe('Friday stream')
   })
 
   it('keeps moments and chat for a stream Golem missed, and says how to catch questions', () => {
-    const view = orcleReportView({
+    const view = golemReportView({
       payload: payload({ report: null }),
       session: SESSION,
-      orcleOn: false
+      golemOn: false
     })
-    expect(view.kind).toBe('orcle-off')
-    if (view.kind !== 'orcle-off') return
+    expect(view.kind).toBe('golem-off')
+    if (view.kind !== 'golem-off') return
     expect(view.title).toBe('Friday stream')
     expect(view.note).toEqual({
       title: 'Golem was off for this stream.',
@@ -412,24 +412,24 @@ describe('report view', () => {
     expect(view.moments).toHaveLength(3)
     expect(view.chat.label).toBe('84 chat messages')
 
-    const on = orcleReportView({
+    const on = golemReportView({
       payload: payload({ report: null }),
       session: SESSION,
-      orcleOn: true
+      golemOn: true
     })
-    if (on.kind !== 'orcle-off') throw new Error(on.kind)
+    if (on.kind !== 'golem-off') throw new Error(on.kind)
     expect(on.note?.hint).toBe('It joins your next stream.')
   })
 
   it('is empty before the first stream', () => {
-    expect(orcleReportView({ payload: null, session: null, orcleOn: false })).toEqual({
+    expect(golemReportView({ payload: null, session: null, golemOn: false })).toEqual({
       kind: 'empty',
       message: 'The report appears here after your first stream with Golem.'
     })
   })
 
   it('shows zeros for a quiet stream instead of hiding the counts', () => {
-    const quiet = orcleReportView({
+    const quiet = golemReportView({
       payload: payload({
         moments: [],
         chat: { messages: 0, byPlatform: [] },
@@ -450,7 +450,7 @@ describe('report view', () => {
         })
       }),
       session: SESSION,
-      orcleOn: true
+      golemOn: true
     })
     if (quiet.kind !== 'report') throw new Error(quiet.kind)
     expect(quiet.stats.every((stat) => stat.value === '0')).toBe(true)
@@ -509,19 +509,19 @@ describe('report view', () => {
       })
     ).toBeNull()
     // The card's view carries it; a stream Golem missed has none.
-    const view = orcleReportView({
+    const view = golemReportView({
       payload: payload({ report: report({ commands: counts }) }),
       session: SESSION,
-      orcleOn: true
+      golemOn: true
     })
     if (view.kind !== 'report') throw new Error(view.kind)
     expect(view.commands?.total).toBe('9 commands')
-    const off = orcleReportView({
+    const off = golemReportView({
       payload: payload({ report: null }),
       session: SESSION,
-      orcleOn: true
+      golemOn: true
     })
-    if (off.kind !== 'orcle-off') throw new Error(off.kind)
+    if (off.kind !== 'golem-off') throw new Error(off.kind)
     expect(off.commands).toBeNull()
   })
 
@@ -536,7 +536,7 @@ describe('report view', () => {
 })
 
 describe('report lists', () => {
-  it(`shows ${ORCLE_REPORT_LIST_CAP} rows, then the rest behind Show all`, () => {
+  it(`shows ${GOLEM_REPORT_LIST_CAP} rows, then the rest behind Show all`, () => {
     const rows = Array.from({ length: 8 }, (_, index) => index)
     expect(capReportList(rows, false)).toEqual({ visible: [0, 1, 2, 3, 4], hidden: 3 })
     expect(capReportList(rows, true)).toEqual({ visible: rows, hidden: 0 })
@@ -573,7 +573,7 @@ describe('stream switcher', () => {
     ])
   })
 
-  it(`lists at most ${ORCLE_REPORT_SWITCHER_LIMIT}, plus the shown stream when the Library page ends before it`, () => {
+  it(`lists at most ${GOLEM_REPORT_SWITCHER_LIMIT}, plus the shown stream when the Library page ends before it`, () => {
     const many = Array.from({ length: 30 }, (_, index) =>
       session({
         id: `s${index}`,
@@ -581,12 +581,12 @@ describe('stream switcher', () => {
       })
     )
     const options = reportSessionOptions(many, null)
-    expect(options).toHaveLength(ORCLE_REPORT_SWITCHER_LIMIT)
+    expect(options).toHaveLength(GOLEM_REPORT_SWITCHER_LIMIT)
     expect(options[0].id).toBe('s29')
     const shown = { id: 'archived', title: 'Old one', date: 'Jan 1' }
     expect(reportSessionOptions(many, shown).at(-1)).toEqual(shown)
     expect(reportSessionOptions(many, { ...shown, id: 's29' })).toHaveLength(
-      ORCLE_REPORT_SWITCHER_LIMIT
+      GOLEM_REPORT_SWITCHER_LIMIT
     )
   })
 

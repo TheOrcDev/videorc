@@ -83,7 +83,7 @@ import {
   golemOnboardingCounter,
   golemOnboardingProgress
 } from '@/lib/golem-onboarding-copy'
-import { CLOUD_AI_KEEPS, CLOUD_AI_USES } from '@/lib/orcle-tab-view'
+import { CLOUD_AI_KEEPS, CLOUD_AI_USES } from '@/lib/golem-tab-view'
 import { displayKeyGlyph } from '@/lib/platform'
 import { VIDEORC_PREMIUM_URL } from '@/lib/premium-upgrade'
 import { cn } from '@/lib/utils'

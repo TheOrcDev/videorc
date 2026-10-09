@@ -1,6 +1,6 @@
 import { useState, type ReactElement } from 'react'
 
-import { OrcleEmblem } from '@/components/orcle-emblem'
+import { GolemEmblem } from '@/components/golem-emblem'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -154,7 +154,7 @@ export function GolemChatControls({
         <DialogContent showCloseButton={false}>
           <DialogHeader>
             <div className="flex items-center gap-3">
-              <OrcleEmblem size="lg" />
+              <GolemEmblem size="lg" />
               <div className="flex flex-col gap-1">
                 <DialogTitle>
                   {step === 'confirm-auto' ? 'Turn on Auto?' : 'Let the Golem post as you?'}

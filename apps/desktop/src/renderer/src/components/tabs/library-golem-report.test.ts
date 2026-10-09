@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { WorkspaceNavContext } from '@/components/workspace-nav'
 import type { SessionSummary } from '@/lib/backend'
-import { hasOrcleReport } from '@/lib/library-view'
+import { hasGolemReport } from '@/lib/library-view'
 
 import { LibraryTab } from './library-tab'
 
@@ -22,7 +22,7 @@ vi.mock('@/hooks/use-studio', () => ({
 
 let root: Root
 let container: HTMLDivElement
-const onOpenOrcleReport = vi.fn((_sessionId: string) => undefined)
+const onOpenGolemReport = vi.fn((_sessionId: string) => undefined)
 const onOpenCleanCut = vi.fn((_sessionId: string) => undefined)
 
 function session(overrides: Partial<SessionSummary>): SessionSummary {
@@ -51,7 +51,7 @@ const SESSIONS = [
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
-  onOpenOrcleReport.mockClear()
+  onOpenGolemReport.mockClear()
   mocked.recording = { state: 'idle' }
   mocked.core = {
     sessions: SESSIONS,
@@ -97,7 +97,7 @@ async function render(): Promise<void> {
     openStudioPanel: vi.fn(),
     closeStudioPanel: vi.fn(),
     openSettings: vi.fn(),
-    openOrcle: vi.fn()
+    openGolem: vi.fn()
   }
   await act(async () =>
     root.render(
@@ -107,7 +107,7 @@ async function render(): Promise<void> {
         createElement(
           TooltipProvider,
           null,
-          createElement(LibraryTab, { onOpenOrcleReport, onOpenCleanCut })
+          createElement(LibraryTab, { onOpenGolemReport, onOpenCleanCut })
         )
       )
     )
@@ -148,7 +148,7 @@ describe('Library → Golem report (plan 119 S3)', () => {
     const items = await openMenu('stream-1')
     expect(labels(items).slice(0, 2)).toEqual(['Play', 'Golem report'])
     await act(async () => items[1].click())
-    expect(onOpenOrcleReport).toHaveBeenCalledExactlyOnceWith('stream-1')
+    expect(onOpenGolemReport).toHaveBeenCalledExactlyOnceWith('stream-1')
 
     const streamOnly = await openMenu('stream-only')
     expect(labels(streamOnly)).toContain('Golem report')
@@ -175,10 +175,10 @@ describe('Library → Golem report (plan 119 S3)', () => {
   })
 
   it('knows which sessions went out live', () => {
-    expect(hasOrcleReport({ mode: 'stream' })).toBe(true)
-    expect(hasOrcleReport({ mode: 'record+stream' })).toBe(true)
-    expect(hasOrcleReport({ mode: 'streaming' })).toBe(true)
-    expect(hasOrcleReport({ mode: 'record' })).toBe(false)
-    expect(hasOrcleReport({ mode: 'imported' })).toBe(false)
+    expect(hasGolemReport({ mode: 'stream' })).toBe(true)
+    expect(hasGolemReport({ mode: 'record+stream' })).toBe(true)
+    expect(hasGolemReport({ mode: 'streaming' })).toBe(true)
+    expect(hasGolemReport({ mode: 'record' })).toBe(false)
+    expect(hasGolemReport({ mode: 'imported' })).toBe(false)
   })
 })

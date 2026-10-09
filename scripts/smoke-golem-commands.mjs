@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { devAppSpawnOptions, repoRoot, stopProcess } from './lib/app-launcher.mjs'
 import { startCaptionAudioPump } from './lib/cohost-caption-audio.mjs'
 import { startFakeApiRouter } from './lib/fake-api-router.mjs'
-import { ORCLE_COMMAND_FINALS, startFakeCaptionService } from './lib/fake-caption-service.mjs'
+import { GOLEM_COMMAND_FINALS, startFakeCaptionService } from './lib/fake-caption-service.mjs'
 import {
   COHOST_SPOTLIGHT_PATH,
   COHOST_TICK_PATH,
@@ -46,16 +46,16 @@ const CONFIRM_WINDOW_MS = 20_000
 const COMMAND_DEADLINE_MS = 6_000
 const KILL_SWITCH_QUIET_MS = 4_000
 
-const stateRoot = mkdtempSync(join(tmpdir(), 'videorc-orcle-commands-smoke-'))
+const stateRoot = mkdtempSync(join(tmpdir(), 'videorc-golem-commands-smoke-'))
 const backendBinaryName = process.platform === 'win32' ? 'videorc-backend.exe' : 'videorc-backend'
 const backendBinary = join(repoRoot, 'target', 'debug', backendBinaryName)
-const smokeSessionToken = `orcle-smoke-session-${randomUUID()}`
+const smokeSessionToken = `golem-smoke-session-${randomUUID()}`
 // No colons: message ids are `<session>:<platform>:<target>:<provider id>`.
-const sessionId = `orcle-smoke-${Date.now()}`
+const sessionId = `golem-smoke-${Date.now()}`
 
 const MAIN_LANE = {
   platform: 'twitch',
-  targetId: 'orcle-main',
+  targetId: 'golem-main',
   count: 6,
   intervalMs: 250,
   send: 'sent',
@@ -65,7 +65,7 @@ const MAIN_LANE = {
 }
 const NO_SCOPE_LANE = {
   platform: 'kick',
-  targetId: 'orcle-noscope',
+  targetId: 'golem-noscope',
   count: 1,
   intervalMs: 300,
   send: 'sent',
@@ -78,7 +78,7 @@ const SPOTLIGHT_PHRASE = 'mechanical keyboard'
 const fakeCohost = await startFakeCohostService({ smokeSessionToken, flagMarker: FLAG_MARKER })
 const captionFake = await startFakeCaptionService({
   smokeSessionToken,
-  smokeRealtimeToken: `orcle-smoke-realtime-${randomUUID()}`,
+  smokeRealtimeToken: `golem-smoke-realtime-${randomUUID()}`,
   autoTranscript: false
 })
 const capabilities = await startFakeTranscriptService({ smokeSessionToken })
@@ -98,10 +98,10 @@ const router = await startFakeApiRouter({
 const startedAt = Date.now()
 const results = []
 const phase = (label) =>
-  console.log(`[orcle-smoke +${((Date.now() - startedAt) / 1000).toFixed(1)}s] ${label}`)
+  console.log(`[golem-smoke +${((Date.now() - startedAt) / 1000).toFixed(1)}s] ${label}`)
 const pass = (label) => {
   results.push(label)
-  console.log(`[orcle-smoke +${((Date.now() - startedAt) / 1000).toFixed(1)}s] PASS ${label}`)
+  console.log(`[golem-smoke +${((Date.now() - startedAt) / 1000).toFixed(1)}s] PASS ${label}`)
 }
 const launched = []
 
@@ -229,8 +229,8 @@ async function runPremiumScenario(profile) {
     expect(parserProbe.status === 404, 'The command-parser observation probe hit the wrong fake')
     const commandRequestsBeforeMarkers = captionFake.state.commandRequests
     expect(commandRequestsBeforeMarkers > 0, 'The router did not expose command-parser requests')
-    await say(events, ORCLE_COMMAND_FINALS.namedMarker)
-    await say(events, ORCLE_COMMAND_FINALS.negatedMarker)
+    await say(events, GOLEM_COMMAND_FINALS.namedMarker)
+    await say(events, GOLEM_COMMAND_FINALS.negatedMarker)
     expect(
       (await request(ws, timeoutMs, 'session.markers.list', { sessionId })).markers.length === 0,
       'A chat session without capture saved a named marker'
@@ -246,7 +246,7 @@ async function runPremiumScenario(profile) {
     // 1. Highlight by name, one command split across two finals.
     phase('A1: "Orcle, highlight the comment" | "from coders X."')
     const highlightSince = Date.now()
-    await say(events, ORCLE_COMMAND_FINALS.highlightByNameSplit)
+    await say(events, GOLEM_COMMAND_FINALS.highlightByNameSplit)
     const highlighted = await waitForCommand(
       events,
       (command) => command.kind === 'highlight' && command.status === 'done',
@@ -278,7 +278,7 @@ async function runPremiumScenario(profile) {
     // 2. Clear (before the 8 s apply timeout retires the unexecuted card).
     phase('A2: "Orcle, clear the highlight."')
     const clearSince = Date.now()
-    await say(events, ORCLE_COMMAND_FINALS.clear)
+    await say(events, GOLEM_COMMAND_FINALS.clear)
     const cleared = await waitForCommand(
       events,
       (command) => command.kind === 'clear' && command.status === 'done',
@@ -299,7 +299,7 @@ async function runPremiumScenario(profile) {
     // 3. "This one" removal of the flagged comment, confirmed by voice.
     phase('A3: "This one is toxic. Remove it from our chat." then "Yes."')
     const removeSince = Date.now()
-    await say(events, ORCLE_COMMAND_FINALS.removeThisOne)
+    await say(events, GOLEM_COMMAND_FINALS.removeThisOne)
     const card = await waitForCommand(
       events,
       (command) =>
@@ -327,7 +327,7 @@ async function runPremiumScenario(profile) {
         Math.abs(confirmWindow - CONFIRM_WINDOW_MS) <= 1_000,
       `The voice removal should wait 20 s for an answer: ${JSON.stringify(pending)}`
     )
-    await say(events, ORCLE_COMMAND_FINALS.confirm)
+    await say(events, GOLEM_COMMAND_FINALS.confirm)
     const removed = await waitForOperation(
       events,
       card.command.operationId,
@@ -388,7 +388,7 @@ async function runPremiumScenario(profile) {
       cancelCard.command.target?.messageId === anaNewest.id,
       `Removal by name should target ana_dev's newest comment: ${JSON.stringify(cancelCard.command)}`
     )
-    await say(events, ORCLE_COMMAND_FINALS.cancel)
+    await say(events, GOLEM_COMMAND_FINALS.cancel)
     const cancelled = await waitForOperation(
       events,
       cancelCard.command.operationId,
@@ -423,7 +423,7 @@ async function runPremiumScenario(profile) {
       hideCard.command.target?.messageId === lurker.id,
       `Removal by name should target kick_lurker: ${JSON.stringify(hideCard.command)}`
     )
-    await say(events, ORCLE_COMMAND_FINALS.confirm)
+    await say(events, GOLEM_COMMAND_FINALS.confirm)
     const hidden = await waitForOperation(
       events,
       hideCard.command.operationId,
@@ -465,7 +465,7 @@ async function runPremiumScenario(profile) {
       spotlightSince
     )
     const thisOneSince = Date.now()
-    await say(events, ORCLE_COMMAND_FINALS.highlightThisOne)
+    await say(events, GOLEM_COMMAND_FINALS.highlightThisOne)
     const thisOne = await waitForCommand(
       events,
       (command) => command.kind === 'highlight' && command.status === 'done',
@@ -624,7 +624,7 @@ async function runRestartAndKillSwitchScenario(profile, pendingAtKill) {
     `Both switches should read paused: ${JSON.stringify(paused.commandAvailability)}`
   )
   const killSessionId = `${sessionId}-killswitch`
-  const lane = { ...MAIN_LANE, targetId: 'orcle-killswitch', count: 3 }
+  const lane = { ...MAIN_LANE, targetId: 'golem-killswitch', count: 3 }
   await request(ws, timeoutMs, 'cohost.settings.set', {
     enabled: true,
     listen: true,
@@ -720,7 +720,7 @@ async function runBasicScenario(profile) {
   const { ws, events } = backend
   phase('B: Basic account (VIDEORC_PREMIUM_FEATURES=0)')
   const basicSessionId = `${sessionId}-basic`
-  const lane = { ...MAIN_LANE, targetId: 'orcle-basic', count: 3 }
+  const lane = { ...MAIN_LANE, targetId: 'golem-basic', count: 3 }
   await request(ws, timeoutMs, 'cohost.settings.set', { enabled: true, listen: true })
   await request(ws, timeoutMs, 'liveChat.start', {
     sessionId: basicSessionId,
@@ -1035,7 +1035,7 @@ async function waitUntilAsync(probe, deadlineMs, label) {
 
 /** Like `request`, but resolves the whole envelope so error codes are visible. */
 function requestRaw(socket, method, params) {
-  const id = `orcle-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  const id = `golem-${Date.now()}-${Math.random().toString(16).slice(2)}`
   return new Promise((resolveRequest, rejectRequest) => {
     const timer = setTimeout(() => {
       socket.removeEventListener('message', onMessage)
@@ -1059,7 +1059,7 @@ function requestRaw(socket, method, params) {
 }
 
 function expect(condition, message) {
-  if (!condition) throw new Error(`[orcle-smoke] ${message}`)
+  if (!condition) throw new Error(`[golem-smoke] ${message}`)
 }
 
 function sleep(ms) {

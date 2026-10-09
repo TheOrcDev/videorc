@@ -4,7 +4,7 @@ import { BackendClient } from '@/backendClient'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { CohostReportPayload } from '@/lib/backend'
 
-export interface OrcleReportState {
+export interface GolemReportState {
   /**
    * The backend's answer for the asked session (or the latest stream). The
    * previous answer stays while another session loads, so switching never
@@ -26,7 +26,7 @@ interface Answer {
   error: string | null
 }
 
-export const ORCLE_REPORT_READ_ERROR = "Couldn't read this report."
+export const GOLEM_REPORT_READ_ERROR = "Couldn't read this report."
 
 /**
  * The Golem tab's stream report (plan 119 S3). Like Upcoming and the 7TV
@@ -36,7 +36,7 @@ export const ORCLE_REPORT_READ_ERROR = "Couldn't read this report."
  * asks again, so a stream that just ended shows up without a click. The
  * client follows the studio's connection, so a backend restart reconnects it.
  */
-export function useOrcleReport(sessionId: string | null): OrcleReportState {
+export function useGolemReport(sessionId: string | null): GolemReportState {
   const { connection, wsStatus } = useStudioCore()
   const online = wsStatus === 'connected' ? connection : null
   const [client, setClient] = useState<BackendClient | null>(null)
@@ -88,7 +88,7 @@ export function useOrcleReport(sessionId: string | null): OrcleReportState {
           setAnswer((previous) => ({
             ask,
             payload: previous?.payload ?? null,
-            error: ORCLE_REPORT_READ_ERROR
+            error: GOLEM_REPORT_READ_ERROR
           }))
         }
       }
@@ -107,7 +107,7 @@ export function useOrcleReport(sessionId: string | null): OrcleReportState {
   return {
     payload: answer?.payload ?? null,
     loading: settled === null && !connectFailed,
-    error: connectFailed ? ORCLE_REPORT_READ_ERROR : (settled?.error ?? null),
+    error: connectFailed ? GOLEM_REPORT_READ_ERROR : (settled?.error ?? null),
     reload
   }
 }

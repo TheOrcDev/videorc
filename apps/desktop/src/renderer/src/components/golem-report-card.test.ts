@@ -10,9 +10,9 @@ import type {
   SessionSummary
 } from '@/lib/backend'
 import { dayLabel } from '@/lib/format'
-import { ORCLE_REPORT_DESCRIPTION } from '@/lib/orcle-report-view'
+import { GOLEM_REPORT_DESCRIPTION } from '@/lib/golem-report-view'
 
-import { OrcleReportCard } from './orcle-report-card'
+import { GolemReportCard } from './golem-report-card'
 
 const mocked = vi.hoisted(() => ({
   core: {} as Record<string, unknown>,
@@ -20,8 +20,8 @@ const mocked = vi.hoisted(() => ({
   asked: [] as Array<string | null>
 }))
 vi.mock('@/hooks/use-studio', () => ({ useStudioCore: () => mocked.core }))
-vi.mock('@/hooks/use-orcle-report', () => ({
-  useOrcleReport: (sessionId: string | null) => {
+vi.mock('@/hooks/use-golem-report', () => ({
+  useGolemReport: (sessionId: string | null) => {
     mocked.asked.push(sessionId)
     return mocked.report
   }
@@ -165,15 +165,15 @@ async function render({
   sessionId = null as string | null,
   report = { payload: payload(), loading: false, error: null } as Record<string, unknown>,
   sessions = SESSIONS,
-  orcleOn = true
+  golemOn = true
 } = {}): Promise<void> {
-  mocked.core = { sessions, cohostSettings: { enabled: orcleOn } }
+  mocked.core = { sessions, cohostSettings: { enabled: golemOn } }
   mocked.report = { reload, ...report }
-  await act(async () => root.render(createElement(OrcleReportCard, { sessionId, onSessionChange })))
+  await act(async () => root.render(createElement(GolemReportCard, { sessionId, onSessionChange })))
 }
 
 function card(): HTMLElement {
-  return document.querySelector('[data-slot="orcle-report"]') as HTMLElement
+  return document.querySelector('[data-slot="golem-report"]') as HTMLElement
 }
 
 function text(): string {
@@ -186,7 +186,7 @@ function stat(id: string): string {
 
 function rows(list: string): HTMLElement[] {
   return [
-    ...document.querySelectorAll(`[data-slot="orcle-report-${list}"] [data-slot="list-row"]`)
+    ...document.querySelectorAll(`[data-slot="golem-report-${list}"] [data-slot="list-row"]`)
   ] as HTMLElement[]
 }
 
@@ -206,15 +206,15 @@ describe('Golem report card (plan 119 S3)', () => {
     // Plan 150: one title; the picker names which stream.
     expect(text()).toContain('Stream report')
     expect(text()).not.toContain('Last stream')
-    expect(text()).toContain(ORCLE_REPORT_DESCRIPTION)
+    expect(text()).toContain(GOLEM_REPORT_DESCRIPTION)
     expect(card().getAttribute('data-state')).toBe('report')
 
-    const stream = document.querySelector('[data-slot="orcle-report-stream"]')?.textContent
+    const stream = document.querySelector('[data-slot="golem-report-stream"]')?.textContent
     expect(stream).toContain('Rust night')
     expect(stream).toContain('1 hour and 30 minutes')
     expect(stream).toContain('84 chat messages')
     expect(
-      document.querySelector('[data-slot="orcle-report-stream"] [title="Twitch: 60 messages"]')
+      document.querySelector('[data-slot="golem-report-stream"] [title="Twitch: 60 messages"]')
     ).toBeTruthy()
 
     expect(stat('questions')).toBe('2')
@@ -269,16 +269,16 @@ describe('Golem report card (plan 119 S3)', () => {
 
   it('keeps moments and chat for a stream Golem was off for', async () => {
     await render({
-      orcleOn: false,
+      golemOn: false,
       report: { payload: payload({ report: null }), loading: false, error: null }
     })
-    expect(card().getAttribute('data-state')).toBe('orcle-off')
-    const note = document.querySelector('[data-testid="orcle-report-off"]')?.textContent
+    expect(card().getAttribute('data-state')).toBe('golem-off')
+    const note = document.querySelector('[data-testid="golem-report-off"]')?.textContent
     expect(note).toContain('Golem was off for this stream.')
     expect(note).toContain('Turn on Golem to also catch questions.')
-    expect(document.querySelector('[data-slot="orcle-report-stats"]')).toBeNull()
+    expect(document.querySelector('[data-slot="golem-report-stats"]')).toBeNull()
     expect(rows('moments')).toHaveLength(3)
-    expect(document.querySelector('[data-slot="orcle-report-stream"]')?.textContent).toContain(
+    expect(document.querySelector('[data-slot="golem-report-stream"]')?.textContent).toContain(
       'Friday stream'
     )
   })
@@ -331,7 +331,7 @@ describe('Golem report card (plan 119 S3)', () => {
   })
 })
 
-describe('OrcleReportCard: the Commands row (plan 140, S6)', () => {
+describe('GolemReportCard: the Commands row (plan 140, S6)', () => {
   it('shows what voice commands did, counts only', async () => {
     await render({
       report: {
@@ -365,7 +365,7 @@ describe('OrcleReportCard: the Commands row (plan 140, S6)', () => {
 
   it('leaves the row out when no command was counted', async () => {
     await render()
-    expect(document.querySelector('[data-slot="orcle-report-commands"]')).toBeNull()
+    expect(document.querySelector('[data-slot="golem-report-commands"]')).toBeNull()
   })
 })
 
@@ -379,21 +379,21 @@ describe('Reports tab layout (plan 150 S6)', () => {
       },
       sessions: [session({ title: 'Session 2026-10-02 14:55' })]
     })
-    const stream = document.querySelector('[data-slot="orcle-report-stream"]')
+    const stream = document.querySelector('[data-slot="golem-report-stream"]')
     expect(stream?.textContent).not.toContain('Session 2026-10-02 14:55')
     expect(stream?.textContent).toContain('84 chat messages')
   })
 
   it('keeps a real stream title', async () => {
     await render()
-    expect(document.querySelector('[data-slot="orcle-report-stream"]')?.textContent).toContain(
+    expect(document.querySelector('[data-slot="golem-report-stream"]')?.textContent).toContain(
       'Rust night'
     )
   })
 
   it('names the empty tab before any stream with Golem', async () => {
     await render({ report: { payload: null, loading: false, error: null }, sessions: [] })
-    const empty = document.querySelector('[data-slot="orcle-report-empty"]')
+    const empty = document.querySelector('[data-slot="golem-report-empty"]')
     expect(empty?.textContent).toContain('No stream reports yet')
     expect(empty?.textContent).toContain(
       'The report appears here after your first stream with Golem.'
@@ -403,7 +403,7 @@ describe('Reports tab layout (plan 150 S6)', () => {
   it('shows the stats as one tile each, the number over its label', async () => {
     await render()
     const tiles = [
-      ...document.querySelectorAll<HTMLElement>('[data-slot="orcle-report-stats"] > [data-stat]')
+      ...document.querySelectorAll<HTMLElement>('[data-slot="golem-report-stats"] > [data-stat]')
     ]
     expect(tiles.map((tile) => tile.dataset.stat)).toEqual([
       'questions',
@@ -428,19 +428,19 @@ describe('Reports tab layout (plan 150 S6)', () => {
   it('puts Markers in the header beside the stream picker', async () => {
     await render()
     const header = document.querySelector('[data-slot="panel-section"] > header') as HTMLElement
-    const markers = header.querySelector('[data-testid="orcle-report-markers"]')
+    const markers = header.querySelector('[data-testid="golem-report-markers"]')
     expect(markers?.textContent).toBe('Markers')
     expect(header.querySelector('[aria-label="Stream"]')).toBeTruthy()
-    expect(card().querySelector('[data-testid="orcle-report-markers"]')).toBeNull()
+    expect(card().querySelector('[data-testid="golem-report-markers"]')).toBeNull()
 
     // No Markers without a session to mark (the report outlived it).
     await render({ sessions: [] })
-    expect(document.querySelector('[data-testid="orcle-report-markers"]')).toBeNull()
+    expect(document.querySelector('[data-testid="golem-report-markers"]')).toBeNull()
   })
 
   it('sets what needs you beside what happened', async () => {
     await render()
-    const lists = document.querySelector('[data-slot="orcle-report-lists"]') as HTMLElement
+    const lists = document.querySelector('[data-slot="golem-report-lists"]') as HTMLElement
     expect(lists.children.length).toBeGreaterThan(0)
     expect(lists.children.length).toBeLessThanOrEqual(2)
   })

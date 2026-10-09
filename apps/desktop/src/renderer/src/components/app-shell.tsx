@@ -34,11 +34,11 @@ import {
 import { displayKeyGlyph } from '@/lib/platform'
 import { openGolemPetCreator } from '@/lib/golem-pet-creator-nav'
 import {
-  isOrcleTabId,
-  readLastOrcleTab,
-  writeLastOrcleTab,
-  type OrcleTabId
-} from '@/lib/orcle-tabs'
+  isGolemTabId,
+  readLastGolemTab,
+  writeLastGolemTab,
+  type GolemTabId
+} from '@/lib/golem-tabs'
 import {
   isSettingsTabId,
   readLastSettingsTab,
@@ -73,8 +73,8 @@ const LayoutTab = lazy(async () => ({ default: (await loadLayoutTab()).LayoutTab
 const LibraryTab = lazy(async () => ({
   default: (await import('@/components/tabs/library-tab')).LibraryTab
 }))
-const OrcleTab = lazy(async () => ({
-  default: (await import('@/components/tabs/orcle-tab')).OrcleTab
+const GolemTab = lazy(async () => ({
+  default: (await import('@/components/tabs/golem-tab')).GolemTab
 }))
 const RecordingTab = lazy(async () => ({
   default: (await import('@/components/tabs/recording-tab')).RecordingTab
@@ -182,7 +182,7 @@ export function AppShell(): ReactElement {
   // Library's "Golem report" opens the Golem tab on one session's report (plan
   // 119 S3). Any other way to a page drops that ask, so the next visit to
   // Golem shows the last stream again.
-  const [orcleReportSessionId, setOrcleReportSessionId] = useState<string | null>(null)
+  const [golemReportSessionId, setGolemReportSessionId] = useState<string | null>(null)
   // Clean cut (plan 119 S14): Library's "Clean cut" selects a recording in
   // the Golem tab, and the ready toast opens a cut's review there. The card's
   // "Open in Library" focuses the cut copy's row. Like the report ask, any
@@ -192,47 +192,47 @@ export function AppShell(): ReactElement {
   const cleanCutNonceRef = useRef(0)
   // Plan 150: Golem reopens on its tab used last, like Settings; the
   // Library's report and clean-cut asks select the tab that answers them.
-  const [orcleTab, setOrcleTab] = useState<OrcleTabId>(readLastOrcleTab)
-  const selectOrcleTab = useCallback((tab: OrcleTabId) => {
-    setOrcleTab(tab)
-    writeLastOrcleTab(tab)
+  const [golemTab, setGolemTab] = useState<GolemTabId>(readLastGolemTab)
+  const selectGolemTab = useCallback((tab: GolemTabId) => {
+    setGolemTab(tab)
+    writeLastGolemTab(tab)
   }, [])
   const setActive = useCallback((tab: WorkspaceTab) => {
-    setOrcleReportSessionId(null)
+    setGolemReportSessionId(null)
     setCleanCutRequest(null)
     setLibraryFocusSessionId(null)
     setActiveTab(tab)
   }, [])
-  const openOrcleReport = useCallback(
+  const openGolemReport = useCallback(
     (sessionId: string) => {
       setCleanCutRequest(null)
-      setOrcleReportSessionId(sessionId)
-      selectOrcleTab('reports')
+      setGolemReportSessionId(sessionId)
+      selectGolemTab('reports')
       setActiveTab('ai')
     },
-    [selectOrcleTab]
+    [selectGolemTab]
   )
   const openCleanCut = useCallback(
     (request: CleanCutOpenRequest) => {
       cleanCutNonceRef.current += 1
-      setOrcleReportSessionId(null)
+      setGolemReportSessionId(null)
       setCleanCutRequest({ ...request, nonce: cleanCutNonceRef.current })
-      selectOrcleTab('clean-cut')
+      selectGolemTab('clean-cut')
       setActiveTab('ai')
     },
-    [selectOrcleTab]
+    [selectGolemTab]
   )
-  const openOrcle = useCallback(
-    (tab?: OrcleTabId) => {
+  const openGolem = useCallback(
+    (tab?: GolemTabId) => {
       if (tab) {
-        selectOrcleTab(tab)
+        selectGolemTab(tab)
       }
       setActive('ai')
     },
-    [selectOrcleTab, setActive]
+    [selectGolemTab, setActive]
   )
   const openLibrarySession = useCallback((sessionId: string) => {
-    setOrcleReportSessionId(null)
+    setGolemReportSessionId(null)
     setCleanCutRequest(null)
     setLibraryFocusSessionId(sessionId)
     setActiveTab('library')
@@ -373,31 +373,31 @@ export function AppShell(): ReactElement {
   useEffect(() => {
     const onWorkspaceNavigate = (event: Event): void => {
       const detail = (
-        event as CustomEvent<{ tab?: unknown; settingsTab?: unknown; orcleTab?: unknown }>
+        event as CustomEvent<{ tab?: unknown; settingsTab?: unknown; golemTab?: unknown }>
       ).detail
       const tab = detail?.tab
       if (tab === 'settings') {
         openSettings(isSettingsTabId(detail?.settingsTab) ? detail.settingsTab : undefined)
       } else if (tab === 'ai') {
-        openOrcle(isOrcleTabId(detail?.orcleTab) ? detail.orcleTab : undefined)
+        openGolem(isGolemTabId(detail?.golemTab) ? detail.golemTab : undefined)
       } else if (isWorkspaceTab(tab)) {
         setActive(tab)
       }
     }
     window.addEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
     return () => window.removeEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
-  }, [openOrcle, openSettings, setActive])
+  }, [openGolem, openSettings, setActive])
 
   // Plan 170 D18: `videorc://golem` opens the Golem tab (main focused the
   // window and synced the library); Make it Alive also opens the creator
   // once main saw the avatar worn.
   useEffect(() => {
     const off = window.videorc?.onGolemDeepLink?.((navigation) => {
-      openOrcle('live')
+      openGolem('live')
       if (navigation.openCreator) openGolemPetCreator({ reference: 'persona-idle' })
     })
     return off
-  }, [openOrcle])
+  }, [openGolem])
 
   useEffect(() => {
     const onOpenCleanCut = (event: Event): void => {
@@ -429,7 +429,7 @@ export function AppShell(): ReactElement {
         openStudioPanel,
         closeStudioPanel,
         openSettings,
-        openOrcle
+        openGolem
       }}
     >
       {/* The window family's shell (plan 050, D4): the sidebar sits on the
@@ -475,16 +475,16 @@ export function AppShell(): ReactElement {
                     <LibraryTab
                       focusSessionId={libraryFocusSessionId}
                       onOpenCleanCut={(sessionId) => openCleanCut({ sessionId })}
-                      onOpenOrcleReport={openOrcleReport}
+                      onOpenGolemReport={openGolemReport}
                     />
                   ) : null}
                   {active === 'ai' ? (
-                    <OrcleTab
+                    <GolemTab
                       cleanCutRequest={cleanCutRequest}
-                      reportSessionId={orcleReportSessionId}
-                      tab={orcleTab}
+                      reportSessionId={golemReportSessionId}
+                      tab={golemTab}
                       onOpenLibrarySession={openLibrarySession}
-                      onTabChange={selectOrcleTab}
+                      onTabChange={selectGolemTab}
                     />
                   ) : null}
                   {active === 'diagnostics' ? <DiagnosticsTab /> : null}

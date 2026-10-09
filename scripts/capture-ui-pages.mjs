@@ -55,7 +55,7 @@ if (themeArg) {
 // selects Live itself.
 const pages = [
   { tab: 'studio' },
-  { tab: 'ai', name: 'orcle', subTab: 'live', mustShow: '[data-slot="orcle-live-status"]' },
+  { tab: 'ai', name: 'orcle', subTab: 'live', mustShow: '[data-slot="golem-live-status"]' },
   { tab: 'sources' },
   { tab: 'layout' },
   { tab: 'streaming' },
@@ -70,7 +70,7 @@ for (const { tab, name = tab, subTab, mustShow } of pages) {
       // The Golem tab is a lazy chunk: its first open in the dev app can take
       // longer than open-tab's 8 s wait on a busy machine.
       await cmd('open-tab', { tab })
-      const trigger = `[data-videorc-orcle-tab="${subTab}"]`
+      const trigger = `[data-videorc-golem-tab="${subTab}"]`
       await cmd('eval-js', {
         code: `(await waitFor(${JSON.stringify(trigger)}, 30000)).dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 })); await waitFor(${JSON.stringify(mustShow)}, 30000); return true`
       })
@@ -101,19 +101,19 @@ for (const id of settingsTabs) {
 }
 // The Orcle tab has Settings' strip too (plan 150): shoot each of its tabs.
 try {
-  await cmd('open-tab', { tab: 'ai', waitFor: '[data-videorc-orcle-tab]' })
-  const orcleTabs = await cmd('eval-js', {
-    code: `return [...document.querySelectorAll('[data-videorc-orcle-tab]')].map((el) => el.getAttribute('data-videorc-orcle-tab'))`
+  await cmd('open-tab', { tab: 'ai', waitFor: '[data-videorc-golem-tab]' })
+  const golemTabs = await cmd('eval-js', {
+    code: `return [...document.querySelectorAll('[data-videorc-golem-tab]')].map((el) => el.getAttribute('data-videorc-golem-tab'))`
   }).then(r => r.result ?? [], () => [])
-  if (orcleTabs.length !== 5) failures.push(`orcle tabs: expected 5, found ${orcleTabs.length}`)
-  for (const id of orcleTabs) {
+  if (golemTabs.length !== 5) failures.push(`orcle tabs: expected 5, found ${golemTabs.length}`)
+  for (const id of golemTabs) {
     try {
       await cmd('eval-js', {
-        code: `document.querySelector('[data-videorc-orcle-tab="${id}"]').dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 })); await sleep(600); return true`
+        code: `document.querySelector('[data-videorc-golem-tab="${id}"]').dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 })); await sleep(600); return true`
       })
-      const shot = await cmd('capture-page', { name: `orcle-${id}${suffix}` })
+      const shot = await cmd('capture-page', { name: `golem-${id}${suffix}` })
       console.log(shot.file)
-    } catch (e) { console.log(`SKIP orcle-${id}: ${e.message}`) }
+    } catch (e) { console.log(`SKIP golem-${id}: ${e.message}`) }
   }
 } catch (e) {
   failures.push(`orcle tabs: ${e.message}`)

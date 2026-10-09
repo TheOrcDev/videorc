@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { CohostReportPayload } from '@/lib/backend'
 
-import { ORCLE_REPORT_READ_ERROR, useOrcleReport, type OrcleReportState } from './use-orcle-report'
+import { GOLEM_REPORT_READ_ERROR, useGolemReport, type GolemReportState } from './use-golem-report'
 
 interface PendingRequest {
   method: string
@@ -71,10 +71,10 @@ function payload(sessionId: string): CohostReportPayload {
 
 let root: Root
 let container: HTMLDivElement
-let state: OrcleReportState
+let state: GolemReportState
 
 function Probe({ sessionId }: { sessionId: string | null }): null {
-  state = useOrcleReport(sessionId)
+  state = useGolemReport(sessionId)
   return null
 }
 
@@ -108,7 +108,7 @@ afterEach(async () => {
   vi.unstubAllGlobals()
 })
 
-describe('useOrcleReport (plan 119 S3)', () => {
+describe('useGolemReport (plan 119 S3)', () => {
   it('asks for the latest stream without a session, on its own client', async () => {
     await render(null)
     expect(state.loading).toBe(true)
@@ -160,7 +160,7 @@ describe('useOrcleReport (plan 119 S3)', () => {
   it('reports a failed read and tries again on request', async () => {
     await render('stream-1')
     await act(async () => client().requests[0].reject(new Error('cohost-report-failed')))
-    expect(state).toMatchObject({ loading: false, error: ORCLE_REPORT_READ_ERROR, payload: null })
+    expect(state).toMatchObject({ loading: false, error: GOLEM_REPORT_READ_ERROR, payload: null })
 
     await act(async () => state.reload())
     expect(client().requests).toHaveLength(2)
@@ -171,7 +171,7 @@ describe('useOrcleReport (plan 119 S3)', () => {
   it('reconnects on Try again when the backend refused the connection', async () => {
     fake.failConnect = true
     await render(null)
-    expect(state).toMatchObject({ loading: false, error: ORCLE_REPORT_READ_ERROR })
+    expect(state).toMatchObject({ loading: false, error: GOLEM_REPORT_READ_ERROR })
 
     fake.failConnect = false
     await act(async () => state.reload())

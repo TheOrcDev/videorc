@@ -3,7 +3,7 @@ import { removeMessagesReadiness } from '../../../shared/platform-scopes'
 import { COHOST_ERROR_TOAST_MESSAGES, cohostErrorDetail } from './cohost-state'
 import { cohostErrorDetailText, cohostListeningView } from './cohost-view'
 import type { EntitlementUiGate } from './entitlement-ui'
-import type { OrcleTabId } from './orcle-tabs'
+import type { GolemTabId } from './golem-tabs'
 
 // The Golem tab (plan 119 S2): Videorc's AI tab, under Studio. Everything here
 // is a pure derivation of what the studio provider already holds, so the tab,
@@ -15,10 +15,10 @@ import type { OrcleTabId } from './orcle-tabs'
  * does" rows (plan 150): each names the Golem tab that holds its settings, so
  * the row is a way there rather than a pitch.
  */
-export const ORCLE_LIVE_POWERS: readonly {
+export const GOLEM_LIVE_POWERS: readonly {
   title: string
   description: string
-  tab: OrcleTabId
+  tab: GolemTabId
 }[] = [
   {
     title: 'Never miss a question',
@@ -64,17 +64,17 @@ export const CLOUD_AI_USES: readonly string[] = [
 export const CLOUD_AI_KEEPS =
   "Videorc servers don't keep your chat or your audio. A short report of each stream is saved on this computer."
 
-export type OrcleLiveStatusKind = 'off' | 'on' | 'live' | 'attention'
+export type GolemLiveStatusKind = 'off' | 'on' | 'live' | 'attention'
 
-export const ORCLE_LIVE_STATUS_LABELS: Record<OrcleLiveStatusKind, string> = {
+export const GOLEM_LIVE_STATUS_LABELS: Record<GolemLiveStatusKind, string> = {
   off: 'Off',
   on: 'On, joins your next stream',
   live: 'Live now',
   attention: 'Needs attention'
 }
 
-export interface OrcleLiveStatus {
-  kind: OrcleLiveStatusKind
+export interface GolemLiveStatus {
+  kind: GolemLiveStatusKind
   label: string
   /** A plain reason. Always set for `attention`; for `live`, only when Golem
    * reads chat but cannot hear you. */
@@ -84,12 +84,12 @@ export interface OrcleLiveStatus {
 }
 
 /** What unlocks Golem Live for this account, and its one plain line. */
-export interface OrcleLiveUnlock {
+export interface GolemLiveUnlock {
   action: { kind: 'sign-in' } | { kind: 'view-premium'; url: string } | null
   reason: string
 }
 
-export interface OrcleLiveViewInput {
+export interface GolemLiveViewInput {
   /** `cohost.settings`; null until the backend answers. */
   settings: Pick<CohostSettings, 'enabled'> | null
   signedIn: boolean
@@ -103,36 +103,36 @@ export interface OrcleLiveViewInput {
   state: CohostState | null
 }
 
-export interface OrcleLiveView {
-  status: OrcleLiveStatus
+export interface GolemLiveView {
+  status: GolemLiveStatus
   /** The switch shows the stored choice. */
   checked: boolean
   /** A locked account can still turn Golem off, never on. */
   switchDisabled: boolean
   /** Null when nothing is locked. */
-  unlock: OrcleLiveUnlock | null
+  unlock: GolemLiveUnlock | null
   /** "Open Stream Manager" shows while a stream is live. */
   streamManager: boolean
 }
 
-export const ORCLE_SIGNED_OUT_REASON = 'Sign in to use Golem Live, part of Videorc Premium.'
+export const GOLEM_SIGNED_OUT_REASON = 'Sign in to use Golem Live, part of Videorc Premium.'
 
-export const ORCLE_CONSENT_OFF_REASON =
+export const GOLEM_CONSENT_OFF_REASON =
   "Cloud AI is off, so Golem can't read chat or hear you. Allow it under Customize."
 
 function status(
-  kind: OrcleLiveStatusKind,
+  kind: GolemLiveStatusKind,
   reason: string | null = null,
   detail: string | null = null
-): OrcleLiveStatus {
-  return { kind, label: ORCLE_LIVE_STATUS_LABELS[kind], reason, detail }
+): GolemLiveStatus {
+  return { kind, label: GOLEM_LIVE_STATUS_LABELS[kind], reason, detail }
 }
 
-export function orcleLiveUnlock(
+export function golemLiveUnlock(
   signedIn: boolean,
   gate: EntitlementUiGate
-): OrcleLiveUnlock | null {
-  if (!signedIn) return { action: { kind: 'sign-in' }, reason: ORCLE_SIGNED_OUT_REASON }
+): GolemLiveUnlock | null {
+  if (!signedIn) return { action: { kind: 'sign-in' }, reason: GOLEM_SIGNED_OUT_REASON }
   if (gate.allowed) return null
   return {
     action: gate.upgradeUrl ? { kind: 'view-premium', url: gate.upgradeUrl } : null,
@@ -145,7 +145,7 @@ export function orcleLiveUnlock(
  * are what happened to it. The checks run in the order a streamer can fix
  * them: the account, then consent, then the engine's own report.
  */
-export function orcleLiveStatus({
+export function golemLiveStatus({
   enabled,
   unlock,
   consented,
@@ -153,14 +153,14 @@ export function orcleLiveStatus({
   state
 }: {
   enabled: boolean
-  unlock: OrcleLiveUnlock | null
+  unlock: GolemLiveUnlock | null
   consented: boolean
   live: boolean
   state: CohostState | null
-}): OrcleLiveStatus {
+}): GolemLiveStatus {
   if (!enabled) return status('off')
   if (unlock) return status('attention', unlock.reason)
-  if (!consented) return status('attention', ORCLE_CONSENT_OFF_REASON)
+  if (!consented) return status('attention', GOLEM_CONSENT_OFF_REASON)
   if (!live) return status('on')
   if (state?.status === 'paused' || state?.status === 'error') {
     const reason = state.reason
@@ -175,11 +175,11 @@ export function orcleLiveStatus({
   return status('live', listening?.state === 'blocked' ? listening.label : null)
 }
 
-export function orcleLiveView(input: OrcleLiveViewInput): OrcleLiveView {
+export function golemLiveView(input: GolemLiveViewInput): GolemLiveView {
   const enabled = input.settings?.enabled === true
-  const unlock = orcleLiveUnlock(input.signedIn, input.gate)
+  const unlock = golemLiveUnlock(input.signedIn, input.gate)
   return {
-    status: orcleLiveStatus({
+    status: golemLiveStatus({
       enabled,
       unlock,
       consented: input.consented,
@@ -197,7 +197,7 @@ export function orcleLiveView(input: OrcleLiveViewInput): OrcleLiveView {
 
 /** What you can say: the web guide's phrases, shortened for the desktop. The
  * first phrase shows in the row; every one is in its tooltip. */
-export const ORCLE_VOICE_COMMANDS: readonly {
+export const GOLEM_VOICE_COMMANDS: readonly {
   title: string
   result: string
   phrases: readonly string[]
@@ -237,29 +237,29 @@ export const ORCLE_VOICE_COMMANDS: readonly {
 ]
 
 /** One line of quoted phrases, as the row shows them. */
-export function orcleVoicePhrasesLabel(phrases: readonly string[], count = 1): string {
+export function golemVoicePhrasesLabel(phrases: readonly string[], count = 1): string {
   return phrases
     .slice(0, count)
     .map((phrase) => `“${phrase}”`)
     .join(', ')
 }
 
-export const ORCLE_VOICE_COMMANDS_DESCRIPTION =
+export const GOLEM_VOICE_COMMANDS_DESCRIPTION =
   'Ask Golem to put a comment on stream, take it down, or remove it from chat.'
 
-export const ORCLE_VOICE_COMMANDS_OFF = 'Turn on Golem Live to use voice commands.'
+export const GOLEM_VOICE_COMMANDS_OFF = 'Turn on Golem Live to use voice commands.'
 
 /** The numbers the web guide promises (contract part A). */
-export const ORCLE_REMOVAL_LIMITS =
+export const GOLEM_REMOVAL_LIMITS =
   'A removal waits 20 seconds for your answer, then nothing is removed. At most 10 removals a minute.'
 
-export const ORCLE_REMOVAL_FALLBACK =
+export const GOLEM_REMOVAL_FALLBACK =
   'If the platform cannot remove it, Golem hides it in Videorc and tells you viewers may still see it.'
 
-export const ORCLE_VOICE_PREMIUM =
+export const GOLEM_VOICE_PREMIUM =
   "Voice commands are part of Golem, which is Premium. Remove from chat in a comment's menu is free for everyone."
 
-export const ORCLE_REMOVE_MESSAGES_NO_ACCOUNT =
+export const GOLEM_REMOVE_MESSAGES_NO_ACCOUNT =
   'Connect YouTube, Twitch, Kick or X under Livestream to remove their chat messages.'
 
 /** The platforms that can remove a chat message, in the Livestream order. */

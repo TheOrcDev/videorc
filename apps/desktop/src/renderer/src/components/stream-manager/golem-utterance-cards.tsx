@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactElement } from 'react'
 
-import { OrcleIcon } from '@/components/icons'
+import { GolemIcon } from '@/components/icons'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -79,7 +79,7 @@ export function GolemUtteranceCards({
               data-utterance-id={utterance.id}
               role="group"
             >
-              <OrcleIcon aria-hidden weight="duotone" />
+              <GolemIcon aria-hidden weight="duotone" />
               <AlertTitle className="flex min-w-0 items-center gap-2 text-xs">
                 <span className="min-w-0 flex-1 truncate">
                   {GOLEM_UTTERANCE_TRIGGER_LABELS[utterance.trigger.kind]} · posts as you

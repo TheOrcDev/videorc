@@ -22,18 +22,18 @@ import {
   YOUTUBE_ALWAYS_CONFIRMS,
   commandAvailabilityLines,
   removalLimitsLine
-} from '@/lib/orcle-command-view'
+} from '@/lib/golem-command-view'
 import {
-  ORCLE_REMOVAL_FALLBACK,
-  ORCLE_REMOVE_MESSAGES_NO_ACCOUNT,
-  ORCLE_VOICE_COMMANDS,
-  ORCLE_VOICE_COMMANDS_DESCRIPTION,
-  ORCLE_VOICE_COMMANDS_OFF,
-  ORCLE_VOICE_PREMIUM,
-  orcleVoicePhrasesLabel,
+  GOLEM_REMOVAL_FALLBACK,
+  GOLEM_REMOVE_MESSAGES_NO_ACCOUNT,
+  GOLEM_VOICE_COMMANDS,
+  GOLEM_VOICE_COMMANDS_DESCRIPTION,
+  GOLEM_VOICE_COMMANDS_OFF,
+  GOLEM_VOICE_PREMIUM,
+  golemVoicePhrasesLabel,
   removeMessagesRows,
   type RemoveMessagesRow
-} from '@/lib/orcle-tab-view'
+} from '@/lib/golem-tab-view'
 import { toast } from '@/lib/toast'
 import { permissionReconnectOptions } from '../../../shared/platform-scopes'
 
@@ -52,7 +52,7 @@ const PLATFORM_NAME_STAYS = '[&_[data-slot=list-row-title]]:shrink-0'
  * voice commands can't run: locked (`lead`, from the tab), Golem Live off, or
  * Videorc's kill switches.
  */
-export function OrcleVoiceCommands({
+export function GolemVoiceCommands({
   lead = null,
   onOpenLive
 }: {
@@ -106,15 +106,15 @@ export function OrcleVoiceCommands({
   const hasLead = lead !== null || off || paused.length > 0
 
   return (
-    <div className="flex flex-1 flex-col" data-slot="orcle-voice-commands">
+    <div className="flex flex-1 flex-col" data-slot="golem-voice-commands">
       {hasLead ? (
         <div className="flex flex-col gap-2 border-b border-border p-gutter">
           {lead}
           {off ? (
-            <Alert data-testid="orcle-voice-commands-off">
+            <Alert data-testid="golem-voice-commands-off">
               <InfoIcon />
               <AlertTitle className="font-normal text-muted-foreground">
-                {ORCLE_VOICE_COMMANDS_OFF}
+                {GOLEM_VOICE_COMMANDS_OFF}
               </AlertTitle>
               {onOpenLive ? (
                 <AlertAction>
@@ -129,7 +129,7 @@ export function OrcleVoiceCommands({
             <p
               key={line}
               className="flex items-center gap-1.5 text-xs text-muted-foreground"
-              data-slot="orcle-voice-commands-paused"
+              data-slot="golem-voice-commands-paused"
             >
               <StatusDot tone="warn" />
               {line}
@@ -140,16 +140,16 @@ export function OrcleVoiceCommands({
 
       <ConfigGrid className={CONFIG_GRID_PAIR}>
         <PanelSection
-          description={`${ORCLE_VOICE_COMMANDS_DESCRIPTION} ${COHOST_ACTS_ON_ASK_COPY}`}
+          description={`${GOLEM_VOICE_COMMANDS_DESCRIPTION} ${COHOST_ACTS_ON_ASK_COPY}`}
           title="Commands"
         >
           <GroupedList label="What you can say">
-            {ORCLE_VOICE_COMMANDS.map((command) => (
+            {GOLEM_VOICE_COMMANDS.map((command) => (
               <div
                 key={command.title}
                 className="flex min-w-0 flex-col gap-0.5 px-3 py-2"
                 data-command={command.title.toLowerCase()}
-                data-slot="orcle-voice-command"
+                data-slot="golem-voice-command"
               >
                 <p className="flex min-w-0 items-baseline gap-2 text-sm">
                   <span className="shrink-0 font-medium text-foreground">{command.title}</span>
@@ -157,7 +157,7 @@ export function OrcleVoiceCommands({
                     className="truncate text-muted-foreground"
                     title={command.phrases.map((phrase) => `“${phrase}”`).join('\n')}
                   >
-                    {orcleVoicePhrasesLabel(command.phrases, command.title === 'Answer' ? 4 : 1)}
+                    {golemVoicePhrasesLabel(command.phrases, command.title === 'Answer' ? 4 : 1)}
                   </span>
                 </p>
                 <p className="text-xs text-subtle">{command.result}</p>
@@ -169,26 +169,26 @@ export function OrcleVoiceCommands({
             <Field>
               <div className="flex items-center justify-between gap-3">
                 <div className="flex min-w-0 flex-col gap-0.5">
-                  <FieldLabel htmlFor="orcle-wake-word">{WAKE_WORD_LABEL}</FieldLabel>
+                  <FieldLabel htmlFor="golem-wake-word">{WAKE_WORD_LABEL}</FieldLabel>
                   <p className="text-xs text-muted-foreground">{WAKE_WORD_DESCRIPTION}</p>
                 </div>
                 <Switch
                   checked={cohostSettings?.wakeWordRequired === true}
                   disabled={locked}
-                  id="orcle-wake-word"
+                  id="golem-wake-word"
                   onCheckedChange={(wakeWordRequired) => save({ wakeWordRequired })}
                 />
               </div>
             </Field>
             <Field>
-              <FieldLabel htmlFor="orcle-remove-confirm">Before Golem removes a comment</FieldLabel>
+              <FieldLabel htmlFor="golem-remove-confirm">Before Golem removes a comment</FieldLabel>
               <FieldDescription>
                 {REMOVE_CONFIRM_DESCRIPTIONS[removeConfirm]} {YOUTUBE_ALWAYS_CONFIRMS}
               </FieldDescription>
               <ToggleGroup
                 className="w-fit"
                 disabled={locked}
-                id="orcle-remove-confirm"
+                id="golem-remove-confirm"
                 size="sm"
                 type="single"
                 value={removeConfirm}
@@ -209,10 +209,10 @@ export function OrcleVoiceCommands({
         <PanelSection
           description={
             <span className="flex flex-col gap-1">
-              <span data-slot="orcle-voice-commands-notes">
-                {removalLimitsLine(removeConfirm)} {ORCLE_REMOVAL_FALLBACK}
+              <span data-slot="golem-voice-commands-notes">
+                {removalLimitsLine(removeConfirm)} {GOLEM_REMOVAL_FALLBACK}
               </span>
-              <span data-slot="orcle-voice-commands-premium">{ORCLE_VOICE_PREMIUM}</span>
+              <span data-slot="golem-voice-commands-premium">{GOLEM_VOICE_PREMIUM}</span>
             </span>
           }
           title="Remove messages"
@@ -223,7 +223,7 @@ export function OrcleVoiceCommands({
                 className="px-3 py-2 text-xs text-muted-foreground"
                 data-slot="remove-messages-empty"
               >
-                {ORCLE_REMOVE_MESSAGES_NO_ACCOUNT}
+                {GOLEM_REMOVE_MESSAGES_NO_ACCOUNT}
               </p>
             ) : (
               rows.map((row) => (

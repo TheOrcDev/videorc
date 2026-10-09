@@ -478,7 +478,7 @@ function CommentsWindowApp(): ReactElement {
   // the same command; the consent CTA also grants cloud-AI consent in the same
   // click. The settings are main-renderer owned, and the relay reply carries
   // the truth back so the switch reflects what happened, not what was clicked.
-  const setOrcleLive = (on: boolean, grantConsent = false): void => {
+  const setGolemLive = (on: boolean, grantConsent = false): void => {
     void window.videorc
       ?.sendCohostEnable?.({
         requestId: crypto.randomUUID(),
@@ -602,9 +602,9 @@ function CommentsWindowApp(): ReactElement {
           onCohostAuthorGreeted={(entry) =>
             void sendCohostAction('author-greeted')(entry.authorKey)
           }
-          onCohostEnable={(enabled) => setOrcleLive(enabled)}
-          onCohostEnableConsent={() => setOrcleLive(true, true)}
-          onCohostListenOn={() => setOrcleLive(true)}
+          onCohostEnable={(enabled) => setGolemLive(enabled)}
+          onCohostEnableConsent={() => setGolemLive(true, true)}
+          onCohostListenOn={() => setGolemLive(true)}
           onCohostNudgeDismiss={() => {
             setCohostNudgeDismissed(true)
             localStorage.setItem(COHOST_NUDGE_STORAGE_KEY, '1')

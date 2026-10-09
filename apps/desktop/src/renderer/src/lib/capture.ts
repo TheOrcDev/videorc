@@ -487,7 +487,9 @@ export const STORAGE_KEYS = {
   // The Settings tab used last (plan 064), so Settings reopens where it was left.
   settingsTab: 'videorc.settingsTab',
   // The Golem tab's own tab used last (plan 150), so Golem reopens where it was left.
-  orcleTab: 'videorc.orcleTab'
+  // The stored key keeps its old name (plan 170 D22): renaming it would
+  // forget every saved Golem sub-tab.
+  golemTab: 'videorc.orcleTab'
 } as const
 
 // Permissions onboarding: ANY stored value means "seen/dismissed" — the gate

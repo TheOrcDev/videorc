@@ -8,7 +8,8 @@ import { STORAGE_KEYS } from '@/lib/capture'
  * ids, labels and the storage helpers (no icons, no components).
  *
  * Golem's settings moved to the Golem tab (plan 119), so every setting keeps
- * one home. A remembered `orcle` is no longer a tab id and reads as General.
+ * one home. Older apps saved `orcle` here (its old tab id, kept by plan 170
+ * D22): it is no longer a tab id and reads as General.
  */
 export const SETTINGS_TABS = [
   { id: 'general', label: 'General' },

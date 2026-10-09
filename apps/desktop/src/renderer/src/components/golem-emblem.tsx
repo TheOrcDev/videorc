@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils'
 /**
  * Golem's emblem (plans 149 and 164): the owner's stone golem in full colour, shown
  * large in two places, the Golem tab header and the Golem Live consent
- * dialog. Icon slots show the same image through `OrcleIcon`.
+ * dialog. Icon slots show the same image through `GolemIcon`.
  *
  * Each size ships its 2× file and lets the browser scale it down on 1×
  * displays. One file serves both themes: the warm stone reads on porcelain
@@ -18,14 +18,14 @@ const SIZES = {
   lg: { src: emblem112Url, className: 'h-14' }
 } as const
 
-export type OrcleEmblemSize = keyof typeof SIZES
+export type GolemEmblemSize = keyof typeof SIZES
 
-export function OrcleEmblem({
+export function GolemEmblem({
   size = 'md',
   alt = '',
   className
 }: {
-  size?: OrcleEmblemSize
+  size?: GolemEmblemSize
   /** Empty (decorative) by default: the text beside it names Golem. */
   alt?: string
   className?: string
@@ -36,7 +36,7 @@ export function OrcleEmblem({
       alt={alt}
       aria-hidden={alt === '' ? true : undefined}
       className={cn('w-auto shrink-0 select-none', sizeClassName, className)}
-      data-slot="orcle-emblem"
+      data-slot="golem-emblem"
       decoding="async"
       draggable={false}
       src={src}

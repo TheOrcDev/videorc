@@ -367,7 +367,7 @@ const CHUNK_PURPOSES = new Set(['captions', 'listen'])
  * Plan 140 S9: Orcle voice commands as a speech model delivers them. The
  * first is one command cut into two finals; the wake word starts the first.
  */
-export const ORCLE_COMMAND_FINALS = Object.freeze({
+export const GOLEM_COMMAND_FINALS = Object.freeze({
   highlightByNameSplit: Object.freeze(['Orcle, highlight the comment', 'from coders X.']),
   clear: Object.freeze(['Orcle, clear the highlight.']),
   removeThisOne: Object.freeze(['This one is toxic. Remove it from our chat.']),

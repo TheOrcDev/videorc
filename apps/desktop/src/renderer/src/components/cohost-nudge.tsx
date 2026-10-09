@@ -1,4 +1,4 @@
-import { OrcleIcon } from '@/components/icons'
+import { GolemIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
 import { Button } from '@/components/ui/button'
@@ -22,7 +22,7 @@ export function CohostNudge({
       className="mt-1.5 flex items-center gap-2 rounded-row border border-border/60 bg-card/30 px-2.5 py-1.5 text-[11px] text-muted-foreground"
       data-slot="cohost-nudge"
     >
-      <OrcleIcon aria-hidden className="size-4 shrink-0" weight="duotone" />
+      <GolemIcon aria-hidden className="size-4 shrink-0" weight="duotone" />
       <span className="min-w-0 flex-1">
         Golem is off. It can group your chat&apos;s questions, draft replies and hear you answer.
       </span>

@@ -23,17 +23,17 @@ import { formatClipMarkClock } from '../../../shared/clip-marks'
 // card and its tests cannot disagree about a count.
 
 /** The website's line for the report, word for word (plan 119 S5). */
-export const ORCLE_REPORT_DESCRIPTION =
+export const GOLEM_REPORT_DESCRIPTION =
   'Golem saves a short report on your computer: questions caught and missed, flags, promises, first-timers greeted, and the moments you marked by saying clip that.'
 
-export const ORCLE_REPORT_EMPTY = 'The report appears here after your first stream with Golem.'
-export const ORCLE_REPORT_OFF = 'Golem was off for this stream.'
-export const ORCLE_REPORT_TURN_ON = 'Turn on Golem to also catch questions.'
-export const ORCLE_REPORT_NEXT_STREAM = 'It joins your next stream.'
-export const ORCLE_REPORT_UNTITLED = 'Untitled stream'
+export const GOLEM_REPORT_EMPTY = 'The report appears here after your first stream with Golem.'
+export const GOLEM_REPORT_OFF = 'Golem was off for this stream.'
+export const GOLEM_REPORT_TURN_ON = 'Turn on Golem to also catch questions.'
+export const GOLEM_REPORT_NEXT_STREAM = 'It joins your next stream.'
+export const GOLEM_REPORT_UNTITLED = 'Untitled stream'
 
-/** The empty Reports tab's heading (plan 150), over `ORCLE_REPORT_EMPTY`. */
-export const ORCLE_REPORT_EMPTY_TITLE = 'No stream reports yet'
+/** The empty Reports tab's heading (plan 150), over `GOLEM_REPORT_EMPTY`. */
+export const GOLEM_REPORT_EMPTY_TITLE = 'No stream reports yet'
 
 /**
  * The backend names an unnamed session after its start, "Session 2026-10-02
@@ -46,9 +46,9 @@ export function isAutoSessionTitle(title: string): boolean {
 }
 
 /** Rows a list shows before "Show all". */
-export const ORCLE_REPORT_LIST_CAP = 5
+export const GOLEM_REPORT_LIST_CAP = 5
 /** Streams the switcher offers, newest first. */
-export const ORCLE_REPORT_SWITCHER_LIMIT = 20
+export const GOLEM_REPORT_SWITCHER_LIMIT = 20
 
 const COUNT = new Intl.NumberFormat()
 
@@ -56,7 +56,7 @@ export function formatReportCount(value: number): string {
   return COUNT.format(Math.max(0, Math.round(value)))
 }
 
-export interface OrcleReportStat {
+export interface GolemReportStat {
   id:
     | 'questions'
     | 'answered-on-air'
@@ -73,22 +73,22 @@ export interface OrcleReportStat {
   label: string
 }
 
-export interface OrcleReportPlatform {
+export interface GolemReportPlatform {
   platform: StreamPlatform
   messages: number
   /** "Twitch: 60 messages", for the icon's tooltip and screen readers. */
   label: string
 }
 
-export interface OrcleReportChatView {
+export interface GolemReportChatView {
   messages: number
   /** "84 chat messages", "No chat messages". */
   label: string
   /** Busiest first, one entry per platform. */
-  platforms: OrcleReportPlatform[]
+  platforms: GolemReportPlatform[]
 }
 
-export interface OrcleReportQuestionRow {
+export interface GolemReportQuestionRow {
   id: string
   text: string
   /** "Ada +2", empty when nobody was named. */
@@ -101,13 +101,13 @@ export interface OrcleReportQuestionRow {
   at: string | null
 }
 
-export interface OrcleReportPromiseRow {
+export interface GolemReportPromiseRow {
   key: string
   text: string
   at: string | null
 }
 
-export interface OrcleReportMomentRow {
+export interface GolemReportMomentRow {
   key: string
   kind: ClipMomentSource
   label: string
@@ -116,7 +116,7 @@ export interface OrcleReportMomentRow {
   range: string
 }
 
-export interface OrcleReportAlertRow {
+export interface GolemReportAlertRow {
   key: string
   kind: CohostAlertKind
   label: string
@@ -125,7 +125,7 @@ export interface OrcleReportAlertRow {
   at: string | null
 }
 
-export interface OrcleReportSessionOption {
+export interface GolemReportSessionOption {
   id: string
   title: string
   /** The session's start, as Library shows it. */
@@ -133,7 +133,7 @@ export interface OrcleReportSessionOption {
 }
 
 /** One count of the report's "Commands" row (plan 140 S3). */
-export interface OrcleReportCommandCount {
+export interface GolemReportCommandCount {
   id:
     | 'highlighted'
     | 'cleared'
@@ -148,15 +148,15 @@ export interface OrcleReportCommandCount {
 }
 
 /** The report's "Commands" row: what voice commands did, counts only. */
-export interface OrcleReportCommandsView {
+export interface GolemReportCommandsView {
   /** "6 commands", "1 command". */
   total: string
   /** The non-zero counts, in a fixed order. */
-  counts: OrcleReportCommandCount[]
+  counts: GolemReportCommandCount[]
 }
 
 /** One line the Golem posted as you (plan 164 D10). */
-export interface OrcleReportPostRow {
+export interface GolemReportPostRow {
   id: string
   trigger: string
   text: string
@@ -166,42 +166,42 @@ export interface OrcleReportPostRow {
   at: string | null
 }
 
-export type OrcleReportView =
+export type GolemReportView =
   | { kind: 'empty'; message: string }
   | {
-      /** `orcle-off`: the stream left chat and moments, but no report. */
-      kind: 'report' | 'orcle-off'
+      /** `golem-off`: the stream left chat and moments, but no report. */
+      kind: 'report' | 'golem-off'
       sessionId: string
       title: string
       date: string | null
       duration: string | null
-      chat: OrcleReportChatView
+      chat: GolemReportChatView
       /** Empty when Golem was off. */
-      stats: OrcleReportStat[]
+      stats: GolemReportStat[]
       /** Golem-off only: why nothing was caught, and what to do about it. */
       note: { title: string; hint: string } | null
-      missed: OrcleReportQuestionRow[]
-      promises: OrcleReportPromiseRow[]
-      moments: OrcleReportMomentRow[]
-      alerts: OrcleReportAlertRow[]
+      missed: GolemReportQuestionRow[]
+      promises: GolemReportPromiseRow[]
+      moments: GolemReportMomentRow[]
+      alerts: GolemReportAlertRow[]
       /** Plan 140 S3: null when no voice command was counted (or Golem was off). */
-      commands: OrcleReportCommandsView | null
+      commands: GolemReportCommandsView | null
       /** Plan 164 D10: what the Golem posted as you, oldest first. */
-      posts: OrcleReportPostRow[]
+      posts: GolemReportPostRow[]
     }
 
-export interface OrcleReportViewInput {
+export interface GolemReportViewInput {
   /** The backend's answer; null when no stream exists yet. */
   payload: CohostReportPayload | null
   /** The Library row of the payload's session, when the loaded list has it. */
   session: Pick<SessionSummary, 'id' | 'title' | 'startedAt' | 'durationMs'> | null
   /** Golem Live's stored switch, for what the Golem-off note asks for. */
-  orcleOn: boolean
+  golemOn: boolean
 }
 
 // --- Questions ---------------------------------------------------------------
 
-export interface OrcleQuestionTally {
+export interface GolemQuestionTally {
   caught: number
   answeredOnAir: number
   replied: number
@@ -214,7 +214,7 @@ export interface OrcleQuestionTally {
  * past its 200-question cap the counters decide. Missed means still open at
  * the end: a question shown on stream was handled.
  */
-export function questionTally(questions: CohostReportQuestions): OrcleQuestionTally {
+export function questionTally(questions: CohostReportQuestions): GolemQuestionTally {
   const items = questions.items ?? []
   const outcomes = (outcome: CohostReportQuestion['outcome']): number =>
     items.filter((item) => item.outcome === outcome).length
@@ -260,7 +260,7 @@ export function chatMessagesLabel(messages: number): string {
 
 /** One entry per platform (an older backend could repeat one), busiest first,
  * platforms without a message left out. */
-export function reportPlatforms(chat: CohostReportChat): OrcleReportPlatform[] {
+export function reportPlatforms(chat: CohostReportChat): GolemReportPlatform[] {
   const totals = new Map<StreamPlatform, number>()
   for (const entry of chat.byPlatform) {
     totals.set(entry.platform, (totals.get(entry.platform) ?? 0) + Math.max(0, entry.messages))
@@ -284,8 +284,8 @@ export function momentKind(moment: Pick<ClipMoment, 'source'>): ClipMomentSource
   return moment.source ?? 'chat'
 }
 
-export const ORCLE_MOMENT_VOICE_LABEL = "You said 'clip that'"
-export const ORCLE_MOMENT_MANUAL_LABEL = 'Marked'
+export const GOLEM_MOMENT_VOICE_LABEL = "You said 'clip that'"
+export const GOLEM_MOMENT_MANUAL_LABEL = 'Marked'
 
 /** Marks say who placed them; a chat peak keeps the backend's reason. A voice
  * mark keeps its own phrase ("You said 'clip it'"). */
@@ -293,9 +293,9 @@ export function momentLabel(moment: Pick<ClipMoment, 'source' | 'reason'>): stri
   const reason = moment.reason.trim()
   switch (momentKind(moment)) {
     case 'voice':
-      return reason || ORCLE_MOMENT_VOICE_LABEL
+      return reason || GOLEM_MOMENT_VOICE_LABEL
     case 'manual':
-      return ORCLE_MOMENT_MANUAL_LABEL
+      return GOLEM_MOMENT_MANUAL_LABEL
     case 'chat':
       return reason || 'Chat got busy'
   }
@@ -308,7 +308,7 @@ export function formatMomentRange(startMs: number, endMs: number): string {
 }
 
 /** The streamer's marks first, then chat peaks, each in recording order. */
-export function reportMoments(moments: readonly ClipMoment[]): OrcleReportMomentRow[] {
+export function reportMoments(moments: readonly ClipMoment[]): GolemReportMomentRow[] {
   const rank = (moment: ClipMoment): number => (momentKind(moment) === 'chat' ? 1 : 0)
   return [...moments]
     .sort((left, right) => rank(left) - rank(right) || left.startMs - right.startMs)
@@ -354,7 +354,7 @@ function reportSpanMs(report: CohostSessionReport | null): number | undefined {
 
 // --- Stats ---------------------------------------------------------------------
 
-function reportStats(report: CohostSessionReport): OrcleReportStat[] {
+function reportStats(report: CohostSessionReport): GolemReportStat[] {
   const tally = questionTally(report.questions)
   const greetings = report.greetings
   return [
@@ -386,7 +386,7 @@ function reportStats(report: CohostSessionReport): OrcleReportStat[] {
 // --- Voice commands (plan 140 S3) -------------------------------------------------
 
 const COMMAND_COUNT_LABELS: ReadonlyArray<
-  [OrcleReportCommandCount['id'], keyof CohostReportCommands, string]
+  [GolemReportCommandCount['id'], keyof CohostReportCommands, string]
 > = [
   ['highlighted', 'highlighted', 'Highlighted'],
   ['cleared', 'cleared', 'Cleared'],
@@ -401,7 +401,7 @@ const COMMAND_COUNT_LABELS: ReadonlyArray<
 /** The "Commands" row: the non-zero counts in a fixed order, null when none. */
 export function reportCommands(
   commands: CohostReportCommands | undefined
-): OrcleReportCommandsView | null {
+): GolemReportCommandsView | null {
   if (!commands) return null
   const counts = COMMAND_COUNT_LABELS.map(([id, key, label]) => ({
     id,
@@ -418,24 +418,24 @@ export function reportCommands(
 
 // --- The card ------------------------------------------------------------------
 
-export function orcleReportView({
+export function golemReportView({
   payload,
   session,
-  orcleOn
-}: OrcleReportViewInput): OrcleReportView {
-  if (!payload) return { kind: 'empty', message: ORCLE_REPORT_EMPTY }
+  golemOn
+}: GolemReportViewInput): GolemReportView {
+  if (!payload) return { kind: 'empty', message: GOLEM_REPORT_EMPTY }
   const report = payload.report
   const startedAt = session?.startedAt ?? report?.startedAt ?? null
   const durationMs = session?.durationMs ?? reportSpanMs(report)
   const platforms = reportPlatforms(payload.chat)
-  const chat: OrcleReportChatView = {
+  const chat: GolemReportChatView = {
     messages: payload.chat.messages,
     label: chatMessagesLabel(payload.chat.messages),
     platforms
   }
   const base = {
     sessionId: payload.sessionId,
-    title: report?.streamTitle?.trim() || session?.title.trim() || ORCLE_REPORT_UNTITLED,
+    title: report?.streamTitle?.trim() || session?.title.trim() || GOLEM_REPORT_UNTITLED,
     date: startedAt ? dayLabel(startedAt) : null,
     duration: typeof durationMs === 'number' ? durationMsLabel(durationMs) : null,
     chat,
@@ -444,11 +444,11 @@ export function orcleReportView({
   if (!report) {
     return {
       ...base,
-      kind: 'orcle-off',
+      kind: 'golem-off',
       stats: [],
       note: {
-        title: ORCLE_REPORT_OFF,
-        hint: orcleOn ? ORCLE_REPORT_NEXT_STREAM : ORCLE_REPORT_TURN_ON
+        title: GOLEM_REPORT_OFF,
+        hint: golemOn ? GOLEM_REPORT_NEXT_STREAM : GOLEM_REPORT_TURN_ON
       },
       missed: [],
       promises: [],
@@ -516,7 +516,7 @@ const POST_RESULT_LABELS: Record<CohostReportPost['result'], string> = {
 export function capReportList<T>(
   items: readonly T[],
   expanded: boolean,
-  cap: number = ORCLE_REPORT_LIST_CAP
+  cap: number = GOLEM_REPORT_LIST_CAP
 ): { visible: readonly T[]; hidden: number } {
   if (expanded || items.length <= cap) return { visible: items, hidden: 0 }
   return { visible: items.slice(0, cap), hidden: items.length - cap }
@@ -535,7 +535,7 @@ function recentStreams(sessions: readonly SwitchableSession[]): SwitchableSessio
   return sessions
     .filter(isReportableStream)
     .sort((left, right) => right.startedAt.localeCompare(left.startedAt))
-    .slice(0, ORCLE_REPORT_SWITCHER_LIMIT)
+    .slice(0, GOLEM_REPORT_SWITCHER_LIMIT)
 }
 
 /** The stream "Last stream" means: the newest one that ended. Null while the
@@ -548,11 +548,11 @@ export function newestStreamedSessionId(sessions: readonly SwitchableSession[]):
  * when the loaded Library page does not reach it. */
 export function reportSessionOptions(
   sessions: readonly SwitchableSession[],
-  shown: OrcleReportSessionOption | null
-): OrcleReportSessionOption[] {
+  shown: GolemReportSessionOption | null
+): GolemReportSessionOption[] {
   const options = recentStreams(sessions).map((session) => ({
     id: session.id,
-    title: session.title.trim() || ORCLE_REPORT_UNTITLED,
+    title: session.title.trim() || GOLEM_REPORT_UNTITLED,
     date: dayLabel(session.startedAt)
   }))
   if (shown && !options.some((option) => option.id === shown.id)) options.push(shown)

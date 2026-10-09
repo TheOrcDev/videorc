@@ -1,29 +1,29 @@
 import { describe, expect, it } from 'vitest'
 
 import type { CohostState, PlatformAccount } from './backend'
-import { orcleLiveSettingsPatch } from './cohost-state'
+import { golemLiveSettingsPatch } from './cohost-state'
 import { COHOST_ACTS_ON_ASK_COPY } from './cohost-view'
 import type { EntitlementUiGate } from './entitlement-ui'
 import {
-  ORCLE_REMOVAL_FALLBACK,
-  ORCLE_REMOVAL_LIMITS,
-  ORCLE_REMOVE_MESSAGES_NO_ACCOUNT,
-  ORCLE_VOICE_COMMANDS,
-  ORCLE_VOICE_COMMANDS_DESCRIPTION,
-  ORCLE_VOICE_COMMANDS_OFF,
-  ORCLE_VOICE_PREMIUM,
-  orcleVoicePhrasesLabel,
+  GOLEM_REMOVAL_FALLBACK,
+  GOLEM_REMOVAL_LIMITS,
+  GOLEM_REMOVE_MESSAGES_NO_ACCOUNT,
+  GOLEM_VOICE_COMMANDS,
+  GOLEM_VOICE_COMMANDS_DESCRIPTION,
+  GOLEM_VOICE_COMMANDS_OFF,
+  GOLEM_VOICE_PREMIUM,
+  golemVoicePhrasesLabel,
   removeMessagesRows,
   CLOUD_AI_KEEPS,
   CLOUD_AI_USES,
-  ORCLE_CONSENT_OFF_REASON,
-  ORCLE_LIVE_POWERS,
-  ORCLE_LIVE_STATUS_LABELS,
-  ORCLE_SIGNED_OUT_REASON,
-  orcleLiveUnlock,
-  orcleLiveView,
-  type OrcleLiveViewInput
-} from './orcle-tab-view'
+  GOLEM_CONSENT_OFF_REASON,
+  GOLEM_LIVE_POWERS,
+  GOLEM_LIVE_STATUS_LABELS,
+  GOLEM_SIGNED_OUT_REASON,
+  golemLiveUnlock,
+  golemLiveView,
+  type GolemLiveViewInput
+} from './golem-tab-view'
 
 const premium: EntitlementUiGate = { allowed: true }
 const basic: EntitlementUiGate = {
@@ -48,7 +48,7 @@ function engine(overrides: Partial<CohostState> = {}): CohostState {
   }
 }
 
-function input(overrides: Partial<OrcleLiveViewInput> = {}): OrcleLiveViewInput {
+function input(overrides: Partial<GolemLiveViewInput> = {}): GolemLiveViewInput {
   return {
     settings: { enabled: true },
     signedIn: true,
@@ -62,7 +62,7 @@ function input(overrides: Partial<OrcleLiveViewInput> = {}): OrcleLiveViewInput 
 
 describe('Golem tab copy (plan 119 S2)', () => {
   it('names what Golem does, each with the tab that holds its settings (plan 150)', () => {
-    expect(ORCLE_LIVE_POWERS.map((power) => [power.title, power.tab])).toEqual([
+    expect(GOLEM_LIVE_POWERS.map((power) => [power.title, power.tab])).toEqual([
       ['Never miss a question', 'chat'],
       ['Chat stays safe', 'chat'],
       ['The room, handled', 'chat'],
@@ -72,13 +72,13 @@ describe('Golem tab copy (plan 119 S2)', () => {
 
   it('keeps every line plain: no em dash, sentence case, a full stop', () => {
     const lines = [
-      ...ORCLE_LIVE_POWERS.map((power) => power.description),
+      ...GOLEM_LIVE_POWERS.map((power) => power.description),
       ...CLOUD_AI_USES,
       CLOUD_AI_KEEPS,
-      ORCLE_SIGNED_OUT_REASON,
-      ORCLE_CONSENT_OFF_REASON
+      GOLEM_SIGNED_OUT_REASON,
+      GOLEM_CONSENT_OFF_REASON
     ]
-    for (const line of [...lines, ...Object.values(ORCLE_LIVE_STATUS_LABELS)]) {
+    for (const line of [...lines, ...Object.values(GOLEM_LIVE_STATUS_LABELS)]) {
       expect(line).not.toContain('—')
       expect(line).not.toMatch(/co-?host/i)
     }
@@ -100,24 +100,24 @@ describe('Golem tab copy (plan 119 S2)', () => {
   })
 })
 
-describe('orcleLiveSettingsPatch', () => {
+describe('golemLiveSettingsPatch', () => {
   it('turns Golem on with listening in one patch, and off without touching listening', () => {
-    expect(orcleLiveSettingsPatch(true)).toEqual({ enabled: true, listen: true })
-    expect(orcleLiveSettingsPatch(false)).toEqual({ enabled: false })
+    expect(golemLiveSettingsPatch(true)).toEqual({ enabled: true, listen: true })
+    expect(golemLiveSettingsPatch(false)).toEqual({ enabled: false })
   })
 })
 
-describe('orcleLiveUnlock', () => {
+describe('golemLiveUnlock', () => {
   it('asks a signed-out streamer to sign in before anything else', () => {
-    expect(orcleLiveUnlock(false, basic)).toEqual({
+    expect(golemLiveUnlock(false, basic)).toEqual({
       action: { kind: 'sign-in' },
-      reason: ORCLE_SIGNED_OUT_REASON
+      reason: GOLEM_SIGNED_OUT_REASON
     })
-    expect(orcleLiveUnlock(false, premium)?.action).toEqual({ kind: 'sign-in' })
+    expect(golemLiveUnlock(false, premium)?.action).toEqual({ kind: 'sign-in' })
   })
 
   it('offers Premium to a signed-in Basic account, with the gate reason', () => {
-    expect(orcleLiveUnlock(true, basic)).toEqual({
+    expect(golemLiveUnlock(true, basic)).toEqual({
       action: { kind: 'view-premium', url: 'https://www.videorc.com/premium' },
       reason: 'Golem requires Videorc Premium.'
     })
@@ -125,16 +125,16 @@ describe('orcleLiveUnlock', () => {
 
   it('names a lock without an upgrade link and offers no action', () => {
     expect(
-      orcleLiveUnlock(true, { allowed: false, featureId: 'live-cohost', reason: 'Not enabled.' })
+      golemLiveUnlock(true, { allowed: false, featureId: 'live-cohost', reason: 'Not enabled.' })
     ).toEqual({ action: null, reason: 'Not enabled.' })
   })
 
   it('unlocks nothing for Premium', () => {
-    expect(orcleLiveUnlock(true, premium)).toBeNull()
+    expect(golemLiveUnlock(true, premium)).toBeNull()
   })
 })
 
-describe('orcleLiveView', () => {
+describe('golemLiveView', () => {
   it('is off when the streamer turned it off, whatever else is true', () => {
     for (const overrides of [
       {},
@@ -142,14 +142,14 @@ describe('orcleLiveView', () => {
       { live: true, state: engine() },
       { signedIn: false }
     ]) {
-      const view = orcleLiveView(input({ settings: { enabled: false }, ...overrides }))
+      const view = golemLiveView(input({ settings: { enabled: false }, ...overrides }))
       expect(view.status).toMatchObject({ kind: 'off', label: 'Off', reason: null })
       expect(view.checked).toBe(false)
     }
   })
 
   it('joins the next stream once on, consented and unlocked', () => {
-    const view = orcleLiveView(input())
+    const view = golemLiveView(input())
     expect(view.status).toEqual({
       kind: 'on',
       label: 'On, joins your next stream',
@@ -169,14 +169,14 @@ describe('orcleLiveView', () => {
       engine({ status: 'off' }),
       engine({ tickInFlight: true })
     ]) {
-      const view = orcleLiveView(input({ live: true, state }))
+      const view = golemLiveView(input({ live: true, state }))
       expect(view.status).toMatchObject({ kind: 'live', label: 'Live now', reason: null })
       expect(view.streamManager).toBe(true)
     }
   })
 
   it('says why it cannot hear you while live, without raising an alarm', () => {
-    const view = orcleLiveView(
+    const view = golemLiveView(
       input({
         live: true,
         state: engine({ listening: { state: 'blocked', reasonCode: 'no-microphone' } })
@@ -189,7 +189,7 @@ describe('orcleLiveView', () => {
   })
 
   it('needs attention when the engine paused or failed, in the plain words the toast uses', () => {
-    const paused = orcleLiveView(
+    const paused = golemLiveView(
       input({ live: true, state: engine({ status: 'paused', reason: 'quota-exhausted' }) })
     )
     expect(paused.status).toMatchObject({
@@ -198,7 +198,7 @@ describe('orcleLiveView', () => {
       reason: 'Golem paused: daily AI quota is used up.'
     })
 
-    const failed = orcleLiveView(
+    const failed = golemLiveView(
       input({
         live: true,
         state: engine({
@@ -216,32 +216,32 @@ describe('orcleLiveView', () => {
     })
 
     expect(
-      orcleLiveView(input({ live: true, state: engine({ status: 'error', reason: null }) })).status
+      golemLiveView(input({ live: true, state: engine({ status: 'error', reason: null }) })).status
         .reason
     ).toBe('Golem hit an error.')
   })
 
   it('needs attention when cloud AI was revoked with Golem still on', () => {
-    const view = orcleLiveView(input({ consented: false, live: true, state: engine() }))
-    expect(view.status).toMatchObject({ kind: 'attention', reason: ORCLE_CONSENT_OFF_REASON })
+    const view = golemLiveView(input({ consented: false, live: true, state: engine() }))
+    expect(view.status).toMatchObject({ kind: 'attention', reason: GOLEM_CONSENT_OFF_REASON })
     // The switch still shows the stored choice; turning it off stays possible.
     expect(view.checked).toBe(true)
     expect(view.switchDisabled).toBe(false)
   })
 
   it('locks a signed-out or Basic account out of turning it on, never out of turning it off', () => {
-    const signedOut = orcleLiveView(input({ signedIn: false, settings: { enabled: false } }))
+    const signedOut = golemLiveView(input({ signedIn: false, settings: { enabled: false } }))
     expect(signedOut.switchDisabled).toBe(true)
     expect(signedOut.unlock?.action).toEqual({ kind: 'sign-in' })
 
-    const basicOff = orcleLiveView(input({ gate: basic, settings: { enabled: false } }))
+    const basicOff = golemLiveView(input({ gate: basic, settings: { enabled: false } }))
     expect(basicOff.switchDisabled).toBe(true)
     expect(basicOff.unlock?.action).toEqual({
       kind: 'view-premium',
       url: 'https://www.videorc.com/premium'
     })
 
-    const basicOn = orcleLiveView(input({ gate: basic }))
+    const basicOn = golemLiveView(input({ gate: basic }))
     expect(basicOn.switchDisabled).toBe(false)
     expect(basicOn.status).toMatchObject({
       kind: 'attention',
@@ -250,7 +250,7 @@ describe('orcleLiveView', () => {
   })
 
   it('waits for the backend before the switch can move', () => {
-    const view = orcleLiveView(input({ settings: null }))
+    const view = golemLiveView(input({ settings: null }))
     expect(view.switchDisabled).toBe(true)
     expect(view.checked).toBe(false)
     expect(view.status.kind).toBe('off')
@@ -259,13 +259,13 @@ describe('orcleLiveView', () => {
 
 describe('Voice commands (plan 140, S6 part A)', () => {
   it("says what you can say in the web guide's words", () => {
-    expect(ORCLE_VOICE_COMMANDS.map((command) => command.title)).toEqual([
+    expect(GOLEM_VOICE_COMMANDS.map((command) => command.title)).toEqual([
       'Highlight',
       'Clear',
       'Remove',
       'Answer'
     ])
-    const phrases = ORCLE_VOICE_COMMANDS.flatMap((command) => command.phrases)
+    const phrases = GOLEM_VOICE_COMMANDS.flatMap((command) => command.phrases)
     for (const phrase of [
       'Golem, highlight the comment from coders X',
       'Golem, put this one up',
@@ -278,7 +278,7 @@ describe('Voice commands (plan 140, S6 part A)', () => {
     ]) {
       expect(phrases).toContain(phrase)
     }
-    expect(orcleVoicePhrasesLabel(['Yes', 'Do it', 'No'], 2)).toBe('“Yes”, “Do it”')
+    expect(golemVoicePhrasesLabel(['Yes', 'Do it', 'No'], 2)).toBe('“Yes”, “Do it”')
   })
 
   it('keeps the promises plain: posts only in your modes, 20 seconds, 10 a minute, free removal', () => {
@@ -286,21 +286,21 @@ describe('Voice commands (plan 140, S6 part A)', () => {
     expect(COHOST_ACTS_ON_ASK_COPY).toBe(
       'The Golem posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to.'
     )
-    expect(ORCLE_REMOVAL_LIMITS).toContain('20 seconds')
-    expect(ORCLE_REMOVAL_LIMITS).toContain('At most 10 removals a minute.')
-    expect(ORCLE_REMOVAL_FALLBACK).toBe(
+    expect(GOLEM_REMOVAL_LIMITS).toContain('20 seconds')
+    expect(GOLEM_REMOVAL_LIMITS).toContain('At most 10 removals a minute.')
+    expect(GOLEM_REMOVAL_FALLBACK).toBe(
       'If the platform cannot remove it, Golem hides it in Videorc and tells you viewers may still see it.'
     )
-    expect(ORCLE_VOICE_PREMIUM).toContain('Premium')
-    expect(ORCLE_VOICE_PREMIUM).toContain('free for everyone')
+    expect(GOLEM_VOICE_PREMIUM).toContain('Premium')
+    expect(GOLEM_VOICE_PREMIUM).toContain('free for everyone')
     for (const line of [
-      ORCLE_VOICE_COMMANDS_DESCRIPTION,
-      ORCLE_VOICE_COMMANDS_OFF,
-      ORCLE_REMOVAL_LIMITS,
-      ORCLE_REMOVAL_FALLBACK,
-      ORCLE_VOICE_PREMIUM,
-      ORCLE_REMOVE_MESSAGES_NO_ACCOUNT,
-      ...ORCLE_VOICE_COMMANDS.flatMap((command) => [command.result, ...command.phrases])
+      GOLEM_VOICE_COMMANDS_DESCRIPTION,
+      GOLEM_VOICE_COMMANDS_OFF,
+      GOLEM_REMOVAL_LIMITS,
+      GOLEM_REMOVAL_FALLBACK,
+      GOLEM_VOICE_PREMIUM,
+      GOLEM_REMOVE_MESSAGES_NO_ACCOUNT,
+      ...GOLEM_VOICE_COMMANDS.flatMap((command) => [command.result, ...command.phrases])
     ]) {
       expect(line).not.toContain('—')
       expect(line).not.toMatch(/co-?host/i)

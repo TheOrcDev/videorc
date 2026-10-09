@@ -5,10 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { CohostSettings, CohostState } from '@/lib/backend'
 import type { CleanCutTabRequest } from '@/lib/clean-cut-events'
-import { CLOUD_AI_KEEPS, CLOUD_AI_USES, ORCLE_LIVE_POWERS } from '@/lib/orcle-tab-view'
-import type { OrcleTabId } from '@/lib/orcle-tabs'
+import { CLOUD_AI_KEEPS, CLOUD_AI_USES, GOLEM_LIVE_POWERS } from '@/lib/golem-tab-view'
+import type { GolemTabId } from '@/lib/golem-tabs'
 
-import { OrcleTab } from './orcle-tab'
+import { GolemTab } from './golem-tab'
 
 const mocked = vi.hoisted(() => ({
   core: {} as Record<string, unknown>,
@@ -25,8 +25,8 @@ vi.mock('@/hooks/use-studio', () => ({
   useStudioShell: () => mocked.shell
 }))
 vi.mock('@/hooks/use-account', () => ({ useVideorcAccount: () => mocked.account }))
-vi.mock('@/hooks/use-orcle-report', () => ({
-  useOrcleReport: (sessionId: string | null) => {
+vi.mock('@/hooks/use-golem-report', () => ({
+  useGolemReport: (sessionId: string | null) => {
     mocked.reportAsks.push(sessionId)
     return { payload: null, loading: false, error: null, reload: () => undefined }
   }
@@ -75,14 +75,14 @@ vi.mock('@/components/clean-cut/clean-cut-review', async () => {
 let root: Root
 let container: HTMLDivElement
 const calls = {
-  setOrcleLive: vi.fn(async (_on: boolean) => undefined),
-  answerOrcleConsent: vi.fn(async (_accepted: boolean) => undefined),
+  setGolemLive: vi.fn(async (_on: boolean) => undefined),
+  answerGolemConsent: vi.fn(async (_accepted: boolean) => undefined),
   setAiConsent: vi.fn((_consent: boolean) => undefined),
   patchCohostSettings: vi.fn(async () => undefined),
   openCommentsWindow: vi.fn(async () => undefined),
   signIn: vi.fn(),
   openOAuthUrl: vi.fn(async (_url: string) => undefined),
-  onTabChange: vi.fn((_tab: OrcleTabId) => undefined)
+  onTabChange: vi.fn((_tab: GolemTabId) => undefined)
 }
 
 const premium = { allowed: true }
@@ -152,7 +152,7 @@ async function render({
   state = null as CohostState | null,
   reportSessionId = undefined as string | null | undefined,
   cleanCutRequest = undefined as CleanCutTabRequest | undefined,
-  tab = undefined as OrcleTabId | undefined,
+  tab = undefined as GolemTabId | undefined,
   core = {} as Record<string, unknown>
 } = {}): Promise<void> {
   mocked.core = {
@@ -163,9 +163,9 @@ async function render({
     cohostGate: gate,
     cohostSettings: cohost,
     runtimeInfo: { platform: 'darwin', commentsWindowEnabled: true },
-    orcleConsentRequested: consentRequested,
-    setOrcleLive: calls.setOrcleLive,
-    answerOrcleConsent: calls.answerOrcleConsent,
+    golemConsentRequested: consentRequested,
+    setGolemLive: calls.setGolemLive,
+    answerGolemConsent: calls.answerGolemConsent,
     setAiConsent: calls.setAiConsent,
     patchCohostSettings: calls.patchCohostSettings,
     ...core
@@ -180,7 +180,7 @@ async function render({
   mocked.account = { signIn: calls.signIn }
   await act(async () =>
     root.render(
-      createElement(OrcleTab, {
+      createElement(GolemTab, {
         ...(reportSessionId === undefined ? {} : { reportSessionId }),
         ...(cleanCutRequest === undefined ? {} : { cleanCutRequest }),
         ...(tab === undefined ? {} : { tab, onTabChange: calls.onTabChange })
@@ -195,9 +195,9 @@ async function render({
 
 /** Plan 164 S-D6: the switch moved to Stream Manager; the tab points there. */
 function livePointer(): HTMLElement {
-  const pointer = document.querySelector('[data-testid="orcle-live-pointer"]') as HTMLElement | null
+  const pointer = document.querySelector('[data-testid="golem-live-pointer"]') as HTMLElement | null
   expect(pointer).toBeTruthy()
-  expect(document.getElementById('orcle-live-switch')).toBeNull()
+  expect(document.getElementById('golem-live-switch')).toBeNull()
   return pointer!
 }
 
@@ -210,24 +210,24 @@ function button(label: string): HTMLButtonElement {
 }
 
 function statusLine(): HTMLElement {
-  return document.querySelector('[data-slot="orcle-live-status"]') as HTMLElement
+  return document.querySelector('[data-slot="golem-live-status"]') as HTMLElement
 }
 
 function stripTabs(): HTMLElement[] {
-  return [...document.querySelectorAll<HTMLElement>('[data-videorc-orcle-tab]')]
+  return [...document.querySelectorAll<HTMLElement>('[data-videorc-golem-tab]')]
 }
 
 function selectedTab(): string | null {
   return (
     document
-      .querySelector('[data-videorc-orcle-tab][data-state="active"]')
-      ?.getAttribute('data-videorc-orcle-tab') ?? null
+      .querySelector('[data-videorc-golem-tab][data-state="active"]')
+      ?.getAttribute('data-videorc-golem-tab') ?? null
   )
 }
 
 /** Radix activates a tab on mousedown with the primary button. */
-async function pressTab(id: OrcleTabId): Promise<void> {
-  const trigger = document.querySelector(`[data-videorc-orcle-tab="${id}"]`) as HTMLElement
+async function pressTab(id: GolemTabId): Promise<void> {
+  const trigger = document.querySelector(`[data-videorc-golem-tab="${id}"]`) as HTMLElement
   expect(trigger).toBeTruthy()
   await act(async () => {
     trigger.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))
@@ -246,14 +246,14 @@ describe('Golem tab strip (plan 150)', () => {
     ])
     expect(selectedTab()).toBe('live')
     expect(document.querySelector('[data-slot="page-header"]')).toBeNull()
-    expect(document.querySelector('[data-slot="orcle-customize"]')).toBeNull()
+    expect(document.querySelector('[data-slot="golem-customize"]')).toBeNull()
   })
 
   it('shows the tab the shell names and asks the shell to change it', async () => {
     await render({ tab: 'voice' })
     expect(selectedTab()).toBe('voice')
-    expect(document.querySelector('[data-slot="orcle-voice-commands"]')).toBeTruthy()
-    expect(document.getElementById('orcle-live-switch')).toBeNull()
+    expect(document.querySelector('[data-slot="golem-voice-commands"]')).toBeTruthy()
+    expect(document.getElementById('golem-live-switch')).toBeNull()
     await pressTab('reports')
     expect(calls.onTabChange).toHaveBeenLastCalledWith('reports')
   })
@@ -289,7 +289,7 @@ describe('Golem tab (plan 119 S2)', () => {
     expect(text).toContain('Joins my streams')
     expect(text).toContain('Alpha')
     expect(text).toContain('Golem joins my streams')
-    for (const power of ORCLE_LIVE_POWERS) {
+    for (const power of GOLEM_LIVE_POWERS) {
       expect(text).toContain(power.title)
       expect(text).toContain(power.description)
     }
@@ -303,7 +303,7 @@ describe('Golem tab (plan 119 S2)', () => {
   it('has no switch of its own any more: the Stream Manager mode turns Golem on', async () => {
     await render()
     livePointer()
-    expect(calls.setOrcleLive).not.toHaveBeenCalled()
+    expect(calls.setGolemLive).not.toHaveBeenCalled()
     await render({ cohost: settings({ enabled: true, listen: true }) })
     expect(statusLine().textContent).toContain('On, joins your next stream')
     expect(calls.patchCohostSettings).not.toHaveBeenCalled()
@@ -314,17 +314,17 @@ describe('Golem tab (plan 119 S2)', () => {
     const dialog = document.querySelector('[role="dialog"]')
     expect(dialog?.textContent).toContain('Turn on Golem Live?')
     // Plan 149: Golem's emblem leads the dialog, at its large size.
-    const emblem = dialog?.querySelector('[data-slot="orcle-emblem"]')
+    const emblem = dialog?.querySelector('[data-slot="golem-emblem"]')
     expect(emblem?.getAttribute('src')).toContain('golem-emblem-112')
     expect(emblem?.getAttribute('alt')).toBe('')
     for (const use of CLOUD_AI_USES) expect(dialog?.textContent).toContain(use)
     expect(dialog?.textContent).toContain(CLOUD_AI_KEEPS)
 
     await act(async () => button('Allow and turn on').click())
-    expect(calls.answerOrcleConsent).toHaveBeenLastCalledWith(true)
+    expect(calls.answerGolemConsent).toHaveBeenLastCalledWith(true)
 
     await act(async () => button('Not now').click())
-    expect(calls.answerOrcleConsent).toHaveBeenLastCalledWith(false)
+    expect(calls.answerGolemConsent).toHaveBeenLastCalledWith(false)
     expect(calls.setAiConsent).not.toHaveBeenCalled()
   })
 
@@ -335,7 +335,7 @@ describe('Golem tab (plan 119 S2)', () => {
 
   it('asks a signed-out streamer to sign in', async () => {
     await render({ signedIn: false, gate: basic })
-    const unlock = document.querySelector('[data-testid="orcle-live-unlock"]')
+    const unlock = document.querySelector('[data-testid="golem-live-unlock"]')
     expect(unlock?.textContent).toContain('Sign in to use Golem Live, part of Videorc Premium.')
     livePointer()
     await act(async () => button('Sign in').click())
@@ -344,7 +344,7 @@ describe('Golem tab (plan 119 S2)', () => {
 
   it('offers Premium to a Basic account', async () => {
     await render({ gate: basic })
-    expect(document.querySelector('[data-testid="orcle-live-unlock"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="golem-live-unlock"]')?.textContent).toContain(
       'Golem requires Videorc Premium.'
     )
     livePointer()
@@ -389,16 +389,16 @@ describe('Golem tab (plan 119 S2)', () => {
 describe('Live and Chat tabs (plan 150 S3, S4)', () => {
   it('leads Live with the emblem beside the status, and listening under it', async () => {
     await render()
-    const block = document.querySelector('[data-slot="orcle-live-status-block"]') as HTMLElement
-    expect(block.querySelector('[data-slot="orcle-emblem"]')?.getAttribute('src')).toContain(
+    const block = document.querySelector('[data-slot="golem-live-status-block"]') as HTMLElement
+    expect(block.querySelector('[data-slot="golem-emblem"]')?.getAttribute('src')).toContain(
       'golem-emblem-112'
     )
-    expect(block.querySelector('#orcle-live-switch')).toBeNull()
-    expect(block.querySelector('[data-testid="orcle-live-pointer"]')).toBeTruthy()
+    expect(block.querySelector('#golem-live-switch')).toBeNull()
+    expect(block.querySelector('[data-testid="golem-live-pointer"]')).toBeTruthy()
     expect(document.getElementById('cohost-listen')).toBeTruthy()
     // The three-column pitch is gone; Live lists what Golem does as rows.
     expect(document.querySelector('ul[aria-label="What Golem Live does"]')).toBeNull()
-    expect(document.querySelectorAll('[data-power-tab]')).toHaveLength(ORCLE_LIVE_POWERS.length)
+    expect(document.querySelectorAll('[data-power-tab]')).toHaveLength(GOLEM_LIVE_POWERS.length)
   })
 
   it('opens the tab that holds a power when its row is pressed', async () => {
@@ -418,10 +418,10 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
     )
     // Plan 164 S-D5: Greetings lead the Chat tab, above Replies.
     expect(titles).toEqual(['Greetings', 'Replies', 'Moderation'])
-    expect(document.querySelector('[data-testid="orcle-tab-unlock"]')).toBeNull()
+    expect(document.querySelector('[data-testid="golem-tab-unlock"]')).toBeNull()
 
     await render({ tab: 'chat', gate: basic })
-    expect(document.querySelector('[data-testid="orcle-tab-unlock"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="golem-tab-unlock"]')?.textContent).toContain(
       'Golem requires Videorc Premium.'
     )
     expect((document.getElementById('cohost-notes') as HTMLTextAreaElement).disabled).toBe(true)
@@ -436,31 +436,31 @@ describe('Live and Chat tabs (plan 150 S3, S4)', () => {
 describe('Locked means disabled, with one reason, on every tab (plan 150, D7)', () => {
   it('gives a signed-out streamer the same sign-in reason on Live, Chat and Voice', async () => {
     await render({ signedIn: false })
-    expect(document.querySelector('[data-testid="orcle-live-unlock"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="golem-live-unlock"]')?.textContent).toContain(
       'Sign in to use Golem Live'
     )
     expect((document.getElementById('cohost-listen') as HTMLButtonElement).disabled).toBe(true)
 
     await render({ signedIn: false, tab: 'chat' })
-    expect(document.querySelector('[data-testid="orcle-tab-unlock"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="golem-tab-unlock"]')?.textContent).toContain(
       'Sign in to use Golem Live'
     )
     expect((document.getElementById('cohost-notes') as HTMLTextAreaElement).disabled).toBe(true)
 
     await render({ signedIn: false, tab: 'voice' })
-    expect(document.querySelector('[data-testid="orcle-tab-unlock"]')?.textContent).toContain(
+    expect(document.querySelector('[data-testid="golem-tab-unlock"]')?.textContent).toContain(
       'Sign in to use Golem Live'
     )
-    expect(document.querySelector('[data-testid="orcle-voice-commands-off"]')).toBeNull()
-    expect((document.getElementById('orcle-wake-word') as HTMLButtonElement).disabled).toBe(true)
+    expect(document.querySelector('[data-testid="golem-voice-commands-off"]')).toBeNull()
+    expect((document.getElementById('golem-wake-word') as HTMLButtonElement).disabled).toBe(true)
   })
 })
 
 describe('Reports (plan 119 S3, plan 150)', () => {
   it('is its own tab and follows the last stream', async () => {
     await render({ tab: 'reports' })
-    expect(document.querySelector('[data-slot="orcle-report"]')).toBeTruthy()
-    expect(document.getElementById('orcle-live-switch')).toBeNull()
+    expect(document.querySelector('[data-slot="golem-report"]')).toBeTruthy()
+    expect(document.getElementById('golem-live-switch')).toBeNull()
     expect(mocked.reportAsks.at(-1)).toBeNull()
     expect(document.body.textContent).toContain(
       'The report appears here after your first stream with Golem.'
@@ -476,19 +476,19 @@ describe('Reports (plan 119 S3, plan 150)', () => {
 describe('Cloud AI and the settings tabs (plan 119 S2, plan 150)', () => {
   it('keeps cloud-AI consent on Live, its single home: it revokes and grants', async () => {
     await render({ cohost: settings({ enabled: true, listen: true }) })
-    const cloudAi = document.getElementById('orcle-cloud-ai') as HTMLButtonElement
+    const cloudAi = document.getElementById('golem-cloud-ai') as HTMLButtonElement
     expect(cloudAi.getAttribute('data-state')).toBe('checked')
     for (const use of CLOUD_AI_USES) expect(document.body.textContent).toContain(use)
     await act(async () => cloudAi.click())
     expect(calls.setAiConsent).toHaveBeenLastCalledWith(false)
 
     await render({ cohost: settings({ enabled: true, listen: true }), consented: false })
-    const revoked = document.getElementById('orcle-cloud-ai') as HTMLButtonElement
+    const revoked = document.getElementById('golem-cloud-ai') as HTMLButtonElement
     expect(revoked.getAttribute('data-state')).toBe('unchecked')
     await act(async () => revoked.click())
     expect(calls.setAiConsent).toHaveBeenLastCalledWith(true)
     // Consent alone never turns Golem on or off.
-    expect(calls.setOrcleLive).not.toHaveBeenCalled()
+    expect(calls.setGolemLive).not.toHaveBeenCalled()
   })
 
   it("holds Golem's settings without a second Enable switch", async () => {
@@ -503,7 +503,7 @@ describe('Clean cut in the Golem tab (plan 119 S14)', () => {
   it('is its own tab', async () => {
     await render({ tab: 'clean-cut' })
     expect(document.querySelector('[data-slot="clean-cut"]')).toBeTruthy()
-    expect(document.querySelector('[data-slot="orcle-report"]')).toBeNull()
+    expect(document.querySelector('[data-slot="golem-report"]')).toBeNull()
   })
 
   it("opens a cut's review on the ready toast's ask, and goes back to the tab", async () => {
@@ -550,7 +550,7 @@ describe('Golem tab: Voice commands (plan 140, S6 part A)', () => {
   ]
 
   function section(): HTMLElement {
-    const element = document.querySelector<HTMLElement>('[data-slot="orcle-voice-commands"]')
+    const element = document.querySelector<HTMLElement>('[data-slot="golem-voice-commands"]')
     expect(element).toBeTruthy()
     return element!
   }
@@ -558,7 +558,7 @@ describe('Golem tab: Voice commands (plan 140, S6 part A)', () => {
   it('is the Voice tab: what you can say, and the promise', async () => {
     await render({ cohost: settings({ enabled: true }), tab: 'voice' })
     const voice = section()
-    expect(document.getElementById('orcle-live-switch')).toBeNull()
+    expect(document.getElementById('golem-live-switch')).toBeNull()
     const text = voice.textContent ?? ''
     expect(text).toContain('Voice commands')
     expect(text).toContain('What you can say')
@@ -570,12 +570,12 @@ describe('Golem tab: Voice commands (plan 140, S6 part A)', () => {
     )
     expect(text).toContain('20 seconds')
     expect(text).toContain('At most 10 removals a minute.')
-    expect(voice.querySelector('[data-testid="orcle-voice-commands-off"]')).toBeNull()
+    expect(voice.querySelector('[data-testid="golem-voice-commands-off"]')).toBeNull()
   })
 
   it('says to turn on Golem Live first while it is off, with a way to Live', async () => {
     await render({ tab: 'voice' })
-    const off = section().querySelector('[data-testid="orcle-voice-commands-off"]') as HTMLElement
+    const off = section().querySelector('[data-testid="golem-voice-commands-off"]') as HTMLElement
     expect(off.textContent).toContain('Turn on Golem Live to use voice commands.')
     await act(async () => off.querySelector('button')!.click())
     expect(calls.onTabChange).toHaveBeenLastCalledWith('live')
@@ -583,11 +583,11 @@ describe('Golem tab: Voice commands (plan 140, S6 part A)', () => {
 
   it('leads with one reason when Golem is locked, and disables the settings (plan 150)', async () => {
     await render({ tab: 'voice', gate: basic })
-    expect(section().querySelector('[data-testid="orcle-tab-unlock"]')?.textContent).toContain(
+    expect(section().querySelector('[data-testid="golem-tab-unlock"]')?.textContent).toContain(
       'Golem requires Videorc Premium.'
     )
-    expect(section().querySelector('[data-testid="orcle-voice-commands-off"]')).toBeNull()
-    expect((document.getElementById('orcle-wake-word') as HTMLButtonElement).disabled).toBe(true)
+    expect(section().querySelector('[data-testid="golem-voice-commands-off"]')).toBeNull()
+    expect((document.getElementById('golem-wake-word') as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('puts each phrase over what it does, in two columns (plan 150)', async () => {
@@ -599,7 +599,7 @@ describe('Golem tab: Voice commands (plan 140, S6 part A)', () => {
     const highlight = section().querySelector('[data-command="highlight"]') as HTMLElement
     expect(highlight.children).toHaveLength(2)
     expect(highlight.lastElementChild?.textContent).toBe('Puts it on stream.')
-    expect(section().querySelector('[data-slot="orcle-voice-commands-premium"]')).toBeTruthy()
+    expect(section().querySelector('[data-slot="golem-voice-commands-premium"]')).toBeTruthy()
   })
 
   it('lists Remove messages per account, with the one fix for each', async () => {
@@ -663,7 +663,7 @@ describe('Golem tab: Voice commands (plan 140, S6 part A)', () => {
     expect(voice.textContent).toContain('Commands need “Golem” first')
     expect(voice.textContent).toContain('YouTube always asks you to confirm.')
     expect(voice.textContent).toContain('A removal waits 20 seconds for your answer')
-    const wake = document.getElementById('orcle-wake-word') as HTMLButtonElement
+    const wake = document.getElementById('golem-wake-word') as HTMLButtonElement
     await act(async () => wake.click())
     expect(calls.patchCohostSettings).toHaveBeenLastCalledWith({ wakeWordRequired: true })
     const countdown = [...voice.querySelectorAll<HTMLButtonElement>('button')].find(
@@ -676,7 +676,7 @@ describe('Golem tab: Voice commands (plan 140, S6 part A)', () => {
 
   it('names the countdown in the numbers line when it is on', async () => {
     await render({ cohost: settings({ enabled: true, removeConfirm: 'countdown' }), tab: 'voice' })
-    const notes = section().querySelector('[data-slot="orcle-voice-commands-notes"]')
+    const notes = section().querySelector('[data-slot="golem-voice-commands-notes"]')
     expect(notes?.textContent).toContain('runs after 5 seconds unless you cancel')
   })
 
@@ -696,7 +696,7 @@ describe('Golem tab: Voice commands (plan 140, S6 part A)', () => {
         commandAvailability: { voiceCommands: 'paused', remove: 'paused' }
       }
     })
-    const lines = [...section().querySelectorAll('[data-slot="orcle-voice-commands-paused"]')].map(
+    const lines = [...section().querySelectorAll('[data-slot="golem-voice-commands-paused"]')].map(
       (line) => line.textContent
     )
     expect(lines).toEqual([
@@ -704,7 +704,7 @@ describe('Golem tab: Voice commands (plan 140, S6 part A)', () => {
       'Removing messages is paused by Videorc.'
     ])
     await render({ tab: 'voice' })
-    expect(section().querySelector('[data-slot="orcle-voice-commands-paused"]')).toBeNull()
+    expect(section().querySelector('[data-slot="golem-voice-commands-paused"]')).toBeNull()
   })
 
   it('says where to connect when no platform is connected', async () => {

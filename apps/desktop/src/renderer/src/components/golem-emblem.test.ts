@@ -4,7 +4,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
-import { OrcleEmblem } from './orcle-emblem'
+import { GolemEmblem } from './golem-emblem'
 
 // Plans 149 and 164: Golem's emblem ships as two trimmed WebP exports of the
 // master in `assets/brand/golem/`. Their heights are the 2× files for 32 and 56 px.
@@ -52,9 +52,9 @@ describe('the Golem emblem exports', () => {
   })
 })
 
-describe('OrcleEmblem', () => {
-  const markup = (props: Parameters<typeof OrcleEmblem>[0] = {}): string =>
-    renderToStaticMarkup(createElement(OrcleEmblem, props))
+describe('GolemEmblem', () => {
+  const markup = (props: Parameters<typeof GolemEmblem>[0] = {}): string =>
+    renderToStaticMarkup(createElement(GolemEmblem, props))
 
   it('is decorative at 32 px by default', () => {
     const html = markup()

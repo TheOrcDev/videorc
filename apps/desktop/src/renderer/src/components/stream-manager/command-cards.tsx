@@ -1,16 +1,16 @@
 import { useEffect, useRef, type KeyboardEvent, type ReactElement } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
-import { MicrophoneIcon, OrcleIcon, PreviewIcon } from '@/components/icons'
+import { MicrophoneIcon, GolemIcon, PreviewIcon } from '@/components/icons'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
-import { orcleCardPickIndex, removalKeyAnswer } from '@/components/stream-manager/removal-cards'
+import { golemCardPickIndex, removalKeyAnswer } from '@/components/stream-manager/removal-cards'
 import type {
   CommandChooserView,
   CommandConfirmView,
   CommandStripView
-} from '@/lib/orcle-command-view'
+} from '@/lib/golem-command-view'
 import { cn } from '@/lib/utils'
 
 // Golem voice commands in the Stream Manager's Golem pane (plan 140, S6 part
@@ -95,7 +95,7 @@ export function CommandCards({
     const onKeyDown = (event: globalThis.KeyboardEvent): void => {
       // A focused card (this one or a removal card) answers its own keys.
       if (document.activeElement?.closest(FOCUSED_CARD)) return
-      const index = orcleCardPickIndex(event, document.activeElement, document.body, pickCount)
+      const index = golemCardPickIndex(event, document.activeElement, document.body, pickCount)
       if (index !== null) {
         event.preventDefault()
         onAnswerRef.current(commandId, { action: 'choose', index })
@@ -168,7 +168,7 @@ function CommandChooser({
       tabIndex={-1}
       onKeyDown={(event) => cardKeyDown(event, onAnswer, { picks: view.candidates.length })}
     >
-      <OrcleIcon aria-hidden weight="duotone" />
+      <GolemIcon aria-hidden weight="duotone" />
       <AlertTitle className="flex min-w-0 items-center gap-2 text-xs">
         <span className="min-w-0 flex-1 truncate">{view.title}</span>
         {view.timer ? (

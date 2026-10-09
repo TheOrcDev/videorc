@@ -22,7 +22,7 @@ import {
   SelectTrigger,
   SelectValue
 } from '@/components/ui/select'
-import { useOrcleReport } from '@/hooks/use-orcle-report'
+import { useGolemReport } from '@/hooks/use-golem-report'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { ClipMomentSource } from '@/lib/backend'
 import {
@@ -30,23 +30,23 @@ import {
   formatReportCount,
   isAutoSessionTitle,
   newestStreamedSessionId,
-  ORCLE_REPORT_DESCRIPTION,
-  ORCLE_REPORT_EMPTY_TITLE,
-  ORCLE_REPORT_LIST_CAP,
-  orcleReportView,
+  GOLEM_REPORT_DESCRIPTION,
+  GOLEM_REPORT_EMPTY_TITLE,
+  GOLEM_REPORT_LIST_CAP,
+  golemReportView,
   reportSessionChoice,
   reportSessionOptions,
-  type OrcleReportSessionOption,
-  type OrcleReportStat,
-  type OrcleReportView
-} from '@/lib/orcle-report-view'
+  type GolemReportSessionOption,
+  type GolemReportStat,
+  type GolemReportView
+} from '@/lib/golem-report-view'
 import { cn } from '@/lib/utils'
 
 const SessionMarkersDialog = lazy(async () => ({
   default: (await import('@/components/session-markers-dialog')).SessionMarkersDialog
 }))
 
-type ShownReport = Exclude<OrcleReportView, { kind: 'empty' }>
+type ShownReport = Exclude<GolemReportView, { kind: 'empty' }>
 
 // Which part of a one-line row gives way first. A question keeps its words
 // and lets the askers go; a moment or an alert keeps its short label and
@@ -61,7 +61,7 @@ const LABEL_STAYS = '[&_[data-slot=list-row-title]]:shrink-0'
  * `sessionId` null follows the newest stream, so the next one that ends
  * replaces it on its own; the Library's "Golem report" passes one session.
  */
-export function OrcleReportCard({
+export function GolemReportCard({
   sessionId,
   onSessionChange
 }: {
@@ -72,11 +72,11 @@ export function OrcleReportCard({
   const [markersOpen, setMarkersOpen] = useState(false)
   const newestId = useMemo(() => newestStreamedSessionId(sessions), [sessions])
   const ask = sessionId ?? newestId
-  const { payload, loading, error, reload } = useOrcleReport(ask)
+  const { payload, loading, error, reload } = useGolemReport(ask)
   const session = payload
     ? (sessions.find((entry) => entry.id === payload.sessionId) ?? null)
     : null
-  const view = orcleReportView({ payload, session, orcleOn: cohostSettings?.enabled === true })
+  const view = golemReportView({ payload, session, golemOn: cohostSettings?.enabled === true })
   const shown = view.kind === 'empty' ? null : view
   const options = reportSessionOptions(
     sessions,
@@ -94,7 +94,7 @@ export function OrcleReportCard({
           <>
             {showMarkers ? (
               <Button
-                data-testid="orcle-report-markers"
+                data-testid="golem-report-markers"
                 size="sm"
                 type="button"
                 variant="ghost"
@@ -114,13 +114,13 @@ export function OrcleReportCard({
           </>
         ) : null
       }
-      description={ORCLE_REPORT_DESCRIPTION}
+      description={GOLEM_REPORT_DESCRIPTION}
       title="Stream report"
     >
       <div
         aria-busy={loading || undefined}
-        className="@container/orcle-report flex min-w-0 flex-col gap-4"
-        data-slot="orcle-report"
+        className="@container/golem-report flex min-w-0 flex-col gap-4"
+        data-slot="golem-report"
         data-state={loading ? 'loading' : view.kind === 'empty' ? 'empty' : view.kind}
       >
         {error ? (
@@ -146,8 +146,8 @@ export function OrcleReportCard({
         ) : error ? null : loading ? (
           <p className="text-xs text-muted-foreground">Loading the report…</p>
         ) : view.kind === 'empty' ? (
-          <div className="flex flex-col gap-1 py-6" data-slot="orcle-report-empty">
-            <p className="text-sm font-medium text-foreground">{ORCLE_REPORT_EMPTY_TITLE}</p>
+          <div className="flex flex-col gap-1 py-6" data-slot="golem-report-empty">
+            <p className="text-sm font-medium text-foreground">{GOLEM_REPORT_EMPTY_TITLE}</p>
             <p className="text-xs text-muted-foreground">{view.message}</p>
           </div>
         ) : null}
@@ -162,7 +162,7 @@ function ReportSwitcher({
   selectedId,
   onSelect
 }: {
-  options: readonly OrcleReportSessionOption[]
+  options: readonly GolemReportSessionOption[]
   selectedId: string
   onSelect: (sessionId: string) => void
 }): ReactElement {
@@ -193,7 +193,7 @@ function ReportBody({ view }: { view: ShownReport }): ReactElement {
     <>
       <StreamLine view={view} />
       {view.note ? (
-        <Alert data-testid="orcle-report-off" role="note">
+        <Alert data-testid="golem-report-off" role="note">
           <InfoIcon />
           <AlertTitle>{view.note.title}</AlertTitle>
           <AlertDescription className="text-xs">{view.note.hint}</AlertDescription>
@@ -236,7 +236,7 @@ function ReportBody({ view }: { view: ShownReport }): ReactElement {
             (view.moments.length > 0 || view.alerts.length > 0) &&
             'lg:grid-cols-2'
         )}
-        data-slot="orcle-report-lists"
+        data-slot="golem-report-lists"
       >
         {view.missed.length > 0 || view.promises.length > 0 ? (
           <div className="flex min-w-0 flex-col gap-4">
@@ -335,7 +335,7 @@ function ReportBody({ view }: { view: ShownReport }): ReactElement {
 function StreamLine({ view }: { view: ShownReport }): ReactElement {
   const facts = [view.duration, view.chat.label].filter((fact): fact is string => Boolean(fact))
   return (
-    <div className="flex min-w-0 flex-col gap-0.5" data-slot="orcle-report-stream">
+    <div className="flex min-w-0 flex-col gap-0.5" data-slot="golem-report-stream">
       {isAutoSessionTitle(view.title) ? null : (
         <p className="truncate text-sm font-medium text-foreground select-text" title={view.title}>
           {view.title}
@@ -351,7 +351,7 @@ function StreamLine({ view }: { view: ShownReport }): ReactElement {
         {view.chat.platforms.length > 0 ? (
           <span
             className="ml-1 inline-flex items-center gap-2.5"
-            data-slot="orcle-report-platforms"
+            data-slot="golem-report-platforms"
           >
             {view.chat.platforms.map((entry) => (
               <span
@@ -380,7 +380,7 @@ function StreamLine({ view }: { view: ShownReport }): ReactElement {
 function ReportCommands({ commands }: { commands: ShownReport['commands'] }): ReactElement | null {
   if (!commands) return null
   return (
-    <div className="flex min-w-0 flex-col gap-1" data-slot="orcle-report-commands">
+    <div className="flex min-w-0 flex-col gap-1" data-slot="golem-report-commands">
       <GroupedList>
         <ListRow
           className={LABEL_STAYS}
@@ -407,11 +407,11 @@ function ReportCommands({ commands }: { commands: ShownReport['commands'] }): Re
  * the report's own width (2, 3, 5, then all 9 in one row), and every tile in
  * a row is as tall as the tallest.
  */
-function ReportStats({ stats }: { stats: readonly OrcleReportStat[] }): ReactElement {
+function ReportStats({ stats }: { stats: readonly GolemReportStat[] }): ReactElement {
   return (
     <dl
-      className="grid grid-cols-2 gap-2 @min-[30rem]/orcle-report:grid-cols-3 @min-[52rem]/orcle-report:grid-cols-5 @min-[90rem]/orcle-report:grid-cols-9"
-      data-slot="orcle-report-stats"
+      className="grid grid-cols-2 gap-2 @min-[30rem]/golem-report:grid-cols-3 @min-[52rem]/golem-report:grid-cols-5 @min-[90rem]/golem-report:grid-cols-9"
+      data-slot="golem-report-stats"
     >
       {stats.map((stat) => (
         <div
@@ -459,7 +459,7 @@ function ReportList<T>({
   if (items.length === 0) return null
   const { visible } = capReportList(items, expanded)
   return (
-    <div className="flex min-w-0 flex-col gap-1" data-slot={`orcle-report-${id}`}>
+    <div className="flex min-w-0 flex-col gap-1" data-slot={`golem-report-${id}`}>
       <GroupedList
         label={
           <>
@@ -469,7 +469,7 @@ function ReportList<T>({
       >
         {visible.map(render)}
       </GroupedList>
-      {items.length > ORCLE_REPORT_LIST_CAP ? (
+      {items.length > GOLEM_REPORT_LIST_CAP ? (
         <Button
           aria-expanded={expanded}
           className="w-fit"

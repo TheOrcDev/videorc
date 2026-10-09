@@ -101,7 +101,7 @@ import {
   CommandStrip,
   type CommandAnswer
 } from '@/components/stream-manager/command-cards'
-import { commandChooserView, commandConfirmView, commandStripView } from '@/lib/orcle-command-view'
+import { commandChooserView, commandConfirmView, commandStripView } from '@/lib/golem-command-view'
 import {
   removalPaneView,
   removeFromChatAvailable,
@@ -118,7 +118,7 @@ import { latestModerationOperationByMessage } from '../../../../shared/chat-mode
  * here, not imported: importing that module moves it into the chunk this
  * window shares with the main window and grows the main window's eager bytes.
  */
-const ORCLE_SHORTCUT = /Macintosh/.test(globalThis.navigator?.userAgent ?? '') ? '⌘J' : 'Ctrl+J'
+const GOLEM_SHORTCUT = /Macintosh/.test(globalThis.navigator?.userAgent ?? '') ? '⌘J' : 'Ctrl+J'
 
 const NO_MODERATION_OPERATIONS: readonly ModerationOperation[] = []
 
@@ -426,14 +426,14 @@ export function StreamManager({
     command !== null && command.id === commandAnsweringId
   )
   const commandCardId = commandChooser || commandConfirm ? (command?.id ?? '') : ''
-  const orcleCardsActive = removalPane.active || commandStrip !== null || commandCardId !== ''
+  const golemCardsActive = removalPane.active || commandStrip !== null || commandCardId !== ''
   useEffect(() => {
     const timer = setInterval(
       () => setNowMs(Date.now()),
-      onAir || orcleCardsActive ? 1_000 : 15_000
+      onAir || golemCardsActive ? 1_000 : 15_000
     )
     return () => clearInterval(timer)
-  }, [onAir, orcleCardsActive])
+  }, [onAir, golemCardsActive])
 
   // --- Golem (unchanged behaviour, moved into its own pane: D5) ---
   const cohostSensitivity = useCohostSensitivity()
@@ -470,7 +470,7 @@ export function StreamManager({
       paneOpen: cohostPaneOpenRef.current,
       lastToastAtMs: cohostToastAtRef.current,
       nowMs: Date.now(),
-      shortcut: ORCLE_SHORTCUT
+      shortcut: GOLEM_SHORTCUT
     })
     if (questionToast) {
       cohostToastAtRef.current = questionToast.atMs
@@ -523,13 +523,13 @@ export function StreamManager({
   const [searchFocus, setSearchFocus] = useState(0)
   const chatRef = useRef<HTMLDivElement>(null)
   const activityRef = useRef<HTMLDivElement>(null)
-  const orcleRef = useRef<HTMLDivElement>(null)
+  const golemRef = useRef<HTMLDivElement>(null)
   const chatVisible = usePaneVisible(chatRef)
   const activityVisible = usePaneVisible(activityRef)
-  const orcleVisible = usePaneVisible(orcleRef)
+  const golemVisible = usePaneVisible(golemRef)
   useEffect(() => {
-    cohostPaneOpenRef.current = orcleVisible
-  }, [orcleVisible])
+    cohostPaneOpenRef.current = golemVisible
+  }, [golemVisible])
 
   const activityAudience = inHistory ? (history?.audience ?? null) : (dashboard?.audience ?? null)
   const items = useMemo(
@@ -579,10 +579,10 @@ export function StreamManager({
     messages.some(
       (message) => message.id === liveHighlightId && isActivityOnlyEvent(message.eventType)
     )
-  const orcleUnseen = useUnseen(
+  const golemUnseen = useUnseen(
     undefined,
     `${arrivalKey}:${cohostSensitivity}`,
-    orcleVisible,
+    golemVisible,
     () => false,
     shownCohostState?.questions.map((question) => question.id) ?? []
   )
@@ -633,9 +633,9 @@ export function StreamManager({
     saveStatsLayout(browserStorage(), next)
   }, [])
 
-  const showOrcle = useCallback((): void => {
-    setNarrowPane('orcle')
-    setRightPane('orcle')
+  const showGolem = useCallback((): void => {
+    setNarrowPane('golem')
+    setRightPane('golem')
     setCohostExpand((value) => value + 1)
   }, [])
 
@@ -643,7 +643,7 @@ export function StreamManager({
   // a tab, without taking focus from the composer. Once the cards and their
   // result lines are gone, the pane the streamer was on comes back, unless
   // they moved on themselves.
-  const orcleCardIds = [
+  const golemCardIds = [
     ...removalPane.cards.map((card) => card.operationId),
     ...(commandCardId ? [commandCardId] : [])
   ].join(' ')
@@ -653,21 +653,21 @@ export function StreamManager({
     right: StreamManagerRightPane
   } | null>(null)
   useEffect(() => {
-    const ids = orcleCardIds ? orcleCardIds.split(' ') : []
+    const ids = golemCardIds ? golemCardIds.split(' ') : []
     const fresh = ids.filter((id) => !seenRemovalCardsRef.current.has(id))
     for (const id of fresh) seenRemovalCardsRef.current.add(id)
-    if (fresh.length === 0 || orcleVisible || !cohostPresent) return
+    if (fresh.length === 0 || golemVisible || !cohostPresent) return
     revealedFromRef.current ??= { narrow: narrowPane, right: rightPane }
-    setNarrowPane('orcle')
-    setRightPane('orcle')
-  }, [cohostPresent, narrowPane, orcleVisible, orcleCardIds, rightPane])
+    setNarrowPane('golem')
+    setRightPane('golem')
+  }, [cohostPresent, narrowPane, golemVisible, golemCardIds, rightPane])
   useEffect(() => {
     const from = revealedFromRef.current
-    if (orcleCardsActive || !from) return
+    if (golemCardsActive || !from) return
     revealedFromRef.current = null
-    setNarrowPane((current) => (current === 'orcle' ? from.narrow : current))
-    setRightPane((current) => (current === 'orcle' ? from.right : current))
-  }, [orcleCardsActive])
+    setNarrowPane((current) => (current === 'golem' ? from.narrow : current))
+    setRightPane((current) => (current === 'golem' ? from.right : current))
+  }, [golemCardsActive])
 
   // ⌘J focuses Golem wherever it sits; ⌘F searches chat. The pane is shown
   // first, so its own focus handling lands on a visible element.
@@ -677,7 +677,7 @@ export function StreamManager({
       const key = event.key.toLowerCase()
       if (key === 'j' && cohostVisible) {
         event.preventDefault()
-        showOrcle()
+        showGolem()
       } else if (key === 'f') {
         event.preventDefault()
         setNarrowPane('chat')
@@ -686,7 +686,7 @@ export function StreamManager({
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [cohostVisible, showOrcle])
+  }, [cohostVisible, showGolem])
 
   // Flagged messages Remove from chat can act on: still in chat, removable,
   // and with no removal in flight.
@@ -730,14 +730,14 @@ export function StreamManager({
     if (message) onHighlight?.(message)
   }
 
-  const orclePane = cohostPresent ? (
-    <div className="flex min-h-0 flex-1 flex-col" data-slot="orcle-pane">
+  const golemPane = cohostPresent ? (
+    <div className="flex min-h-0 flex-1 flex-col" data-slot="golem-pane">
       <div
         className={cn(
           CHAT_HEADER_CONTAINER,
           'flex h-9 shrink-0 items-center gap-2 overflow-hidden border-b border-border px-3'
         )}
-        data-slot="orcle-pane-header"
+        data-slot="golem-pane-header"
       >
         <span className="shrink-0 text-xs font-medium">Golem</span>
         {/* Whether Golem hears you (plan 068); nothing while listening is off. */}
@@ -959,8 +959,8 @@ export function StreamManager({
                 <PaneLabel label="Activity" onStream={activityOnStream} unseen={activityUnseen} />
               </TabsTrigger>
               {cohostPresent ? (
-                <TabsTrigger value="orcle">
-                  <PaneLabel dot={cohostTone(cohostState)} label="Golem" unseen={orcleUnseen} />
+                <TabsTrigger value="golem">
+                  <PaneLabel dot={cohostTone(cohostState)} label="Golem" unseen={golemUnseen} />
                 </TabsTrigger>
               ) : null}
             </TabsList>
@@ -983,8 +983,8 @@ export function StreamManager({
                 <PaneLabel label="Activity" onStream={activityOnStream} unseen={activityUnseen} />
               </TabsTrigger>
               {cohostPresent ? (
-                <TabsTrigger value="orcle">
-                  <PaneLabel dot={cohostTone(cohostState)} label="Golem" unseen={orcleUnseen} />
+                <TabsTrigger value="golem">
+                  <PaneLabel dot={cohostTone(cohostState)} label="Golem" unseen={golemUnseen} />
                 </TabsTrigger>
               ) : null}
             </TabsList>
@@ -1056,13 +1056,13 @@ export function StreamManager({
             onAutoShowChange={onAutoShowActivityChange}
           />
         </div>
-        {orclePane ? (
+        {golemPane ? (
           <div
-            ref={orcleRef}
-            className={cn('min-h-0 flex-col', paneClasses('orcle', narrowPane, rightPane))}
-            data-pane="orcle"
+            ref={golemRef}
+            className={cn('min-h-0 flex-col', paneClasses('golem', narrowPane, rightPane))}
+            data-pane="golem"
           >
-            {orclePane}
+            {golemPane}
           </div>
         ) : null}
       </div>

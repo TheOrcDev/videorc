@@ -7317,7 +7317,7 @@ mod tests {
     /// words reach the SRT and Clip that); with no capture running, or on an
     /// explicit `liveChat.stop`, it ends at once.
     #[tokio::test]
-    async fn session_stop_lets_orcles_listen_task_drain_with_the_capture() {
+    async fn session_stop_lets_golems_listen_task_drain_with_the_capture() {
         let _caption_test_guard = crate::captions::caption_lifecycle_test_lock().lock().await;
         let state = test_state();
         *state.recording.lock().await =

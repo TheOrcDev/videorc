@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { CohostCommand, ModerationOperation } from '@/lib/backend'
 import { removalPaneView } from '@/lib/chat-removal-view'
-import { commandChooserView, commandConfirmView, commandStripView } from '@/lib/orcle-command-view'
+import { commandChooserView, commandConfirmView, commandStripView } from '@/lib/golem-command-view'
 
 import { CommandCards, CommandStrip, type CommandAnswer } from './command-cards'
 import { RemovalCards } from './removal-cards'

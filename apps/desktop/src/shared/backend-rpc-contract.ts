@@ -3130,6 +3130,7 @@ const cohostFlagParamsSchema = objectSchema(
 ) as RuntimeSchema<CohostFlagParams>
 // Chat moderation (plan 140 S4): closed shapes, kebab-case enums, optional
 // fields absent (never null) when the backend has nothing to say.
+// 'orcle-voice' is a saved wire value (plan 170 D22); never rename it.
 const moderationSourceSchema = enumSchema(['manual', 'orcle-voice'])
 const removeConfirmModeSchema = enumSchema(['confirm', 'countdown'])
 const moderationOperationSchema = objectSchema(

@@ -160,7 +160,7 @@ export function CohostListenField({
  * Replies (plan 150, Chat tab): how Golem drafts the replies you approve, and
  * the facts it answers from.
  */
-export function OrcleRepliesSection({
+export function GolemRepliesSection({
   locked: lockedByTab = false
 }: {
   /** Golem Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
@@ -352,7 +352,7 @@ function cooldownLabel(seconds: number): string {
  * Moderation (plan 150, Chat tab): what Golem flags for you and what it may
  * put on stream. It posts only in the modes you turn on (plan 164 D4).
  */
-export function OrcleModerationSection({
+export function GolemModerationSection({
   locked: lockedByTab = false
 }: {
   /** Golem Live's unlock reason shows above: everything here is disabled (plan 150, D7). */

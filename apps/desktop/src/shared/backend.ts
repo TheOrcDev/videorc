@@ -3863,6 +3863,7 @@ export interface CommentsSendOperation {
 // event `liveChat.moderationOperation` carries a ModerationOperation on every
 // change. Manual removal is free; `orcle-voice` needs Premium.
 
+// The value stays 'orcle-voice' (plan 170 D22): saved reports and older apps carry it.
 export type ModerationSource = 'manual' | 'orcle-voice'
 export type RemoveConfirmMode = 'confirm' | 'countdown'
 export type ModerationPhase =

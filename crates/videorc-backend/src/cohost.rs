@@ -7574,12 +7574,12 @@ pub(crate) fn note_transcript_final(
     state: &AppState,
     update: &CaptionsUpdate,
     final_: RecentSpeechFinal,
-    orcle_owned: bool,
+    golem_owned: bool,
 ) {
     if final_.text.trim().is_empty() {
         return;
     }
-    if !orcle_owned {
+    if !golem_owned {
         return;
     }
     note_caption_final(state, update);
@@ -7603,7 +7603,7 @@ fn detect_voice_command(
     final_: &RecentSpeechFinal,
 ) -> Option<(CommandSession, DetectedCommand)> {
     // Contract part D: `voiceCommands: false` stops command detection.
-    if !crate::service_flags::orcle_voice_commands_enabled(state) {
+    if !crate::service_flags::golem_voice_commands_enabled(state) {
         return None;
     }
     let mut commands = state.cohost_commands.lock().ok()?;
@@ -7717,8 +7717,8 @@ fn mirror_command_slot(state: &AppState, engine: &CohostEngine) {
 /// The voice-command kill switches as they are now (contract part D).
 fn command_availability_now(state: &AppState) -> Option<CohostCommandAvailability> {
     command_availability(
-        crate::service_flags::orcle_voice_commands_enabled(state),
-        crate::service_flags::orcle_remove_enabled(state),
+        crate::service_flags::golem_voice_commands_enabled(state),
+        crate::service_flags::golem_remove_enabled(state),
     )
 }
 
@@ -7742,8 +7742,8 @@ async fn live_card_message_id(state: &AppState) -> Option<String> {
 async fn command_context(state: &AppState, premium: bool) -> CommandContext {
     CommandContext {
         premium,
-        voice_enabled: crate::service_flags::orcle_voice_commands_enabled(state),
-        remove_enabled: crate::service_flags::orcle_remove_enabled(state),
+        voice_enabled: crate::service_flags::golem_voice_commands_enabled(state),
+        remove_enabled: crate::service_flags::golem_remove_enabled(state),
         on_stream: live_card_message_id(state).await,
         now: Instant::now(),
         now_utc: chrono::Utc::now(),
@@ -7872,7 +7872,7 @@ where
     C: FnOnce(String, CohostCommandRequest) -> F,
     F: std::future::Future<Output = Result<CohostCommandResponse, CohostApiError>>,
 {
-    let voice_enabled = crate::service_flags::orcle_voice_commands_enabled(state);
+    let voice_enabled = crate::service_flags::golem_voice_commands_enabled(state);
     let ready = {
         let engine = state.cohost.lock().await;
         engine.command_parser_ready(scope, premium, voice_enabled, Instant::now())
@@ -8239,7 +8239,7 @@ async fn request_command_removal(
         ModerationRequest {
             operation_id: uuid::Uuid::new_v4().to_string(),
             message_id: request.message_id.clone(),
-            source: ModerationSource::OrcleVoice,
+            source: ModerationSource::GolemVoice,
             reason: request.reason.clone(),
             confirm_mode: request.confirm_mode,
         },
@@ -8349,7 +8349,7 @@ async fn sync_command_operation(state: &AppState, operation: ModerationOperation
 /// removal (and the report), from the stored copy, so an older change that
 /// lands late never wins. Manual removals are not commands.
 pub(crate) fn note_moderation_operation(state: &AppState, operation: &ModerationOperation) {
-    if operation.source != ModerationSource::OrcleVoice {
+    if operation.source != ModerationSource::GolemVoice {
         return;
     }
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
@@ -8563,7 +8563,7 @@ pub(crate) async fn resume_listen_after_sign_in(state: &AppState) {
     // listening (plan 140 S2).
     arm_command_detector(state, &session_id, generation, wake_word_required);
     if consent {
-        crate::captions::grant_orcle_speech(state).await;
+        crate::captions::grant_golem_speech(state).await;
     }
     start_listen_if_wanted(state, &session_id, consent, listen).await;
     let snapshot = fresh_snapshot(state).await;
@@ -8664,7 +8664,7 @@ pub async fn set_cohost_settings(
         }
     }
     if stopped {
-        crate::captions::retire_orcle_speech(state).await;
+        crate::captions::retire_golem_speech(state).await;
         clear_transcript(state);
         crate::captions::stop_listen(state).await;
         state.emit_log("info", "Golem stopped: turned off in Settings.");
@@ -8771,12 +8771,12 @@ where
         cancel_abandoned_removal(state, abandoned_removal).await;
         // Invalidate delayed listen publications and capture-resume admissions
         // before reflecting the new consent. Explicit captions keep their task.
-        crate::captions::retire_orcle_speech(state).await;
+        crate::captions::retire_golem_speech(state).await;
         crate::captions::stop_listen(state).await;
         clear_transcript(state);
         arm_command_detector(state, &session_id, generation, wake_word_required);
         if consent {
-            crate::captions::grant_orcle_speech(state).await;
+            crate::captions::grant_golem_speech(state).await;
         }
         start_listen_if_wanted(state, &session_id, consent, listen).await;
         let snapshot = fresh_snapshot(state).await;
@@ -8802,12 +8802,12 @@ where
     let wake_word_required = engine.settings.wake_word_required;
     drop(engine);
     save_session_report(state, replaced);
-    crate::captions::retire_orcle_speech(state).await;
+    crate::captions::retire_golem_speech(state).await;
     crate::captions::stop_listen(state).await;
     clear_transcript(state);
     arm_command_detector(state, &session_id, generation, wake_word_required);
     if consent {
-        crate::captions::grant_orcle_speech(state).await;
+        crate::captions::grant_golem_speech(state).await;
     }
     // The listen intent joins after the session exists (it reports into the
     // session) and before the first state emit (so the renderer sees it at
@@ -8893,7 +8893,7 @@ where
         // The off state names why the backend ended the session (a Premium
         // lapse); a streamer's own Stop carries no reason, as before.
         snapshot.reason = stopped_reason;
-        crate::captions::retire_orcle_speech(state).await;
+        crate::captions::retire_golem_speech(state).await;
         clear_transcript(state);
         crate::captions::stop_listen_with(state, listen_stop).await;
     }
@@ -8978,7 +8978,7 @@ async fn stop_cohost_for_session_end_if_matching_impl<F>(
     drop(engine);
     save_session_report(state, report);
     if stopped {
-        crate::captions::retire_orcle_speech(state).await;
+        crate::captions::retire_golem_speech(state).await;
         clear_transcript(state);
         // The recording monitor retires its capture next: the listen task
         // drains there (`finish_captions_for_capture`) instead of aborting.
@@ -12509,7 +12509,7 @@ mod tests {
     /// Plan 155, D7: Golem hears a Twitch GIF as an action with its title,
     /// never as the bracketed GIPHY title pretending to be the viewer's words.
     #[test]
-    fn orcle_reads_a_twitch_gif_as_an_action_with_its_title() {
+    fn golem_reads_a_twitch_gif_as_an_action_with_its_title() {
         let gif = |text: &str| LiveChatMessageFragment {
             fragment_type: "gif".into(),
             text: text.into(),
@@ -15592,7 +15592,7 @@ mod tests {
     /// Finding 4: sign-out purges everything Golem heard under the account,
     /// blocks listening, and drops the answer of a tick in flight.
     #[tokio::test]
-    async fn sign_out_purges_what_orcle_heard_and_blocks_listening() {
+    async fn sign_out_purges_what_golem_heard_and_blocks_listening() {
         let state = test_state();
         let start = Instant::now();
         note_transcript_final(
@@ -16184,7 +16184,7 @@ mod tests {
         }
     }
 
-    async fn enable_orcle(state: &AppState, enabled: bool) {
+    async fn enable_golem(state: &AppState, enabled: bool) {
         set_cohost_settings(
             state,
             CohostSettingsPatch {
@@ -16213,12 +16213,12 @@ mod tests {
             .lock()
             .await
             .start_session("s-settings".to_string(), Vec::new());
-        enable_orcle(&state, true).await;
+        enable_golem(&state, true).await;
         start_cohost(&state, start_params("s-settings"))
             .await
             .unwrap();
         note_messages(&state, &messages("s-settings", 0..3)).await;
-        enable_orcle(&state, false).await;
+        enable_golem(&state, false).await;
         let report = state
             .database
             .get_cohost_report("s-settings")
@@ -16230,7 +16230,7 @@ mod tests {
         assert_eq!(saved_report_ids(&mut events), vec!["s-settings"]);
 
         // Explicit stop.
-        enable_orcle(&state, true).await;
+        enable_golem(&state, true).await;
         state
             .database
             .ensure_fake_live_chat_session("s-stop")
@@ -16319,7 +16319,7 @@ mod tests {
             .lock()
             .await
             .start_session("s-basic".to_string(), Vec::new());
-        enable_orcle(&state, true).await;
+        enable_golem(&state, true).await;
         let mut events = state.events.subscribe();
 
         let refused = start_cohost_if_entitled(&state, start_params("s-basic"), false)
@@ -16344,7 +16344,7 @@ mod tests {
     /// names the reason, and nothing happens while Premium holds or when
     /// nothing is running.
     #[tokio::test]
-    async fn a_premium_lapse_stops_orcle_and_saves_its_report() {
+    async fn a_premium_lapse_stops_golem_and_saves_its_report() {
         let state = test_state();
         state
             .database
@@ -16355,7 +16355,7 @@ mod tests {
             .lock()
             .await
             .start_session("s-lapse".to_string(), Vec::new());
-        enable_orcle(&state, true).await;
+        enable_golem(&state, true).await;
         start_cohost(&state, start_params("s-lapse")).await.unwrap();
         note_messages(&state, &messages("s-lapse", 0..4)).await;
         // A debug build without the Basic override resolves to the Developer
@@ -16401,7 +16401,7 @@ mod tests {
 
     /// Golem turned off and back on mid-stream: one report, merged.
     #[tokio::test]
-    async fn orcle_off_and_on_mid_stream_folds_into_one_report() {
+    async fn golem_off_and_on_mid_stream_folds_into_one_report() {
         let state = test_state();
         state.database.ensure_fake_live_chat_session("s-1").unwrap();
         state
@@ -16409,10 +16409,10 @@ mod tests {
             .lock()
             .await
             .start_session("s-1".to_string(), Vec::new());
-        enable_orcle(&state, true).await;
+        enable_golem(&state, true).await;
         start_cohost(&state, start_params("s-1")).await.unwrap();
         note_messages(&state, &messages("s-1", 0..3)).await;
-        enable_orcle(&state, false).await;
+        enable_golem(&state, false).await;
         assert_eq!(
             state
                 .database
@@ -16423,7 +16423,7 @@ mod tests {
             3
         );
 
-        enable_orcle(&state, true).await;
+        enable_golem(&state, true).await;
         start_cohost(&state, start_params("s-1")).await.unwrap();
         note_messages(&state, &messages("s-1", 3..8)).await;
         stop_cohost(&state).await;
@@ -16599,7 +16599,7 @@ mod tests {
             provider_message_id: message.provider_message_id.clone(),
             author_name: message.author_name.clone(),
             excerpt: message.message_text.clone(),
-            source: ModerationSource::OrcleVoice,
+            source: ModerationSource::GolemVoice,
             reason: Some("toxic".to_string()),
             phase,
             confirm_mode: RemoveConfirmMode::Confirm,
@@ -16814,9 +16814,9 @@ mod tests {
         }
     }
 
-    fn set_orcle_flags(state: &AppState, orcle: &str) {
+    fn set_golem_flags(state: &AppState, golem: &str) {
         let flags = crate::service_flags::parse_service_flags(
-            &format!(r#"{{"version":1,"orcle":{orcle}}}"#),
+            &format!(r#"{{"version":1,"orcle":{golem}}}"#),
             chrono::Utc::now(),
         )
         .unwrap();
@@ -17226,7 +17226,7 @@ mod tests {
     }
 
     #[test]
-    fn a_highlight_of_a_comment_orcle_flagged_high_asks_first() {
+    fn a_highlight_of_a_comment_golem_flagged_high_asks_first() {
         let now = Instant::now();
         let rows = vec![
             command_row(1, "grumpy_gus", StreamPlatform::Twitch, "you are bad"),
@@ -17831,7 +17831,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(operation.phase, ModerationPhase::PendingConfirm);
-        assert_eq!(operation.source, ModerationSource::OrcleVoice);
+        assert_eq!(operation.source, ModerationSource::GolemVoice);
         assert_eq!(operation.message_id, rows[0].id);
         assert_eq!(operation.reason.as_deref(), Some("toxic"));
         assert_eq!(card.expires_at, operation.confirm_by);
@@ -18179,7 +18179,7 @@ mod tests {
         assert!(no_operations(&state));
 
         // Removing paused by Videorc: the same, with its own line.
-        set_orcle_flags(&state, r#"{"remove":false}"#);
+        set_golem_flags(&state, r#"{"remove":false}"#);
         run_new_command(&state, &scope, resolved_removal(&rows[0].id), true).await;
         let paused = state_command(&state).await;
         assert_eq!(paused.status, CohostCommandStatus::Unavailable);
@@ -18192,7 +18192,7 @@ mod tests {
                 remove: CohostSwitchState::Paused,
             })
         );
-        set_orcle_flags(&state, "{}");
+        set_golem_flags(&state, "{}");
 
         // Chat moderation's own Premium check refuses: unavailable too.
         crate::live_chat_moderation::set_premium_check_for_tests(&state, Arc::new(|| false)).await;
@@ -18239,7 +18239,7 @@ mod tests {
     async fn the_voice_kill_switch_stops_detection_and_every_command() {
         let rows = vec![command_row(1, "coders_x", StreamPlatform::Twitch, "hello")];
         let (state, scope) = command_state(&rows, None).await;
-        set_orcle_flags(&state, r#"{"voiceCommands":false}"#);
+        set_golem_flags(&state, r#"{"voiceCommands":false}"#);
         // Detection stops.
         assert!(
             detect_voice_command(
@@ -18282,7 +18282,7 @@ mod tests {
             })
         );
         // Back on: heard again, and the state stops saying paused.
-        set_orcle_flags(&state, "{}");
+        set_golem_flags(&state, "{}");
         let (_, command) = detect_voice_command(
             &state,
             &caption_final(2),
@@ -18543,7 +18543,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn orcle_says_it_did_not_catch_an_unclear_request_unless_a_card_is_open() {
+    async fn golem_says_it_did_not_catch_an_unclear_request_unless_a_card_is_open() {
         let rows = vec![
             command_row(1, "coders_x", StreamPlatform::Twitch, "rust is great"),
             command_row(2, "coders_y", StreamPlatform::Twitch, "which editor?"),

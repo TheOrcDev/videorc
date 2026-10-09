@@ -420,7 +420,7 @@ import {
   cohostHighlightMessageId,
   cohostStoppedToast,
   mergeAutoChatRelayPatch,
-  orcleLiveSettingsPatch
+  golemLiveSettingsPatch
 } from '@/lib/cohost-state'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import { upsertNoiseCleanupJob } from '@/lib/noise-cleanup-jobs'
@@ -1166,16 +1166,16 @@ export type StudioContextValue = {
   patchCohostSettings: (patch: CohostSettingsPatch) => Promise<void>
   /**
    * Golem Live's one switch (plan 119). On without cloud-AI consent only
-   * raises `orcleConsentRequested` (the Golem tab's consent dialog) and writes
+   * raises `golemConsentRequested` (the Golem tab's consent dialog) and writes
    * nothing; on with consent writes `{enabled: true, listen: true}` in one
    * `cohost.settings.set`; off writes `{enabled: false}`.
    */
-  setOrcleLive: (on: boolean) => Promise<void>
+  setGolemLive: (on: boolean) => Promise<void>
   /** The consent dialog Golem Live asked for is waiting for an answer. */
-  orcleConsentRequested: boolean
+  golemConsentRequested: boolean
   /** Accept: grant cloud-AI consent, then the one Golem Live patch. Decline:
    * close the dialog and change nothing. */
-  answerOrcleConsent: (accepted: boolean) => Promise<void>
+  answerGolemConsent: (accepted: boolean) => Promise<void>
   markCohostQuestionAnswered: (questionId: string, sessionId?: string) => void
   dismissCohostQuestion: (questionId: string, sessionId?: string) => void
   /** Put a voice-resolved question back (`cohost.question.restore`, plan 060 D9). */
@@ -4366,23 +4366,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Golem Live's one switch (plan 119 S2). Consent comes first: on without it
   // only asks (the Golem tab's consent dialog), and nothing is written until
   // the streamer accepts. On is one save: chat and listening together.
-  const [orcleConsentRequested, setOrcleConsentRequested] = useState(false)
-  const setOrcleLive = useCallback(
+  const [golemConsentRequested, setGolemConsentRequested] = useState(false)
+  const setGolemLive = useCallback(
     async (on: boolean): Promise<void> => {
       if (on && !aiConsent) {
-        setOrcleConsentRequested(true)
+        setGolemConsentRequested(true)
         return
       }
-      await patchCohostSettings(orcleLiveSettingsPatch(on))
+      await patchCohostSettings(golemLiveSettingsPatch(on))
     },
     [aiConsent, patchCohostSettings]
   )
-  const answerOrcleConsent = useCallback(
+  const answerGolemConsent = useCallback(
     async (accepted: boolean): Promise<void> => {
-      setOrcleConsentRequested(false)
+      setGolemConsentRequested(false)
       if (!accepted) return
       setAiConsent(true)
-      await patchCohostSettings(orcleLiveSettingsPatch(true))
+      await patchCohostSettings(golemLiveSettingsPatch(true))
     },
     [patchCohostSettings, setAiConsent]
   )
@@ -4678,7 +4678,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           ? mergeAutoChatRelayPatch(cohostSettingsRef.current?.autoChat ?? null, command.autoChat)
           : null
         const next = await client.request<CohostSettings>('cohost.settings.set', {
-          ...orcleLiveSettingsPatch(command.enabled),
+          ...golemLiveSettingsPatch(command.enabled),
           ...(autoChat ? { autoChat } : {})
         })
         setCohostSettings(next)
@@ -15509,9 +15509,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cohostGate,
       cohostActionPending,
       patchCohostSettings,
-      setOrcleLive,
-      orcleConsentRequested,
-      answerOrcleConsent,
+      setGolemLive,
+      golemConsentRequested,
+      answerGolemConsent,
       markCohostQuestionAnswered,
       dismissCohostQuestion,
       restoreCohostQuestion,
@@ -15743,9 +15743,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cohostGate,
       cohostActionPending,
       patchCohostSettings,
-      setOrcleLive,
-      orcleConsentRequested,
-      answerOrcleConsent,
+      setGolemLive,
+      golemConsentRequested,
+      answerGolemConsent,
       markCohostQuestionAnswered,
       dismissCohostQuestion,
       restoreCohostQuestion,

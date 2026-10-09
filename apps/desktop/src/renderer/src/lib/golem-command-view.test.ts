@@ -15,8 +15,8 @@ import {
   commandStripView,
   openCommandCardId,
   removalLimitsLine
-} from './orcle-command-view'
-import { ORCLE_REMOVAL_LIMITS } from './orcle-tab-view'
+} from './golem-command-view'
+import { GOLEM_REMOVAL_LIMITS } from './golem-tab-view'
 
 const NOW = Date.parse('2026-10-04T12:00:10Z')
 
@@ -176,7 +176,7 @@ describe('the Golem tab copy for voice commands', () => {
       countdown: '5-second countdown'
     })
     expect(YOUTUBE_ALWAYS_CONFIRMS).toBe('YouTube always asks you to confirm.')
-    expect(removalLimitsLine('confirm')).toBe(ORCLE_REMOVAL_LIMITS)
+    expect(removalLimitsLine('confirm')).toBe(GOLEM_REMOVAL_LIMITS)
     expect(removalLimitsLine('countdown')).toContain('after 5 seconds unless you cancel')
     expect(removalLimitsLine('countdown')).toContain('At most 10 removals a minute.')
     for (const line of [

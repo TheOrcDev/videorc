@@ -3,13 +3,13 @@ import { describe, expect, it, vi } from 'vitest'
 import { STORAGE_KEYS } from '@/lib/capture'
 
 import {
-  DEFAULT_ORCLE_TAB,
-  ORCLE_TABS,
-  isOrcleTabId,
-  openOrcleTab,
-  readLastOrcleTab,
-  writeLastOrcleTab
-} from './orcle-tabs'
+  DEFAULT_GOLEM_TAB,
+  GOLEM_TABS,
+  isGolemTabId,
+  openGolemTab,
+  readLastGolemTab,
+  writeLastGolemTab
+} from './golem-tabs'
 
 function memoryStorage(initial: Record<string, string> = {}): Storage {
   const values = new Map(Object.entries(initial))
@@ -38,16 +38,16 @@ const throwingStorage: Storage = {
   }
 }
 
-describe('ORCLE_TABS (plan 150)', () => {
+describe('GOLEM_TABS (plan 150)', () => {
   it('lists the five tabs in strip order', () => {
-    expect(ORCLE_TABS.map((tab) => tab.id)).toEqual([
+    expect(GOLEM_TABS.map((tab) => tab.id)).toEqual([
       'live',
       'chat',
       'voice',
       'reports',
       'clean-cut'
     ])
-    expect(ORCLE_TABS.map((tab) => tab.label)).toEqual([
+    expect(GOLEM_TABS.map((tab) => tab.label)).toEqual([
       'Golem',
       'Chat',
       'Voice',
@@ -57,32 +57,32 @@ describe('ORCLE_TABS (plan 150)', () => {
   })
 
   it('opens on Live by default', () => {
-    expect(DEFAULT_ORCLE_TAB).toBe('live')
+    expect(DEFAULT_GOLEM_TAB).toBe('live')
   })
 
   it('accepts every tab id and nothing else', () => {
-    for (const tab of ORCLE_TABS) expect(isOrcleTabId(tab.id)).toBe(true)
-    expect(isOrcleTabId('Live')).toBe(false)
-    expect(isOrcleTabId('customize')).toBe(false)
-    expect(isOrcleTabId(null)).toBe(false)
-    expect(isOrcleTabId(undefined)).toBe(false)
+    for (const tab of GOLEM_TABS) expect(isGolemTabId(tab.id)).toBe(true)
+    expect(isGolemTabId('Live')).toBe(false)
+    expect(isGolemTabId('customize')).toBe(false)
+    expect(isGolemTabId(null)).toBe(false)
+    expect(isGolemTabId(undefined)).toBe(false)
   })
 })
 
-describe('readLastOrcleTab', () => {
+describe('readLastGolemTab', () => {
   it('returns the stored tab', () => {
-    const storage = memoryStorage({ [STORAGE_KEYS.orcleTab]: 'reports' })
-    expect(readLastOrcleTab(storage)).toBe('reports')
+    const storage = memoryStorage({ [STORAGE_KEYS.golemTab]: 'reports' })
+    expect(readLastGolemTab(storage)).toBe('reports')
   })
 
   it('falls back to Live when nothing or an unknown id is stored', () => {
-    expect(readLastOrcleTab(memoryStorage())).toBe('live')
-    expect(readLastOrcleTab(memoryStorage({ [STORAGE_KEYS.orcleTab]: 'customize' }))).toBe('live')
+    expect(readLastGolemTab(memoryStorage())).toBe('live')
+    expect(readLastGolemTab(memoryStorage({ [STORAGE_KEYS.golemTab]: 'customize' }))).toBe('live')
   })
 
   it('falls back to Live when storage throws or is missing', () => {
-    expect(readLastOrcleTab(throwingStorage)).toBe('live')
-    expect(readLastOrcleTab(null)).toBe('live')
+    expect(readLastGolemTab(throwingStorage)).toBe('live')
+    expect(readLastGolemTab(null)).toBe('live')
   })
 
   it('falls back to Live when even reading localStorage throws', () => {
@@ -94,8 +94,8 @@ describe('readLastOrcleTab', () => {
       }
     })
     try {
-      expect(readLastOrcleTab()).toBe('live')
-      expect(() => writeLastOrcleTab('voice')).not.toThrow()
+      expect(readLastGolemTab()).toBe('live')
+      expect(() => writeLastGolemTab('voice')).not.toThrow()
     } finally {
       if (descriptor) {
         Object.defineProperty(globalThis, 'localStorage', descriptor)
@@ -106,20 +106,20 @@ describe('readLastOrcleTab', () => {
   })
 })
 
-describe('writeLastOrcleTab', () => {
+describe('writeLastGolemTab', () => {
   it('stores the tab so the next read reopens it', () => {
     const storage = memoryStorage()
-    writeLastOrcleTab('clean-cut', storage)
-    expect(storage.getItem(STORAGE_KEYS.orcleTab)).toBe('clean-cut')
-    expect(readLastOrcleTab(storage)).toBe('clean-cut')
+    writeLastGolemTab('clean-cut', storage)
+    expect(storage.getItem(STORAGE_KEYS.golemTab)).toBe('clean-cut')
+    expect(readLastGolemTab(storage)).toBe('clean-cut')
   })
 
   it('never throws when storage refuses the write', () => {
-    expect(() => writeLastOrcleTab('chat', throwingStorage)).not.toThrow()
+    expect(() => writeLastGolemTab('chat', throwingStorage)).not.toThrow()
   })
 })
 
-describe('openOrcleTab', () => {
+describe('openGolemTab', () => {
   it('asks the shell to open Golem on the tab, on the workspace navigation event', () => {
     const target = new EventTarget()
     const opened: unknown[] = []
@@ -128,10 +128,10 @@ describe('openOrcleTab', () => {
     )
     vi.stubGlobal('window', target)
     try {
-      openOrcleTab('voice')
+      openGolemTab('voice')
     } finally {
       vi.unstubAllGlobals()
     }
-    expect(opened).toEqual([{ tab: 'ai', orcleTab: 'voice' }])
+    expect(opened).toEqual([{ tab: 'ai', golemTab: 'voice' }])
   })
 })

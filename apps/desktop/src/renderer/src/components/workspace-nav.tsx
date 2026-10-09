@@ -5,7 +5,7 @@ import {
   HealthIcon,
   LibraryIcon,
   LivestreamIcon,
-  OrcleIcon,
+  GolemIcon,
   OutputIcon,
   SceneIcon,
   SettingsIcon,
@@ -14,7 +14,7 @@ import {
 } from '@/components/icons'
 import { createContext, useContext } from 'react'
 
-import { GOLEM_TAB_LABEL, type OrcleTabId } from '@/lib/orcle-tabs'
+import { GOLEM_TAB_LABEL, type GolemTabId } from '@/lib/golem-tabs'
 import type { SettingsTabId } from '@/lib/settings-tabs'
 
 // Studio control pages, grouped under "Studio" in the sidebar: one click away, but
@@ -52,7 +52,7 @@ export type StudioPanelMeta = {
 // already use.
 export const WORKSPACE_TABS: WorkspaceTabMeta[] = [
   { id: 'studio', label: 'Studio', icon: StudioIcon, group: 'stage' },
-  { id: 'ai', label: GOLEM_TAB_LABEL, icon: OrcleIcon, group: 'stage' },
+  { id: 'ai', label: GOLEM_TAB_LABEL, icon: GolemIcon, group: 'stage' },
   { id: 'library', label: 'Library', icon: LibraryIcon, group: 'library' },
   { id: 'settings', label: 'Settings', icon: SettingsIcon, group: 'system' },
   { id: 'diagnostics', label: 'Health', icon: HealthIcon, group: 'system' }
@@ -141,7 +141,7 @@ type WorkspaceNavValue = {
   /** Opens Settings on `tab`, or on the tab used last when none is named. */
   openSettings: (tab?: SettingsTabId) => void
   /** Opens Golem on `tab`, or on the tab used last when none is named (plan 150). */
-  openOrcle: (tab?: OrcleTabId) => void
+  openGolem: (tab?: GolemTabId) => void
 }
 
 export const WorkspaceNavContext = createContext<WorkspaceNavValue | null>(null)

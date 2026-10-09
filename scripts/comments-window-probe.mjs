@@ -808,7 +808,7 @@ async function probeNarrowWidths() {
         metrics.wideTabs &&
           !metrics.narrowTabs &&
           metrics.panes.chat &&
-          (metrics.panes.activity || metrics.panes.orcle),
+          (metrics.panes.activity || metrics.panes.golem),
         `${tag}: Wide shows Chat and the right pane`,
         JSON.stringify({ panes: metrics.panes, wide: metrics.wideTabs })
       )

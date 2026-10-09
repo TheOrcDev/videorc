@@ -57,12 +57,12 @@ describe('Library Noise Cleanup direct action', () => {
     expect(menu).toBeGreaterThan(cleanup)
     // The menu's "Golem report" and "Clean cut" open the Golem tab (plan 119).
     const menuPlay = rowActions.indexOf('Play\n', menu)
-    const orcleReport = rowActions.indexOf('Golem report', menu)
+    const golemReport = rowActions.indexOf('Golem report', menu)
     const cleanCut = rowActions.indexOf('Clean cut\n', menu)
     const reveal = rowActions.indexOf('revealInFileManagerLabel()', menu)
     expect(menuPlay).toBeGreaterThan(menu)
-    expect(orcleReport).toBeGreaterThan(menuPlay)
-    expect(cleanCut).toBeGreaterThan(orcleReport)
+    expect(golemReport).toBeGreaterThan(menuPlay)
+    expect(cleanCut).toBeGreaterThan(golemReport)
     expect(reveal).toBeGreaterThan(cleanCut)
   })
 

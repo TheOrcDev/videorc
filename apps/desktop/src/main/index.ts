@@ -11245,7 +11245,7 @@ async function runSmokePreviewMotionCommand(
             (element) => (element.textContent ?? '').trim() === text
           );
         const panes = Object.fromEntries(
-          ['chat', 'activity', 'orcle'].map((pane) => [
+          ['chat', 'activity', 'golem'].map((pane) => [
             pane,
             visible(document.querySelector('[data-pane="' + pane + '"]'))
           ])

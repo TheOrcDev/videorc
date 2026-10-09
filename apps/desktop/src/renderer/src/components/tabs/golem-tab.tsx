@@ -8,17 +8,17 @@ import {
 } from '@/components/clean-cut/clean-cut-card'
 import {
   CohostListenField,
-  OrcleModerationSection,
-  OrcleRepliesSection
+  GolemModerationSection,
+  GolemRepliesSection
 } from '@/components/cohost-settings-section'
 import { GolemGreetingsSection } from '@/components/golem-greetings-section'
 import { GolemLibrarySection } from '@/components/golem-library-section'
 import { GolemPersonaSection } from '@/components/golem-persona-section'
 import { GolemPetCreator } from '@/components/golem-pet-creator'
 import { GolemPetSettings } from '@/components/golem-pet-settings'
-import { OrcleEmblem } from '@/components/orcle-emblem'
-import { OrcleReportCard } from '@/components/orcle-report-card'
-import { OrcleVoiceCommands } from '@/components/orcle-voice-commands'
+import { GolemEmblem } from '@/components/golem-emblem'
+import { GolemReportCard } from '@/components/golem-report-card'
+import { GolemVoiceCommands } from '@/components/golem-voice-commands'
 import { ConfigGrid, CONFIG_GRID_PAIR, PageStack } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertAction, AlertTitle } from '@/components/ui/alert'
@@ -56,16 +56,16 @@ import {
 import {
   CLOUD_AI_KEEPS,
   CLOUD_AI_USES,
-  ORCLE_LIVE_POWERS,
-  orcleLiveView,
-  type OrcleLiveStatus
-} from '@/lib/orcle-tab-view'
+  GOLEM_LIVE_POWERS,
+  golemLiveView,
+  type GolemLiveStatus
+} from '@/lib/golem-tab-view'
 import { displayKeyGlyph } from '@/lib/platform'
 import { toast } from '@/lib/toast'
 import { cn } from '@/lib/utils'
 import { openVideorcWebLink } from '@/lib/videorc-web-links'
 import type { CleanCutTabRequest } from '@/lib/clean-cut-events'
-import { ORCLE_TABS, isOrcleTabId, type OrcleTabId } from '@/lib/orcle-tabs'
+import { GOLEM_TABS, isGolemTabId, type GolemTabId } from '@/lib/golem-tabs'
 import { closeGolemPetCreator, useGolemPetCreatorOpen } from '@/lib/golem-pet-creator-nav'
 import { sessionIsLive } from '../../../../shared/capture-state'
 
@@ -88,7 +88,7 @@ function reviewTargetOf(request: CleanCutTabRequest | null): CleanCutReviewTarge
 function initialTab(
   reportSessionId: string | null,
   cleanCutRequest: CleanCutTabRequest | null
-): OrcleTabId {
+): GolemTabId {
   if (cleanCutRequest) return 'clean-cut'
   if (reportSessionId) return 'reports'
   return 'live'
@@ -109,7 +109,7 @@ function initialTab(
  * `cleanCutRequest` is the Library's "Clean cut" (select that recording) or
  * the ready toast's Review (open that cut's review, inside Clean cut).
  */
-export function OrcleTab({
+export function GolemTab({
   reportSessionId = null,
   cleanCutRequest = null,
   tab,
@@ -118,16 +118,16 @@ export function OrcleTab({
 }: {
   reportSessionId?: string | null
   cleanCutRequest?: CleanCutTabRequest | null
-  tab?: OrcleTabId
-  onTabChange?: (tab: OrcleTabId) => void
+  tab?: GolemTabId
+  onTabChange?: (tab: GolemTabId) => void
   onOpenLibrarySession?: (sessionId: string) => void
 }): ReactElement {
   // The shell owns the tab; a page rendered on its own (tests) keeps its own.
-  const [ownTab, setOwnTab] = useState<OrcleTabId>(() =>
+  const [ownTab, setOwnTab] = useState<GolemTabId>(() =>
     initialTab(reportSessionId, cleanCutRequest)
   )
   const current = tab ?? ownTab
-  const selectTab = (next: OrcleTabId): void => {
+  const selectTab = (next: GolemTabId): void => {
     if (onTabChange) onTabChange(next)
     else setOwnTab(next)
   }
@@ -164,17 +164,17 @@ export function OrcleTab({
     <>
       <Tabs
         className="min-h-0 flex-1 gap-0"
-        data-testid="orcle-tab"
+        data-testid="golem-tab"
         value={current}
         onValueChange={(value) => {
-          if (isOrcleTabId(value)) selectTab(value)
+          if (isGolemTabId(value)) selectTab(value)
         }}
       >
         {/* Settings' strip, verbatim; the toolbar carries only the title. */}
         <div className="shrink-0 border-b border-border px-gutter py-2">
           <TabsList aria-label="Golem sections">
-            {ORCLE_TABS.map(({ id, label }) => (
-              <TabsTrigger key={id} data-videorc-orcle-tab={id} value={id}>
+            {GOLEM_TABS.map(({ id, label }) => (
+              <TabsTrigger key={id} data-videorc-golem-tab={id} value={id}>
                 {label}
               </TabsTrigger>
             ))}
@@ -184,7 +184,7 @@ export function OrcleTab({
         <div
           key={current}
           className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain"
-          data-slot="orcle-scroll"
+          data-slot="golem-scroll"
         >
           <TabsContent className="flex flex-1 flex-col" value="live">
             {/* Plan 164 S-A4: the creation screen leads; the old Live switch
@@ -199,9 +199,9 @@ export function OrcleTab({
                 <GolemPersonaSection />
                 <GolemPetSettings />
                 <ConfigGrid className={CONFIG_GRID_PAIR}>
-                  <OrcleLiveSection />
+                  <GolemLiveSection />
                   <div className="flex flex-col">
-                    <OrcleLivePowers onSelectTab={selectTab} />
+                    <GolemLivePowers onSelectTab={selectTab} />
                     <CloudAiSection />
                   </div>
                 </ConfigGrid>
@@ -209,14 +209,14 @@ export function OrcleTab({
             </GolemLookClientProvider>
           </TabsContent>
           <TabsContent className="flex flex-1 flex-col" value="chat">
-            <OrcleChatTab />
+            <GolemChatTab />
           </TabsContent>
           <TabsContent className="flex flex-1 flex-col" value="voice">
-            <OrcleVoiceTab onOpenLive={() => selectTab('live')} />
+            <GolemVoiceTab onOpenLive={() => selectTab('live')} />
           </TabsContent>
           <TabsContent className="flex flex-col" value="reports">
             <PageStack>
-              <OrcleReportCard sessionId={reportSession} onSessionChange={setReportSession} />
+              <GolemReportCard sessionId={reportSession} onSessionChange={setReportSession} />
             </PageStack>
           </TabsContent>
           <TabsContent className="flex flex-1 flex-col" value="clean-cut">
@@ -242,7 +242,7 @@ export function OrcleTab({
           </TabsContent>
         </div>
       </Tabs>
-      <OrcleConsentDialog />
+      <GolemConsentDialog />
     </>
   )
 }
@@ -263,11 +263,11 @@ function CleanCutReviewFallback(): ReactElement {
  * Golem Live's state as the provider holds it, shared by the Live tab and the
  * locked alert every other settings tab leads with (plan 150, D7).
  */
-function useOrcleLive(): ReturnType<typeof orcleLiveView> {
+function useGolemLive(): ReturnType<typeof golemLiveView> {
   const { account, aiConsent, cohostGate, cohostSettings } = useStudioCore()
   const { cohostState } = useStudioChat()
   const { recording } = useStudioRecordingState()
-  return orcleLiveView({
+  return golemLiveView({
     settings: cohostSettings,
     signedIn: account?.status === 'signed-in',
     gate: cohostGate,
@@ -282,13 +282,13 @@ function useOrcleLive(): ReturnType<typeof orcleLiveView> {
  * disabled with one reason (plan 150, D7): the tab's controls render disabled
  * under it, and nothing live-looking sits beside it.
  */
-function OrcleUnlockAlert({
-  testId = 'orcle-live-unlock'
+function GolemUnlockAlert({
+  testId = 'golem-live-unlock'
 }: {
   testId?: string
 }): ReactElement | null {
   const { signIn } = useVideorcAccount()
-  const view = useOrcleLive()
+  const view = useGolemLive()
   if (!view.unlock) return null
   const unlockAction = view.unlock.action ?? null
   return (
@@ -319,32 +319,32 @@ function OrcleUnlockAlert({
  * why and every Premium field under it is disabled (D7), the same reason
  * Live shows; the greetings stay editable.
  */
-function OrcleChatTab(): ReactElement {
-  const locked = useOrcleLive().unlock !== null
+function GolemChatTab(): ReactElement {
+  const locked = useGolemLive().unlock !== null
   return (
     <>
       {locked ? (
-        <div className="border-b border-border p-gutter" data-slot="orcle-tab-lock">
-          <OrcleUnlockAlert testId="orcle-tab-unlock" />
+        <div className="border-b border-border p-gutter" data-slot="golem-tab-lock">
+          <GolemUnlockAlert testId="golem-tab-unlock" />
         </div>
       ) : null}
       <ConfigGrid className={CONFIG_GRID_PAIR}>
         <div className="flex flex-col">
           <GolemGreetingsSection />
-          <OrcleRepliesSection locked={locked} />
+          <GolemRepliesSection locked={locked} />
         </div>
-        <OrcleModerationSection locked={locked} />
+        <GolemModerationSection locked={locked} />
       </ConfigGrid>
     </>
   )
 }
 
 /** The Voice tab (plan 150): led by the same locked reason as Live and Chat. */
-function OrcleVoiceTab({ onOpenLive }: { onOpenLive: () => void }): ReactElement {
-  const locked = useOrcleLive().unlock !== null
+function GolemVoiceTab({ onOpenLive }: { onOpenLive: () => void }): ReactElement {
+  const locked = useGolemLive().unlock !== null
   return (
-    <OrcleVoiceCommands
-      lead={locked ? <OrcleUnlockAlert testId="orcle-tab-unlock" /> : null}
+    <GolemVoiceCommands
+      lead={locked ? <GolemUnlockAlert testId="golem-tab-unlock" /> : null}
       onOpenLive={onOpenLive}
     />
   )
@@ -356,10 +356,10 @@ function OrcleVoiceTab({ onOpenLive }: { onOpenLive: () => void }): ReactElement
  * The switch moved to Stream Manager (plan 164 S-D6): the chat mode there
  * is what turns the Golem on, so this column points at it.
  */
-function OrcleLiveSection(): ReactElement {
+function GolemLiveSection(): ReactElement {
   const { cohostSettings, runtimeInfo } = useStudioCore()
   const { openCommentsWindow } = useStudioShell()
-  const view = useOrcleLive()
+  const view = useGolemLive()
   const golemName = cohostSettings?.persona.name ?? 'Golem'
   const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
   const shiftKey = displayKeyGlyph('⇧', runtimeInfo?.platform)
@@ -370,20 +370,20 @@ function OrcleLiveSection(): ReactElement {
       description={`Your Golem reads your chat and hears you while you stream. ${GOLEM_POSTS_PROMISE}`}
       title="Joins my streams"
     >
-      <div className="flex items-center gap-3" data-slot="orcle-live-status-block">
-        <OrcleEmblem size="lg" />
+      <div className="flex items-center gap-3" data-slot="golem-live-status-block">
+        <GolemEmblem size="lg" />
         <Field className="min-w-0 flex-1" orientation="horizontal">
           <FieldContent>
             <FieldTitle>{golemName} joins my streams</FieldTitle>
-            <OrcleLiveStatusLine status={view.status} />
-            <FieldDescription className="text-xs" data-testid="orcle-live-pointer">
+            <GolemLiveStatusLine status={view.status} />
+            <FieldDescription className="text-xs" data-testid="golem-live-pointer">
               Turn it on in Stream Manager: the Golem pane&apos;s chat mode, Suggest or Auto.
             </FieldDescription>
           </FieldContent>
         </Field>
       </div>
 
-      <OrcleUnlockAlert />
+      <GolemUnlockAlert />
 
       {runtimeInfo?.commentsWindowEnabled !== false ? (
         <Button
@@ -410,16 +410,16 @@ function OrcleLiveSection(): ReactElement {
  * "What Golem does" (plan 150, D5): the powers as rows, each with a way to the
  * tab that holds its settings. Navigation, not a pitch.
  */
-function OrcleLivePowers({
+function GolemLivePowers({
   onSelectTab
 }: {
-  onSelectTab: (tab: OrcleTabId) => void
+  onSelectTab: (tab: GolemTabId) => void
 }): ReactElement {
   return (
     <PanelSection title="What Golem does">
       <FieldGroup aria-label="What Golem Live does" role="list" variant="grouped">
-        {ORCLE_LIVE_POWERS.map((power) => {
-          const label = ORCLE_TABS.find((entry) => entry.id === power.tab)?.label ?? power.tab
+        {GOLEM_LIVE_POWERS.map((power) => {
+          const label = GOLEM_TABS.find((entry) => entry.id === power.tab)?.label ?? power.tab
           return (
             <Field
               key={power.title}
@@ -450,7 +450,7 @@ function OrcleLivePowers({
   )
 }
 
-const STATUS_TONE: Record<OrcleLiveStatus['kind'], string> = {
+const STATUS_TONE: Record<GolemLiveStatus['kind'], string> = {
   off: 'tone-neutral',
   on: 'tone-neutral',
   live: 'tone-success',
@@ -458,11 +458,11 @@ const STATUS_TONE: Record<OrcleLiveStatus['kind'], string> = {
 }
 
 /** The glass dot carries the tone; the words stay monochrome. */
-function OrcleLiveStatusLine({ status }: { status: OrcleLiveStatus }): ReactElement {
+function GolemLiveStatusLine({ status }: { status: GolemLiveStatus }): ReactElement {
   return (
     <p
       className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground"
-      data-slot="orcle-live-status"
+      data-slot="golem-live-status"
       data-status={status.kind}
       title={status.detail ?? undefined}
     >
@@ -497,7 +497,7 @@ function CloudAiSection(): ReactElement {
         <Field>
           <div className="flex items-center justify-between gap-3">
             <div className="flex min-w-0 flex-col gap-1">
-              <FieldLabel htmlFor="orcle-cloud-ai">Allow cloud AI</FieldLabel>
+              <FieldLabel htmlFor="golem-cloud-ai">Allow cloud AI</FieldLabel>
               <ul className="flex list-disc flex-col gap-0.5 pl-4 text-xs text-muted-foreground">
                 {CLOUD_AI_USES.map((use) => (
                   <li key={use}>{use}</li>
@@ -505,7 +505,7 @@ function CloudAiSection(): ReactElement {
               </ul>
               <p className="text-xs text-subtle">{CLOUD_AI_KEEPS}</p>
             </div>
-            <Switch checked={aiConsent} id="orcle-cloud-ai" onCheckedChange={setAiConsent} />
+            <Switch checked={aiConsent} id="golem-cloud-ai" onCheckedChange={setAiConsent} />
           </div>
         </Field>
       </FieldGroup>
@@ -518,10 +518,10 @@ function CloudAiSection(): ReactElement {
  * grants cloud-AI consent, then makes the one settings save; declining
  * changes nothing. The safe choice has the focus.
  */
-function OrcleConsentDialog(): ReactElement {
-  const { orcleConsentRequested, answerOrcleConsent } = useStudioCore()
+function GolemConsentDialog(): ReactElement {
+  const { golemConsentRequested, answerGolemConsent } = useStudioCore()
   const answer = (accepted: boolean): void => {
-    void answerOrcleConsent(accepted).catch((error: unknown) =>
+    void answerGolemConsent(accepted).catch((error: unknown) =>
       toast.error('Could not turn on Golem Live', {
         description: error instanceof Error ? error.message : undefined
       })
@@ -529,7 +529,7 @@ function OrcleConsentDialog(): ReactElement {
   }
   return (
     <Dialog
-      open={orcleConsentRequested}
+      open={golemConsentRequested}
       onOpenChange={(open) => {
         if (!open) answer(false)
       }}
@@ -539,7 +539,7 @@ function OrcleConsentDialog(): ReactElement {
           {/* Golem's emblem leads, the way the Videorc logo leads
               permissions onboarding (plan 149). */}
           <div className="flex items-center gap-3">
-            <OrcleEmblem size="lg" />
+            <GolemEmblem size="lg" />
             <div className="flex flex-col gap-1">
               <DialogTitle>Turn on Golem Live?</DialogTitle>
               <DialogDescription>

@@ -17,7 +17,7 @@ import type {
  * in one save; off only stops Golem joining and leaves listening as it was.
  * The Golem tab and every Comments-window way on write this one patch.
  */
-export function orcleLiveSettingsPatch(on: boolean): CohostSettingsPatch {
+export function golemLiveSettingsPatch(on: boolean): CohostSettingsPatch {
   return on ? { enabled: true, listen: true } : { enabled: false }
 }
 

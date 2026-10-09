@@ -59,6 +59,7 @@ describe('SETTINGS_TABS', () => {
   })
 
   it('has no Golem tab: its settings live in the Golem tab (plan 119)', () => {
+    // 'orcle' is the old tab id older apps saved (plan 170 D22).
     expect(SETTINGS_TABS.map((tab) => tab.id)).not.toContain('orcle')
     expect(isSettingsTabId('orcle')).toBe(false)
   })

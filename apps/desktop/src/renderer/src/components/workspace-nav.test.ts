@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { OrcleIcon } from './icons'
+import { GolemIcon } from './icons'
 import {
   STUDIO_PANELS,
   WORKSPACE_SHORTCUTS,
@@ -88,8 +88,8 @@ describe('workspace navigation', () => {
   // Plan 119: Golem sits right under Studio. Its id is `ai`, the id ⌘9, deep
   // links, smokes and data-videorc-tab-trigger use.
   it('shows Golem under Studio in the stage row, on id ai and ⌘9', () => {
-    const orcle = WORKSPACE_TABS.find((tab) => tab.id === 'ai')
-    expect(orcle).toEqual({ id: 'ai', label: 'Golem', icon: OrcleIcon, group: 'stage' })
+    const golem = WORKSPACE_TABS.find((tab) => tab.id === 'ai')
+    expect(golem).toEqual({ id: 'ai', label: 'Golem', icon: GolemIcon, group: 'stage' })
     expect(WORKSPACE_TABS.filter((tab) => tab.group === 'stage').map((tab) => tab.id)).toEqual([
       'studio',
       'ai'
