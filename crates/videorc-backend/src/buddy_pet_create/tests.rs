@@ -1311,8 +1311,22 @@ fn buddy_pet_reference_needs_transparency_and_is_scaled_to_the_web_bounds() {
     }
     let png = reference_png(large).unwrap();
     let decoded = image::load_from_memory(&png).unwrap();
-    assert_eq!((decoded.width(), decoded.height()), (1536, 1024));
+    assert_eq!((decoded.width(), decoded.height()), (1024, 683));
     assert!(png.len() <= REFERENCE_PNG_MAX_BYTES);
+    // A picture too detailed for 3 MB at 1024 px steps down instead of
+    // failing: the web's request body cap is 4.5 MB (plan 172).
+    let mut noisy = image::RgbaImage::new(1200, 1200);
+    let mut seed: u32 = 0x9e37_79b9;
+    for (x, y, pixel) in noisy.enumerate_pixels_mut() {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let [r, g, b, _] = seed.to_le_bytes();
+        let alpha = if x < 40 || y < 40 { 0 } else { 255 };
+        *pixel = image::Rgba([r, g, b, alpha]);
+    }
+    let noisy_png = reference_png(noisy).unwrap();
+    assert!(noisy_png.len() <= REFERENCE_PNG_MAX_BYTES);
+    let noisy_decoded = image::load_from_memory(&noisy_png).unwrap();
+    assert!(noisy_decoded.width() < 1024, "{}", noisy_decoded.width());
     let opaque = image::RgbaImage::from_pixel(10, 10, image::Rgba([1, 2, 3, 255]));
     assert_eq!(
         reference_png(opaque).unwrap_err().code,

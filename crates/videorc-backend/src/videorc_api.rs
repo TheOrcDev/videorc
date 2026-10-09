@@ -69,7 +69,8 @@ const COHOST_PET_BUILDS_PATH: &str = "/api/ai/cohost/pet/builds";
 const COHOST_PET_IDENTITY_PATH: &str = "/api/ai/cohost/pet/identity";
 const COHOST_PET_SHEET_PATH: &str = "/api/ai/cohost/pet/sheet";
 /// A build session and the identity notes are small; a sheet is a PNG of up
-/// to 1536 x 1024 as base64, refused unread above this.
+/// to 3072 x 1024 (gaze) or 2048 x 2048 (narrow reactions) as base64, about
+/// 8 MB, streamed by the web (plan 172), and refused unread above this.
 const COHOST_PET_SMALL_RESPONSE_MAX_BYTES: usize = 256 * 1024;
 pub(crate) const COHOST_PET_SHEET_MAX_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
 // --- end Buddy pets (plan 168, Phase F) ---

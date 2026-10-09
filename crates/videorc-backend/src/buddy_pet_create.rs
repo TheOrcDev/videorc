@@ -84,10 +84,15 @@ const STATE_VERSION: u32 = 1;
 const STATE_MAX_BYTES: u64 = 1024 * 1024;
 /// The sheet key of the reference picture in `sources/` and `accepted`.
 pub const REFERENCE_KEY: &str = "reference";
-/// The web takes a reference of at most 4 MB (decoded PNG).
-pub const REFERENCE_PNG_MAX_BYTES: usize = 4 * 1024 * 1024;
-/// A reference is scaled down to this on its longest side before it is sent.
-pub const REFERENCE_MAX_SIDE: u32 = 1536;
+/// A reference is sent as base64 inside a JSON body, and Vercel refuses
+/// request bodies over 4.5 MB before the route runs (plan 172), so the PNG
+/// stays at or under 3 MB.
+pub const REFERENCE_PNG_MAX_BYTES: usize = 3 * 1024 * 1024;
+/// A reference is scaled down to this on its longest side before it is sent
+/// (the official references are 1024 px); a picture still over
+/// `REFERENCE_PNG_MAX_BYTES` there steps down through `REFERENCE_FALLBACK_SIDES`.
+pub const REFERENCE_MAX_SIDE: u32 = 1024;
+const REFERENCE_FALLBACK_SIDES: [u32; 2] = [768, 512];
 /// An upload is refused above this before it is decoded.
 pub const REFERENCE_UPLOAD_MAX_BYTES: usize = 8 * 1024 * 1024;
 const REFERENCE_MAX_PIXELS: u64 = 20_000_000;
@@ -1154,27 +1159,31 @@ pub(crate) fn reference_png(image: image::RgbaImage) -> Result<Vec<u8>, BuddyPet
         ));
     }
     let longest = image.width().max(image.height());
-    let image = if longest > REFERENCE_MAX_SIDE {
-        let scale = f64::from(REFERENCE_MAX_SIDE) / f64::from(longest);
-        image::imageops::resize(
-            &image,
-            ((f64::from(image.width()) * scale).round() as u32).max(1),
-            ((f64::from(image.height()) * scale).round() as u32).max(1),
-            image::imageops::FilterType::Lanczos3,
-        )
-    } else {
-        image
-    };
-    let mut png = Vec::new();
-    image::DynamicImage::ImageRgba8(image)
-        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-        .map_err(|error| reference_error(format!("The picture could not be prepared: {error}")))?;
-    if png.len() > REFERENCE_PNG_MAX_BYTES {
-        return Err(reference_error(
-            "The picture is over 4 MB as a PNG. Use a smaller picture.",
-        ));
+    for side in std::iter::once(REFERENCE_MAX_SIDE).chain(REFERENCE_FALLBACK_SIDES) {
+        let scaled = if longest > side {
+            let scale = f64::from(side) / f64::from(longest);
+            image::imageops::resize(
+                &image,
+                ((f64::from(image.width()) * scale).round() as u32).max(1),
+                ((f64::from(image.height()) * scale).round() as u32).max(1),
+                image::imageops::FilterType::Lanczos3,
+            )
+        } else {
+            image.clone()
+        };
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(scaled)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .map_err(|error| {
+                reference_error(format!("The picture could not be prepared: {error}"))
+            })?;
+        if png.len() <= REFERENCE_PNG_MAX_BYTES {
+            return Ok(png);
+        }
     }
-    Ok(png)
+    Err(reference_error(
+        "The picture is too detailed to send, even made smaller. Use a simpler picture.",
+    ))
 }
 
 /// A generated sheet checked before it is written: base64 of a PNG, at most

@@ -7,6 +7,7 @@
 
 ## Status
 
+- **Status**: EXECUTED 2026-10-10 except Phase F (owner deploys and accepts)
 - **Priority**: P1 (owner, 2026-10-09: "make now a plan to make it alive, we
   need to finish that part")
 - **Effort**: XL, 6 phases (A to F)
@@ -24,14 +25,54 @@
   (backend sync, creator). E UI/Product Design fit 9 (the web player). F
   Release-adjacent, orchestrator. Model lane `opus` (Fable credits out).
 
-| Phase                                                       | Where   | Status  |
-| ----------------------------------------------------------- | ------- | ------- |
-| A: The pipeline, proven on Buddy the Golem                  | both    | PLANNED |
-| B: The other four official packs, and how they ship         | both    | PLANNED |
-| C: Alive packs in the account library (web)                 | web     | PLANNED |
-| D: The app: apply, sync, and Make it Alive everywhere       | desktop | PLANNED |
-| E: Alive on videorc.com (the player, the demo, the library) | web     | PLANNED |
-| F: Deploy, a real creation, and the on-stream acceptance    | both    | PLANNED |
+| Phase                                                       | Where   | Status                  |
+| ----------------------------------------------------------- | ------- | ----------------------- |
+| A: The pipeline, proven on Buddy the Golem                  | both    | DONE, owner review owed |
+| B: The other four official packs, and how they ship         | both    | DONE, owner review owed |
+| C: Alive packs in the account library (web)                 | web     | DONE (#79)              |
+| D: The app: apply, sync, and Make it Alive everywhere       | desktop | DONE (#647)             |
+| E: Alive on videorc.com (the player, the demo, the library) | web     | DONE (#79)              |
+| F: Deploy, a real creation, and the on-stream acceptance    | both    | OWED (owner deploys)    |
+
+## Execution (2026-10-10)
+
+Executed in desktop #647 and web #79. The open questions took the plan's
+defaults (6 MB line, alive sync on Neon only, "Save to my library", web in
+#79).
+
+- **The official packs.** All five have 40 frames of 640 px, built by the
+  app's builder and loaded by its loader.
+  - Colour is WebP quality 92 with lossless alpha for all five, a D3
+    deviation: the three under 6 MB would have stayed lossless. Quality 92
+    looks the same at stream size and on the face at 2x, and cuts the four
+    downloads from 18.3 MB to about 5.5 MB.
+  - Buddy the Golem ships as `bundled:buddy`; the other four live on the web
+    under `public/buddy/official/<slug>/alive/1/`.
+  - About $5.14 of image calls in all; a clean creation is about $0.35 to
+    $0.60.
+  - Sources stay outside the repo in `~/videorc-assets/buddy-alive/`.
+- **The probe fixed the web.**
+  - The identity call needs 2048 output tokens at low reasoning effort;
+    with 600 tokens it never answered.
+  - Sheets need their own sizes: gaze 3072 x 1024, reactions 2304 x 1536,
+    extras 2304 x 1024, and 2048 x 2048 reactions for narrow characters, so
+    a blink never pops wider than the neutral.
+  - `PET_PROMPT_VERSION` is 3, and sheets stream back past Vercel's 4.5 MB
+    response cap.
+  - References go out at 1024 px and at most 3 MB, so the request stays
+    under the 4.5 MB body cap.
+- **Uploads.** Alive packs and imported Buddies upload straight to the Neon
+  bucket. On the real bucket, presigned PUTs that sign their length were
+  accepted and a wrong length was refused. The web serves pack JSON from
+  its own origin and redirects only the atlas.
+- **Web player.** A port of the app's preview, with motion parity on the
+  shared fixture. The stream demo uses the app's studio backdrop (owner
+  request) and stays dark in both themes.
+- **Owed.**
+  - The owner's review of every row of the five packs
+    (`scratchpad/p172-review/<slug>/`, and in the PRs).
+  - Deploying #75, then #79, with migrations 0018, 0019 and 0020.
+  - A real creation, and the 10-minute stream acceptance (Phase F).
 
 ## The owner's answers (2026-10-09)
 

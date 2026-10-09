@@ -1442,7 +1442,14 @@ async fn buddy_library_signed_out_changes_nothing_and_official_still_applies() {
         !root.join(&idle).exists(),
         "the orc's pictures went with it"
     );
-    assert!(web.seen().is_empty());
+    // Signed out, nothing touches the account: the only requests are the
+    // public official pack files (plan 172 D4).
+    let seen = web.seen();
+    assert!(
+        seen.iter()
+            .all(|call| call.starts_with("GET /buddy/official/")),
+        "signed out, only public official pack files are fetched: {seen:?}"
+    );
 }
 
 #[tokio::test]
