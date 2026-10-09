@@ -24,6 +24,9 @@ import type { GolemMotionSettings } from '../../../shared/golem-pet'
  * (S-C1), the same model the stream uses.
  */
 
+/** The motion pose of a motion-only hop; matches the Rust animator's `HOP_REACTION_ID`. */
+export const GOLEM_HOP_REACTION_ID = 'hop'
+
 export interface GolemPetPlayerFrame {
   id: string
   kind: 'gaze' | 'reaction'
@@ -285,13 +288,14 @@ export class GolemPetPlayer {
 
   /**
    * D14's last fallback: a reaction the pack has no frame for plays as a
-   * motion-only hop (its pose, or page-pet's default pose) on the current
-   * frame. False under reduced motion or at Motion 0.
+   * motion-only hop (the `hop` pose, as on stream) on the current frame.
+   * `id` names what was asked for. False under reduced motion or at Motion 0.
    */
-  hop(id: string, now: number): boolean {
+  hop(_id: string, now: number): boolean {
     if (this.reduced || this.locked) return false
     this.lastActivity = now
-    const seconds = this.motion.react(id, now / 1000)
+    // The same pose the on-stream animator plays for a motion-only hop.
+    const seconds = this.motion.react(GOLEM_HOP_REACTION_ID, now / 1000)
     return seconds > 0
   }
 

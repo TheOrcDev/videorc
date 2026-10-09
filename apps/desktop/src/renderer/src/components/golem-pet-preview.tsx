@@ -119,6 +119,7 @@ export function GolemPetPreview({
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const playerRef = useRef<GolemPetPlayer | null>(null)
   const kickRef = useRef<(() => void) | null>(null)
+  const pendingReactionRef = useRef<string | null>(null)
   const activeRef = useRef(false)
   const [pack, setPack] = useState<GolemPreviewPack | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -335,22 +336,43 @@ export function GolemPetPreview({
     }
   }, [active, interactive, reduced])
 
+  /** The pack's frame and motion, or a motion-only hop when it has no frame. */
+  const playNow = (player: GolemPetPlayer, reaction: string): boolean => {
+    const now = performance.now()
+    const played = player.hasReaction(reaction)
+      ? player.react(reaction, now)
+      : player.hop(reaction, now)
+    if (played) kickRef.current?.()
+    return played
+  }
+
   useImperativeHandle(
     ref,
     () => ({
       react: (reaction: string): boolean => {
         const player = playerRef.current
-        if (!player || !activeRef.current) return false
-        const now = performance.now()
-        const played = player.hasReaction(reaction)
-          ? player.react(reaction, now)
-          : player.hop(reaction, now)
-        if (played) kickRef.current?.()
-        return played
+        if (!player) return false
+        if (!activeRef.current) {
+          // Off screen (a Try button far below it): bring the pet into view
+          // and play the reaction as soon as it is visible again.
+          pendingReactionRef.current = reaction
+          wrapperRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+          return true
+        }
+        return playNow(player, reaction)
       }
     }),
     []
   )
+
+  // A reaction asked for while the pet was off screen plays once it is back.
+  useEffect(() => {
+    const pending = pendingReactionRef.current
+    const player = playerRef.current
+    if (!active || !pending || !player) return
+    pendingReactionRef.current = null
+    playNow(player, pending)
+  }, [active])
 
   const name = label?.trim() || pack?.name || 'Golem'
   const status = error ? 'error' : pack ? 'ready' : 'loading'

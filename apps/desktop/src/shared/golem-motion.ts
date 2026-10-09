@@ -132,10 +132,13 @@ export const REACTION_POSES: Readonly<Record<string, ReactionPose>> = Object.fre
   sleep: [2, -2, 0.025],
   wave: [-7, 6, -0.025],
   dance: [-12, 7, -0.06],
-  shy: [3, -4, 0.04]
+  shy: [3, -4, 0.04],
+  // Videorc's motion-only hop (D14's last fallback): not in page-pet, and
+  // stronger than its default pose because no frame change carries it.
+  hop: [-22, 0, -0.12]
 })
 
-/** The pose of any id not in the table (D14's motion-only hop too). */
+/** The pose of any id not in the table (page-pet's default). */
 export const DEFAULT_REACTION_POSE: ReactionPose = Object.freeze([-8, 3, -0.05]) as ReactionPose
 
 /** A blink is a frame change only; page-pet never animates it. */

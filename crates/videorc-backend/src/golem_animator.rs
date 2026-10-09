@@ -109,8 +109,9 @@ pub const REACTION_MAX_AGE_SECONDS: f64 = 6.0;
 /// connect is history, not news). Greetings keep their own 10 minute window.
 pub const ACTIVITY_REACTION_FRESH_SECONDS: i64 = 60;
 
-/// The motion-only hop (D14's last fallback): an id the pose table does not
-/// know, so page-pet's default pose `[-8, 3, -0.05]` plays.
+/// The motion-only hop (D14's last fallback): its own pose in the motion
+/// table (`golem_motion::REACTION_POSES`), stronger than page-pet's default
+/// because no frame change carries it.
 pub const HOP_REACTION_ID: &str = "hop";
 const BLINK_ID: &str = "blink";
 const SLEEP_ID: &str = "sleep";

@@ -157,9 +157,13 @@ pub const REACTION_POSES: &[(&str, [f64; 3])] = &[
     ("wave", [-7.0, 6.0, -0.025]),
     ("dance", [-12.0, 7.0, -0.06]),
     ("shy", [3.0, -4.0, 0.04]),
+    // Videorc's motion-only hop (D14's last fallback, and every reaction a
+    // pack has no drawing for): not in page-pet. Stronger than its default
+    // pose, because no frame change carries it.
+    ("hop", [-22.0, 0.0, -0.12]),
 ];
 
-/// The pose of any id not in the table (D14's motion-only hop too).
+/// The pose of any id not in the table (page-pet's default).
 pub const DEFAULT_REACTION_POSE: [f64; 3] = [-8.0, 3.0, -0.05];
 
 /// A blink is a frame change only; page-pet never animates it.
@@ -1052,8 +1056,10 @@ mod tests {
     }
 
     #[test]
-    fn every_pose_id_is_in_the_table_and_unknown_ids_use_the_default() {
-        assert_eq!(REACTION_POSES.len(), 15);
+    fn every_pose_id_and_the_hop_are_in_the_table_and_unknown_ids_use_the_default() {
+        // page-pet's 15 poses plus Videorc's motion-only hop.
+        assert_eq!(REACTION_POSES.len(), 16);
+        assert_eq!(reaction_pose("hop"), [-22.0, 0.0, -0.12]);
         assert_eq!(reaction_pose("surprised"), [-17.0, -3.0, -0.10]);
         assert_eq!(reaction_pose("laugh"), [-9.0, 3.0, 0.065]);
         assert_eq!(reaction_pose("excited"), [-20.0, 4.0, -0.11]);

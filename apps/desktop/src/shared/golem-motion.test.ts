@@ -181,8 +181,10 @@ describe('GolemMotion', () => {
     expect(isIdentityTransform(model.advance(0.21))).toBe(true)
   })
 
-  it('keeps every page-pet pose and falls back to the default for unknown ids', () => {
-    expect(POSE_IDS).toHaveLength(15)
+  it('keeps every page-pet pose plus the hop, and falls back to the default for unknown ids', () => {
+    // page-pet's 15 poses plus Videorc's motion-only hop.
+    expect(POSE_IDS).toHaveLength(16)
+    expect(reactionPose('hop')).toEqual([-22, 0, -0.12])
     expect(reactionPose('surprised')).toEqual([-17, -3, -0.1])
     expect(reactionPose('laugh')).toEqual([-9, 3, 0.065])
     expect(reactionPose('excited')).toEqual([-20, 4, -0.11])
