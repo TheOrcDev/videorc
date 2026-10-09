@@ -76,7 +76,7 @@ describe('CohostQuestionRow', () => {
         onSelect: () => undefined
       })
     )
-    expect(onTopic).toContain('data-slot="cohost-on-topic"')
+    expect(onTopic).toContain('data-testid="cohost-on-topic"')
     expect(onTopic).toContain('On topic')
     const plain = renderRow(
       createElement(CohostQuestionRow, {
@@ -87,7 +87,7 @@ describe('CohostQuestionRow', () => {
         onSelect: () => undefined
       })
     )
-    expect(plain).not.toContain('data-slot="cohost-on-topic"')
+    expect(plain).not.toContain('data-testid="cohost-on-topic"')
   })
 
   it('reads as one dense line: question, askers, age', () => {
@@ -148,7 +148,7 @@ describe('CohostQuestionRow', () => {
         onSelect: () => undefined
       })
     )
-    expect(markup).toContain('Answered from your Orcle notes')
+    expect(markup).toContain('Answered from your Buddy notes')
     expect(markup).toContain('On stream')
   })
 })
@@ -165,7 +165,7 @@ describe('CohostQuestionRow spotlight', () => {
         onSelect: () => undefined
       })
     )
-    expect(markup).toContain('data-slot="cohost-talking-about"')
+    expect(markup).toContain('data-testid="cohost-talking-about"')
     expect(markup).toContain('Talking about this')
     expect(markup).toContain('data-variant="outline"')
 
@@ -344,21 +344,21 @@ describe('CohostPane', () => {
       gate: {
         allowed: false,
         featureId: 'live-cohost',
-        reason: 'Orcle requires Videorc Premium.',
+        reason: 'Buddy requires Videorc Premium.',
         upgradeUrl: 'https://www.videorc.com/premium'
       },
       onUpgrade: () => undefined
     })
     expect(markup).toContain('data-slot="cohost-notice"')
-    expect(markup).toContain('Orcle requires Videorc Premium.')
+    expect(markup).toContain('Buddy requires Videorc Premium.')
     expect(markup).toContain('View Premium')
-    expect(markup).not.toContain('data-slot="cohost-pane"')
+    expect(markup).not.toContain('data-testid="cohost-pane"')
   })
 
   it('asks for cloud-AI consent instead of quietly doing nothing', () => {
     const markup = renderPane({ consented: false, onEnableConsent: () => undefined })
     expect(markup).toContain('Turn on cloud AI')
-    expect(markup).not.toContain('data-slot="cohost-pane"')
+    expect(markup).not.toContain('data-testid="cohost-pane"')
   })
 
   it('renders nothing at all when the streamer turned co-host off', () => {
@@ -370,16 +370,17 @@ describe('CohostPane', () => {
       onShowOnStream: () => undefined,
       state: state({ questions: [question({ priority: 'high' })] })
     })
-    expect(markup).toContain('data-slot="cohost-pane"')
+    expect(markup).toContain('data-testid="cohost-pane"')
     expect(markup).toContain('data-slot="cohost-actions"')
     for (const label of ['Reply', 'Show on stream', 'Answered', 'Dismiss']) {
       expect(markup).toContain(label)
     }
-    // Plan 140: Orcle can now remove a comment, but only when asked.
+    // Plan 140: Buddy can remove a comment, but only when asked; plan 164 D4:
+    // it posts only in the modes you turn on.
     expect(markup).not.toContain('Nothing sends without you.')
-    expect(markup).toContain('Orcle never acts on its own.')
+    expect(markup).toContain('Posts only in the modes you turn on.')
     expect(markup).toContain(
-      'title="Orcle never acts on its own. It removes a comment only when you tell it to."'
+      'title="The Buddy posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to."'
     )
   })
 
@@ -421,14 +422,14 @@ describe('CohostPane', () => {
   })
 
   it("names the failed tick in the server's words as the chip tooltip and a secondary line", () => {
-    const detail = 'ai-gateway-error (HTTP 502): The Orcle tick failed on every configured model.'
+    const detail = 'ai-gateway-error (HTTP 502): The Buddy tick failed on every configured model.'
     const markup = renderPane({
       state: state({
         status: 'error',
         reason: 'gateway-error',
         detail: {
           code: 'ai-gateway-error',
-          message: 'The Orcle tick failed on every configured model.',
+          message: 'The Buddy tick failed on every configured model.',
           status: 502
         }
       })
@@ -438,7 +439,7 @@ describe('CohostPane', () => {
     expect(markup).toContain('data-tone="destructive"')
     expect(markup).toContain(`title="${detail}"`)
     expect(markup).toContain('data-slot="cohost-error-detail"')
-    expect(markup).toContain('once Orcle is reading chat again')
+    expect(markup).toContain('once Buddy is reading chat again')
     expect(markup).not.toContain('Reading chat. Questions')
     // Monochrome: only the presence DOT carries the error accent; the label and
     // the detail line stay chrome.
@@ -485,10 +486,10 @@ describe('the one-time listening card (plan 068 D3)', () => {
       createElement(CohostListenPrompt, { enabled, listen, onTurnOn: () => undefined })
     )
 
-  it('asks an Orcle user with listening off', () => {
+  it('asks a Buddy user with listening off', () => {
     const markup = renderPrompt(true, false)
     expect(markup).toContain('data-slot="cohost-listen-prompt"')
-    expect(markup).toContain('Orcle can hear you while you&#x27;re live')
+    expect(markup).toContain('Buddy can hear you while you&#x27;re live')
     // The consent names the cloud step and what is (not) kept (plan 068 D3).
     expect(markup).toContain('goes to Videorc&#x27;s cloud speech-to-text to be turned into text')
     expect(markup).toContain('Videorc servers don&#x27;t keep it.')
@@ -497,7 +498,7 @@ describe('the one-time listening card (plan 068 D3)', () => {
     expect(markup).toContain('>Not now<')
   })
 
-  it('stays away when listening is on or unknown, or Orcle cannot run', () => {
+  it('stays away when listening is on or unknown, or Buddy cannot run', () => {
     expect(renderPrompt(true, true)).toBe('')
     expect(renderPrompt(true, undefined)).toBe('')
     expect(renderPrompt(false, false)).toBe('')

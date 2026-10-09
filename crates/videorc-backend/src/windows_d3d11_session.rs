@@ -32,7 +32,7 @@ fn windows_d3d11_terminal_source_error(
 fn windows_d3d11_overlay_layer_geometry(
     overlay_size: (u32, u32),
     output_size: (u32, u32),
-    placement: crate::captions::OverlayPlacement,
+    rect: crate::overlay_layout::OverlayRect,
     safe_inset: usize,
 ) -> (
     crate::windows_d3d11_compositor::WindowsD3d11NormalizedTransform,
@@ -43,12 +43,12 @@ fn windows_d3d11_overlay_layer_geometry(
     let output_width = output_size.0.max(1) as usize;
     let output_height = output_size.1.max(1) as usize;
     let (source_left, destination_left, destination_top, draw_width) =
-        crate::compositor::caption_overlay_layout_with_inset(
+        crate::overlay_layout::overlay_blit_layout(
             overlay_width,
             overlay_height,
             output_width,
             output_height,
-            placement,
+            rect,
             safe_inset,
         );
     let draw_height = overlay_height.min(output_height);
@@ -66,6 +66,128 @@ fn windows_d3d11_overlay_layer_geometry(
             bottom: (overlay_height - draw_height) as f32 / overlay_height as f32,
         },
     )
+}
+
+/// The Buddy's bubble above the pet's head (plan 168 D16) as a normalized
+/// transform and crop: the same oracle as the CPU and Metal paths
+/// (`buddy_sprite::buddy_bubble_blit_layout`).
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_bubble_layer_geometry(
+    overlay_size: (u32, u32),
+    output_size: (u32, u32),
+    anchor: crate::buddy_sprite::BuddyBubbleAnchor,
+) -> (
+    crate::windows_d3d11_compositor::WindowsD3d11NormalizedTransform,
+    crate::windows_d3d11_compositor::WindowsD3d11Crop,
+) {
+    let overlay_width = overlay_size.0.max(1) as usize;
+    let overlay_height = overlay_size.1.max(1) as usize;
+    let output_width = output_size.0.max(1) as usize;
+    let output_height = output_size.1.max(1) as usize;
+    let (source_left, destination_left, destination_top, draw_width) =
+        crate::buddy_sprite::buddy_bubble_blit_layout(
+            overlay_width,
+            overlay_height,
+            output_width,
+            output_height,
+            anchor,
+        );
+    let draw_height = overlay_height.min(output_height);
+    (
+        crate::windows_d3d11_compositor::WindowsD3d11NormalizedTransform {
+            x: destination_left as f32 / output_width as f32,
+            y: destination_top as f32 / output_height as f32,
+            width: draw_width as f32 / output_width as f32,
+            height: draw_height as f32 / output_height as f32,
+        },
+        crate::windows_d3d11_compositor::WindowsD3d11Crop {
+            left: source_left as f32 / overlay_width as f32,
+            top: 0.0,
+            right: (overlay_width - source_left - draw_width) as f32 / overlay_width as f32,
+            bottom: (overlay_height - draw_height) as f32 / overlay_height as f32,
+        },
+    )
+}
+
+/// The pump's Buddy clock (plan 168 S-C4): `output_sequence / fps`, the
+/// pump's own deterministic time, the first animation clock on this path.
+/// Both legs of a tick read the same value, so the animator steps once per
+/// tick and a repeated tick draws exactly what it drew.
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_buddy_clock_seconds(output_sequence: u64, render_fps: u32) -> f64 {
+    output_sequence as f64 / f64::from(render_fps.max(1))
+}
+
+/// The Buddy's pet as a D3D11 layer (plan 168 S-B4): the untransformed
+/// square (plus the draw's translation) normalized to the leg's output, the
+/// atlas cell as the crop, and the 2x2 turn about the pivot for `SceneVs`.
+/// The planner keeps the square unclamped so the edge clips, never squashes.
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_buddy_sprite_layer(
+    source_id: u64,
+    sprite: &crate::buddy_sprite::BuddySpriteLayer,
+    output_size: (u32, u32),
+    output_targets: crate::windows_d3d11_compositor::WindowsD3d11SceneOutputTargets,
+    z_index: i32,
+) -> Result<crate::windows_d3d11_compositor::WindowsD3d11SceneLayerInput, String> {
+    use crate::windows_d3d11_compositor::{
+        WindowsD3d11Crop, WindowsD3d11LayerEffects, WindowsD3d11NormalizedTransform,
+        WindowsD3d11OutputDimensions, WindowsD3d11SceneFit, WindowsD3d11SceneLayerInput,
+        WindowsD3d11SceneMask, WindowsD3d11SceneSourceKind, WindowsD3d11SpriteTransform,
+    };
+    let draw = &sprite.draw;
+    let atlas = &sprite.atlas;
+    let [cell_x, cell_y, cell_width, cell_height] = draw.cell;
+    if !draw.is_drawable()
+        || cell_x + cell_width > atlas.width
+        || cell_y + cell_height > atlas.height
+    {
+        return Err(format!(
+            "Buddy sprite revision {} has an undrawable cell",
+            atlas.revision
+        ));
+    }
+    let width = output_size.0.max(1) as f32;
+    let height = output_size.1.max(1) as f32;
+    let left = draw.center[0] - draw.size / 2.0 + draw.translate[0];
+    let top = draw.center[1] - draw.size / 2.0 + draw.translate[1];
+    let pivot = draw.pivot_point();
+    let atlas_width = atlas.width as f32;
+    let atlas_height = atlas.height as f32;
+    Ok(WindowsD3d11SceneLayerInput {
+        source_id,
+        source_kind: WindowsD3d11SceneSourceKind::BuddySprite,
+        source_dimensions: WindowsD3d11OutputDimensions::new(atlas.width, atlas.height)
+            .map_err(|error| error.to_string())?,
+        transform: WindowsD3d11NormalizedTransform {
+            x: left / width,
+            y: top / height,
+            width: draw.size / width,
+            height: draw.size / height,
+        },
+        crop: WindowsD3d11Crop {
+            left: cell_x as f32 / atlas_width,
+            top: cell_y as f32 / atlas_height,
+            right: (atlas.width - cell_x - cell_width) as f32 / atlas_width,
+            bottom: (atlas.height - cell_y - cell_height) as f32 / atlas_height,
+        },
+        fit: WindowsD3d11SceneFit::Cover,
+        mirror_x: false,
+        mask: WindowsD3d11SceneMask::None,
+        effects: WindowsD3d11LayerEffects {
+            opacity: draw.opacity.clamp(0.0, 1.0),
+            sprite: Some(WindowsD3d11SpriteTransform {
+                affine: draw.affine,
+                pivot: [
+                    (pivot[0] + draw.translate[0]) / width,
+                    (pivot[1] + draw.translate[1]) / height,
+                ],
+            }),
+            ..Default::default()
+        },
+        z_index,
+        output_targets,
+    })
 }
 
 /// Presenter liveness follows the sources actually required by the effective
@@ -605,6 +727,20 @@ mod runtime {
     const CAPTION_AUXILIARY_SOURCE_ID: u64 = 11;
     const HIGHLIGHT_PRIMARY_SOURCE_ID: u64 = 12;
     const HIGHLIGHT_AUXILIARY_SOURCE_ID: u64 = 13;
+    /// The Buddy's bubble per target (plan 168 D16).
+    const BUDDY_PRIMARY_SOURCE_ID: u64 = 14;
+    const BUDDY_AUXILIARY_SOURCE_ID: u64 = 15;
+    /// The Buddy's pet atlas per leg (plan 168 S-B4).
+    const BUDDY_SPRITE_PRIMARY_SOURCE_ID: u64 = 16;
+    const BUDDY_SPRITE_AUXILIARY_SOURCE_ID: u64 = 17;
+    /// Overlay stacking (plan 164 owner answer 7, plan 168 D9): captions,
+    /// then the Buddy (pet, then bubble), then the highlight card on top.
+    /// `build_windows_d3d11_scene_plan` sorts layers by z, so the numbers are
+    /// the order.
+    const CAPTION_Z_INDEX: i32 = 10;
+    const BUDDY_SPRITE_Z_INDEX: i32 = 11;
+    const BUDDY_Z_INDEX: i32 = 12;
+    const HIGHLIGHT_Z_INDEX: i32 = 13;
 
     /// Shared committed authority only; no recording/pump back-reference.
     pub(crate) struct WindowsLiveSources {
@@ -768,10 +904,17 @@ mod runtime {
     pub(crate) struct WindowsD3d11OverlayInput {
         pub(crate) captions: CaptionOverlaySlots,
         pub(crate) highlight: CaptionOverlaySlot,
+        /// The Buddy's bubble, one raster per target like captions (plan 164;
+        /// the bubble only since plan 168).
+        pub(crate) buddy: CaptionOverlaySlots,
+        /// The Buddy's pet atlases and draws (plan 168 S-B4).
+        pub(crate) buddy_sprite: crate::buddy_sprite::BuddySpriteSlot,
         pub(crate) caption_on_primary: bool,
         pub(crate) caption_on_auxiliary: bool,
         pub(crate) highlight_on_primary: bool,
         pub(crate) highlight_on_auxiliary: bool,
+        pub(crate) buddy_on_primary: bool,
+        pub(crate) buddy_on_auxiliary: bool,
     }
 
     #[derive(Clone)]
@@ -782,6 +925,19 @@ mod runtime {
         output_targets: WindowsD3d11SceneOutputTargets,
         output_dimensions: WindowsD3d11OutputDimensions,
         safe_inset: usize,
+        z_index: i32,
+        /// The Buddy's bubble: anchored above the pet's head on its leg
+        /// (plan 168 D16) instead of inside its rect.
+        bubble_anchor: Option<crate::buddy_sprite::BuddyBubbleAnchor>,
+    }
+
+    /// The Buddy's pet on one leg for one tick (plan 168 S-B4).
+    #[derive(Clone)]
+    struct WindowsD3d11SpriteFrame {
+        source_id: u64,
+        layer: crate::buddy_sprite::BuddySpriteLayer,
+        output_targets: WindowsD3d11SceneOutputTargets,
+        output_dimensions: WindowsD3d11OutputDimensions,
         z_index: i32,
     }
 
@@ -1188,7 +1344,9 @@ mod runtime {
                 ));
             }
             if plan.auxiliary.is_none()
-                && (overlays.caption_on_auxiliary || overlays.highlight_on_auxiliary)
+                && (overlays.caption_on_auxiliary
+                    || overlays.highlight_on_auxiliary
+                    || overlays.buddy_on_auxiliary)
             {
                 return Err(
                     "D3D11 overlay plan targets an auxiliary leg that this session did not create"
@@ -1550,12 +1708,131 @@ mod runtime {
         })
     }
 
+    /// The Buddy on each leg for this tick (plan 168 S-B4): the pet's draw
+    /// and the bubble's anchor, from the sprite slot, with the gaze targets
+    /// Phase C reads (the card's and the caption bar's blits on the leg).
+    /// `now_seconds` is the pump's deterministic clock.
+    fn current_buddy_legs(
+        plan: &WindowsD3d11SessionPlan,
+        input: &WindowsD3d11OverlayInput,
+        now_seconds: f64,
+    ) -> [Option<crate::buddy_sprite::BuddyLegFrame>; 2] {
+        use crate::buddy_sprite::{BuddyLegRequest, BuddySpriteLeg};
+        if !input.buddy_on_primary && !input.buddy_on_auxiliary {
+            return [None, None];
+        }
+        let captions = current_caption_overlays(&input.captions);
+        let highlight = current_caption_overlay(&input.highlight);
+        let blit = |overlay: &CaptionOverlay, (width, height): (u32, u32), inset: usize| {
+            let (_, left, top, draw_width) = crate::overlay_layout::overlay_blit_layout(
+                overlay.width as usize,
+                overlay.height as usize,
+                width.max(1) as usize,
+                height.max(1) as usize,
+                overlay.blit_rect(width, height),
+                inset,
+            );
+            [
+                left as f32,
+                top as f32,
+                draw_width as f32,
+                overlay.height.min(height.max(1)) as f32,
+            ]
+        };
+        let leg = |leg: BuddySpriteLeg,
+                   canvas: (u32, u32),
+                   caption: Option<&CaptionOverlay>,
+                   card: Option<&CaptionOverlay>| {
+            input.buddy_sprite.leg_frame(BuddyLegRequest {
+                leg,
+                canvas,
+                now_seconds,
+                highlight_rect: card.map(|card| blit(card, canvas, 0)),
+                caption_rect: caption.map(|caption| {
+                    blit(
+                        caption,
+                        canvas,
+                        caption_overlay_safe_inset(Some(caption), card, canvas.0, canvas.1),
+                    )
+                }),
+            })
+        };
+        let primary = input.buddy_on_primary.then(|| {
+            leg(
+                BuddySpriteLeg::Primary,
+                (plan.primary.width, plan.primary.height),
+                captions
+                    .primary
+                    .as_ref()
+                    .filter(|_| input.caption_on_primary),
+                highlight.as_ref().filter(|_| input.highlight_on_primary),
+            )
+        });
+        let auxiliary = plan
+            .auxiliary
+            .filter(|_| input.buddy_on_auxiliary)
+            .map(|video| {
+                leg(
+                    BuddySpriteLeg::Auxiliary,
+                    (video.width, video.height),
+                    captions
+                        .auxiliary
+                        .as_ref()
+                        .filter(|_| input.caption_on_auxiliary),
+                    highlight.as_ref().filter(|_| input.highlight_on_auxiliary),
+                )
+            });
+        [primary, auxiliary]
+    }
+
+    /// The pet's layer per leg that has an atlas this tick.
+    fn buddy_sprite_frames(
+        plan: &WindowsD3d11SessionPlan,
+        buddy_legs: &[Option<crate::buddy_sprite::BuddyLegFrame>; 2],
+    ) -> Result<Vec<WindowsD3d11SpriteFrame>, String> {
+        let primary_dimensions =
+            WindowsD3d11OutputDimensions::new(plan.primary.width, plan.primary.height)
+                .map_err(|error| error.to_string())?;
+        let primary_targets = if plan.auxiliary.is_none() {
+            WindowsD3d11SceneOutputTargets::PRIMARY.union(WindowsD3d11SceneOutputTargets::PREVIEW)
+        } else {
+            WindowsD3d11SceneOutputTargets::PRIMARY
+        };
+        let mut frames = Vec::with_capacity(2);
+        if let Some(sprite) = buddy_legs[0].as_ref().and_then(|leg| leg.sprite.clone()) {
+            frames.push(WindowsD3d11SpriteFrame {
+                source_id: BUDDY_SPRITE_PRIMARY_SOURCE_ID,
+                layer: sprite,
+                output_targets: primary_targets,
+                output_dimensions: primary_dimensions,
+                z_index: BUDDY_SPRITE_Z_INDEX,
+            });
+        }
+        if let (Some(sprite), Some(video)) = (
+            buddy_legs[1].as_ref().and_then(|leg| leg.sprite.clone()),
+            plan.auxiliary,
+        ) {
+            frames.push(WindowsD3d11SpriteFrame {
+                source_id: BUDDY_SPRITE_AUXILIARY_SOURCE_ID,
+                layer: sprite,
+                output_targets: WindowsD3d11SceneOutputTargets::AUXILIARY
+                    .union(WindowsD3d11SceneOutputTargets::PREVIEW),
+                output_dimensions: WindowsD3d11OutputDimensions::new(video.width, video.height)
+                    .map_err(|error| error.to_string())?,
+                z_index: BUDDY_SPRITE_Z_INDEX,
+            });
+        }
+        Ok(frames)
+    }
+
     fn current_overlay_frames(
         plan: &WindowsD3d11SessionPlan,
         input: &WindowsD3d11OverlayInput,
+        buddy_legs: &[Option<crate::buddy_sprite::BuddyLegFrame>; 2],
     ) -> Result<Vec<WindowsD3d11OverlayFrame>, String> {
         let captions = current_caption_overlays(&input.captions);
         let highlight = current_caption_overlay(&input.highlight);
+        let buddy = current_caption_overlays(&input.buddy);
         let primary_dimensions =
             WindowsD3d11OutputDimensions::new(plan.primary.width, plan.primary.height)
                 .map_err(|error| error.to_string())?;
@@ -1571,7 +1848,7 @@ mod runtime {
         };
         let auxiliary_targets = WindowsD3d11SceneOutputTargets::AUXILIARY
             .union(WindowsD3d11SceneOutputTargets::PREVIEW);
-        let mut frames = Vec::with_capacity(4);
+        let mut frames = Vec::with_capacity(6);
 
         if input.caption_on_primary
             && let Some(caption) = captions.primary
@@ -1592,7 +1869,8 @@ mod runtime {
                 output_targets: primary_targets,
                 output_dimensions: primary_dimensions,
                 safe_inset,
-                z_index: 10,
+                z_index: CAPTION_Z_INDEX,
+                bubble_anchor: None,
             });
         }
         if input.caption_on_auxiliary
@@ -1615,7 +1893,37 @@ mod runtime {
                 output_targets: auxiliary_targets,
                 output_dimensions,
                 safe_inset,
-                z_index: 10,
+                z_index: CAPTION_Z_INDEX,
+                bubble_anchor: None,
+            });
+        }
+        if input.buddy_on_primary
+            && let Some(overlay) = buddy.primary
+        {
+            frames.push(WindowsD3d11OverlayFrame {
+                source_id: BUDDY_PRIMARY_SOURCE_ID,
+                source_kind: WindowsD3d11SceneSourceKind::BuddyOverlay,
+                overlay,
+                output_targets: primary_targets,
+                output_dimensions: primary_dimensions,
+                safe_inset: 0,
+                z_index: BUDDY_Z_INDEX,
+                bubble_anchor: buddy_legs[0].as_ref().map(|leg| leg.bubble_anchor),
+            });
+        }
+        if input.buddy_on_auxiliary
+            && let (Some(overlay), Some(output_dimensions)) =
+                (buddy.auxiliary, auxiliary_dimensions)
+        {
+            frames.push(WindowsD3d11OverlayFrame {
+                source_id: BUDDY_AUXILIARY_SOURCE_ID,
+                source_kind: WindowsD3d11SceneSourceKind::BuddyOverlay,
+                overlay,
+                output_targets: auxiliary_targets,
+                output_dimensions,
+                safe_inset: 0,
+                z_index: BUDDY_Z_INDEX,
+                bubble_anchor: buddy_legs[1].as_ref().map(|leg| leg.bubble_anchor),
             });
         }
         if input.highlight_on_primary
@@ -1628,7 +1936,8 @@ mod runtime {
                 output_targets: primary_targets,
                 output_dimensions: primary_dimensions,
                 safe_inset: 0,
-                z_index: 11,
+                z_index: HIGHLIGHT_Z_INDEX,
+                bubble_anchor: None,
             });
         }
         if input.highlight_on_auxiliary
@@ -1641,7 +1950,8 @@ mod runtime {
                 output_targets: auxiliary_targets,
                 output_dimensions,
                 safe_inset: 0,
-                z_index: 11,
+                z_index: HIGHLIGHT_Z_INDEX,
+                bubble_anchor: None,
             });
         }
         Ok(frames)
@@ -1941,7 +2251,21 @@ mod runtime {
                 pace_render_tick(frame_started_at, frame_interval);
                 continue;
             }
-            let overlay_frames = match current_overlay_frames(&plan, &overlays) {
+            // Plan 168 S-B4 / S-C4: the Buddy's pet per leg on the pump's
+            // own deterministic clock; the animator steps once per tick.
+            let buddy_legs = current_buddy_legs(
+                &plan,
+                &overlays,
+                super::windows_d3d11_buddy_clock_seconds(tick.output_sequence, render_fps),
+            );
+            let overlay_frames = match current_overlay_frames(&plan, &overlays, &buddy_legs) {
+                Ok(frames) => frames,
+                Err(error) => {
+                    finish_with_error(&snapshot, &mut startup_tx, error);
+                    break;
+                }
+            };
+            let sprite_frames = match buddy_sprite_frames(&plan, &buddy_legs) {
                 Ok(frames) => frames,
                 Err(error) => {
                     finish_with_error(&snapshot, &mut startup_tx, error);
@@ -1957,6 +2281,7 @@ mod runtime {
                     .map(|frame| (frame.width, frame.height)),
                 camera.as_ref().map(|input| &input.layout),
                 &overlay_frames,
+                &sprite_frames,
                 committed.as_ref(),
                 if retained_capture_ticket.is_some() {
                     Some((plan.source_width, plan.source_height))
@@ -2069,9 +2394,12 @@ mod runtime {
                     }
                 }
             }
-            let overlay_sources = overlay_frames
+            // The pet's atlas uploads once per revision (immutable, keyed
+            // by source id and revision); then the bubbles and cards.
+            let overlay_sources = sprite_frames
                 .iter()
-                .map(overlay_upload_source)
+                .map(sprite_upload_source)
+                .chain(overlay_frames.iter().map(overlay_upload_source))
                 .collect::<Result<Vec<_>, _>>();
             match overlay_sources {
                 Ok(overlay_sources) => sources.extend(overlay_sources),
@@ -2270,6 +2598,28 @@ mod runtime {
         })
     }
 
+    fn sprite_upload_source(
+        frame: &WindowsD3d11SpriteFrame,
+    ) -> Result<WindowsD3d11CompositionSource, String> {
+        let atlas = &frame.layer.atlas;
+        let row_pitch = atlas.width.checked_mul(4).ok_or_else(|| {
+            format!(
+                "D3D11 Buddy sprite revision {} has an overflowing row pitch",
+                atlas.revision
+            )
+        })?;
+        Ok(WindowsD3d11CompositionSource::BgraUpload {
+            source_id: frame.source_id,
+            pixels: Arc::clone(&atlas.bgra),
+            dimensions: WindowsD3d11OutputDimensions::new(atlas.width, atlas.height)
+                .map_err(|error| error.to_string())?,
+            row_pitch,
+            pixel_order: WindowsD3d11UploadPixelOrder::Bgra,
+            content_revision: atlas.revision,
+            immutable: true,
+        })
+    }
+
     fn pace_render_tick(started_at: Instant, frame_interval: Duration) {
         if let Some(remaining) = frame_interval.checked_sub(started_at.elapsed()) {
             thread::sleep(remaining);
@@ -2357,6 +2707,7 @@ mod runtime {
         camera_dimensions: Option<(u32, u32)>,
         camera_layout: Option<&LayoutSettings>,
         overlays: &[WindowsD3d11OverlayFrame],
+        sprites: &[WindowsD3d11SpriteFrame],
         committed: Option<&WindowsLiveSnapshot>,
         capture_dimensions: Option<(u32, u32)>,
     ) -> Result<crate::windows_d3d11_compositor::WindowsD3d11ScenePlan, String> {
@@ -2586,16 +2937,41 @@ mod runtime {
         } else if capture_dimensions.is_none() {
             layers.retain(|layer| layer.source_id != CAPTURE_SOURCE_ID);
         }
-        for overlay in overlays {
-            let (transform, crop) = super::windows_d3d11_overlay_layer_geometry(
-                (overlay.overlay.width, overlay.overlay.height),
+        for sprite in sprites {
+            layers.push(super::windows_d3d11_buddy_sprite_layer(
+                sprite.source_id,
+                &sprite.layer,
                 (
-                    overlay.output_dimensions.width,
-                    overlay.output_dimensions.height,
+                    sprite.output_dimensions.width,
+                    sprite.output_dimensions.height,
                 ),
-                overlay.overlay.placement,
-                overlay.safe_inset,
-            );
+                sprite.output_targets,
+                sprite.z_index,
+            )?);
+        }
+        for overlay in overlays {
+            let (transform, crop) = match overlay.bubble_anchor {
+                Some(anchor) => super::windows_d3d11_bubble_layer_geometry(
+                    (overlay.overlay.width, overlay.overlay.height),
+                    (
+                        overlay.output_dimensions.width,
+                        overlay.output_dimensions.height,
+                    ),
+                    anchor,
+                ),
+                None => super::windows_d3d11_overlay_layer_geometry(
+                    (overlay.overlay.width, overlay.overlay.height),
+                    (
+                        overlay.output_dimensions.width,
+                        overlay.output_dimensions.height,
+                    ),
+                    overlay.overlay.blit_rect(
+                        overlay.output_dimensions.width,
+                        overlay.output_dimensions.height,
+                    ),
+                    overlay.safe_inset,
+                ),
+            };
             layers.push(WindowsD3d11SceneLayerInput {
                 source_id: overlay.source_id,
                 source_kind: overlay.source_kind,
@@ -2714,7 +3090,18 @@ mod runtime {
                 .collect(),
         };
         let map = |current: &WindowsLiveSnapshot, camera| {
-            build_scene_plan(&plan, 9, 4, camera, Some(&layout), &[], Some(current), None).unwrap()
+            build_scene_plan(
+                &plan,
+                9,
+                4,
+                camera,
+                Some(&layout),
+                &[],
+                &[],
+                Some(current),
+                None,
+            )
+            .unwrap()
         };
         assert!(
             map(&current, None).layers.is_empty(),
@@ -2778,6 +3165,294 @@ mod runtime {
                 .layers
                 .iter()
                 .all(|layer| layer.source_id == 20)
+        );
+    }
+
+    /// Plan 164 S-C3: the Buddy rides its own per-target slot between the
+    /// caption bar and the highlight card on both legs, and a session with no
+    /// auxiliary leg refuses an auxiliary Buddy like it refuses auxiliary
+    /// captions. Mirrored from the CPU/Metal order by reading; this is the
+    /// Windows CI gate for it.
+    #[cfg(test)]
+    #[test]
+    fn windows_buddy_legs_of_one_tick_share_the_animator_step() {
+        // Plan 168 S-C4: the pump asks both legs at one clock; asking again
+        // at that clock draws the same, the next tick moves on.
+        let video = super::WindowsD3d11VideoPlan {
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4500,
+        };
+        let plan = WindowsD3d11SessionPlan {
+            screen_id: "screen:dxgi:00000000000003f1:2".into(),
+            source_width: 1920,
+            source_height: 1080,
+            primary: video,
+            auxiliary: Some(video),
+            camera_required: false,
+            preview_required_at_startup: false,
+            primary_role: WindowsD3d11MediaRole::Record,
+            roles: [WindowsD3d11MediaRole::Record, WindowsD3d11MediaRole::Stream]
+                .into_iter()
+                .collect(),
+        };
+        let input = WindowsD3d11OverlayInput {
+            captions: crate::captions::new_caption_overlay_slots(),
+            highlight: crate::captions::new_caption_overlay_slot(),
+            buddy: crate::captions::new_caption_overlay_slots(),
+            buddy_sprite: crate::buddy_sprite::BuddySpriteSlot::new(
+                &crate::cohost::CohostPersona::default(),
+                crate::overlay_layout::OverlayLayout::default().buddy,
+                None,
+            ),
+            caption_on_primary: false,
+            caption_on_auxiliary: false,
+            highlight_on_primary: false,
+            highlight_on_auxiliary: false,
+            buddy_on_primary: true,
+            buddy_on_auxiliary: true,
+        };
+        input
+            .buddy_sprite
+            .set_source(Box::new(crate::buddy_animator::BuddyAnimatorSource::new(
+                crate::buddy_animator::BuddyAnimatorSettings::default(),
+                7,
+            )));
+        for leg in crate::buddy_sprite::BuddySpriteLeg::ALL {
+            input.buddy_sprite.install_atlas_for_test(
+                leg,
+                (1280, 720),
+                crate::buddy_animator::tests::alive(),
+            );
+        }
+        let draws = |clock: f64| {
+            current_buddy_legs(&plan, &input, clock)
+                .map(|leg| leg.and_then(|leg| leg.sprite).map(|sprite| sprite.draw))
+        };
+        let mut previous = None;
+        for sequence in 1..=90_u64 {
+            if sequence == 10 {
+                input
+                    .buddy_sprite
+                    .notify(crate::buddy_animator::BuddyAnimatorEvent::React {
+                        reaction: "surprised".to_string(),
+                    });
+            }
+            let clock = super::windows_d3d11_buddy_clock_seconds(sequence, 30);
+            let first = draws(clock);
+            assert!(first.iter().all(Option::is_some), "tick {sequence}");
+            assert_eq!(draws(clock), first, "tick {sequence} asked twice");
+            if (11..20).contains(&sequence) {
+                assert_ne!(
+                    Some(first),
+                    previous,
+                    "tick {sequence} moves with the reaction"
+                );
+            }
+            previous = Some(first);
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn windows_overlay_frames_stack_the_buddy_between_captions_and_the_card() {
+        use crate::captions::CaptionOverlayPosition;
+        use crate::overlay_layout::OverlayRect;
+        let video = super::WindowsD3d11VideoPlan {
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4500,
+        };
+        let mut plan = WindowsD3d11SessionPlan {
+            screen_id: "screen:dxgi:00000000000003f1:2".into(),
+            source_width: 1920,
+            source_height: 1080,
+            primary: video,
+            auxiliary: Some(video),
+            camera_required: false,
+            preview_required_at_startup: false,
+            primary_role: WindowsD3d11MediaRole::Record,
+            roles: [WindowsD3d11MediaRole::Record, WindowsD3d11MediaRole::Stream]
+                .into_iter()
+                .collect(),
+        };
+        let png = {
+            use base64::Engine as _;
+            let mut bytes = Vec::new();
+            image::RgbaImage::from_pixel(200, 100, image::Rgba([0, 255, 0, 255]))
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Png,
+                )
+                .unwrap();
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        };
+        let input = WindowsD3d11OverlayInput {
+            captions: crate::captions::new_caption_overlay_slots(),
+            highlight: crate::captions::new_caption_overlay_slot(),
+            buddy: crate::captions::new_caption_overlay_slots(),
+            buddy_sprite: crate::buddy_sprite::BuddySpriteSlot::new(
+                &crate::cohost::CohostPersona::default(),
+                crate::overlay_layout::OverlayLayout::default().buddy,
+                None,
+            ),
+            caption_on_primary: true,
+            caption_on_auxiliary: true,
+            highlight_on_primary: true,
+            highlight_on_auxiliary: true,
+            buddy_on_primary: true,
+            buddy_on_auxiliary: true,
+        };
+        crate::captions::install_caption_overlays(
+            &input.captions,
+            crate::captions::SetCaptionOverlayParams {
+                png_base64: png.clone(),
+                position: CaptionOverlayPosition::Bottom,
+                rect: None,
+                target: None,
+                style_revision: None,
+            },
+        )
+        .unwrap();
+        crate::captions::install_caption_overlay(
+            &input.highlight,
+            &png,
+            CaptionOverlayPosition::Top,
+        )
+        .unwrap();
+        let buddy_rect = OverlayRect::new(0.15, 0.25, 0.25, 0.2);
+        crate::buddy_overlay::install_buddy_overlay(
+            &input.buddy,
+            crate::buddy_overlay::SetBuddyOverlayParams {
+                png_base64: png,
+                target: None,
+                rect: Some(buddy_rect),
+            },
+        )
+        .unwrap();
+        let frames = current_overlay_frames(&plan, &input, &[None, None]).unwrap();
+        let stack = |frames: &[WindowsD3d11OverlayFrame]| {
+            frames
+                .iter()
+                .map(|frame| (frame.source_id, frame.z_index, frame.source_kind))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            stack(&frames),
+            vec![
+                (
+                    CAPTION_PRIMARY_SOURCE_ID,
+                    CAPTION_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::CaptionOverlay
+                ),
+                (
+                    CAPTION_AUXILIARY_SOURCE_ID,
+                    CAPTION_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::CaptionOverlay
+                ),
+                (
+                    BUDDY_PRIMARY_SOURCE_ID,
+                    BUDDY_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::BuddyOverlay
+                ),
+                (
+                    BUDDY_AUXILIARY_SOURCE_ID,
+                    BUDDY_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::BuddyOverlay
+                ),
+                (
+                    HIGHLIGHT_PRIMARY_SOURCE_ID,
+                    HIGHLIGHT_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::CommentHighlight
+                ),
+                (
+                    HIGHLIGHT_AUXILIARY_SOURCE_ID,
+                    HIGHLIGHT_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::CommentHighlight
+                ),
+            ]
+        );
+        assert!(
+            CAPTION_Z_INDEX < BUDDY_SPRITE_Z_INDEX
+                && BUDDY_SPRITE_Z_INDEX < BUDDY_Z_INDEX
+                && BUDDY_Z_INDEX < HIGHLIGHT_Z_INDEX
+        );
+        let buddy_primary = &frames[2];
+        assert_eq!(
+            buddy_primary.output_targets,
+            WindowsD3d11SceneOutputTargets::PRIMARY
+        );
+        assert_eq!(
+            frames[3].output_targets,
+            WindowsD3d11SceneOutputTargets::AUXILIARY
+                .union(WindowsD3d11SceneOutputTargets::PREVIEW)
+        );
+        assert_eq!(buddy_primary.overlay.blit_rect(1280, 720), buddy_rect);
+        assert_eq!(buddy_primary.safe_inset, 0);
+        // The same geometry oracle as the CPU and Metal paths: the parity
+        // fixture's Buddy lands at (192, 180).
+        let (transform, _) = super::windows_d3d11_overlay_layer_geometry(
+            (200, 100),
+            (1280, 720),
+            buddy_primary.overlay.blit_rect(1280, 720),
+            0,
+        );
+        assert_eq!(transform.x, 192.0 / 1280.0);
+        assert_eq!(transform.y, 180.0 / 720.0);
+        // The scene plan keeps the stack: z sorts captions, Buddy, card.
+        let scene = build_scene_plan(
+            &plan,
+            1,
+            1,
+            None,
+            None,
+            &frames,
+            &[],
+            None,
+            Some((1920, 1080)),
+        )
+        .unwrap();
+        let overlay_layers = scene
+            .layers
+            .iter()
+            .filter(|layer| layer.source_id >= CAPTION_PRIMARY_SOURCE_ID)
+            .map(|layer| layer.source_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            overlay_layers,
+            vec![
+                CAPTION_PRIMARY_SOURCE_ID,
+                CAPTION_AUXILIARY_SOURCE_ID,
+                BUDDY_PRIMARY_SOURCE_ID,
+                BUDDY_AUXILIARY_SOURCE_ID,
+                HIGHLIGHT_PRIMARY_SOURCE_ID,
+                HIGHLIGHT_AUXILIARY_SOURCE_ID,
+            ]
+        );
+        // No auxiliary leg: only the primary frames remain, in the same stack
+        // (the pump's start refuses an auxiliary flag without a leg).
+        plan.auxiliary = None;
+        assert_eq!(
+            stack(&current_overlay_frames(&plan, &input, &[None, None]).unwrap()),
+            vec![
+                (
+                    CAPTION_PRIMARY_SOURCE_ID,
+                    CAPTION_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::CaptionOverlay
+                ),
+                (
+                    BUDDY_PRIMARY_SOURCE_ID,
+                    BUDDY_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::BuddyOverlay
+                ),
+                (
+                    HIGHLIGHT_PRIMARY_SOURCE_ID,
+                    HIGHLIGHT_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::CommentHighlight
+                ),
+            ]
         );
     }
 
@@ -3077,6 +3752,22 @@ pub(crate) use runtime::{
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_buddy_clock_is_the_output_sequence_over_the_fps() {
+        assert_eq!(windows_d3d11_buddy_clock_seconds(0, 30), 0.0);
+        assert_eq!(windows_d3d11_buddy_clock_seconds(30, 30), 1.0);
+        assert_eq!(windows_d3d11_buddy_clock_seconds(90, 60), 1.5);
+        // The same tick is the same time, to the bit.
+        assert_eq!(
+            windows_d3d11_buddy_clock_seconds(1234, 30).to_bits(),
+            windows_d3d11_buddy_clock_seconds(1234, 30).to_bits()
+        );
+        // A tick later is one frame later.
+        let step = windows_d3d11_buddy_clock_seconds(1235, 30)
+            - windows_d3d11_buddy_clock_seconds(1234, 30);
+        assert!((step - 1.0 / 30.0).abs() < 1e-12, "{step}");
+    }
+
     fn request() -> WindowsD3d11SessionRequest {
         WindowsD3d11SessionRequest {
             platform_supported: true,
@@ -3104,15 +3795,19 @@ mod tests {
     }
 
     #[test]
-    fn windows_d3d11_overlay_layer_geometry_follows_the_shared_corner_oracle() {
+    fn windows_d3d11_overlay_layer_geometry_follows_the_shared_rect_oracle() {
         use crate::captions::{CaptionOverlayPosition, OverlayPlacement};
         use crate::comment_highlight::CommentHighlightAnchor;
+        use crate::overlay_layout::OverlayRect;
 
+        let legacy = |placement: OverlayPlacement, width: u32, height: u32| {
+            placement.rect_for_canvas(width, height)
+        };
         // 1920x1080: margin = round(1080 * 0.04) = 43 px on BOTH axes.
         let (right, crop) = windows_d3d11_overlay_layer_geometry(
             (600, 200),
             (1920, 1080),
-            CommentHighlightAnchor::BottomRight.into(),
+            legacy(CommentHighlightAnchor::BottomRight.into(), 1920, 1080),
             0,
         );
         assert_eq!(right.x, (1920 - 600 - 43) as f32 / 1920.0);
@@ -3127,7 +3822,7 @@ mod tests {
         let (left, _) = windows_d3d11_overlay_layer_geometry(
             (600, 200),
             (1920, 1080),
-            CommentHighlightAnchor::TopLeft.into(),
+            legacy(CommentHighlightAnchor::TopLeft.into(), 1920, 1080),
             0,
         );
         assert_eq!(left.x, 43.0 / 1920.0);
@@ -3139,7 +3834,7 @@ mod tests {
         let (vertical, _) = windows_d3d11_overlay_layer_geometry(
             (600, 200),
             (1080, 1920),
-            CommentHighlightAnchor::TopRight.into(),
+            legacy(CommentHighlightAnchor::TopRight.into(), 1080, 1920),
             0,
         );
         assert_eq!(vertical.x, (1080 - 600 - 77) as f32 / 1080.0);
@@ -3149,17 +3844,34 @@ mod tests {
         let (caption, _) = windows_d3d11_overlay_layer_geometry(
             (1000, 100),
             (1920, 1080),
-            OverlayPlacement::from(CaptionOverlayPosition::Top),
+            legacy(
+                OverlayPlacement::from(CaptionOverlayPosition::Top),
+                1920,
+                1080,
+            ),
             222,
         );
         assert_eq!(caption.x, 460.0 / 1920.0);
         assert_eq!(caption.y, (43 + 222) as f32 / 1080.0);
 
-        // Over-wide overlays centre-crop regardless of anchor.
+        // A placed rect (plan 164): the bitmap sits at the rect's top-left.
+        let (placed, placed_crop) = windows_d3d11_overlay_layer_geometry(
+            (200, 100),
+            (1280, 720),
+            OverlayRect::new(0.1, 0.2, 0.25, 0.2),
+            0,
+        );
+        assert_eq!(placed.x, 128.0 / 1280.0);
+        assert_eq!(placed.y, 144.0 / 720.0);
+        assert_eq!(placed.width, 200.0 / 1280.0);
+        assert_eq!(placed.height, 100.0 / 720.0);
+        assert_eq!((placed_crop.left, placed_crop.right), (0.0, 0.0));
+
+        // Over-wide overlays centre-crop to the full-canvas rect.
         let (wide, wide_crop) = windows_d3d11_overlay_layer_geometry(
             (2400, 100),
             (1920, 1080),
-            CommentHighlightAnchor::TopRight.into(),
+            OverlayRect::new(0.0, 0.0, 1.0, 1.0),
             0,
         );
         assert_eq!((wide.x, wide.width), (0.0, 1.0));
@@ -3566,6 +4278,195 @@ mod tests {
                 },
             )
             .is_err()
+        );
+    }
+    /// The S-B5 draw (the CPU and Metal parity fixture's): cell 4 of the 3 x
+    /// 2 atlas, 150 px from 120 px cells, turned 30 degrees, scaled 1.1 x 0.9
+    /// about page-pet's pivot and nudged by (12, -7).
+    fn buddy_parity_sprite() -> crate::buddy_sprite::BuddySpriteLayer {
+        let atlas = std::sync::Arc::new(crate::buddy_sprite::tests::parity_atlas(120));
+        let (sin, cos) = 30.0_f32.to_radians().sin_cos();
+        let draw = crate::buddy_sprite::BuddySpriteDraw {
+            affine: [cos * 1.1, sin * 1.1, -sin * 0.9, cos * 0.9],
+            translate: [12.0, -7.0],
+            ..crate::buddy_sprite::BuddySpriteDraw::at_rest(
+                atlas.cell("cell-4").unwrap().rect,
+                [565.0, 285.0, 150.0, 150.0],
+                crate::buddy_sprite::BUDDY_SPRITE_DEFAULT_PIVOT,
+            )
+        };
+        crate::buddy_sprite::BuddySpriteLayer { atlas, draw }
+    }
+
+    fn plan_one_layer(
+        layer: crate::windows_d3d11_compositor::WindowsD3d11SceneLayerInput,
+        canvas: (u32, u32),
+    ) -> crate::windows_d3d11_compositor::WindowsD3d11PlannedLayer {
+        use crate::windows_d3d11_compositor::{
+            WindowsD3d11CanvasOrientation, WindowsD3d11OutputDimensions,
+            WindowsD3d11ScenePlanRequest, build_windows_d3d11_scene_plan,
+        };
+        build_windows_d3d11_scene_plan(WindowsD3d11ScenePlanRequest {
+            adapter_luid: crate::windows_d3d11_device::DxgiAdapterLuid::from_u64(1),
+            generation: 1,
+            sequence: 1,
+            orientation: if canvas.0 >= canvas.1 {
+                WindowsD3d11CanvasOrientation::Horizontal
+            } else {
+                WindowsD3d11CanvasOrientation::Vertical
+            },
+            canvas_dimensions: WindowsD3d11OutputDimensions::new(canvas.0, canvas.1).unwrap(),
+            layers: vec![layer],
+            encoded_outputs: vec![],
+        })
+        .unwrap()
+        .layers[0]
+    }
+
+    /// Plan 168 S-B4/S-B5, the D3D11 twin on every host: the planned sprite
+    /// layer and `SceneVs`'s turn (its Rust twin) put the quad's corners
+    /// where the CPU and Metal paths put them, on the leg's own output and on
+    /// a larger target of the same aspect; the source rect is the atlas cell.
+    #[test]
+    fn windows_d3d11_buddy_sprite_vertices_match_the_cpu_and_metal_quad() {
+        use crate::windows_d3d11_compositor::{
+            WindowsD3d11SceneOutputTargets, WindowsD3d11SceneSourceKind, windows_d3d11_scene_vertex,
+        };
+        let sprite = buddy_parity_sprite();
+        let layer = windows_d3d11_buddy_sprite_layer(
+            16,
+            &sprite,
+            (1280, 720),
+            WindowsD3d11SceneOutputTargets::PRIMARY,
+            11,
+        )
+        .unwrap();
+        let planned = plan_one_layer(layer, (1280, 720));
+        assert_eq!(
+            planned.source_kind,
+            WindowsD3d11SceneSourceKind::BuddySprite
+        );
+        assert_eq!(planned.effects.opacity, 1.0);
+        let expected = sprite.draw.corners();
+        for (width, height) in [(1280.0_f32, 720.0_f32), (1920.0, 1080.0)] {
+            let scale = width / 1280.0;
+            for (unit, want) in [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]
+                .into_iter()
+                .zip(expected)
+            {
+                let [x, y] = windows_d3d11_scene_vertex(
+                    planned.destination_normalized,
+                    planned.effects.sprite,
+                    [1.0 / width, 1.0 / height],
+                    unit,
+                );
+                assert!(
+                    (x * width - want[0] * scale).abs() < 0.05
+                        && (y * height - want[1] * scale).abs() < 0.05,
+                    "corner {unit:?} at {width}x{height}: ({}, {}) vs {want:?}",
+                    x * width,
+                    y * height
+                );
+            }
+        }
+        let [cell_x, cell_y, cell_w, cell_h] = sprite.draw.cell;
+        let (atlas_w, atlas_h) = (sprite.atlas.width as f32, sprite.atlas.height as f32);
+        for (got, want) in planned.source_uv.into_iter().zip([
+            cell_x as f32 / atlas_w,
+            cell_y as f32 / atlas_h,
+            cell_w as f32 / atlas_w,
+            cell_h as f32 / atlas_h,
+        ]) {
+            assert!((got - want).abs() < 1e-6, "source uv {got} vs {want}");
+        }
+        // Every other layer keeps its exact axis-aligned vertices.
+        assert_eq!(
+            windows_d3d11_scene_vertex([0.25, 0.5, 0.5, 0.25], None, [1.0, 1.0], [1.0, 1.0]),
+            [0.75, 0.75]
+        );
+    }
+
+    /// D7: the pet hanging off the canvas edge is clipped by the rasterizer
+    /// (its square stays whole), where an ordinary layer is squashed into
+    /// the canvas by the planner.
+    #[test]
+    fn windows_d3d11_buddy_sprite_clips_at_the_canvas_edge_instead_of_squashing() {
+        use crate::windows_d3d11_compositor::{
+            WindowsD3d11SceneOutputTargets, WindowsD3d11SceneSourceKind,
+        };
+        let mut sprite = buddy_parity_sprite();
+        sprite.draw = crate::buddy_sprite::BuddySpriteDraw::at_rest(
+            sprite.draw.cell,
+            [1200.0, 300.0, 120.0, 120.0],
+            crate::buddy_sprite::BUDDY_SPRITE_DEFAULT_PIVOT,
+        );
+        let layer = windows_d3d11_buddy_sprite_layer(
+            16,
+            &sprite,
+            (1280, 720),
+            WindowsD3d11SceneOutputTargets::PRIMARY,
+            11,
+        )
+        .unwrap();
+        let planned = plan_one_layer(layer, (1280, 720));
+        let [x, _, w, _] = planned.destination_normalized;
+        assert!((x - 1200.0 / 1280.0).abs() < 1e-6);
+        assert!(
+            (w - 120.0 / 1280.0).abs() < 1e-6,
+            "the square is not squashed"
+        );
+        assert!(
+            x + w > 1.0,
+            "it hangs off the right edge; the rasterizer clips it"
+        );
+        let mut squashed = layer;
+        squashed.source_kind = WindowsD3d11SceneSourceKind::BuddyOverlay;
+        squashed.effects.sprite = None;
+        let ordinary = plan_one_layer(squashed, (1280, 720));
+        assert!(
+            ordinary.destination_normalized[0] + ordinary.destination_normalized[2] <= 1.0 + 1e-6
+        );
+        // A sprite transform on any other kind is refused.
+        let mut stray = layer;
+        stray.source_kind = WindowsD3d11SceneSourceKind::BuddyOverlay;
+        assert!(
+            crate::windows_d3d11_compositor::build_windows_d3d11_scene_plan(
+                crate::windows_d3d11_compositor::WindowsD3d11ScenePlanRequest {
+                    adapter_luid: crate::windows_d3d11_device::DxgiAdapterLuid::from_u64(1),
+                    generation: 1,
+                    sequence: 1,
+                    orientation:
+                        crate::windows_d3d11_compositor::WindowsD3d11CanvasOrientation::Horizontal,
+                    canvas_dimensions:
+                        crate::windows_d3d11_compositor::WindowsD3d11OutputDimensions::new(
+                            1280, 720
+                        )
+                        .unwrap(),
+                    layers: vec![stray],
+                    encoded_outputs: vec![],
+                }
+            )
+            .is_err()
+        );
+    }
+
+    /// D16 on D3D11: the bubble sits above the pet's head through the same
+    /// oracle as the CPU and Metal paths.
+    #[test]
+    fn windows_d3d11_buddy_bubble_sits_above_the_head_like_cpu_and_metal() {
+        let anchor = crate::buddy_sprite::BuddyBubbleAnchor { x: 650.0, y: 320.0 };
+        let (transform, crop) = windows_d3d11_bubble_layer_geometry((60, 40), (1280, 720), anchor);
+        assert_eq!(
+            crate::buddy_sprite::buddy_bubble_blit_layout(60, 40, 1280, 720, anchor),
+            (0, 620, 280, 60)
+        );
+        assert_eq!(transform.x, 620.0 / 1280.0);
+        assert_eq!(transform.y, 280.0 / 720.0);
+        assert_eq!(transform.width, 60.0 / 1280.0);
+        assert_eq!(transform.height, 40.0 / 720.0);
+        assert_eq!(
+            (crop.left, crop.top, crop.right, crop.bottom),
+            (0.0, 0.0, 0.0, 0.0)
         );
     }
 }

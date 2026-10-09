@@ -5,7 +5,7 @@ import {
   DarkModeIcon,
   DesktopIcon,
   LightModeIcon,
-  OrcleIcon,
+  BuddyIcon,
   SettingsIcon,
   StopIcon
 } from '@/components/icons'
@@ -23,7 +23,7 @@ import {
   CommandShortcut
 } from '@/components/ui/command'
 import { Kbd } from '@/components/ui/kbd'
-import { ORCLE_TABS } from '@/lib/orcle-tabs'
+import { BUDDY_TABS } from '@/lib/buddy-tabs'
 import { displayKeyGlyph } from '@/lib/platform'
 import { SETTINGS_TABS } from '@/lib/settings-tabs'
 import {
@@ -43,7 +43,7 @@ export function CommandPalette({
   open: boolean
   onOpenChange: (open: boolean) => void
 }): ReactElement {
-  const { setActive, openStudioPanel, openSettings, openOrcle } = useWorkspaceNav()
+  const { setActive, openStudioPanel, openSettings, openBuddy } = useWorkspaceNav()
   const {
     runtimeInfo,
     savedScenes,
@@ -156,15 +156,15 @@ export function CommandPalette({
 
         <CommandSeparator />
 
-        {/* Plan 150: every Orcle tab is one jump away, like Settings'. */}
-        <CommandGroup heading="Orcle">
-          {ORCLE_TABS.map((tab) => (
+        {/* Plan 150: every Buddy tab is one jump away, like Settings'. */}
+        <CommandGroup heading="Buddy">
+          {BUDDY_TABS.map((tab) => (
             <CommandItem
               key={tab.id}
-              value={`Orcle ${tab.label}`}
-              onSelect={() => run(() => openOrcle(tab.id))}
+              value={`Buddy ${tab.label}`}
+              onSelect={() => run(() => openBuddy(tab.id))}
             >
-              <OrcleIcon className="size-4" />
+              <BuddyIcon className="size-4" />
               {tab.label}
             </CommandItem>
           ))}

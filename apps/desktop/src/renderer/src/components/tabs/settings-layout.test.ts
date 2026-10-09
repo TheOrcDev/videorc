@@ -125,8 +125,9 @@ describe('Settings layout', () => {
     })
   })
 
-  it('has no Orcle panel: Orcle is configured in its own tab (plan 119)', () => {
+  it('has no Buddy panel: Buddy is configured in its own tab (plan 119)', () => {
     expect(shellSource).not.toContain('CohostSettingsSection')
+    // 'orcle' is the old tab id older apps saved (plan 170 D22).
     expect(tabPanels().map((panel) => panel.value)).not.toContain('orcle')
   })
 

@@ -10,12 +10,14 @@ import {
   InputGroupInput
 } from '@/components/ui/input-group'
 import { Kbd } from '@/components/ui/kbd'
+import { Slider } from '@/components/ui/slider'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { setCohostSensitivity, useCohostSensitivity } from '@/hooks/use-cohost-sensitivity'
 import { useStudioChat, useStudioCore } from '@/hooks/use-studio'
-import type { CohostSettings, CohostSettingsPatch, CohostTone } from '@/lib/backend'
+import type { CohostAutoChat, CohostSettings, CohostSettingsPatch, CohostTone } from '@/lib/backend'
+import { BUDDY_POSTS_PROMISE } from '@/lib/buddy-auto-chat-view'
 import {
   COHOST_LISTEN_CONSENT_SENTENCE,
   COHOST_SENSITIVITIES,
@@ -37,7 +39,7 @@ const TONE_LABELS: Record<CohostTone, string> = {
 }
 
 /** "Show on stream automatically" (plan 060 D8): one three-way choice over the
- * two engine flags. `autoHighlight` keeps meaning Orcle's picks and
+ * two engine flags. `autoHighlight` keeps meaning Buddy's picks and
  * `voiceHighlight` means what the streamer talks about. */
 export type CohostShowOnStreamMode = 'off' | 'voice' | 'voice-and-picks'
 
@@ -50,7 +52,7 @@ export const COHOST_SHOW_ON_STREAM_MODES: readonly CohostShowOnStreamMode[] = [
 export const COHOST_SHOW_ON_STREAM_LABELS: Record<CohostShowOnStreamMode, string> = {
   off: 'Off',
   voice: 'What I talk about',
-  'voice-and-picks': "What I talk about and Orcle's picks"
+  'voice-and-picks': "What I talk about and Buddy's picks"
 }
 
 export const COHOST_SHOW_ON_STREAM_PATCHES: Record<
@@ -72,12 +74,12 @@ export function cohostShowOnStreamMode(
 }
 
 /**
- * Saving Orcle's settings (plan 119; Settings → Orcle before). Persisted per
+ * Saving Buddy's settings (plan 119; Settings → Buddy before). Persisted per
  * profile through `cohost.settings.get/set` (the engine reads the same row
  * when it builds a tick), NOT through local settings — so what the streamer
  * types here is what the model is given.
  *
- * Orcle Live's switch owns `enabled` and the Premium gate's call to action,
+ * Buddy Live's switch owns `enabled` and the Premium gate's call to action,
  * so neither repeats here: a locked account sees these controls disabled.
  */
 function useCohostSettingsSave(lockedByTab = false): {
@@ -92,7 +94,7 @@ function useCohostSettingsSave(lockedByTab = false): {
   const save = (patch: CohostSettingsPatch): void => {
     setError(null)
     void patchCohostSettings(patch).catch((failure: unknown) =>
-      setError(failure instanceof Error ? failure.message : 'Could not save Orcle settings.')
+      setError(failure instanceof Error ? failure.message : 'Could not save Buddy settings.')
     )
   }
   return {
@@ -114,48 +116,54 @@ function SaveError({ error }: { error: string | null }): ReactElement | null {
 }
 
 /**
- * "Orcle hears you while you're live" (plan 068), on the Orcle tab's Live tab
- * (plan 150): listening is part of what turning Orcle on means, so it sits
- * under Orcle Live's switch rather than with the reply settings.
+ * "Buddy hears you while you're live" (plan 068), on the Buddy tab's Live tab
+ * (plan 150): listening is part of what turning Buddy on means, so it sits
+ * under Buddy Live's switch rather than with the reply settings.
  */
 export function CohostListenField({
   locked: lockedByTab = false
 }: {
-  /** Orcle Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
+  /** Buddy Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
   locked?: boolean
 } = {}): ReactElement | null {
   const { cohostSettings, locked, save, error } = useCohostSettingsSave(lockedByTab)
   if (!cohostSettings) return null
+  // The error sits under the card, as in Moderation: a row in a grouped card
+  // that is not a Field gets none of the card's padding (plan 168 S-02).
   return (
-    <FieldGroup variant="grouped" data-slot="cohost-listen-field">
-      <Field>
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex min-w-0 flex-col gap-0.5">
-            <FieldLabel htmlFor="cohost-listen">Orcle hears you while you&apos;re live</FieldLabel>
-            <p className="text-xs text-muted-foreground">{COHOST_LISTEN_CONSENT_SENTENCE}</p>
-            <CohostListenAllowance />
+    <>
+      <FieldGroup variant="grouped">
+        <Field>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <FieldLabel htmlFor="cohost-listen">
+                Buddy hears you while you&apos;re live
+              </FieldLabel>
+              <p className="text-xs text-muted-foreground">{COHOST_LISTEN_CONSENT_SENTENCE}</p>
+              <CohostListenAllowance />
+            </div>
+            <Switch
+              checked={cohostSettings.listen === true}
+              disabled={locked}
+              id="cohost-listen"
+              onCheckedChange={(listen) => save({ listen })}
+            />
           </div>
-          <Switch
-            checked={cohostSettings.listen === true}
-            disabled={locked}
-            id="cohost-listen"
-            onCheckedChange={(listen) => save({ listen })}
-          />
-        </div>
-      </Field>
+        </Field>
+      </FieldGroup>
       <SaveError error={error} />
-    </FieldGroup>
+    </>
   )
 }
 
 /**
- * Replies (plan 150, Chat tab): how Orcle drafts the replies you approve, and
+ * Replies (plan 150, Chat tab): how Buddy drafts the replies you approve, and
  * the facts it answers from.
  */
-export function OrcleRepliesSection({
+export function BuddyRepliesSection({
   locked: lockedByTab = false
 }: {
-  /** Orcle Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
+  /** Buddy Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
   locked?: boolean
 } = {}): ReactElement | null {
   const { cohostSettings, locked, save, error } = useCohostSettingsSave(lockedByTab)
@@ -175,12 +183,36 @@ export function OrcleRepliesSection({
   const notesOverLimit = notesDraft.length > COHOST_NOTES_MAX_CHARS
   const notesDirty = notesDraft !== (cohostSettings.notes ?? '')
   const notesError = error
+  const autoChat = cohostSettings.autoChat
+  const saveAutoChat = (next: CohostAutoChat): void => save({ autoChat: next })
   return (
     <PanelSection
-      description="How Orcle drafts the replies you approve, and the facts it answers from."
+      description="How Buddy drafts the replies you approve, and the facts it answers from. Answers and Banter post as you, only in the modes you turn on in Stream Manager."
       title="Replies"
     >
       <FieldGroup variant="grouped">
+        {/* Plan 164 S-D5: the two AI behaviours and their cooldowns. Premium
+            and cloud AI, like the rest of this tab. */}
+        <CohostCooldownField
+          cooldown={autoChat.answers.cooldownSeconds}
+          description="A reply when a viewer asks the Buddy by name, at most one per cooldown."
+          enabled={autoChat.answers.enabled}
+          id="cohost-answers"
+          label="Answers"
+          locked={locked}
+          max={300}
+          onChange={(answers) => saveAutoChat({ ...autoChat, answers })}
+        />
+        <CohostCooldownField
+          cooldown={autoChat.banter.cooldownSeconds}
+          description="A short remark when you have been quiet for a while, never within a minute of a greeting or an answer."
+          enabled={autoChat.banter.enabled}
+          id="cohost-banter"
+          label="Banter"
+          locked={locked}
+          max={1800}
+          onChange={(banter) => saveAutoChat({ ...autoChat, banter })}
+        />
         <Field>
           <FieldLabel htmlFor="cohost-tone">Reply tone</FieldLabel>
           <FieldDescription>How the drafted replies read before you edit them.</FieldDescription>
@@ -203,9 +235,9 @@ export function OrcleRepliesSection({
           </ToggleGroup>
         </Field>
         <Field>
-          <FieldLabel htmlFor="cohost-notes">Orcle notes</FieldLabel>
+          <FieldLabel htmlFor="cohost-notes">Buddy notes</FieldLabel>
           <FieldDescription>
-            Facts Orcle answers from, one per line. For example:
+            Facts Buddy answers from, one per line. For example:
             <br />
             <span className="text-subtle">Keyboard: Keychron Q1 with Boba U4T switches.</span>
             <br />
@@ -247,14 +279,83 @@ export function OrcleRepliesSection({
   )
 }
 
+/** One AI behaviour with its switch and cooldown slider (plan 164 S-D5). */
+function CohostCooldownField({
+  id,
+  label,
+  description,
+  enabled,
+  cooldown,
+  max,
+  locked,
+  onChange
+}: {
+  id: string
+  label: string
+  description: string
+  enabled: boolean
+  cooldown: number
+  max: number
+  locked: boolean
+  onChange: (next: { enabled: boolean; cooldownSeconds: number }) => void
+}): ReactElement {
+  const [draft, setDraft] = useState(cooldown)
+  useEffect(() => setDraft(cooldown), [cooldown])
+  return (
+    <Field>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 flex-col gap-0.5">
+          <FieldLabel htmlFor={id}>{label}</FieldLabel>
+          <FieldDescription>{description}</FieldDescription>
+        </div>
+        <Switch
+          checked={enabled}
+          disabled={locked}
+          id={id}
+          onCheckedChange={(next) => onChange({ enabled: next, cooldownSeconds: cooldown })}
+        />
+      </div>
+      <div className="flex items-center gap-3">
+        <Slider
+          aria-label={`${label} cooldown`}
+          className="max-w-56"
+          disabled={locked}
+          max={max}
+          min={5}
+          step={5}
+          value={[draft]}
+          onValueChange={([value]) => {
+            if (value !== undefined) setDraft(value)
+          }}
+          onValueCommit={([value]) => {
+            if (value !== undefined && value !== cooldown) {
+              onChange({ enabled, cooldownSeconds: value })
+            }
+          }}
+        />
+        <span className="text-xs tabular-nums text-muted-foreground">
+          {cooldownLabel(draft)} cooldown
+        </span>
+      </div>
+    </Field>
+  )
+}
+
+function cooldownLabel(seconds: number): string {
+  if (seconds < 60) return `${seconds} s`
+  const minutes = Math.floor(seconds / 60)
+  const rest = seconds % 60
+  return rest === 0 ? `${minutes} min` : `${minutes} min ${rest} s`
+}
+
 /**
- * Moderation (plan 150, Chat tab): what Orcle flags for you and what it may
- * put on stream. Orcle never acts on its own.
+ * Moderation (plan 150, Chat tab): what Buddy flags for you and what it may
+ * put on stream. It posts only in the modes you turn on (plan 164 D4).
  */
-export function OrcleModerationSection({
+export function BuddyModerationSection({
   locked: lockedByTab = false
 }: {
-  /** Orcle Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
+  /** Buddy Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
   locked?: boolean
 } = {}): ReactElement | null {
   const { cohostSettings, locked, save, error } = useCohostSettingsSave(lockedByTab)
@@ -274,14 +375,14 @@ export function OrcleModerationSection({
   }
   return (
     <PanelSection
-      description="What Orcle flags for you, and what it may put on stream. Orcle never acts on its own."
+      description={`What Buddy flags for you, and what it may put on stream. ${BUDDY_POSTS_PROMISE}`}
       title="Moderation"
     >
       <FieldGroup variant="grouped">
         <Field>
           <FieldLabel htmlFor="cohost-rule-new">Chat rules</FieldLabel>
           <FieldDescription>
-            Plain-language rules Orcle flags for you, like “no spoilers” or “English only”.
+            Plain-language rules Buddy flags for you, like “no spoilers” or “English only”.
           </FieldDescription>
           {rules.length > 0 ? (
             <ul aria-label="Chat rules" className="flex flex-col gap-1.5">
@@ -356,7 +457,7 @@ export function OrcleModerationSection({
         <Field>
           <FieldLabel htmlFor="cohost-sensitivity">Flag sensitivity</FieldLabel>
           <FieldDescription>
-            How sure Orcle must be before a flag shows up. Relaxed shows only the clear cases,
+            How sure Buddy must be before a flag shows up. Relaxed shows only the clear cases,
             Strict shows everything it noticed.
           </FieldDescription>
           <ToggleGroup
@@ -409,9 +510,9 @@ export function OrcleModerationSection({
             ))}
           </ToggleGroup>
           <FieldDescription className="flex flex-col gap-0.5">
-            <span>What I talk about needs Orcle to hear you (or live captions).</span>
+            <span>What I talk about needs Buddy to hear you (or live captions).</span>
             <span>
-              Orcle&apos;s picks: at most one card every 45 seconds; nothing Orcle flagged is ever
+              Buddy&apos;s picks: at most one card every 45 seconds; nothing Buddy flagged is ever
               shown.
             </span>
           </FieldDescription>

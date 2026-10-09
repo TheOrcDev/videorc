@@ -127,7 +127,7 @@ export function CohostStatusChip({ state }: { state: CohostState | null }): Reac
   const chip = cohostChipView(state)
   if (!chip) return null
   return (
-    <Badge data-slot="cohost-status-chip" variant={chip.tone === 'live' ? 'success' : 'neutral'}>
+    <Badge data-testid="cohost-status-chip" variant={chip.tone === 'live' ? 'success' : 'neutral'}>
       {chip.label}
     </Badge>
   )

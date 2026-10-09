@@ -115,12 +115,12 @@ describe('CohostPane: Remove from chat on a flagged message (plan 140, S6)', () 
     expect(onDismissFlag).not.toHaveBeenCalled()
   })
 
-  it('says Orcle acts only when asked', async () => {
+  it('says Buddy posts only in the modes you turn on', async () => {
     await renderPane()
     const hint = container.querySelector<HTMLElement>('[data-slot="cohost-acts-on-ask"]')
-    expect(hint?.textContent).toBe('Orcle never acts on its own.')
+    expect(hint?.textContent).toBe('Posts only in the modes you turn on.')
     expect(hint?.title).toBe(
-      'Orcle never acts on its own. It removes a comment only when you tell it to.'
+      'The Buddy posts only in the modes you turn on. Everything is off by default. It removes a comment only when you tell it to.'
     )
   })
 })

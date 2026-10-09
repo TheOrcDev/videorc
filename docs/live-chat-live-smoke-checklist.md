@@ -17,7 +17,7 @@ send-result honesty, highlight slot, and event protocol end to end over a real W
       snapshots → event-stream reconnect → correlated/idempotent send persistence. The result
       matrix must include sent, failed, receive-only, and timed-out-unknown without claiming an
       X account is connected. No OAuth required.
-- [ ] `pnpm smoke:cohost-fake` — Orcle offline proof (no cloud, no account): launches
+- [ ] `pnpm smoke:cohost-fake` — Buddy offline proof (no cloud, no account): launches
       the debug backend against an isolated profile and a local fake `POST /api/ai/cohost/tick`,
       scripts fake-connector lanes, and asserts the tick wire shape, one grouped question whose
       askers/messageIds grow across ticks, a flagged message, 429/403/503 → paused/paused/error
@@ -35,7 +35,7 @@ send-result honesty, highlight slot, and event protocol end to end over a real W
       leaves by expiry, never a clear; a question enters `recentlyResolved` only on the second
       "answered" hit and `cohost.question.restore` puts it back; a queued 404 closes the lane
       (no spotlight request for 6 s) without touching the tick status; in "What I talk about and
-      Orcle's picks" mode no card fires for 45 s after the previous card left the stream, then
+      Buddy's picks" mode no card fires for 45 s after the previous card left the stream, then
       the first pick is never the flagged message (which the fake suggests first on purpose),
       the one already shown, or the previous card's author. Whole run: about 4 minutes.
 
@@ -144,12 +144,12 @@ OAuth with `events:subscribe` and `chat:write`.
 - [ ] Click a live comment and confirm `On stream` appears only after the card is visible on the
       viewer-facing output; historical comments must not expose the highlight action.
 
-## Orcle (Premium, opt-in)
+## Buddy (Premium, opt-in)
 
-Prerequisites: Premium account signed in, AI consent ON, Settings → Streaming → Orcle enabled,
+Prerequisites: Premium account signed in, AI consent ON, Settings → Streaming → Buddy enabled,
 web has `VIDEORC_AI_COHOST_DISABLED` off. Offline proof: `pnpm smoke:cohost-fake`.
 
-- [ ] Go Live with Twitch + YouTube chat attached. Confirm the Orcle chip reads
+- [ ] Go Live with Twitch + YouTube chat attached. Confirm the Buddy chip reads
       `listening` only after `cohost.start` succeeded; with consent OFF it must read
       `paused · consent` and no tick request leaves the machine.
 - [ ] Have viewers ask the same question three times in different words. Confirm ONE grouped
@@ -163,11 +163,11 @@ web has `VIDEORC_AI_COHOST_DISABLED` off. Offline proof: `pnpm smoke:cohost-fake
 - [ ] Press `H` on a question: the source comment appears on the viewer-facing output for ~10 s
       via the existing comment highlight; `A` and `⌫` remove questions and they never return.
 - [ ] Post a clearly toxic message from a viewer account. Confirm it shows under Flags with a
-      reason and that Orcle never removes or replies to it on its own. Then pick the flag and use
+      reason and that Buddy never removes or replies to it on its own. Then pick the flag and use
       **Remove from chat** (⇧⌫): the row reads "Removed" (or "Hidden in Videorc" with the reason
       on hover) and the message is gone for viewers. Voice removal ("this one is toxic, remove it
       from our chat") must show a card and wait for your answer; see
-      [orcle-commands.md](orcle-commands.md).
+      [buddy-commands.md](buddy-commands.md).
 - [ ] Sign out mid-stream: chip reads `paused · signed out`; sign back in and confirm listening
       resumes without losing open questions. Exhaust the daily quota (or set the limit to 1 on
       web): chip reads `quota` and resumes after `Retry-After`.
@@ -176,14 +176,14 @@ web has `VIDEORC_AI_COHOST_DISABLED` off. Offline proof: `pnpm smoke:cohost-fake
 
 ### Show on stream automatically (plan 060)
 
-Prerequisites: "Orcle hears you while you're live" or live captions ON with a working microphone
+Prerequisites: "Buddy hears you while you're live" or live captions ON with a working microphone
 (the "What I talk about" modes read the transcript), a real stream going out, and at least one
 viewer account that can post.
 
-- [ ] Settings → Streaming → Orcle → "Show on stream automatically" offers exactly Off, What I
-      talk about, and What I talk about and Orcle's picks, with the helper line "What I talk
-      about needs Orcle to hear you (or live captions)." The row is disabled without Premium like
-      the rest of Orcle.
+- [ ] Settings → Streaming → Buddy → "Show on stream automatically" offers exactly Off, What I
+      talk about, and What I talk about and Buddy's picks, with the helper line "What I talk
+      about needs Buddy to hear you (or live captions)." The row is disabled without Premium like
+      the rest of Buddy.
 - [ ] Off: chat, questions and highlights keep working and nothing ever goes on stream by itself.
 - [ ] What I talk about: have a viewer post a comment, then talk about it in your own words
       (do not read it out). Within a few seconds the comment row shows the quiet "Talking about
@@ -198,8 +198,8 @@ viewer account that can post.
       open list and shows as one collapsed "Answered on air: <text>" line with Restore. Press
       Restore: the question returns to the open list and the line disappears. Without Restore
       the line is gone after 60 s.
-- [ ] What I talk about and Orcle's picks: after a card leaves the stream, nothing new goes on
-      stream by itself for 45 s (time it); after that Orcle may put one of its picks up, never
+- [ ] What I talk about and Buddy's picks: after a card leaves the stream, nothing new goes on
+      stream by itself for 45 s (time it); after that Buddy may put one of its picks up, never
       the author of the previous automatic card and never a comment already shown.
 - [ ] Post a flagged (toxic or spammy) message and then talk about it on air: it gets no
       "Talking about this" mark and never appears on stream in any mode, even if it was suggested.

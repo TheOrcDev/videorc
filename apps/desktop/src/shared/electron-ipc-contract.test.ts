@@ -34,19 +34,25 @@ import {
 describe('Electron IPC contract', () => {
   it('maps every renderer-facing invoke channel to a real async API method', () => {
     expectTypeOf<ElectronInvokeMappingInvariant>().toEqualTypeOf<true>()
+    // 127: plan 164 S-A3 adds the Buddy avatar store pair (import, remove).
+    // 128: plan 164 S-C2 adds the Buddy image bytes read for the overlay raster.
+    // 129: plan 168 S-A2 adds buddy-pets:read (pet pack files for the preview).
+    // 130: plan 168 S-A3 adds buddy-pets:import-folder (Import pack…).
+    // 131: plan 168 S-F5 adds buddy-pets:read-creation (the creator's sheets).
     // 124: plan 155 adds chat-gifs:cache and the GIF mode relay (push, get).
     // 121: plan 152 adds marker request/reply and capture context get/push.
     // 117: plan 151 added chat:open-link.
     // 125: plan 156 added the Activity auto-show switch channel (116: plan
-    // 140 S6 part B added the Orcle command answer pair; part A
+    // 140 S6 part B added the Buddy command answer pair; part A
     // the chat removal relay pair; S5 the Stream
     // Manager's reconnect-scopes channel; plan 119 the in-app player's
     // media:grant-session; plan 095 the highlight card's avatars:read; plan 071
     // the Stream Manager Show who followed channel; plan 068 the mark-clip
     // relay pair; plan 062 the shortcut recorder arm; plan 055 the dashboard
     // push and get; plan 050 retired glass:wallpaper:get).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(125)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(125)
+    // 130: plan 169 D10 retired buddy-assets:import-image (no per-state uploads).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(130)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(130)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -455,7 +461,7 @@ describe('Electron IPC contract', () => {
     expect(validateElectronInvokeResult('comments-window:moderation-result-push', true)).toBe(true)
   })
 
-  it('relays one answer to an Orcle command by id, nothing more (plan 140, S6 part B)', () => {
+  it('relays one answer to a Buddy command by id, nothing more (plan 140, S6 part B)', () => {
     const choose = {
       requestId: 'r-1',
       sessionId: 'session-1',

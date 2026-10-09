@@ -3,7 +3,7 @@ import { describe, it } from 'node:test'
 
 import WebSocket from 'ws'
 
-import { ORCLE_COMMAND_FINALS, startFakeCaptionService } from './fake-caption-service.mjs'
+import { BUDDY_COMMAND_FINALS, startFakeCaptionService } from './fake-caption-service.mjs'
 
 describe('fake caption service', () => {
   it(
@@ -306,7 +306,7 @@ describe('fake caption service', () => {
       assert.equal(await fake.emitRealtimeFinal('Second scripted final.'), 1)
       await waitFor(() => received.length === 4)
       // Plan 140 S9: one spoken command split across two finals, in order.
-      const split = ORCLE_COMMAND_FINALS.highlightByNameSplit
+      const split = BUDDY_COMMAND_FINALS.highlightByNameSplit
       assert.deepEqual(await fake.emitRealtimeFinals(split, { gapMs: 5 }), [1, 1])
       await waitFor(() => received.length === 8)
       assert.deepEqual(
@@ -314,7 +314,7 @@ describe('fake caption service', () => {
           .filter((event) => event.type === 'input-transcription-completed')
           .slice(2)
           .map((event) => event.transcript),
-        ['Orcle, highlight the comment', 'from coders X.']
+        ['Buddy, highlight the comment', 'from coders X.']
       )
       socket.close()
 
@@ -336,7 +336,7 @@ describe('fake caption service', () => {
         [
           ['First scripted final.', 1],
           ['Second scripted final.', 1],
-          ['Orcle, highlight the comment', 1],
+          ['Buddy, highlight the comment', 1],
           ['from coders X.', 1]
         ]
       )

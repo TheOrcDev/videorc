@@ -19,7 +19,7 @@ import {
 import { activityItems } from '@/lib/stream-activity'
 import { YOUTUBE_ARTBOARD, YOUTUBE_ICON_URL, YOUTUBE_MARK } from '@/lib/youtube-mark'
 import { X_LOGO_WHITE_URL, X_VERIFIED_URL } from '@/lib/x-mark'
-import type { CaptionStyleId, LiveChatMessageFragment } from '@/lib/backend'
+import type { CaptionStyleId, LiveChatMessageFragment, OverlayRect } from '@/lib/backend'
 import { COMMENTS_HIGHLIGHT_TIMING_CONTRACT } from '../../../shared/comments-command-timing'
 
 export type CaptionTextSize = 's' | 'm' | 'l'
@@ -161,7 +161,8 @@ export function captionBarMetrics(
   canvasWidth: number,
   textSize: CaptionTextSize,
   styleId: CaptionStyleId = 'glass',
-  canvasHeight?: number
+  canvasHeight?: number,
+  maxBarWidthPx?: number
 ): CaptionBarMetrics {
   const style = captionStyleDefinition(styleId)
   const portrait = isPortraitCanvas(canvasWidth, canvasHeight)
@@ -175,8 +176,21 @@ export function captionBarMetrics(
     paddingYPx: Math.round(fontPx * style.paddingYFactor),
     radiusPx: Math.round(fontPx * style.radiusFactor),
     maxTextWidthPx:
-      Math.floor(canvasWidth * captionBarWidthFraction(style, portrait)) - paddingXPx * 2
+      captionBarMaxWidthPx(canvasWidth, style, portrait, maxBarWidthPx) - paddingXPx * 2
   }
+}
+
+/** The widest bar: the placed rect's width (plan 164) or the style's fraction. */
+function captionBarMaxWidthPx(
+  canvasWidth: number,
+  style: CaptionStyleDefinition,
+  portrait: boolean,
+  maxBarWidthPx?: number
+): number {
+  const fraction = Math.floor(canvasWidth * captionBarWidthFraction(style, portrait))
+  return maxBarWidthPx !== undefined && Number.isFinite(maxBarWidthPx) && maxBarWidthPx > 0
+    ? Math.max(1, Math.floor(Math.min(maxBarWidthPx, canvasWidth)))
+    : fraction
 }
 
 /**
@@ -222,6 +236,8 @@ export function layoutCaptionBar(params: {
   canvasHeight?: number
   textSize: CaptionTextSize
   styleId?: CaptionStyleId
+  /** The placed rect's width in pixels (plan 164); omitted keeps the style's fraction. */
+  maxBarWidthPx?: number
   measure: TextMeasurer
 }): CaptionBarLayout | null {
   const style = captionStyleDefinition(params.styleId ?? 'glass')
@@ -229,16 +245,19 @@ export function layoutCaptionBar(params: {
     params.canvasWidth,
     params.textSize,
     style.id,
-    params.canvasHeight
+    params.canvasHeight,
+    params.maxBarWidthPx
   )
   const lines = wrapCaptionText(params.text, metrics, params.measure)
   if (lines.length === 0) {
     return null
   }
   const widest = Math.max(...lines.map((line) => params.measure(line, metrics.fontPx)))
-  const maxBarWidth = Math.floor(
-    params.canvasWidth *
-      captionBarWidthFraction(style, isPortraitCanvas(params.canvasWidth, params.canvasHeight))
+  const maxBarWidth = captionBarMaxWidthPx(
+    params.canvasWidth,
+    style,
+    isPortraitCanvas(params.canvasWidth, params.canvasHeight),
+    params.maxBarWidthPx
   )
   const barWidthPx = style.wide
     ? maxBarWidth
@@ -411,6 +430,8 @@ export async function renderCaptionOverlayPng(params: {
   canvasHeight?: number
   textSize: CaptionTextSize
   styleId?: CaptionStyleId
+  /** The placed rect's width in pixels (plan 164). */
+  maxBarWidthPx?: number
 }): Promise<string | null> {
   const styleId = params.styleId ?? 'glass'
   const measurer = canvasMeasurer(styleId)
@@ -499,7 +520,12 @@ export function commentHighlightCardText(message: import('@/lib/backend').LiveCh
   return item.message ? `${item.line}: ${item.message}` : item.line
 }
 
-type HighlightCanvas = { width: number; height: number }
+type HighlightCanvas = {
+  width: number
+  height: number
+  /** The placed highlight rect for this canvas (plan 164): the card wraps to its width. */
+  rect?: OverlayRect
+}
 
 /** A decoded image the card paints: an ImageBitmap in the app, any sized
  * CanvasImageSource in tests. */
@@ -718,6 +744,7 @@ export async function renderCommentHighlightCards(
       emotes,
       canvasWidth: canvas.width,
       canvasHeight: canvas.height,
+      maxCardWidthPx: canvas.rect ? Math.floor(canvas.rect.w * canvas.width) : undefined,
       platform: message.platform,
       platformMark,
       verifiedMark
@@ -742,6 +769,8 @@ export async function renderCommentHighlightPng(params: {
   canvasWidth: number
   /** Omitted = landscape. A portrait canvas gets the vertical-leg card. */
   canvasHeight?: number
+  /** The placed rect's width in pixels (plan 164); omitted keeps the width fraction. */
+  maxCardWidthPx?: number
   platform?: import('@/lib/backend').StreamPlatform
   /** YouTube's official icon (plan 165) or X's kit mark (plan 167); omitted =
    * the card names the platform in words. Drawn on the identity row, never

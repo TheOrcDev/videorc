@@ -311,6 +311,7 @@ export function layoutCommentHighlightTokens(params: {
   fragments?: readonly LiveChatMessageFragment[]
   canvasWidth: number
   canvasHeight?: number
+  maxCardWidthPx?: number
   platform?: StreamPlatform
   /** The painter has YouTube's or X's mark to draw beside the name (plans
    * 165, 167). */
@@ -320,7 +321,7 @@ export function layoutCommentHighlightTokens(params: {
   measure: HighlightTextMeasurer
   emoteSize: HighlightEmoteSizer
 }): HighlightTokenLayout | null {
-  const metrics = highlightMetrics(params.canvasWidth, params.canvasHeight)
+  const metrics = highlightMetrics(params.canvasWidth, params.canvasHeight, params.maxCardWidthPx)
   if (metrics.maxTextWidthPx <= 0) {
     return null
   }

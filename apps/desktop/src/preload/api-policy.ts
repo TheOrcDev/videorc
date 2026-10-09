@@ -35,9 +35,9 @@ export const AUXILIARY_API_KEYS = {
     'markClipFromCommentsWindow',
     // Show who followed (plan 071, S2): main starts the Twitch reconnect.
     'showFollowNamesFromCommentsWindow',
-    // Reconnect Twitch or Kick so Orcle can remove messages (plan 140, S5).
+    // Reconnect Twitch or Kick so Buddy can remove messages (plan 140, S5).
     'reconnectScopesFromCommentsWindow',
-    // Remove from chat and Orcle's removal cards (plan 140, S6): relayed.
+    // Remove from chat and Buddy's removal cards (plan 140, S6): relayed.
     'moderateFromCommentsWindow',
     'getCommentsWindowState',
     'setCommentsWindowAlwaysOnTop',
@@ -61,9 +61,11 @@ export const AUXILIARY_API_KEYS = {
     'getCohostWindowState',
     'onCohostWindowState',
     'sendCohostAction',
-    // Answers to Orcle's voice command cards (plan 140, S6 part B).
+    // Answers to Buddy's voice command cards (plan 140, S6 part B).
     'sendCohostCommand',
-    'sendCohostEnable'
+    'sendCohostEnable',
+    // The Buddy pane's living preview reads its pet pack (plan 168 Phase D).
+    'readBuddyPetFile'
   ],
   captions: [
     'getCaptionsWindowState',

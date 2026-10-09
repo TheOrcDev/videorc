@@ -21,7 +21,7 @@ vi.mock('@/hooks/use-studio', () => ({
 
 let root: Root
 let container: HTMLDivElement
-const onOpenOrcleReport = vi.fn((_sessionId: string) => undefined)
+const onOpenBuddyReport = vi.fn((_sessionId: string) => undefined)
 const onOpenCleanCut = vi.fn((_sessionId: string) => undefined)
 
 function session(overrides: Partial<CleanCutSession>): CleanCutSession {
@@ -92,7 +92,7 @@ const SESSIONS: CleanCutSession[] = [
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
-  onOpenOrcleReport.mockClear()
+  onOpenBuddyReport.mockClear()
   onOpenCleanCut.mockClear()
   mocked.recording = { state: 'idle' }
   mocked.core = {
@@ -139,7 +139,7 @@ async function render(focusSessionId: string | null = null): Promise<void> {
     openStudioPanel: vi.fn(),
     closeStudioPanel: vi.fn(),
     openSettings: vi.fn(),
-    openOrcle: vi.fn()
+    openBuddy: vi.fn()
   }
   await act(async () =>
     root.render(
@@ -149,7 +149,7 @@ async function render(focusSessionId: string | null = null): Promise<void> {
         createElement(
           TooltipProvider,
           null,
-          createElement(LibraryTab, { onOpenOrcleReport, onOpenCleanCut, focusSessionId })
+          createElement(LibraryTab, { onOpenBuddyReport, onOpenCleanCut, focusSessionId })
         )
       )
     )
@@ -183,7 +183,7 @@ function labels(items: HTMLElement[]): string[] {
 }
 
 describe('Library → Clean cut (plan 119 S14)', () => {
-  it('opens the Orcle tab on an eligible recording, right after Play and the report', async () => {
+  it('opens the Buddy tab on an eligible recording, right after Play and the report', async () => {
     await render()
     const recording = await openMenu('tutorial')
     expect(labels(recording).slice(0, 2)).toEqual(['Play', 'Clean cut'])
@@ -191,7 +191,7 @@ describe('Library → Clean cut (plan 119 S14)', () => {
     expect(onOpenCleanCut).toHaveBeenCalledExactlyOnceWith('tutorial')
 
     const streamed = await openMenu('stream')
-    expect(labels(streamed).slice(0, 3)).toEqual(['Play', 'Orcle report', 'Clean cut'])
+    expect(labels(streamed).slice(0, 3)).toEqual(['Play', 'Buddy report', 'Clean cut'])
     await closeMenu()
   })
 

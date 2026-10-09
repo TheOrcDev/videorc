@@ -123,16 +123,16 @@ describe('Stream Manager chat pane', () => {
         })
       })
     )
-    expect(markup).toContain('data-slot="comment-first-message"')
+    expect(markup).toContain('data-testid="comment-first-message"')
     expect(markup).toContain('First chat')
     // Plan 057, D3: the arrow says reply; the chip says mention in four
     // characters, with the words on hover.
     expect(markup).toContain('↳ @ph4se_on3: which mic is that?')
     expect(markup).not.toContain('Replying to')
-    expect(markup).toContain('data-slot="comment-mention"')
+    expect(markup).toContain('data-testid="comment-mention"')
     expect(markup).toContain('@you')
     expect(markup).toContain('title="Mentions you"')
-    expect(markup).toContain('data-slot="comment-role"')
+    expect(markup).toContain('data-testid="comment-role"')
     expect(markup).toContain('VIP')
   })
 

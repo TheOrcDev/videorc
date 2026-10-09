@@ -103,7 +103,7 @@ const between = (markup: string, from: string, to: string): string => {
 describe('StreamManager highlight slot (plan 095, S2)', () => {
   it('tells Activity which item is on stream, and dots its tab while hidden', () => {
     const markup = render(live(follow.id))
-    const activity = between(markup, 'data-slot="activity-pane"', 'data-pane="orcle"')
+    const activity = between(markup, 'data-slot="activity-pane"', 'data-pane="buddy"')
     const row = between(activity, `data-activity-id="${follow.id}"`, '</li>')
     expect(row).toContain('data-highlight-phase="live"')
     expect(row).toContain('On stream')
@@ -114,15 +114,15 @@ describe('StreamManager highlight slot (plan 095, S2)', () => {
     expect(between(narrowTabs, 'data-slot="pane-on-stream"', '</button>')).toContain('Activity')
     const wideTabs = between(markup, 'data-slot="pane-tabs-wide"', 'data-pane="chat"')
     expect(wideTabs.match(/data-slot="pane-on-stream"/g)).toHaveLength(1)
-    // The Orcle question behind another message is not on stream.
-    const orcle = markup.slice(markup.indexOf('data-pane="orcle"'))
-    expect(orcle).not.toMatch(/data-variant="success"[^>]*>On stream</)
+    // The Buddy question behind another message is not on stream.
+    const buddy = markup.slice(markup.indexOf('data-pane="buddy"'))
+    expect(buddy).not.toMatch(/data-variant="success"[^>]*>On stream</)
   })
 
-  it('lights the Orcle badge for the question on stream, without the Activity dot', () => {
+  it('lights the Buddy badge for the question on stream, without the Activity dot', () => {
     const markup = render(live(chat.id))
-    const orcle = markup.slice(markup.indexOf('data-pane="orcle"'))
-    expect(orcle).toMatch(/data-variant="success"[^>]*>On stream</)
+    const buddy = markup.slice(markup.indexOf('data-pane="buddy"'))
+    expect(buddy).toMatch(/data-variant="success"[^>]*>On stream</)
     // A chat message has its own row in Chat: no Activity tab dot.
     expect(markup).not.toContain('data-slot="pane-on-stream"')
   })
@@ -166,12 +166,12 @@ describe('StreamManager Remove messages reconnect (plan 140, S5)', () => {
       })
     )
 
-  it('puts one quiet row in the Orcle pane for each platform missing the permission', () => {
+  it('puts one quiet row in the Buddy pane for each platform missing the permission', () => {
     const markup = renderWith({})
-    const orcle = markup.slice(markup.indexOf('data-slot="orcle-pane"'))
-    expect(orcle).toContain('data-slot="remove-messages-reconnect"')
-    expect(orcle).toContain('Reconnect Twitch to let Orcle remove messages.')
-    expect(markup.match(/to let Orcle remove messages/g)).toHaveLength(1)
+    const buddy = markup.slice(markup.indexOf('data-slot="buddy-pane"'))
+    expect(buddy).toContain('data-slot="remove-messages-reconnect"')
+    expect(buddy).toContain('Reconnect Twitch to let Buddy remove messages.')
+    expect(markup.match(/to let Buddy remove messages/g)).toHaveLength(1)
     expect(markup).not.toContain('Reconnect YouTube')
     expect(markup).not.toContain('Reconnect Kick')
   })
@@ -230,19 +230,19 @@ describe('StreamManager removal cards (plan 140, S6)', () => {
       })
     )
 
-  it('puts the open card at the top of the Orcle pane, above everything that scrolls', () => {
+  it('puts the open card at the top of the Buddy pane, above everything that scrolls', () => {
     const markup = renderWith({})
-    const orcle = markup.slice(markup.indexOf('data-slot="orcle-pane"'))
-    const cards = orcle.indexOf('data-slot="removal-cards"')
-    expect(cards).toBeGreaterThan(orcle.indexOf('data-slot="orcle-pane-header"'))
-    expect(cards).toBeLessThan(orcle.indexOf('data-slot="cohost-pane"'))
-    expect(orcle).toContain('Remove from chat?')
-    expect(orcle).toContain('spam')
-    // Only the Orcle pane carries cards.
-    expect(markup.match(/data-slot="removal-card"/g)).toHaveLength(1)
+    const buddy = markup.slice(markup.indexOf('data-slot="buddy-pane"'))
+    const cards = buddy.indexOf('data-slot="removal-cards"')
+    expect(cards).toBeGreaterThan(buddy.indexOf('data-slot="buddy-pane-header"'))
+    expect(cards).toBeLessThan(buddy.indexOf('data-testid="cohost-pane"'))
+    expect(buddy).toContain('Remove from chat?')
+    expect(buddy).toContain('spam')
+    // Only the Buddy pane carries cards.
+    expect(markup.match(/data-testid="removal-card"/g)).toHaveLength(1)
   })
 
-  it('puts what Orcle heard, then the chooser, above the removal cards (part B)', () => {
+  it('puts what Buddy heard, then the chooser, above the removal cards (part B)', () => {
     const markup = renderWith({
       onAnswerCommand: () => undefined,
       cohostState: {
@@ -251,7 +251,7 @@ describe('StreamManager removal cards (plan 140, S6)', () => {
         status: 'listening',
         command: {
           id: 'cmd-1',
-          heard: 'orcle remove it',
+          heard: 'buddy remove it',
           kind: 'remove',
           status: 'ambiguous',
           message: 'Which comment?',
@@ -263,13 +263,13 @@ describe('StreamManager removal cards (plan 140, S6)', () => {
         }
       }
     })
-    const orcle = markup.slice(markup.indexOf('data-slot="orcle-pane"'))
-    const strip = orcle.indexOf('data-slot="command-strip"')
-    const chooser = orcle.indexOf('data-slot="command-chooser"')
+    const buddy = markup.slice(markup.indexOf('data-slot="buddy-pane"'))
+    const strip = buddy.indexOf('data-slot="command-strip"')
+    const chooser = buddy.indexOf('data-testid="command-chooser"')
     expect(strip).toBeGreaterThan(-1)
     expect(chooser).toBeGreaterThan(strip)
-    expect(orcle.indexOf('data-slot="removal-cards"')).toBeGreaterThan(chooser)
-    expect(orcle).toContain('Heard: “orcle remove it”')
+    expect(buddy.indexOf('data-slot="removal-cards"')).toBeGreaterThan(chooser)
+    expect(buddy).toContain('Heard: “buddy remove it”')
     // History never shows a command.
     expect(
       renderWith({
@@ -294,11 +294,11 @@ describe('StreamManager removal cards (plan 140, S6)', () => {
           startedAt: '2026-10-02T10:00:00Z'
         }
       })
-    ).not.toContain('data-slot="removal-card"')
-    expect(renderWith({ onAnswerRemoval: undefined })).not.toContain('data-slot="removal-card"')
+    ).not.toContain('data-testid="removal-card"')
+    expect(renderWith({ onAnswerRemoval: undefined })).not.toContain('data-testid="removal-card"')
     expect(
       renderWith({ moderationOperations: [{ ...pending, source: 'manual', phase: 'executing' }] })
-    ).not.toContain('data-slot="removal-card"')
+    ).not.toContain('data-testid="removal-card"')
   })
 })
 

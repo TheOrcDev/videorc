@@ -1355,7 +1355,7 @@ pub fn apply_service_flags(state: &AppState, flags: crate::service_flags::YouTub
             || previous.viewer_sample_ms != flags.viewer_sample_ms
             || previous.daily_budget_units != flags.daily_budget_units
             || previous.paused_until != flags.paused_until
-            || previous.orcle != flags.orcle
+            || previous.buddy != flags.buddy
             || previous.source != flags.source
     };
     set_daily_budget_limit(state, flags.daily_budget_units);

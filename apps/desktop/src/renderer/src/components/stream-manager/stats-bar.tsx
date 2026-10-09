@@ -73,7 +73,7 @@ function SessionChip({ badge }: { badge: StatItemModel['badge'] }): ReactElement
     case 'live':
       // Broadcast convention (owner call, 2026-09-24): the live chip is ON AIR.
       return (
-        <Badge data-slot="session-on-air" variant="live">
+        <Badge data-testid="session-on-air" variant="live">
           ON AIR
         </Badge>
       )
@@ -101,7 +101,7 @@ function StatLead({ item }: { item: StatItemModel }): ReactElement | null {
 
 function StatDetails({ item }: { item: StatItemModel }): ReactElement {
   return (
-    <HoverCardContent align="start" className="w-64 p-2" data-slot="stat-details">
+    <HoverCardContent align="start" className="w-64 p-2" data-testid="stat-details">
       <div className="px-1 pb-1 text-[11px] font-semibold text-subtle">{item.label}</div>
       <div className="flex flex-col">
         {item.details.map((row, index) => (
@@ -319,7 +319,7 @@ export function StatsBar({
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>{bar}</ContextMenuTrigger>
-      <ContextMenuContent className="w-52" data-slot="stats-bar-menu">
+      <ContextMenuContent className="w-52" data-testid="stats-bar-menu">
         <ContextMenuLabel>Stats</ContextMenuLabel>
         {DEFAULT_STAT_ORDER.filter((id) => !LOCKED_STATS.has(id)).map((id) => (
           <ContextMenuCheckboxItem

@@ -29,7 +29,7 @@ vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => mocked.core,
   useStudioRecordingState: () => mocked.recording
 }))
-vi.mock('@/hooks/use-orcle-report', () => ({ useOrcleReport: () => mocked.report }))
+vi.mock('@/hooks/use-buddy-report', () => ({ useBuddyReport: () => mocked.report }))
 vi.mock('@tanstack/react-virtual', () => ({
   useVirtualizer: (options: {
     count: number
@@ -452,12 +452,12 @@ describe('Clean cut review (plan 119 S14)', () => {
 
   it('asks before leaving unsaved changes, and discards on request', async () => {
     await render()
-    await act(async () => button('Orcle').click())
+    await act(async () => button('Buddy').click())
     expect(onClose).toHaveBeenCalledTimes(1)
 
     onClose.mockClear()
     await act(async () => cut('r2').click())
-    await act(async () => button('Orcle').click())
+    await act(async () => button('Buddy').click())
     expect(onClose).not.toHaveBeenCalled()
     expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
       'Leave without saving?'
@@ -475,9 +475,9 @@ describe('Clean cut review (plan 119 S14)', () => {
         }))
       })
     )
-    expect(document.querySelector('[data-slot="clean-cut-review-waiting"]')?.textContent).toContain(
-      'Transcribing 40%'
-    )
+    expect(
+      document.querySelector('[data-testid="clean-cut-review-waiting"]')?.textContent
+    ).toContain('Transcribing 40%')
     expect(current.transcript).not.toHaveBeenCalled()
   })
 })

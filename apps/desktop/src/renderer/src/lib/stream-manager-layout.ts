@@ -1,9 +1,9 @@
 // The Stream Manager window body is a CSS container (`@container/stream-manager`):
 // its layout follows its own width, never JS resize state (plan 055, D1).
 //   Wide    ≥ 1040px: the stats strip, then Chat beside a right pane
-//                     (Activity · Orcle).
+//                     (Activity · Buddy).
 //   Medium  640–1039px: a compact strip, then one pane with a segmented
-//                     control (Chat · Activity · Orcle).
+//                     control (Chat · Activity · Buddy).
 //   Narrow  < 640px (320 minimum): a one-line summary above the same segments.
 // The viewer count is never hidden while live (owner, plan 047).
 // Class strings stay literal so Tailwind's scanner generates them.
@@ -27,7 +27,7 @@ export const COMPACT_LABEL = '@max-[799px]/stream-manager:sr-only'
 export const PANES_GRID =
   'grid min-h-0 flex-1 grid-cols-1 grid-rows-[auto_minmax(0,1fr)] @min-[1040px]/stream-manager:grid-cols-[minmax(0,1fr)_clamp(340px,34%,440px)]'
 
-export type StreamManagerPane = 'chat' | 'activity' | 'orcle'
+export type StreamManagerPane = 'chat' | 'activity' | 'buddy'
 export type StreamManagerRightPane = Exclude<StreamManagerPane, 'chat'>
 
 /**

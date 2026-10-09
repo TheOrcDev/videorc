@@ -2026,6 +2026,10 @@ pub struct ActiveRecording {
     /// Portrait canvas `(width, height)` of the vertical simulcast leg when it
     /// burns the comment card. The renderer rasterizes a second card for it.
     pub comment_highlight_vertical_canvas: Option<(u32, u32)>,
+    /// The session shape the overlay leg plan was built for (plan 164), kept
+    /// so a layout saved mid-session can re-plan the compositor flags. None
+    /// on paths without the compositor bridge (nothing draws overlays there).
+    pub overlay_session_shape: Option<crate::overlay_layout::OverlaySessionShape>,
     pub _capture_permit: Option<CapturePermit>,
     /// Signals the process monitor at the exact user-stop edge. The monitor
     /// orders this against FFmpeg exit readiness before it touches the shared
@@ -2141,6 +2145,7 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         performance_check: false,
         comment_highlight_available: false,
         comment_highlight_vertical_canvas: None,
+        overlay_session_shape: None,
         _capture_permit: None,
         stop_intent_sender: None,
         stop_requested: false,
@@ -3647,6 +3652,10 @@ async fn start_session_with_timeline(
         None
     };
     let session_caption_plan = caption_leg_plan(&params);
+    // Plan 164: the highlight card and the Buddy follow the streamer's
+    // per-output switches in the backend-owned overlay layout; captions keep
+    // `burnTarget` (derived from the same switches by the renderer).
+    let overlay_layout = crate::overlay_layout::load_overlay_layout(&state.database);
     // A new session must never inherit a composited caption bar. The overlay
     // slot is app-global and the renderer's stop-time clear is best-effort
     // (fire-and-forget, and a closed renderer never sends it) — clearing here
@@ -3658,6 +3667,9 @@ async fn start_session_with_timeline(
     // Same boundary rule for comment highlights, including backend state and
     // any old expiry task — a new session never inherits the prior card.
     let _ = crate::comment_highlight::clear_comment_highlight_for_session_start(&state).await;
+    // The Buddy's bubble too (plan 164): the avatar stays (its raster is the
+    // renderer's, re-pushed for this session's canvases), the words do not.
+    let _ = crate::buddy_overlay::clear(&state).await;
     // Burn-in needs the synthetic compositor (encoder-bridge path) and, for a
     // split-leg plan, an auxiliary render. Outside those shapes the captions
     // stay UI-only — say so instead of silently skipping pixels.
@@ -3807,26 +3819,41 @@ async fn start_session_with_timeline(
                 None
             }
             WindowsD3d11SessionSelection::Candidate(plan) => {
-                let (highlight_on_primary, highlight_on_auxiliary) =
-                    crate::captions::highlight_overlay_leg_plan(
-                        params.output.record_enabled,
-                        params.output.stream_enabled,
+                let d3d11_overlay_plans = crate::overlay_layout::overlay_session_plans(
+                    crate::overlay_layout::OverlaySessionShape {
+                        record_enabled: params.output.record_enabled,
+                        stream_enabled: params.output.stream_enabled,
                         // The D3D11 path refuses simulcast sessions above, so
                         // its auxiliary is always a split stream leg.
-                        if plan.auxiliary.is_some() {
-                            crate::captions::HighlightAuxLeg::Stream
+                        aux_leg: if plan.auxiliary.is_some() {
+                            crate::overlay_layout::OverlayAuxLeg::Stream
                         } else {
-                            crate::captions::HighlightAuxLeg::None
+                            crate::overlay_layout::OverlayAuxLeg::None
                         },
-                    );
+                    },
+                    &overlay_layout,
+                );
+                let (highlight_on_primary, highlight_on_auxiliary) = (
+                    d3d11_overlay_plans.highlight.primary,
+                    d3d11_overlay_plans.highlight.aux,
+                );
                 let overlays = WindowsD3d11OverlayInput {
                     captions: state.caption_overlay.clone(),
                     highlight: state.highlight_overlay.clone(),
+                    buddy: state.buddy_overlay.clone(),
+                    buddy_sprite: state.buddy_sprite.clone(),
                     caption_on_primary: session_caption_plan.primary,
                     caption_on_auxiliary: session_caption_plan.aux,
                     highlight_on_primary,
                     highlight_on_auxiliary,
+                    buddy_on_primary: d3d11_overlay_plans.buddy.primary,
+                    buddy_on_auxiliary: d3d11_overlay_plans.buddy.aux,
                 };
+                state.buddy_sprite.prepare(&buddy_sprite_legs(
+                    d3d11_overlay_plans.buddy,
+                    (plan.primary.width, plan.primary.height),
+                    plan.auxiliary.map(|video| (video.width, video.height)),
+                ));
                 match WindowsD3d11SessionPump::start(
                     &state.windows_d3d11_media,
                     plan.clone(),
@@ -4100,11 +4127,25 @@ async fn start_session_with_timeline(
     } else {
         None
     };
-    let highlight_overlay_plan = crate::captions::highlight_overlay_leg_plan(
-        params.output.record_enabled,
-        params.output.stream_enabled,
-        highlight_aux_leg(encoder_bridge_stream_output.as_ref()),
-    );
+    let overlay_session_shape = crate::overlay_layout::OverlaySessionShape {
+        record_enabled: params.output.record_enabled,
+        stream_enabled: params.output.stream_enabled,
+        aux_leg: highlight_aux_leg(encoder_bridge_stream_output.as_ref()),
+    };
+    let overlay_plans =
+        crate::overlay_layout::overlay_session_plans(overlay_session_shape, &overlay_layout);
+    // Plan 168 S-B1: the pet's atlases start building now (off this task),
+    // so the session's first frame already has the Buddy.
+    if use_encoder_bridge {
+        state.buddy_sprite.prepare(&buddy_sprite_legs(
+            overlay_plans.buddy,
+            (params.output.video.width, params.output.video.height),
+            encoder_bridge_stream_output
+                .as_ref()
+                .map(|output| (output.width, output.height)),
+        ));
+    }
+    let highlight_overlay_plan = (overlay_plans.highlight.primary, overlay_plans.highlight.aux);
     let comment_highlight_vertical_canvas = comment_highlight_vertical_canvas(
         encoder_bridge_stream_output.as_ref(),
         highlight_overlay_plan,
@@ -4114,9 +4155,32 @@ async fn start_session_with_timeline(
             session = %session_id,
             primary = highlight_overlay_plan.0,
             aux = highlight_overlay_plan.1,
+            buddy_primary = overlay_plans.buddy.primary,
+            buddy_aux = overlay_plans.buddy.aux,
+            // S-B2.2: any item (not only captions) whose switches disagree
+            // on a shared leg asks for the split; the topology decides.
+            needs_split = crate::overlay_layout::overlay_layout_needs_split(
+                overlay_session_shape,
+                &overlay_layout
+            ),
             vertical_canvas = ?comment_highlight_vertical_canvas,
-            "comment highlight leg plan"
+            "overlay leg plan"
         );
+    }
+    // D13: every switch pair this session cannot honour is said out loud
+    // (the Go Live sheet already showed the same sentence before start).
+    if use_encoder_bridge {
+        for notice in
+            crate::overlay_layout::overlay_start_notices(overlay_session_shape, &overlay_layout)
+        {
+            let _ = emit_health_event(
+                &state,
+                Some(&session_id),
+                HealthLevel::Info,
+                "overlay-start-notice",
+                &notice.notice,
+            );
+        }
     }
     #[cfg(target_os = "windows")]
     let (direct_d3d11_recording_source, direct_d3d11_camera_overlay) = if !use_windows_d3d11_media
@@ -4140,6 +4204,8 @@ async fn start_session_with_timeline(
         && !session_caption_plan.aux
         && !highlight_overlay_plan.0
         && !highlight_overlay_plan.1
+        && !overlay_plans.buddy.primary
+        && !overlay_plans.buddy.aux
     {
         let camera_overlay = if matches!(params.layout.layout_preset, LayoutPreset::ScreenCamera) {
             let scene = scene_from_capture_config(SceneConfigParams {
@@ -4287,6 +4353,8 @@ async fn start_session_with_timeline(
                         caption_overlay_on_aux: session_caption_plan.aux,
                         highlight_overlay_on_primary: highlight_overlay_plan.0,
                         highlight_overlay_on_aux: highlight_overlay_plan.1,
+                        buddy_overlay_on_primary: overlay_plans.buddy.primary,
+                        buddy_overlay_on_aux: overlay_plans.buddy.aux,
                     },
                 )
                 .await
@@ -4346,6 +4414,8 @@ async fn start_session_with_timeline(
                         caption_overlay_on_aux: session_caption_plan.aux,
                         highlight_overlay_on_primary: highlight_overlay_plan.0,
                         highlight_overlay_on_aux: highlight_overlay_plan.1,
+                        buddy_overlay_on_primary: overlay_plans.buddy.primary,
+                        buddy_overlay_on_aux: overlay_plans.buddy.aux,
                     },
                 )
                 .await;
@@ -5371,6 +5441,7 @@ async fn start_session_with_timeline(
             highlight_overlay_plan,
         ),
         comment_highlight_vertical_canvas,
+        overlay_session_shape: use_encoder_bridge.then_some(overlay_session_shape),
         _capture_permit: Some(capture_permit),
         stop_intent_sender: Some(stop_intent_sender),
         stop_requested: false,
@@ -5594,7 +5665,7 @@ async fn start_session_with_timeline(
             state.clone(),
             session_id.clone(),
         ));
-        // Orcle's listen intent (plan 068): wanted before this capture, it
+        // Buddy's listen intent (plan 068): wanted before this capture, it
         // resumes now. Off the recording path; it never fails or delays it.
         let listen_state = state.clone();
         tokio::spawn(async move {
@@ -20251,6 +20322,58 @@ fn caption_leg_plan(params: &StartSessionParams) -> crate::captions::CaptionOver
     )
 }
 
+/// Plan 164 (S-B3.4): a layout saved mid-session re-plans the highlight and
+/// Buddy legs for the running session and swaps the compositor flags in
+/// place. Captions keep their start-time plan (their burn target is a session
+/// parameter, pre-armed with its leg); the Windows D3D11 pump keeps its
+/// start-time overlay input, which is said in the log rather than hidden.
+pub async fn apply_overlay_layout_to_active_session(
+    state: &AppState,
+    layout: &crate::overlay_layout::OverlayLayout,
+) {
+    let (session_id, plans, d3d11) = {
+        let mut recording = state.recording.lock().await;
+        let Some(active) = recording.as_mut() else {
+            return;
+        };
+        let Some(shape) = active.overlay_session_shape else {
+            return;
+        };
+        let plans = crate::overlay_layout::overlay_session_plans(shape, layout);
+        active.comment_highlight_available = plans.highlight.burns_anywhere();
+        #[cfg(target_os = "windows")]
+        let d3d11 = active.windows_d3d11_media.is_some();
+        #[cfg(not(target_os = "windows"))]
+        let d3d11 = false;
+        (active.session_id.clone(), plans, d3d11)
+    };
+    let swapped = crate::compositor::update_overlay_flags(
+        state,
+        crate::compositor::OverlayLegFlags {
+            highlight_on_primary: plans.highlight.primary,
+            highlight_on_aux: plans.highlight.aux,
+            buddy_on_primary: plans.buddy.primary,
+            buddy_on_aux: plans.buddy.aux,
+        },
+    )
+    .await;
+    tracing::info!(
+        session = %session_id,
+        highlight_primary = plans.highlight.primary,
+        highlight_aux = plans.highlight.aux,
+        buddy_primary = plans.buddy.primary,
+        buddy_aux = plans.buddy.aux,
+        swapped,
+        "overlay layout changed mid-session"
+    );
+    if d3d11 {
+        state.emit_log(
+            "warn",
+            "Overlay layout changed mid-session; the Windows D3D11 media path applies output switches at the next session start.",
+        );
+    }
+}
+
 /// A session can put a comment card on stream only when the compositor bridge
 /// renders it AND the leg plan burns it on at least one leg. Deriving this
 /// from the same plan the compositor receives keeps "On stream" honest: the
@@ -20259,15 +20382,34 @@ fn comment_highlight_available(use_encoder_bridge: bool, leg_plan: (bool, bool))
     use_encoder_bridge && (leg_plan.0 || leg_plan.1)
 }
 
+/// The legs (and their canvases) the Buddy's pet draws on in a session
+/// (plan 168 S-B1), for `BuddySpriteSlot::prepare`.
+fn buddy_sprite_legs(
+    plan: crate::overlay_layout::OverlayLegPlan,
+    primary: (u32, u32),
+    auxiliary: Option<(u32, u32)>,
+) -> Vec<(crate::buddy_sprite::BuddySpriteLeg, (u32, u32))> {
+    let mut legs = Vec::with_capacity(2);
+    if plan.primary {
+        legs.push((crate::buddy_sprite::BuddySpriteLeg::Primary, primary));
+    }
+    if plan.aux
+        && let Some(auxiliary) = auxiliary
+    {
+        legs.push((crate::buddy_sprite::BuddySpriteLeg::Auxiliary, auxiliary));
+    }
+    legs
+}
+
 fn highlight_aux_leg(
     stream_output: Option<&CompositorAuxiliaryOutput>,
-) -> crate::captions::HighlightAuxLeg {
+) -> crate::overlay_layout::OverlayAuxLeg {
     match stream_output {
-        None => crate::captions::HighlightAuxLeg::None,
+        None => crate::overlay_layout::OverlayAuxLeg::None,
         Some(output) if output.composes_simulcast_scene => {
-            crate::captions::HighlightAuxLeg::VerticalSimulcast
+            crate::overlay_layout::OverlayAuxLeg::VerticalSimulcast
         }
-        Some(_) => crate::captions::HighlightAuxLeg::Stream,
+        Some(_) => crate::overlay_layout::OverlayAuxLeg::Stream,
     }
 }
 
@@ -21635,6 +21777,7 @@ async fn publish_stream_target_failure_if_active(
             "stream-target-failed",
             &format!("Streaming to {label} stopped: {reason}"),
         );
+        note_buddy_destination_failed(state);
         state.emit_event("stream.targets", snapshot);
     }
 }
@@ -21920,8 +22063,22 @@ pub(crate) async fn observe_platform_stream(
             ),
         };
         let _ = emit_health_event(state, Some(session_id), level, code, &text);
+        if next == StreamTargetState::Failed {
+            note_buddy_destination_failed(state);
+        }
         state.emit_event("stream.targets", snapshot);
     }
+}
+
+/// Plan 168 D14: a destination failed; the Buddy reacts only when the persona
+/// chose a reaction for it (owner default: none).
+fn note_buddy_destination_failed(state: &AppState) {
+    state
+        .buddy_sprite
+        .notify(crate::buddy_animator::BuddyAnimatorEvent::Trigger {
+            trigger: crate::buddy_pet::BuddyTrigger::DestinationFailed,
+            reaction: None,
+        });
 }
 
 pub(crate) const STREAM_TARGET_NOT_RECEIVING_CODE: &str = "stream-target-not-receiving";
@@ -27092,6 +27249,7 @@ mod tests {
             performance_check: false,
             comment_highlight_available: false,
             comment_highlight_vertical_canvas: None,
+            overlay_session_shape: None,
             _capture_permit: None,
             stop_intent_sender: None,
             stop_requested: false,
@@ -33843,6 +34001,7 @@ mod tests {
             performance_check: false,
             comment_highlight_available: false,
             comment_highlight_vertical_canvas: None,
+            overlay_session_shape: None,
             _capture_permit: None,
             stop_intent_sender: Some(stop_intent_sender),
             stop_requested: false,

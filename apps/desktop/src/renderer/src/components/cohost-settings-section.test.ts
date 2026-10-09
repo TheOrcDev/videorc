@@ -1,6 +1,8 @@
 // @vitest-environment happy-dom
 import { act, createElement, Fragment } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
+import { compile } from 'tailwindcss'
+import { transformWithEsbuild } from 'vite'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { CohostListening, CohostSettings } from '@/lib/backend'
@@ -8,8 +10,8 @@ import type { CohostListening, CohostSettings } from '@/lib/backend'
 import {
   COHOST_SHOW_ON_STREAM_PATCHES,
   CohostListenField,
-  OrcleModerationSection,
-  OrcleRepliesSection,
+  BuddyModerationSection,
+  BuddyRepliesSection,
   cohostShowOnStreamMode
 } from './cohost-settings-section'
 
@@ -37,6 +39,23 @@ function settings(overrides: Partial<CohostSettings> = {}): CohostSettings {
     listen: false,
     wakeWordRequired: false,
     removeConfirm: 'confirm',
+    persona: {
+      id: 'default',
+      name: 'Buddy',
+      personality: '',
+      bubbleStyle: 'speech',
+      images: {},
+      source: 'default',
+      avatar: { kind: 'still' },
+      motion: { intensity: 0.45, sleepAfterSeconds: 180, breathing: true },
+      reactions: {}
+    },
+    autoChat: {
+      mode: 'off',
+      greetings: { enabled: false, templates: [] },
+      answers: { enabled: false, cooldownSeconds: 20 },
+      banter: { enabled: false, cooldownSeconds: 240 }
+    },
     ...overrides
   }
 }
@@ -52,6 +71,7 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount())
   container.remove()
+  document.head.innerHTML = ''
   vi.unstubAllGlobals()
 })
 
@@ -69,8 +89,8 @@ async function render(
         Fragment,
         null,
         createElement(CohostListenField),
-        createElement(OrcleRepliesSection),
-        createElement(OrcleModerationSection)
+        createElement(BuddyRepliesSection),
+        createElement(BuddyModerationSection)
       )
     )
   )
@@ -107,9 +127,9 @@ describe('Show on stream automatically', () => {
     await render(settings())
     expect(document.body.textContent).toContain('Show on stream automatically')
     expect(document.body.textContent).toContain(
-      'What I talk about needs Orcle to hear you (or live captions).'
+      'What I talk about needs Buddy to hear you (or live captions).'
     )
-    expect(document.body.textContent).toContain('nothing Orcle flagged is ever shown')
+    expect(document.body.textContent).toContain('nothing Buddy flagged is ever shown')
     expect(option('Off').getAttribute('data-state')).toBe('on')
 
     await act(async () => option('What I talk about').click())
@@ -117,7 +137,7 @@ describe('Show on stream automatically', () => {
       autoHighlight: false,
       voiceHighlight: true
     })
-    await act(async () => option("What I talk about and Orcle's picks").click())
+    await act(async () => option("What I talk about and Buddy's picks").click())
     expect(patchCohostSettings).toHaveBeenLastCalledWith({
       autoHighlight: true,
       voiceHighlight: true
@@ -126,7 +146,7 @@ describe('Show on stream automatically', () => {
 
   it('shows a stored picks-only row as the third option and rewrites it on a click', async () => {
     await render(settings({ autoHighlight: true, voiceHighlight: false }))
-    const third = option("What I talk about and Orcle's picks")
+    const third = option("What I talk about and Buddy's picks")
     expect(third.getAttribute('data-state')).toBe('on')
     await act(async () => third.click())
     expect(patchCohostSettings).toHaveBeenLastCalledWith({
@@ -145,9 +165,9 @@ describe('Show on stream automatically', () => {
     await render(settings(), {
       allowed: false,
       featureId: 'live-cohost',
-      reason: 'Orcle requires Videorc Premium.'
+      reason: 'Buddy requires Videorc Premium.'
     })
-    for (const label of ['Off', 'What I talk about', "What I talk about and Orcle's picks"]) {
+    for (const label of ['Off', 'What I talk about', "What I talk about and Buddy's picks"]) {
       expect(option(label).disabled).toBe(true)
     }
   })
@@ -160,14 +180,14 @@ describe('Show on stream automatically', () => {
   })
 })
 
-// Plan 119 S2, plan 150: the settings live in the Orcle tab's Chat tab, where
-// Orcle Live's switch owns `enabled` and the Premium call to action.
-describe('under the Orcle tab', () => {
+// Plan 119 S2, plan 150: the settings live in the Buddy tab's Chat tab, where
+// Buddy Live's switch owns `enabled` and the Premium call to action.
+describe('under the Buddy tab', () => {
   it('splits into Replies and Moderation, with no Enable switch', async () => {
     await render(settings())
     expect(document.getElementById('cohost-enabled')).toBeNull()
-    expect(document.body.textContent).not.toContain('Enable Orcle')
-    expect(document.body.textContent).not.toContain('Orcle (alpha)')
+    expect(document.body.textContent).not.toContain('Enable Buddy')
+    expect(document.body.textContent).not.toContain('Buddy (alpha)')
     const titles = [...document.querySelectorAll('[data-slot="panel-section"] h3')].map(
       (heading) => heading.textContent
     )
@@ -180,16 +200,16 @@ describe('under the Orcle tab', () => {
     expect(moderation.querySelector('#cohost-rule-new')).toBeTruthy()
     expect(moderation.querySelector('#cohost-sensitivity')).toBeTruthy()
     expect(moderation.querySelector('#cohost-show-on-stream')).toBeTruthy()
-    // Listening sits outside both: it belongs with Orcle Live's switch.
+    // Listening sits outside both: it belongs with Buddy Live's switch.
     expect(replies.querySelector('#cohost-listen')).toBeNull()
     expect(moderation.querySelector('#cohost-listen')).toBeNull()
   })
 
-  it('leaves the Premium call to action to Orcle Live: a Basic account sees it disabled', async () => {
+  it('leaves the Premium call to action to Buddy Live: a Basic account sees it disabled', async () => {
     await render(settings(), {
       allowed: false,
       featureId: 'live-cohost',
-      reason: 'Orcle requires Videorc Premium.',
+      reason: 'Buddy requires Videorc Premium.',
       upgradeUrl: 'https://www.videorc.com/premium'
     })
     expect(document.body.textContent).not.toContain('View Premium')
@@ -198,7 +218,7 @@ describe('under the Orcle tab', () => {
   })
 })
 
-describe('Orcle hears you while you are live (plan 068)', () => {
+describe('Buddy hears you while you are live (plan 068)', () => {
   function listenSwitch(): HTMLButtonElement {
     const control = document.getElementById('cohost-listen') as HTMLButtonElement | null
     expect(control).toBeTruthy()
@@ -207,7 +227,7 @@ describe('Orcle hears you while you are live (plan 068)', () => {
 
   it('is a switch bound to the listen setting', async () => {
     await render(settings())
-    expect(document.body.textContent).toContain("Orcle hears you while you're live")
+    expect(document.body.textContent).toContain("Buddy hears you while you're live")
     expect(listenSwitch().getAttribute('data-state')).toBe('unchecked')
     await act(async () => listenSwitch().click())
     expect(patchCohostSettings).toHaveBeenLastCalledWith({ listen: true })
@@ -246,5 +266,78 @@ describe('Orcle hears you while you are live (plan 068)', () => {
     expect(document.querySelector('[data-slot="cohost-listen-allowance"]')?.textContent).toBe(
       'Your listening time for this month is used up.'
     )
+  })
+})
+
+/**
+ * The real Tailwind rules for every class rendered under `root`, applied to
+ * the document so `getComputedStyle` sees what the app paints. happy-dom
+ * needs three rewrites the browser does not: nesting lowered (esbuild),
+ * `:is(.group > *)` unwrapped, and the logical paddings spelled out.
+ */
+async function applyTailwind(root: Element): Promise<void> {
+  const classes = new Set<string>()
+  for (const element of [root, ...root.querySelectorAll('*')]) {
+    for (const name of element.classList) classes.add(name)
+  }
+  const compiler = await compile('@theme inline { --spacing: 0.25rem; }\n@tailwind utilities;', {})
+  const { code } = await transformWithEsbuild(compiler.build([...classes]), 'tailwind.css', {
+    loader: 'css',
+    target: 'chrome100'
+  })
+  const style = document.createElement('style')
+  style.textContent = code
+    .replace(/:is\(([^()]+)\)/g, '$1')
+    .replace(/padding-inline:\s*([^;]+);/g, 'padding-left: $1; padding-right: $1;')
+    .replace(/padding-block:\s*([^;]+);/g, 'padding-top: $1; padding-bottom: $1;')
+  document.head.append(style)
+}
+
+/** Tailwind's `calc(<spacing> * n)` in px (16 px root); NaN for anything else. */
+function px(value: string): number {
+  const match = /^calc\(([\d.]+)(px|rem) \* ([\d.]+)\)$/.exec(value.trim())
+  if (!match) return Number.NaN
+  return Number(match[1]) * (match[2] === 'rem' ? 16 : 1) * Number(match[3])
+}
+
+// Plan 168 S-00: the grouped card pads its rows by selecting the shadcn
+// `data-slot="field"`. Answers and Banter once replaced that slot with their
+// own and sat flush against the card's edges and the hairline above them.
+describe('grouped cards (plan 168 Phase 0)', () => {
+  it('pads Answers and Banter exactly like Reply tone and Buddy notes', async () => {
+    await render(settings())
+    const replies = [...document.querySelectorAll<HTMLElement>('[data-slot="panel-section"]')].find(
+      (section) => section.querySelector('h3')?.textContent === 'Replies'
+    )!
+    const card = replies.querySelector<HTMLElement>('[data-variant="grouped"]')!
+    const rows = [...card.children] as HTMLElement[]
+    expect(rows.map((row) => row.querySelector('label')?.textContent)).toEqual([
+      'Answers',
+      'Banter',
+      'Reply tone',
+      'Buddy notes'
+    ])
+    await applyTailwind(document.body)
+    for (const row of rows) {
+      const style = getComputedStyle(row)
+      expect(
+        [style.paddingLeft, style.paddingRight, style.paddingTop, style.paddingBottom].map(px)
+      ).toEqual([12, 12, 10, 10])
+    }
+  })
+
+  it('keeps the shadcn slots on every grouped card and its rows, even with a save error', async () => {
+    patchCohostSettings.mockRejectedValue(new Error('Could not reach the backend.'))
+    await render(settings())
+    await act(async () => (document.getElementById('cohost-listen') as HTMLButtonElement).click())
+    // The error shows under the listen card, never as an unpadded row in it.
+    expect(document.body.textContent).toContain('Could not reach the backend.')
+    const cards = [...document.querySelectorAll<HTMLElement>('[data-variant="grouped"]')]
+    // Listen (Live tab), Replies and Moderation (Chat tab).
+    expect(cards).toHaveLength(3)
+    for (const card of cards) {
+      expect(card.getAttribute('data-slot')).toBe('field-group')
+      for (const row of card.children) expect(row.getAttribute('data-slot')).toBe('field')
+    }
   })
 })

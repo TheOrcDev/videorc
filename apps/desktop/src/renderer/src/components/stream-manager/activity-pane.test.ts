@@ -71,7 +71,7 @@ describe('ActivityPane', () => {
   })
 
   it('renders no Auto-show switch without a handler', () => {
-    expect(markup).not.toContain('data-slot="activity-auto-show"')
+    expect(markup).not.toContain('data-testid="activity-auto-show"')
   })
 })
 
@@ -90,7 +90,7 @@ describe('ActivityPane Auto-show switch', () => {
 
   it('renders in the header and reflects the setting', () => {
     const off = render(false)
-    expect(off).toContain('data-slot="activity-auto-show"')
+    expect(off).toContain('data-testid="activity-auto-show"')
     expect(off).toContain('Auto-show')
     expect(off).toContain('data-state="unchecked"')
     expect(render(true)).toContain('data-state="checked"')
@@ -200,7 +200,7 @@ describe('ActivityPane Show who followed', () => {
 
   it('offers the reconnect while Twitch lacks the follow permission', () => {
     const markup = render(false, true)
-    expect(markup).toContain('data-slot="activity-follow-names"')
+    expect(markup).toContain('data-testid="activity-follow-names"')
     expect(markup).toContain('Twitch names each follower once you allow it.')
     expect(markup).not.toContain('Livestream → Setup')
   })

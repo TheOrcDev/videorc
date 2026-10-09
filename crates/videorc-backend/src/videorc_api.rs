@@ -34,12 +34,19 @@ const COHOST_SPOTLIGHT_PATH: &str = "/api/ai/cohost/spotlight";
 /// The server rejects a larger body (checked on content-length bytes) as
 /// `invalid-request`; the engine trims candidates until the JSON fits.
 pub(crate) const COHOST_SPOTLIGHT_MAX_BODY_BYTES: usize = 32 * 1024;
-/// The Orcle command parser (plan 140 S8) answers a wake-word utterance the
+/// The Buddy command parser (plan 140 S8) answers a wake-word utterance the
 /// local grammar could not read. The server's own budget is 2 s; past 2.5 s
 /// the streamer has moved on, so the engine says "didn't catch that".
 pub(crate) const COHOST_COMMAND_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(2_500);
 const COHOST_COMMAND_PATH: &str = "/api/ai/cohost/command";
+/// Plan 169 D4, D7: the set route's own `maxDuration` is 180 s (an idle,
+/// then three edits of it in parallel), so the client waits 190. Four PNGs
+/// as base64 stay well under 40 MB; a larger body is refused unread.
+pub(crate) const COHOST_AVATAR_SET_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(190);
+const COHOST_AVATAR_SET_PATH: &str = "/api/ai/cohost/avatar/set";
+pub(crate) const COHOST_AVATAR_SET_MAX_RESPONSE_BYTES: usize = 40 * 1024 * 1024;
 /// The route's limits (contract part E).
 pub(crate) const COHOST_COMMAND_MAX_BODY_BYTES: usize = 16 * 1024;
 pub(crate) const COHOST_COMMAND_MAX_CANDIDATES: usize = 20;
@@ -48,6 +55,53 @@ const COHOST_COMMAND_AUTHOR_MAX_CHARS: usize = 120;
 const COHOST_COMMAND_TEXT_MAX_CHARS: usize = 500;
 const COHOST_COMMAND_ID_MAX_CHARS: usize = 200;
 const WINDOWS_PILOT_UPDATE_TOKEN_PATH: &str = "/api/desktop/updates/windows-pilot-token";
+// --- Buddy pets (plan 168, Phase F) ---
+/// The pet routes (videorc-web PR #75): the client timeouts the web side
+/// names. A build session is a quick row; identity is one vision call; a
+/// sheet is one image edit (the route's own budget is 150 s).
+pub(crate) const COHOST_PET_BUILDS_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(15);
+pub(crate) const COHOST_PET_IDENTITY_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(60);
+pub(crate) const COHOST_PET_SHEET_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(155);
+const COHOST_PET_BUILDS_PATH: &str = "/api/ai/cohost/pet/builds";
+const COHOST_PET_IDENTITY_PATH: &str = "/api/ai/cohost/pet/identity";
+const COHOST_PET_SHEET_PATH: &str = "/api/ai/cohost/pet/sheet";
+/// A build session and the identity notes are small; a sheet is a PNG of up
+/// to 3072 x 1024 (gaze) or 2048 x 2048 (narrow reactions) as base64, about
+/// 8 MB, streamed by the web (plan 172), and refused unread above this.
+const COHOST_PET_SMALL_RESPONSE_MAX_BYTES: usize = 256 * 1024;
+pub(crate) const COHOST_PET_SHEET_MAX_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
+// --- end Buddy pets (plan 168, Phase F) ---
+// --- Buddy library (plan 170 D5 to D8) ---
+/// Create and redo run the plan 169 generation (the route's `maxDuration` is
+/// 180 s), so the client waits as long as the set route's.
+pub(crate) const BUDDY_LIBRARY_GENERATE_TIMEOUT: std::time::Duration = COHOST_AVATAR_SET_TIMEOUT;
+/// The list, one avatar, an edit, a delete and the profile are plain rows.
+pub(crate) const BUDDY_LIBRARY_SHORT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(15);
+/// A pose is a 302 to a short-lived signed URL, then one PNG.
+pub(crate) const BUDDY_LIBRARY_POSE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
+const BUDDY_LIBRARY_AVATARS_PATH: &str = "/api/buddy/avatars";
+const BUDDY_LIBRARY_PROFILE_PATH: &str = "/api/buddy/profile";
+/// 30 avatars of text (a context is at most 4000 characters) stay far under this.
+const BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES: usize = 2 * 1024 * 1024;
+/// A stored pose is one PNG the generation made (8 MB at most, like a draft's).
+pub(crate) const BUDDY_LIBRARY_POSE_MAX_BYTES: usize = 8 * 1024 * 1024;
+// --- end Buddy library (plan 170) ---
+// --- Buddy alive packs (plan 172 D4, D7 to D10) ---
+/// One alive pack file (the atlas is up to 32 MB) moves to or from storage
+/// within this; the presign, commit and delete calls are plain rows.
+pub(crate) const BUDDY_ALIVE_TRANSFER_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(300);
+/// A commit reads every object back and checks the manifest rules.
+pub(crate) const BUDDY_ALIVE_COMMIT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(60);
+/// Official packs are static files on the web (`public/buddy/official/`).
+pub(crate) const BUDDY_OFFICIAL_ALIVE_PREFIX: &str = "/buddy/official/";
+// --- end Buddy alive packs (plan 172) ---
 /// Bounded well inside the provider-mutation RPC envelope: an update check must
 /// never wait on a slow web edge for long.
 pub(crate) const WINDOWS_PILOT_UPDATE_TOKEN_TIMEOUT: std::time::Duration =
@@ -178,6 +232,51 @@ pub struct CohostTickRequest {
     /// `invalid-request`, so the desktop caps).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_promises: Option<Vec<CohostTickOpenPromise>>,
+    /// v4 (plan 164 S-D3): the user's creature. Absent below v4, so a v3 body
+    /// stays byte-identical to what a v3 desktop sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<CohostTickPersona>,
+    /// v4: `banter` asks for one short line on dead air (S-D4); absent means
+    /// a normal tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<CohostTickIntent>,
+}
+
+/// v4: the persona the prompt speaks as (plan 164).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickPersona {
+    pub name: String,
+    pub personality: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostTickIntent {
+    Tick,
+    Banter,
+}
+
+/// v4: the mood a reply is said in (plan 164 D18); unknown values read as
+/// neutral.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostTickMood {
+    #[default]
+    Neutral,
+    Amused,
+    Thinking,
+    #[serde(other)]
+    Unknown,
+}
+
+/// v4: the one banter line (≤ 120 chars) a `banter` request returns.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickBanter {
+    pub text: String,
+    #[serde(default)]
+    pub mood: Option<CohostTickMood>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -259,6 +358,21 @@ pub struct CohostTickResponse {
     /// v3: a recap for viewers who asked what they missed (≤ 140 chars).
     #[serde(default)]
     pub recap: Option<String>,
+    /// v4 (plan 164 S-D4): the banter line, only on an `intent: banter`
+    /// request. An unreadable one is dropped, never the whole tick.
+    #[serde(default, deserialize_with = "lenient_item")]
+    pub banter: Option<CohostTickBanter>,
+}
+
+/// One optional item the desktop drops when it does not fit, like
+/// `lenient_items` for arrays.
+fn lenient_item<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 /// `lenient_items` for an array the desktop must tell apart from an absent
@@ -275,6 +389,17 @@ where
             .filter_map(|item| serde_json::from_value(item).ok())
             .collect()
     }))
+}
+
+/// A tolerant optional object: a value that does not fit the desktop's shape
+/// reads as None instead of failing the body.
+fn lenient_option<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 /// Item-wise tolerant array: an entry that does not fit the desktop's shape is
@@ -311,6 +436,12 @@ pub struct CohostTickQuestion {
     /// v3: the question is about what the streamer is talking about.
     #[serde(default)]
     pub on_topic: bool,
+    /// v4 (plan 164 S-D3): the viewer named the Buddy or used `@<name>`.
+    #[serde(default)]
+    pub addressed: bool,
+    /// v4: the mood the drafted reply is said in.
+    #[serde(default)]
+    pub mood: Option<CohostTickMood>,
 }
 
 /// v3 promise as the server returns it. An unknown trigger kind lands on
@@ -458,9 +589,451 @@ pub struct CohostSpotlightMatch {
     pub answered: Option<f64>,
 }
 
-// --- Orcle command parser wire types (plan 140 S8, contract part E) ---
+// --- Buddy look wire types (plan 169 D4, D5) ---
 
-/// `POST /api/ai/cohost/command`: what the streamer said after "Orcle" that
+/// `POST /api/ai/cohost/avatar/set`. A create carries a description, an
+/// inspiration picture (base64 PNG, JPEG or WebP, at most 3 MB decoded) or
+/// both; a redo carries `redo` (talk, laugh or think) and `base` (the
+/// draft's idle PNG) and neither of the others. The route is strict.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarSetRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspiration: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redo: Option<crate::cohost::CohostAvatarState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+}
+
+/// One delivered picture: a PNG, returned even when the model gave no alpha.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarResponse {
+    pub png_base64: String,
+    #[serde(default)]
+    pub opaque: bool,
+}
+
+/// The pictures a set delivered, per state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarSetImages {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle: Option<CohostAvatarResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub talk: Option<CohostAvatarResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub laugh: Option<CohostAvatarResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub think: Option<CohostAvatarResponse>,
+}
+
+impl CohostAvatarSetImages {
+    pub fn get(&self, state: crate::cohost::CohostAvatarState) -> Option<&CohostAvatarResponse> {
+        use crate::cohost::CohostAvatarState;
+        match state {
+            CohostAvatarState::Idle => self.idle.as_ref(),
+            CohostAvatarState::Talk => self.talk.as_ref(),
+            CohostAvatarState::Laugh => self.laugh.as_ref(),
+            CohostAvatarState::Think => self.think.as_ref(),
+        }
+    }
+}
+
+/// Why the web left one state out of a set (its slot was released).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CohostAvatarSetFailure {
+    pub code: String,
+    pub message: String,
+}
+
+/// The set route's 200: the pictures it made and why any other state is
+/// missing. A failed idle fails the whole call (an error envelope), so a
+/// 200 always carries idle on a create.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarSetResponse {
+    #[serde(default)]
+    pub images: CohostAvatarSetImages,
+    #[serde(default)]
+    pub failed:
+        std::collections::BTreeMap<crate::cohost::CohostAvatarState, CohostAvatarSetFailure>,
+}
+
+// --- Buddy library wire types (plan 170 D5 to D8; videorc-web lib/buddy/library.ts) ---
+// Named `BuddyLibraryWeb*` so they never meet the persona's `BuddyAvatar`
+// (Still or Alive). The desktop renderer never sees these: the backend turns
+// them into `cohost_library::BuddyLibraryEntry`.
+
+/// One pose of an account avatar: `/api/buddy/avatars/<id>/<state>?v=<8 hex>`
+/// (the `v` changes exactly when the picture does).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyLibraryWebPose {
+    pub url: String,
+    #[serde(default)]
+    pub opaque: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyLibraryWebPoses {
+    pub idle: BuddyLibraryWebPose,
+    #[serde(default)]
+    pub talk: Option<BuddyLibraryWebPose>,
+    #[serde(default)]
+    pub laugh: Option<BuddyLibraryWebPose>,
+    #[serde(default)]
+    pub think: Option<BuddyLibraryWebPose>,
+}
+
+impl BuddyLibraryWebPoses {
+    pub fn get(&self, state: crate::cohost::CohostAvatarState) -> Option<&BuddyLibraryWebPose> {
+        use crate::cohost::CohostAvatarState;
+        match state {
+            CohostAvatarState::Idle => Some(&self.idle),
+            CohostAvatarState::Talk => self.talk.as_ref(),
+            CohostAvatarState::Laugh => self.laugh.as_ref(),
+            CohostAvatarState::Think => self.think.as_ref(),
+        }
+    }
+}
+
+/// A user's own avatar as the web returns it (the shapes' `BuddyAvatar`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyLibraryWebAvatar {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub personality: String,
+    #[serde(default)]
+    pub context: String,
+    #[serde(default)]
+    pub look_version: u32,
+    pub created_at: String,
+    pub updated_at: String,
+    pub poses: BuddyLibraryWebPoses,
+    /// The Buddy's alive pack (plan 172 D9); one this build cannot read
+    /// reads as none, never as a broken avatar.
+    #[serde(default, deserialize_with = "lenient_option")]
+    pub alive: Option<BuddyLibraryWebAlive>,
+}
+
+/// One file of an account Buddy's alive pack:
+/// `/api/buddy/avatars/<id>/alive/<name>?v=<first 8 of sha256>`, a 302 to a
+/// short-lived signed URL.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyLibraryWebAliveFile {
+    pub name: String,
+    pub url: String,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+/// An account Buddy's alive pack (plan 172 D9).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyLibraryWebAlive {
+    pub pack_id: String,
+    pub version: u32,
+    pub cell_size: u32,
+    pub frames: u32,
+    pub files: Vec<BuddyLibraryWebAliveFile>,
+}
+
+/// A file the app declares before it uploads it (plan 172 D8).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyUploadFile {
+    pub name: String,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+/// `POST /api/buddy/avatars/:id/alive`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyAliveUploadRequest {
+    pub pack_id: String,
+    pub files: Vec<BuddyUploadFile>,
+}
+
+/// `POST /api/buddy/avatars/import`: a Buddy made on this computer joins the
+/// library (no generation, no allowance).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyImportRequest {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    pub files: Vec<BuddyUploadFile>,
+}
+
+/// One presigned PUT: the file goes straight to storage with these headers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyUploadTarget {
+    pub name: String,
+    pub url: String,
+    pub method: String,
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+}
+
+/// The presign answer of the alive and import routes: a signed token for the
+/// commit and one PUT per declared file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyUploadPlan {
+    pub upload_id: String,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    pub uploads: Vec<BuddyUploadTarget>,
+}
+
+/// `POST .../alive/commit` and `.../import/commit`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyUploadCommit {
+    pub upload_id: String,
+}
+
+/// Whether `url` is an alive file path this client may send the bearer to:
+/// `/api/buddy/avatars/<avatarId>/alive/<name>`, on the API host.
+pub(crate) fn buddy_alive_path_ok(url: &str, avatar_id: &str) -> bool {
+    buddy_pose_path_ok(url) && url.starts_with(&format!("/api/buddy/avatars/{avatar_id}/alive/"))
+}
+
+/// Where a presigned PUT may go: https, or plain http on this machine (a
+/// local web in development and the tests' fake storage).
+pub(crate) fn presigned_url_ok(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    match parsed.scheme() {
+        "https" => parsed.host_str().is_some(),
+        "http" => matches!(parsed.host_str(), Some("127.0.0.1" | "localhost")),
+        _ => false,
+    }
+}
+
+/// `GET /api/buddy/avatars`: newest first. One avatar the desktop cannot
+/// read is skipped, never the whole list.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyLibraryWebList {
+    #[serde(default, deserialize_with = "lenient_items")]
+    pub avatars: Vec<BuddyLibraryWebAvatar>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub active_avatar_id: Option<String>,
+    #[serde(default)]
+    pub profile_updated_at: Option<String>,
+}
+
+/// `POST /api/buddy/avatars`. `name` is required; a description or an
+/// inspiration picture (base64, at most 3 MB decoded) is too.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyLibraryWebCreateRequest {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspiration: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+}
+
+/// The create's streamed 200: the stored avatar and the PNGs, so the desktop
+/// needs no second download, and why any of talk, laugh or think is missing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyLibraryWebCreateResponse {
+    pub avatar: BuddyLibraryWebAvatar,
+    #[serde(default)]
+    pub images: CohostAvatarSetImages,
+    #[serde(default)]
+    pub failed:
+        std::collections::BTreeMap<crate::cohost::CohostAvatarState, CohostAvatarSetFailure>,
+}
+
+impl BuddyLibraryWebCreateResponse {
+    /// The pictures as the plan 169 draft store reads a set.
+    pub fn as_set(&self) -> CohostAvatarSetResponse {
+        CohostAvatarSetResponse {
+            images: self.images.clone(),
+            failed: self.failed.clone(),
+        }
+    }
+}
+
+/// `GET` and `PATCH /api/buddy/avatars/:id`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyLibraryWebAvatarResponse {
+    pub avatar: BuddyLibraryWebAvatar,
+}
+
+/// `PATCH /api/buddy/avatars/:id`: at least one field.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyLibraryWebPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+}
+
+impl BuddyLibraryWebPatch {
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none() && self.personality.is_none() && self.context.is_none()
+    }
+}
+
+/// `DELETE /api/buddy/avatars/:id`: deleting the active one clears the
+/// profile and moves its clock.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyLibraryWebDeleted {
+    #[serde(default)]
+    pub deleted: bool,
+    #[serde(default)]
+    pub active_avatar_id: Option<String>,
+    #[serde(default)]
+    pub profile_updated_at: Option<String>,
+}
+
+/// `POST /api/buddy/avatars/:id/redo`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyLibraryWebRedoRequest {
+    pub state: crate::cohost::CohostAvatarState,
+}
+
+/// The redo's streamed 200: the avatar with its new pose URL and the PNG.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyLibraryWebRedoResponse {
+    pub avatar: BuddyLibraryWebAvatar,
+    #[serde(default)]
+    pub images: CohostAvatarSetImages,
+}
+
+/// `GET` and `PUT /api/buddy/profile`: the account's choice and its clock.
+/// The request always carries `activeAvatarId` (null clears it).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyLibraryWebProfile {
+    #[serde(default)]
+    pub active_avatar_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_updated_at: Option<String>,
+}
+
+/// Whether `url` is a pose path this client may send the bearer to: a path
+/// under `/api/buddy/avatars/` on the API host, never an absolute URL.
+pub(crate) fn buddy_pose_path_ok(url: &str) -> bool {
+    url.starts_with("/api/buddy/avatars/")
+        && !url.contains("..")
+        && !url.contains('\\')
+        && !url.contains("//")
+        && url.len() <= 512
+        && url.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+/// A static path on the web this client reads without credentials: plain
+/// path characters only, no `..`, no query.
+pub(crate) fn buddy_static_path_ok(path: &str) -> bool {
+    path.starts_with('/')
+        && !path.contains("..")
+        && !path.contains("//")
+        && path.len() <= 256
+        && path
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.'))
+}
+
+// --- end Buddy library wire types (plan 170) ---
+
+// --- Buddy pets (plan 168, Phase F) ---
+
+/// `POST /api/ai/cohost/pet/builds`: one creation's server-side session.
+/// Nothing is metered when it opens.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostPetBuildSession {
+    pub build_id: String,
+    pub sheets_allowed: u32,
+    pub redos_allowed: u32,
+    pub pilots_allowed: u32,
+    /// ISO 8601, 24 h after the session opened.
+    pub expires_at: String,
+}
+
+/// `POST /api/ai/cohost/pet/identity`: the reference as base64 PNG.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostPetIdentityRequest {
+    pub build_id: String,
+    pub reference: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostPetIdentityResponse {
+    pub notes: crate::buddy_pet_create::BuddyPetIdentityNotes,
+}
+
+/// `POST /api/ai/cohost/pet/sheet`: one generated sheet, an edit of the
+/// reference with the identity notes. `row` rides with `gaze` only.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostPetSheetRequest {
+    pub build_id: String,
+    pub kind: crate::buddy_pet_create::BuddyPetSheetKindName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row: Option<crate::buddy_pet_build::GazeRow>,
+    pub reference: String,
+    pub notes: crate::buddy_pet_create::BuddyPetIdentityNotes,
+    pub redo: bool,
+}
+
+/// The route's answer: the sheet (returned even when it came back opaque)
+/// and what is left of this creation's allowance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostPetSheetResponse {
+    pub png_base64: String,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    #[serde(default)]
+    pub opaque: bool,
+    pub sheets_remaining: u32,
+    pub redos_remaining: u32,
+}
+
+// --- end Buddy pets (plan 168, Phase F) ---
+
+// --- Buddy command parser wire types (plan 140 S8, contract part E) ---
+
+/// `POST /api/ai/cohost/command`: what the streamer said after "Buddy" that
 /// the local grammar could not read, plus the chat comments it may mean.
 /// Build it with `CohostCommandRequest::shaped`, which enforces the route's
 /// limits; the client refuses anything else without sending.
@@ -794,11 +1367,11 @@ impl CohostApiError {
     fn from_transport_within(error: reqwest::Error, timeout: std::time::Duration) -> Self {
         if error.is_timeout() {
             Self::timeout(format!(
-                "Orcle did not answer within {} s.",
+                "Buddy did not answer within {} s.",
                 timeout.as_secs()
             ))
         } else {
-            Self::network(format!("Could not reach Orcle: {error}"))
+            Self::network(format!("Could not reach Buddy: {error}"))
         }
     }
 }
@@ -810,6 +1383,58 @@ pub(crate) fn parse_retry_after_seconds(value: Option<&str>) -> Option<std::time
         .map(str::trim)
         .and_then(|value| value.parse::<u64>().ok())
         .map(std::time::Duration::from_secs)
+}
+
+/// `/api/buddy/avatars/<id>` for a user avatar id (a lowercase uuid); any
+/// other id is refused before anything is sent.
+fn buddy_avatar_path(avatar_id: &str) -> std::result::Result<String, CohostApiError> {
+    if crate::cohost_library::user_avatar_id_ok(avatar_id) {
+        Ok(format!("{BUDDY_LIBRARY_AVATARS_PATH}/{avatar_id}"))
+    } else {
+        Err(CohostApiError {
+            kind: CohostApiErrorKind::InvalidRequest,
+            detail: CohostErrorDetail::new(
+                "invalid-request",
+                "That is not a library avatar id.",
+                None,
+            ),
+        })
+    }
+}
+
+/// A success body read whole, refused above `max_bytes` (by its length
+/// header first, then by what arrived).
+async fn read_capped_body(
+    response: reqwest::Response,
+    status: reqwest::StatusCode,
+    timeout: std::time::Duration,
+    max_bytes: usize,
+) -> std::result::Result<Vec<u8>, CohostApiError> {
+    let too_large = || {
+        CohostApiError::malformed_response(
+            status.as_u16(),
+            "The response is larger than this route ever sends.",
+        )
+    };
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(too_large());
+    }
+    let body = response.bytes().await.map_err(|error| {
+        if error.is_timeout() {
+            return CohostApiError::from_transport_within(error, timeout);
+        }
+        CohostApiError::malformed_response(
+            status.as_u16(),
+            format!("Could not read the response: {error}"),
+        )
+    })?;
+    if body.len() > max_bytes {
+        return Err(too_large());
+    }
+    Ok(body.to_vec())
 }
 
 pub(crate) fn classify_cohost_failure(
@@ -1034,7 +1659,7 @@ impl VideorcApiClient {
             return response.json().await.map_err(|error| {
                 CohostApiError::malformed_response(
                     status.as_u16(),
-                    format!("Could not read Orcle's response: {error}"),
+                    format!("Could not read Buddy's response: {error}"),
                 )
             });
         }
@@ -1077,7 +1702,7 @@ impl VideorcApiClient {
             return response.json().await.map_err(|error| {
                 CohostApiError::malformed_response(
                     status.as_u16(),
-                    format!("Could not read Orcle's spotlight response: {error}"),
+                    format!("Could not read Buddy's spotlight response: {error}"),
                 )
             });
         }
@@ -1095,7 +1720,7 @@ impl VideorcApiClient {
         ))
     }
 
-    /// One Orcle command parse (plan 140 S8). Same auth, client version and
+    /// One Buddy command parse (plan 140 S8). Same auth, client version and
     /// failure mapping as the spotlight; a request out of the route's shape
     /// is refused here, before anything is sent.
     pub async fn post_cohost_command(
@@ -1118,7 +1743,7 @@ impl VideorcApiClient {
                 kind: CohostApiErrorKind::InvalidRequest,
                 detail: CohostErrorDetail::new(
                     "invalid-request",
-                    format!("Orcle did not send the command: {problem}."),
+                    format!("Buddy did not send the command: {problem}."),
                     None,
                 ),
             });
@@ -1141,7 +1766,7 @@ impl VideorcApiClient {
                 }
                 CohostApiError::malformed_response(
                     status.as_u16(),
-                    format!("Could not read Orcle's command response: {error}"),
+                    format!("Could not read Buddy's command response: {error}"),
                 )
             });
         }
@@ -1158,6 +1783,512 @@ impl VideorcApiClient {
             retry_after.as_deref(),
         ))
     }
+
+    /// One Buddy look call (plan 169 D4, D5): a whole set, or one state
+    /// redone from the draft's idle. Bearer JSON, a 190 s timeout, a 40 MB cap
+    /// on the body read before it is parsed, and the tick's failure mapping
+    /// (code first, then status; `Retry-After` kept for the quota hint).
+    pub async fn post_cohost_avatar_set(
+        &self,
+        bearer_token: &str,
+        request: &CohostAvatarSetRequest,
+    ) -> std::result::Result<CohostAvatarSetResponse, CohostApiError> {
+        self.post_cohost_pet_json(
+            COHOST_AVATAR_SET_PATH,
+            bearer_token,
+            request,
+            COHOST_AVATAR_SET_TIMEOUT,
+            COHOST_AVATAR_SET_MAX_RESPONSE_BYTES,
+        )
+        .await
+    }
+
+    // --- Buddy library (plan 170 D5 to D8) ---
+
+    /// `GET /api/buddy/avatars`: the account's avatars and its choice.
+    pub async fn get_buddy_library(
+        &self,
+        bearer_token: &str,
+    ) -> std::result::Result<BuddyLibraryWebList, CohostApiError> {
+        self.send_cohost_json::<(), _>(
+            reqwest::Method::GET,
+            BUDDY_LIBRARY_AVATARS_PATH,
+            bearer_token,
+            None,
+            BUDDY_LIBRARY_SHORT_TIMEOUT,
+            BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// `POST /api/buddy/avatars`: make a whole avatar and save it to the library.
+    pub async fn post_buddy_avatar(
+        &self,
+        bearer_token: &str,
+        request: &BuddyLibraryWebCreateRequest,
+    ) -> std::result::Result<BuddyLibraryWebCreateResponse, CohostApiError> {
+        self.send_cohost_json(
+            reqwest::Method::POST,
+            BUDDY_LIBRARY_AVATARS_PATH,
+            bearer_token,
+            Some(request),
+            BUDDY_LIBRARY_GENERATE_TIMEOUT,
+            COHOST_AVATAR_SET_MAX_RESPONSE_BYTES,
+        )
+        .await
+    }
+
+    /// `GET /api/buddy/avatars/:id`.
+    pub async fn get_buddy_avatar(
+        &self,
+        bearer_token: &str,
+        avatar_id: &str,
+    ) -> std::result::Result<BuddyLibraryWebAvatarResponse, CohostApiError> {
+        self.send_cohost_json::<(), _>(
+            reqwest::Method::GET,
+            &buddy_avatar_path(avatar_id)?,
+            bearer_token,
+            None,
+            BUDDY_LIBRARY_SHORT_TIMEOUT,
+            BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// `PATCH /api/buddy/avatars/:id`.
+    pub async fn patch_buddy_avatar(
+        &self,
+        bearer_token: &str,
+        avatar_id: &str,
+        patch: &BuddyLibraryWebPatch,
+    ) -> std::result::Result<BuddyLibraryWebAvatarResponse, CohostApiError> {
+        self.send_cohost_json(
+            reqwest::Method::PATCH,
+            &buddy_avatar_path(avatar_id)?,
+            bearer_token,
+            Some(patch),
+            BUDDY_LIBRARY_SHORT_TIMEOUT,
+            BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// `DELETE /api/buddy/avatars/:id`.
+    pub async fn delete_buddy_avatar(
+        &self,
+        bearer_token: &str,
+        avatar_id: &str,
+    ) -> std::result::Result<BuddyLibraryWebDeleted, CohostApiError> {
+        self.send_cohost_json::<(), _>(
+            reqwest::Method::DELETE,
+            &buddy_avatar_path(avatar_id)?,
+            bearer_token,
+            None,
+            BUDDY_LIBRARY_SHORT_TIMEOUT,
+            BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// `POST /api/buddy/avatars/:id/redo`: talk, laugh or think again from the
+    /// stored idle (one image of the daily allowance).
+    pub async fn post_buddy_avatar_redo(
+        &self,
+        bearer_token: &str,
+        avatar_id: &str,
+        state: crate::cohost::CohostAvatarState,
+    ) -> std::result::Result<BuddyLibraryWebRedoResponse, CohostApiError> {
+        let path = format!("{}/redo", buddy_avatar_path(avatar_id)?);
+        self.send_cohost_json(
+            reqwest::Method::POST,
+            &path,
+            bearer_token,
+            Some(&BuddyLibraryWebRedoRequest { state }),
+            BUDDY_LIBRARY_GENERATE_TIMEOUT,
+            COHOST_AVATAR_SET_MAX_RESPONSE_BYTES,
+        )
+        .await
+    }
+
+    /// `PUT /api/buddy/profile`: a user avatar id, `official:<slug>` or None.
+    pub async fn put_buddy_profile(
+        &self,
+        bearer_token: &str,
+        active_avatar_id: Option<&str>,
+    ) -> std::result::Result<BuddyLibraryWebProfile, CohostApiError> {
+        self.send_cohost_json(
+            reqwest::Method::PUT,
+            BUDDY_LIBRARY_PROFILE_PATH,
+            bearer_token,
+            Some(&serde_json::json!({ "activeAvatarId": active_avatar_id })),
+            BUDDY_LIBRARY_SHORT_TIMEOUT,
+            BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// One pose's PNG: `GET /api/buddy/avatars/:id/:state` answers a 302 to a
+    /// short-lived signed URL, which the client follows (reqwest drops the
+    /// bearer when the redirect leaves the API host). Only a pose path the
+    /// web gave is ever requested.
+    pub async fn get_buddy_pose(
+        &self,
+        bearer_token: &str,
+        pose_path: &str,
+    ) -> std::result::Result<Vec<u8>, CohostApiError> {
+        if !buddy_pose_path_ok(pose_path) {
+            return Err(CohostApiError::malformed_response(
+                200,
+                "The library gave a picture address this app does not read.",
+            ));
+        }
+        let timeout = BUDDY_LIBRARY_POSE_TIMEOUT;
+        let response = self
+            .http
+            .get(self.endpoint(pose_path))
+            .bearer_auth(bearer_token)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|error| CohostApiError::from_transport_within(error, timeout))?;
+        let status = response.status();
+        if !status.is_success() {
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            let (code, message) = read_error_code_and_message(response).await;
+            return Err(classify_cohost_failure(
+                status.as_u16(),
+                &code,
+                message,
+                retry_after.as_deref(),
+            ));
+        }
+        read_capped_body(response, status, timeout, BUDDY_LIBRARY_POSE_MAX_BYTES).await
+    }
+
+    // --- Buddy alive packs (plan 172 D4, D7 to D10) ---
+
+    /// `POST /api/buddy/avatars/:id/alive`: one presigned PUT per pack file.
+    pub async fn post_buddy_alive(
+        &self,
+        bearer_token: &str,
+        avatar_id: &str,
+        request: &BuddyAliveUploadRequest,
+    ) -> std::result::Result<BuddyUploadPlan, CohostApiError> {
+        let path = format!("{}/alive", buddy_avatar_path(avatar_id)?);
+        self.send_cohost_json(
+            reqwest::Method::POST,
+            &path,
+            bearer_token,
+            Some(request),
+            BUDDY_LIBRARY_SHORT_TIMEOUT,
+            BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// `POST /api/buddy/avatars/:id/alive/commit`: the web checks what was
+    /// uploaded and the avatar comes back with `alive` filled.
+    pub async fn post_buddy_alive_commit(
+        &self,
+        bearer_token: &str,
+        avatar_id: &str,
+        upload_id: &str,
+    ) -> std::result::Result<BuddyLibraryWebAvatarResponse, CohostApiError> {
+        let path = format!("{}/alive/commit", buddy_avatar_path(avatar_id)?);
+        self.send_cohost_json(
+            reqwest::Method::POST,
+            &path,
+            bearer_token,
+            Some(&BuddyUploadCommit {
+                upload_id: upload_id.to_string(),
+            }),
+            BUDDY_ALIVE_COMMIT_TIMEOUT,
+            BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// `DELETE /api/buddy/avatars/:id/alive`: the avatar comes back with
+    /// `alive: null`.
+    pub async fn delete_buddy_alive(
+        &self,
+        bearer_token: &str,
+        avatar_id: &str,
+    ) -> std::result::Result<BuddyLibraryWebAvatarResponse, CohostApiError> {
+        let path = format!("{}/alive", buddy_avatar_path(avatar_id)?);
+        self.send_cohost_json::<(), _>(
+            reqwest::Method::DELETE,
+            &path,
+            bearer_token,
+            None,
+            BUDDY_LIBRARY_SHORT_TIMEOUT,
+            BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// `POST /api/buddy/avatars/import`: one presigned PUT per pose.
+    pub async fn post_buddy_import(
+        &self,
+        bearer_token: &str,
+        request: &BuddyImportRequest,
+    ) -> std::result::Result<BuddyUploadPlan, CohostApiError> {
+        self.send_cohost_json(
+            reqwest::Method::POST,
+            &format!("{BUDDY_LIBRARY_AVATARS_PATH}/import"),
+            bearer_token,
+            Some(request),
+            BUDDY_LIBRARY_SHORT_TIMEOUT,
+            BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// `POST /api/buddy/avatars/import/commit`: the imported Buddy.
+    pub async fn post_buddy_import_commit(
+        &self,
+        bearer_token: &str,
+        upload_id: &str,
+    ) -> std::result::Result<BuddyLibraryWebAvatarResponse, CohostApiError> {
+        self.send_cohost_json(
+            reqwest::Method::POST,
+            &format!("{BUDDY_LIBRARY_AVATARS_PATH}/import/commit"),
+            bearer_token,
+            Some(&BuddyUploadCommit {
+                upload_id: upload_id.to_string(),
+            }),
+            BUDDY_ALIVE_COMMIT_TIMEOUT,
+            BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// PUT one file straight to storage at a presigned URL: never the bearer,
+    /// only the headers the web signed (never a credential or a host).
+    pub async fn put_presigned(
+        &self,
+        target: &BuddyUploadTarget,
+        bytes: Vec<u8>,
+    ) -> std::result::Result<(), CohostApiError> {
+        if !target.method.eq_ignore_ascii_case("PUT") || !presigned_url_ok(&target.url) {
+            return Err(CohostApiError::malformed_response(
+                200,
+                "The library gave an upload address this app does not use.",
+            ));
+        }
+        let timeout = BUDDY_ALIVE_TRANSFER_TIMEOUT;
+        let mut builder = self.http.put(&target.url).timeout(timeout).body(bytes);
+        for (name, value) in &target.headers {
+            let lower = name.to_ascii_lowercase();
+            if matches!(
+                lower.as_str(),
+                "authorization" | "cookie" | "host" | "content-length" | "proxy-authorization"
+            ) {
+                continue;
+            }
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        let response = builder
+            .send()
+            .await
+            .map_err(|error| CohostApiError::from_transport_within(error, timeout))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        Err(classify_cohost_failure(
+            status.as_u16(),
+            "buddy-upload-failed",
+            format!("The upload was refused ({status})."),
+            None,
+        ))
+    }
+
+    /// One alive pack file, at most `max_bytes`: an official pack's static
+    /// file (no bearer, `/buddy/official/...`) or an account Buddy's
+    /// (`/api/buddy/avatars/<id>/alive/<name>` with the bearer, a 302 to a
+    /// signed URL that reqwest follows without it). The caller checks the
+    /// size and SHA-256.
+    pub async fn get_buddy_alive_file(
+        &self,
+        path: &str,
+        bearer_token: Option<&str>,
+        max_bytes: u64,
+    ) -> std::result::Result<Vec<u8>, CohostApiError> {
+        let official = path.starts_with(BUDDY_OFFICIAL_ALIVE_PREFIX) && buddy_static_path_ok(path);
+        let account = bearer_token.is_some() && buddy_pose_path_ok(path);
+        if !(official && bearer_token.is_none()) && !account {
+            return Err(CohostApiError::malformed_response(
+                200,
+                "The library gave a pack address this app does not read.",
+            ));
+        }
+        let timeout = BUDDY_ALIVE_TRANSFER_TIMEOUT;
+        let mut builder = self.http.get(self.endpoint(path)).timeout(timeout);
+        if let Some(token) = bearer_token {
+            builder = builder.bearer_auth(token);
+        }
+        let response = builder
+            .send()
+            .await
+            .map_err(|error| CohostApiError::from_transport_within(error, timeout))?;
+        let status = response.status();
+        if !status.is_success() {
+            let (code, message) = read_error_code_and_message(response).await;
+            return Err(classify_cohost_failure(
+                status.as_u16(),
+                &code,
+                message,
+                None,
+            ));
+        }
+        read_capped_body(
+            response,
+            status,
+            timeout,
+            usize::try_from(max_bytes).unwrap_or(usize::MAX),
+        )
+        .await
+    }
+
+    // --- end Buddy alive packs (plan 172) ---
+
+    /// One JSON call to a co-host or Buddy library route: the bearer, the
+    /// timeout, a response cap, and the `{ error: { code, message } }`
+    /// envelope classified like every co-host failure.
+    async fn send_cohost_json<Req: Serialize + ?Sized, Resp: DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        bearer_token: &str,
+        request: Option<&Req>,
+        timeout: std::time::Duration,
+        max_bytes: usize,
+    ) -> std::result::Result<Resp, CohostApiError> {
+        let mut builder = self
+            .http
+            .request(method, self.endpoint(path))
+            .bearer_auth(bearer_token)
+            .timeout(timeout);
+        if let Some(request) = request {
+            builder = builder.json(request);
+        }
+        let response = builder
+            .send()
+            .await
+            .map_err(|error| CohostApiError::from_transport_within(error, timeout))?;
+        let status = response.status();
+        if status.is_success() {
+            let body = read_capped_body(response, status, timeout, max_bytes).await?;
+            return serde_json::from_slice(&body).map_err(|error| {
+                CohostApiError::malformed_response(
+                    status.as_u16(),
+                    format!("Could not read the response: {error}"),
+                )
+            });
+        }
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let (code, message) = read_error_code_and_message(response).await;
+        Err(classify_cohost_failure(
+            status.as_u16(),
+            &code,
+            message,
+            retry_after.as_deref(),
+        ))
+    }
+
+    // --- end Buddy library (plan 170) ---
+
+    // --- Buddy pets (plan 168, Phase F) ---
+
+    /// Open a pet build session (`POST /api/ai/cohost/pet/builds`).
+    pub async fn post_cohost_pet_build(
+        &self,
+        bearer_token: &str,
+    ) -> std::result::Result<CohostPetBuildSession, CohostApiError> {
+        self.post_cohost_pet_json(
+            COHOST_PET_BUILDS_PATH,
+            bearer_token,
+            &serde_json::json!({}),
+            COHOST_PET_BUILDS_TIMEOUT,
+            COHOST_PET_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// Read the reference's identity notes (`POST /api/ai/cohost/pet/identity`).
+    pub async fn post_cohost_pet_identity(
+        &self,
+        bearer_token: &str,
+        request: &CohostPetIdentityRequest,
+    ) -> std::result::Result<CohostPetIdentityResponse, CohostApiError> {
+        self.post_cohost_pet_json(
+            COHOST_PET_IDENTITY_PATH,
+            bearer_token,
+            request,
+            COHOST_PET_IDENTITY_TIMEOUT,
+            COHOST_PET_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// Generate one sheet (`POST /api/ai/cohost/pet/sheet`).
+    pub async fn post_cohost_pet_sheet(
+        &self,
+        bearer_token: &str,
+        request: &CohostPetSheetRequest,
+    ) -> std::result::Result<CohostPetSheetResponse, CohostApiError> {
+        self.post_cohost_pet_json(
+            COHOST_PET_SHEET_PATH,
+            bearer_token,
+            request,
+            COHOST_PET_SHEET_TIMEOUT,
+            COHOST_PET_SHEET_MAX_RESPONSE_BYTES,
+        )
+        .await
+    }
+
+    /// One bearer JSON call to a Buddy route (the pet routes and the look's
+    /// set route): the route's own timeout, the body capped before it is
+    /// parsed, and the tick's failure mapping (code first, then status;
+    /// `Retry-After` kept).
+    async fn post_cohost_pet_json<Req: Serialize + ?Sized, Resp: DeserializeOwned>(
+        &self,
+        path: &str,
+        bearer_token: &str,
+        request: &Req,
+        timeout: std::time::Duration,
+        max_bytes: usize,
+    ) -> std::result::Result<Resp, CohostApiError> {
+        self.send_cohost_json(
+            reqwest::Method::POST,
+            path,
+            bearer_token,
+            Some(request),
+            timeout,
+            max_bytes,
+        )
+        .await
+    }
+
+    /// A client for a local fake web (tests only).
+    #[cfg(test)]
+    pub(crate) fn for_base_url(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    // --- end Buddy pets (plan 168, Phase F) ---
 
     /// Fetch safe client-facing AI quota metadata for the signed-in user.
     pub async fn get_ai_quota(&self, bearer_token: &str) -> Result<AiQuotaStatus> {
@@ -1596,7 +2727,7 @@ pub struct CaptionRealtimeToken {
 
 /// Which allowance one transcription chunk is metered against (plan 068 D5).
 /// `Captions` wins while captions present: one upload, one charge. `Listen`
-/// is Orcle's own bucket and an old chunk route ignores the field.
+/// is Buddy's own bucket and an old chunk route ignores the field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptionChunkPurpose {
     Captions,
@@ -1612,7 +2743,7 @@ impl CaptionChunkPurpose {
     }
 }
 
-/// Terminal codes that end only Orcle's listen intent (plan 068 D5): the
+/// Terminal codes that end only Buddy's listen intent (plan 068 D5): the
 /// listen allowance is separate from captions, so a presenting caption
 /// session keeps going when one of these arrives.
 pub fn is_listen_block_code(code: &str) -> bool {
@@ -1859,6 +2990,94 @@ mod tests {
         assert!(
             parsed.captions.is_none(),
             "older web deployments remain compatible during rollout"
+        );
+    }
+
+    #[test]
+    fn ai_capabilities_cohost_block_is_optional_and_parses_the_avatar_cap() {
+        let without: AiCapabilities = serde_json::from_str(
+            r#"{"entitlement":{"checkedAt":"2026-06-15T12:00:00.000Z","cloudAi":true,"expiresAt":"2026-06-15T12:05:00.000Z","isPremium":true,"subscriptionStatus":"active","tier":"premium"},"features":{"cloudAiEnabled":true,"gatewayConfigured":true,"modelTestingEnabled":true,"multipartAudioJobsEnabled":true,"objectBackedJobsEnabled":false,"transcriptJobsEnabled":true,"uploadTicketsEnabled":false},"generatedAt":"2026-06-15T12:30:00.000Z","limits":{"dailyJobs":25,"maxAudioBytes":null,"maxAudioMegabytes":null,"maxOutputTokens":null,"maxTranscriptCharacters":90000,"monthlyJobs":600},"models":{"allowedTextModelCount":2,"allowedTextModelsConfigured":true,"defaultTextModel":null,"fallbackTextModels":[]},"objectStorage":{"deleteConfigured":false,"downloadConfigured":false,"provider":null,"providerError":null,"proofConfigured":false,"proofTtlMs":null,"uploadConfigured":false},"readiness":{"access":{"cloudAiEntitled":true,"globallyDisabled":false},"gateway":{"configError":null,"configured":true},"objectStorage":{"deleteConfigError":null,"downloadConfigError":null,"proofConfigError":null,"providerError":null,"uploadConfigError":null},"transcription":{"configError":null,"configured":true}},"transcription":{"configured":true,"configError":null,"maxAudioBytes":null,"maxAudioMegabytes":null,"requestTimeoutMs":65000},"workflow":{"inputModes":[],"kind":"post-recording-publish-pack","outputs":[]}}"#,
+        )
+        .unwrap();
+        assert!(
+            without.cohost.is_none(),
+            "older web deployments omit the block"
+        );
+        // Omitted on the way out too, never null (the renderer contract).
+        assert!(
+            serde_json::to_value(&without)
+                .unwrap()
+                .get("cohost")
+                .is_none()
+        );
+        let mut value = serde_json::to_value(&without).unwrap();
+        value["cohost"] = serde_json::json!({
+            "tick": 4,
+            "avatar": { "enabled": true, "remainingToday": 23, "dailyLimit": 24 }
+        });
+        let with: AiCapabilities = serde_json::from_value(value).unwrap();
+        let cohost = with.cohost.unwrap();
+        assert_eq!(cohost.tick, Some(4));
+        let avatar = cohost.avatar.unwrap();
+        assert!(avatar.enabled);
+        assert_eq!((avatar.remaining_today, avatar.daily_limit), (23, 24));
+        assert!(
+            cohost.pet.is_none(),
+            "servers before plan 168 omit the pet block"
+        );
+        assert!(
+            cohost.buddy_library.is_none(),
+            "servers before plan 170 omit the library block"
+        );
+    }
+
+    #[test]
+    fn ai_capabilities_cohost_pet_block_parses_and_round_trips() {
+        let without: AiCapabilities = serde_json::from_str(
+            r#"{"entitlement":{"checkedAt":"2026-06-15T12:00:00.000Z","cloudAi":true,"expiresAt":"2026-06-15T12:05:00.000Z","isPremium":true,"subscriptionStatus":"active","tier":"premium"},"features":{"cloudAiEnabled":true,"gatewayConfigured":true,"modelTestingEnabled":true,"multipartAudioJobsEnabled":true,"objectBackedJobsEnabled":false,"transcriptJobsEnabled":true,"uploadTicketsEnabled":false},"generatedAt":"2026-06-15T12:30:00.000Z","limits":{"dailyJobs":25,"maxAudioBytes":null,"maxAudioMegabytes":null,"maxOutputTokens":null,"maxTranscriptCharacters":90000,"monthlyJobs":600},"models":{"allowedTextModelCount":2,"allowedTextModelsConfigured":true,"defaultTextModel":null,"fallbackTextModels":[]},"objectStorage":{"deleteConfigured":false,"downloadConfigured":false,"provider":null,"providerError":null,"proofConfigured":false,"proofTtlMs":null,"uploadConfigured":false},"readiness":{"access":{"cloudAiEntitled":true,"globallyDisabled":false},"gateway":{"configError":null,"configured":true},"objectStorage":{"deleteConfigError":null,"downloadConfigError":null,"proofConfigError":null,"providerError":null,"uploadConfigError":null},"transcription":{"configError":null,"configured":true}},"transcription":{"configured":true,"configError":null,"maxAudioBytes":null,"maxAudioMegabytes":null,"requestTimeoutMs":65000},"workflow":{"inputModes":[],"kind":"post-recording-publish-pack","outputs":[]}}"#,
+        )
+        .unwrap();
+        let mut value = serde_json::to_value(&without).unwrap();
+        value["cohost"] = serde_json::json!({
+            "tick": 4,
+            "pet": { "enabled": true, "creationsRemainingThisMonth": 2, "monthlyLimit": 3 }
+        });
+        let with: AiCapabilities = serde_json::from_value(value.clone()).unwrap();
+        let pet = with.cohost.clone().unwrap().pet.unwrap();
+        assert!(pet.enabled);
+        assert_eq!(
+            (pet.creations_remaining_this_month, pet.monthly_limit),
+            (2, 3)
+        );
+        // The proxy hands the renderer the same block, field for field.
+        assert_eq!(
+            serde_json::to_value(&with).unwrap()["cohost"]["pet"],
+            value["cohost"]["pet"]
+        );
+        // Plan 170 D9: the library block rides the same proxy, field for field
+        // (plan 172 D8 adds `alive`).
+        value["cohost"]["buddyLibrary"] =
+            serde_json::json!({ "enabled": true, "count": 3, "limit": 30, "alive": true });
+        let with: AiCapabilities = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            with.cohost.as_ref().unwrap().buddy_library,
+            Some(crate::protocol::AiCapabilitiesBuddyLibrary {
+                enabled: true,
+                count: 3,
+                limit: 30,
+                alive: true
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&with).unwrap()["cohost"]["buddyLibrary"],
+            value["cohost"]["buddyLibrary"]
+        );
+        // Basic: the block is present and off.
+        value["cohost"]["pet"] = serde_json::json!({ "enabled": false, "creationsRemainingThisMonth": 0, "monthlyLimit": 0 });
+        let basic: AiCapabilities = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            basic.cohost.unwrap().pet.unwrap(),
+            crate::protocol::AiCapabilitiesPet::default()
         );
     }
 
@@ -2178,11 +3397,11 @@ mod tests {
         // answered 502 with this envelope; the desktop must carry both parts.
         assert_eq!(
             parse_error_envelope(
-                r#"{"error":{"code":"ai-gateway-error","message":"The Orcle tick failed on every configured model."}}"#
+                r#"{"error":{"code":"ai-gateway-error","message":"The Buddy tick failed on every configured model."}}"#
             ),
             (
                 "ai-gateway-error".to_string(),
-                "The Orcle tick failed on every configured model.".to_string()
+                "The Buddy tick failed on every configured model.".to_string()
             )
         );
         assert_eq!(
@@ -2216,21 +3435,21 @@ mod tests {
 
     #[test]
     fn cohost_desktop_side_failures_carry_their_own_detail_codes() {
-        let network = CohostApiError::network("Could not reach Orcle: dns");
+        let network = CohostApiError::network("Could not reach Buddy: dns");
         assert_eq!(network.kind, CohostApiErrorKind::Network);
         assert_eq!(network.reason(), CohostReason::Network);
         assert_eq!(network.detail.code, COHOST_DETAIL_CODE_NETWORK);
         assert_eq!(network.detail.status, None);
 
-        let timeout = CohostApiError::timeout("Orcle did not answer within 12 s.");
+        let timeout = CohostApiError::timeout("Buddy did not answer within 12 s.");
         assert_eq!(timeout.kind, CohostApiErrorKind::Network);
         assert_eq!(timeout.reason(), CohostReason::Network);
         assert_eq!(timeout.detail.code, COHOST_DETAIL_CODE_TIMEOUT);
         assert_eq!(timeout.detail.status, None);
-        assert_eq!(timeout.message(), "Orcle did not answer within 12 s.");
+        assert_eq!(timeout.message(), "Buddy did not answer within 12 s.");
 
         let malformed =
-            CohostApiError::malformed_response(200, "Could not read Orcle's response: EOF");
+            CohostApiError::malformed_response(200, "Could not read Buddy's response: EOF");
         assert_eq!(malformed.kind, CohostApiErrorKind::MalformedResponse);
         assert_eq!(malformed.reason(), CohostReason::GatewayError);
         assert_eq!(malformed.detail.code, COHOST_DETAIL_CODE_MALFORMED_RESPONSE);
@@ -2353,7 +3572,7 @@ mod tests {
         assert!(response.usage.is_none());
     }
 
-    // --- Orcle command parser (plan 140 S8) ---
+    // --- Buddy command parser (plan 140 S8) ---
 
     fn command_candidate(id: &str, author: &str, text: &str) -> CohostCommandCandidate {
         CohostCommandCandidate {
@@ -2390,13 +3609,13 @@ mod tests {
             "videorc-desktop/0.9.130",
             "session-1",
             12,
-            &format!("  orcle {}", "u".repeat(400)),
+            &format!("  buddy {}", "u".repeat(400)),
             Some("m-29"),
             candidates,
         )
         .expect("a request");
         assert_eq!(request.utterance.encode_utf16().count(), 300);
-        assert!(request.utterance.starts_with("orcle "));
+        assert!(request.utterance.starts_with("buddy "));
         assert!(request.consent_to_process_chat);
         assert_eq!(request.seq, 12);
         assert_eq!(request.candidates.len(), 20);
@@ -2431,7 +3650,7 @@ mod tests {
             "videorc-desktop/0.9.130",
             "session-1",
             3,
-            "orcle show that",
+            "buddy show that",
             Some("not-a-candidate"),
             vec![command_candidate("m-1", "ada", "hi")],
         )
@@ -2443,7 +3662,7 @@ mod tests {
                 "sessionClientId": "session-1",
                 "consentToProcessChat": true,
                 "seq": 3,
-                "utterance": "orcle show that",
+                "utterance": "buddy show that",
                 "candidates": [
                     { "id": "m-1", "author": "ada", "text": "hi", "at": "2026-10-04T12:00:00Z" }
                 ]
@@ -2467,7 +3686,7 @@ mod tests {
                 "v",
                 "s",
                 1,
-                "orcle",
+                "buddy",
                 None,
                 vec![command_candidate("m-1", "ada", " ")]
             ),
@@ -2480,7 +3699,7 @@ mod tests {
             .map(|index| command_candidate(&format!("w-{index}"), "viewer", &wide))
             .collect();
         many[19].id = "focus".to_string();
-        let fitted = CohostCommandRequest::shaped("v", "s", 1, "orcle", Some("focus"), many)
+        let fitted = CohostCommandRequest::shaped("v", "s", 1, "buddy", Some("focus"), many)
             .expect("a request");
         assert!(serde_json::to_vec(&fitted).unwrap().len() <= COHOST_COMMAND_MAX_BODY_BYTES);
         assert!(fitted.candidates.len() < 20);
@@ -2608,7 +3827,7 @@ mod tests {
             "videorc-desktop/0.9.130",
             "session-1",
             12,
-            "orcle show what coders x asked",
+            "buddy show what coders x asked",
             Some("m1"),
             vec![command_candidate(
                 "m1",

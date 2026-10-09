@@ -148,6 +148,13 @@ export function buildRecordingStudioGateSteps({
         args: ['smoke:comment-highlight-stream']
       },
       {
+        // Plan 168 S-C5: the animated Buddy pet on a real recording (follow
+        // reaction, gaze at the card, talk frames, Motion on and off, sleep).
+        label: 'living Buddy pet recording artifact smoke',
+        command: 'pnpm',
+        args: ['smoke:buddy-pet']
+      },
+      {
         label: 'detached Comments command relay probe',
         command: 'pnpm',
         args: ['probe:comments-window']

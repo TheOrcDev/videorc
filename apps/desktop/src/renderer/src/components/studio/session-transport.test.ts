@@ -96,7 +96,7 @@ describe('SessionTransport (plan 095 S5)', () => {
     expect(
       container.querySelector('[data-videorc-session-status] [data-slot=status-badge]')
     ).toHaveProperty('dataset.tone', 'live')
-    const rec = container.querySelector('[data-slot=session-also-recording]')
+    const rec = container.querySelector('[data-testid=session-also-recording]')
     expect(rec?.textContent).toBe('Rec')
     expect(rec?.getAttribute('data-variant')).toBe('outline')
 
@@ -114,12 +114,12 @@ describe('SessionTransport (plan 095 S5)', () => {
       streamUrl: STREAM_URL
     })
     expect(text('[data-videorc-session-status]')).toBe('Streaming')
-    expect(container.querySelector('[data-slot=session-also-recording]')).toBeNull()
+    expect(container.querySelector('[data-testid=session-also-recording]')).toBeNull()
     expect(container.querySelector('button[title]')).toBeNull()
 
     renderTransport({ state: 'recording', sessionId: 's', startedAt: STARTED_AT })
     expect(text('[data-videorc-session-status]')).toBe('Recording')
-    expect(container.querySelector('[data-slot=session-also-recording]')).toBeNull()
+    expect(container.querySelector('[data-testid=session-also-recording]')).toBeNull()
     expect(text('button')).toContain('Stop recording')
   })
 })

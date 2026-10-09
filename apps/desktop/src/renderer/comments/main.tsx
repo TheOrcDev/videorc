@@ -8,8 +8,11 @@ import { removeMessagesReconnectStarted } from '@/components/stream-manager/remo
 import { WindowFrame } from '@/components/window-frame'
 import type {
   CohostActionKind,
+  CohostBuddyActionCommand,
+  CohostAutoChatRelayPatch,
   CohostQuestion,
   CohostState,
+  CohostUtteranceState,
   CohostWindowState,
   CommentHighlightAnchor,
   CommentHighlightState,
@@ -28,6 +31,13 @@ import { applyCohostState } from '@/lib/cohost-state'
 import { ChatGifModeProvider } from '@/lib/chat-gifs'
 import { DEFAULT_TWITCH_GIF_MODE, type TwitchGifMode } from '../../shared/chat-gif'
 import type { CommandAnswer } from '@/components/stream-manager/command-cards'
+
+/** A Buddy action before main's request id (distributive, one per kind). */
+type BuddyActionBody = CohostBuddyActionCommand extends infer Command
+  ? Command extends { requestId: string }
+    ? Omit<Command, 'requestId'>
+    : never
+  : never
 import {
   cohostHighlightMessageId,
   cohostNudgeDismissedFromStorage,
@@ -323,7 +333,7 @@ function CommentsWindowApp(): ReactElement {
       )
       .finally(() => flagId(setRemovalRequestIds, message.id, false))
   }
-  // An Orcle removal card's Remove or Cancel (Enter or Esc).
+  // A Buddy removal card's Remove or Cancel (Enter or Esc).
   const answerRemoval = (operation: ModerationOperation, answer: RemovalAnswer): void => {
     const sessionId = snapshot.sessionId
     const moderate = window.videorc?.moderateFromCommentsWindow
@@ -400,7 +410,7 @@ function CommentsWindowApp(): ReactElement {
             {
               destinationId: 'cohost-command',
               platform: 'custom',
-              reason: error instanceof Error ? error.message : 'Orcle action failed.'
+              reason: error instanceof Error ? error.message : 'Buddy action failed.'
             }
           ])
           return null
@@ -408,7 +418,41 @@ function CommentsWindowApp(): ReactElement {
         .finally(() => setCohostActionPending(false))
     }
 
-  // Answers to Orcle's voice command cards (plan 140, S6 part B). The reply
+  // The Buddy's own actions (plan 164 S-C4): the Say box and the Show on
+  // stream switch. Not chat commands, so no session is required; the Say box
+  // names the live session when there is one so the line can also be posted
+  // per the chat mode (D7). Studio makes the call and the window state push
+  // follows.
+  const [buddyPending, setBuddyPending] = useState(false)
+  const sendBuddyAction = (command: BuddyActionBody): Promise<void> => {
+    const send = window.videorc?.sendCohostAction
+    if (!send) return Promise.resolve()
+    setBuddyPending(true)
+    return send({ requestId: crypto.randomUUID(), ...command } as CohostBuddyActionCommand)
+      .then(() => undefined)
+      .catch((error) => {
+        toast.error(error instanceof Error ? error.message : 'Buddy action failed.', {
+          id: 'buddy-action'
+        })
+      })
+      .finally(() => setBuddyPending(false))
+  }
+  const sayBuddy = (text: string, state: CohostUtteranceState): Promise<void> =>
+    sendBuddyAction({
+      kind: 'buddy-say',
+      text,
+      state,
+      ...(live && snapshot.sessionId ? { sessionId: snapshot.sessionId } : {})
+    })
+  const setBuddyShowOnStream = (showOnStream: boolean): void => {
+    void sendBuddyAction({ kind: 'buddy-show-on-stream', showOnStream })
+  }
+  // Plan 168 S-D3: a reaction chip plays on air (Studio calls cohost.pet.react).
+  const reactBuddy = (reaction: string): void => {
+    void sendBuddyAction({ kind: 'buddy-react', reaction })
+  }
+
+  // Answers to Buddy's voice command cards (plan 140, S6 part B). The reply
   // merges like an event: the newer command (by `at`) wins.
   const [commandAnsweringId, setCommandAnsweringId] = useState<string | null>(null)
   const answerCommand = (commandId: string, answer: CommandAnswer): void => {
@@ -421,20 +465,20 @@ function CommentsWindowApp(): ReactElement {
         setCohost((current) => ({ ...current, state: applyCohostState(current.state, state) }))
       )
       .catch((error) =>
-        toast.error(error instanceof Error ? error.message : 'Could not answer Orcle.', {
+        toast.error(error instanceof Error ? error.message : 'Could not answer Buddy.', {
           id: `cohost-command:${commandId}`
         })
       )
       .finally(() => setCommandAnsweringId((current) => (current === commandId ? null : current)))
   }
 
-  // Orcle Live's one switch (plan 119), relayed: on means Orcle reads chat AND
+  // Buddy Live's one switch (plan 119), relayed: on means Buddy reads chat AND
   // hears you (`listen: true`), off only stops it joining. Every way on (the
   // status popover, the nudge, the consent CTA and the listening card) sends
   // the same command; the consent CTA also grants cloud-AI consent in the same
   // click. The settings are main-renderer owned, and the relay reply carries
   // the truth back so the switch reflects what happened, not what was clicked.
-  const setOrcleLive = (on: boolean, grantConsent = false): void => {
+  const setBuddyLive = (on: boolean, grantConsent = false): void => {
     void window.videorc
       ?.sendCohostEnable?.({
         requestId: crypto.randomUUID(),
@@ -445,10 +489,33 @@ function CommentsWindowApp(): ReactElement {
       .then((state) => state && setCohost(state))
       .catch((error) =>
         toast.error(
-          error instanceof Error ? error.message : 'Could not change the Orcle setting.',
+          error instanceof Error ? error.message : 'Could not change the Buddy setting.',
           {
             id: 'cohost-enable'
           }
+        )
+      )
+  }
+
+  // Plan 164 S-D6: the pane's mode control and behaviour switches. The
+  // mode is the pane's enable: Suggest or Auto turns the Buddy on (the same
+  // {enabled, listen} save as the switch), Off turns it off; a behaviour
+  // switch keeps `enabled` as it is. The templates and cooldowns live in
+  // the Buddy tab and ride along untouched (Studio merges the block).
+  const setBuddyAutoChat = (patch: CohostAutoChatRelayPatch): void => {
+    const enabled = patch.mode === undefined ? cohost.enabled : patch.mode !== 'off'
+    void window.videorc
+      ?.sendCohostEnable?.({
+        requestId: crypto.randomUUID(),
+        enabled,
+        ...(enabled && patch.mode !== undefined ? { listen: true } : {}),
+        autoChat: patch
+      })
+      .then((state) => state && setCohost(state))
+      .catch((error) =>
+        toast.error(
+          error instanceof Error ? error.message : 'Could not change the Buddy chat mode.',
+          { id: 'cohost-auto-chat' }
         )
       )
   }
@@ -468,7 +535,7 @@ function CommentsWindowApp(): ReactElement {
     : {
         allowed: false,
         featureId: 'live-cohost',
-        reason: cohost.entitlementReason ?? 'Orcle requires Videorc Premium.',
+        reason: cohost.entitlementReason ?? 'Buddy requires Videorc Premium.',
         ...(cohost.upgradeUrl ? { upgradeUrl: cohost.upgradeUrl } : {})
       }
 
@@ -501,9 +568,22 @@ function CommentsWindowApp(): ReactElement {
           cohostEnabled={cohost.enabled}
           cohostGate={cohostGate}
           cohostListen={cohost.listen}
+          cohostAutoChat={cohost.autoChat}
+          onCohostAutoChatChange={setBuddyAutoChat}
+          onCohostUtteranceApprove={(utterance) =>
+            void sendCohostAction('approve-utterance')(utterance.id)
+          }
+          onCohostUtteranceDismiss={(utterance) =>
+            void sendCohostAction('dismiss-utterance')(utterance.id)
+          }
           cohostNudgeDismissedForever={cohostNudgeDismissed}
           cohostStarting={cohostStarting}
           cohostState={cohost.state}
+          cohostBuddy={cohost.buddy}
+          buddyPending={buddyPending}
+          onBuddySay={sayBuddy}
+          onBuddyShowOnStream={setBuddyShowOnStream}
+          onBuddyReact={reactBuddy}
           moderationOperations={moderationOperations}
           removalAnsweringIds={removalAnsweringIds}
           removalRequestIds={removalRequestIds}
@@ -522,9 +602,9 @@ function CommentsWindowApp(): ReactElement {
           onCohostAuthorGreeted={(entry) =>
             void sendCohostAction('author-greeted')(entry.authorKey)
           }
-          onCohostEnable={(enabled) => setOrcleLive(enabled)}
-          onCohostEnableConsent={() => setOrcleLive(true, true)}
-          onCohostListenOn={() => setOrcleLive(true)}
+          onCohostEnable={(enabled) => setBuddyLive(enabled)}
+          onCohostEnableConsent={() => setBuddyLive(true, true)}
+          onCohostListenOn={() => setBuddyLive(true)}
           onCohostNudgeDismiss={() => {
             setCohostNudgeDismissed(true)
             localStorage.setItem(COHOST_NUDGE_STORAGE_KEY, '1')

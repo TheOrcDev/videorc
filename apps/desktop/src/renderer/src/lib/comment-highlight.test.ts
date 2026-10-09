@@ -137,6 +137,18 @@ describe('layoutCommentHighlight', () => {
     expect(highlightMetrics(1920)).toEqual(highlightMetrics(1920, 1080))
   })
 
+  it('wraps to the placed rect width instead of the width fraction (plan 164)', () => {
+    const fraction = highlightMetrics(1920, 1080)
+    const placed = highlightMetrics(1920, 1080, 600)
+    expect(placed.textFontPx).toBe(fraction.textFontPx)
+    expect(placed.maxTextWidthPx).toBe(600 - placed.paddingPx * 2)
+    expect(placed.maxNameWidthPx).toBe(
+      placed.maxTextWidthPx - placed.avatarPx - placed.identityGapPx
+    )
+    expect(highlightMetrics(1920, 1080, 5000).maxTextWidthPx).toBe(1920 - placed.paddingPx * 2)
+    expect(highlightMetrics(1920, 1080, 0)).toEqual(fraction)
+  })
+
   it('collapses to the identity row when there is no message text', () => {
     const layout = layoutCommentHighlight({
       authorName: 'Orc Dev',

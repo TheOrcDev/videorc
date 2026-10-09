@@ -10724,6 +10724,9 @@ mod tests {
             mask: crate::metal_compositor::SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         }];
         compositor
             .compose_bgra(

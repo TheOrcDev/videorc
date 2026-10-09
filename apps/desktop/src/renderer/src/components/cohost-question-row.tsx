@@ -72,7 +72,7 @@ export function CohostQuestionRow({
       {question.onTopic === true ? (
         <Badge
           className="shrink-0 text-muted-foreground"
-          data-slot="cohost-on-topic"
+          data-testid="cohost-on-topic"
           title="About what you are talking about right now"
           variant="outline"
         >
@@ -81,7 +81,7 @@ export function CohostQuestionRow({
       ) : null}
       {question.fromNotes ? (
         <NoteIcon
-          aria-label="Answered from your Orcle notes"
+          aria-label="Answered from your Buddy notes"
           className="size-3.5 shrink-0 text-muted-foreground"
           weight="duotone"
         />
@@ -98,7 +98,7 @@ export function CohostQuestionRow({
         <Badge
           aria-label="Talking about this"
           className="shrink-0"
-          data-slot="cohost-talking-about"
+          data-testid="cohost-talking-about"
           title="You are talking about this question"
           variant="outline"
         >

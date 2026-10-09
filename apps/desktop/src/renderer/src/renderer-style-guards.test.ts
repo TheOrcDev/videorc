@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
+import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 
 // Plan 050 (D5, D6, S20): the renderer stays on real glass and native feel.
@@ -11,6 +12,10 @@ import { describe, expect, it } from 'vitest'
 // - No colour literals in chrome: colour comes from the tokens in styles.css.
 //   The allowlist names the files whose literals are CONTENT (what ends up in
 //   the video or a scanner), never chrome.
+// - No `data-slot` passed to a component (plan 168 S-01): it belongs to the
+//   element that renders it. A shadcn primitive sets its own slot and spreads
+//   props after it, so a passed slot replaces it and silently drops every
+//   selector keyed on it (the grouped card's row padding, S-00).
 
 const RENDERER_ROOT = join(__dirname, '..')
 
@@ -22,6 +27,9 @@ const COLOUR_LITERAL_ALLOWLIST = new Set([
   'src/components/captions-reader.tsx',
   // The comment highlight overlay drawn onto the stream.
   'src/lib/comment-highlight.ts',
+  // The Buddy's comic bubble as it is drawn onto the stream (plan 164 D17):
+  // always the light variant, the stream is not themed.
+  'src/lib/buddy-overlay.ts',
   // Chroma-key colours are the key itself.
   'src/lib/capture.ts',
   'src/components/tabs/layout-tab.tsx',
@@ -69,6 +77,34 @@ function offenders(pattern: RegExp, filter: (path: string) => boolean = () => tr
       if (pattern.test(line)) found.push(`${path}:${index + 1}: ${line.trim().slice(0, 120)}`)
     })
   }
+  return found
+}
+
+/**
+ * Every `data-slot` passed to a component (a capitalized JSX tag) in a TSX
+ * source, as `path:line: <Tag data-slot=...>`. Parsed, not matched line by
+ * line: JSX props wrap, and a prop may hold `=>` or nested JSX.
+ */
+function passedSlots(path: string, source: string): string[] {
+  const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const found: string[] = []
+  const visit = (node: ts.Node): void => {
+    if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+      const tag = node.tagName.getText(file)
+      for (const attribute of node.attributes.properties) {
+        if (
+          /^[A-Z]/.test(tag) &&
+          ts.isJsxAttribute(attribute) &&
+          attribute.name.getText(file) === 'data-slot'
+        ) {
+          const { line } = file.getLineAndCharacterOfPosition(attribute.getStart(file))
+          found.push(`${path}:${line + 1}: <${tag} ${attribute.getText(file)}>`)
+        }
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
   return found
 }
 
@@ -124,5 +160,36 @@ describe('renderer style guards (plan 050)', () => {
     for (const path of COLOUR_LITERAL_ALLOWLIST) {
       expect(files.some((file) => file.path === path)).toBe(true)
     }
+  })
+
+  it('never passes data-slot to a component: hooks on components are data-testid', () => {
+    // components/ui is shadcn's own: its primitives name their Radix parts.
+    const offending = files
+      .filter(({ path, code }) => path.endsWith('.tsx') && code.includes('data-slot'))
+      .filter(({ path }) => !path.startsWith('src/components/ui/'))
+      .flatMap(({ path }) => passedSlots(path, readFileSync(join(RENDERER_ROOT, path), 'utf8')))
+    expect(offending).toEqual([])
+  })
+
+  it('catches a passed slot however the props wrap, and leaves elements alone', () => {
+    // The helper that made Answers and Banter lose their padding (S-00).
+    const oldHelper = `
+      export function CohostCooldownField({ id }: { id: string }) {
+        return (
+          <Field
+            onClick={() => setDraft((value) => (value > 0 ? value : 1))}
+            data-slot={\`\${id}-field\`}
+          >
+            <div data-slot="cohost-cooldown">x</div>
+          </Field>
+        )
+      }`
+    expect(passedSlots('old.tsx', oldHelper)).toEqual([
+      'old.tsx:6: <Field data-slot={`${id}-field`}>'
+    ])
+    expect(passedSlots('ok.tsx', '<FieldGroup variant="grouped" data-testid="x" />')).toEqual([])
+    expect(passedSlots('ok.tsx', '<Ui.Alert data-slot="x" />')).toEqual([
+      'ok.tsx:1: <Ui.Alert data-slot="x">'
+    ])
   })
 })

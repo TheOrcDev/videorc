@@ -21,7 +21,7 @@ export const SHORTCUTS: readonly ShortcutEntry[] = [
   { id: 'nav-captions', keys: ['⌘', '6'], label: 'Captions', group: 'Navigation' },
   { id: 'nav-recording', keys: ['⌘', '7'], label: 'Output', group: 'Navigation' },
   { id: 'nav-library', keys: ['⌘', '8'], label: 'Library', group: 'Navigation' },
-  { id: 'nav-ai', keys: ['⌘', '9'], label: 'Orcle', group: 'Navigation' },
+  { id: 'nav-ai', keys: ['⌘', '9'], label: 'Buddy', group: 'Navigation' },
   { id: 'nav-settings', keys: ['⌘', ','], label: 'Settings', group: 'Navigation' },
   { id: 'search', keys: ['⌘', 'K'], label: 'Search & commands', group: 'Navigation' },
 
@@ -34,7 +34,7 @@ export const SHORTCUTS: readonly ShortcutEntry[] = [
   // Co-host pane (Comments window). Plain (cmd)J toggles the Comments window
   // from the main window; inside the window it focuses the co-host pane, and
   // the single-key actions apply to the selected row.
-  { id: 'cohost-focus', keys: ['⌘', 'J'], label: 'Focus Orcle', group: 'Chat' },
+  { id: 'cohost-focus', keys: ['⌘', 'J'], label: 'Focus Buddy', group: 'Chat' },
   { id: 'cohost-move', keys: ['↑', '↓'], label: 'Move between questions', group: 'Chat' },
   { id: 'cohost-reply', keys: ['R'], label: 'Draft a reply', group: 'Chat' },
   { id: 'cohost-highlight', keys: ['H'], label: 'Show the question on stream', group: 'Chat' },

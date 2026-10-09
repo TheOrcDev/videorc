@@ -1,20 +1,20 @@
 import { useEffect, useRef, type KeyboardEvent, type ReactElement } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
-import { MicrophoneIcon, OrcleIcon, PreviewIcon } from '@/components/icons'
+import { MicrophoneIcon, BuddyIcon, PreviewIcon } from '@/components/icons'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
-import { orcleCardPickIndex, removalKeyAnswer } from '@/components/stream-manager/removal-cards'
+import { buddyCardPickIndex, removalKeyAnswer } from '@/components/stream-manager/removal-cards'
 import type {
   CommandChooserView,
   CommandConfirmView,
   CommandStripView
-} from '@/lib/orcle-command-view'
+} from '@/lib/buddy-command-view'
 import { cn } from '@/lib/utils'
 
-// Orcle voice commands in the Stream Manager's Orcle pane (plan 140, S6 part
-// B), directly above the removal cards: what Orcle heard and did (the strip),
+// Buddy voice commands in the Stream Manager's Buddy pane (plan 140, S6 part
+// B), directly above the removal cards: what Buddy heard and did (the strip),
 // then what waits for you (the chooser, or "show it anyway?").
 //
 // Keys follow the removal cards' scoping (`removalKeyAnswer`): Enter only
@@ -23,14 +23,14 @@ import { cn } from '@/lib/utils'
 // window listener runs in the capture phase and takes the key first.
 
 const FOCUSED_CARD =
-  '[data-slot="removal-card"], [data-slot="command-chooser"], [data-slot="command-confirm"]'
+  '[data-testid="removal-card"], [data-testid="command-chooser"], [data-testid="command-confirm"]'
 
 export type CommandAnswer =
   | { action: 'choose'; index: number }
   | { action: 'confirm' }
   | { action: 'cancel' }
 
-/** "Heard: “…”", then what Orcle did. Quiet statuses use secondary text. */
+/** "Heard: “…”", then what Buddy did. Quiet statuses use secondary text. */
 export function CommandStrip({ view }: { view: CommandStripView | null }): ReactElement | null {
   if (!view) return null
   return (
@@ -95,7 +95,7 @@ export function CommandCards({
     const onKeyDown = (event: globalThis.KeyboardEvent): void => {
       // A focused card (this one or a removal card) answers its own keys.
       if (document.activeElement?.closest(FOCUSED_CARD)) return
-      const index = orcleCardPickIndex(event, document.activeElement, document.body, pickCount)
+      const index = buddyCardPickIndex(event, document.activeElement, document.body, pickCount)
       if (index !== null) {
         event.preventDefault()
         onAnswerRef.current(commandId, { action: 'choose', index })
@@ -163,12 +163,12 @@ function CommandChooser({
       aria-label="Which comment did you mean?"
       className="outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
       data-command-id={view.commandId}
-      data-slot="command-chooser"
+      data-testid="command-chooser"
       role="group"
       tabIndex={-1}
       onKeyDown={(event) => cardKeyDown(event, onAnswer, { picks: view.candidates.length })}
     >
-      <OrcleIcon aria-hidden weight="duotone" />
+      <BuddyIcon aria-hidden weight="duotone" />
       <AlertTitle className="flex min-w-0 items-center gap-2 text-xs">
         <span className="min-w-0 flex-1 truncate">{view.title}</span>
         {view.timer ? (
@@ -183,7 +183,7 @@ function CommandChooser({
             <li key={candidate.index}>
               <Button
                 className="h-auto w-full min-w-0 justify-start gap-2 px-1.5 py-1 text-left whitespace-normal"
-                data-slot="command-candidate"
+                data-testid="command-candidate"
                 size="xs"
                 title={`Pick ${candidate.authorName} (${candidate.key})`}
                 type="button"
@@ -206,7 +206,7 @@ function CommandChooser({
       </AlertDescription>
       <div className="col-start-2 mt-1 flex flex-wrap gap-1">
         <Button
-          data-slot="command-cancel"
+          data-testid="command-cancel"
           size="xs"
           title="Cancel (Esc)"
           type="button"
@@ -235,7 +235,7 @@ function CommandConfirm({
       aria-label="Show this comment on stream?"
       className="outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
       data-command-id={view.commandId}
-      data-slot="command-confirm"
+      data-testid="command-confirm"
       role="group"
       tabIndex={-1}
       onKeyDown={(event) => {
@@ -273,7 +273,7 @@ function CommandConfirm({
         data-slot="command-confirm-actions"
       >
         <Button
-          data-slot="command-show"
+          data-testid="command-show"
           disabled={view.busy}
           size="xs"
           title="Show it (Enter)"
@@ -285,7 +285,7 @@ function CommandConfirm({
           {keys ? <Kbd>↵</Kbd> : null}
         </Button>
         <Button
-          data-slot="command-cancel"
+          data-testid="command-cancel"
           disabled={view.busy}
           size="xs"
           title="Cancel (Esc)"

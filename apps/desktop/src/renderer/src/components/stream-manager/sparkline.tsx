@@ -36,7 +36,7 @@ export function Sparkline({
       aria-hidden
       className={cn('aspect-auto h-6 w-full', className)}
       config={config}
-      data-slot="sparkline"
+      data-testid="sparkline"
       initialDimension={size}
     >
       <AreaChart data={data} margin={{ top: 2, right: 0, bottom: 0, left: 0 }}>

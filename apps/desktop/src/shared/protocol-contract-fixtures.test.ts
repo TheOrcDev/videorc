@@ -34,6 +34,7 @@ import type {
   ModerationOperation,
   ModerationOperationParams,
   ModerationRequestParams,
+  OverlayLayout,
   PreviewSurfaceBounds,
   RecordingStatus,
   Scene,
@@ -42,7 +43,43 @@ import type {
   SessionDeletionOperation,
   SessionChatTotals
 } from './backend'
+import type {
+  CohostPetImportParams,
+  CohostPetReactAccepted,
+  CohostPetReactParams,
+  CohostPetRemoveParams,
+  BuddyPetSummary
+} from './backend'
+import type {
+  CohostPetBuildIdParams,
+  CohostPetIdentityParams,
+  CohostPetSaveParams,
+  CohostPetSheetGenerateParams,
+  BuddyPetBuildProgressEvent,
+  BuddyPetCreationAccepted,
+  BuddyPetCreationStatus,
+  BuddyPetIdentityReadEvent,
+  BuddyPetSheetGeneratedEvent
+} from './buddy-pet-creator'
 import { normalizeSessionCommentsListParams } from './backend'
+import type {
+  CohostAvatarAccepted,
+  CohostAvatarCreateParams,
+  CohostAvatarDraft,
+  CohostAvatarDraftStatus,
+  CohostAvatarProgressEvent,
+  CohostAvatarRedoParams,
+  CohostAvatarRequestIdParams
+} from './backend'
+import type {
+  CohostLibraryAccepted,
+  CohostLibraryDeleteParams,
+  CohostLibrarySyncParams,
+  CohostLibraryUpdateParams,
+  CohostLibraryUseParams,
+  BuddyLibraryState
+} from './buddy-library'
+import { BUDDY_OFFICIAL_CATALOG, officialAliveFallback } from './buddy-library'
 import {
   validateBackendEventPayload,
   validateBackendRpcParams,
@@ -91,6 +128,64 @@ interface HighRiskContractFixtures {
     deleteParams: BackendRpcParams<'sessions.delete'>
     deletionOperation: SessionDeletionOperation
     eventMessages: LiveChatMessage[]
+  }
+  overlayLayout: {
+    defaults: OverlayLayout
+    placed: OverlayLayout
+  }
+  buddyPets: {
+    summary: BuddyPetSummary
+    bundledSummary: BuddyPetSummary
+    importParams: CohostPetImportParams
+    removeParams: CohostPetRemoveParams
+    reactParams: CohostPetReactParams
+    reactAccepted: CohostPetReactAccepted
+  }
+  buddyLook: {
+    createParams: CohostAvatarCreateParams
+    createDescriptionParams: CohostAvatarCreateParams
+    redoParams: CohostAvatarRedoParams
+    requestIdParams: CohostAvatarRequestIdParams
+    accepted: CohostAvatarAccepted
+    progressWorking: CohostAvatarProgressEvent
+    progressDone: CohostAvatarProgressEvent
+    progressFailed: CohostAvatarProgressEvent
+    draft: CohostAvatarDraft
+    status: CohostAvatarDraftStatus
+    statusNone: CohostAvatarDraftStatus
+    createLibraryParams: CohostAvatarCreateParams
+    libraryDraft: CohostAvatarDraft
+  }
+  buddyLibrary: {
+    signedOut: BuddyLibraryState
+    signedIn: BuddyLibraryState
+    localOnly: BuddyLibraryState
+    importing: BuddyLibraryState
+    aliveUpload: BuddyLibraryState
+    aliveDownload: BuddyLibraryState
+    syncParams: CohostLibrarySyncParams
+    useParams: CohostLibraryUseParams
+    useOfficialParams: CohostLibraryUseParams
+    updateParams: CohostLibraryUpdateParams
+    deleteParams: CohostLibraryDeleteParams
+    accepted: CohostLibraryAccepted
+  }
+  buddyPetCreator: {
+    status: BuddyPetCreationStatus
+    statusNone: BuddyPetCreationStatus
+    identityParams: CohostPetIdentityParams
+    identityUploadParams: CohostPetIdentityParams
+    sheetParams: CohostPetSheetGenerateParams
+    pilotParams: CohostPetSheetGenerateParams
+    buildParams: CohostPetBuildIdParams
+    saveParams: CohostPetSaveParams
+    accepted: BuddyPetCreationAccepted
+    identityRead: BuddyPetIdentityReadEvent
+    sheetGenerated: BuddyPetSheetGeneratedEvent
+    sheetFailed: BuddyPetSheetGeneratedEvent
+    buildProgress: BuddyPetBuildProgressEvent
+    buildFailed: BuddyPetBuildProgressEvent
+    savedPack: BuddyPetSummary
   }
   cohost: {
     startParams: CohostStartParams
@@ -536,7 +631,7 @@ describe('shared high-risk protocol fixture', () => {
     expect(fixtures.cohost.stateV2.listening).toStrictEqual({
       state: 'blocked',
       reasonCode: 'listen-monthly-quota-exhausted',
-      message: "Orcle's listening allowance for this month is used up.",
+      message: "Buddy's listening allowance for this month is used up.",
       remainingSeconds: 0
     })
     expect(fixtures.cohost.state).not.toHaveProperty('listening')
@@ -578,12 +673,12 @@ describe('shared high-risk protocol fixture', () => {
     }
     expect(fixtures.cohost.errorState.detail).toStrictEqual({
       code: 'ai-gateway-error',
-      message: 'The Orcle tick failed on every configured model.',
+      message: 'The Buddy tick failed on every configured model.',
       status: 502
     })
     expect(fixtures.cohost.timeoutState.detail).toStrictEqual({
       code: 'timeout',
-      message: 'Orcle did not answer within 12 s.',
+      message: 'Buddy did not answer within 12 s.',
       status: null
     })
     expect('detail' in fixtures.cohost.legacyState).toBe(false)
@@ -600,7 +695,90 @@ describe('shared high-risk protocol fixture', () => {
     }
   })
 
-  it('keeps Orcle voice commands, their answers and settings identical across languages (plan 140 S3)', () => {
+  it('keeps the overlay layout wire shape identical across languages (plan 164)', () => {
+    for (const layout of [fixtures.overlayLayout.defaults, fixtures.overlayLayout.placed]) {
+      expect(validateBackendRpcResult('overlays.layout.get', layout)).toStrictEqual(layout)
+      expect(validateBackendRpcParams('overlays.layout.set', layout)).toStrictEqual(layout)
+      expect(validateBackendRpcResult('overlays.layout.set', layout)).toStrictEqual(layout)
+    }
+    expect(
+      validateBackendRpcParams('overlays.layout.migrate_highlight_anchor', { anchor: 'top-right' })
+    ).toStrictEqual({ anchor: 'top-right' })
+    expect(() =>
+      validateBackendRpcParams('overlays.layout.set', {
+        ...fixtures.overlayLayout.defaults,
+        extra: true
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcParams('overlays.layout.set', {
+        ...fixtures.overlayLayout.defaults,
+        buddy: { ...fixtures.overlayLayout.defaults.buddy, horizontal: { x: 2, y: 0, w: 1, h: 1 } }
+      })
+    ).toThrow()
+    // The shipped defaults: highlight bottom-left on both outputs, captions
+    // off (today's burnTarget default), the Buddy bottom-right.
+    expect(fixtures.overlayLayout.defaults.highlight.showOnStream).toBe(true)
+    expect(fixtures.overlayLayout.defaults.captions.showOnStream).toBe(false)
+    expect(fixtures.overlayLayout.defaults.buddy.horizontal.x).toBeCloseTo(0.7975, 6)
+  })
+
+  it('keeps the Buddy overlay wire shapes strict (plan 164 Phase C)', () => {
+    const idle = { personaId: 'default', state: 'idle', bubble: null }
+    const talking = {
+      personaId: 'a1b2c3',
+      state: 'laugh',
+      bubble: { text: 'Welcome to the horde', until: '2026-10-08T12:00:03.000Z' }
+    }
+    for (const snapshot of [idle, talking]) {
+      expect(validateBackendRpcResult('cohost.buddy.status', snapshot)).toStrictEqual(snapshot)
+      expect(validateBackendEventPayload('cohost.buddy.state', snapshot)).toStrictEqual(snapshot)
+    }
+    // The bubble is null or whole, never absent, and no field rides along.
+    expect(() =>
+      validateBackendEventPayload('cohost.buddy.state', { personaId: 'x', state: 'idle' })
+    ).toThrow()
+    expect(() =>
+      validateBackendEventPayload('cohost.buddy.state', { ...idle, bubble: { text: 'x' } })
+    ).toThrow()
+    expect(() => validateBackendEventPayload('cohost.buddy.state', { ...idle, extra: 1 })).toThrow()
+    // The Say box is one utterance (`cohost.utterance.say`): a session when
+    // the line may be posted, none when it is bubble-only.
+    const say = { sessionId: 'session-1', text: 'Hello horde', state: 'talk' }
+    expect(validateBackendRpcParams('cohost.utterance.say', say)).toStrictEqual(say)
+    const bubbleOnly = { text: 'Hello horde' }
+    expect(validateBackendRpcParams('cohost.utterance.say', bubbleOnly)).toStrictEqual(bubbleOnly)
+    expect(() => validateBackendRpcParams('cohost.utterance.say', { text: '' })).toThrow()
+    expect(() =>
+      validateBackendRpcParams('cohost.utterance.say', { text: 'x', state: 'idle' })
+    ).toThrow()
+    const set = {
+      target: 'auxiliary',
+      pngBase64: 'iVBORw0KGgo=',
+      rect: { x: 0.7975, y: 0.64, w: 0.18, h: 0.32 }
+    }
+    expect(validateBackendRpcParams('buddy.overlay.set', set)).toStrictEqual(set)
+    expect(() =>
+      validateBackendRpcParams('buddy.overlay.set', { ...set, rect: undefined })
+    ).toThrow()
+    const info = {
+      active: true,
+      primary: { active: true, width: 400, height: 520, revision: 3, styleRevision: 0 },
+      auxiliary: { active: false, width: 0, height: 0, revision: 0, styleRevision: 0 }
+    }
+    expect(validateBackendRpcResult('buddy.overlay.set', info)).toStrictEqual(info)
+    // Plan 168 S-B1: the bubble's raster is cleared when it ends, one target
+    // or both; nothing else rides along.
+    expect(validateBackendRpcParams('buddy.overlay.clear', {})).toStrictEqual({})
+    expect(validateBackendRpcParams('buddy.overlay.clear', { target: 'primary' })).toStrictEqual({
+      target: 'primary'
+    })
+    expect(() => validateBackendRpcParams('buddy.overlay.clear', { target: 'vertical' })).toThrow()
+    expect(() => validateBackendRpcParams('buddy.overlay.clear', { rect: null })).toThrow()
+    expect(validateBackendRpcResult('buddy.overlay.clear', info)).toStrictEqual(info)
+  })
+
+  it('keeps Buddy voice commands, their answers and settings identical across languages (plan 140 S3)', () => {
     // The Rust side round-trips the same objects in protocol.rs
     // (`shared_high_risk_contract_fixture_matches_cohost_dtos`).
     expect(
@@ -660,6 +838,56 @@ describe('shared high-risk protocol fixture', () => {
       wakeWordRequired: true,
       removeConfirm: 'countdown'
     })
+    // Plan 164 S-A2: the persona and the automatic chat block ride the
+    // settings (defaults: the bundled pack, everything automatic off) and
+    // the patch (whole objects). Absent images are omitted, never null.
+    expect(fixtures.cohost.settings.persona).toStrictEqual({
+      id: 'default',
+      name: 'Buddy',
+      personality: '',
+      bubbleStyle: 'speech',
+      images: {},
+      source: 'default',
+      avatar: { kind: 'still' },
+      motion: { intensity: 0.45, sleepAfterSeconds: 180, breathing: true },
+      reactions: {}
+    })
+    expect(fixtures.cohost.settings.autoChat).toStrictEqual({
+      mode: 'off',
+      greetings: { enabled: false, templates: [] },
+      answers: { enabled: false, cooldownSeconds: 20 },
+      banter: { enabled: false, cooldownSeconds: 240 }
+    })
+    expect(fixtures.cohost.settingsPatch.persona?.images).toStrictEqual({
+      idle: 'persona-fixture/idle.png',
+      laugh: 'persona-fixture/laugh.webp'
+    })
+    expect(fixtures.cohost.settingsPatch.autoChat?.greetings.templates[0]).toMatchObject({
+      kind: 'follow',
+      platform: 'twitch',
+      state: 'laugh'
+    })
+    expect(() =>
+      validateBackendRpcParams('cohost.settings.set', {
+        persona: { ...fixtures.cohost.settingsPatch.persona, images: { idle: null } }
+      })
+    ).toThrow('cohost.settings.set')
+    expect(() =>
+      validateBackendRpcParams('cohost.settings.set', {
+        autoChat: {
+          ...fixtures.cohost.settingsPatch.autoChat,
+          greetings: {
+            enabled: true,
+            templates: [
+              {
+                ...fixtures.cohost.settingsPatch.autoChat!.greetings.templates[0],
+                kind: 'hype-train'
+              }
+            ]
+          }
+        }
+      })
+    ).toThrow('cohost.settings.set')
     // The report counts commands; the minimal report has none (never null).
     expect(fixtures.cohost.report.commands).toStrictEqual({
       highlighted: 3,
@@ -706,7 +934,7 @@ describe('shared high-risk protocol fixture', () => {
     }
   })
 
-  it('keeps the Orcle report, its payload and the saved event identical across languages (plan 119 S1)', () => {
+  it('keeps the Buddy report, its payload and the saved event identical across languages (plan 119 S1)', () => {
     expect(
       validateBackendRpcParams('cohost.report.get', fixtures.cohost.reportGetParams)
     ).toStrictEqual(fixtures.cohost.reportGetParams)
@@ -932,5 +1160,488 @@ describe('shared high-risk protocol fixture', () => {
       })
     )
     expect(snapshot.messages).toStrictEqual(fixtures.comments.eventMessages)
+  })
+})
+
+describe('Buddy pets wire (plan 168, Phase A)', () => {
+  const pets = fixtures.buddyPets
+
+  it('validates the pet RPCs exactly as the backend round-trips them', () => {
+    expect(validateBackendRpcParams('cohost.pet.list', undefined)).toBeUndefined()
+    expect(
+      validateBackendRpcResult('cohost.pet.list', [pets.bundledSummary, pets.summary])
+    ).toStrictEqual([pets.bundledSummary, pets.summary])
+    expect(validateBackendRpcParams('cohost.pet.import', pets.importParams)).toStrictEqual(
+      pets.importParams
+    )
+    expect(validateBackendRpcResult('cohost.pet.import', pets.summary)).toStrictEqual(pets.summary)
+    expect(validateBackendRpcParams('cohost.pet.remove', pets.removeParams)).toStrictEqual(
+      pets.removeParams
+    )
+    const removed = { packId: pets.removeParams.packId, settings: fixtures.cohost.settings }
+    expect(validateBackendRpcResult('cohost.pet.remove', removed)).toStrictEqual(removed)
+    expect(validateBackendRpcParams('cohost.pet.react', pets.reactParams)).toStrictEqual(
+      pets.reactParams
+    )
+    expect(validateBackendRpcResult('cohost.pet.react', pets.reactAccepted)).toStrictEqual(
+      pets.reactAccepted
+    )
+  })
+
+  it('refuses unknown fields, bad pack ids and out-of-bounds summaries', () => {
+    expect(() =>
+      validateBackendRpcParams('cohost.pet.import', { ...pets.importParams, path: '/tmp/x' })
+    ).toThrow('cohost.pet.import')
+    for (const packId of ['bundled:', '../x', pets.summary.packId.toUpperCase(), 'buddy']) {
+      expect(() => validateBackendRpcParams('cohost.pet.remove', { packId })).toThrow(
+        'cohost.pet.remove'
+      )
+    }
+    expect(() =>
+      validateBackendRpcResult('cohost.pet.import', { ...pets.summary, cellSize: 64 })
+    ).toThrow('cohost.pet.import')
+    expect(() =>
+      validateBackendRpcResult('cohost.pet.import', { ...pets.summary, source: 'web' })
+    ).toThrow('cohost.pet.import')
+    expect(() => validateBackendRpcParams('cohost.pet.react', { reaction: '' })).toThrow(
+      'cohost.pet.react'
+    )
+  })
+
+  it('carries the persona avatar: still by default, alive by pack id, nothing else', () => {
+    expect(fixtures.cohost.settings.persona.avatar).toStrictEqual({ kind: 'still' })
+    expect(fixtures.cohost.settingsPatch.persona?.avatar).toStrictEqual({
+      kind: 'alive',
+      packId: pets.summary.packId
+    })
+    const persona = fixtures.cohost.settingsPatch.persona!
+    for (const avatar of [
+      null,
+      { kind: 'alive' },
+      { kind: 'alive', packId: 'bundled:Buddy' },
+      { kind: 'still', packId: pets.summary.packId },
+      { kind: 'animated' }
+    ]) {
+      expect(() =>
+        validateBackendRpcParams('cohost.settings.set', { persona: { ...persona, avatar } })
+      ).toThrow('cohost.settings.set')
+    }
+    const { avatar: _avatar, ...withoutAvatar } = persona
+    expect(() =>
+      validateBackendRpcParams('cohost.settings.set', { persona: withoutAvatar })
+    ).toThrow('cohost.settings.set')
+  })
+
+  it('carries motion, reaction overrides and a greeting reaction (S-A4)', () => {
+    const persona = fixtures.cohost.settingsPatch.persona!
+    expect(persona.motion).toStrictEqual({ intensity: 0.8, sleepAfterSeconds: 0, breathing: false })
+    expect(persona.reactions).toStrictEqual({
+      follow: 'wave',
+      tip: 'none',
+      'destination-failed': 'worried'
+    })
+    expect(fixtures.cohost.settingsPatch.autoChat?.greetings.templates[0]?.reaction).toBe('proud')
+    for (const motion of [
+      { intensity: 1.5, sleepAfterSeconds: 180, breathing: true },
+      { intensity: 0.5, sleepAfterSeconds: 10, breathing: true },
+      { intensity: 0.5, sleepAfterSeconds: 1801, breathing: true },
+      { intensity: 0.5, sleepAfterSeconds: 180 }
+    ]) {
+      expect(() =>
+        validateBackendRpcParams('cohost.settings.set', { persona: { ...persona, motion } })
+      ).toThrow('cohost.settings.set')
+    }
+    for (const reactions of [{ 'moderation-flag': 'laugh' }, { follow: 'Wave' }, { raid: '' }]) {
+      expect(() =>
+        validateBackendRpcParams('cohost.settings.set', { persona: { ...persona, reactions } })
+      ).toThrow('cohost.settings.set')
+    }
+    const autoChat = fixtures.cohost.settingsPatch.autoChat!
+    const template = autoChat.greetings.templates[0]!
+    expect(() =>
+      validateBackendRpcParams('cohost.settings.set', {
+        autoChat: {
+          ...autoChat,
+          greetings: { ...autoChat.greetings, templates: [{ ...template, reaction: null }] }
+        }
+      })
+    ).toThrow('cohost.settings.set')
+  })
+})
+
+describe('Buddy look wire (plan 169, Phase B)', () => {
+  const look = fixtures.buddyLook
+
+  it('validates the look RPCs and events exactly as the backend round-trips them', () => {
+    for (const params of [look.createParams, look.createDescriptionParams]) {
+      expect(validateBackendRpcParams('cohost.avatar.create', params)).toStrictEqual(params)
+    }
+    for (const method of ['cohost.avatar.create', 'cohost.avatar.redo'] as const) {
+      expect(validateBackendRpcResult(method, look.accepted)).toStrictEqual(look.accepted)
+    }
+    expect(validateBackendRpcParams('cohost.avatar.redo', look.redoParams)).toStrictEqual(
+      look.redoParams
+    )
+    for (const method of ['cohost.avatar.keep', 'cohost.avatar.discard'] as const) {
+      expect(validateBackendRpcParams(method, look.requestIdParams)).toStrictEqual(
+        look.requestIdParams
+      )
+    }
+    expect(validateBackendRpcResult('cohost.avatar.keep', fixtures.cohost.settings)).toStrictEqual(
+      fixtures.cohost.settings
+    )
+    expect(validateBackendRpcParams('cohost.avatar.draft.get', undefined)).toBeUndefined()
+    for (const method of ['cohost.avatar.draft.get', 'cohost.avatar.discard'] as const) {
+      for (const status of [look.status, look.statusNone]) {
+        expect(validateBackendRpcResult(method, status)).toStrictEqual(status)
+      }
+    }
+    for (const event of [look.progressWorking, look.progressDone, look.progressFailed]) {
+      expect(validateBackendEventPayload('cohost.avatar.progress', event)).toStrictEqual(event)
+    }
+    expect(validateBackendEventPayload('cohost.avatar.draft', look.draft)).toStrictEqual(look.draft)
+  })
+
+  it('refuses the old style menu, idle redo, bad ids and paths outside a draft', () => {
+    expect(() =>
+      validateBackendRpcParams('cohost.avatar.create', { ...look.createParams, style: 'pixel' })
+    ).toThrow('cohost.avatar.create')
+    expect(() => validateBackendRpcParams('cohost.avatar.create', { description: '' })).toThrow(
+      'cohost.avatar.create'
+    )
+    expect(() =>
+      validateBackendRpcParams('cohost.avatar.redo', { ...look.redoParams, state: 'idle' })
+    ).toThrow('cohost.avatar.redo')
+    const { requestId } = look.requestIdParams
+    for (const bad of ['../default', requestId.toUpperCase(), '']) {
+      expect(() => validateBackendRpcParams('cohost.avatar.keep', { requestId: bad })).toThrow(
+        'cohost.avatar.keep'
+      )
+    }
+    for (const path of ['default/idle.png', `../drafts/${requestId}/idle.png`]) {
+      expect(() =>
+        validateBackendEventPayload('cohost.avatar.progress', { ...look.progressDone, path })
+      ).toThrow('cohost.avatar.progress')
+    }
+    expect(() =>
+      validateBackendEventPayload('cohost.avatar.draft', {
+        ...look.draft,
+        images: { ...look.draft.images, idle: 'default/idle.png' }
+      })
+    ).toThrow('cohost.avatar.draft')
+    expect(() =>
+      validateBackendRpcResult('cohost.avatar.draft.get', {
+        running: { requestId, kind: 'build' }
+      })
+    ).toThrow('cohost.avatar.draft.get')
+  })
+})
+
+describe('Buddy library wire (plan 170, Phase D)', () => {
+  const library = fixtures.buddyLibrary
+  const look = fixtures.buddyLook
+
+  it('validates the library RPCs and event exactly as the backend round-trips them', () => {
+    expect(validateBackendRpcParams('cohost.library.get', undefined)).toBeUndefined()
+    for (const state of [
+      library.signedOut,
+      library.signedIn,
+      library.localOnly,
+      library.importing,
+      library.aliveUpload,
+      library.aliveDownload
+    ]) {
+      expect(validateBackendRpcResult('cohost.library.get', state)).toStrictEqual(state)
+      expect(validateBackendEventPayload('cohost.library.changed', state)).toStrictEqual(state)
+    }
+    expect(validateBackendRpcParams('cohost.library.sync', library.syncParams)).toStrictEqual(
+      library.syncParams
+    )
+    for (const params of [library.useParams, library.useOfficialParams]) {
+      expect(validateBackendRpcParams('cohost.library.use', params)).toStrictEqual(params)
+    }
+    expect(validateBackendRpcParams('cohost.library.update', library.updateParams)).toStrictEqual(
+      library.updateParams
+    )
+    expect(validateBackendRpcParams('cohost.library.delete', library.deleteParams)).toStrictEqual(
+      library.deleteParams
+    )
+    for (const method of [
+      'cohost.library.sync',
+      'cohost.library.use',
+      'cohost.library.update',
+      'cohost.library.delete'
+    ] as const) {
+      expect(validateBackendRpcResult(method, library.accepted)).toStrictEqual(library.accepted)
+    }
+    // The signed-out state lists the whole official catalog, pictures by
+    // slug; with no buddy roots, a bundled pack is not here and a pack that
+    // downloads is available (plan 172 D4).
+    expect(library.signedOut.official).toStrictEqual(
+      BUDDY_OFFICIAL_CATALOG.map(({ description: _description, alive, ...entry }) => ({
+        ...entry,
+        alive: alive?.bundled ? 'none' : officialAliveFallback({ alive })
+      }))
+    )
+  })
+
+  it('carries the alive packs, their jobs and Save to my library (plan 172)', () => {
+    expect(library.signedIn.mine![0]!.alive).toStrictEqual({
+      packId: '0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a',
+      cellSize: 640
+    })
+    expect(library.signedIn.mine![1]!.alive).toBeNull()
+    expect(library.aliveDownload.official.map((entry) => entry.alive)).toStrictEqual([
+      'bundled',
+      'available'
+    ])
+    expect(
+      [library.importing, library.aliveUpload, library.aliveDownload].map(
+        (state) => state.busy?.kind
+      )
+    ).toStrictEqual(['import', 'alive-upload', 'alive-download'])
+    expect(validateBackendRpcParams('cohost.library.saveToLibrary', undefined)).toBeUndefined()
+    expect(() => validateBackendRpcParams('cohost.library.saveToLibrary', {})).toThrow(
+      'cohost.library.saveToLibrary'
+    )
+    expect(
+      validateBackendRpcResult('cohost.library.saveToLibrary', library.accepted)
+    ).toStrictEqual(library.accepted)
+    const entry = library.signedIn.mine![0]!
+    for (const alive of [
+      { packId: 'bundled:buddy', cellSize: 640 },
+      { packId: entry.alive!.packId.toUpperCase(), cellSize: 640 },
+      { packId: entry.alive!.packId, cellSize: 64 },
+      { packId: entry.alive!.packId, cellSize: 640, version: 1 },
+      undefined
+    ]) {
+      const { alive: _alive, ...rest } = entry
+      expect(() =>
+        validateBackendEventPayload('cohost.library.changed', {
+          ...library.signedIn,
+          mine: [alive === undefined ? rest : { ...entry, alive }]
+        })
+      ).toThrow('cohost.library.changed')
+    }
+    const official = library.signedOut.official[0]!
+    for (const alive of ['alive', null, undefined]) {
+      expect(() =>
+        validateBackendRpcResult('cohost.library.get', {
+          ...library.signedOut,
+          official: [{ ...official, alive }]
+        })
+      ).toThrow('cohost.library.get')
+    }
+    // A persona may wear an official pack (official:<slug>), never a path.
+    const patch = fixtures.cohost.settingsPatch
+    const wearing = {
+      persona: { ...patch.persona!, avatar: { kind: 'alive', packId: 'official:orc' } }
+    }
+    expect(validateBackendRpcParams('cohost.settings.set', wearing)).toStrictEqual(wearing)
+    for (const packId of ['official:', 'official:Orc', 'official:../orc']) {
+      expect(() =>
+        validateBackendRpcParams('cohost.settings.set', {
+          persona: { ...patch.persona!, avatar: { kind: 'alive', packId } }
+        })
+      ).toThrow('cohost.settings.set')
+    }
+  })
+
+  it('carries the library on the persona, the create params and the draft', () => {
+    const patch = fixtures.cohost.settingsPatch
+    expect(patch.persona?.libraryAvatarId).toBe(library.useParams.avatarId)
+    expect(validateBackendRpcParams('cohost.settings.set', patch)).toStrictEqual(patch)
+    // The default persona has no link: absent, never null.
+    expect('libraryAvatarId' in fixtures.cohost.settings.persona).toBe(false)
+    expect(() =>
+      validateBackendRpcParams('cohost.settings.set', {
+        persona: { ...patch.persona, libraryAvatarId: null }
+      })
+    ).toThrow('cohost.settings.set')
+    expect(() =>
+      validateBackendRpcParams('cohost.settings.set', {
+        persona: { ...patch.persona, libraryAvatarId: 'x'.repeat(65) }
+      })
+    ).toThrow('cohost.settings.set')
+    expect(
+      validateBackendRpcParams('cohost.avatar.create', look.createLibraryParams)
+    ).toStrictEqual(look.createLibraryParams)
+    expect(validateBackendEventPayload('cohost.avatar.draft', look.libraryDraft)).toStrictEqual(
+      look.libraryDraft
+    )
+    expect(
+      validateBackendRpcResult('cohost.avatar.draft.get', { draft: look.libraryDraft })
+    ).toEqual({ draft: look.libraryDraft })
+    for (const bad of [
+      { ...look.createLibraryParams, name: '' },
+      { ...look.createLibraryParams, name: 'n'.repeat(25) },
+      { ...look.createLibraryParams, personality: 'p'.repeat(1201) },
+      { ...look.createLibraryParams, context: 'c'.repeat(4001) }
+    ]) {
+      expect(() => validateBackendRpcParams('cohost.avatar.create', bad)).toThrow(
+        'cohost.avatar.create'
+      )
+    }
+    expect(() =>
+      validateBackendEventPayload('cohost.avatar.draft', {
+        ...look.libraryDraft,
+        libraryAvatarId: 'official:golem'
+      })
+    ).toThrow('cohost.avatar.draft')
+  })
+
+  it('refuses unknown slugs, official edits, empty updates and pictures outside the cache', () => {
+    expect(() =>
+      validateBackendRpcParams('cohost.library.use', { avatarId: 'official:dragon' })
+    ).toThrow('cohost.library.use')
+    expect(() =>
+      validateBackendRpcParams('cohost.library.use', {
+        avatarId: library.useParams.avatarId.toUpperCase()
+      })
+    ).toThrow('cohost.library.use')
+    expect(() =>
+      validateBackendRpcParams('cohost.library.delete', { avatarId: 'official:golem' })
+    ).toThrow('cohost.library.delete')
+    expect(() =>
+      validateBackendRpcParams('cohost.library.update', {
+        avatarId: 'official:orc',
+        name: 'Grok'
+      })
+    ).toThrow('cohost.library.update')
+    expect(() =>
+      validateBackendRpcParams('cohost.library.update', { avatarId: library.useParams.avatarId })
+    ).toThrow('cohost.library.update')
+    expect(() => validateBackendRpcParams('cohost.library.sync', { reason: 'timer' })).toThrow(
+      'cohost.library.sync'
+    )
+    expect(() => validateBackendRpcResult('cohost.library.sync', { accepted: false })).toThrow(
+      'cohost.library.sync'
+    )
+    const entry = library.signedIn.mine![0]!
+    for (const idle of [
+      'videorc-asset://buddy/default/idle.png',
+      `videorc-asset://buddy/library/${entry.id}/idle.png`,
+      `videorc-asset://buddy/library/${entry.id}/../idle-0a1b2c3d.png`,
+      `file:///library/${entry.id}/idle-0a1b2c3d.png`
+    ]) {
+      expect(() =>
+        validateBackendEventPayload('cohost.library.changed', {
+          ...library.signedIn,
+          mine: [{ ...entry, poses: { ...entry.poses, idle } }]
+        })
+      ).toThrow('cohost.library.changed')
+    }
+    expect(() =>
+      validateBackendRpcResult('cohost.library.get', { ...library.signedOut, error: null })
+    ).toThrow('cohost.library.get')
+    expect(() =>
+      validateBackendRpcResult('cohost.library.get', {
+        ...library.signedOut,
+        busy: { kind: 'generate' }
+      })
+    ).toThrow('cohost.library.get')
+  })
+})
+
+describe('Buddy pet creator wire (plan 168, Phase F)', () => {
+  const creator = fixtures.buddyPetCreator
+
+  it('validates the creator RPCs and events exactly as the backend round-trips them', () => {
+    for (const method of ['cohost.pet.creation.start', 'cohost.pet.creation.status'] as const) {
+      expect(validateBackendRpcParams(method, undefined)).toBeUndefined()
+      expect(validateBackendRpcResult(method, creator.status)).toStrictEqual(creator.status)
+      expect(validateBackendRpcResult(method, creator.statusNone)).toStrictEqual(creator.statusNone)
+    }
+    expect(
+      validateBackendRpcParams('cohost.pet.creation.cancel', creator.buildParams)
+    ).toStrictEqual(creator.buildParams)
+    for (const params of [creator.identityParams, creator.identityUploadParams]) {
+      expect(validateBackendRpcParams('cohost.pet.identity', params)).toStrictEqual(params)
+    }
+    for (const params of [creator.sheetParams, creator.pilotParams]) {
+      expect(validateBackendRpcParams('cohost.pet.sheet.generate', params)).toStrictEqual(params)
+    }
+    for (const method of [
+      'cohost.pet.identity',
+      'cohost.pet.sheet.generate',
+      'cohost.pet.build'
+    ] as const) {
+      expect(validateBackendRpcResult(method, creator.accepted)).toStrictEqual(creator.accepted)
+    }
+    expect(validateBackendRpcParams('cohost.pet.build', creator.buildParams)).toStrictEqual(
+      creator.buildParams
+    )
+    expect(validateBackendRpcParams('cohost.pet.save', creator.saveParams)).toStrictEqual(
+      creator.saveParams
+    )
+    const saved = { pack: creator.savedPack, settings: fixtures.cohost.settings }
+    expect(validateBackendRpcResult('cohost.pet.save', saved)).toStrictEqual(saved)
+    expect(
+      validateBackendEventPayload('cohost.pet.identity.read', creator.identityRead)
+    ).toStrictEqual(creator.identityRead)
+    for (const event of [creator.sheetGenerated, creator.sheetFailed]) {
+      expect(validateBackendEventPayload('cohost.pet.sheet.generated', event)).toStrictEqual(event)
+    }
+    for (const event of [creator.buildProgress, creator.buildFailed]) {
+      expect(validateBackendEventPayload('cohost.pet.build.progress', event)).toStrictEqual(event)
+    }
+  })
+
+  it('refuses unknown fields, bad ids, paths and out-of-bounds notes', () => {
+    const { buildId } = creator.buildParams
+    for (const bad of ['../pets', buildId.toUpperCase(), 'bundled:buddy', '']) {
+      expect(() => validateBackendRpcParams('cohost.pet.build', { buildId: bad })).toThrow(
+        'cohost.pet.build'
+      )
+    }
+    expect(() =>
+      validateBackendRpcParams('cohost.pet.save', { ...creator.saveParams, packId: buildId })
+    ).toThrow('cohost.pet.save')
+    expect(() =>
+      validateBackendRpcParams('cohost.pet.save', { ...creator.saveParams, name: '' })
+    ).toThrow('cohost.pet.save')
+    expect(() =>
+      validateBackendRpcParams('cohost.pet.identity', {
+        buildId,
+        reference: { kind: 'path', path: '/etc/passwd' }
+      })
+    ).toThrow('cohost.pet.identity')
+    expect(() =>
+      validateBackendRpcParams('cohost.pet.sheet.generate', { ...creator.sheetParams, row: 'up3' })
+    ).toThrow('cohost.pet.sheet.generate')
+    const notes = creator.pilotParams.notes!
+    for (const bad of [
+      { ...notes, palette: ['x'.repeat(61)] },
+      { ...notes, palette: [''] },
+      { ...notes, proportions: '' },
+      { ...notes, asymmetric: [{ feature: 'horn', side: 'up' }] },
+      { ...notes, extra: true }
+    ]) {
+      expect(() =>
+        validateBackendRpcParams('cohost.pet.sheet.generate', {
+          ...creator.pilotParams,
+          notes: bad
+        })
+      ).toThrow('cohost.pet.sheet.generate')
+    }
+    const creation = creator.status.creation!
+    for (const file of [
+      '../build-state.json',
+      'sources/../x.png',
+      '/tmp/a.png',
+      'pack/buddy.json'
+    ]) {
+      expect(() =>
+        validateBackendRpcResult('cohost.pet.creation.status', {
+          creation: { ...creation, reference: { ...creation.reference!, file } }
+        })
+      ).toThrow('cohost.pet.creation.status')
+    }
+    expect(() =>
+      validateBackendEventPayload('cohost.pet.build.progress', {
+        ...creator.buildProgress,
+        step: 'uploading'
+      })
+    ).toThrow('cohost.pet.build.progress')
   })
 })

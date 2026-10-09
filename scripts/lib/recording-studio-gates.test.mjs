@@ -35,6 +35,7 @@ describe('buildRecordingStudioGateSteps', () => {
       'layout/source preview liveness smoke',
       'active-session live layout switch recording smoke',
       'comment highlight stream artifact smoke',
+      'living Buddy pet recording artifact smoke',
       'detached Comments command relay probe',
       'backend-owned preview scene commit smoke',
       'preview main pump diagnostics smoke',
@@ -67,18 +68,19 @@ describe('buildRecordingStudioGateSteps', () => {
     ])
     assert.deepEqual(steps[1].args, ['test:scripts'])
     assert.deepEqual(steps[2].args, ['probe:live-audio-controls'])
-    assert.deepEqual(steps.at(-23).args, ['smoke:captions-contract'])
-    assert.deepEqual(steps.at(-22).args, ['smoke:captions-live'])
-    assert.deepEqual(steps.at(-21).args, ['smoke:noise-cleanup'])
-    assert.deepEqual(steps.at(-20).args, ['smoke:dev'])
-    assert.deepEqual(steps.at(-19).args, ['smoke:app-quit-recording'])
-    assert.deepEqual(steps.at(-18).args, ['smoke:record-latency:gate'])
-    assert.deepEqual(steps.at(-17).args, ['smoke:output-stall'])
-    assert.deepEqual(steps.at(-16).args, ['smoke:screens'])
-    assert.deepEqual(steps.at(-15).args, ['smoke:preview-real-launch'])
-    assert.deepEqual(steps.at(-14).args, ['smoke:layout-source-loop'])
-    assert.deepEqual(steps.at(-13).args, ['smoke:live-layout-switch-recording'])
-    assert.deepEqual(steps.at(-12).args, ['smoke:comment-highlight-stream'])
+    assert.deepEqual(steps.at(-24).args, ['smoke:captions-contract'])
+    assert.deepEqual(steps.at(-23).args, ['smoke:captions-live'])
+    assert.deepEqual(steps.at(-22).args, ['smoke:noise-cleanup'])
+    assert.deepEqual(steps.at(-21).args, ['smoke:dev'])
+    assert.deepEqual(steps.at(-20).args, ['smoke:app-quit-recording'])
+    assert.deepEqual(steps.at(-19).args, ['smoke:record-latency:gate'])
+    assert.deepEqual(steps.at(-18).args, ['smoke:output-stall'])
+    assert.deepEqual(steps.at(-17).args, ['smoke:screens'])
+    assert.deepEqual(steps.at(-16).args, ['smoke:preview-real-launch'])
+    assert.deepEqual(steps.at(-15).args, ['smoke:layout-source-loop'])
+    assert.deepEqual(steps.at(-14).args, ['smoke:live-layout-switch-recording'])
+    assert.deepEqual(steps.at(-13).args, ['smoke:comment-highlight-stream'])
+    assert.deepEqual(steps.at(-12).args, ['smoke:buddy-pet'])
     assert.deepEqual(steps.at(-11).args, ['probe:comments-window'])
     assert.deepEqual(steps.at(-10).args, ['smoke:preview-scene-commit'])
     assert.deepEqual(steps.at(-9).args, ['smoke:preview-pump-diagnostics'])
@@ -140,6 +142,7 @@ describe('buildRecordingStudioGateSteps', () => {
     assert.match(report, /smoke:layout-source-loop/)
     assert.match(report, /smoke:live-layout-switch-recording/)
     assert.match(report, /smoke:comment-highlight-stream/)
+    assert.match(report, /smoke:buddy-pet/)
     assert.match(report, /probe:comments-window/)
     assert.match(report, /smoke:preview-scene-commit/)
     assert.match(report, /smoke:preview-pump-diagnostics/)

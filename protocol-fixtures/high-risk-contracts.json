@@ -573,7 +573,38 @@
       "rules": ["No spoilers", "English only"],
       "listen": true,
       "wakeWordRequired": true,
-      "removeConfirm": "countdown"
+      "removeConfirm": "countdown",
+      "persona": {
+        "id": "persona-fixture",
+        "name": "Grum the Goblin",
+        "personality": "Cheerful goblin merchant",
+        "bubbleStyle": "shout",
+        "images": { "idle": "persona-fixture/idle.png", "laugh": "persona-fixture/laugh.webp" },
+        "source": "uploaded",
+        "avatar": { "kind": "alive", "packId": "0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a" },
+        "motion": { "intensity": 0.8, "sleepAfterSeconds": 0, "breathing": false },
+        "reactions": { "follow": "wave", "tip": "none", "destination-failed": "worried" },
+        "libraryAvatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51"
+      },
+      "autoChat": {
+        "mode": "suggest",
+        "greetings": {
+          "enabled": true,
+          "templates": [
+            {
+              "id": "template-fixture",
+              "kind": "follow",
+              "platform": "twitch",
+              "text": "Welcome to the horde, {name}",
+              "state": "laugh",
+              "enabled": true,
+              "reaction": "proud"
+            }
+          ]
+        },
+        "answers": { "enabled": true, "cooldownSeconds": 30 },
+        "banter": { "enabled": false, "cooldownSeconds": 240 }
+      }
     },
     "settings": {
       "enabled": true,
@@ -584,7 +615,24 @@
       "rules": [],
       "listen": false,
       "wakeWordRequired": false,
-      "removeConfirm": "confirm"
+      "removeConfirm": "confirm",
+      "persona": {
+        "id": "default",
+        "name": "Buddy",
+        "personality": "",
+        "bubbleStyle": "speech",
+        "images": {},
+        "source": "default",
+        "avatar": { "kind": "still" },
+        "motion": { "intensity": 0.45, "sleepAfterSeconds": 180, "breathing": true },
+        "reactions": {}
+      },
+      "autoChat": {
+        "mode": "off",
+        "greetings": { "enabled": false, "templates": [] },
+        "answers": { "enabled": false, "cooldownSeconds": 20 },
+        "banter": { "enabled": false, "cooldownSeconds": 240 }
+      }
     },
     "state": {
       "sessionId": "session-fixture",
@@ -647,7 +695,7 @@
       "reason": "gateway-error",
       "detail": {
         "code": "ai-gateway-error",
-        "message": "The Orcle tick failed on every configured model.",
+        "message": "The Buddy tick failed on every configured model.",
         "status": 502
       },
       "questions": [],
@@ -668,7 +716,7 @@
       "reason": "network",
       "detail": {
         "code": "timeout",
-        "message": "Orcle did not answer within 12 s.",
+        "message": "Buddy did not answer within 12 s.",
         "status": null
       },
       "questions": [],
@@ -790,7 +838,7 @@
       "listening": {
         "state": "blocked",
         "reasonCode": "listen-monthly-quota-exhausted",
-        "message": "Orcle's listening allowance for this month is used up.",
+        "message": "Buddy's listening allowance for this month is used up.",
         "remainingSeconds": 0
       },
       "topic": "Mechanical keyboards",
@@ -1043,7 +1091,7 @@
       "questionsTotal": 0,
       "command": {
         "id": "cmd-11111111-1111-4111-8111-111111111111",
-        "heard": "orcle highlight the comment from coders",
+        "heard": "buddy highlight the comment from coders",
         "kind": "highlight",
         "status": "ambiguous",
         "message": "Which comment? Say 'the first one' or press 1 or 2.",
@@ -1462,5 +1510,453 @@
         }
       ]
     }
+  },
+  "overlayLayout": {
+    "defaults": {
+      "highlight": {
+        "horizontal": { "x": 0.0225, "y": 0.7, "w": 0.6, "h": 0.26 },
+        "vertical": { "x": 0.071111, "y": 0.58, "w": 0.78, "h": 0.2 },
+        "showOnStream": true,
+        "showInRecording": true
+      },
+      "captions": {
+        "horizontal": { "x": 0.04, "y": 0.8, "w": 0.92, "h": 0.16 },
+        "vertical": { "x": 0.12, "y": 0.64, "w": 0.76, "h": 0.14 },
+        "showOnStream": false,
+        "showInRecording": false
+      },
+      "buddy": {
+        "horizontal": { "x": 0.7975, "y": 0.64, "w": 0.18, "h": 0.32 },
+        "vertical": { "x": 0.608889, "y": 0.6, "w": 0.32, "h": 0.18 },
+        "showOnStream": false,
+        "showInRecording": false
+      }
+    },
+    "placed": {
+      "highlight": {
+        "horizontal": { "x": 0.05, "y": 0.05, "w": 0.4, "h": 0.2 },
+        "vertical": { "x": 0.1, "y": 0.1, "w": 0.8, "h": 0.15 },
+        "showOnStream": true,
+        "showInRecording": false
+      },
+      "captions": {
+        "horizontal": { "x": 0.04, "y": 0.8, "w": 0.92, "h": 0.16 },
+        "vertical": { "x": 0.12, "y": 0.64, "w": 0.76, "h": 0.14 },
+        "showOnStream": true,
+        "showInRecording": true
+      },
+      "buddy": {
+        "horizontal": { "x": 0.1, "y": 0.2, "w": 0.25, "h": 0.2 },
+        "vertical": { "x": 0.6, "y": 0.6, "w": 0.32, "h": 0.18 },
+        "showOnStream": false,
+        "showInRecording": true
+      }
+    }
+  },
+  "buddyPets": {
+    "summary": {
+      "packId": "0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a",
+      "name": "Synthetic Pip",
+      "cellSize": 640,
+      "gazeCount": 25,
+      "reactions": ["laugh", "surprised", "talk-a", "talk-b", "wave"],
+      "source": "page-pet-import",
+      "hasTalk": true
+    },
+    "bundledSummary": {
+      "packId": "bundled:buddy",
+      "name": "Buddy",
+      "cellSize": 640,
+      "gazeCount": 25,
+      "reactions": ["laugh"],
+      "source": "videorc-creator",
+      "hasTalk": false
+    },
+    "importParams": { "folderToken": "default/pets/0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a" },
+    "removeParams": { "packId": "0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a" },
+    "reactParams": { "reaction": "laugh" },
+    "reactAccepted": { "reaction": "laugh" }
+  },
+  "buddyPetCreator": {
+    "status": {
+      "creation": {
+        "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
+        "step": "build",
+        "createdAt": "2026-10-09T10:00:00Z",
+        "expiresAt": "2026-10-10T10:00:00Z",
+        "expired": false,
+        "sheetsAllowed": 9,
+        "redosAllowed": 6,
+        "pilotsAllowed": 3,
+        "sheetsRemaining": 7,
+        "redosRemaining": 6,
+        "pilotsUsed": 1,
+        "reference": {
+          "sheet": "reference",
+          "version": 1,
+          "file": "sources/reference-v1.png",
+          "sha256": "3b4e0f6a9c2d1e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f",
+          "opaque": false,
+          "createdAt": "2026-10-09T10:00:05Z"
+        },
+        "notes": {
+          "palette": ["stone grey", "moss green"],
+          "materials": ["granite"],
+          "proportions": "Short legs, a heavy round body and a small head.",
+          "asymmetric": [{ "feature": "a crack over the eye", "side": "left" }]
+        },
+        "pilot": {
+          "sheet": "pilot",
+          "version": 1,
+          "file": "sources/pilot-v1.png",
+          "sha256": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+          "opaque": false,
+          "referenceVersion": 1,
+          "createdAt": "2026-10-09T10:01:00Z"
+        },
+        "pilotAccepted": true,
+        "sheets": [
+          {
+            "sheet": "gaze-up2",
+            "version": 1,
+            "file": "sources/gaze-up2-v1.png",
+            "sha256": "aa11bb22cc33dd44ee55ff6600112233445566778899aabbccddeeff00112233",
+            "opaque": false,
+            "referenceVersion": 1,
+            "createdAt": "2026-10-09T10:03:00Z"
+          },
+          {
+            "sheet": "gaze-up1",
+            "version": 2,
+            "file": "sources/gaze-up1-v2.png",
+            "sha256": "aa11bb22cc33dd44ee55ff6600112233445566778899aabbccddeeff00112233",
+            "opaque": true,
+            "referenceVersion": 1,
+            "createdAt": "2026-10-09T10:05:00Z"
+          }
+        ],
+        "build": {
+          "state": "failed",
+          "fresh": false,
+          "finishedAt": "2026-10-09T10:06:00Z",
+          "error": {
+            "code": "margin-too-small",
+            "message": "gaze-up1, gaze-0-1: the pose needs more room than the cell gives (4.5 px of margin, 8 needed); the builder never shrinks a pose. Generate the sheet again with the pose closer to the body",
+            "sheet": "gaze-up1",
+            "cell": "gaze-0-1"
+          }
+        },
+        "running": { "job": "sheet", "sheet": "gaze-level" }
+      }
+    },
+    "statusNone": { "creation": null },
+    "identityParams": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90", "reference": { "kind": "persona-idle" } },
+    "identityUploadParams": {
+      "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
+      "reference": { "kind": "upload", "imageBase64": "iVBORw0KGgo=" }
+    },
+    "sheetParams": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90", "kind": "gaze", "row": "level", "redo": true },
+    "pilotParams": {
+      "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
+      "kind": "pilot",
+      "redo": false,
+      "notes": {
+          "palette": ["stone grey", "moss green"],
+          "materials": ["granite"],
+          "proportions": "Short legs, a heavy round body and a small head.",
+          "asymmetric": [{ "feature": "a crack over the eye", "side": "left" }]
+        }
+    },
+    "buildParams": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90" },
+    "saveParams": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90", "name": "Pebble" },
+    "accepted": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90", "sheet": "gaze-level" },
+    "identityRead": { "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90", "notes": {
+          "palette": ["stone grey", "moss green"],
+          "materials": ["granite"],
+          "proportions": "Short legs, a heavy round body and a small head.",
+          "asymmetric": [{ "feature": "a crack over the eye", "side": "left" }]
+        } },
+    "sheetGenerated": {
+      "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
+      "sheet": "gaze-level",
+      "version": 2,
+      "opaque": false,
+      "sheetsRemaining": 6,
+      "redosRemaining": 5
+    },
+    "sheetFailed": {
+      "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
+      "sheet": "pilot",
+      "opaque": false,
+      "error": {
+        "code": "pet-pilot-daily-limit",
+        "message": "Today's pilots are used up. Try again tomorrow."
+      }
+    },
+    "buildProgress": {
+      "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
+      "step": "cutting",
+      "sheet": "gaze-up2",
+      "done": 1,
+      "total": 19
+    },
+    "buildFailed": {
+      "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
+      "step": "failed",
+      "sheet": "gaze-up1",
+      "cell": "gaze-0-1",
+      "done": 0,
+      "total": 0,
+      "error": "gaze-up1, gaze-0-1: the cell is empty",
+      "code": "cell-empty"
+    },
+    "savedPack": {
+      "packId": "7d3c9b2a-1e4f-4a6b-8c5d-9e0f1a2b3c4d",
+      "name": "Pebble",
+      "cellSize": 640,
+      "gazeCount": 25,
+      "reactions": [
+        "laugh", "surprised", "wink", "kiss", "blink", "sleep",
+        "worried", "annoyed", "proud", "confused", "excited", "calm",
+        "talk-a", "talk-b", "wave"
+      ],
+      "source": "videorc-creator",
+      "hasTalk": true
+    }
+  },
+  "buddyLook": {
+    "createParams": {
+      "description": "A grumpy stone golem with a mossy back",
+      "inspirationBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    },
+    "createDescriptionParams": { "description": "A grumpy stone golem with a mossy back" },
+    "createLibraryParams": {
+      "description": "A grumpy stone golem with a mossy back",
+      "name": "Grum",
+      "personality": "Grumbles, then helps.",
+      "context": "I stream speedruns on Tuesdays."
+    },
+    "redoParams": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8", "state": "laugh" },
+    "requestIdParams": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8" },
+    "accepted": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8" },
+    "progressWorking": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8", "state": "idle", "phase": "working" },
+    "progressDone": {
+      "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8",
+      "state": "talk",
+      "phase": "done",
+      "path": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/talk.png"
+    },
+    "progressFailed": {
+      "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8",
+      "state": "think",
+      "phase": "failed",
+      "error": { "code": "avatar-timeout", "message": "The model took too long. Try again." }
+    },
+    "draft": {
+      "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8",
+      "images": {
+        "idle": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/idle.png",
+        "talk": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/talk.png",
+        "laugh": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/laugh.png"
+      },
+      "failed": {
+        "think": { "code": "ai-gateway-error", "message": "The image model failed. Try again." }
+      }
+    },
+    "status": {
+      "draft": {
+        "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8",
+        "images": {
+          "idle": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/idle.png",
+          "talk": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/talk.png",
+          "laugh": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/laugh.png",
+          "think": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/think.png"
+        },
+        "failed": {}
+      },
+      "running": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8", "kind": "redo", "state": "think" }
+    },
+    "statusNone": {},
+    "libraryDraft": {
+      "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8",
+      "images": {
+        "idle": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/idle.png",
+        "talk": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/talk.png",
+        "laugh": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/laugh.png",
+        "think": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/think.png"
+      },
+      "failed": {},
+      "libraryAvatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51"
+    }
+  },
+  "buddyLibrary": {
+    "signedOut": {
+      "signedIn": false,
+      "official": [
+        {
+          "id": "official:golem",
+          "slug": "golem",
+          "name": "Buddy",
+          "kind": "Golem",
+          "tagline": "The original. Steady as stone.",
+          "personality": "Calm, warm and a little slow to speak. Greets every follower like an old friend and never rushes anyone.",
+          "alive": "none"
+        },
+        {
+          "id": "official:orc",
+          "slug": "orc",
+          "name": "Golmar",
+          "kind": "Orc",
+          "tagline": "Loud, loyal, all horde.",
+          "personality": "Loud, loyal and proud of the horde. Cheers every follower like a battle won and calls the chat his warband.",
+          "alive": "available"
+        },
+        {
+          "id": "official:goblin",
+          "slug": "goblin",
+          "name": "Nib",
+          "kind": "Goblin",
+          "tagline": "Small, sly and in on the joke.",
+          "personality": "Sly, quick and always after a good deal. Loves a joke at the streamer's expense, but never a mean one.",
+          "alive": "available"
+        },
+        {
+          "id": "official:pirate",
+          "slug": "pirate",
+          "name": "Captain Barnacle",
+          "kind": "Pirate",
+          "tagline": "Calls your chat his crew.",
+          "personality": "Booming and theatrical. Calls viewers his crew, new followers new recruits, and every raid a boarding party.",
+          "alive": "available"
+        },
+        {
+          "id": "official:robot",
+          "slug": "robot",
+          "name": "Bolt",
+          "kind": "Robot",
+          "tagline": "Polite, precise, loves a stat.",
+          "personality": "Polite, precise and delighted by every stat. Counts followers out loud and celebrates round numbers.",
+          "alive": "available"
+        }
+      ],
+      "mine": null,
+      "activeAvatarId": "official:golem",
+      "serverActiveAvatarId": null,
+      "limit": 30,
+      "busy": null
+    },
+    "signedIn": {
+      "signedIn": true,
+      "official": [
+        {
+          "id": "official:orc",
+          "slug": "orc",
+          "name": "Golmar",
+          "kind": "Orc",
+          "tagline": "Loud, loyal, all horde.",
+          "personality": "Loud, loyal and proud of the horde. Cheers every follower like a battle won and calls the chat his warband.",
+          "alive": "downloaded"
+        }
+      ],
+      "mine": [
+        {
+          "id": "7c9e6679-7425-40de-944b-e07fc1ee9a51",
+          "name": "Grum",
+          "description": "A grumpy stone golem with a mossy back",
+          "personality": "Grumbles, then helps.",
+          "context": "I stream speedruns on Tuesdays.",
+          "createdAt": "2026-10-09T10:00:00.000Z",
+          "updatedAt": "2026-10-09T10:05:00.000Z",
+          "poses": {
+            "idle": "videorc-asset://buddy/library/7c9e6679-7425-40de-944b-e07fc1ee9a51/idle-0a1b2c3d.png",
+            "talk": "videorc-asset://buddy/library/7c9e6679-7425-40de-944b-e07fc1ee9a51/talk-4e5f6a7b.png",
+            "laugh": null,
+            "think": null
+          },
+          "alive": { "packId": "0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a", "cellSize": 640 }
+        },
+        {
+          "id": "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+          "name": "Pixel",
+          "description": "",
+          "personality": "",
+          "context": "",
+          "createdAt": "2026-10-08T09:00:00.000Z",
+          "updatedAt": "2026-10-08T09:00:00.000Z",
+          "poses": { "idle": null, "talk": null, "laugh": null, "think": null },
+          "alive": null
+        }
+      ],
+      "activeAvatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51",
+      "serverActiveAvatarId": "official:pirate",
+      "limit": 30,
+      "busy": { "kind": "use", "avatarId": "official:pirate" },
+      "error": { "code": "network", "message": "Could not reach Videorc. Check your connection and try again." }
+    },
+    "localOnly": {
+      "signedIn": true,
+      "official": [],
+      "mine": [],
+      "activeAvatarId": null,
+      "serverActiveAvatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51",
+      "limit": 30,
+      "busy": { "kind": "sync" }
+    },
+    "importing": {
+      "signedIn": true,
+      "official": [],
+      "mine": [],
+      "activeAvatarId": null,
+      "serverActiveAvatarId": null,
+      "limit": 30,
+      "busy": { "kind": "import" }
+    },
+    "aliveUpload": {
+      "signedIn": true,
+      "official": [],
+      "mine": [],
+      "activeAvatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51",
+      "serverActiveAvatarId": null,
+      "limit": 30,
+      "busy": { "kind": "alive-upload", "avatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51" }
+    },
+    "aliveDownload": {
+      "signedIn": false,
+      "official": [
+        {
+          "id": "official:golem",
+          "slug": "golem",
+          "name": "Buddy",
+          "kind": "Golem",
+          "tagline": "The original. Steady as stone.",
+          "personality": "Calm, warm and a little slow to speak. Greets every follower like an old friend and never rushes anyone.",
+          "alive": "bundled"
+        },
+        {
+          "id": "official:orc",
+          "slug": "orc",
+          "name": "Golmar",
+          "kind": "Orc",
+          "tagline": "Loud, loyal, all horde.",
+          "personality": "Loud, loyal and proud of the horde. Cheers every follower like a battle won and calls the chat his warband.",
+          "alive": "available"
+        }
+      ],
+      "mine": null,
+      "activeAvatarId": "official:orc",
+      "serverActiveAvatarId": null,
+      "limit": 30,
+      "busy": { "kind": "alive-download", "avatarId": "official:orc" }
+    },
+    "syncParams": { "reason": "deep-link" },
+    "useParams": { "avatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51" },
+    "useOfficialParams": { "avatarId": "official:goblin" },
+    "updateParams": {
+      "avatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51",
+      "name": "Grum",
+      "context": ""
+    },
+    "deleteParams": { "avatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51" },
+    "accepted": { "accepted": true }
   }
 }

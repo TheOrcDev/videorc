@@ -27,7 +27,7 @@ import { inspectPcm16Wav } from './audio-amplitude.mjs'
  *   Default keeps the first and last segment.
  * - `monthlySecondsLimit`, `remainingSeconds`: the metered allowance.
  * - `cohostCommandEnabled`: `features.cohostCommandEnabled` (plan 140 S8,
- *   contract part E). Default false: Orcle's cloud command parser stays off.
+ *   contract part E). Default false: Buddy's cloud command parser stays off.
  *   `state.cohostCommandEnabled` changes the next capability read.
  *
  * Knobs on `state`: `chunkFailureCode` answers every chunk upload with that
@@ -207,7 +207,7 @@ export async function startFakeTranscriptService({
   monthlySecondsLimit = 72_000,
   remainingSeconds = null,
   // Plan 140 S9: `features.cohostCommandEnabled` in the capabilities block.
-  // Off by default, so Orcle's cloud command parser stays off in every smoke
+  // Off by default, so Buddy's cloud command parser stays off in every smoke
   // that does not opt in (`state.cohostCommandEnabled` flips it later).
   cohostCommandEnabled = false
 }) {

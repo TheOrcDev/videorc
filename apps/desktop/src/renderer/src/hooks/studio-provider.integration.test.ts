@@ -4,7 +4,11 @@ import {
   hydrateCommentsSnapshot,
   reconcileBrokerCommentsSnapshot
 } from '../../../shared/comments-snapshot-delta'
-import type { CommentsSnapshotDelta, CommentsViewSnapshot } from '../../../shared/backend'
+import type {
+  CommentsSnapshotDelta,
+  CommentsViewSnapshot,
+  OverlayLayout
+} from '../../../shared/backend'
 import { SCENE_LIBRARY_KEY, WORKING_SCENE_KEY, sameSceneVisual } from '../lib/scene-presets'
 import { act, createElement, useEffect, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -84,6 +88,7 @@ import type {
   VideorcApi
 } from '../../../shared/backend'
 import { resolveStreamOutputTopologyRequest } from '@/lib/go-live-output'
+import { DEFAULT_OVERLAY_LAYOUT } from '@/lib/overlay-layout'
 import { BackgroundAssetsProvider } from './use-background-assets'
 import { useFrameSource } from './use-frame-source'
 import { useStudioMicVisualSource } from './use-studio-mic-sources'
@@ -443,6 +448,7 @@ class StudioBackend {
   sessionListNextCursor: string | undefined
   sessionHealthEvents: HealthEvent[] = []
   sessionLogs: SessionLogEntry[] = []
+  overlayLayout: OverlayLayout = DEFAULT_OVERLAY_LAYOUT
   cohostSettings: CohostSettings = {
     enabled: true,
     tone: 'friendly',
@@ -452,7 +458,24 @@ class StudioBackend {
     rules: [],
     listen: false,
     wakeWordRequired: false,
-    removeConfirm: 'confirm'
+    removeConfirm: 'confirm',
+    persona: {
+      id: 'default',
+      name: 'Buddy',
+      personality: '',
+      bubbleStyle: 'speech',
+      images: {},
+      source: 'default',
+      avatar: { kind: 'still' },
+      motion: { intensity: 0.45, sleepAfterSeconds: 180, breathing: true },
+      reactions: {}
+    },
+    autoChat: {
+      mode: 'off',
+      greetings: { enabled: false, templates: [] },
+      answers: { enabled: false, cooldownSeconds: 20 },
+      banter: { enabled: false, cooldownSeconds: 240 }
+    }
   }
   cohostState: CohostState = {
     sessionId: null,
@@ -618,6 +641,11 @@ class StudioBackend {
         return signedInAccount
       case 'account.sign_out':
         return { status: 'signed-out' }
+      case 'overlays.layout.get':
+        return this.overlayLayout
+      case 'overlays.layout.set':
+        this.overlayLayout = params as OverlayLayout
+        return this.overlayLayout
       case 'cohost.settings.get':
         return this.cohostSettings
       case 'cohost.settings.set':
@@ -7801,7 +7829,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(toastSpies.error).not.toHaveBeenCalled()
   }, 15_000)
 
-  it('applies cloud-AI preference flips to the same active Orcle session from backend replies', async () => {
+  it('applies cloud-AI preference flips to the same active Buddy session from backend replies', async () => {
     const backend = new StudioBackend()
     backend.entitlements = premiumEntitlements
     backend.cohostSettings.listen = true
@@ -7973,10 +8001,10 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()?.chat.cohostState?.status).toBe('paused')
   }, 15_000)
 
-  // Plan 119 S2: Orcle Live is one switch. On asks for cloud-AI consent first
-  // (the Orcle tab's dialog), then writes chat AND listening in ONE save; off
+  // Plan 119 S2: Buddy Live is one switch. On asks for cloud-AI consent first
+  // (the Buddy tab's dialog), then writes chat AND listening in ONE save; off
   // writes `enabled` alone. Cloud AI is its own choice and never rewrites them.
-  async function mountOrcleLiveProvider(consent: '0' | '1'): Promise<{
+  async function mountBuddyLiveProvider(consent: '0' | '1'): Promise<{
     backend: StudioBackend
     latest: () => StudioObservation | undefined
     settingsWrites: () => unknown[]
@@ -8022,25 +8050,25 @@ describe('real StudioProvider lifecycle', () => {
     }
   }
 
-  it('turns Orcle Live on only through the consent dialog, then in one save with listening', async () => {
-    const { latest, settingsWrites } = await mountOrcleLiveProvider('0')
+  it('turns Buddy Live on only through the consent dialog, then in one save with listening', async () => {
+    const { latest, settingsWrites } = await mountBuddyLiveProvider('0')
 
-    await act(async () => latest()!.core.setOrcleLive(true))
-    await waitForObservation(() => latest()?.core.orcleConsentRequested === true)
+    await act(async () => latest()!.core.setBuddyLive(true))
+    await waitForObservation(() => latest()?.core.buddyConsentRequested === true)
     // Asking writes nothing: no consent and no settings until the answer.
     expect(settingsWrites()).toEqual([])
     expect(localStorage.getItem('videorc.aiConsent')).toBe('0')
 
-    await act(async () => latest()!.core.answerOrcleConsent(true))
+    await act(async () => latest()!.core.answerBuddyConsent(true))
     await waitForObservation(() => latest()?.core.cohostSettings?.enabled === true)
-    expect(latest()!.core.orcleConsentRequested).toBe(false)
+    expect(latest()!.core.buddyConsentRequested).toBe(false)
     expect(latest()!.core.aiConsent).toBe(true)
     expect(localStorage.getItem('videorc.aiConsent')).toBe('1')
     expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
     expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: true })
 
     // Off is `enabled` alone: listening and consent stay as they were.
-    await act(async () => latest()!.core.setOrcleLive(false))
+    await act(async () => latest()!.core.setBuddyLive(false))
     await waitForObservation(() => latest()?.core.cohostSettings?.enabled === false)
     expect(settingsWrites()).toEqual([{ enabled: true, listen: true }, { enabled: false }])
     expect(latest()!.core.cohostSettings?.listen).toBe(true)
@@ -8048,13 +8076,13 @@ describe('real StudioProvider lifecycle', () => {
     expect(toastSpies.error).not.toHaveBeenCalled()
   }, 15_000)
 
-  it('changes nothing when the Orcle Live consent dialog is declined', async () => {
-    const { latest, settingsWrites } = await mountOrcleLiveProvider('0')
+  it('changes nothing when the Buddy Live consent dialog is declined', async () => {
+    const { latest, settingsWrites } = await mountBuddyLiveProvider('0')
 
-    await act(async () => latest()!.core.setOrcleLive(true))
-    await waitForObservation(() => latest()?.core.orcleConsentRequested === true)
-    await act(async () => latest()!.core.answerOrcleConsent(false))
-    await waitForObservation(() => latest()?.core.orcleConsentRequested === false)
+    await act(async () => latest()!.core.setBuddyLive(true))
+    await waitForObservation(() => latest()?.core.buddyConsentRequested === true)
+    await act(async () => latest()!.core.answerBuddyConsent(false))
+    await waitForObservation(() => latest()?.core.buddyConsentRequested === false)
 
     expect(latest()!.core.aiConsent).toBe(false)
     expect(localStorage.getItem('videorc.aiConsent')).toBe('0')
@@ -8062,18 +8090,18 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()!.core.cohostSettings?.enabled).toBe(false)
   }, 15_000)
 
-  it('turns Orcle Live on without a dialog once cloud AI is allowed', async () => {
-    const { latest, settingsWrites } = await mountOrcleLiveProvider('1')
+  it('turns Buddy Live on without a dialog once cloud AI is allowed', async () => {
+    const { latest, settingsWrites } = await mountBuddyLiveProvider('1')
 
-    await act(async () => latest()!.core.setOrcleLive(true))
+    await act(async () => latest()!.core.setBuddyLive(true))
     await waitForObservation(() => latest()?.core.cohostSettings?.enabled === true)
-    expect(latest()!.core.orcleConsentRequested).toBe(false)
+    expect(latest()!.core.buddyConsentRequested).toBe(false)
     expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
   }, 15_000)
 
-  it('revokes cloud AI without rewriting Orcle settings, and asks again on the next on', async () => {
-    const { latest, settingsWrites } = await mountOrcleLiveProvider('1')
-    await act(async () => latest()!.core.setOrcleLive(true))
+  it('revokes cloud AI without rewriting Buddy settings, and asks again on the next on', async () => {
+    const { latest, settingsWrites } = await mountBuddyLiveProvider('1')
+    await act(async () => latest()!.core.setBuddyLive(true))
     await waitForObservation(() => latest()?.core.cohostSettings?.enabled === true)
 
     await act(async () => latest()!.core.setAiConsent(false))
@@ -8082,14 +8110,14 @@ describe('real StudioProvider lifecycle', () => {
     expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
     expect(latest()!.core.cohostSettings?.enabled).toBe(true)
 
-    await act(async () => latest()!.core.setOrcleLive(true))
-    await waitForObservation(() => latest()?.core.orcleConsentRequested === true)
+    await act(async () => latest()!.core.setBuddyLive(true))
+    await waitForObservation(() => latest()?.core.buddyConsentRequested === true)
     expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
   }, 15_000)
 
-  it('applies the same Orcle Live save to every Comments-window way on', async () => {
+  it('applies the same Buddy Live save to every Comments-window way on', async () => {
     const { latest, settingsWrites, emitApi, pushCohostEnableResult } =
-      await mountOrcleLiveProvider('0')
+      await mountBuddyLiveProvider('0')
 
     // The consent CTA: grant consent and turn on in the same click.
     await act(async () => {
@@ -8123,13 +8151,13 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 3)
     expect(settingsWrites().at(-1)).toEqual({ enabled: true, listen: true })
     expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: true })
-    expect(latest()!.core.orcleConsentRequested).toBe(false)
+    expect(latest()!.core.buddyConsentRequested).toBe(false)
   }, 15_000)
 
   // Stop never starts a cloud job on its own: a streamed, recorded session
-  // Orcle heard finalizes with its transcript, and only the cloud-AI
+  // Buddy heard finalizes with its transcript, and only the cloud-AI
   // readiness reads go out.
-  it('starts no cloud job when a streamed recording Orcle heard finalizes', async () => {
+  it('starts no cloud job when a streamed recording Buddy heard finalizes', async () => {
     // Cloud AI reads ready, so only a missing trigger keeps a job from going out.
     class CloudReadyBackend extends StudioBackend {
       override response(command: BackendCommand): unknown {
@@ -8201,7 +8229,7 @@ describe('real StudioProvider lifecycle', () => {
         await Promise.resolve()
       })
     }
-    // Everything a post-recording job could key on: Orcle heard the stream,
+    // Everything a post-recording job could key on: Buddy heard the stream,
     // the transcript landed, and the MP4 finalized.
     await emit('liveChat.snapshot', {
       sessionId: 'pack-1',

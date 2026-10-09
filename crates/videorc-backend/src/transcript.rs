@@ -1,8 +1,8 @@
 //! The `<recording>.srt` transcript as timed cues (plan 119 S1).
 //!
-//! Live captions and Orcle listening write one `.srt` next to the finished
+//! Live captions and Buddy listening write one `.srt` next to the finished
 //! recording (`captions.rs`). Everything that reads it back (clip moments,
-//! the Orcle report, Clean cut's re-timed captions) shares this
+//! the Buddy report, Clean cut's re-timed captions) shares this
 //! parser so a cue means the same thing everywhere.
 
 /// One caption cue from a live-captions `.srt` (kept with timing for

@@ -132,7 +132,7 @@ export function SessionMarkersDialog({
         if (!open) onClose()
       }}
     >
-      <DialogContent className="max-h-[90vh] sm:max-w-3xl" data-slot="session-markers-dialog">
+      <DialogContent className="max-h-[90vh] sm:max-w-3xl" data-testid="session-markers-dialog">
         <DialogHeader>
           <DialogTitle>Markers · {session.title || 'Untitled session'}</DialogTitle>
           <DialogDescription>
@@ -206,7 +206,7 @@ export function SessionMarkersDialog({
             {!markers.length && !loading && !error ? (
               <p className="py-5 text-center text-xs text-muted-foreground">
                 No markers yet. During capture, type /marker [title] in Stream Manager or say
-                “Orcle, make a marker here for [title]”.
+                “Buddy, make a marker here for [title]”.
               </p>
             ) : null}
           </div>

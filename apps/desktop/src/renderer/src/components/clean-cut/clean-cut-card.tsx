@@ -85,13 +85,13 @@ function errorMessage(error: unknown): string | undefined {
 }
 
 /**
- * The Orcle tab's Clean cut tab (plan 119 S14, S19; plan 150 S7), in Settings'
+ * The Buddy tab's Clean cut tab (plan 119 S14, S19; plan 150 S7), in Settings'
  * two columns: Clean cut (the "every recording" switch, the monthly allowance
  * and, when it can't run, the one reason why) beside Recordings (the chosen
  * recording's cut with what to do next). Locked means disabled with one
  * reason: the switch and "Make a clean cut" are off while the reason shows;
  * the picker stays, because cuts already made stay reviewable. Starting needs the same sign-in, Premium and Cloud
- * AI consent as Orcle Live; consent is asked here, in a dialog that names
+ * AI consent as Buddy Live; consent is asked here, in a dialog that names
  * the audio upload.
  */
 export function CleanCutCard({
@@ -252,7 +252,7 @@ export function CleanCutCard({
       <PanelSection
         action={
           minutesLeft ? (
-            <Badge data-slot="clean-cut-minutes" variant="outline">
+            <Badge data-testid="clean-cut-minutes" variant="outline">
               {minutesLeft}
             </Badge>
           ) : null
@@ -274,7 +274,7 @@ export function CleanCutCard({
         </Field>
 
         {unlock ? (
-          <Alert data-slot="clean-cut-unlock">
+          <Alert data-testid="clean-cut-unlock">
             <LockIcon />
             <AlertTitle className="font-normal text-muted-foreground">{unlock.reason}</AlertTitle>
             {unlockAction ? (
@@ -362,7 +362,7 @@ export function CleanCutCard({
               {condensedBlocked && condensed && !condensed.eligible ? (
                 <GroupedList>
                   <ListRow
-                    data-slot="clean-cut-status"
+                    data-testid="clean-cut-status"
                     data-status="unavailable"
                     icon={<ClipIcon aria-hidden className="text-muted-foreground" />}
                     interactive={false}
@@ -371,7 +371,7 @@ export function CleanCutCard({
                   />
                 </GroupedList>
               ) : status.kind === 'failed' && job ? (
-                <Alert data-slot="clean-cut-status" data-status="failed" variant="destructive">
+                <Alert data-testid="clean-cut-status" data-status="failed" variant="destructive">
                   <AlertIcon />
                   <AlertTitle>
                     {mode === 'condensed' ? 'The condensed cut failed' : 'The clean cut failed'}
@@ -406,7 +406,7 @@ export function CleanCutCard({
                         selectedFacts(selected)
                       )
                     }
-                    data-slot="clean-cut-status"
+                    data-testid="clean-cut-status"
                     data-status={status.kind}
                     icon={<StatusGlyph kind={status.kind} />}
                     interactive={false}
@@ -564,7 +564,7 @@ function StatusActions({
   )
 }
 
-// As Orcle Live's line: on is a choice, not a health state, so only
+// As Buddy Live's line: on is a choice, not a health state, so only
 // attention takes a colour.
 const AUTO_TONE: Record<CleanCutAutoStatus['kind'], string> = {
   off: 'tone-neutral',

@@ -175,12 +175,12 @@ describe('CommentRow: Talking about this', () => {
         onHighlight: () => undefined
       })
     )
-    expect(markup).toContain('data-slot="cohost-comment-spotlight"')
+    expect(markup).toContain('data-testid="cohost-comment-spotlight"')
     expect(markup).toContain('Talking about this')
     expect(markup).toContain('data-spotlight="true"')
     expect(markup).toContain('bg-accent')
-    // One Orcle mark at a time: the pull-up wins over the suggestion.
-    expect(markup).not.toContain('data-slot="cohost-comment-suggested"')
+    // One Buddy mark at a time: the pull-up wins over the suggestion.
+    expect(markup).not.toContain('data-testid="cohost-comment-suggested"')
   })
 
   it('never pulls up a flagged comment, and stays quiet without a spotlight', () => {
@@ -220,7 +220,7 @@ describe('CommentRow: member tint (plan 154)', () => {
       expect(markup).toContain('bg-member/8')
       expect(markup).toContain('data-member="true"')
       expect(markup).toContain('data-row-tint="member"')
-      expect(markup).toContain('data-slot="comment-role"')
+      expect(markup).toContain('data-testid="comment-role"')
       expect(markup).toContain('>Member<')
       expect(markup).not.toContain('bg-accent')
       expect(markup).not.toContain('bg-warning/10')
@@ -381,7 +381,7 @@ describe('CommentRow: Remove from chat (plan 140, S6)', () => {
         })
       })
     )
-    const chip = /<span[^>]*data-slot="removal-status"[^>]*>([^<]*)<\/span>/.exec(markup)
+    const chip = /<span[^>]*data-testid="removal-status"[^>]*>([^<]*)<\/span>/.exec(markup)
     expect(chip?.[0]).toContain('data-removal="hidden"')
     expect(chip?.[0]).toContain(
       'title="Hidden in Videorc. Viewers on YouTube still see it. YouTube quota is paused."'
@@ -389,7 +389,7 @@ describe('CommentRow: Remove from chat (plan 140, S6)', () => {
     expect(chip?.[1]).toBe('Hidden in Videorc')
     // The body keeps its muted line-through; the chip is not inside it.
     expect(markup).toContain('line-through')
-    expect(markup.indexOf('data-slot="removal-status"')).toBeLessThan(
+    expect(markup.indexOf('data-testid="removal-status"')).toBeLessThan(
       markup.indexOf('line-through')
     )
   })

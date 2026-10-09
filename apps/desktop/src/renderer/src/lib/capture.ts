@@ -486,8 +486,10 @@ export const STORAGE_KEYS = {
   outputChosenByUser: 'videorc.outputChosenByUser',
   // The Settings tab used last (plan 064), so Settings reopens where it was left.
   settingsTab: 'videorc.settingsTab',
-  // The Orcle tab's own tab used last (plan 150), so Orcle reopens where it was left.
-  orcleTab: 'videorc.orcleTab'
+  // The Buddy tab's own tab used last (plan 150), so Buddy reopens where it was left.
+  // The stored key keeps its old name (plan 170 D22): renaming it would
+  // forget every saved Buddy sub-tab.
+  buddyTab: 'videorc.orcleTab'
 } as const
 
 // Permissions onboarding: ANY stored value means "seen/dismissed" — the gate

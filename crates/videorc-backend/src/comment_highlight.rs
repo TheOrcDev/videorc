@@ -12,10 +12,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use crate::captions::{CaptionOverlayPosition, OverlayHorizontal, OverlayPlacement};
+use crate::captions::{OverlayFallbackPlacement, OverlayPlacement};
 use crate::live_chat::HighlightMessageEligibility;
 #[cfg(test)]
 use crate::live_chat::{LiveChatEventType, LiveChatMessage};
+use crate::overlay_layout::{OverlayItem, OverlayRect, OverlaySnap};
 use crate::protocol::CompositorState;
 use crate::state::AppState;
 
@@ -80,23 +81,15 @@ pub enum CommentHighlightAnchor {
 
 impl From<CommentHighlightAnchor> for OverlayPlacement {
     fn from(anchor: CommentHighlightAnchor) -> Self {
-        let (vertical, horizontal) = match anchor {
-            CommentHighlightAnchor::TopLeft => {
-                (CaptionOverlayPosition::Top, OverlayHorizontal::Left)
-            }
-            CommentHighlightAnchor::TopRight => {
-                (CaptionOverlayPosition::Top, OverlayHorizontal::Right)
-            }
-            CommentHighlightAnchor::BottomLeft => {
-                (CaptionOverlayPosition::Bottom, OverlayHorizontal::Left)
-            }
-            CommentHighlightAnchor::BottomRight => {
-                (CaptionOverlayPosition::Bottom, OverlayHorizontal::Right)
-            }
-        };
+        Self::new(None, anchor)
+    }
+}
+
+impl From<CommentHighlightAnchor> for OverlayFallbackPlacement {
+    fn from(anchor: CommentHighlightAnchor) -> Self {
         Self {
-            vertical,
-            horizontal,
+            item: OverlayItem::Highlight,
+            snap: OverlaySnap::from(anchor),
         }
     }
 }
@@ -112,11 +105,18 @@ pub struct SetCommentHighlightParams {
     /// `"position": "top"`, which is accepted and ignored.
     #[serde(default)]
     pub anchor: CommentHighlightAnchor,
+    /// The highlight rect for the horizontal canvas (plan 164 overlay
+    /// layout). Missing => the `anchor` corner snap.
+    #[serde(default)]
+    pub rect: Option<OverlayRect>,
     /// The same card rasterized for the vertical simulcast leg's portrait
     /// canvas (see `comments.highlight.canvases`). Missing => the vertical leg
     /// streams without the card; ignored when the session has no vertical leg.
     #[serde(default)]
     pub vertical_png_base64: Option<String>,
+    /// The highlight rect for the vertical leg. Missing => the `anchor` snap.
+    #[serde(default)]
+    pub vertical_rect: Option<OverlayRect>,
     #[cfg(test)]
     #[serde(skip)]
     preparation_blocker: Option<CommentHighlightPreparationBlocker>,
@@ -294,7 +294,29 @@ fn next_generation(generation: u64) -> u64 {
 }
 
 fn emit_state(state: &AppState, highlight: &CommentHighlightState) {
+    // Plan 168 S-C3: the Buddy looks at the card while it shows (the card's
+    // rect per leg reaches the animator with every frame).
+    state.buddy_sprite.notify(match highlight.phase {
+        CommentHighlightPhase::Live => crate::buddy_animator::BuddyAnimatorEvent::HighlightLive {
+            ttl_seconds: highlight_ttl_seconds(highlight),
+        },
+        CommentHighlightPhase::Idle | CommentHighlightPhase::Failed => {
+            crate::buddy_animator::BuddyAnimatorEvent::HighlightIdle
+        }
+    });
     state.emit_event("comments.highlight.status", highlight.clone());
+}
+
+/// Seconds the live card has left, from its `expires_at` (the full TTL when
+/// that is missing or unreadable).
+fn highlight_ttl_seconds(highlight: &CommentHighlightState) -> f64 {
+    highlight
+        .expires_at
+        .as_deref()
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .map(|at| (at.with_timezone(&Utc) - Utc::now()).num_milliseconds() as f64 / 1000.0)
+        .filter(|seconds| *seconds > 0.0)
+        .unwrap_or(COMMENT_HIGHLIGHT_TTL.as_secs_f64())
 }
 
 pub async fn comment_highlight_status(state: &AppState) -> CommentHighlightState {
@@ -461,7 +483,7 @@ fn install_validated_highlight(
     crate::captions::install_prepared_caption_overlay(
         &state.highlight_overlay,
         prepared.horizontal,
-        params.anchor,
+        OverlayPlacement::new(params.rect, params.anchor),
     );
     // A replacement without a vertical raster must not leave the previous
     // card on the vertical leg.
@@ -470,7 +492,7 @@ fn install_validated_highlight(
             crate::captions::install_prepared_caption_overlay(
                 &state.simulcast_highlight_overlay,
                 vertical,
-                params.anchor,
+                OverlayPlacement::new(params.vertical_rect, params.anchor),
             );
         }
         None => {
@@ -618,8 +640,9 @@ pub(crate) async fn invalidate_comment_highlight_for_compositor_non_live(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::captions::CaptionOverlayPosition;
     use tokio::sync::broadcast;
 
     use crate::live_chat::LiveChatMessageFragment;
@@ -702,7 +725,9 @@ mod tests {
             message_id: "session-1:x:x-target:message-1".to_string(),
             png_base64: TEST_PNG.to_string(),
             anchor: CommentHighlightAnchor::default(),
+            rect: None,
             vertical_png_base64: None,
+            vertical_rect: None,
             preparation_blocker: None,
             commit_blocker: None,
         }
@@ -758,34 +783,21 @@ mod tests {
     }
 
     #[test]
-    fn anchors_map_to_corner_placements() {
-        for (anchor, vertical, horizontal) in [
-            (
-                CommentHighlightAnchor::TopLeft,
-                CaptionOverlayPosition::Top,
-                OverlayHorizontal::Left,
-            ),
-            (
-                CommentHighlightAnchor::TopRight,
-                CaptionOverlayPosition::Top,
-                OverlayHorizontal::Right,
-            ),
-            (
-                CommentHighlightAnchor::BottomLeft,
-                CaptionOverlayPosition::Bottom,
-                OverlayHorizontal::Left,
-            ),
+    fn anchors_map_to_corner_snaps() {
+        for (anchor, snap) in [
+            (CommentHighlightAnchor::TopLeft, OverlaySnap::TopLeft),
+            (CommentHighlightAnchor::TopRight, OverlaySnap::TopRight),
+            (CommentHighlightAnchor::BottomLeft, OverlaySnap::BottomLeft),
             (
                 CommentHighlightAnchor::BottomRight,
-                CaptionOverlayPosition::Bottom,
-                OverlayHorizontal::Right,
+                OverlaySnap::BottomRight,
             ),
         ] {
             assert_eq!(
-                OverlayPlacement::from(anchor),
-                OverlayPlacement {
-                    vertical,
-                    horizontal
+                OverlayFallbackPlacement::from(anchor),
+                OverlayFallbackPlacement {
+                    item: OverlayItem::Highlight,
+                    snap,
                 }
             );
         }
@@ -812,7 +824,15 @@ mod tests {
         let overlay = crate::captions::current_caption_overlay(&state.highlight_overlay).unwrap();
         assert_eq!(
             overlay.placement,
-            OverlayPlacement::from(CommentHighlightAnchor::BottomRight)
+            OverlayPlacement::new(None, CommentHighlightAnchor::BottomRight)
+        );
+        assert_eq!(
+            overlay.blit_rect(1920, 1080),
+            crate::overlay_layout::overlay_snap_rect(
+                OverlayItem::Highlight,
+                crate::overlay_layout::OverlayOrientation::Horizontal,
+                OverlaySnap::BottomRight
+            )
         );
     }
 
@@ -837,7 +857,7 @@ mod tests {
             .expect("vertical card installed");
         assert_eq!(
             vertical.placement,
-            OverlayPlacement::from(CommentHighlightAnchor::TopRight)
+            OverlayPlacement::new(None, CommentHighlightAnchor::TopRight)
         );
 
         // A replacement without a vertical raster must not leave the old card
@@ -1080,6 +1100,24 @@ mod tests {
             );
             state.recording.lock().await.take();
         }
+    }
+
+    /// A card live on a stream session through the real `set` path (the
+    /// Buddy's animator tests watch the pet look at it, plan 168 S-C3).
+    pub(crate) async fn install_live_highlight_for_test(state: &AppState) -> CommentHighlightState {
+        state.compositor.lock().await.status.state = CompositorState::Live;
+        {
+            let mut chat = state.live_chat.lock().await;
+            chat.start_session("session-1".to_string(), Vec::new());
+            chat.ingest(message(LiveChatEventType::Message, false));
+        }
+        let mut active = crate::recording::test_active_recording_stub("session-1");
+        active.mode = "record+stream".to_string();
+        active.comment_highlight_available = true;
+        *state.recording.lock().await = Some(active);
+        let status = set_comment_highlight(state, params()).await.unwrap();
+        assert_eq!(status.phase, CommentHighlightPhase::Live);
+        status
     }
 
     #[tokio::test]

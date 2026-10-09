@@ -3,3 +3,6 @@ target
 vendor
 apps/desktop/out
 apps/desktop/release
+# Built Buddy pet packs: byte-exact builder output, pinned by size and SHA-256
+# in the official catalog (plan 172 D4).
+apps/desktop/resources/buddy/*/

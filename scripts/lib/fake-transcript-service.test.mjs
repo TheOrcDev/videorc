@@ -193,7 +193,7 @@ describe('fake transcript service', () => {
         assert.equal(capabilities.cleanCut.remainingSeconds, 5)
         assert.deepEqual(capabilities.cleanCut.modes, ['clean', 'condensed'])
         assert.equal(capabilities.cleanCut.workflowKind, 'post-recording-clean-cut')
-        // Plan 140 S9: Orcle's cloud command parser is off unless a smoke opts in.
+        // Plan 140 S9: Buddy's cloud command parser is off unless a smoke opts in.
         assert.equal(capabilities.features.cohostCommandEnabled, false)
         assert.equal(capabilities.limits.dailyCommandCalls, 300)
         fake.state.cohostCommandEnabled = true

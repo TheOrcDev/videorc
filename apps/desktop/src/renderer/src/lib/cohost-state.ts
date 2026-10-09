@@ -1,4 +1,6 @@
 import type {
+  CohostAutoChat,
+  CohostAutoChatRelayPatch,
   CohostErrorDetail,
   CohostQuestion,
   CohostReason,
@@ -11,12 +13,38 @@ import type {
 // of the eager renderer bundle.
 
 /**
- * Orcle Live's one switch (plan 119): on means Orcle reads chat AND hears you,
- * in one save; off only stops Orcle joining and leaves listening as it was.
- * The Orcle tab and every Comments-window way on write this one patch.
+ * Buddy Live's one switch (plan 119): on means Buddy reads chat AND hears you,
+ * in one save; off only stops Buddy joining and leaves listening as it was.
+ * The Buddy tab and every Comments-window way on write this one patch.
  */
-export function orcleLiveSettingsPatch(on: boolean): CohostSettingsPatch {
+export function buddyLiveSettingsPatch(on: boolean): CohostSettingsPatch {
   return on ? { enabled: true, listen: true } : { enabled: false }
+}
+
+/** The stored `autoChat` when none has been loaded yet: everything off. */
+export const DEFAULT_COHOST_AUTO_CHAT: CohostAutoChat = {
+  mode: 'off',
+  greetings: { enabled: false, templates: [] },
+  answers: { enabled: false, cooldownSeconds: 20 },
+  banter: { enabled: false, cooldownSeconds: 240 }
+}
+
+/**
+ * The Stream Manager's mode control and behaviour switches (plan 164 S-D6)
+ * change only those fields: the templates and cooldowns the Buddy tab holds
+ * ride along unchanged, so the save never drops them.
+ */
+export function mergeAutoChatRelayPatch(
+  current: CohostAutoChat | null,
+  patch: CohostAutoChatRelayPatch
+): CohostAutoChat {
+  const base = current ?? DEFAULT_COHOST_AUTO_CHAT
+  return {
+    mode: patch.mode ?? base.mode,
+    greetings: { ...base.greetings, enabled: patch.greetings ?? base.greetings.enabled },
+    answers: { ...base.answers, enabled: patch.answers ?? base.answers.enabled },
+    banter: { ...base.banter, enabled: patch.banter ?? base.banter.enabled }
+  }
 }
 
 /**
@@ -78,20 +106,20 @@ export function cohostErrorToastKey(state: CohostState | null): string | null {
 }
 
 export const COHOST_ERROR_TOAST_MESSAGES: Record<CohostReason, string> = {
-  'premium-required': 'Orcle stopped: Videorc Premium is required.',
-  'consent-required': 'Orcle stopped: cloud AI consent is off.',
-  'session-expired': 'Orcle stopped: your Videorc sign-in expired.',
-  'signed-out': 'Orcle stopped: sign in to Videorc to use it.',
-  'quota-exhausted': 'Orcle paused: daily AI quota is used up.',
-  'server-unconfigured': 'Orcle stopped: Videorc AI is unavailable right now.',
-  network: 'Orcle stopped: no connection to Videorc AI.',
-  'gateway-error': 'Orcle stopped: Videorc AI returned an error.'
+  'premium-required': 'Buddy stopped: Videorc Premium is required.',
+  'consent-required': 'Buddy stopped: cloud AI consent is off.',
+  'session-expired': 'Buddy stopped: your Videorc sign-in expired.',
+  'signed-out': 'Buddy stopped: sign in to Videorc to use it.',
+  'quota-exhausted': 'Buddy paused: daily AI quota is used up.',
+  'server-unconfigured': 'Buddy stopped: Videorc AI is unavailable right now.',
+  network: 'Buddy stopped: no connection to Videorc AI.',
+  'gateway-error': 'Buddy stopped: Videorc AI returned an error.'
 }
 
 /**
  * Toast copy with the server's words attached:
- * "Orcle stopped: Videorc AI returned an error (ai-gateway-error: The
- * Orcle tick failed on every configured model)." The HTTP status stays in
+ * "Buddy stopped: Videorc AI returned an error (ai-gateway-error: The
+ * Buddy tick failed on every configured model)." The HTTP status stays in
  * the chip tooltip — a toast is read in a second, not debugged.
  */
 export function cohostErrorToastMessage(
@@ -130,8 +158,8 @@ export function cohostErrorToast(
  * reason and no toast.
  */
 export const COHOST_STOPPED_TOAST_MESSAGES: Partial<Record<CohostReason, string>> = {
-  'premium-required': 'Orcle stopped. Premium ended.',
-  'signed-out': 'Orcle stopped. You signed out.'
+  'premium-required': 'Buddy stopped. Premium ended.',
+  'signed-out': 'Buddy stopped. You signed out.'
 }
 
 /**

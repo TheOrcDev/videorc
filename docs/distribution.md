@@ -440,7 +440,7 @@ How the boundary is enforced (since 2026-07-05 there is no runtime unlock):
   hydrates a verified premium entitlement. No environment variable can raise
   the tier — `VIDEORC_PREMIUM_FEATURES` is downgrade-only: `=0`/`basic` forces
   Basic (for exercising the gates), every other value is ignored with a
-  warning. The tier changes cloud AI, live captions, Orcle, and Noise
+  warning. The tier changes cloud AI, live captions, Buddy, and Noise
   Cleanup; the streaming quality ceiling and the destination cap are the same
   shared numbers for every tier and are pipeline limits, not plan gates.
 - **The premium entitlement is a signed proof**, not a boolean: videorc.com

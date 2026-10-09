@@ -9,7 +9,7 @@ import {
 // Co-host presence (W2). One pure derivation of `cohost.state` that every
 // surface renders: the Comments window header, the pane's segment header and
 // the Studio session panel. Presence is UNCONDITIONAL — a null or off-shaped
-// state is a state ("Orcle off"), never an absence.
+// state is a state ("Buddy off"), never an absence.
 //
 // Color discipline (videorc-design): the live accent is earned ONLY by an
 // engine that is actually listening; destructive red ONLY by a real error.
@@ -105,23 +105,23 @@ function presenceLabel(
 ): string {
   switch (kind) {
     case 'off':
-      return 'Orcle off'
+      return 'Buddy off'
     case 'starting':
-      return 'Orcle starting'
+      return 'Buddy starting'
     case 'reading': {
       const pending = nonNegative(state?.pendingMessages)
-      return `Orcle · reading ${pending} new…`
+      return `Buddy · reading ${pending} new…`
     }
     case 'thinking':
-      return 'Orcle · thinking…'
+      return 'Buddy · thinking…'
     case 'listening':
-      return openCount > 0 ? `Orcle · ${openCount} q` : 'Orcle is reading chat'
+      return openCount > 0 ? `Buddy · ${openCount} q` : 'Buddy is reading chat'
     case 'paused': {
       const reason = cohostReasonLabel(state?.reason ?? null)
-      return reason ? `Orcle paused · ${reason}` : 'Orcle paused'
+      return reason ? `Buddy paused · ${reason}` : 'Buddy paused'
     }
     case 'error':
-      return 'Orcle error'
+      return 'Buddy error'
   }
 }
 
@@ -133,10 +133,10 @@ function presenceTooltip(
 ): string[] {
   const lines: string[] = []
   if (kind === 'off') {
-    lines.push('Orcle is off. It reads live chat, groups questions and drafts replies.')
+    lines.push('Buddy is off. It reads live chat, groups questions and drafts replies.')
   }
   if (kind === 'starting') {
-    lines.push('Orcle is starting. Waiting for the first pass.')
+    lines.push('Buddy is starting. Waiting for the first pass.')
   }
 
   const lastPass = cohostAgoLabel(state?.lastTickAt ?? null, nowMs)
@@ -157,7 +157,7 @@ function presenceTooltip(
 
   if (state?.partial === true) lines.push('Chat outran one AI pass; the newest messages were used.')
 
-  // Whether Orcle hears the streamer (plan 068): a sentence, never a second dot.
+  // Whether Buddy hears the streamer (plan 068): a sentence, never a second dot.
   const listening = cohostListeningView(state?.listening)
   if (listening) lines.push(listening.detail)
 
@@ -211,7 +211,7 @@ export function cohostEmptyStateCopy(view: CohostPresenceView, state: CohostStat
   if (view.kind === 'thinking') return 'Thinking about the last batch…'
   if (view.kind === 'listening') return 'Reading chat. Questions will appear here.'
   if (view.kind === 'starting') return 'Starting. Questions from chat will appear here.'
-  return 'Questions from chat will appear here once Orcle is reading chat again.'
+  return 'Questions from chat will appear here once Buddy is reading chat again.'
 }
 
 /**

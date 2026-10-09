@@ -41,7 +41,7 @@ import { Kbd } from '@/components/ui/kbd'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type { CleanCutClient } from '@/hooks/use-clean-cut'
-import { useOrcleReport } from '@/hooks/use-orcle-report'
+import { useBuddyReport } from '@/hooks/use-buddy-report'
 import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
 import type { ClipMomentSource, CleanCutEdl, CleanCutJob, CleanCutMode } from '@/lib/backend'
 import {
@@ -258,7 +258,7 @@ export function CleanCutReview({
     () => new Map(effective.map((removal) => [removal.id, removal])),
     [effective]
   )
-  const report = useOrcleReport(target.sessionId)
+  const report = useBuddyReport(target.sessionId)
   const pins = useMemo(() => cleanCutPins(report.payload?.moments), [report.payload])
   const condensedMode = data?.job.mode === 'condensed'
   const durationMs = data?.edl.durationMs ?? 0
@@ -490,7 +490,7 @@ export function CleanCutReview({
       <header className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-border px-gutter py-1.5">
         <Button size="sm" type="button" variant="ghost" onClick={close}>
           <ArrowLeftIcon data-icon="inline-start" />
-          Orcle
+          Buddy
         </Button>
         <div className="flex min-w-0 flex-1 items-baseline gap-2">
           <h2 className="truncate text-[13px] font-semibold text-foreground" title={title}>
@@ -752,7 +752,7 @@ function ReviewPlaceholder({
   }
   const waiting = load.kind === 'waiting'
   return (
-    <Empty className="flex-1 gap-1 p-6" data-slot="clean-cut-review-waiting">
+    <Empty className="flex-1 gap-1 p-6" data-testid="clean-cut-review-waiting">
       <EmptyHeader>
         <EmptyTitle className="text-sm">
           {load.kind === 'loading'
@@ -766,7 +766,7 @@ function ReviewPlaceholder({
             ? 'Reading the cut list and the transcript.'
             : waiting && load.job
               ? 'The review opens when the cut list is ready.'
-              : 'Make one from the Orcle tab.'}
+              : 'Make one from the Buddy tab.'}
         </EmptyDescription>
       </EmptyHeader>
     </Empty>
@@ -786,7 +786,7 @@ function KindChips({
     <ToggleGroup
       aria-label="Kinds of cuts"
       className="flex-wrap"
-      data-slot="clean-cut-chips"
+      data-testid="clean-cut-chips"
       size="sm"
       spacing={1}
       type="multiple"

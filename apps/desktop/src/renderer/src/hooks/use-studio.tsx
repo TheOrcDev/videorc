@@ -132,6 +132,17 @@ import {
   type WsStatus
 } from '@/lib/capture'
 import {
+  burnTargetFromOverlaySwitches,
+  seedCaptionsSwitchesFromBurnTarget
+} from '@/lib/captions-output'
+import {
+  DEFAULT_OVERLAY_LAYOUT,
+  overlayLayoutsEqual,
+  overlayOrientationForCanvas,
+  overlaySnapRect
+} from '@/lib/overlay-layout'
+import { buddyOverlayKey, buddyOverlayTargetPlan } from '@/lib/buddy-overlay-targets'
+import {
   autoApplyPreset,
   isShippedDefaultOutput,
   isUntrustedPerformanceCheckResult,
@@ -220,12 +231,15 @@ import type {
   CohostFlagParams,
   CohostPromiseParams,
   CohostQuestion,
+  CohostSayParams,
+  CohostUtteranceParams,
   CohostQuestionParams,
   CohostRecapParams,
   CohostSettings,
   CohostSettingsPatch,
   CohostState,
   CohostWindowState,
+  BuddyOverlaySnapshot,
   CommentHighlightAnchor,
   CommentHighlightCanvases,
   CommentHighlightCommand,
@@ -353,6 +367,8 @@ import type {
   YouTubeChannel,
   YouTubeQuotaStatus,
   YouTubeStreamStatusResult,
+  OverlayLayout,
+  OverlayRect,
   SetCommentHighlightParams,
   ViewerSample
 } from '@/lib/backend'
@@ -403,7 +419,8 @@ import {
   cohostErrorToast,
   cohostHighlightMessageId,
   cohostStoppedToast,
-  orcleLiveSettingsPatch
+  mergeAutoChatRelayPatch,
+  buddyLiveSettingsPatch
 } from '@/lib/cohost-state'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import { upsertNoiseCleanupJob } from '@/lib/noise-cleanup-jobs'
@@ -485,6 +502,7 @@ type CaptionOverlayWork = {
     target: 'primary' | 'auxiliary'
     canvasWidth: number
     canvasHeight: number
+    rect?: OverlayRect
   }>
   styleId: CaptionStyleId
   styleRevision: number
@@ -531,6 +549,11 @@ function loadCaptionOverlay() {
   return import('@/lib/caption-overlay')
 }
 
+// The Buddy's bubble rasterizer: lazy, never in the eager shell.
+function loadBuddyOverlay() {
+  return import('@/lib/buddy-overlay')
+}
+
 // Steady-state telemetry (surface counters, diagnostics stats) commits to
 // React state at most once a second. Every commit re-renders the entire
 // StudioContext tree, and in dev each of those renders also feeds React's
@@ -539,6 +562,8 @@ function loadCaptionOverlay() {
 // still commit immediately via the significant-change fast path.
 const TELEMETRY_UI_COMMIT_INTERVAL_MS = 1000
 const SIGNED_IN_ENTITLEMENT_REFRESH_INTERVAL_MS = 5 * 60_000
+/** Window focus syncs the Buddy library at most this often (plan 170 D12). */
+const BUDDY_LIBRARY_FOCUS_SYNC_MS = 60_000
 // Main and the renderer hear the idle status on separate sockets. A short settle
 // keeps the post-capture replay from racing Main into a second deferral.
 const ACCOUNT_REFRESH_IDLE_REPLAY_DELAY_MS = 1_000
@@ -1129,21 +1154,28 @@ export type StudioContextValue = {
   /** Live Chat Co-host (Premium): persisted settings + approve/dismiss actions.
    * `cohostState` itself lives on the chat context with the chat snapshot. */
   cohostSettings: CohostSettings | null
+  /** Overlay layout (plan 164): where the highlight card, captions and the
+   * Buddy sit per orientation and which outputs carry them. Backend-owned. */
+  overlayLayout: OverlayLayout
+  setOverlayLayout: (layout: OverlayLayout) => Promise<void>
+  /** The Buddy on stream (plan 164 Phase C): which state shows and the bubble
+   * that is up (`cohost.buddy.state`); null until the backend reported. */
+  buddyOverlay: BuddyOverlaySnapshot | null
   cohostGate: EntitlementUiGate
   cohostActionPending: boolean
   patchCohostSettings: (patch: CohostSettingsPatch) => Promise<void>
   /**
-   * Orcle Live's one switch (plan 119). On without cloud-AI consent only
-   * raises `orcleConsentRequested` (the Orcle tab's consent dialog) and writes
+   * Buddy Live's one switch (plan 119). On without cloud-AI consent only
+   * raises `buddyConsentRequested` (the Buddy tab's consent dialog) and writes
    * nothing; on with consent writes `{enabled: true, listen: true}` in one
    * `cohost.settings.set`; off writes `{enabled: false}`.
    */
-  setOrcleLive: (on: boolean) => Promise<void>
-  /** The consent dialog Orcle Live asked for is waiting for an answer. */
-  orcleConsentRequested: boolean
-  /** Accept: grant cloud-AI consent, then the one Orcle Live patch. Decline:
+  setBuddyLive: (on: boolean) => Promise<void>
+  /** The consent dialog Buddy Live asked for is waiting for an answer. */
+  buddyConsentRequested: boolean
+  /** Accept: grant cloud-AI consent, then the one Buddy Live patch. Decline:
    * close the dialog and change nothing. */
-  answerOrcleConsent: (accepted: boolean) => Promise<void>
+  answerBuddyConsent: (accepted: boolean) => Promise<void>
   markCohostQuestionAnswered: (questionId: string, sessionId?: string) => void
   dismissCohostQuestion: (questionId: string, sessionId?: string) => void
   /** Put a voice-resolved question back (`cohost.question.restore`, plan 060 D9). */
@@ -2582,6 +2614,72 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     await openCaptionsWindow()
   }, [captionsWindow.open, closeCaptionsWindow, openCaptionsWindow])
   const [commentsWindow, setCommentsWindow] = useState<CommentsWindowState>(idleCommentsWindowState)
+  // Overlay layout (plan 164): backend-owned, loaded on connect and pushed
+  // to every window on change. A ref feeds the highlight and caption pushes
+  // so a placement applies to the very next raster without re-creating the
+  // relay listeners.
+  const [overlayLayout, setOverlayLayoutState] = useState<OverlayLayout>(DEFAULT_OVERLAY_LAYOUT)
+  const overlayLayoutRef = useRef<OverlayLayout>(DEFAULT_OVERLAY_LAYOUT)
+  overlayLayoutRef.current = overlayLayout
+  const commitOverlayLayout = useCallback((next: OverlayLayout) => {
+    setOverlayLayoutState((current) => (overlayLayoutsEqual(current, next) ? current : next))
+  }, [])
+  // The layout itself: loaded on connect, pushed on change (`overlays.layout`).
+  useEffect(() => {
+    if (!client || wsStatus !== 'connected') return
+    let cancelled = false
+    void client
+      .requestTyped('overlays.layout.get')
+      .then((layout) => {
+        if (!cancelled) commitOverlayLayout(layout)
+      })
+      // An older backend has no such method (or answers off-contract); the
+      // shipped defaults stand.
+      .catch(() => undefined)
+    const off = client.on('overlays.layout', commitOverlayLayout)
+    return () => {
+      cancelled = true
+      off()
+    }
+  }, [client, commitOverlayLayout, wsStatus])
+  const setOverlayLayout = useCallback(
+    async (layout: OverlayLayout): Promise<void> => {
+      if (!client) throw new Error('Backend socket is not connected.')
+      const saved = await client.requestTyped('overlays.layout.set', layout)
+      commitOverlayLayout(saved)
+    },
+    [client, commitOverlayLayout]
+  )
+  // Captions keep `burnTarget` on the wire, derived from the captions item's
+  // two switches (plan 164, D14). The first layout after the update is
+  // seeded once from a saved target that was on, so nobody loses it.
+  const captionsSwitchesKey = `${overlayLayout.captions.showOnStream}:${overlayLayout.captions.showInRecording}`
+  const captionsSeedRef = useRef<string | null>(null)
+  const captionsBurnTargetRef = useRef(captureConfig.captions.burnTarget)
+  captionsBurnTargetRef.current = captureConfig.captions.burnTarget
+  useEffect(() => {
+    if (!client || wsStatus !== 'connected') return
+    const savedTarget = captionsBurnTargetRef.current
+    const seeded =
+      captionsSeedRef.current === null
+        ? seedCaptionsSwitchesFromBurnTarget(overlayLayout.captions, savedTarget)
+        : null
+    captionsSeedRef.current = captionsSwitchesKey
+    if (seeded) {
+      void setOverlayLayout({ ...overlayLayoutRef.current, captions: seeded }).catch(() => {})
+      return
+    }
+    const derived = burnTargetFromOverlaySwitches(overlayLayout.captions)
+    if (derived === savedTarget) return
+    setCaptureConfig((current) =>
+      current.captions.burnTarget === derived
+        ? current
+        : { ...current, captions: { ...current.captions, burnTarget: derived } }
+    )
+    // The layout's switches are the one home; the key keeps this effect on
+    // switch changes (and a saved target arriving) only, never on a rect drag.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, wsStatus, captionsSwitchesKey, captureConfig.captions.burnTarget, setOverlayLayout])
   // The streamer's corner pick lives in main (it must survive the Chat window
   // being closed). A ref, not state, feeds the highlight RPC so a pick applies
   // to the very next highlight without re-creating the relay listeners.
@@ -2589,14 +2687,29 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const moveLiveCommentHighlightRef = useRef<((anchor: CommentHighlightAnchor) => void) | null>(
     null
   )
+  // The Stream Manager corner menu is a SNAP (plan 164, D11): it writes the
+  // highlight rect on both orientations; the layout change then re-sends a
+  // live card. A ref, so the relay listeners below never re-subscribe.
+  const snapHighlightToAnchorRef = useRef<(anchor: CommentHighlightAnchor) => void>(() => {})
+  snapHighlightToAnchorRef.current = (anchor) => {
+    const current = overlayLayoutRef.current
+    void setOverlayLayout({
+      ...current,
+      highlight: {
+        ...current.highlight,
+        horizontal: overlaySnapRect('highlight', 'horizontal', anchor),
+        vertical: overlaySnapRect('highlight', 'vertical', anchor)
+      }
+    }).catch(() => {})
+  }
   useEffect(() => {
     let cancelled = false
     const noteHighlightAnchor = (state: CommentsWindowState, move: boolean): void => {
       const anchor = normalizeCommentHighlightAnchor(state.highlightAnchor)
       if (anchor === commentHighlightAnchorRef.current) return
       commentHighlightAnchorRef.current = anchor
-      // A card already on the stream follows the pick immediately.
-      if (move) moveLiveCommentHighlightRef.current?.(anchor)
+      // A pick writes the layout; the placement effect moves a live card.
+      if (move) snapHighlightToAnchorRef.current(anchor)
     }
     const reconcile = async (): Promise<void> => {
       const fresh = await window.videorc?.getCommentsWindowState?.()
@@ -2813,11 +2926,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (commentHighlightIntentRef.current !== intent) return null
         const { renderCommentHighlightCards } = await loadCaptionOverlay()
         if (commentHighlightIntentRef.current !== intent) return null
+        // The streamer's placement (plan 164): the card wraps to the rect's
+        // width on each canvas and the backend blits it inside that rect.
+        const highlightLayout = overlayLayoutRef.current.highlight
+        const rect =
+          highlightLayout[overlayOrientationForCanvas(streamVideo.width, streamVideo.height)]
+        const verticalRect = highlightLayout.vertical
         const cards = await renderCommentHighlightCards(
           message,
           avatarUrl ?? null,
-          streamVideo,
-          canvases?.vertical
+          { ...streamVideo, rect },
+          canvases?.vertical ? { ...canvases.vertical, rect: verticalRect } : undefined
         )
         if (!cards) throw new Error('Could not render this message for the stream.')
         if (commentHighlightIntentRef.current !== intent) return null
@@ -2827,6 +2946,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             sessionId,
             messageId: message.id,
             anchor: commentHighlightAnchorRef.current,
+            rect,
+            ...(cards.verticalPngBase64 ? { verticalRect } : {}),
             ...cards
           } satisfies SetCommentHighlightParams)
         } catch (error) {
@@ -2888,6 +3009,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [applyCommentHighlight, client, publishCommentHighlightState]
   )
+
+  // Placement changed while a card is live (plan 164): the same re-send.
+  const highlightPlacementKey = JSON.stringify([
+    overlayLayout.highlight.horizontal,
+    overlayLayout.highlight.vertical
+  ])
+  const highlightPlacementSeenRef = useRef(highlightPlacementKey)
+  useEffect(() => {
+    if (highlightPlacementSeenRef.current === highlightPlacementKey) return
+    highlightPlacementSeenRef.current = highlightPlacementKey
+    moveLiveCommentHighlightRef.current?.(commentHighlightAnchorRef.current)
+  }, [highlightPlacementKey])
 
   // Corner changed while a card is live: re-send the same message so it moves.
   // The backend TTL restarts, which suits an adjustment the streamer is watching.
@@ -4020,6 +4153,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // talks to the web.
   const [cohostState, setCohostState] = useState<CohostState | null>(null)
   const [cohostSettings, setCohostSettings] = useState<CohostSettings | null>(null)
+  const [buddyOverlay, setBuddyOverlay] = useState<BuddyOverlaySnapshot | null>(null)
+  const cohostSettingsRef = useRef(cohostSettings)
+  cohostSettingsRef.current = cohostSettings
   const [cohostActionPending, setCohostActionPending] = useState(false)
   const cohostStateRef = useRef<CohostState | null>(null)
   const streamTitleRef = useRef<string | null>(null)
@@ -4062,11 +4198,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     let cancelled = false
     void Promise.all([
       client.request<CohostSettings>('cohost.settings.get').catch(() => null),
-      client.request<CohostState>('cohost.status').catch(() => null)
-    ]).then(([nextSettings, nextState]) => {
+      client.request<CohostState>('cohost.status').catch(() => null),
+      // An older backend has no Buddy overlay (plan 164); the avatar stays off.
+      client.requestTyped('cohost.buddy.status').catch(() => null)
+    ]).then(([nextSettings, nextState, nextBuddy]) => {
       if (cancelled) return
       if (nextSettings) setCohostSettings(nextSettings)
       if (nextState) commitCohostState(nextState)
+      if (nextBuddy) setBuddyOverlay(nextBuddy)
     })
     return () => {
       cancelled = true
@@ -4116,6 +4255,72 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     cohostGate.allowed,
     cohostState?.status
   ])
+  // The Buddy on stream (plan 164 S-C2, plan 168 S-B1). The backend owns the
+  // state and the bubble and draws the pet itself from its atlas; this
+  // renderer rasterizes the bubble only, once per output canvas, and pushes
+  // each PNG into the `buddy_overlay` slot (the backend anchors it above the
+  // pet's head), or clears the slot when the bubble ends. A push happens on
+  // every change of bubble, style, placement or canvas, whether or not a
+  // session runs: the slot is app-global. Latest wins: a stale raster never
+  // lands after a newer state.
+  const buddyPersona = cohostSettings?.persona ?? null
+  const buddyTargetsKey = useMemo(
+    () =>
+      JSON.stringify(
+        buddyOverlayTargetPlan({
+          streamEnabled: captureConfig.streamEnabled,
+          recordingVideo: captureConfig.video,
+          streamVideo: auxiliaryStreamOutputVideoSettings(
+            captureConfig.video,
+            captureConfig.streamEnabled ? captureConfig.streaming : undefined
+          ),
+          verticalLeg: simulcastLegLiveRequest(captureConfig)?.video,
+          layout: overlayLayout.buddy
+        })
+      ),
+    [captureConfig, overlayLayout.buddy]
+  )
+  const buddyPushEpochRef = useRef(0)
+  const buddyPushedKeyRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (wsStatus !== 'connected') buddyPushedKeyRef.current = null
+  }, [wsStatus])
+  useEffect(() => {
+    if (!client || wsStatus !== 'connected' || !buddyPersona) return
+    const targets = JSON.parse(buddyTargetsKey) as ReturnType<typeof buddyOverlayTargetPlan>
+    if (targets.length === 0) return
+    const bubble = buddyOverlay?.bubble?.text ?? null
+    const style = buddyPersona.bubbleStyle
+    const key = buddyOverlayKey({ bubble, style, targets })
+    if (key === buddyPushedKeyRef.current) return
+    const epoch = ++buddyPushEpochRef.current
+    void (async () => {
+      if (bubble === null) {
+        await client.requestTyped('buddy.overlay.clear', {})
+      } else {
+        const buddy = await loadBuddyOverlay()
+        for (const target of targets) {
+          if (epoch !== buddyPushEpochRef.current) return
+          const pngBase64 = await buddy.renderBuddyBubblePng({
+            bubble,
+            style,
+            canvas: { width: target.canvasWidth, height: target.canvasHeight },
+            rect: target.rect
+          })
+          if (!pngBase64 || epoch !== buddyPushEpochRef.current) return
+          await client.requestTyped('buddy.overlay.set', {
+            target: target.target,
+            pngBase64,
+            rect: target.rect
+          })
+        }
+      }
+      if (epoch === buddyPushEpochRef.current) buddyPushedKeyRef.current = key
+    })().catch((error: unknown) => {
+      console.warn(`Buddy overlay: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  }, [client, wsStatus, buddyPersona, buddyOverlay, buddyTargetsKey])
+
   // Start with the live-chat session, and re-assert on a consent flip.
   // The backend applies changed consent in place and returns its confirmed
   // state; unchanged consent is idempotent. It stops itself when chat ends.
@@ -4158,26 +4363,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [client]
   )
 
-  // Orcle Live's one switch (plan 119 S2). Consent comes first: on without it
-  // only asks (the Orcle tab's consent dialog), and nothing is written until
+  // Buddy Live's one switch (plan 119 S2). Consent comes first: on without it
+  // only asks (the Buddy tab's consent dialog), and nothing is written until
   // the streamer accepts. On is one save: chat and listening together.
-  const [orcleConsentRequested, setOrcleConsentRequested] = useState(false)
-  const setOrcleLive = useCallback(
+  const [buddyConsentRequested, setBuddyConsentRequested] = useState(false)
+  const setBuddyLive = useCallback(
     async (on: boolean): Promise<void> => {
       if (on && !aiConsent) {
-        setOrcleConsentRequested(true)
+        setBuddyConsentRequested(true)
         return
       }
-      await patchCohostSettings(orcleLiveSettingsPatch(on))
+      await patchCohostSettings(buddyLiveSettingsPatch(on))
     },
     [aiConsent, patchCohostSettings]
   )
-  const answerOrcleConsent = useCallback(
+  const answerBuddyConsent = useCallback(
     async (accepted: boolean): Promise<void> => {
-      setOrcleConsentRequested(false)
+      setBuddyConsentRequested(false)
       if (!accepted) return
       setAiConsent(true)
-      await patchCohostSettings(orcleLiveSettingsPatch(true))
+      await patchCohostSettings(buddyLiveSettingsPatch(true))
     },
     [patchCohostSettings, setAiConsent]
   )
@@ -4213,13 +4418,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         | 'cohost.promise.dismiss'
         | 'cohost.recap.dismiss'
         | 'cohost.recap.draft'
-        | 'cohost.author.greeted',
+        | 'cohost.author.greeted'
+        | 'cohost.utterance.approve'
+        | 'cohost.utterance.dismiss'
+        | 'cohost.utterance.say',
       params:
         | CohostQuestionParams
         | CohostFlagParams
         | CohostPromiseParams
         | CohostRecapParams
         | CohostAuthorParams
+        | CohostUtteranceParams
+        | CohostSayParams
     ): Promise<CohostState> => {
       if (!client) throw new Error('Backend socket is not connected.')
       setCohostActionPending(true)
@@ -4293,7 +4503,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [toggleCommentHighlight]
   )
 
-  // Orcle's automatic card (plan 060 S1): the ENGINE decides (cadence, roles,
+  // Buddy's automatic card (plan 060 S1): the ENGINE decides (cadence, roles,
   // safety gate, one command per decision with an engine-wide generation) and
   // the renderer only executes it. Always-set semantics: an automatic path
   // must never read a repeat as "un-pin" (the H key keeps its toggle). No
@@ -4334,7 +4544,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     executeCohostAutoHighlightRef.current(cohostAutoHighlightMessageId)
   }, [cohostAutoHighlightGeneration, cohostAutoHighlightMessageId])
 
-  // Plan 156: the Activity auto-show engine. Manual and Orcle cards always
+  // Plan 156: the Activity auto-show engine. Manual and Buddy cards always
   // win — auto only fires into an idle slot with no apply in flight, never
   // un-pins (always-set semantics), and a backlog or History view never
   // replays: the queue reseeds on session change and on switch-on, so only
@@ -4398,6 +4608,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // re-derives Premium or consent, it renders what the main renderer resolved.
   // Presence is unconditional: before the engine reports (or when it is off)
   // the relay carries the off shape, never null.
+  const buddyShowOnStream = overlayLayout.buddy.showOnStream
+  const cohostAutoChat = cohostSettings?.autoChat
   const cohostWindowState = useMemo<CohostWindowState>(
     () => ({
       state: cohostState ?? offCohostState(),
@@ -4406,9 +4618,40 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       upgradeUrl: (cohostGate.allowed ? undefined : cohostGate.upgradeUrl) ?? null,
       consented: aiConsent,
       enabled: cohostEnabled,
-      listen: cohostListen
+      listen: cohostListen,
+      // The Buddy on stream (plan 164 S-C4): the pane's header operates it.
+      ...(buddyPersona
+        ? {
+            buddy: {
+              persona: {
+                id: buddyPersona.id,
+                name: buddyPersona.name,
+                images: buddyPersona.images,
+                bubbleStyle: buddyPersona.bubbleStyle,
+                source: buddyPersona.source,
+                // Plan 168 S-D3: the header's living preview wears the same pack.
+                avatar: buddyPersona.avatar,
+                motion: buddyPersona.motion
+              },
+              state: buddyOverlay?.state ?? 'idle',
+              bubble: buddyOverlay?.bubble?.text ?? null,
+              showOnStream: buddyShowOnStream
+            }
+          }
+        : {}),
+      ...(cohostAutoChat ? { autoChat: cohostAutoChat } : {})
     }),
-    [aiConsent, cohostEnabled, cohostGate, cohostListen, cohostState]
+    [
+      aiConsent,
+      cohostAutoChat,
+      cohostEnabled,
+      cohostGate,
+      cohostListen,
+      cohostState,
+      buddyOverlay,
+      buddyPersona,
+      buddyShowOnStream
+    ]
   )
 
   const cohostWindowStateRef = useRef(cohostWindowState)
@@ -4417,9 +4660,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     void window.videorc?.pushCohostWindowState?.(cohostWindowState)
   }, [cohostWindowState])
 
-  // Orcle Live's one switch from the Comments window (plan 119): its presence
+  // Buddy Live's one switch from the Comments window (plan 119): its presence
   // popover, nudge, consent CTA and one-time listening card. On is the same
-  // single `{enabled: true, listen: true}` save as the Orcle tab (the window
+  // single `{enabled: true, listen: true}` save as the Buddy tab (the window
   // sends `listen: true` too), off only `{enabled: false}`. The settings and
   // cloud-AI consent are main-renderer owned, so the window asks and gets the
   // resolved window state back; its consent CTA grants consent in the click.
@@ -4428,16 +4671,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       void (async () => {
         if (command.grantConsent === true) setAiConsent(true)
         if (!client) throw new Error('Backend socket is not connected.')
-        const next = await client.request<CohostSettings>(
-          'cohost.settings.set',
-          orcleLiveSettingsPatch(command.enabled)
-        )
+        // Plan 164 S-D6: the Stream Manager's mode control and behaviour
+        // switches ride the same save, merged into the stored block so the
+        // templates and cooldowns stay.
+        const autoChat = command.autoChat
+          ? mergeAutoChatRelayPatch(cohostSettingsRef.current?.autoChat ?? null, command.autoChat)
+          : null
+        const next = await client.request<CohostSettings>('cohost.settings.set', {
+          ...buddyLiveSettingsPatch(command.enabled),
+          ...(autoChat ? { autoChat } : {})
+        })
         setCohostSettings(next)
         return {
           ...cohostWindowStateRef.current,
           consented: command.grantConsent === true || cohostWindowStateRef.current.consented,
           enabled: next.enabled,
-          listen: next.listen === true
+          listen: next.listen === true,
+          autoChat: next.autoChat
         } satisfies CohostWindowState
       })()
         .then(async (state) => {
@@ -4451,7 +4701,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           await window.videorc?.pushCohostEnableResult?.({
             requestId: command.requestId,
             ok: false,
-            error: error instanceof Error ? error.message : 'Could not change the Orcle setting.'
+            error: error instanceof Error ? error.message : 'Could not change the Buddy setting.'
           })
         })
     })
@@ -4462,6 +4712,32 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const off = window.videorc?.onCohostActionRequest?.((command: CohostActionCommand) => {
       void (async () => {
         if (!client) throw new Error('Backend socket is not connected.')
+        // The Buddy's own actions (plan 164 S-C4): the Say box and the output
+        // switch. The Say box is one utterance (D7): it posts per the chat
+        // mode when the window named its live session, and bubbles at once
+        // when the Buddy is on some output. The backend owns the bubble.
+        if (command.kind === 'buddy-say') {
+          return runCohostAction('cohost.utterance.say', {
+            ...(command.sessionId ? { sessionId: command.sessionId } : {}),
+            text: command.text,
+            state: command.state
+          })
+        }
+        // Plan 168 S-D3: a reaction chip; the backend plays it on air.
+        if (command.kind === 'buddy-react') {
+          await client.requestTyped('cohost.pet.react', { reaction: command.reaction })
+          return cohostStateRef.current ?? offCohostState()
+        }
+        if (command.kind === 'buddy-show-on-stream') {
+          const current = overlayLayoutRef.current
+          if (current.buddy.showOnStream !== command.showOnStream) {
+            await setOverlayLayout({
+              ...current,
+              buddy: { ...current.buddy, showOnStream: command.showOnStream }
+            })
+          }
+          return cohostStateRef.current ?? offCohostState()
+        }
         if (command.kind === 'dismiss-flag') {
           return runCohostAction('cohost.flag.dismiss', {
             sessionId: command.sessionId,
@@ -4488,6 +4764,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             authorKey: command.targetId
           })
         }
+        // Plan 164 S-D2 / D7: the Buddy's proposed cards and the Say box.
+        if (command.kind === 'approve-utterance' || command.kind === 'dismiss-utterance') {
+          return runCohostAction(
+            command.kind === 'approve-utterance'
+              ? 'cohost.utterance.approve'
+              : 'cohost.utterance.dismiss',
+            { sessionId: command.sessionId, utteranceId: command.targetId }
+          )
+        }
+        if (command.kind === 'say-utterance') {
+          return runCohostAction('cohost.utterance.say', {
+            sessionId: command.sessionId,
+            text: command.text ?? '',
+            ...(command.state ? { state: command.state } : {})
+          })
+        }
         const method =
           command.kind === 'answered'
             ? 'cohost.question.answered'
@@ -4510,12 +4802,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           await window.videorc?.pushCohostActionResult?.({
             requestId: command.requestId,
             ok: false,
-            error: error instanceof Error ? error.message : 'Orcle action failed.'
+            error: error instanceof Error ? error.message : 'Buddy action failed.'
           })
         })
     })
     return off
-  }, [client, runCohostAction])
+  }, [client, runCohostAction, setOverlayLayout])
 
   const refreshAiReadinessForClient = useCallback(
     async (
@@ -6064,7 +6356,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       .catch(() => undefined)
     // Chat removals (plan 140, S6): a lazy chunk keeps the live session's
     // removal ledger, relays the Stream Manager's Remove from chat and card
-    // answers, and mirrors an open Orcle card as a toast while the Stream
+    // answers, and mirrors an open Buddy card as a toast while the Stream
     // Manager is closed. Events that arrive first wait for it.
     let moderation: typeof chatModerationRef.current = null
     let stopCohostCommandRelay: (() => void) | null = null
@@ -6072,7 +6364,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     void import('@/lib/chat-moderation-relay')
       .then(({ startChatModerationRelay, startCohostCommandRelay }) => {
         if (!generationIsCurrent()) return
-        // Plan 140, S6 part B: the Stream Manager's answers to Orcle's cards.
+        // Plan 140, S6 part B: the Stream Manager's answers to Buddy's cards.
         stopCohostCommandRelay = startCohostCommandRelay({
           client: nextClient,
           sessionId: () => liveChatSnapshotRef.current.sessionId,
@@ -6957,6 +7249,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
       nextClient.on('cohost.state', (payload) => {
         commitCohostState(payload as CohostState)
+      }),
+      nextClient.on('cohost.buddy.state', (payload) => {
+        setBuddyOverlay(payload as BuddyOverlaySnapshot)
+      }),
+      // Plan 170 D12: a library job (use, sync, keep, delete) can change the
+      // Buddy in the backend; the persona and notes are read again when it ends.
+      nextClient.on('cohost.library.changed', (library) => {
+        if (library.busy !== null) return
+        void nextClient
+          .requestTyped('cohost.settings.get')
+          .then((next) => setCohostSettings(next))
+          .catch(() => undefined)
       }),
       // Clip that (plan 068 D6): one toast per mark, whether it came from a
       // spoken phrase, a shortcut, a deck key, or the Stream Manager.
@@ -7896,6 +8200,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     refreshEntitlementsForClient,
     wsStatus
   ])
+
+  // Plan 170 D12: the Buddy library follows the account when the window is
+  // focused, at most once a minute (the Buddy tab also syncs as it opens; the
+  // backend syncs at launch and never applies a choice while live). A sync the
+  // backend refuses changes nothing; the Buddy tab shows the library's state.
+  const buddyLibrarySyncAtRef = useRef(0)
+  const buddyLibrarySignedIn = account?.status === 'signed-in'
+  useEffect(() => {
+    if (!client || wsStatus !== 'connected' || !buddyLibrarySignedIn) return
+    const syncOnFocus = (): void => {
+      const now = Date.now()
+      if (now - buddyLibrarySyncAtRef.current < BUDDY_LIBRARY_FOCUS_SYNC_MS) return
+      buddyLibrarySyncAtRef.current = now
+      void client.requestTyped('cohost.library.sync', { reason: 'focus' }).catch(() => undefined)
+    }
+    window.addEventListener('focus', syncOnFocus)
+    return () => window.removeEventListener('focus', syncOnFocus)
+  }, [client, buddyLibrarySignedIn, wsStatus])
 
   // Main defers account maintenance while capture is active. When the session
   // goes idle, replay exactly one deferred refresh so a purchase or avatar
@@ -10868,12 +11190,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         canvasWidth: output.canvasWidth,
         canvasHeight: output.canvasHeight,
         textSize: work.textSize,
-        styleId: work.styleId
+        styleId: work.styleId,
+        maxBarWidthPx: output.rect ? Math.floor(output.rect.w * output.canvasWidth) : undefined
       })
       if (!pngBase64 || work.epoch !== captionOverlayEpochRef.current) return
       await work.client.request('captions.overlay.set', {
         pngBase64,
         position: work.position,
+        ...(output.rect ? { rect: output.rect } : {}),
         target: output.target,
         styleRevision: work.styleRevision
       })
@@ -10959,20 +11283,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       streamEnabled: captureConfig.streamEnabled,
       recordingVideo: captureConfig.video,
       streamVideo,
-      verticalLeg: simulcastLegLiveRequest(captureConfig)?.video
+      verticalLeg: simulcastLegLiveRequest(captureConfig)?.video,
+      captionsLayout: overlayLayout.captions
     })
     const candidateKey = latest
       ? outputs
-          .map((output) =>
-            captionOverlayKey(latest, {
-              styleId: captureConfig.captions.styleId,
-              styleRevision: captureConfig.captions.styleRevision,
-              position: captureConfig.captions.position,
-              textSize: captureConfig.captions.textSize,
-              canvasWidth: output.canvasWidth,
-              canvasHeight: output.canvasHeight,
-              outputLeg: output.target
-            })
+          .map(
+            (output) =>
+              captionOverlayKey(latest, {
+                styleId: captureConfig.captions.styleId,
+                styleRevision: captureConfig.captions.styleRevision,
+                position: captureConfig.captions.position,
+                textSize: captureConfig.captions.textSize,
+                canvasWidth: output.canvasWidth,
+                canvasHeight: output.canvasHeight,
+                outputLeg: output.target
+              }) + (output.rect ? `@${JSON.stringify(output.rect)}` : '')
           )
           .join('|')
       : undefined
@@ -11015,7 +11341,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       outputs: outputs.map((output) => ({
         target: output.target,
         canvasWidth: output.canvasWidth,
-        canvasHeight: output.canvasHeight
+        canvasHeight: output.canvasHeight,
+        ...(output.rect ? { rect: output.rect } : {})
       })),
       styleId: captureConfig.captions.styleId,
       styleRevision: captureConfig.captions.styleRevision,
@@ -11031,7 +11358,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captureConfig.recordEnabled,
     captureConfig.video,
     captureConfig.streamEnabled,
-    captureConfig.streaming
+    captureConfig.streaming,
+    overlayLayout.captions
   ])
 
   // Silence expiry belongs to the current line, not to a render attempt. Every
@@ -15175,12 +15503,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       commentHighlightFailure,
       toggleCommentHighlight,
       cohostSettings,
+      overlayLayout,
+      setOverlayLayout,
+      buddyOverlay,
       cohostGate,
       cohostActionPending,
       patchCohostSettings,
-      setOrcleLive,
-      orcleConsentRequested,
-      answerOrcleConsent,
+      setBuddyLive,
+      buddyConsentRequested,
+      answerBuddyConsent,
       markCohostQuestionAnswered,
       dismissCohostQuestion,
       restoreCohostQuestion,
@@ -15406,12 +15737,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       commentHighlightFailure,
       toggleCommentHighlight,
       cohostSettings,
+      overlayLayout,
+      setOverlayLayout,
+      buddyOverlay,
       cohostGate,
       cohostActionPending,
       patchCohostSettings,
-      setOrcleLive,
-      orcleConsentRequested,
-      answerOrcleConsent,
+      setBuddyLive,
+      buddyConsentRequested,
+      answerBuddyConsent,
       markCohostQuestionAnswered,
       dismissCohostQuestion,
       restoreCohostQuestion,

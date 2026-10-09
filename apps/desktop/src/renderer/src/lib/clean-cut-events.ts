@@ -1,8 +1,8 @@
 import type { CleanCutMode } from './backend'
 
-// The one way into Clean cut from outside the Orcle tab (plan 119 S14, S15):
+// The one way into Clean cut from outside the Buddy tab (plan 119 S14, S15):
 // the ready toast and the Library dispatch this, and app-shell opens the
-// Orcle tab on it. Kept tiny because app-shell is on the eager path.
+// Buddy tab on it. Kept tiny because app-shell is on the eager path.
 
 export const OPEN_CLEAN_CUT_EVENT = 'videorc:open-clean-cut'
 
@@ -16,7 +16,7 @@ export interface CleanCutOpenRequest {
   review?: boolean
 }
 
-/** What app-shell hands the Orcle tab; a new nonce re-applies the same ask. */
+/** What app-shell hands the Buddy tab; a new nonce re-applies the same ask. */
 export type CleanCutTabRequest = CleanCutOpenRequest & { nonce: number }
 
 export function openCleanCut(request: CleanCutOpenRequest): void {

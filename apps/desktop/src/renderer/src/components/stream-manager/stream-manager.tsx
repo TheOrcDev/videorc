@@ -17,6 +17,8 @@ import {
 import { toast } from '@/lib/toast'
 
 import { CohostListenPrompt, CohostPane } from '@/components/cohost-pane'
+import { BuddyChatControls } from '@/components/stream-manager/buddy-chat-controls'
+import { BuddyUtteranceCards } from '@/components/stream-manager/buddy-utterance-cards'
 import { CohostListeningIndicator, CohostStatus } from '@/components/cohost-status'
 import { ActivityPane } from '@/components/stream-manager/activity-pane'
 import {
@@ -33,11 +35,16 @@ import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useTrafficLightGutter } from '@/components/window-frame'
 import type {
+  CohostAutoChat,
+  CohostAutoChatRelayPatch,
   CohostFlag,
   CohostPromise,
   CohostQuestion,
   CohostSayHi,
   CohostState,
+  CohostUtteranceState,
+  CohostWindowBuddy,
+  CohostUtterance,
   CommentHighlightAnchor,
   CommentHighlightState,
   CommentsHistoryStats,
@@ -94,7 +101,7 @@ import {
   CommandStrip,
   type CommandAnswer
 } from '@/components/stream-manager/command-cards'
-import { commandChooserView, commandConfirmView, commandStripView } from '@/lib/orcle-command-view'
+import { commandChooserView, commandConfirmView, commandStripView } from '@/lib/buddy-command-view'
 import {
   removalPaneView,
   removeFromChatAvailable,
@@ -111,7 +118,7 @@ import { latestModerationOperationByMessage } from '../../../../shared/chat-mode
  * here, not imported: importing that module moves it into the chunk this
  * window shares with the main window and grows the main window's eager bytes.
  */
-const ORCLE_SHORTCUT = /Macintosh/.test(globalThis.navigator?.userAgent ?? '') ? '⌘J' : 'Ctrl+J'
+const BUDDY_SHORTCUT = /Macintosh/.test(globalThis.navigator?.userAgent ?? '') ? '⌘J' : 'Ctrl+J'
 
 const NO_MODERATION_OPERATIONS: readonly ModerationOperation[] = []
 
@@ -199,7 +206,7 @@ function PaneLabel({
       {unseen.count > 0 || unseen.incomplete ? (
         <Badge
           className="h-4 px-1.5 text-[10px] tabular-nums"
-          data-slot="pane-unseen"
+          data-testid="pane-unseen"
           variant="outline"
         >
           {unseen.incomplete ? 'New' : unseen.count > 99 ? '99+' : unseen.count}
@@ -239,11 +246,11 @@ export interface StreamManagerProps {
    * owned by Electron main; the Studio renderer runs the engine. */
   autoShowActivity?: boolean
   onAutoShowActivityChange?: (on: boolean) => void
-  /** Reconnect Twitch or Kick so Orcle can remove messages (plan 140, S5);
+  /** Reconnect Twitch or Kick so Buddy can remove messages (plan 140, S5);
    * Electron main starts it. Rows show only while live. */
   onReconnectScopes?: (platform: ScopeReconnectPlatform) => void
   /** The live session's chat removals (plan 140, S6), relayed by Studio:
-   * row chips, and Orcle's removal cards in the Orcle pane. */
+   * row chips, and Buddy's removal cards in the Buddy pane. */
   moderationOperations?: readonly ModerationOperation[]
   /** "Remove from chat" asked for, before any operation answered. */
   removalRequestIds?: ReadonlySet<string>
@@ -251,9 +258,9 @@ export interface StreamManagerProps {
   removalAnsweringIds?: ReadonlySet<string>
   /** ⋯ Remove from chat on a row, or on a flagged message: a manual removal. */
   onRemoveFromChat?: (message: LiveChatMessage) => void
-  /** Remove or Cancel on an Orcle removal card. */
+  /** Remove or Cancel on a Buddy removal card. */
   onAnswerRemoval?: (operation: ModerationOperation, answer: RemovalAnswer) => void
-  /** Answer Orcle's open voice command (plan 140, S6 part B): pick from the
+  /** Answer Buddy's open voice command (plan 140, S6 part B): pick from the
    * chooser, or Show / Cancel a flagged highlight. */
   onAnswerCommand?: (commandId: string, answer: CommandAnswer) => void
   /** The command whose answer is on its way. */
@@ -271,8 +278,26 @@ export interface StreamManagerProps {
   cohostNudgeDismissedForever?: boolean
   /** Persisted `cohost.settings.listen` (plan 068); unknown hides its card. */
   cohostListen?: boolean
-  /** Orcle Live's one switch (plan 119), from the status popover and the
-   * nudge: on means Orcle reads chat and hears you, off only stops it. */
+  /** The Buddy on stream (plan 164 S-C4): the pane's header shows and
+   * operates it; absent hides the header. */
+  cohostBuddy?: CohostWindowBuddy
+  /** A Buddy action is on its way through the relay. */
+  buddyPending?: boolean
+  /** Say something in the bubble (D7): ↵ talks, ⌘↵ laughs. */
+  onBuddySay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
+  /** `overlayLayout.buddy.showOnStream`, through the Studio relay. */
+  onBuddyShowOnStream?: (showOnStream: boolean) => void
+  /** A reaction chip (plan 168 S-D3), through the Studio relay. */
+  onBuddyReact?: (reaction: string) => void
+  /** Persisted `cohost.settings.autoChat` (plan 164 S-D6): the pane's mode
+   * control and behaviour switches; unknown hides them. */
+  cohostAutoChat?: CohostAutoChat
+  onCohostAutoChatChange?: (patch: CohostAutoChatRelayPatch) => void
+  /** The Buddy's proposed cards (plan 164 S-D2): Send and Dismiss. */
+  onCohostUtteranceApprove?: (utterance: CohostUtterance) => void
+  onCohostUtteranceDismiss?: (utterance: CohostUtterance) => void
+  /** Buddy Live's one switch (plan 119), from the status popover and the
+   * nudge: on means Buddy reads chat and hears you, off only stops it. */
   onCohostEnable?: (enabled: boolean) => void
   /** Turn listening on from the one-time card (plan 068 D3). */
   onCohostListenOn?: () => void
@@ -342,6 +367,15 @@ export function StreamManager({
   cohostStarting = false,
   cohostNudgeDismissedForever = false,
   cohostListen,
+  cohostBuddy,
+  buddyPending = false,
+  onBuddySay,
+  onBuddyShowOnStream,
+  onBuddyReact,
+  cohostAutoChat,
+  onCohostAutoChatChange,
+  onCohostUtteranceApprove,
+  onCohostUtteranceDismiss,
   onCohostEnable,
   onCohostListenOn,
   onCohostNudgeDismiss,
@@ -361,7 +395,7 @@ export function StreamManager({
   const trafficLightGutter = useTrafficLightGutter()
   const messages = useMemo(() => sortMessagesChronological(snapshot.messages), [snapshot.messages])
   // The message on stream now (plan 095, S2): the backend's live state when
-  // it has one. Chat, Activity and Orcle all read this one slot.
+  // it has one. Chat, Activity and Buddy all read this one slot.
   const liveHighlightId =
     highlightState?.phase === 'live' ? (highlightState.messageId ?? null) : highlightedId
   const inHistory = viewMode?.kind === 'history'
@@ -373,7 +407,7 @@ export function StreamManager({
   const [nowMs, setNowMs] = useState(() => Date.now())
   const onAir =
     !inHistory && dashboard?.session.state !== undefined && dashboard.session.state !== 'off-air'
-  // Chat removals (plan 140, S6): each row's newest removal, and Orcle's
+  // Chat removals (plan 140, S6): each row's newest removal, and Buddy's
   // cards and their result lines. History never has any.
   const removalOperations = live ? moderationOperations : NO_MODERATION_OPERATIONS
   const removals = useMemo(
@@ -381,7 +415,7 @@ export function StreamManager({
     [removalOperations]
   )
   const removalPane = removalPaneView(removalOperations, nowMs, removalAnsweringIds)
-  // Orcle voice commands (plan 140, S6 part B): the strip, the chooser and
+  // Buddy voice commands (plan 140, S6 part B): the strip, the chooser and
   // the "show it anyway?" card, from the latest command. Live only.
   const command = live ? (cohostState?.command ?? null) : null
   const commandStrip = commandStripView(command, nowMs)
@@ -392,16 +426,16 @@ export function StreamManager({
     command !== null && command.id === commandAnsweringId
   )
   const commandCardId = commandChooser || commandConfirm ? (command?.id ?? '') : ''
-  const orcleCardsActive = removalPane.active || commandStrip !== null || commandCardId !== ''
+  const buddyCardsActive = removalPane.active || commandStrip !== null || commandCardId !== ''
   useEffect(() => {
     const timer = setInterval(
       () => setNowMs(Date.now()),
-      onAir || orcleCardsActive ? 1_000 : 15_000
+      onAir || buddyCardsActive ? 1_000 : 15_000
     )
     return () => clearInterval(timer)
-  }, [onAir, orcleCardsActive])
+  }, [onAir, buddyCardsActive])
 
-  // --- Orcle (unchanged behaviour, moved into its own pane: D5) ---
+  // --- Buddy (unchanged behaviour, moved into its own pane: D5) ---
   const cohostSensitivity = useCohostSensitivity()
   const shownCohostState = useMemo(
     () => cohostStateForSensitivity(cohostState, cohostSensitivity),
@@ -436,7 +470,7 @@ export function StreamManager({
       paneOpen: cohostPaneOpenRef.current,
       lastToastAtMs: cohostToastAtRef.current,
       nowMs: Date.now(),
-      shortcut: ORCLE_SHORTCUT
+      shortcut: BUDDY_SHORTCUT
     })
     if (questionToast) {
       cohostToastAtRef.current = questionToast.atMs
@@ -489,13 +523,13 @@ export function StreamManager({
   const [searchFocus, setSearchFocus] = useState(0)
   const chatRef = useRef<HTMLDivElement>(null)
   const activityRef = useRef<HTMLDivElement>(null)
-  const orcleRef = useRef<HTMLDivElement>(null)
+  const buddyRef = useRef<HTMLDivElement>(null)
   const chatVisible = usePaneVisible(chatRef)
   const activityVisible = usePaneVisible(activityRef)
-  const orcleVisible = usePaneVisible(orcleRef)
+  const buddyVisible = usePaneVisible(buddyRef)
   useEffect(() => {
-    cohostPaneOpenRef.current = orcleVisible
-  }, [orcleVisible])
+    cohostPaneOpenRef.current = buddyVisible
+  }, [buddyVisible])
 
   const activityAudience = inHistory ? (history?.audience ?? null) : (dashboard?.audience ?? null)
   const items = useMemo(
@@ -545,10 +579,10 @@ export function StreamManager({
     messages.some(
       (message) => message.id === liveHighlightId && isActivityOnlyEvent(message.eventType)
     )
-  const orcleUnseen = useUnseen(
+  const buddyUnseen = useUnseen(
     undefined,
     `${arrivalKey}:${cohostSensitivity}`,
-    orcleVisible,
+    buddyVisible,
     () => false,
     shownCohostState?.questions.map((question) => question.id) ?? []
   )
@@ -599,17 +633,17 @@ export function StreamManager({
     saveStatsLayout(browserStorage(), next)
   }, [])
 
-  const showOrcle = useCallback((): void => {
-    setNarrowPane('orcle')
-    setRightPane('orcle')
+  const showBuddy = useCallback((): void => {
+    setNarrowPane('buddy')
+    setRightPane('buddy')
     setCohostExpand((value) => value + 1)
   }, [])
 
-  // A new Orcle removal card brings the Orcle pane forward when it sits behind
+  // A new Buddy removal card brings the Buddy pane forward when it sits behind
   // a tab, without taking focus from the composer. Once the cards and their
   // result lines are gone, the pane the streamer was on comes back, unless
   // they moved on themselves.
-  const orcleCardIds = [
+  const buddyCardIds = [
     ...removalPane.cards.map((card) => card.operationId),
     ...(commandCardId ? [commandCardId] : [])
   ].join(' ')
@@ -619,23 +653,23 @@ export function StreamManager({
     right: StreamManagerRightPane
   } | null>(null)
   useEffect(() => {
-    const ids = orcleCardIds ? orcleCardIds.split(' ') : []
+    const ids = buddyCardIds ? buddyCardIds.split(' ') : []
     const fresh = ids.filter((id) => !seenRemovalCardsRef.current.has(id))
     for (const id of fresh) seenRemovalCardsRef.current.add(id)
-    if (fresh.length === 0 || orcleVisible || !cohostPresent) return
+    if (fresh.length === 0 || buddyVisible || !cohostPresent) return
     revealedFromRef.current ??= { narrow: narrowPane, right: rightPane }
-    setNarrowPane('orcle')
-    setRightPane('orcle')
-  }, [cohostPresent, narrowPane, orcleVisible, orcleCardIds, rightPane])
+    setNarrowPane('buddy')
+    setRightPane('buddy')
+  }, [cohostPresent, narrowPane, buddyVisible, buddyCardIds, rightPane])
   useEffect(() => {
     const from = revealedFromRef.current
-    if (orcleCardsActive || !from) return
+    if (buddyCardsActive || !from) return
     revealedFromRef.current = null
-    setNarrowPane((current) => (current === 'orcle' ? from.narrow : current))
-    setRightPane((current) => (current === 'orcle' ? from.right : current))
-  }, [orcleCardsActive])
+    setNarrowPane((current) => (current === 'buddy' ? from.narrow : current))
+    setRightPane((current) => (current === 'buddy' ? from.right : current))
+  }, [buddyCardsActive])
 
-  // ⌘J focuses Orcle wherever it sits; ⌘F searches chat. The pane is shown
+  // ⌘J focuses Buddy wherever it sits; ⌘F searches chat. The pane is shown
   // first, so its own focus handling lands on a visible element.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -643,7 +677,7 @@ export function StreamManager({
       const key = event.key.toLowerCase()
       if (key === 'j' && cohostVisible) {
         event.preventDefault()
-        showOrcle()
+        showBuddy()
       } else if (key === 'f') {
         event.preventDefault()
         setNarrowPane('chat')
@@ -652,7 +686,7 @@ export function StreamManager({
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [cohostVisible, showOrcle])
+  }, [cohostVisible, showBuddy])
 
   // Flagged messages Remove from chat can act on: still in chat, removable,
   // and with no removal in flight.
@@ -696,17 +730,17 @@ export function StreamManager({
     if (message) onHighlight?.(message)
   }
 
-  const orclePane = cohostPresent ? (
-    <div className="flex min-h-0 flex-1 flex-col" data-slot="orcle-pane">
+  const buddyPane = cohostPresent ? (
+    <div className="flex min-h-0 flex-1 flex-col" data-slot="buddy-pane">
       <div
         className={cn(
           CHAT_HEADER_CONTAINER,
           'flex h-9 shrink-0 items-center gap-2 overflow-hidden border-b border-border px-3'
         )}
-        data-slot="orcle-pane-header"
+        data-slot="buddy-pane-header"
       >
-        <span className="shrink-0 text-xs font-medium">Orcle</span>
-        {/* Whether Orcle hears you (plan 068); nothing while listening is off. */}
+        <span className="shrink-0 text-xs font-medium">Buddy</span>
+        {/* Whether Buddy hears you (plan 068); nothing while listening is off. */}
         {cohostVisible ? <CohostListeningIndicator listening={cohostState?.listening} /> : null}
         <span className="flex-1" />
         <CohostStatus
@@ -723,8 +757,28 @@ export function StreamManager({
           onUpgrade={onCohostUpgrade}
         />
       </div>
-      {/* Plan 140, S6: what Orcle heard and did, what waits for an answer
-          (the chooser, "show it anyway?"), then what Orcle is about to remove
+      {/* Plan 164 S-D6: the chat mode and the three behaviours. The pane's
+          enable is the mode: Off means the Buddy does not join. */}
+      {cohostPresent && cohostAutoChat && onCohostAutoChatChange ? (
+        <BuddyChatControls
+          autoChat={cohostAutoChat}
+          consented={cohostConsented}
+          gate={cohostGate!}
+          onChange={onCohostAutoChatChange}
+        />
+      ) : null}
+      {/* Plan 164 S-D2: what the Buddy wants to post as you (Suggest), and
+          the last lines it said. */}
+      {live && onCohostUtteranceApprove && onCohostUtteranceDismiss ? (
+        <BuddyUtteranceCards
+          pending={cohostActionPending}
+          utterances={shownCohostState?.utterances ?? []}
+          onApprove={onCohostUtteranceApprove}
+          onDismiss={onCohostUtteranceDismiss}
+        />
+      ) : null}
+      {/* Plan 140, S6: what Buddy heard and did, what waits for an answer
+          (the chooser, "show it anyway?"), then what Buddy is about to remove
           because you asked, and how to stop it. Above the scroll, so none of
           it scrolls away. */}
       <CommandStrip view={commandStrip} />
@@ -747,7 +801,7 @@ export function StreamManager({
         />
       ) : null}
       {/* Plan 140, S5: a quiet row per platform whose account must be
-          reconnected before Orcle can remove messages there. Live only. */}
+          reconnected before Buddy can remove messages there. Live only. */}
       {live && onReconnectScopes ? (
         <RemoveMessagesReconnectRows
           platforms={removeMessagesReconnectPlatforms(snapshot.providers)}
@@ -756,7 +810,7 @@ export function StreamManager({
       ) : null}
       {/* The one-time listening card (plan 068 D3), on air or off, above the
           scroll so it never scrolls away. Same gate as the pane itself:
-          Premium, cloud-AI consent, and Orcle on. */}
+          Premium, cloud-AI consent, and Buddy on. */}
       {onCohostListenOn ? (
         <CohostListenPrompt
           enabled={cohostEnabled && cohostConsented && cohostGate?.allowed === true}
@@ -770,6 +824,11 @@ export function StreamManager({
             actionPending={cohostActionPending}
             consented={cohostConsented}
             enabled={cohostEnabled}
+            buddy={cohostBuddy ?? null}
+            sayPending={buddyPending}
+            onSay={onBuddySay}
+            onShowOnStreamChange={onBuddyShowOnStream}
+            onReact={onBuddyReact}
             expandSignal={cohostExpand}
             flash={cohostFlash}
             gate={cohostGate!}
@@ -820,7 +879,7 @@ export function StreamManager({
         <Empty className="border-0 p-6">
           <EmptyHeader>
             <EmptyDescription>
-              Orcle listens to chat during a live stream: questions, flags and the room's mood.
+              Buddy listens to chat during a live stream: questions, flags and the room's mood.
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
@@ -900,14 +959,14 @@ export function StreamManager({
                 <PaneLabel label="Activity" onStream={activityOnStream} unseen={activityUnseen} />
               </TabsTrigger>
               {cohostPresent ? (
-                <TabsTrigger value="orcle">
-                  <PaneLabel dot={cohostTone(cohostState)} label="Orcle" unseen={orcleUnseen} />
+                <TabsTrigger value="buddy">
+                  <PaneLabel dot={cohostTone(cohostState)} label="Buddy" unseen={buddyUnseen} />
                 </TabsTrigger>
               ) : null}
             </TabsList>
           </Tabs>
         </div>
-        {/* At Wide: Chat on the left, Activity · Orcle on the right. */}
+        {/* At Wide: Chat on the left, Activity · Buddy on the right. */}
         <div
           className={cn(
             'col-start-2 row-start-1 items-center border-b border-l border-border px-2 py-1.5',
@@ -924,8 +983,8 @@ export function StreamManager({
                 <PaneLabel label="Activity" onStream={activityOnStream} unseen={activityUnseen} />
               </TabsTrigger>
               {cohostPresent ? (
-                <TabsTrigger value="orcle">
-                  <PaneLabel dot={cohostTone(cohostState)} label="Orcle" unseen={orcleUnseen} />
+                <TabsTrigger value="buddy">
+                  <PaneLabel dot={cohostTone(cohostState)} label="Buddy" unseen={buddyUnseen} />
                 </TabsTrigger>
               ) : null}
             </TabsList>
@@ -997,13 +1056,13 @@ export function StreamManager({
             onAutoShowChange={onAutoShowActivityChange}
           />
         </div>
-        {orclePane ? (
+        {buddyPane ? (
           <div
-            ref={orcleRef}
-            className={cn('min-h-0 flex-col', paneClasses('orcle', narrowPane, rightPane))}
-            data-pane="orcle"
+            ref={buddyRef}
+            className={cn('min-h-0 flex-col', paneClasses('buddy', narrowPane, rightPane))}
+            data-pane="buddy"
           >
-            {orclePane}
+            {buddyPane}
           </div>
         ) : null}
       </div>

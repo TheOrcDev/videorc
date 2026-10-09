@@ -13,7 +13,7 @@ import {
 
 // Chat removal, the renderer's view (plan 140, S6). Everything here is a pure
 // derivation of the chat row and the backend's `ModerationOperation`, so the
-// row chip, Orcle's removal card, its result line and the main-window toast
+// row chip, Buddy's removal card, its result line and the main-window toast
 // cannot disagree. The backend owns every timer (`confirmBy`, `executeAt`);
 // the views only count down to them.
 
@@ -100,7 +100,7 @@ export function removeFromChatAvailable(
   return !operation || moderationOperationTerminal(operation)
 }
 
-// --- Orcle's removal card --------------------------------------------------
+// --- Buddy's removal card --------------------------------------------------
 
 export const REMOVAL_CARD_TITLE = 'Remove from chat?'
 export const REMOVAL_CARD_REMOVING = 'Removing…'
@@ -138,7 +138,7 @@ export interface RemovalCardView {
 }
 
 /**
- * The card for one Orcle voice removal: while it waits for an answer, and
+ * The card for one Buddy voice removal: while it waits for an answer, and
  * while it runs once answered. Manual removals never have a card; the menu
  * click was the consent. YouTube is always confirm-first.
  */
@@ -213,7 +213,7 @@ export interface RemovalResultView {
   text: string
 }
 
-/** The brief line a finished Orcle removal leaves where its card was. */
+/** The brief line a finished Buddy removal leaves where its card was. */
 export function removalResultView(
   operation: ModerationOperation,
   nowMs: number

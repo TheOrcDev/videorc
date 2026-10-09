@@ -32,12 +32,13 @@ import {
   type CleanCutTabRequest
 } from '@/lib/clean-cut-events'
 import { displayKeyGlyph } from '@/lib/platform'
+import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import {
-  isOrcleTabId,
-  readLastOrcleTab,
-  writeLastOrcleTab,
-  type OrcleTabId
-} from '@/lib/orcle-tabs'
+  isBuddyTabId,
+  readLastBuddyTab,
+  writeLastBuddyTab,
+  type BuddyTabId
+} from '@/lib/buddy-tabs'
 import {
   isSettingsTabId,
   readLastSettingsTab,
@@ -72,8 +73,8 @@ const LayoutTab = lazy(async () => ({ default: (await loadLayoutTab()).LayoutTab
 const LibraryTab = lazy(async () => ({
   default: (await import('@/components/tabs/library-tab')).LibraryTab
 }))
-const OrcleTab = lazy(async () => ({
-  default: (await import('@/components/tabs/orcle-tab')).OrcleTab
+const BuddyTab = lazy(async () => ({
+  default: (await import('@/components/tabs/buddy-tab')).BuddyTab
 }))
 const RecordingTab = lazy(async () => ({
   default: (await import('@/components/tabs/recording-tab')).RecordingTab
@@ -178,60 +179,60 @@ export function AppShell(): ReactElement {
   } = useStudioShell()
   const { recording } = useStudioRecordingState()
   const [active, setActiveTab] = useState<WorkspaceTab>('studio')
-  // Library's "Orcle report" opens the Orcle tab on one session's report (plan
+  // Library's "Buddy report" opens the Buddy tab on one session's report (plan
   // 119 S3). Any other way to a page drops that ask, so the next visit to
-  // Orcle shows the last stream again.
-  const [orcleReportSessionId, setOrcleReportSessionId] = useState<string | null>(null)
+  // Buddy shows the last stream again.
+  const [buddyReportSessionId, setBuddyReportSessionId] = useState<string | null>(null)
   // Clean cut (plan 119 S14): Library's "Clean cut" selects a recording in
-  // the Orcle tab, and the ready toast opens a cut's review there. The card's
+  // the Buddy tab, and the ready toast opens a cut's review there. The card's
   // "Open in Library" focuses the cut copy's row. Like the report ask, any
   // other way to a page drops them.
   const [cleanCutRequest, setCleanCutRequest] = useState<CleanCutTabRequest | null>(null)
   const [libraryFocusSessionId, setLibraryFocusSessionId] = useState<string | null>(null)
   const cleanCutNonceRef = useRef(0)
-  // Plan 150: Orcle reopens on its tab used last, like Settings; the
+  // Plan 150: Buddy reopens on its tab used last, like Settings; the
   // Library's report and clean-cut asks select the tab that answers them.
-  const [orcleTab, setOrcleTab] = useState<OrcleTabId>(readLastOrcleTab)
-  const selectOrcleTab = useCallback((tab: OrcleTabId) => {
-    setOrcleTab(tab)
-    writeLastOrcleTab(tab)
+  const [buddyTab, setBuddyTab] = useState<BuddyTabId>(readLastBuddyTab)
+  const selectBuddyTab = useCallback((tab: BuddyTabId) => {
+    setBuddyTab(tab)
+    writeLastBuddyTab(tab)
   }, [])
   const setActive = useCallback((tab: WorkspaceTab) => {
-    setOrcleReportSessionId(null)
+    setBuddyReportSessionId(null)
     setCleanCutRequest(null)
     setLibraryFocusSessionId(null)
     setActiveTab(tab)
   }, [])
-  const openOrcleReport = useCallback(
+  const openBuddyReport = useCallback(
     (sessionId: string) => {
       setCleanCutRequest(null)
-      setOrcleReportSessionId(sessionId)
-      selectOrcleTab('reports')
+      setBuddyReportSessionId(sessionId)
+      selectBuddyTab('reports')
       setActiveTab('ai')
     },
-    [selectOrcleTab]
+    [selectBuddyTab]
   )
   const openCleanCut = useCallback(
     (request: CleanCutOpenRequest) => {
       cleanCutNonceRef.current += 1
-      setOrcleReportSessionId(null)
+      setBuddyReportSessionId(null)
       setCleanCutRequest({ ...request, nonce: cleanCutNonceRef.current })
-      selectOrcleTab('clean-cut')
+      selectBuddyTab('clean-cut')
       setActiveTab('ai')
     },
-    [selectOrcleTab]
+    [selectBuddyTab]
   )
-  const openOrcle = useCallback(
-    (tab?: OrcleTabId) => {
+  const openBuddy = useCallback(
+    (tab?: BuddyTabId) => {
       if (tab) {
-        selectOrcleTab(tab)
+        selectBuddyTab(tab)
       }
       setActive('ai')
     },
-    [selectOrcleTab, setActive]
+    [selectBuddyTab, setActive]
   )
   const openLibrarySession = useCallback((sessionId: string) => {
-    setOrcleReportSessionId(null)
+    setBuddyReportSessionId(null)
     setCleanCutRequest(null)
     setLibraryFocusSessionId(sessionId)
     setActiveTab('library')
@@ -372,20 +373,31 @@ export function AppShell(): ReactElement {
   useEffect(() => {
     const onWorkspaceNavigate = (event: Event): void => {
       const detail = (
-        event as CustomEvent<{ tab?: unknown; settingsTab?: unknown; orcleTab?: unknown }>
+        event as CustomEvent<{ tab?: unknown; settingsTab?: unknown; buddyTab?: unknown }>
       ).detail
       const tab = detail?.tab
       if (tab === 'settings') {
         openSettings(isSettingsTabId(detail?.settingsTab) ? detail.settingsTab : undefined)
       } else if (tab === 'ai') {
-        openOrcle(isOrcleTabId(detail?.orcleTab) ? detail.orcleTab : undefined)
+        openBuddy(isBuddyTabId(detail?.buddyTab) ? detail.buddyTab : undefined)
       } else if (isWorkspaceTab(tab)) {
         setActive(tab)
       }
     }
     window.addEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
     return () => window.removeEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
-  }, [openOrcle, openSettings, setActive])
+  }, [openBuddy, openSettings, setActive])
+
+  // Plan 170 D18: `videorc://buddy` opens the Buddy tab (main focused the
+  // window and synced the library); Make it Alive also opens the creator
+  // once main saw the avatar worn.
+  useEffect(() => {
+    const off = window.videorc?.onBuddyDeepLink?.((navigation) => {
+      openBuddy('live')
+      if (navigation.openCreator) openBuddyPetCreator({ reference: 'persona-idle' })
+    })
+    return off
+  }, [openBuddy])
 
   useEffect(() => {
     const onOpenCleanCut = (event: Event): void => {
@@ -417,7 +429,7 @@ export function AppShell(): ReactElement {
         openStudioPanel,
         closeStudioPanel,
         openSettings,
-        openOrcle
+        openBuddy
       }}
     >
       {/* The window family's shell (plan 050, D4): the sidebar sits on the
@@ -446,7 +458,7 @@ export function AppShell(): ReactElement {
           <Pane>
             <Toolbar title={workspaceTabLabel(active)} />
             {/* Library manages its own scroll (pinned header and toolbar,
-                  only the table scrolls), and so do Settings and Orcle (their
+                  only the table scrolls), and so do Settings and Buddy (their
                   tab strips stay pinned, only the tab under it scrolls); every
                   other tab scrolls as one. */}
             <PaneBody scroll={active !== 'library' && active !== 'settings' && active !== 'ai'}>
@@ -463,16 +475,16 @@ export function AppShell(): ReactElement {
                     <LibraryTab
                       focusSessionId={libraryFocusSessionId}
                       onOpenCleanCut={(sessionId) => openCleanCut({ sessionId })}
-                      onOpenOrcleReport={openOrcleReport}
+                      onOpenBuddyReport={openBuddyReport}
                     />
                   ) : null}
                   {active === 'ai' ? (
-                    <OrcleTab
+                    <BuddyTab
                       cleanCutRequest={cleanCutRequest}
-                      reportSessionId={orcleReportSessionId}
-                      tab={orcleTab}
+                      reportSessionId={buddyReportSessionId}
+                      tab={buddyTab}
                       onOpenLibrarySession={openLibrarySession}
-                      onTabChange={selectOrcleTab}
+                      onTabChange={selectBuddyTab}
                     />
                   ) : null}
                   {active === 'diagnostics' ? <DiagnosticsTab /> : null}

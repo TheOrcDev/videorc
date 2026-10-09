@@ -8,11 +8,12 @@ import {
   LayoutIcon,
   ResetIcon
 } from '@/components/icons'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { dockHiddenDisplay } from '@/components/preview-stage'
+import { OverlayEdits, overlayStageItems, withOverlayRect } from '@/components/scene/overlay-stage'
 import { SceneStage } from '@/components/scene/scene-stage'
 import { SourceTransformFields } from '@/components/scene/source-transform-fields'
 import { PowerSlider } from '@/components/power-slider'
@@ -29,6 +30,9 @@ import type {
   CameraFit,
   CameraShape,
   CameraSize,
+  OverlayItem,
+  OverlayOrientation,
+  OverlaySnap,
   SceneSource,
   SideBySideCameraSide,
   SideBySideSplit
@@ -38,8 +42,16 @@ import {
   hasSelectedScreenSource,
   layoutPresetNeedsCamera,
   layoutPresetNeedsScreen,
-  layoutPresetOrientation
+  layoutPresetOrientation,
+  simulcastLegLiveRequest
 } from '@/lib/capture'
+import {
+  OVERLAY_ITEM_LABELS,
+  OVERLAY_SNAPS,
+  OVERLAY_SNAP_LABELS,
+  overlayOrientationForCanvas,
+  overlaySnapRect
+} from '@/lib/overlay-layout'
 import { effectiveCameraMaskShape } from '../../../../shared/native-preview-proof-geometry'
 
 // The two real-world screen colors; the protocol takes any #RRGGBB so a
@@ -91,9 +103,38 @@ export function LayoutTab(): ReactElement {
     setSceneSourceVisible,
     isSessionActive,
     layoutSwitchPending,
-    savedScenePendingId
+    savedScenePendingId,
+    overlayLayout,
+    setOverlayLayout
   } = useStudioCore()
   const [stageBusy, setStageBusy] = useState(false)
+  // Overlay items on the canvas (plan 164, D15). One selection on the stage:
+  // picking an item clears the source selection and the other way round.
+  const [selectedOverlayItem, setSelectedOverlayItem] = useState<OverlayItem | null>(null)
+  const [, redrawOverlays] = useReducer((value: number) => value + 1, 0)
+  const overlayEditsRef = useRef<OverlayEdits | null>(null)
+  if (!overlayEditsRef.current)
+    overlayEditsRef.current = new OverlayEdits(setOverlayLayout, redrawOverlays)
+  const overlayEdits = overlayEditsRef.current
+  overlayEdits.configure(setOverlayLayout)
+  useLayoutEffect(() => {
+    overlayEdits.observe(overlayLayout)
+  }, [overlayEdits, overlayLayout])
+  // Orientation (D15): the primary canvas places the item's horizontal rect
+  // (or its vertical one for a vertical scene); with a vertical leg armed the
+  // toggle shows that leg's rects over a greyed 9:16 canvas.
+  const verticalLeg = simulcastLegLiveRequest(captureConfig)
+  const primaryOrientation = overlayOrientationForCanvas(
+    captureConfig.video.width,
+    captureConfig.video.height
+  )
+  const [orientationChoice, setOrientationChoice] = useState<OverlayOrientation>('horizontal')
+  const verticalView = Boolean(verticalLeg) && orientationChoice === 'vertical'
+  const overlayOrientation: OverlayOrientation = verticalView ? 'vertical' : primaryOrientation
+  const verticalLegArmed = Boolean(verticalLeg)
+  useEffect(() => {
+    if (!verticalLegArmed) setOrientationChoice('horizontal')
+  }, [verticalLegArmed])
   const handleStageBusyChange = useCallback(
     (busy: boolean) => {
       setStageBusy(busy)
@@ -126,12 +167,33 @@ export function LayoutTab(): ReactElement {
   // SC2: the inspector follows the stage selection; default to the camera
   // (the thing people usually frame) so the panel is never empty.
   useEffect(() => {
-    if (selectedSceneSourceId || !scene?.sources.length) {
+    if (selectedSceneSourceId || selectedOverlayItem || !scene?.sources.length) {
       return
     }
     const camera = scene.sources.find((source) => source.kind === 'camera')
     setSelectedSceneSourceId((camera ?? scene.sources[0]).id)
-  }, [scene, selectedSceneSourceId, setSelectedSceneSourceId])
+  }, [scene, selectedOverlayItem, selectedSceneSourceId, setSelectedSceneSourceId])
+  const selectedOverlayLayout = selectedOverlayItem ? overlayLayout[selectedOverlayItem] : null
+  const patchSelectedOverlay = (
+    patch: Partial<{ showOnStream: boolean; showInRecording: boolean }>
+  ): void => {
+    if (!selectedOverlayItem) return
+    void setOverlayLayout({
+      ...overlayLayout,
+      [selectedOverlayItem]: { ...overlayLayout[selectedOverlayItem], ...patch }
+    }).catch(() => {})
+  }
+  const snapSelectedOverlay = (snap: OverlaySnap): void => {
+    if (!selectedOverlayItem) return
+    void setOverlayLayout(
+      withOverlayRect(
+        overlayLayout,
+        selectedOverlayItem,
+        overlayOrientation,
+        overlaySnapRect(selectedOverlayItem, overlayOrientation, snap)
+      )
+    ).catch(() => {})
+  }
   const hasCamera = hasSelectedCameraSource(captureConfig.sources)
   const hasScreen = hasSelectedScreenSource(captureConfig.sources)
   const isCameraOnly = layout.layoutPreset === 'camera-only'
@@ -304,6 +366,25 @@ export function LayoutTab(): ReactElement {
               draws the committed composition as a schematic (zero idle IPC). */}
           <div className="flex flex-col gap-3 border-b border-border p-gutter">
             <ScenePresetControls toolbar />
+            {verticalLeg ? (
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-xs text-subtle">Overlays on</span>
+                <ToggleGroup
+                  aria-label="Overlay orientation"
+                  data-videorc-overlay-orientation
+                  size="sm"
+                  type="single"
+                  value={verticalView ? 'vertical' : 'horizontal'}
+                  variant="outline"
+                  onValueChange={(value) => {
+                    if (value === 'horizontal' || value === 'vertical') setOrientationChoice(value)
+                  }}
+                >
+                  <ToggleGroupItem value="horizontal">Horizontal</ToggleGroupItem>
+                  <ToggleGroupItem value="vertical">Vertical</ToggleGroupItem>
+                </ToggleGroup>
+              </div>
+            ) : null}
             <SceneStage
               aspectLocked={aspectLocked}
               externalPending={preciseEditPending}
@@ -321,28 +402,54 @@ export function LayoutTab(): ReactElement {
               cameraShape={effectiveCameraMaskShape(layout)}
               background={scene?.background ?? null}
               dragEnabled={
+                !verticalView &&
                 (showOverlayControls || isFreeform) &&
                 !isSessionActive &&
                 !preciseEditPending &&
                 !sceneSwitchPending
               }
               freeform={isFreeform}
-              outputAspect={captureConfig.video.width / Math.max(1, captureConfig.video.height)}
+              outputAspect={
+                verticalView && verticalLeg?.video
+                  ? verticalLeg.video.width / Math.max(1, verticalLeg.video.height)
+                  : verticalView
+                    ? 9 / 16
+                    : captureConfig.video.width / Math.max(1, captureConfig.video.height)
+              }
               previewOpen={previewWindow.open}
               // Free resize: the backend honors custom camera width/height
               // (aspect law permitting) since plan phase 3.
               resizeEnabled={
+                !verticalView &&
                 (showOverlayControls || isFreeform) &&
                 !isSessionActive &&
                 !preciseEditPending &&
                 !sceneSwitchPending
               }
-              scene={scene}
-              selectedSourceId={selectedSceneSourceId}
-              liveDocked={liveCanvasActive}
-              liveHint={liveHint}
-              liveSurface={liveSurface}
-              slotRef={liveCanvasSupported ? slotRef : undefined}
+              // The vertical view is the derived leg's canvas: a greyed stage
+              // with that leg's overlay rects; the sources stay with the
+              // primary (the leg is derived, plan 164 out of scope).
+              scene={verticalView ? null : scene}
+              selectedSourceId={verticalView ? null : selectedSceneSourceId}
+              liveDocked={!verticalView && liveCanvasActive}
+              liveHint={verticalView ? 'Vertical leg: overlay placement only.' : liveHint}
+              liveSurface={!verticalView && liveSurface}
+              slotRef={liveCanvasSupported && !verticalView ? slotRef : undefined}
+              overlays={{
+                items: overlayStageItems(overlayLayout, overlayOrientation),
+                selectedItem: selectedOverlayItem,
+                draft:
+                  overlayEdits.draft?.orientation === overlayOrientation
+                    ? overlayEdits.draft
+                    : null,
+                editable: !preciseEditPending && !sceneSwitchPending,
+                onSelect: (item) => {
+                  setSelectedOverlayItem(item)
+                  setSelectedSceneSourceId(null)
+                },
+                onCommit: (item, rect) =>
+                  overlayEdits.submit(overlayLayout, item, overlayOrientation, rect)
+              }}
               onPopOut={
                 liveCanvasSupported ? () => void setPreviewWindowMode('floating') : undefined
               }
@@ -355,6 +462,7 @@ export function LayoutTab(): ReactElement {
               onCommitTransform={setSceneSourceTransform}
               onRequestFreeform={isFreeform || isSessionActive ? undefined : enterFreeform}
               onSelectSource={(sourceId) => {
+                setSelectedOverlayItem(null)
                 setSelectedSceneSourceId(sourceId)
                 if (!sceneEditMode) {
                   setSceneEditMode(true)
@@ -383,11 +491,25 @@ export function LayoutTab(): ReactElement {
           <PanelSection
             className="min-w-0"
             icon={AdjustIcon}
-            title={selectedSource ? selectedSource.name : 'Inspector'}
+            title={
+              selectedSource
+                ? selectedSource.name
+                : selectedOverlayItem
+                  ? OVERLAY_ITEM_LABELS[selectedOverlayItem]
+                  : 'Inspector'
+            }
           >
-            {!selectedSource ? (
+            {!selectedSource && selectedOverlayItem && selectedOverlayLayout ? (
+              <OverlayItemInspector
+                item={selectedOverlayItem}
+                layout={selectedOverlayLayout}
+                orientation={overlayOrientation}
+                onPatch={patchSelectedOverlay}
+                onSnap={snapSelectedOverlay}
+              />
+            ) : !selectedSource ? (
               <p className="text-sm text-muted-foreground">
-                Click a source on the stage to edit it.
+                Click a source or an overlay on the stage to edit it.
               </p>
             ) : selectedSource.kind === 'camera' ? (
               <>
@@ -1005,6 +1127,75 @@ function SourceVisibilityField({
         onCheckedChange={(visible) => void onVisibilityChange(source.id, visible)}
       />
     </Field>
+  )
+}
+
+// The inspector for an overlay item (plan 164, S-B4.3): the two output
+// switches and a snap menu for the orientation on the stage. Placement lives
+// here and on the canvas, nowhere else (one-home law); the Stream Manager
+// corner menu is a snap that writes the same rect.
+const OVERLAY_ITEM_DESCRIPTIONS: Record<OverlayItem, string> = {
+  highlight: 'The highlighted message card. Drag it on the stage or snap it to a corner.',
+  captions: 'The caption bar. Its width is the rect; style and size stay in Captions.',
+  buddy: 'Your Buddy and its speech bubble. Drag it on the stage or snap it to a corner.'
+}
+
+function OverlayItemInspector({
+  item,
+  layout,
+  orientation,
+  onPatch,
+  onSnap
+}: {
+  item: OverlayItem
+  layout: { showOnStream: boolean; showInRecording: boolean }
+  orientation: OverlayOrientation
+  onPatch: (patch: Partial<{ showOnStream: boolean; showInRecording: boolean }>) => void
+  onSnap: (snap: OverlaySnap) => void
+}): ReactElement {
+  return (
+    <div className="flex flex-col gap-4" data-videorc-overlay-inspector={item}>
+      <p className="text-sm text-muted-foreground">{OVERLAY_ITEM_DESCRIPTIONS[item]}</p>
+      <Field orientation="horizontal">
+        <FieldContent>
+          <FieldLabel htmlFor={`overlay-${item}-stream`}>Show on stream</FieldLabel>
+        </FieldContent>
+        <Switch
+          checked={layout.showOnStream}
+          id={`overlay-${item}-stream`}
+          onCheckedChange={(showOnStream) => onPatch({ showOnStream })}
+        />
+      </Field>
+      <Field orientation="horizontal">
+        <FieldContent>
+          <FieldLabel htmlFor={`overlay-${item}-recording`}>Show in recording</FieldLabel>
+        </FieldContent>
+        <Switch
+          checked={layout.showInRecording}
+          id={`overlay-${item}-recording`}
+          onCheckedChange={(showInRecording) => onPatch({ showInRecording })}
+        />
+      </Field>
+      <Field>
+        <FieldLabel>Snap ({orientation})</FieldLabel>
+        <ToggleGroup
+          aria-label="Snap overlay"
+          className="w-full flex-wrap"
+          type="single"
+          value=""
+          variant="outline"
+          onValueChange={(value) => {
+            if ((OVERLAY_SNAPS as readonly string[]).includes(value)) onSnap(value as OverlaySnap)
+          }}
+        >
+          {OVERLAY_SNAPS.map((snap) => (
+            <ToggleGroupItem key={snap} value={snap}>
+              {OVERLAY_SNAP_LABELS[snap]}
+            </ToggleGroupItem>
+          ))}
+        </ToggleGroup>
+      </Field>
+    </div>
   )
 }
 

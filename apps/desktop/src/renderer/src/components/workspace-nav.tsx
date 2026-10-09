@@ -5,7 +5,7 @@ import {
   HealthIcon,
   LibraryIcon,
   LivestreamIcon,
-  OrcleIcon,
+  BuddyIcon,
   OutputIcon,
   SceneIcon,
   SettingsIcon,
@@ -14,7 +14,7 @@ import {
 } from '@/components/icons'
 import { createContext, useContext } from 'react'
 
-import type { OrcleTabId } from '@/lib/orcle-tabs'
+import { BUDDY_TAB_LABEL, type BuddyTabId } from '@/lib/buddy-tabs'
 import type { SettingsTabId } from '@/lib/settings-tabs'
 
 // Studio control pages, grouped under "Studio" in the sidebar: one click away, but
@@ -47,12 +47,12 @@ export type StudioPanelMeta = {
   legacyTabId: string
 }
 
-// Orcle (plan 119) sits in the stage row, right under Studio. Its id is `ai`,
+// Buddy (plan 119) sits in the stage row, right under Studio. Its id is `ai`,
 // the id deep links, smokes, ⌘9 and the `data-videorc-tab-trigger` value
 // already use.
 export const WORKSPACE_TABS: WorkspaceTabMeta[] = [
   { id: 'studio', label: 'Studio', icon: StudioIcon, group: 'stage' },
-  { id: 'ai', label: 'Orcle', icon: OrcleIcon, group: 'stage' },
+  { id: 'ai', label: BUDDY_TAB_LABEL, icon: BuddyIcon, group: 'stage' },
   { id: 'library', label: 'Library', icon: LibraryIcon, group: 'library' },
   { id: 'settings', label: 'Settings', icon: SettingsIcon, group: 'system' },
   { id: 'diagnostics', label: 'Health', icon: HealthIcon, group: 'system' }
@@ -72,7 +72,7 @@ export const STUDIO_PANELS: StudioPanelMeta[] = [
 ]
 
 // Page shortcuts. Studio, the Setup pages and Library take ⌘1–⌘8 in sidebar
-// order. Orcle takes ⌘9, the key tab id `ai` has always had, although it sits
+// order. Buddy takes ⌘9, the key tab id `ai` has always had, although it sits
 // under Studio (plan 119): muscle memory and deep links outrank a strict
 // sidebar order.
 // Settings keeps the platform-standard ⌘,. Health intentionally has NO digit — it
@@ -109,7 +109,7 @@ const SIDEBAR_ORDER: WorkspaceTab[] = [
 /**
  * A page's position down the sidebar. The reveal cascade uses it so the
  * shortcut chips arrive top-to-bottom, regardless of which sidebar group a row
- * sits in and of its digit (Orcle's ⌘9 sits second).
+ * sits in and of its digit (Buddy's ⌘9 sits second).
  */
 export function sidebarOrderFor(tab: WorkspaceTab): number {
   const index = SIDEBAR_ORDER.indexOf(tab)
@@ -140,8 +140,8 @@ type WorkspaceNavValue = {
   closeStudioPanel: () => void
   /** Opens Settings on `tab`, or on the tab used last when none is named. */
   openSettings: (tab?: SettingsTabId) => void
-  /** Opens Orcle on `tab`, or on the tab used last when none is named (plan 150). */
-  openOrcle: (tab?: OrcleTabId) => void
+  /** Opens Buddy on `tab`, or on the tab used last when none is named (plan 150). */
+  openBuddy: (tab?: BuddyTabId) => void
 }
 
 export const WorkspaceNavContext = createContext<WorkspaceNavValue | null>(null)

@@ -803,7 +803,7 @@ function collectCohostStates(ws) {
       for (const waiter of [...collection.waiters]) {
         waiter(parsed.payload)
       }
-    } else if (parsed.event === 'backend.log' && /\borcle\b/i.test(parsed.payload?.message ?? '')) {
+    } else if (parsed.event === 'backend.log' && /\bbuddy\b/i.test(parsed.payload?.message ?? '')) {
       console.log(`[backend] ${parsed.payload.level}: ${parsed.payload.message}`)
     }
   })
@@ -939,7 +939,7 @@ async function runConsentScenario({ ready, startedAt }) {
       destinations: [{ platform: 'twitch', targetId: 'consent', read: 'ready', write: 'ready' }],
       fakes: [{ platform: 'twitch', targetId: 'consent', count: 5, intervalMs: 200, send: 'sent' }]
     })
-    // Captions own the realtime task before Orcle joins: a task started
+    // Captions own the realtime task before Buddy joins: a task started
     // listen-only deliberately stays chunked when captions later present.
     await request(backend, timeoutMs, 'captions.start', { language: 'en' })
     await flip(true)
@@ -966,7 +966,7 @@ async function runConsentScenario({ ready, startedAt }) {
     const tickHold = fake.holdNextTickResponse()
     holds.push(tickHold)
     await emit(
-      'I am discussing this keyboard in detail so this complete sentence supplies enough fresh speech for an Orcle tick. The discussion continues through several concrete examples about typing comfort, key travel, desk space and the different shortcuts I use throughout a normal working day.'
+      'I am discussing this keyboard in detail so this complete sentence supplies enough fresh speech for a Buddy tick. The discussion continues through several concrete examples about typing comfort, key travel, desk space and the different shortcuts I use throughout a normal working day.'
     )
     const tick = await admitted(tickHold, 'held consent tick admission', 30_000)
     const sourceId = tick.body.openQuestions[0]?.id
@@ -983,7 +983,7 @@ async function runConsentScenario({ ready, startedAt }) {
     const speechHold = captionFake.holdNextRealtimeFinal()
     holds.push(speechHold)
     const staleSpeech =
-      'This speech response was admitted before consent was revoked. These old words must never become context for Orcle after consent is granted again, even though live captions can still show this complete delayed transcription for the recording.'
+      'This speech response was admitted before consent was revoked. These old words must never become context for Buddy after consent is granted again, even though live captions can still show this complete delayed transcription for the recording.'
     delayedFinal = captionFake.emitRealtimeFinal(staleSpeech)
     delayedFinal.catch(() => {})
     await admitted(speechHold, 'held consent speech completion', 2_000)
@@ -1012,7 +1012,7 @@ async function runConsentScenario({ ready, startedAt }) {
     expect(
       fake.state.requests.length === counts.tick &&
         fake.state.spotlightRequests.length === counts.spotlight,
-      'Revoked Orcle admitted new cloud work.'
+      'Revoked Buddy admitted new cloud work.'
     )
     const after = await request(backend, timeoutMs, 'cohost.status', {})
     expect(
@@ -1020,7 +1020,7 @@ async function runConsentScenario({ ready, startedAt }) {
         after.listening?.reasonCode === 'consent-required' &&
         !after.spotlight &&
         JSON.stringify(after.questions) === JSON.stringify(revoked.questions),
-      'Late tick, spotlight or speech reactivated revoked Orcle.'
+      'Late tick, spotlight or speech reactivated revoked Buddy.'
     )
     expect(
       events.list
@@ -1029,7 +1029,7 @@ async function runConsentScenario({ ready, startedAt }) {
         .every(
           (entry) => entry.payload.status === 'paused' && entry.payload.listening?.state !== 'on'
         ),
-      'A stale cloud response published active Orcle after revoke.'
+      'A stale cloud response published active Buddy after revoke.'
     )
     const captionAfter = await request(backend, timeoutMs, 'captions.status.get', {})
     expect(
@@ -1074,7 +1074,7 @@ async function runConsentScenario({ ready, startedAt }) {
     )
     fake.setSpotlightMatches([])
     await emit(
-      'Fresh authorized speech after granting consent should reach the existing Orcle session without any reset. This new discussion covers the keyboard I am using today, how I compare the keys and their feel, and the changes I would suggest to make the same workflow more comfortable.'
+      'Fresh authorized speech after granting consent should reach the existing Buddy session without any reset. This new discussion covers the keyboard I am using today, how I compare the keys and their feel, and the changes I would suggest to make the same workflow more comfortable.'
     )
     await waitUntil(
       () => fake.state.requests.length > counts.tick,
@@ -1089,7 +1089,7 @@ async function runConsentScenario({ ready, startedAt }) {
       'Grant did not resume eligible work in the same session.'
     )
     console.log(
-      'Orcle consent fake smoke PASS - same-session revoke/grant, bounded cloud admissions, retired tick/spotlight/speech, preserved history and independent captions.'
+      'Buddy consent fake smoke PASS - same-session revoke/grant, bounded cloud admissions, retired tick/spotlight/speech, preserved history and independent captions.'
     )
   } finally {
     for (const hold of holds) hold.release()
@@ -1447,8 +1447,8 @@ async function runSpotlightScenario({ ready, startedAt }) {
       `Restore must reopen the question and empty recentlyResolved: ${JSON.stringify({ open: restored.questions.map((question) => question.id), recentlyResolved: restored.recentlyResolved })}`
     )
 
-    // --- "What I talk about and Orcle's picks" -------------------------------
-    phase("settings: What I talk about and Orcle's picks")
+    // --- "What I talk about and Buddy's picks" -------------------------------
+    phase("settings: What I talk about and Buddy's picks")
     const picksSettings = await request(backend, timeoutMs, 'cohost.settings.set', {
       autoHighlight: true,
       voiceHighlight: true

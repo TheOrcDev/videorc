@@ -75,7 +75,7 @@ const SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home
 export interface ChatPrefill {
   seq: number
   text: string
-  /** A reply to an Orcle question: a real send marks it answered. */
+  /** A reply to a Buddy question: a real send marks it answered. */
   questionId?: string
 }
 
@@ -133,7 +133,7 @@ export function ChatPane({
   cohostSuggested?: ReadonlySet<string>
   /** The message the streamer is talking about: marked, and pulled into view. */
   cohostSpotlight?: string | null
-  /** Messages behind Orcle's open questions (the Questions filter). */
+  /** Messages behind Buddy's open questions (the Questions filter). */
   questionMessageIds: ReadonlySet<string>
   /** The streamer's own account names (the Mentions filter). */
   mentionNames: readonly string[]
@@ -155,7 +155,7 @@ export function ChatPane({
   cohostNudge?: boolean
   onCohostNudgeTurnOn?: () => void
   onCohostNudgeDismiss?: () => void
-  /** Orcle "jump to message": scroll there and stop following new chat. */
+  /** Buddy "jump to message": scroll there and stop following new chat. */
   jumpTo?: { messageId: string; seq: number } | null
   /** Bumped by ⌘F in the window. */
   searchFocusSignal?: number
@@ -166,7 +166,7 @@ export function ChatPane({
     mentions: false,
     search: ''
   })
-  // One prefill stream for the composer: the window's (Orcle Reply, Thank in
+  // One prefill stream for the composer: the window's (Buddy Reply, Thank in
   // chat) and a row's ⋯ Reply, in the order they were asked for.
   const [composerPrefill, setComposerPrefill] = useState<ChatPrefill | null>(null)
   const prefillSeqRef = useRef(0)
@@ -301,7 +301,7 @@ export function ChatPane({
     if (shown.length > 0) virtualizer.scrollToIndex(shown.length - 1, { align: 'end' })
   }, [shown.length, virtualizer])
 
-  // Orcle's "jump to message": clear filters that hide it, then scroll there.
+  // Buddy's "jump to message": clear filters that hide it, then scroll there.
   const handledJumpSeqRef = useRef<number | null>(null)
   useEffect(() => {
     if (!jumpTo || handledJumpSeqRef.current === jumpTo.seq) return
@@ -320,7 +320,7 @@ export function ChatPane({
     virtualizer.scrollToIndex(index, { align: 'center' })
   }, [filtering, jumpTo, shown, virtualizer])
 
-  // Orcle's pull-up: scroll the comment being talked about into view once per
+  // Buddy's pull-up: scroll the comment being talked about into view once per
   // spotlight, unless the streamer is reading back (spotlightScrollAllowed).
   // If it took them away from the latest, they go back there when it ends,
   // unless they scrolled in the meantime.
@@ -419,7 +419,7 @@ export function ChatPane({
           >
             <ToggleGroupItem
               className="h-6 px-2 text-xs"
-              title="Messages behind Orcle's open questions"
+              title="Messages behind Buddy's open questions"
               value="questions"
             >
               Questions
@@ -496,7 +496,7 @@ export function ChatPane({
             </DropdownMenuGroup>
           </DropdownMenuContent>
         </DropdownMenu>
-        <InputGroup className="h-7 min-w-28 flex-1 basis-40" data-slot="chat-search">
+        <InputGroup className="h-7 min-w-28 flex-1 basis-40" data-testid="chat-search">
           <InputGroupAddon>
             <SearchIcon />
           </InputGroupAddon>
@@ -595,7 +595,7 @@ export function ChatPane({
           <Button
             aria-label={`Chat paused: ${incomplete ? 'New chat' : `${unread} new`}. Jump to the newest`}
             className="absolute inset-x-0 bottom-2 mx-auto h-6 w-fit rounded-full px-2.5 text-xs text-foreground glass-chip hover:text-foreground"
-            data-slot="chat-paused"
+            data-testid="chat-paused"
             size="sm"
             type="button"
             variant="ghost"
@@ -789,7 +789,7 @@ export function Composer({
                 <DropdownMenuTrigger asChild>
                   <InputGroupButton
                     aria-label={`Send to: ${pickLabel}`}
-                    data-slot="chat-send-to"
+                    data-testid="chat-send-to"
                     size="xs"
                   >
                     To: {pickLabel}
@@ -932,11 +932,11 @@ export function Composer({
         {markerContext?.available ? (
           <p className="mt-1 text-[11px] text-muted-foreground" data-slot="marker-voice-status">
             {markerContext.voice?.state === 'on'
-              ? 'Orcle hears marker commands.'
+              ? 'Buddy hears marker commands.'
               : markerContext.voice?.state === 'starting'
-                ? 'Orcle is connecting to hear marker commands…'
+                ? 'Buddy is connecting to hear marker commands…'
                 : (markerContext.voice?.message ??
-                  'Typed /marker commands are available. Turn on Orcle listening for voice markers.')}
+                  'Typed /marker commands are available. Turn on Buddy listening for voice markers.')}
           </p>
         ) : null}
         {notice ? (
@@ -971,10 +971,10 @@ export function Composer({
           </div>
         ) : null}
         {replyToQuestionId ? (
-          <p className="mt-1 text-[11px] text-subtle">Orcle&apos;s draft. ↵ sends it.</p>
+          <p className="mt-1 text-[11px] text-subtle">Buddy&apos;s draft. ↵ sends it.</p>
         ) : null}
         {/* Only exceptions speak here (plan 057, D3): the "To:" picker names
-            where a message goes, and Orcle's segment carries its status. */}
+            where a message goes, and Buddy's segment carries its status. */}
         <div className="mt-1.5 empty:hidden">
           <CommentsDestinationStatus
             failures={failures}

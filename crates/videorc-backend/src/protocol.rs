@@ -4694,6 +4694,30 @@ pub struct CohostAuthorParams {
     pub author_key: String,
 }
 
+/// `cohost.utterance.approve` / `cohost.utterance.dismiss` (plan 164 S-D2):
+/// a proposed card by its id.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostUtteranceParams {
+    pub session_id: String,
+    pub utterance_id: String,
+}
+
+/// `cohost.utterance.say` (plan 164 D7): the streamer's own line for the
+/// Buddy, 1 to 200 characters; `state` defaults to `talk`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostSayParams {
+    /// The live-chat session the line may be posted to. Empty or absent:
+    /// no session, so the line is bubble-only (the overlay is free; the Say
+    /// box works while recording without chat).
+    #[serde(default)]
+    pub session_id: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<crate::cohost::CohostUtteranceState>,
+}
+
 /// `cohost.settings.set`: every field optional; absent fields are unchanged.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -4711,15 +4735,43 @@ pub struct CohostSettingsPatch {
     /// Replaces the whole list; the engine normalises it (trim, <= 10 x 120).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules: Option<Vec<String>>,
-    /// Orcle hears the microphone while live (plan 068 D2).
+    /// Buddy hears the microphone while live (plan 068 D2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen: Option<bool>,
-    /// Voice commands need "Orcle" first (plan 140 S3).
+    /// Voice commands need "Buddy" first (plan 140 S3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wake_word_required: Option<bool>,
     /// How a voice removal is confirmed (plan 140 S3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remove_confirm: Option<crate::live_chat_moderation::RemoveConfirmMode>,
+    /// The whole persona (plan 164 S-A2); the engine validates and trims it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<crate::cohost::CohostPersona>,
+    /// The whole automatic chat block (plan 164 S-A2), validated likewise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_chat: Option<crate::cohost::CohostAutoChat>,
+}
+
+/// Why a Buddy look picture failed (plan 169), in the web's code and the
+/// tile's words.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAvatarErrorDetail {
+    pub code: String,
+    pub message: String,
+}
+
+impl CohostAvatarErrorDetail {
+    pub fn new(code: &str, message: impl Into<String>) -> Self {
+        Self {
+            code: code.to_string(),
+            message: message.into(),
+        }
+    }
+
+    pub fn new_owned(code: String, message: String) -> Self {
+        Self { code, message }
+    }
 }
 
 /// `cohost.command.choose` (plan 140 S3): pick one comment from the chooser
@@ -4739,7 +4791,7 @@ pub struct CohostCommandParams {
     pub command_id: String,
 }
 
-// --- Orcle report (plan 119 S1; mirrored in shared/backend.ts) ---
+// --- Buddy report (plan 119 S1; mirrored in shared/backend.ts) ---
 
 /// The report format this build writes and reads. A stored report with any
 /// other version reads as unavailable, never as an error.
@@ -4766,7 +4818,7 @@ pub struct CohostReportSavedEvent {
     pub session_id: String,
 }
 
-/// What became of a question Orcle caught. The latest outcome wins; a
+/// What became of a question Buddy caught. The latest outcome wins; a
 /// restore puts it back to `open`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -4799,7 +4851,7 @@ pub struct CohostReportQuestion {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostReportQuestions {
-    /// Distinct question ids Orcle surfaced.
+    /// Distinct question ids Buddy surfaced.
     #[serde(default)]
     pub total: u64,
     #[serde(default)]
@@ -4895,6 +4947,33 @@ pub struct CohostReportGreetings {
 }
 
 /// One alert kind viewers raised, with the most distinct viewers who said it
+/// Plan 164 D10: one automatic send, written when it lands (or fails), so
+/// the report says what the Buddy posted as the streamer and why.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostReportPost {
+    /// The utterance id.
+    pub id: String,
+    pub at: String,
+    pub trigger: crate::cohost::CohostUtteranceTriggerKind,
+    pub text: String,
+    /// The platforms the send reached, or was meant to.
+    #[serde(default)]
+    pub destinations: Vec<crate::streaming::StreamPlatform>,
+    pub result: CohostReportPostResult,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostReportPostResult {
+    Sent,
+    Partial,
+    Failed,
+}
+
+/// Posts kept per report, newest kept.
+pub const COHOST_REPORT_POSTS_CAP: usize = 200;
+
 /// at once and whether it was ever corroborated (two viewers within 60 s).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -4905,7 +4984,7 @@ pub struct CohostReportAlert {
     pub first_seen_at: String,
 }
 
-/// Recaps are never posted by Orcle, so posting leaves no count.
+/// Recaps are never posted by Buddy, so posting leaves no count.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostReportRecap {
@@ -4943,7 +5022,7 @@ pub struct CohostReportCommands {
     /// A removal that failed or ended unknown, or a refused request.
     #[serde(default)]
     pub failed: u64,
-    /// No comment matched, or Orcle didn't catch what was said.
+    /// No comment matched, or Buddy didn't catch what was said.
     #[serde(default)]
     pub not_found: u64,
 }
@@ -4966,7 +5045,7 @@ impl CohostReportCommands {
     }
 }
 
-/// What Orcle caught in one stream, saved on this computer when the session
+/// What Buddy caught in one stream, saved on this computer when the session
 /// ends and deleted with the recording (plan 119 decision 6). Counts and the
 /// question log; never raw chat or drafts. Every optional field is omitted,
 /// never null; the blocks always ride and default on read.
@@ -4977,7 +5056,7 @@ pub struct CohostSessionReport {
     pub session_id: String,
     pub started_at: String,
     pub ended_at: String,
-    /// Orcle sessions folded into this report: turning Orcle off and on
+    /// Buddy sessions folded into this report: turning Buddy off and on
     /// mid-stream adds one.
     #[serde(default)]
     pub segments: u32,
@@ -5004,6 +5083,10 @@ pub struct CohostSessionReport {
     /// a report from before voice commands reads and writes unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commands: Option<CohostReportCommands>,
+    /// Plan 164 D10: what the Buddy posted as the streamer, oldest first, at
+    /// most 200. Omitted while empty, so older reports read unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub posts: Vec<CohostReportPost>,
 }
 
 impl CohostSessionReport {
@@ -5014,7 +5097,7 @@ impl CohostSessionReport {
         (report.version == COHOST_SESSION_REPORT_VERSION).then_some(report)
     }
 
-    /// Fold a later report of the same session into this one (Orcle turned
+    /// Fold a later report of the same session into this one (Buddy turned
     /// off and on mid-stream, or a replacing start): counts add up, questions
     /// union by id with the later outcome winning, open promises union by
     /// text, and the span covers both.
@@ -5141,7 +5224,40 @@ impl CohostSessionReport {
             (Some(base), Some(later)) => Some(base.merged_with(later)),
             (base, later) => base.or(later),
         };
+        for post in later.posts {
+            if self.posts.iter().any(|existing| existing.id == post.id) {
+                continue;
+            }
+            self.posts.push(post);
+        }
+        while self.posts.len() > COHOST_REPORT_POSTS_CAP {
+            self.posts.remove(0);
+        }
         self
+    }
+
+    /// A report that carries nothing but `post` (plan 164 D10): folded into
+    /// the session's report, or kept alone when the tick session never ran
+    /// (greetings are free). `segments: 0` says so.
+    pub fn post_only(session_id: &str, post: CohostReportPost) -> Self {
+        Self {
+            version: COHOST_SESSION_REPORT_VERSION,
+            session_id: session_id.to_string(),
+            started_at: post.at.clone(),
+            ended_at: post.at.clone(),
+            segments: 0,
+            stream_title: None,
+            messages_seen: 0,
+            shown_on_stream: 0,
+            questions: CohostReportQuestions::default(),
+            flags: CohostReportFlags::default(),
+            promises: CohostReportPromises::default(),
+            greetings: CohostReportGreetings::default(),
+            alerts: Vec::new(),
+            recap: CohostReportRecap::default(),
+            commands: None,
+            posts: vec![post],
+        }
     }
 }
 
@@ -5175,7 +5291,7 @@ pub struct CohostReportChat {
 }
 
 /// `cohost.report.get` / `cohost.report.latest`: the saved report (null when
-/// Orcle left none), the session's moments (computed on read, never stored)
+/// Buddy left none), the session's moments (computed on read, never stored)
 /// and its chat totals.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -5189,7 +5305,7 @@ pub struct CohostReportPayload {
 }
 
 /// A moment worth a clip: a clip mark or a chat peak, snapped to the
-/// captions. Computed on read for the Orcle report, never stored.
+/// captions. Computed on read for the Buddy report, never stored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipMoment {
@@ -5275,6 +5391,10 @@ pub struct AiCapabilities {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entitlement_token: Option<String>,
     pub features: AiCapabilitiesFeatures,
+    /// The Buddy routes (plan 164): the tick contract the web speaks and
+    /// whether avatar generation is on. Older servers omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cohost: Option<AiCapabilitiesCohost>,
     pub generated_at: String,
     pub limits: AiCapabilitiesLimits,
     pub models: AiCapabilitiesModels,
@@ -5282,6 +5402,70 @@ pub struct AiCapabilities {
     pub readiness: AiCapabilitiesReadiness,
     pub transcription: AiCapabilitiesTranscription,
     pub workflow: AiCapabilitiesWorkflow,
+}
+
+/// `cohost` from `GET /api/ai/capabilities` (plan 164): every field
+/// defaults so a partial block never breaks the load.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesCohost {
+    /// The newest tick prompt version the web accepts (4 adds the persona).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<AiCapabilitiesAvatar>,
+    /// Pet creation (plan 168, Phase F): on, and this month's creations.
+    /// Older servers omit it: the creator stays off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pet: Option<AiCapabilitiesPet>,
+    /// The account Buddy library (plan 170 D9). Older servers omit it: the
+    /// library is off and the look falls back to the plan 169 route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buddy_library: Option<AiCapabilitiesBuddyLibrary>,
+}
+
+/// `cohost.buddyLibrary` from `GET /api/ai/capabilities` (plan 170 D9):
+/// `enabled` when signed in and the web's library store is configured
+/// (creating still follows `avatar.enabled`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesBuddyLibrary {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub count: u32,
+    #[serde(default)]
+    pub limit: u32,
+    /// Plan 172 D8: alive packs and imports sync (the web's S3 storage is
+    /// configured). Older servers omit it: nothing uploads.
+    #[serde(default)]
+    pub alive: bool,
+}
+
+// --- Buddy pets (plan 168, Phase F) ---
+/// `cohost.pet` from `GET /api/ai/capabilities`. Basic accounts get
+/// `{ enabled: false, creationsRemainingThisMonth: 0, monthlyLimit: 0 }`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesPet {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub creations_remaining_this_month: u32,
+    #[serde(default)]
+    pub monthly_limit: u32,
+}
+// --- end Buddy pets (plan 168, Phase F) ---
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesAvatar {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub remaining_today: u32,
+    #[serde(default)]
+    pub daily_limit: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5356,7 +5540,7 @@ pub struct AiCapabilitiesFeatures {
     #[serde(default)]
     pub clean_cut_enabled: bool,
     pub cloud_ai_enabled: bool,
-    /// The Orcle command route is on and its model configured (plan 140 S8,
+    /// The Buddy command route is on and its model configured (plan 140 S8,
     /// contract part E). Older servers omit it: the parser stays off.
     #[serde(default)]
     pub cohost_command_enabled: bool,
@@ -6834,7 +7018,7 @@ mod tests {
             errored.detail,
             Some(crate::cohost::CohostErrorDetail {
                 code: "ai-gateway-error".to_string(),
-                message: "The Orcle tick failed on every configured model.".to_string(),
+                message: "The Buddy tick failed on every configured model.".to_string(),
                 status: Some(502),
             })
         );
@@ -6912,7 +7096,7 @@ mod tests {
             Some(crate::cohost::CohostListening {
                 state: crate::cohost::CohostListeningState::Blocked,
                 reason_code: Some("listen-monthly-quota-exhausted".to_string()),
-                message: Some("Orcle's listening allowance for this month is used up.".to_string()),
+                message: Some("Buddy's listening allowance for this month is used up.".to_string()),
                 remaining_seconds: Some(0),
             })
         );
@@ -7132,7 +7316,7 @@ mod tests {
         let mut without = base.clone();
         without.commands = None;
 
-        // Orcle off and on mid-stream: the counts add up.
+        // Buddy off and on mid-stream: the counts add up.
         let merged = base.clone().merged_with(base.clone());
         let doubled = merged.commands.unwrap();
         assert_eq!(doubled.highlighted, counted.highlighted * 2);

@@ -408,7 +408,7 @@ export function TechnicalDetails({
   return (
     <Collapsible
       className="border-b border-border"
-      data-slot="technical-details"
+      data-testid="technical-details"
       open={open}
       onOpenChange={(next) => {
         setOpen(next)

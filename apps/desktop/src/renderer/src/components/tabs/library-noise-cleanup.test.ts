@@ -55,14 +55,14 @@ describe('Library Noise Cleanup direct action', () => {
     expect(play).toBeGreaterThan(-1)
     expect(cleanup).toBeGreaterThan(play)
     expect(menu).toBeGreaterThan(cleanup)
-    // The menu's "Orcle report" and "Clean cut" open the Orcle tab (plan 119).
+    // The menu's "Buddy report" and "Clean cut" open the Buddy tab (plan 119).
     const menuPlay = rowActions.indexOf('Play\n', menu)
-    const orcleReport = rowActions.indexOf('Orcle report', menu)
+    const buddyReport = rowActions.indexOf('Buddy report', menu)
     const cleanCut = rowActions.indexOf('Clean cut\n', menu)
     const reveal = rowActions.indexOf('revealInFileManagerLabel()', menu)
     expect(menuPlay).toBeGreaterThan(menu)
-    expect(orcleReport).toBeGreaterThan(menuPlay)
-    expect(cleanCut).toBeGreaterThan(orcleReport)
+    expect(buddyReport).toBeGreaterThan(menuPlay)
+    expect(cleanCut).toBeGreaterThan(buddyReport)
     expect(reveal).toBeGreaterThan(cleanCut)
   })
 

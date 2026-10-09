@@ -13,13 +13,13 @@ export function removeMessagesReconnectStarted(platform: ScopeReconnectPlatform)
   const name = CHAT_PLATFORM_LABELS[platform]
   return {
     title: `Approve the ${name} permission in your browser`,
-    description: `Orcle can remove messages once ${name} confirms.`
+    description: `Buddy can remove messages once ${name} confirms.`
   }
 }
 
 /**
- * "Reconnect Twitch to let Orcle remove messages" in the Stream Manager's
- * Orcle pane (plan 140, S5): one quiet row per platform whose chat can't
+ * "Reconnect Twitch to let Buddy remove messages" in the Stream Manager's
+ * Buddy pane (plan 140, S5): one quiet row per platform whose chat can't
  * remove messages until its account is reconnected, from the backend's
  * per-destination `moderate` state. Nothing at all when every platform can.
  */
@@ -33,7 +33,7 @@ export function RemoveMessagesReconnectRows({
   if (platforms.length === 0) return null
   return (
     <ul
-      aria-label="Permissions Orcle needs"
+      aria-label="Permissions Buddy needs"
       className="flex shrink-0 flex-col divide-y divide-border border-b border-border"
       data-slot="remove-messages-reconnect"
     >

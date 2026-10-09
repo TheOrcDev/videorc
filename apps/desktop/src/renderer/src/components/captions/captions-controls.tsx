@@ -12,7 +12,6 @@ import { PanelSection } from '@/components/panel-section'
 import { StatusBadge, type StatusTone } from '@/components/status-badge'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
-import { Checkbox } from '@/components/ui/checkbox'
 import {
   Field,
   FieldContent,
@@ -37,7 +36,6 @@ import type { CaptionStyleId, CaptionsStatus } from '@/lib/backend'
 import {
   CAPTION_STYLE_IDS,
   captionStyleDefinition,
-  type CaptionPosition,
   type CaptionTextSize
 } from '@/lib/caption-overlay'
 import {
@@ -45,7 +43,7 @@ import {
   captionsStatusIsActive,
   latestFinalCaptionText
 } from '@/lib/captions-ui'
-import { simulcastArmed, type CaptionBurnTarget, type CaptionsCaptureSettings } from '@/lib/capture'
+import { simulcastArmed, type CaptionsCaptureSettings } from '@/lib/capture'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
 import { displayKeyGlyph } from '@/lib/platform'
 import { cn } from '@/lib/utils'
@@ -119,13 +117,6 @@ function captionsStatusPresentation(
   }
 }
 
-function burnTargetFromChecks(stream: boolean, recording: boolean): CaptionBurnTarget {
-  if (stream && recording) return 'both'
-  if (stream) return 'stream'
-  if (recording) return 'recording'
-  return 'off'
-}
-
 function StyleSwatch({ styleId }: { styleId: CaptionStyleId }): ReactElement {
   const style = captionStyleDefinition(styleId)
   return (
@@ -152,37 +143,6 @@ function StyleSwatch({ styleId }: { styleId: CaptionStyleId }): ReactElement {
   )
 }
 
-function OutputCheckbox({
-  id,
-  checked,
-  disabled,
-  title,
-  description,
-  onCheckedChange
-}: {
-  id: string
-  checked: boolean
-  disabled: boolean
-  title: string
-  description: string
-  onCheckedChange: (checked: boolean) => void
-}): ReactElement {
-  return (
-    <Field data-disabled={disabled || undefined} orientation="horizontal">
-      <Checkbox
-        id={id}
-        checked={checked}
-        disabled={disabled}
-        onCheckedChange={(value) => onCheckedChange(value === true)}
-      />
-      <FieldContent>
-        <FieldLabel htmlFor={id}>{title}</FieldLabel>
-        <FieldDescription>{description}</FieldDescription>
-      </FieldContent>
-    </Field>
-  )
-}
-
 export function CaptionsControls(): ReactElement {
   const {
     aiQuota,
@@ -204,8 +164,6 @@ export function CaptionsControls(): ReactElement {
   const status = captionsStatusPresentation(captionsStatus, captions.enabled, isSessionActive)
   const lines = captionStripLines(captionLines)
   const finalAnnouncement = latestFinalCaptionText(captionLines)
-  const streamChecked = captions.burnTarget === 'stream' || captions.burnTarget === 'both'
-  const recordingChecked = captions.burnTarget === 'recording' || captions.burnTarget === 'both'
   // A vertical destination shares the recording's picture with the
   // horizontal stream, so livestream captions land in the recording too.
   const verticalLegArmed = simulcastArmed(captureConfig)
@@ -361,28 +319,6 @@ export function CaptionsControls(): ReactElement {
         </Field>
 
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field>
-            <FieldLabel>Position</FieldLabel>
-            <ToggleGroup
-              aria-label="Caption position"
-              className="w-full"
-              type="single"
-              value={captions.position}
-              variant="outline"
-              onValueChange={(value) => {
-                if (value === 'top' || value === 'bottom') {
-                  patchCaptions({ position: value as CaptionPosition }, true)
-                }
-              }}
-            >
-              <ToggleGroupItem className="flex-1" value="bottom">
-                Bottom
-              </ToggleGroupItem>
-              <ToggleGroupItem className="flex-1" value="top">
-                Top
-              </ToggleGroupItem>
-            </ToggleGroup>
-          </Field>
           {/* Three labelled items need a full row: sharing a half-column let
               the labels escape the buttons at narrow widths (owner report,
               twice). min-w-fit keeps each item's intrinsic floor. */}
@@ -444,43 +380,13 @@ export function CaptionsControls(): ReactElement {
 
         <Field>
           <FieldContent>
-            <FieldTitle>Show captions in</FieldTitle>
+            <FieldTitle>Placement and output</FieldTitle>
             <FieldDescription>
-              {isSessionActive
-                ? 'Output routing is locked until the next session.'
-                : 'Choose livestream burn-in and whether to create a captioned recording copy.'}
+              {verticalLegArmed
+                ? 'Live in Scene → Captions: where the bar sits and whether it is on the stream and in the recording. A vertical destination shares the recording picture with the horizontal stream.'
+                : 'Live in Scene → Captions: where the bar sits and whether it is on the stream and in the recording.'}
             </FieldDescription>
           </FieldContent>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <OutputCheckbox
-              checked={streamChecked}
-              description={
-                verticalLegArmed
-                  ? 'Visible on your horizontal and vertical streams.'
-                  : 'Visible to livestream viewers.'
-              }
-              disabled={isSessionActive}
-              id="captions-output-stream"
-              title="Livestream"
-              onCheckedChange={(checked) =>
-                patchCaptions({ burnTarget: burnTargetFromChecks(checked, recordingChecked) })
-              }
-            />
-            <OutputCheckbox
-              checked={recordingChecked}
-              description={
-                verticalLegArmed && streamChecked
-                  ? 'Already in the recording while a vertical destination is on: it shares the horizontal stream picture.'
-                  : 'Visible in the captioned recording copy.'
-              }
-              disabled={isSessionActive}
-              id="captions-output-recording"
-              title="Recording"
-              onCheckedChange={(checked) =>
-                patchCaptions({ burnTarget: burnTargetFromChecks(streamChecked, checked) })
-              }
-            />
-          </div>
         </Field>
 
         {(runtimeActive || lines.length > 0) && (

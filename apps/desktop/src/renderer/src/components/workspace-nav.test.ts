@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { OrcleIcon } from './icons'
+import { BuddyIcon } from './icons'
 import {
   STUDIO_PANELS,
   WORKSPACE_SHORTCUTS,
@@ -85,20 +85,20 @@ describe('workspace navigation', () => {
     expect(WORKSPACE_SHORTCUTS).toHaveLength(reachable.length - noDigit.length)
   })
 
-  // Plan 119: Orcle sits right under Studio. Its id is `ai`, the id ⌘9, deep
+  // Plan 119: Buddy sits right under Studio. Its id is `ai`, the id ⌘9, deep
   // links, smokes and data-videorc-tab-trigger use.
-  it('shows Orcle under Studio in the stage row, on id ai and ⌘9', () => {
-    const orcle = WORKSPACE_TABS.find((tab) => tab.id === 'ai')
-    expect(orcle).toEqual({ id: 'ai', label: 'Orcle', icon: OrcleIcon, group: 'stage' })
+  it('shows Buddy under Studio in the stage row, on id ai and ⌘9', () => {
+    const buddy = WORKSPACE_TABS.find((tab) => tab.id === 'ai')
+    expect(buddy).toEqual({ id: 'ai', label: 'Buddy', icon: BuddyIcon, group: 'stage' })
     expect(WORKSPACE_TABS.filter((tab) => tab.group === 'stage').map((tab) => tab.id)).toEqual([
       'studio',
       'ai'
     ])
     expect(shortcutDigitFor('ai')).toBe('9')
-    expect(workspaceTabLabel('ai')).toBe('Orcle')
+    expect(workspaceTabLabel('ai')).toBe('Buddy')
   })
 
-  it('cascades the shortcut chips down the sidebar, so Orcle (⌘9) arrives second', () => {
+  it('cascades the shortcut chips down the sidebar, so Buddy (⌘9) arrives second', () => {
     const rows: WorkspaceTab[] = [
       'studio',
       'ai',

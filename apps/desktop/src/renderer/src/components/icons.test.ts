@@ -13,7 +13,7 @@ import {
   StudioIcon,
   BrainIcon,
   KickIcon,
-  OrcleIcon,
+  BuddyIcon,
   YOUTUBE_MARK_ASPECT,
   YOUTUBE_MARK_MIN_PX,
   XPlatformIcon,
@@ -104,23 +104,23 @@ describe('semantic icon registry', () => {
     )
   })
 
-  // Plan 149: Orcle's icon is the real emblem image, kept inside an <svg> so
+  // Plan 149: Buddy's icon is the real emblem image, kept inside an <svg> so
   // icon slots that size and lay out through `svg` selectors still apply.
-  it('draws Orcle as the real emblem image inside an svg, whatever the weight', () => {
+  it('draws Buddy as the real emblem image inside an svg, whatever the weight', () => {
     const markup = (weight?: AppIconProps['weight']): string =>
-      renderToStaticMarkup(createElement(OrcleIcon, { size: 16, weight, className: 'orcle' }))
+      renderToStaticMarkup(createElement(BuddyIcon, { size: 16, weight, className: 'buddy' }))
     const html = markup()
     expect(html).toMatch(/^<svg /)
     expect(html).toContain('viewBox="0 0 256 256"')
     expect(html).toContain('width="16"')
-    expect(html).toContain('class="orcle"')
-    expect(html).toMatch(/<image href="[^"]*orcle-emblem-64[^"]*"/)
+    expect(html).toContain('class="buddy"')
+    expect(html).toMatch(/<image href="[^"]*buddy-emblem-64[^"]*"/)
     expect(html).toContain('preserveAspectRatio="xMidYMid meet"')
     expect(html).not.toContain('<path')
     for (const weight of ['thin', 'light', 'regular', 'duotone', 'fill', 'bold'] as const) {
       expect(markup(weight)).toBe(html)
     }
-    expect(renderToStaticMarkup(createElement(OrcleIcon))).toContain('width="1em"')
+    expect(renderToStaticMarkup(createElement(BuddyIcon))).toContain('width="1em"')
   })
   // Plan 165 (Google's ToS report, III.F.2a): the YouTube mark is YouTube's
   // own file, unmodified, and never drawn shorter than 20px.

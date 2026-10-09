@@ -14,8 +14,8 @@ import type {
 } from '@/lib/chat-removal-view'
 import { cn } from '@/lib/utils'
 
-// Orcle's removal cards (plan 140, S6), at the top of the Stream Manager's
-// Orcle pane: what Orcle is about to remove because you asked, and how to stop
+// Buddy's removal cards (plan 140, S6), at the top of the Stream Manager's
+// Buddy pane: what Buddy is about to remove because you asked, and how to stop
 // it. The backend owns the timing; a card only counts down to it, and leaves
 // a one-line result behind when the operation ends.
 //
@@ -65,7 +65,7 @@ export function removalKeyAnswer(
  * only while nothing else has focus, so a digit typed in the composer or the
  * search field is always just a digit. Null to leave the key alone.
  */
-export function orcleCardPickIndex(
+export function buddyCardPickIndex(
   event: Parameters<typeof removalKeyAnswer>[0],
   activeElement: Element | null,
   body: Element | null,
@@ -107,7 +107,7 @@ export function RemovalCards({
   if (!view.active) return null
   return (
     <div
-      aria-label="Removals Orcle is waiting on"
+      aria-label="Removals Buddy is waiting on"
       className="flex shrink-0 flex-col gap-1.5 border-b border-border p-2"
       data-slot="removal-cards"
     >
@@ -152,7 +152,7 @@ function RemovalCard({
   const confirm = (
     <Button
       key="confirm"
-      data-slot="removal-confirm"
+      data-testid="removal-confirm"
       disabled={card.busy}
       size="xs"
       title={`${card.confirmLabel} (Enter)`}
@@ -167,7 +167,7 @@ function RemovalCard({
   const cancel = (
     <Button
       key="cancel"
-      data-slot="removal-cancel"
+      data-testid="removal-cancel"
       disabled={card.busy}
       size="xs"
       title="Cancel (Esc)"
@@ -186,7 +186,7 @@ function RemovalCard({
       className="outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
       data-mode={card.mode}
       data-operation-id={card.operationId}
-      data-slot="removal-card"
+      data-testid="removal-card"
       data-topmost={topmost || undefined}
       role="group"
       tabIndex={-1}
@@ -211,7 +211,7 @@ function RemovalCard({
           <ChatPlatformIcon platform={card.platform} />
           <span className="min-w-0 truncate font-medium text-foreground">{card.authorName}</span>
           {card.reason ? (
-            <Badge className="shrink-0" data-slot="removal-card-reason" variant="outline">
+            <Badge className="shrink-0" data-testid="removal-card-reason" variant="outline">
               {card.reason}
             </Badge>
           ) : null}
