@@ -1152,6 +1152,9 @@ pub struct AppState {
     pub golem_overlay: crate::captions::CaptionOverlaySlots,
     /// Which avatar state shows and the bubble that is up (`cohost.golem.state`).
     pub golem_overlay_state: crate::golem_overlay::GolemOverlayStateSlot,
+    /// The Golem's pet on stream (plan 168 Phase B): pre-scaled atlases per
+    /// leg and the per-frame draw (std mutex: read from the render threads).
+    pub golem_sprite: crate::golem_sprite::GolemSpriteSlot,
     /// Backend-owned acknowledgement/lifetime for the viewer-facing comment
     /// card. The image slot above and this state are mutated under this
     /// state-machine lock so stale expiry tasks cannot clear newer cards.
@@ -1258,6 +1261,11 @@ impl AppState {
         let oauth_store_path = (database.path().to_string_lossy() != ":memory:")
             .then(|| database.path().with_extension("oauth-pending.json"));
         let cohost_settings = crate::cohost::load_cohost_settings(&database);
+        let golem_sprite = crate::golem_sprite::GolemSpriteSlot::new(
+            &cohost_settings.persona,
+            crate::overlay_layout::load_overlay_layout(&database).golem,
+            Some(events.clone()),
+        );
         Self {
             process_runtime: tokio::runtime::Handle::try_current().ok(),
             process_shutdown_requested: Arc::new(AtomicBool::new(false)),
@@ -1365,6 +1373,7 @@ impl AppState {
             golem_overlay_state: crate::golem_overlay::new_golem_overlay_state_slot(
                 cohost_settings.persona.id.clone(),
             ),
+            golem_sprite,
             comment_highlight: crate::comment_highlight::new_comment_highlight_slot(),
             comment_highlight_commit: Arc::new(tokio::sync::Mutex::new(())),
             cohost: crate::cohost::new_cohost_slot(cohost_settings),

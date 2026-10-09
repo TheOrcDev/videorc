@@ -2239,6 +2239,7 @@ mod editor_draft_tests {
             caption_overlay: None,
             highlight_overlay: None,
             golem_overlay: None,
+            golem_leg: None,
         };
         let mut via_frame = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame_with_chrome(inputs, &quads, &mut via_frame);
@@ -5935,6 +5936,10 @@ struct PreparedGpuSource<'a> {
     /// Camera chroma key; forces `blend` semantics via the shader's computed
     /// alpha, so keyed camera quads set both.
     chroma_key: Option<crate::metal_compositor::GpuChromaKey>,
+    /// A turned quad (the Golem sprite, plan 168 S-B2); see `GpuSource`.
+    corners: Option<[[f32; 2]; 4]>,
+    sampler: crate::metal_compositor::GpuSourceSampler,
+    opacity: f32,
 }
 
 #[cfg(target_os = "macos")]
@@ -5981,6 +5986,9 @@ impl<'a> PreparedGpuSource<'a> {
             mask: scene_mask_into_metal(self.mask),
             blend: self.blend,
             chroma_key: self.chroma_key,
+            corners: self.corners,
+            sampler: self.sampler,
+            opacity: self.opacity,
         }
     }
 }
@@ -6075,19 +6083,41 @@ fn push_caption_overlay_gpu_source<'a>(
     content_namespace: u64,
     safe_inset: usize,
 ) {
-    let overlay_width = overlay.width as usize;
-    let overlay_height = overlay.height as usize;
-    if overlay.rgba.len() < overlay_width * overlay_height * 4 {
-        return;
-    }
-    let (source_left, dest_left, dest_top, draw_width) = crate::overlay_layout::overlay_blit_layout(
-        overlay_width,
-        overlay_height,
+    let layout = crate::overlay_layout::overlay_blit_layout(
+        overlay.width as usize,
+        overlay.height as usize,
         canvas_width.max(1) as usize,
         canvas_height.max(1) as usize,
         overlay.blit_rect(canvas_width, canvas_height),
         safe_inset,
     );
+    push_overlay_gpu_source_at(
+        prepared_sources,
+        overlay,
+        layout,
+        canvas_width,
+        canvas_height,
+        content_namespace,
+    );
+}
+
+/// [`push_caption_overlay_gpu_source`] at a layout already decided (the
+/// Golem's bubble above the pet's head, plan 168 D16).
+#[cfg(target_os = "macos")]
+fn push_overlay_gpu_source_at<'a>(
+    prepared_sources: &mut Vec<PreparedGpuSource<'a>>,
+    overlay: &'a crate::captions::CaptionOverlay,
+    layout: (usize, usize, usize, usize),
+    canvas_width: u32,
+    canvas_height: u32,
+    content_namespace: u64,
+) {
+    let overlay_width = overlay.width as usize;
+    let overlay_height = overlay.height as usize;
+    if overlay.rgba.len() < overlay_width * overlay_height * 4 {
+        return;
+    }
+    let (source_left, dest_left, dest_top, draw_width) = layout;
     let draw_height = overlay_height.min(canvas_height.max(1) as usize);
     // Channel conversion happens once when the overlay revision is installed. Crop only
     // when the canvas is narrower than the overlay; the common path borrows immutable BGRA.
@@ -6141,6 +6171,110 @@ fn push_caption_overlay_gpu_source<'a>(
         // its alpha-0 pixels overwrite the frame as an opaque black box.
         blend: true,
         chroma_key: None,
+        corners: None,
+        sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+        opacity: 1.0,
+    });
+}
+
+// The pet atlas's key-addressed Metal slot (D8) must be the namespace the
+// sprite is keyed with.
+#[cfg(target_os = "macos")]
+const _: () = assert!(
+    crate::metal_compositor::KEYED_TEXTURE_NAMESPACES[0]
+        == crate::golem_sprite::GOLEM_SPRITE_METAL_NAMESPACE
+);
+
+/// The Golem on the Metal path (plan 168 S-B2): the pet as one turned,
+/// linearly sampled quad from its atlas (namespace 7, a key-addressed slot
+/// that never re-uploads when another layer appears), then the bubble
+/// (namespace 8) above its head. Captions draw before, the card after (D9).
+#[cfg(target_os = "macos")]
+fn push_golem_gpu_sources<'a>(
+    prepared_sources: &mut Vec<PreparedGpuSource<'a>>,
+    inputs: &CompositorRenderInputs<'a>,
+) {
+    if let Some(sprite) = inputs.golem_leg.and_then(|leg| leg.sprite.as_ref()) {
+        push_golem_sprite_gpu_source(prepared_sources, sprite, inputs.width, inputs.height);
+    }
+    if let Some(overlay) = inputs.golem_overlay {
+        let layout = golem_bubble_layout(overlay, inputs.golem_leg, inputs.width, inputs.height);
+        push_overlay_gpu_source_at(
+            prepared_sources,
+            overlay,
+            layout,
+            inputs.width,
+            inputs.height,
+            crate::golem_sprite::GOLEM_BUBBLE_METAL_NAMESPACE,
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn push_golem_sprite_gpu_source<'a>(
+    prepared_sources: &mut Vec<PreparedGpuSource<'a>>,
+    sprite: &'a crate::golem_sprite::GolemSpriteLayer,
+    canvas_width: u32,
+    canvas_height: u32,
+) {
+    let atlas = &*sprite.atlas;
+    let draw = &sprite.draw;
+    let [cell_x, cell_y, cell_w, cell_h] = draw.cell;
+    if !draw.is_drawable()
+        || cell_x + cell_w > atlas.width
+        || cell_y + cell_h > atlas.height
+        || atlas.bgra.len() < atlas.width as usize * atlas.height as usize * 4
+    {
+        return;
+    }
+    let (width, height) = (canvas_width.max(1) as f32, canvas_height.max(1) as f32);
+    let corners = draw.corners().map(|[x, y]| [x / width, y / height]);
+    let min_x = corners
+        .iter()
+        .map(|corner| corner[0])
+        .fold(f32::INFINITY, f32::min);
+    let max_x = corners
+        .iter()
+        .map(|corner| corner[0])
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_y = corners
+        .iter()
+        .map(|corner| corner[1])
+        .fold(f32::INFINITY, f32::min);
+    let max_y = corners
+        .iter()
+        .map(|corner| corner[1])
+        .fold(f32::NEG_INFINITY, f32::max);
+    let (atlas_width, atlas_height) = (atlas.width as f32, atlas.height as f32);
+    prepared_sources.push(PreparedGpuSource {
+        pixels: PreparedGpuSourcePixels::Borrowed(&atlas.bgra),
+        kind: crate::metal_compositor::GpuSourceKind::Image,
+        content_key: Some(crate::metal_compositor::GpuSourceContentKey {
+            namespace: crate::golem_sprite::GOLEM_SPRITE_METAL_NAMESPACE,
+            revision: atlas.revision,
+            variant: 0,
+        }),
+        iosurface: None,
+        pixel_buffer: None,
+        width: atlas.width as usize,
+        height: atlas.height as usize,
+        // The bounding box; the quad itself is `corners`.
+        dest: [min_x, min_y, max_x - min_x, max_y - min_y],
+        crop: [
+            cell_x as f32 / atlas_width,
+            cell_y as f32 / atlas_height,
+            (atlas.width - cell_x - cell_w) as f32 / atlas_width,
+            (atlas.height - cell_y - cell_h) as f32 / atlas_height,
+        ],
+        mirror: false,
+        mask: SceneMask::None,
+        // Straight alpha over the frame; the gutters and alpha bleed keep
+        // the linear filter's edge clean.
+        blend: true,
+        chroma_key: None,
+        corners: Some(corners),
+        sampler: crate::metal_compositor::GpuSourceSampler::Linear,
+        opacity: draw.opacity,
     });
 }
 
@@ -6159,7 +6293,7 @@ fn try_gpu_compose(
 }
 
 /// Editor chrome content namespace (images use 1, captions 2, highlight 3,
-/// capture storage 4 and 5). One key per tone: the three 2x2 bitmaps never
+/// capture storage 4 and 5, the Golem's pet 7 and bubble 8). One key per tone: the three 2x2 bitmaps never
 /// change, so a slot that keeps its tone never re-uploads.
 #[cfg(target_os = "macos")]
 const EDITOR_CHROME_CONTENT_NAMESPACE: u64 = 6;
@@ -6234,6 +6368,9 @@ fn push_editor_chrome_gpu_sources<'a>(
             // picture through, not stamp opaque boxes.
             blend: true,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         });
     }
 }
@@ -6310,6 +6447,9 @@ fn try_gpu_compose_with_chrome(
                     mask: SceneMask::None,
                     blend: false,
                     chroma_key: None,
+                    corners: None,
+                    sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                    opacity: 1.0,
                 });
                 true
             } else {
@@ -6370,6 +6510,9 @@ fn try_gpu_compose_with_chrome(
             mask: SceneMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         });
         if let Some(overlay) = inputs.caption_overlay {
             let safe_inset = caption_overlay_safe_inset(
@@ -6387,16 +6530,7 @@ fn try_gpu_compose_with_chrome(
                 safe_inset,
             );
         }
-        if let Some(overlay) = inputs.golem_overlay {
-            push_caption_overlay_gpu_source(
-                &mut prepared_sources,
-                overlay,
-                inputs.width,
-                inputs.height,
-                4,
-                0,
-            );
-        }
+        push_golem_gpu_sources(&mut prepared_sources, inputs);
         if let Some(overlay) = inputs.highlight_overlay {
             push_caption_overlay_gpu_source(
                 &mut prepared_sources,
@@ -6455,6 +6589,9 @@ fn try_gpu_compose_with_chrome(
             mask: SceneMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         });
         if let Some(overlay) = inputs.caption_overlay {
             let safe_inset = caption_overlay_safe_inset(
@@ -6472,16 +6609,7 @@ fn try_gpu_compose_with_chrome(
                 safe_inset,
             );
         }
-        if let Some(overlay) = inputs.golem_overlay {
-            push_caption_overlay_gpu_source(
-                &mut prepared_sources,
-                overlay,
-                inputs.width,
-                inputs.height,
-                4,
-                0,
-            );
-        }
+        push_golem_gpu_sources(&mut prepared_sources, inputs);
         if let Some(overlay) = inputs.highlight_overlay {
             push_caption_overlay_gpu_source(
                 &mut prepared_sources,
@@ -6573,6 +6701,9 @@ fn try_gpu_compose_with_chrome(
                         chroma_key: camera_chroma_key(layout)
                             .as_ref()
                             .and_then(scene_chroma_key_into_metal),
+                        corners: None,
+                        sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                        opacity: 1.0,
                     });
                 } else {
                     let placeholder = missing_source_black_bgra();
@@ -6601,6 +6732,9 @@ fn try_gpu_compose_with_chrome(
                         mask: camera_mask(layout),
                         blend: false,
                         chroma_key: None,
+                        corners: None,
+                        sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                        opacity: 1.0,
                     });
                 }
             }
@@ -6655,6 +6789,9 @@ fn try_gpu_compose_with_chrome(
                         mask: SceneMask::None,
                         blend: false,
                         chroma_key: None,
+                        corners: None,
+                        sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                        opacity: 1.0,
                     });
                 } else {
                     let placeholder = missing_source_black_bgra();
@@ -6683,6 +6820,9 @@ fn try_gpu_compose_with_chrome(
                         mask: SceneMask::None,
                         blend: false,
                         chroma_key: None,
+                        corners: None,
+                        sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                        opacity: 1.0,
                     });
                 }
             }
@@ -6714,6 +6854,9 @@ fn try_gpu_compose_with_chrome(
                     mask: SceneMask::None,
                     blend: false,
                     chroma_key: None,
+                    corners: None,
+                    sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                    opacity: 1.0,
                 });
             }
         }
@@ -6737,16 +6880,7 @@ fn try_gpu_compose_with_chrome(
             safe_inset,
         );
     }
-    if let Some(overlay) = inputs.golem_overlay {
-        push_caption_overlay_gpu_source(
-            &mut prepared_sources,
-            overlay,
-            inputs.width,
-            inputs.height,
-            4,
-            0,
-        );
-    }
+    push_golem_gpu_sources(&mut prepared_sources, inputs);
     if let Some(overlay) = inputs.highlight_overlay {
         push_caption_overlay_gpu_source(
             &mut prepared_sources,
@@ -7527,6 +7661,30 @@ async fn publish_compositor_frame(
     let simulcast_highlight_overlay = stream_output
         .filter(|output| output.composes_simulcast_scene)
         .and_then(|_| crate::captions::current_caption_overlay(&state.simulcast_highlight_overlay));
+    // Plan 168 S-B1: the pet on each leg that carries the Golem, drawn from
+    // the sprite slot once per composed frame at `published_at` (both legs
+    // share the clock; the atlas is built off this thread).
+    let golem_now = if golem_overlay_on_primary || golem_overlay_on_aux {
+        state.golem_sprite.clock_seconds(published_at)
+    } else {
+        0.0
+    };
+    let primary_golem = golem_overlay_on_primary.then(|| {
+        golem_leg_frame(
+            state,
+            crate::golem_sprite::GolemSpriteLeg::Primary,
+            (width, height),
+            golem_now,
+            caption_overlay_for_output(
+                &caption_overlays,
+                crate::captions::CaptionOverlayTarget::Primary,
+                caption_overlay_on_primary,
+            ),
+            highlight_overlay
+                .as_ref()
+                .filter(|_| highlight_overlay_on_primary),
+        )
+    });
     let mut bytes;
     {
         let inputs = CompositorRenderInputs {
@@ -7553,6 +7711,7 @@ async fn publish_compositor_frame(
                 crate::captions::CaptionOverlayTarget::Primary,
                 golem_overlay_on_primary,
             ),
+            golem_leg: primary_golem.as_ref(),
         };
         // GPU path for the cases it reproduces exactly; otherwise the CPU compositor.
         match try_gpu_compose_with_chrome(
@@ -7642,6 +7801,27 @@ async fn publish_compositor_frame(
         } else {
             snapshot.as_ref()
         };
+        let aux_highlight_overlay = if !highlight_overlay_on_aux {
+            None
+        } else if stream_output.composes_simulcast_scene {
+            simulcast_highlight_overlay.as_ref()
+        } else {
+            highlight_overlay.as_ref()
+        };
+        let aux_golem = golem_overlay_on_aux.then(|| {
+            golem_leg_frame(
+                state,
+                crate::golem_sprite::GolemSpriteLeg::Auxiliary,
+                (stream_output.width.max(1), stream_output.height.max(1)),
+                golem_now,
+                caption_overlay_for_output(
+                    &caption_overlays,
+                    crate::captions::CaptionOverlayTarget::Auxiliary,
+                    caption_overlay_on_aux,
+                ),
+                aux_highlight_overlay,
+            )
+        });
         let inputs = CompositorRenderInputs {
             sequence,
             width: stream_output.width.max(1),
@@ -7664,20 +7844,16 @@ async fn publish_compositor_frame(
                 crate::captions::CaptionOverlayTarget::Auxiliary,
                 caption_overlay_on_aux,
             ),
-            highlight_overlay: if !highlight_overlay_on_aux {
-                None
-            } else if stream_output.composes_simulcast_scene {
-                simulcast_highlight_overlay.as_ref()
-            } else {
-                highlight_overlay.as_ref()
-            },
-            // The Golem is rasterized per target like the caption bar (plan
-            // 164 S-C2), so the auxiliary leg always has its own raster.
+            highlight_overlay: aux_highlight_overlay,
+            // The bubble is rasterized per target like the caption bar (plan
+            // 164 S-C2), so the auxiliary leg always has its own raster; the
+            // pet has its own atlas per leg (plan 168 D5).
             golem_overlay: caption_overlay_for_output(
                 &golem_overlays,
                 crate::captions::CaptionOverlayTarget::Auxiliary,
                 golem_overlay_on_aux,
             ),
+            golem_leg: aux_golem.as_ref(),
         };
         let proof_store = stream_frame_store.clone();
         if let Some(aux_timings) = publish_auxiliary_compositor_frame(
@@ -7874,10 +8050,15 @@ struct CompositorRenderInputs<'a> {
     /// Comment-highlight card (Comments upgrade S2) — its own slot, composited
     /// after the caption bar; top vs bottom keeps them from overlapping.
     highlight_overlay: Option<&'a crate::captions::CaptionOverlay>,
-    /// The Golem avatar (plan 164 Phase C): composited after the caption bar
-    /// and BEFORE the highlight card, so the card wins an overlap (owner
-    /// answer 7: the most urgent thing on screen stays on top).
+    /// The Golem's bubble raster (plan 168 D16; plan 164 Phase C's avatar
+    /// raster before): composited after the pet and BEFORE the highlight
+    /// card, so the card wins an overlap (owner answer 7: the most urgent
+    /// thing on screen stays on top).
     golem_overlay: Option<&'a crate::captions::CaptionOverlay>,
+    /// The Golem's pet on this leg and where its bubble anchors (plan 168
+    /// S-B1): the pet draws after the caption bar, then the bubble (D9).
+    /// `None` blits a bubble inside its own rect (tests, no pet frame).
+    golem_leg: Option<&'a crate::golem_sprite::GolemLegFrame>,
 }
 
 /// Full frame render: the scene, then the caption overlay topmost — applied
@@ -7899,12 +8080,100 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
             ),
         );
     }
+    if let Some(sprite) = inputs.golem_leg.and_then(|leg| leg.sprite.as_ref()) {
+        crate::golem_sprite::blit_sprite_affine_to_yuv420p(
+            bytes,
+            inputs.width,
+            inputs.height,
+            &sprite.atlas,
+            &sprite.draw,
+        );
+    }
     if let Some(overlay) = inputs.golem_overlay {
-        composite_caption_overlay(overlay, inputs.width, inputs.height, bytes, 0);
+        let layout = golem_bubble_layout(overlay, inputs.golem_leg, inputs.width, inputs.height);
+        composite_overlay_at(overlay, inputs.width, inputs.height, bytes, layout);
     }
     if let Some(overlay) = inputs.highlight_overlay {
         composite_caption_overlay(overlay, inputs.width, inputs.height, bytes, 0);
     }
+}
+
+/// Where the Golem's bubble lands: above the pet's head on a leg that has a
+/// pet frame (plan 168 D16), else inside its own rect like any overlay. The
+/// tuple of `overlay_layout::overlay_blit_layout`; shared by CPU and Metal.
+fn golem_bubble_layout(
+    overlay: &crate::captions::CaptionOverlay,
+    golem_leg: Option<&crate::golem_sprite::GolemLegFrame>,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> (usize, usize, usize, usize) {
+    match golem_leg {
+        Some(leg) => crate::golem_sprite::golem_bubble_blit_layout(
+            overlay.width as usize,
+            overlay.height as usize,
+            canvas_width.max(1) as usize,
+            canvas_height.max(1) as usize,
+            leg.bubble_anchor,
+        ),
+        None => crate::overlay_layout::overlay_blit_layout(
+            overlay.width as usize,
+            overlay.height as usize,
+            canvas_width.max(1) as usize,
+            canvas_height.max(1) as usize,
+            overlay.blit_rect(canvas_width, canvas_height),
+            0,
+        ),
+    }
+}
+
+/// An overlay's blit on a canvas in canvas pixels `[x, y, w, h]`: the gaze
+/// targets plan 168 Phase C reads per leg.
+fn overlay_canvas_rect(
+    overlay: &crate::captions::CaptionOverlay,
+    canvas_width: u32,
+    canvas_height: u32,
+    safe_inset: usize,
+) -> [f32; 4] {
+    let (_, left, top, width) = crate::overlay_layout::overlay_blit_layout(
+        overlay.width as usize,
+        overlay.height as usize,
+        canvas_width.max(1) as usize,
+        canvas_height.max(1) as usize,
+        overlay.blit_rect(canvas_width, canvas_height),
+        safe_inset,
+    );
+    let height = (overlay.height as usize).min(canvas_height.max(1) as usize);
+    [left as f32, top as f32, width as f32, height as f32]
+}
+
+/// The Golem on one leg for this frame (plan 168 S-B1): the pet's draw from
+/// the sprite slot plus the gaze targets Phase C reads, the highlight card's
+/// and the caption bar's blits on this canvas.
+fn golem_leg_frame(
+    state: &AppState,
+    leg: crate::golem_sprite::GolemSpriteLeg,
+    canvas: (u32, u32),
+    now_seconds: f64,
+    caption: Option<&crate::captions::CaptionOverlay>,
+    highlight: Option<&crate::captions::CaptionOverlay>,
+) -> crate::golem_sprite::GolemLegFrame {
+    let (width, height) = canvas;
+    state
+        .golem_sprite
+        .leg_frame(crate::golem_sprite::GolemLegRequest {
+            leg,
+            canvas,
+            now_seconds,
+            highlight_rect: highlight.map(|overlay| overlay_canvas_rect(overlay, width, height, 0)),
+            caption_rect: caption.map(|overlay| {
+                overlay_canvas_rect(
+                    overlay,
+                    width,
+                    height,
+                    caption_overlay_safe_inset(Some(overlay), highlight, width, height),
+                )
+            }),
+        })
 }
 
 /// `render_compositor_yuv420p_frame` plus the editor chrome quads blended
@@ -7992,6 +8261,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
         caption_overlay: _,
         highlight_overlay: _,
         golem_overlay: _,
+        golem_leg: _,
     } = inputs;
     fill_yuv420p(bytes, width, height, 16, 128, 128);
 
@@ -8698,6 +8968,27 @@ fn composite_caption_overlay(
     dest: &mut [u8],
     safe_inset: usize,
 ) {
+    let layout = crate::overlay_layout::overlay_blit_layout(
+        overlay.width as usize,
+        overlay.height as usize,
+        canvas_width.max(1) as usize,
+        canvas_height.max(1) as usize,
+        overlay.blit_rect(canvas_width.max(1), canvas_height.max(1)),
+        safe_inset,
+    );
+    composite_overlay_at(overlay, canvas_width, canvas_height, dest, layout);
+}
+
+/// Straight-alpha blit of an overlay bitmap at a layout from
+/// `overlay_blit_layout` (or `golem_bubble_blit_layout`): `(source_left,
+/// dest_left, dest_top, draw_width)`, rows cut at the canvas height.
+fn composite_overlay_at(
+    overlay: &crate::captions::CaptionOverlay,
+    canvas_width: u32,
+    canvas_height: u32,
+    dest: &mut [u8],
+    layout: (usize, usize, usize, usize),
+) {
     let canvas_width = canvas_width.max(1) as usize;
     let canvas_height = canvas_height.max(1) as usize;
     if dest.len() < raw_yuv420p_len(canvas_width as u32, canvas_height as u32) {
@@ -8710,14 +9001,7 @@ fn composite_caption_overlay(
     }
 
     let draw_height = overlay_height.min(canvas_height);
-    let (source_left, dest_left, dest_top, draw_width) = crate::overlay_layout::overlay_blit_layout(
-        overlay_width,
-        overlay_height,
-        canvas_width,
-        canvas_height,
-        overlay.blit_rect(canvas_width as u32, canvas_height as u32),
-        safe_inset,
-    );
+    let (source_left, dest_left, dest_top, draw_width) = layout;
 
     let y_len = canvas_width * canvas_height;
     let uv_width = canvas_width.div_ceil(2);
@@ -9892,6 +10176,9 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         };
 
         gpu.force_next_pixel_buffer_import_failure();
@@ -10201,6 +10488,9 @@ mod tests {
                     mask: SourceMask::None,
                     blend: true,
                     chroma_key: scene_chroma_key_into_metal(&spec),
+                    corners: None,
+                    sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                    opacity: 1.0,
                 }],
             )
             .expect("metal compose");
@@ -10457,6 +10747,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             true,
         )
@@ -10475,6 +10766,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             true,
         )
@@ -10564,6 +10856,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             true,
         )
@@ -10693,6 +10986,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             true,
         )
@@ -10792,6 +11086,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             false,
         )
@@ -11197,6 +11492,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             true,
         ) {
@@ -11248,6 +11544,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             true,
         ) {
@@ -14278,6 +14575,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             &mut bytes,
         );
@@ -14357,6 +14655,7 @@ mod tests {
                 caption_overlay: caption,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             }
         }
         render_compositor_yuv420p_frame(inputs(canvas_w, canvas_h, None), &mut baseline);
@@ -14451,6 +14750,7 @@ mod tests {
             caption_overlay: None,
             highlight_overlay: None,
             golem_overlay: None,
+            golem_leg: None,
         };
         let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame(base_inputs, &mut baseline);
@@ -14460,6 +14760,7 @@ mod tests {
                 caption_overlay: Some(&caption),
                 highlight_overlay: Some(&highlight),
                 golem_overlay: None,
+                golem_leg: None,
                 ..base_inputs
             },
             &mut with_both,
@@ -14823,6 +15124,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: highlight,
                 golem_overlay: golem,
+                golem_leg: None,
             }
         }
         let mut cpu_clean = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
@@ -14947,6 +15249,7 @@ mod tests {
             caption_overlay: None,
             highlight_overlay: None,
             golem_overlay: None,
+            golem_leg: None,
         };
         let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame(base_inputs, &mut baseline);
@@ -14973,6 +15276,7 @@ mod tests {
                 CompositorRenderInputs {
                     highlight_overlay: Some(&highlight),
                     golem_overlay: None,
+                    golem_leg: None,
                     ..base_inputs
                 },
                 &mut frame,
@@ -15078,6 +15382,7 @@ mod tests {
                 caption_overlay: Some(&overlay),
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             &mut bytes,
         );
@@ -15097,6 +15402,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             &mut scene_only,
         );
@@ -15132,6 +15438,7 @@ mod tests {
                 caption_overlay: Some(&overlay),
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             &mut bytes,
         );
@@ -15158,6 +15465,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             &mut baseline,
         );
@@ -15248,6 +15556,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             &mut bytes,
         );
@@ -15343,6 +15652,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             &mut bytes,
         );
@@ -15450,6 +15760,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             &mut bytes,
         );
@@ -15702,6 +16013,7 @@ mod tests {
                 caption_overlay: None,
                 highlight_overlay: None,
                 golem_overlay: None,
+                golem_leg: None,
             },
             &mut bytes,
         );
@@ -16540,5 +16852,383 @@ mod tests {
             created_at: "2026-06-04T00:00:00Z".to_string(),
             updated_at: "2026-06-04T00:00:00Z".to_string(),
         }
+    }
+}
+
+/// Plan 168 Phase B: the Golem's pet through the CPU and Metal paths.
+#[cfg(test)]
+mod golem_sprite_tests {
+    use super::*;
+    use crate::golem_sprite::{
+        GOLEM_SPRITE_DEFAULT_PIVOT, GolemBubbleAnchor, GolemLegFrame, GolemSpriteDraw,
+        GolemSpriteLayer,
+    };
+
+    const WIDTH: u32 = 1280;
+    const HEIGHT: u32 = 720;
+
+    fn solid_overlay(
+        width: u32,
+        height: u32,
+        rgba_pixel: [u8; 4],
+        placement: impl Into<crate::captions::OverlayPlacement>,
+        revision: u64,
+    ) -> crate::captions::CaptionOverlay {
+        let rgba = std::iter::repeat_n(rgba_pixel, (width * height) as usize)
+            .flatten()
+            .collect::<Vec<_>>();
+        crate::captions::CaptionOverlay {
+            bgra: Arc::new(rgba_to_bgra_bytes(&rgba)),
+            rgba: Arc::new(rgba),
+            width,
+            height,
+            placement: placement.into(),
+            revision,
+        }
+    }
+
+    fn inputs<'a>(
+        sequence: u64,
+        caption: Option<&'a crate::captions::CaptionOverlay>,
+        highlight: Option<&'a crate::captions::CaptionOverlay>,
+        bubble: Option<&'a crate::captions::CaptionOverlay>,
+        golem_leg: Option<&'a GolemLegFrame>,
+    ) -> CompositorRenderInputs<'a> {
+        CompositorRenderInputs {
+            sequence,
+            width: WIDTH,
+            height: HEIGHT,
+            snapshot: None,
+            active_image_source: None,
+            background_image_source: None,
+            camera_frame: None,
+            screen_frame: None,
+            caption_overlay: caption,
+            highlight_overlay: highlight,
+            golem_overlay: bubble,
+            golem_leg,
+        }
+    }
+
+    fn cpu_frame(inputs: CompositorRenderInputs<'_>) -> Vec<u8> {
+        let mut bytes = vec![0; raw_yuv420p_len(inputs.width, inputs.height)];
+        render_compositor_yuv420p_frame(inputs, &mut bytes);
+        bytes
+    }
+
+    /// The S-B5 draw: cell 4 of the 3 x 2 fixture (neighbours on three
+    /// sides), 150 px on canvas from 120 px cells, turned 30 degrees and
+    /// scaled 1.1 x 0.9 about page-pet's pivot, nudged by (12, -7).
+    fn parity_leg() -> GolemLegFrame {
+        let atlas = Arc::new(crate::golem_sprite::tests::parity_atlas(120));
+        let golem_box = [565.0, 285.0, 150.0, 150.0];
+        let (sin, cos) = 30.0_f32.to_radians().sin_cos();
+        let draw = GolemSpriteDraw {
+            affine: [cos * 1.1, sin * 1.1, -sin * 0.9, cos * 0.9],
+            translate: [12.0, -7.0],
+            ..GolemSpriteDraw::at_rest(
+                atlas.cell("cell-4").unwrap().rect,
+                golem_box,
+                GOLEM_SPRITE_DEFAULT_PIVOT,
+            )
+        };
+        GolemLegFrame {
+            golem_box,
+            sprite: Some(GolemSpriteLayer { atlas, draw }),
+            bubble_anchor: crate::golem_sprite::golem_bubble_anchor(golem_box, 0.25),
+        }
+    }
+
+    /// Distance from a canvas point to the quad's outline, and whether the
+    /// point is inside.
+    fn edge_distance(corners: [[f32; 2]; 4], point: [f32; 2]) -> (f32, bool) {
+        // Outline order: top-left, top-right, bottom-right, bottom-left.
+        let outline = [corners[0], corners[1], corners[3], corners[2]];
+        let mut distance = f32::INFINITY;
+        let mut sign = None;
+        let mut inside = true;
+        for index in 0..4 {
+            let [ax, ay] = outline[index];
+            let [bx, by] = outline[(index + 1) % 4];
+            let (ex, ey) = (bx - ax, by - ay);
+            let (px, py) = (point[0] - ax, point[1] - ay);
+            let t = ((px * ex + py * ey) / (ex * ex + ey * ey)).clamp(0.0, 1.0);
+            let (dx, dy) = (px - t * ex, py - t * ey);
+            distance = distance.min((dx * dx + dy * dy).sqrt());
+            let cross = ex * py - ey * px;
+            let side = cross >= 0.0;
+            if *sign.get_or_insert(side) != side {
+                inside = false;
+            }
+        }
+        (distance, inside)
+    }
+
+    /// Plan 168 S-B5: the CPU and Metal paths draw the same sprite. A
+    /// synthetic 3 x 2 atlas of flat colours with a 1 px alpha ramp edge,
+    /// turned 30 degrees and scaled 1.1 x 0.9 on a 1280 x 720 canvas: the
+    /// two readbacks agree within 3 per channel inside the quad and 8 on its
+    /// edge ring, and the inside is the cell's colour on both.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cpu_and_metal_draw_the_same_sprite() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let leg = parity_leg();
+        let draw = leg.sprite.as_ref().unwrap().draw;
+        let cpu = cpu_frame(inputs(1, None, None, None, Some(&leg)));
+        let metal = try_gpu_compose(
+            Some(&mut gpu),
+            &inputs(1, None, None, None, Some(&leg)),
+            true,
+        )
+        .expect("the sprite renders on Metal")
+        .yuv;
+        assert_eq!(metal.len(), cpu.len());
+        let corners = draw.corners();
+        let (width, height) = (WIDTH as usize, HEIGHT as usize);
+        let (uv_width, uv_height) = (width / 2, height / 2);
+        let close = |a: u8, b: u8, tolerance: i16| (i16::from(a) - i16::from(b)).abs() <= tolerance;
+        const EDGE_RING_PX: f32 = 2.0;
+        let (cell_y, cell_u, cell_v) = rgb_to_yuv(200, 60, 220);
+        let min_x = corners.iter().map(|c| c[0]).fold(f32::INFINITY, f32::min) as usize - 4;
+        let max_x = corners.iter().map(|c| c[0]).fold(0.0, f32::max) as usize + 4;
+        let min_y = corners.iter().map(|c| c[1]).fold(f32::INFINITY, f32::min) as usize - 4;
+        let max_y = corners.iter().map(|c| c[1]).fold(0.0, f32::max) as usize + 4;
+        let (mut inside_pixels, mut ring_pixels) = (0, 0);
+        let (mut worst_inside, mut worst_ring) = (0_i16, 0_i16);
+        for y in min_y..max_y {
+            for x in min_x..max_x {
+                let index = y * width + x;
+                let (distance, inside) = edge_distance(corners, [x as f32 + 0.5, y as f32 + 0.5]);
+                let difference = (i16::from(cpu[index]) - i16::from(metal[index])).abs();
+                let tolerance = if distance <= EDGE_RING_PX {
+                    ring_pixels += 1;
+                    worst_ring = worst_ring.max(difference);
+                    8
+                } else {
+                    if inside {
+                        inside_pixels += 1;
+                    }
+                    worst_inside = worst_inside.max(difference);
+                    3
+                };
+                assert!(
+                    close(cpu[index], metal[index], tolerance),
+                    "luma at {x},{y} (edge distance {distance:.2}, inside {inside}): cpu {} metal {}",
+                    cpu[index],
+                    metal[index]
+                );
+                if inside && distance > 3.0 {
+                    assert!(close(cpu[index], cell_y, 3), "cpu luma at {x},{y}");
+                }
+            }
+        }
+        assert!(inside_pixels > 10_000 && ring_pixels > 500);
+        eprintln!(
+            "sprite parity: worst luma difference {worst_inside} inside, {worst_ring} on the edge ring"
+        );
+        let (u_start, v_start) = (width * height, width * height + uv_width * uv_height);
+        for uv_y in min_y / 2..max_y / 2 {
+            for uv_x in min_x / 2..max_x / 2 {
+                let (distance, inside) =
+                    edge_distance(corners, [uv_x as f32 * 2.0 + 1.0, uv_y as f32 * 2.0 + 1.0]);
+                // The block's four pixels lie within 0.71 px of its centre.
+                let tolerance = if distance <= EDGE_RING_PX + 0.71 {
+                    8
+                } else {
+                    3
+                };
+                let uv_index = uv_y * uv_width + uv_x;
+                for (plane, start, expected) in [("u", u_start, cell_u), ("v", v_start, cell_v)] {
+                    let (a, b) = (cpu[start + uv_index], metal[start + uv_index]);
+                    assert!(
+                        close(a, b, tolerance),
+                        "{plane} at {uv_x},{uv_y} (edge distance {distance:.2}): cpu {a} metal {b}"
+                    );
+                    if inside && distance > 3.0 {
+                        assert!(close(a, expected, 3), "cpu {plane} at {uv_x},{uv_y}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Plan 168 S-B2 / D8: the atlas lives in a key-addressed Metal slot, so
+    /// a caption appearing and disappearing under it (shifting its layer
+    /// index) never uploads it again: once across 100 frames.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_uploads_the_golem_atlas_once_while_a_caption_comes_and_goes() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let leg = parity_leg();
+        let caption = solid_overlay(
+            400,
+            60,
+            [255, 255, 255, 255],
+            crate::captions::CaptionOverlayPosition::Bottom,
+            1,
+        );
+        let mut caption_frames = 0;
+        for frame in 0..100_u64 {
+            let caption = (frame / 10 % 2 == 0).then_some(&caption);
+            caption_frames += usize::from(caption.is_some());
+            try_gpu_compose(
+                Some(&mut gpu),
+                &inputs(frame, caption, None, None, Some(&leg)),
+                frame == 99,
+            )
+            .expect("metal frame");
+        }
+        assert_eq!(caption_frames, 50);
+        assert_eq!(gpu.keyed_texture_uploads(), 1, "the atlas uploaded once");
+        // A new atlas revision uploads once more, into the same slot.
+        let mut next = parity_leg();
+        let atlas = next.sprite.as_mut().unwrap();
+        atlas.atlas = Arc::new(crate::golem_sprite::tests::parity_atlas(120));
+        try_gpu_compose(
+            Some(&mut gpu),
+            &inputs(100, None, None, None, Some(&next)),
+            false,
+        )
+        .expect("metal frame");
+        try_gpu_compose(
+            Some(&mut gpu),
+            &inputs(101, None, None, None, Some(&next)),
+            false,
+        )
+        .expect("metal frame");
+        assert_eq!(gpu.keyed_texture_uploads(), 2);
+    }
+
+    /// D9 on both paths: the pet over the caption bar, its bubble over the
+    /// pet, the highlight card over everything.
+    #[test]
+    fn the_pet_sits_under_its_bubble_and_the_card() {
+        let atlas = Arc::new(crate::golem_sprite::tests::parity_atlas(100));
+        let golem_box = [600.0, 300.0, 100.0, 100.0];
+        let leg = GolemLegFrame {
+            golem_box,
+            sprite: Some(GolemSpriteLayer {
+                draw: GolemSpriteDraw::at_rest(
+                    atlas.cell("cell-1").unwrap().rect,
+                    golem_box,
+                    GOLEM_SPRITE_DEFAULT_PIVOT,
+                ),
+                atlas,
+            }),
+            // Head top at 20 %: the bubble's bottom rows overlap the pet.
+            bubble_anchor: GolemBubbleAnchor { x: 650.0, y: 320.0 },
+        };
+        let bubble = solid_overlay(
+            60,
+            40,
+            [250, 250, 251, 255],
+            crate::golem_overlay::golem_overlay_placement(None),
+            1,
+        );
+        // The card covers the pet's bottom-right corner.
+        let card = solid_overlay(
+            100,
+            40,
+            [255, 0, 0, 255],
+            crate::captions::OverlayPlacement::new(
+                Some(crate::overlay_layout::OverlayRect::new(
+                    680.0 / 1280.0,
+                    380.0 / 720.0,
+                    100.0 / 1280.0,
+                    40.0 / 720.0,
+                )),
+                crate::captions::CaptionOverlayPosition::Top,
+            ),
+            1,
+        );
+        let check = |frame: &[u8], path: &str| {
+            let luma = |x: usize, y: usize| frame[y * WIDTH as usize + x];
+            let (pet_y, _, _) = rgb_to_yuv(40, 200, 60);
+            let (bubble_y, _, _) = rgb_to_yuv(250, 250, 251);
+            let (card_y, _, _) = rgb_to_yuv(255, 0, 0);
+            let near = |a: u8, b: u8| (i16::from(a) - i16::from(b)).abs() <= 3;
+            assert!(near(luma(620, 350), pet_y), "{path}: the pet");
+            assert!(
+                near(luma(650, 310), bubble_y),
+                "{path}: the bubble over the pet"
+            );
+            assert!(
+                near(luma(650, 290), bubble_y),
+                "{path}: the bubble above the head"
+            );
+            assert!(
+                near(luma(690, 390), card_y),
+                "{path}: the card over the pet"
+            );
+        };
+        let frame_inputs = || inputs(1, None, Some(&card), Some(&bubble), Some(&leg));
+        // The bubble's raster bottom-centre sits on the anchor.
+        assert_eq!(
+            golem_bubble_layout(&bubble, Some(&leg), WIDTH, HEIGHT),
+            (0, 620, 280, 60)
+        );
+        check(&cpu_frame(frame_inputs()), "cpu");
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(mut gpu) = new_gpu_compositor(false) {
+                let metal = try_gpu_compose(Some(&mut gpu), &frame_inputs(), true)
+                    .expect("metal frame")
+                    .yuv;
+                check(&metal, "metal");
+            }
+        }
+    }
+
+    /// The pet's per-frame draw comes from the slot for the leg's canvas: no
+    /// pet before its atlas exists (the bubble still has its anchor), then
+    /// the state's cell at rest in the box.
+    #[test]
+    fn a_leg_frame_draws_the_installed_atlas_in_the_golem_box() {
+        let layout = crate::overlay_layout::OverlayLayout::default().golem;
+        let slot = crate::golem_sprite::GolemSpriteSlot::new(
+            &crate::cohost::CohostPersona::default(),
+            layout,
+            None,
+        );
+        let atlas = slot.install_atlas_for_test(
+            crate::golem_sprite::GolemSpriteLeg::Primary,
+            (WIDTH, HEIGHT),
+            crate::golem_sprite::tests::parity_atlas(64),
+        );
+        let frame = slot.leg_frame(crate::golem_sprite::GolemLegRequest {
+            leg: crate::golem_sprite::GolemSpriteLeg::Primary,
+            canvas: (WIDTH, HEIGHT),
+            now_seconds: 2.0,
+            highlight_rect: None,
+            caption_rect: None,
+        });
+        let sprite = frame.sprite.expect("the installed atlas draws");
+        assert_eq!(sprite.atlas.revision, atlas.revision);
+        assert_eq!(sprite.draw.cell, atlas.neutral().unwrap().rect);
+        assert_eq!(
+            frame.golem_box,
+            crate::golem_sprite::golem_box(layout.horizontal, WIDTH, HEIGHT)
+        );
+        assert_eq!(
+            slot.resident_atlas(crate::golem_sprite::GolemSpriteLeg::Primary)
+                .map(|resident| resident.revision),
+            Some(atlas.revision)
+        );
+        // The CPU path draws the neutral cell's colour in the box.
+        let leg = GolemLegFrame {
+            sprite: Some(sprite),
+            ..frame
+        };
+        let cpu = cpu_frame(inputs(1, None, None, None, Some(&leg)));
+        let [x, y, w, h] = leg.golem_box;
+        let centre = (y + h / 2.0) as usize * WIDTH as usize + (x + w / 2.0) as usize;
+        assert_eq!(cpu[centre], rgb_to_yuv(230, 40, 40).0);
     }
 }

@@ -1,5 +1,4 @@
 import type {
-  CohostAvatarState,
   CohostBubbleStyle,
   OverlayItemLayout,
   OverlayRect,
@@ -7,9 +6,10 @@ import type {
 } from '@/lib/backend'
 import { overlayOrientationForCanvas } from '@/lib/overlay-layout'
 
-// Which output canvases the Golem is rasterized for (plan 164 S-C2) and the
-// key that dedupes a push. Pure and asset-free, so the Studio can import it
-// eagerly; the rasterizer itself (`golem-overlay.ts`) stays a lazy chunk.
+// Which output canvases the Golem's bubble is rasterized for (plan 164 S-C2;
+// the bubble only since plan 168) and the key that dedupes a push. Pure and
+// asset-free, so the Studio can import it eagerly; the rasterizer itself
+// (`golem-overlay.ts`) stays a lazy chunk.
 
 export interface GolemOverlayTargetPlan {
   target: OverlayTarget
@@ -19,7 +19,7 @@ export interface GolemOverlayTargetPlan {
 }
 
 /**
- * Which output canvases get a Golem raster. The primary is the capture
+ * Which output canvases get a Golem bubble raster. The primary is the capture
  * canvas (the recording's; a stream-only session composites at that size
  * too, see `captionOverlayTargets`). A streaming session also gets the
  * auxiliary leg: the vertical simulcast canvas when one is armed, else the
@@ -45,21 +45,13 @@ export function golemOverlayTargetPlan(input: {
   return targets
 }
 
-/** Everything that changes pixels, for the push dedupe. */
+/** Everything that changes the bubble's pixels, for the push dedupe. The
+ * pet is drawn by the backend (plan 168 S-B1), so the persona's images and
+ * state no longer change what the renderer pushes. */
 export function golemOverlayKey(params: {
-  personaId: string
-  imagesKey: string
-  state: CohostAvatarState
   bubble: string | null
   style: CohostBubbleStyle
   targets: GolemOverlayTargetPlan[]
 }): string {
-  return JSON.stringify([
-    params.personaId,
-    params.imagesKey,
-    params.state,
-    params.bubble,
-    params.style,
-    params.targets
-  ])
+  return JSON.stringify([params.bubble, params.style, params.targets])
 }

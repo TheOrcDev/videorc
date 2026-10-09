@@ -47,6 +47,7 @@ fn inputs(snapshot: Option<&CompositorSceneSnapshot>) -> CompositorRenderInputs<
         caption_overlay: None,
         highlight_overlay: None,
         golem_overlay: None,
+        golem_leg: None,
     }
 }
 

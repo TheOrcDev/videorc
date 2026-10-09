@@ -6,14 +6,17 @@ import type {
 } from '@/lib/backend'
 import { GOLEM_DEFAULT_PACK } from '@/lib/golem-default-pack'
 
-// The Golem on stream (plan 164 Phase C, D17): the avatar's state image with
-// a comic bubble above it, rasterized per output canvas like the highlight
-// card (`lib/comment-highlight.ts`) and pushed to the backend's `golem_overlay`
-// slot through `golem.overlay.set`. The avatar fills the placed rect's width
-// (a square box), the bubble sits above it with a tail pointing at the
-// avatar's top and wraps to at most four lines at the rect's width. The
-// stream is not themed: the bubble is always the light variant, primary ink
-// on porcelain with a hairline ring.
+// The Golem's comic bubble (plan 164 Phase C, D17), rasterized per output
+// canvas like the highlight card (`lib/comment-highlight.ts`). On stream the
+// backend draws the pet itself (plan 168 S-B1) and this module pushes the
+// bubble alone to the `golem_overlay` slot through `golem.overlay.set`
+// (`renderGolemBubblePng`): its tail tip sits on the bitmap's bottom-centre,
+// which the backend puts on the pet's head (D16). The settings sample still
+// draws plan 164's composite, the avatar under its bubble
+// (`renderGolemOverlayPng`). The avatar box is the placed rect's width (a
+// square), the bubble wraps to at most four lines at that width. The stream
+// is not themed: the bubble is always the light variant, primary ink on
+// porcelain with a hairline ring.
 //
 // Pure layout lives here (unit-tested with a fake measurer and snapshotted
 // paint logs); the OffscreenCanvas painter is a thin shell. This module rides
@@ -254,6 +257,20 @@ export function layoutGolemOverlay(params: {
   }
 }
 
+/**
+ * The bubble alone for the stream (plan 168 D16): plan 164's layout without
+ * the avatar, cut at the tail's tip plus its gap, so the bitmap's
+ * bottom-centre is where the tail points. The backend places that point on
+ * the pet's head. Null without text.
+ */
+export function layoutGolemBubble(
+  params: Parameters<typeof layoutGolemOverlay>[0]
+): GolemOverlayLayout | null {
+  const layout = layoutGolemOverlay(params)
+  if (!layout.bubble) return null
+  return { ...layout, height: layout.avatar.y }
+}
+
 /** The jagged outline of a shout bubble: spikes around its box. */
 export function shoutBubblePoints(bubble: GolemBox, spikePx: number): GolemPoint[] {
   const inset = spikePx
@@ -444,6 +461,35 @@ export async function renderGolemOverlayPng(params: {
   const context = canvas.getContext('2d')
   if (!context) return null
   paintGolemOverlay(context, layout, params.image)
+  return canvasToBase64Png(canvas)
+}
+
+/**
+ * Render the bubble for one output canvas to a PNG (base64, no data: prefix),
+ * wrapped to the width of `rect` on that canvas, its tail tip on the bitmap's
+ * bottom-centre (plan 168 D16). Null without text or a 2D canvas.
+ */
+export async function renderGolemBubblePng(params: {
+  bubble: string
+  style: CohostBubbleStyle
+  canvas: { width: number; height: number }
+  rect: OverlayRect
+}): Promise<string | null> {
+  const measure = golemCanvasMeasurer()
+  if (!measure) return null
+  const layout = layoutGolemBubble({
+    text: params.bubble,
+    style: params.style,
+    canvasWidth: params.canvas.width,
+    canvasHeight: params.canvas.height,
+    rectWidthPx: Math.floor(params.rect.w * params.canvas.width),
+    measure
+  })
+  if (!layout) return null
+  const canvas = new OffscreenCanvas(Math.max(1, layout.width), Math.max(1, layout.height))
+  const context = canvas.getContext('2d')
+  if (!context) return null
+  paintGolemOverlay(context, layout, null)
   return canvasToBase64Png(canvas)
 }
 

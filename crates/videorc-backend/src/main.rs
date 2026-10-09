@@ -44,6 +44,7 @@ mod golem_motion;
 mod golem_overlay;
 mod golem_pet;
 mod golem_pet_store;
+mod golem_sprite;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
 mod golem_pet_build;
 mod golem_pet_create;
@@ -5365,6 +5366,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "overlays.layout.migrate_highlight_anchor"
         | "cohost.avatar.generate"
         | "golem.overlay.set"
+        | "golem.overlay.clear"
         | "cohost.pet.import"
         | "cohost.pet.remove"
         | "cohost.pet.react"
@@ -9446,7 +9448,7 @@ async fn handle_text_message_with_role(
         "golem.overlay.set" => {
             match serde_json::from_value::<golem_overlay::SetGolemOverlayParams>(command.params) {
                 Ok(params) => {
-                    match golem_overlay::install_golem_overlay(&state.golem_overlay, params) {
+                    match golem_overlay::set_golem_overlay(&state.golem_overlay, params).await {
                         Ok(info) => ServerResponse::ok(command.id, info),
                         Err(error) => ServerResponse::error(
                             command.id,
@@ -9460,6 +9462,25 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        // --- Golem pets (plan 168, Phase B) ---
+        "golem.overlay.clear" => {
+            match serde_json::from_value::<golem_overlay::ClearGolemOverlayParams>(command.params) {
+                Ok(params) => {
+                    match golem_overlay::clear_golem_overlay(&state.golem_overlay, params) {
+                        Ok(info) => ServerResponse::ok(command.id, info),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "golem-overlay-invalid",
+                            error.to_string(),
+                        ),
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // --- end Golem pets (plan 168, Phase B) ---
         // --- end Golem overlay ---
         "cohost.avatar.generate" => {
             match serde_json::from_value::<protocol::CohostAvatarGenerateParams>(command.params) {

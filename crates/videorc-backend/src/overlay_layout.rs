@@ -637,6 +637,8 @@ pub const OVERLAY_LAYOUT_EVENT: &str = "overlays.layout";
 /// `overlays.layout.set`: persist the whole layout and tell every window.
 pub async fn set_overlay_layout(state: &AppState, layout: OverlayLayout) -> Result<OverlayLayout> {
     let saved = save_overlay_layout(&state.database, &layout)?;
+    // Plan 168 S-B1: the pet's box and atlas size follow the Golem's rect.
+    state.golem_sprite.set_layout(saved.golem);
     crate::recording::apply_overlay_layout_to_active_session(state, &saved).await;
     state.emit_event(OVERLAY_LAYOUT_EVENT, saved);
     Ok(saved)

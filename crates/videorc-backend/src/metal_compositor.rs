@@ -67,6 +67,9 @@ struct FragParams {
     // color.rs. If these drift, the CPU and GPU keyers disagree.
     float4 chroma_key;
     float4 chroma_key2;
+    // (opacity, reserved, reserved, reserved): multiplies the quad's alpha
+    // (plan 168 S-B2, the Golem sprite); 1 for every other quad.
+    float4 layer;
 };
 vertex VOut v_main(uint vid [[vertex_id]], const device float4* verts [[buffer(0)]]) {
     VOut out;
@@ -159,6 +162,7 @@ fragment float4 f_main(VOut in [[stage_in]],
         }
         color.a *= alpha;
     }
+    color.a *= params.layer.x;
     return color;
 }
 "#;
@@ -180,6 +184,8 @@ struct FragParams {
     chroma_key: [f32; 4],
     /// (band, spill, spill_is_blue, reserved).
     chroma_key2: [f32; 4],
+    /// (opacity, reserved, reserved, reserved); see the MSL comment.
+    layer: [f32; 4],
 }
 
 /// Per-quad chroma key in shader units, converted once from
@@ -259,6 +265,40 @@ pub struct GpuSource<'a> {
     /// Chroma key applied in the fragment shader (camera green screen). The
     /// caller must also set `blend` or the computed alpha is ignored.
     pub chroma_key: Option<GpuChromaKey>,
+    /// A turned quad (plan 168 S-B2, the Golem sprite): the source's corners
+    /// in normalized [0,1] canvas coords, top-left origin, in the order
+    /// top-left, top-right, bottom-left, bottom-right of the (cropped)
+    /// source. `None` draws the axis-aligned `dest` rect.
+    pub corners: Option<[[f32; 2]; 4]>,
+    /// Which sampler this quad reads with.
+    pub sampler: GpuSourceSampler,
+    /// Multiplies the quad's alpha (needs `blend`); 1 for everything but
+    /// the Golem sprite.
+    pub opacity: f32,
+}
+
+/// The sampler a quad reads with (plan 168 D7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuSourceSampler {
+    /// The compositor's scene sampler: nearest on recording compositors (exact
+    /// crop edges at ~1:1), linear on preview compositors.
+    Scene,
+    /// Always linear: the Golem sprite, which is scaled, turned and squashed.
+    Linear,
+}
+
+/// Content namespaces whose texture lives in a key-addressed slot rather than
+/// the per-index cache (plan 168 D8): a layer whose index shifts (a caption
+/// appearing below it) never re-uploads. One slot per namespace.
+/// Namespace 7 is the Golem sprite atlas (`golem_sprite::GOLEM_SPRITE_METAL_NAMESPACE`;
+/// the compositor asserts the two agree at compile time).
+pub const KEYED_TEXTURE_NAMESPACES: [u64; 1] = [7];
+
+fn keyed_texture_namespace(source: &GpuSource<'_>) -> Option<u64> {
+    source
+        .content_key
+        .map(|key| key.namespace)
+        .filter(|namespace| KEYED_TEXTURE_NAMESPACES.contains(namespace))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -750,6 +790,8 @@ pub struct MetalSceneCompositor {
     /// for `GpuSource::blend` overlays (caption bar, comment highlight).
     blend_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     sampler: Retained<ProtocolObject<dyn MTLSamplerState>>,
+    /// Always linear, for quads that ask for it (`GpuSourceSampler::Linear`).
+    linear_sampler: Retained<ProtocolObject<dyn MTLSamplerState>>,
     smooth_scaling: bool,
     targets: Vec<CachedTargetTexture>,
     // Index of the LAST-RENDERED slot; advanced at the start of each compose.
@@ -757,6 +799,11 @@ pub struct MetalSceneCompositor {
     target_width: usize,
     target_height: usize,
     source_textures: Vec<Option<CachedSourceTexture>>,
+    /// Key-addressed slots (`KEYED_TEXTURE_NAMESPACES`), one per namespace.
+    keyed_textures: Vec<CachedSourceTexture>,
+    /// Byte uploads into the key-addressed slots, for the "uploads once"
+    /// contract (plan 168 S-B2).
+    keyed_texture_uploads: u64,
     source_texture_cache: Option<MetalSourceTextureCache>,
     pending_source_import_stats: PendingMetalSourceImportStats,
     retention_counters: Arc<MetalRetentionCounters>,
@@ -1113,6 +1160,7 @@ impl MetalSceneCompositor {
         } else {
             build_sampler(&device)?
         };
+        let linear_sampler = build_preview_sampler(&device)?;
         let source_texture_cache = make_texture_cache(&device).map(MetalSourceTextureCache::new);
         let retention_counters = Arc::new(MetalRetentionCounters::default());
         let retention_lifetime =
@@ -1125,12 +1173,15 @@ impl MetalSceneCompositor {
             pipeline,
             blend_pipeline,
             sampler,
+            linear_sampler,
             smooth_scaling,
             targets: Vec::new(),
             target_cursor: 0,
             target_width: 0,
             target_height: 0,
             source_textures: Vec::new(),
+            keyed_textures: Vec::new(),
+            keyed_texture_uploads: 0,
             source_texture_cache,
             pending_source_import_stats: PendingMetalSourceImportStats::default(),
             retention_counters,
@@ -1239,6 +1290,7 @@ impl MetalSceneCompositor {
         let mut command_encode_ms = 0.0;
         let mut encode_segment_started_at = Instant::now();
         let mut encoder_blend = false;
+        let mut encoder_sampler = GpuSourceSampler::Scene;
         let mut encode_result: Result<(), ()> = Ok(());
         for (source_index, source) in sources.iter().enumerate() {
             if source.blend != encoder_blend {
@@ -1249,7 +1301,18 @@ impl MetalSceneCompositor {
                 });
                 encoder_blend = source.blend;
             }
-            let vertices = quad_vertices(source.dest);
+            if source.sampler != encoder_sampler {
+                let sampler = match source.sampler {
+                    GpuSourceSampler::Scene => &self.sampler,
+                    GpuSourceSampler::Linear => &self.linear_sampler,
+                };
+                unsafe { encoder.setFragmentSamplerState_atIndex(Some(sampler), 0) };
+                encoder_sampler = source.sampler;
+            }
+            let vertices = match source.corners {
+                Some(corners) => quad_vertices_corners(corners),
+                None => quad_vertices(source.dest),
+            };
             let Some(vertices_ptr) = NonNull::new(vertices.as_ptr() as *mut c_void) else {
                 encode_result = Err(());
                 break;
@@ -1282,6 +1345,7 @@ impl MetalSceneCompositor {
                 radius: source.mask.shader_radius(),
                 chroma_key,
                 chroma_key2,
+                layer: [source.opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
             };
             command_encode_ms += encode_segment_started_at.elapsed().as_secs_f64() * 1000.0;
             let source_texture_started_at = Instant::now();
@@ -1303,10 +1367,13 @@ impl MetalSceneCompositor {
                     break;
                 }
             }
-            let Some(texture) = self.source_textures[source_index]
-                .as_ref()
-                .map(|cached| &cached.texture)
-            else {
+            let texture = match keyed_texture_namespace(source) {
+                Some(namespace) => self.keyed_texture(namespace),
+                None => self.source_textures[source_index]
+                    .as_ref()
+                    .map(|cached| &*cached.texture),
+            };
+            let Some(texture) = texture else {
                 encode_result = Err(());
                 break;
             };
@@ -1498,11 +1565,97 @@ impl MetalSceneCompositor {
         self.targets.get(self.target_cursor)
     }
 
+    /// The texture of a key-addressed namespace's slot.
+    fn keyed_texture(&self, namespace: u64) -> Option<&MetalTexture> {
+        self.keyed_textures
+            .iter()
+            .find(|cached| cached.content_key.map(|key| key.namespace) == Some(namespace))
+            .map(|cached| &*cached.texture)
+    }
+
+    /// Plan 168 D8: an immutable source addressed by its content key, not its
+    /// layer index. The slot of its namespace is reused while the key (and
+    /// size) holds; a new revision uploads once into it.
+    fn ensure_keyed_texture(
+        &mut self,
+        namespace: u64,
+        source: &GpuSource<'_>,
+    ) -> Result<SourceTextureReady, SourceImportFailures> {
+        let failures = SourceImportFailures::default();
+        let position = self
+            .keyed_textures
+            .iter()
+            .position(|cached| cached.content_key.map(|key| key.namespace) == Some(namespace));
+        if let Some(index) = position {
+            let cached = &self.keyed_textures[index];
+            if cached.width == source.width
+                && cached.height == source.height
+                && cached.content_key == source.content_key
+            {
+                return Ok(SourceTextureReady {
+                    outcome: SourceImportOutcome::ImmutableByteReused,
+                    failures,
+                });
+            }
+        }
+        let reusable = position.filter(|index| {
+            let cached = &self.keyed_textures[*index];
+            cached.width == source.width && cached.height == source.height
+        });
+        let index = match reusable {
+            Some(index) => index,
+            None => {
+                let texture = make_texture(
+                    &self.device,
+                    source.width,
+                    source.height,
+                    MTLTextureUsage::ShaderRead,
+                )
+                .ok_or(failures)?;
+                let cached = CachedSourceTexture {
+                    texture,
+                    backing: CachedSourceBacking::ByteUpload,
+                    width: source.width,
+                    height: source.height,
+                    content_key: None,
+                    _retention: None,
+                };
+                match position {
+                    Some(index) => {
+                        self.keyed_textures[index] = cached;
+                        index
+                    }
+                    None => {
+                        self.keyed_textures.push(cached);
+                        self.keyed_textures.len() - 1
+                    }
+                }
+            }
+        };
+        let cached = &mut self.keyed_textures[index];
+        upload_bgra_to_texture(&cached.texture, source).ok_or(failures)?;
+        // The namespace stays on the slot even before the first key lands.
+        cached.content_key = source.content_key;
+        self.keyed_texture_uploads = self.keyed_texture_uploads.saturating_add(1);
+        Ok(SourceTextureReady {
+            outcome: SourceImportOutcome::ImmutableByteUploaded,
+            failures,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn keyed_texture_uploads(&self) -> u64 {
+        self.keyed_texture_uploads
+    }
+
     fn ensure_source_texture(
         &mut self,
         index: usize,
         source: &GpuSource<'_>,
     ) -> Result<SourceTextureReady, SourceImportFailures> {
+        if let Some(namespace) = keyed_texture_namespace(source) {
+            return self.ensure_keyed_texture(namespace, source);
+        }
         if self.source_textures.len() <= index {
             self.source_textures.resize_with(index + 1, || None);
         }
@@ -2357,6 +2510,7 @@ fn encode_texture_present(
         radius: 0.0,
         chroma_key: [0.0; 4],
         chroma_key2: [0.0; 4],
+        layer: [1.0, 0.0, 0.0, 0.0],
     };
     unsafe {
         encoder.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
@@ -2441,6 +2595,41 @@ fn quad_vertices(dest: [f32; 4]) -> [f32; 24] {
         x1, y0, 1.0, 0.0, // top-right
         x0, y1, 0.0, 1.0, // bottom-left
         x1, y1, 1.0, 1.0, // bottom-right
+    ]
+}
+
+/// [`quad_vertices`] for a turned quad (plan 168 S-B2): `corners` are the
+/// source's top-left, top-right, bottom-left and bottom-right in top-left
+/// origin [0,1] space; the triangles and UVs are the same as the
+/// axis-aligned quad's, so the crop and every mask read the same `uv`.
+fn quad_vertices_corners(corners: [[f32; 2]; 4]) -> [f32; 24] {
+    let ndc = |[x, y]: [f32; 2]| [2.0 * x - 1.0, 1.0 - 2.0 * y];
+    let [top_left, top_right, bottom_left, bottom_right] = corners.map(ndc);
+    [
+        top_left[0],
+        top_left[1],
+        0.0,
+        0.0,
+        bottom_left[0],
+        bottom_left[1],
+        0.0,
+        1.0,
+        top_right[0],
+        top_right[1],
+        1.0,
+        0.0,
+        top_right[0],
+        top_right[1],
+        1.0,
+        0.0,
+        bottom_left[0],
+        bottom_left[1],
+        0.0,
+        1.0,
+        bottom_right[0],
+        bottom_right[1],
+        1.0,
+        1.0,
     ]
 }
 
@@ -2586,6 +2775,9 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         }];
         let yuv = compositor.compose_yuv420p(4, 4, &sources).unwrap();
         assert_eq!(yuv.len(), 16 + 2 * 4);
@@ -3147,6 +3339,9 @@ mod tests {
             mask,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         }
     }
 
@@ -3327,6 +3522,9 @@ mod tests {
                 mask: SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                corners: None,
+                sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                opacity: 1.0,
             },
             GpuSource {
                 kind: GpuSourceKind::Camera,
@@ -3342,6 +3540,9 @@ mod tests {
                 mask: SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                corners: None,
+                sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                opacity: 1.0,
             },
         ];
         let yuv = compositor.compose_yuv420p(1920, 1080, &sources).unwrap();
@@ -3370,6 +3571,9 @@ mod tests {
                 mask: SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                corners: None,
+                sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                opacity: 1.0,
             },
             GpuSource {
                 kind: GpuSourceKind::Camera,
@@ -3385,6 +3589,9 @@ mod tests {
                 mask: SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                corners: None,
+                sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                opacity: 1.0,
             },
         ];
 
@@ -3484,6 +3691,9 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         };
 
         let first = compositor
@@ -3529,6 +3739,9 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         };
 
         let first = compositor
@@ -3618,6 +3831,9 @@ mod tests {
                 mask: SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                corners: None,
+                sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                opacity: 1.0,
             };
             let imported = compositor
                 .compose_target_with_timings(w, h, [0.0, 0.0, 0.0, 1.0], &[source])
@@ -3774,6 +3990,9 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         };
 
         compositor.force_next_pixel_buffer_import_failure();
@@ -3877,6 +4096,9 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         }];
 
         let output = compositor
@@ -3924,6 +4146,9 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         }];
 
         let output = compositor
@@ -4109,6 +4334,9 @@ mod tests {
             mask: SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         }];
         let pixels = composite_sources(out, out, [0.0, 0.0, 1.0, 1.0], &sources).unwrap();
         assert_eq!(pixels.len(), out * out * 4);

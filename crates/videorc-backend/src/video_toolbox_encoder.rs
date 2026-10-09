@@ -1229,6 +1229,9 @@ mod tests {
             mask: crate::metal_compositor::SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         }];
         compositor
             .compose_bgra(64, 64, [0.0, 0.0, 0.0, 1.0], &sources)
@@ -1330,6 +1333,9 @@ mod tests {
                 mask: crate::metal_compositor::SourceMask::None,
                 blend: false,
                 chroma_key: None,
+                corners: None,
+                sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+                opacity: 1.0,
             }];
             compositor
                 .compose_bgra(64, 64, [0.0, 0.0, 0.0, 1.0], &sources)
@@ -1431,6 +1437,9 @@ mod tests {
             mask: crate::metal_compositor::SourceMask::None,
             blend: false,
             chroma_key: None,
+            corners: None,
+            sampler: crate::metal_compositor::GpuSourceSampler::Scene,
+            opacity: 1.0,
         }];
         compositor
             .compose_bgra(64, 64, [0.0, 0.0, 0.0, 1.0], &sources)

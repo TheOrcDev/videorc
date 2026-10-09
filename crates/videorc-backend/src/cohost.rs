@@ -8622,6 +8622,9 @@ pub async fn set_cohost_settings(
         .map_err(|error| CohostError::Storage(error.to_string()))?;
     let listen_changed = engine.settings.listen != next.listen;
     engine.settings = next.clone();
+    // Plan 168 S-B1: the pet on stream follows the persona (avatar, pack,
+    // still images); the sprite worker decides whether anything changed.
+    state.golem_sprite.set_persona(&next.persona);
     // Plan 140 S3: the detector reads the wake-word setting from its slot.
     mirror_command_slot(state, &engine);
     let report = if !next.enabled && engine.session.is_some() {

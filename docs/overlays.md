@@ -160,9 +160,15 @@ verticalRect?}`: the card, rasterized by `lib/comment-highlight.ts` per
   canvas the session burns (`comments.highlight.canvases`).
 - `captions.overlay.set {pngBase64, position, rect?, target, styleRevision}`:
   the bar, rasterized to at most the rect's width in pixels.
-- `golem.overlay.set {target, pngBase64, rect}`: the avatar and bubble,
-  rasterized by `lib/golem-overlay.ts`; a missing rect falls back to the
-  Golem's bottom-right snap (for smokes).
+- `golem.overlay.set {target, pngBase64, rect}`: the Golem's bubble only,
+  rasterized by `lib/golem-overlay.ts` to the rect's width (plan 168). The
+  backend draws the pet itself from a pre-scaled atlas
+  (`golem_sprite.rs`): a square the rect's width, centred on the rect and
+  resting on its bottom edge (hanging from its top edge in the upper half),
+  and anchors the bubble's bottom-centre above the pet's head
+  (`golem_bubble_blit_layout`). Without a pet frame (smokes, tests) the
+  bubble blits inside its rect like any overlay; a missing rect falls back
+  to the Golem's bottom-right snap. `golem.overlay.clear {target?}` drops it.
 
 One oracle places a bitmap on a canvas for all three render paths:
 `overlay_layout::overlay_blit_layout(overlay_w, overlay_h, canvas_w,
@@ -180,7 +186,12 @@ pixel position. `safe_inset` lets a yielding overlay step inside its rect
   normalized transform and crop. The direct D3D11 recording path (no
   overlays) is never chosen when an overlay burns.
 
-Z order on every path: captions, then the Golem, then the highlight card.
+Z order on every path: captions, then the Golem (its pet, then its bubble),
+then the highlight card. The pet is one turned, linearly sampled quad per
+leg: a bilinear inverse-affine blit on the CPU, a key-addressed texture
+(namespace 7) with corner vertices on Metal, and a `GolemSprite` layer
+turned in `SceneVs` on D3D11 (clipped, never squashed, at the canvas edge);
+`cpu_and_metal_draw_the_same_sprite` pins CPU and Metal parity.
 The card is the most urgent thing on screen, so it wins an overlap (owner
 answer 7). Parity fixtures pin it: `cpu_and_metal_blit_the_same_overlay_rect`
 (the Golem overlapping the card's bottom right, the card wins) and the
