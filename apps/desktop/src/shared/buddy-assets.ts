@@ -4,6 +4,7 @@
 // boundary is verified in node.
 
 import type { CohostAvatarState } from './backend'
+import { isBuddyOfficialSlug, officialAlivePackVersion } from './buddy-library'
 
 /** A persona image read back as bytes never exceeds this (plan 164 D20). */
 export const BUDDY_IMAGE_MAX_BYTES = 4 * 1024 * 1024
@@ -149,6 +150,10 @@ export const BUDDY_PET_MAX_FILES = 128
 export const BUDDY_PET_SKIPPED_FILES_MAX = 50
 /** The prefix of a bundled pack id (`bundled:buddy`, D3). */
 export const BUDDY_BUNDLED_PACK_PREFIX = 'bundled:'
+/** The prefix of a downloaded official pack id (`official:orc`, plan 172 D4). */
+export const BUDDY_OFFICIAL_PACK_PREFIX = 'official:'
+/** The folder of downloaded official packs under the write root. */
+export const BUDDY_OFFICIAL_PACK_DIR = 'official'
 
 const BUDDY_PACK_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const BUDDY_BUNDLED_PACK_NAME = /^[a-z0-9-]{1,40}$/
@@ -173,9 +178,36 @@ export function buddyBundledPackName(value: unknown): string | null {
   return BUDDY_BUNDLED_PACK_NAME.test(name) ? name : null
 }
 
-/** A pack id the store knows: a uuid or `bundled:<name>`. */
+/**
+ * The slug of an official pack id (`official:<slug>`, plan 172 D4), or null.
+ * Any `[a-z0-9-]{1,40}` name passes, as for bundled packs: a slug a newer
+ * build ships may be saved on the persona; only known slugs resolve.
+ */
+export function buddyOfficialPackSlug(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.startsWith(BUDDY_OFFICIAL_PACK_PREFIX)) return null
+  const slug = value.slice(BUDDY_OFFICIAL_PACK_PREFIX.length)
+  return BUDDY_BUNDLED_PACK_NAME.test(slug) ? slug : null
+}
+
+/**
+ * Where a downloaded official pack lives under the write root,
+ * `official/<slug>/<version>`, for a slug whose catalog row has a pack that
+ * downloads; null otherwise (unknown, none, or bundled).
+ */
+export function buddyOfficialPackFolder(packId: unknown): string | null {
+  const slug = buddyOfficialPackSlug(packId)
+  if (!slug || !isBuddyOfficialSlug(slug)) return null
+  const version = officialAlivePackVersion(slug)
+  return version === null ? null : `${BUDDY_OFFICIAL_PACK_DIR}/${slug}/${version}`
+}
+
+/** A pack id the store knows: a uuid, `bundled:<name>` or `official:<slug>`. */
 export function isBuddyPackId(value: unknown): value is string {
-  return isBuddyUserPackId(value) || buddyBundledPackName(value) !== null
+  return (
+    isBuddyUserPackId(value) ||
+    buddyBundledPackName(value) !== null ||
+    buddyOfficialPackSlug(value) !== null
+  )
 }
 
 /**

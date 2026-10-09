@@ -145,6 +145,8 @@ import { LAYOUT_PRESET_VALUES } from './backend'
 import { TWITCH_GIF_MODES } from './chat-gif'
 import { isBuddyPackId, parseBuddyDraftPath } from './buddy-assets'
 import {
+  BUDDY_PET_CELL_MAX,
+  BUDDY_PET_CELL_MIN,
   BUDDY_SLEEP_AFTER_MAX_SECONDS,
   BUDDY_SLEEP_AFTER_MIN_SECONDS,
   isBuddyReactionId
@@ -177,6 +179,8 @@ import { isBuddyUserPackId } from './buddy-assets'
 // --- Buddy library (plan 170) ---
 import { parseBuddyLibraryPoseUrl } from './buddy-assets'
 import {
+  BUDDY_LIBRARY_BUSY_KINDS,
+  BUDDY_OFFICIAL_ALIVE_STATES,
   BUDDY_LIBRARY_CONTEXT_MAX_CHARS,
   BUDDY_LIBRARY_DESCRIPTION_MAX_CHARS,
   BUDDY_LIBRARY_ID_MAX_CHARS,
@@ -418,6 +422,8 @@ export interface BackendRpcMethodMap {
   'cohost.library.use': BackendRpcDefinition<CohostLibraryUseParams, CohostLibraryAccepted>
   'cohost.library.update': BackendRpcDefinition<CohostLibraryUpdateParams, CohostLibraryAccepted>
   'cohost.library.delete': BackendRpcDefinition<CohostLibraryDeleteParams, CohostLibraryAccepted>
+  // Plan 172 D10: a Buddy made only on this computer joins the library.
+  'cohost.library.saveToLibrary': BackendRpcDefinition<undefined, CohostLibraryAccepted>
   // --- end Buddy library (plan 170) ---
   // --- Buddy overlay (plan 164) ---
   'cohost.buddy.status': BackendRpcDefinition<undefined, BuddyOverlaySnapshot>
@@ -2311,12 +2317,13 @@ const cohostRulesSchema = arraySchema(stringSchema({ maxLength: 120 }), { maxLen
 // the backend checks for shape.
 const cohostPersonaImagePathSchema = stringSchema({ minLength: 1, maxLength: 256 })
 // --- Buddy pets (plan 168, Phase A) ---
-// A pack id is a lowercase uuid (the persona's own) or `bundled:<name>`.
+// A pack id is a lowercase uuid (the persona's own), `bundled:<name>`, or a
+// downloaded official pack `official:<slug>` (plan 172 D4).
 const buddyPackIdSchema = runtimeSchema<string>(
-  'a pack id (a uuid or bundled:<name>)',
+  'a pack id (a uuid, bundled:<name> or official:<slug>)',
   (value, path) => {
     if (!isBuddyPackId(value)) {
-      throw new RuntimeSchemaError(path, 'a pack id (a uuid or bundled:<name>)')
+      throw new RuntimeSchemaError(path, 'a pack id (a uuid, bundled:<name> or official:<slug>)')
     }
     return value
   }
@@ -3483,6 +3490,25 @@ const buddyLibraryEntrySchema = objectSchema(
         think: nullableSchema(buddyLibraryPoseUrlSchema)
       },
       { allowUnknown: false }
+    ),
+    // Plan 172 D9: the Buddy's alive pack (a uuid), or null.
+    alive: nullableSchema(
+      objectSchema(
+        {
+          packId: runtimeSchema<string>('a pack id (a uuid)', (value, path) => {
+            if (!isBuddyUserPackId(value)) {
+              throw new RuntimeSchemaError(path, 'a pack id (a uuid)')
+            }
+            return value
+          }),
+          cellSize: numberSchema({
+            integer: true,
+            min: BUDDY_PET_CELL_MIN,
+            max: BUDDY_PET_CELL_MAX
+          })
+        },
+        { allowUnknown: false }
+      )
     )
   },
   { allowUnknown: false }
@@ -3498,7 +3524,9 @@ const buddyLibraryStateSchema = objectSchema(
           name: buddyLibraryNameSchema,
           kind: stringSchema({ minLength: 1, maxLength: 40 }),
           tagline: stringSchema({ maxLength: 200 }),
-          personality: buddyLibraryPersonalitySchema
+          personality: buddyLibraryPersonalitySchema,
+          // Plan 172 D4, D12: where its alive pack is on this computer.
+          alive: enumSchema(BUDDY_OFFICIAL_ALIVE_STATES)
         },
         { allowUnknown: false }
       ),
@@ -3511,7 +3539,7 @@ const buddyLibraryStateSchema = objectSchema(
     busy: nullableSchema(
       objectSchema(
         {
-          kind: enumSchema(['sync', 'use', 'delete', 'update']),
+          kind: enumSchema(BUDDY_LIBRARY_BUSY_KINDS),
           avatarId: optionalSchema(buddyLibraryIdSchema)
         },
         { allowUnknown: false }
@@ -4240,6 +4268,10 @@ const runtimeContracts = {
   },
   'cohost.library.delete': {
     params: cohostLibraryDeleteParamsSchema,
+    result: cohostLibraryAcceptedSchema
+  },
+  'cohost.library.saveToLibrary': {
+    params: undefinedSchema,
     result: cohostLibraryAcceptedSchema
   },
   // --- end Buddy library (plan 170) ---

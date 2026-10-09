@@ -3353,6 +3353,9 @@ export interface AiCapabilities {
       enabled: boolean
       count: number
       limit: number
+      /** Plan 172 D8: alive packs and imports sync (the web's storage is
+       * S3). Older servers omit it: nothing uploads. */
+      alive?: boolean
     }
   }
   entitlement: {
@@ -5418,6 +5421,9 @@ export type {
   BuddyLibraryBusy,
   BuddyLibraryBusyKind,
   BuddyLibraryEntry,
+  BuddyLibraryEntryAlive,
+  BuddyOfficialAlive,
+  BuddyOfficialAliveState,
   BuddyLibraryError,
   BuddyLibraryId,
   BuddyLibraryState,

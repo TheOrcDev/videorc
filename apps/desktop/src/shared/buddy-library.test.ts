@@ -5,6 +5,9 @@ import { describe, expect, it } from 'vitest'
 import {
   buddyLibraryPosePath,
   buddyLibraryPoseUrl,
+  buddyOfficialPackFolder,
+  buddyOfficialPackSlug,
+  isBuddyPackId,
   parseBuddyAssetPath,
   parseBuddyDraftPath,
   parseBuddyLibraryPosePath,
@@ -20,9 +23,12 @@ import {
   isBuddyLibraryId,
   isBuddyUserAvatarId,
   isOfficialBuddyId,
+  officialAliveFallback,
+  officialAlivePackVersion,
   officialBuddy,
   officialBuddyId,
-  officialSlugFromId
+  officialSlugFromId,
+  type BuddyOfficialAlive
 } from './buddy-library'
 
 const catalogFixture = JSON.parse(
@@ -56,6 +62,71 @@ describe('the official Buddy catalog (plan 170 D10, D11)', () => {
     expect(officialBuddy('official:dragon')).toBeNull()
     expect(BUDDY_DEFAULT_OFFICIAL_ID).toBe('official:golem')
     expect(BUDDY_LIBRARY_LIMIT).toBe(30)
+  })
+})
+
+describe('official alive packs (plan 172 D4)', () => {
+  const filled: BuddyOfficialAlive = {
+    version: 1,
+    packId: 'official:orc',
+    bundled: false,
+    cellSize: 640,
+    frames: 40,
+    files: [
+      { name: 'manifest.json', bytes: 1234, sha256: 'a'.repeat(64) },
+      { name: 'mascot.webp', bytes: 3456789, sha256: 'b'.repeat(64) },
+      { name: 'buddy.json', bytes: 123, sha256: 'c'.repeat(64) }
+    ]
+  }
+
+  it('reads the catalog: alive right after description, a pack per row or null', () => {
+    for (const row of catalogFixture.avatars as Record<string, unknown>[]) {
+      const keys = Object.keys(row)
+      expect(keys.indexOf('alive')).toBe(keys.indexOf('description') + 1)
+      expect(keys.at(-1)).toBe('alive')
+    }
+    for (const entry of BUDDY_OFFICIAL_CATALOG) {
+      if (!entry.alive) {
+        expect(officialAlivePackVersion(entry.slug)).toBeNull()
+        expect(officialAliveFallback(entry)).toBe('none')
+        continue
+      }
+      expect(entry.alive.files.map((file) => file.name).sort()).toStrictEqual([
+        'buddy.json',
+        'manifest.json',
+        'mascot.webp'
+      ])
+      // Only Buddy's own pack ships inside the app (bundled:buddy).
+      expect(entry.alive.bundled).toBe(entry.slug === 'golem')
+      expect(entry.alive.packId).toBe(
+        entry.alive.bundled ? 'bundled:buddy' : `official:${entry.slug}`
+      )
+    }
+  })
+
+  it('tells bundled, downloadable and missing packs apart', () => {
+    expect(officialAliveFallback({ alive: filled })).toBe('available')
+    expect(officialAliveFallback({ alive: { ...filled, bundled: true } })).toBe('bundled')
+    expect(officialAliveFallback({ alive: null })).toBe('none')
+    expect(officialAlivePackVersion('dragon')).toBeNull()
+  })
+
+  it('takes official pack ids apart and resolves only listed packs', () => {
+    expect(buddyOfficialPackSlug('official:orc')).toBe('orc')
+    expect(buddyOfficialPackSlug('official:dragon')).toBe('dragon')
+    for (const bad of ['official:', 'official:Orc', 'official:../orc', 'bundled:orc', 7]) {
+      expect(buddyOfficialPackSlug(bad)).toBeNull()
+    }
+    expect(isBuddyPackId('official:orc')).toBe(true)
+    expect(isBuddyPackId('official:../orc')).toBe(false)
+    for (const entry of BUDDY_OFFICIAL_CATALOG) {
+      const version = officialAlivePackVersion(entry.slug)
+      expect(buddyOfficialPackFolder(`official:${entry.slug}`)).toBe(
+        version === null ? null : `official/${entry.slug}/${version}`
+      )
+    }
+    expect(buddyOfficialPackFolder('official:dragon')).toBeNull()
+    expect(parseBuddyPackPath('default/pets/official:orc/manifest.json')).toBeNull()
   })
 })
 

@@ -32,9 +32,8 @@ export const BUDDY_LIBRARY_CONTEXT_MAX_CHARS = 4000
 /** A persona's `libraryAvatarId` is at most this long (a uuid is 36). */
 export const BUDDY_LIBRARY_ID_MAX_CHARS = 64
 
-/** An official avatar as `BuddyLibraryState.official` lists it. Its pictures
- * are bundled with the app, addressed by slug. */
-export interface BuddyOfficialEntry {
+/** What every official avatar has, in the catalog and in the library state. */
+export interface BuddyOfficialInfo {
   id: BuddyOfficialId
   slug: BuddyOfficialSlug
   name: string
@@ -44,10 +43,50 @@ export interface BuddyOfficialEntry {
   personality: string
 }
 
+/**
+ * Where an official character's alive pack is on this computer (plan 172
+ * D4, D12): it ships inside the app, it was downloaded and verified, it
+ * downloads the first time the Buddy is used, or it has none.
+ */
+export const BUDDY_OFFICIAL_ALIVE_STATES = ['bundled', 'downloaded', 'available', 'none'] as const
+export type BuddyOfficialAliveState = (typeof BUDDY_OFFICIAL_ALIVE_STATES)[number]
+
+/** An official avatar as `BuddyLibraryState.official` lists it. Its pictures
+ * are bundled with the app, addressed by slug. */
+export interface BuddyOfficialEntry extends BuddyOfficialInfo {
+  alive: BuddyOfficialAliveState
+}
+
+/** One file of an official pack, as the catalog pins it. */
+export interface BuddyOfficialAliveFile {
+  name: string
+  bytes: number
+  /** 64 lowercase hex digits. */
+  sha256: string
+}
+
+/**
+ * An official character's alive pack (plan 172 D4): `bundled:buddy` ships
+ * inside the app; the others (`official:<slug>`) download from
+ * `/buddy/official/<slug>/alive/<version>/<name>` on videorc.com the first
+ * time they are used and live at `<root>/official/<slug>/<version>/`.
+ */
+export interface BuddyOfficialAlive {
+  version: number
+  packId: string
+  /** True only for the pack that ships inside the app. */
+  bundled: boolean
+  cellSize: number
+  frames: number
+  files: BuddyOfficialAliveFile[]
+}
+
 /** A catalog row: the entry plus what the image model was asked for (null
- * for Buddy the Golem, whose art is the owner's original). */
-export interface BuddyOfficialCatalogEntry extends BuddyOfficialEntry {
+ * for Buddy the Golem, whose art is the owner's original) and its alive
+ * pack (null until it ships). */
+export interface BuddyOfficialCatalogEntry extends BuddyOfficialInfo {
   description: string | null
+  alive: BuddyOfficialAlive | null
 }
 
 export const BUDDY_OFFICIAL_CATALOG_VERSION = 1
@@ -62,7 +101,8 @@ export const BUDDY_OFFICIAL_CATALOG: readonly BuddyOfficialCatalogEntry[] = [
     tagline: 'The original. Steady as stone.',
     personality:
       'Calm, warm and a little slow to speak. Greets every follower like an old friend and never rushes anyone.',
-    description: null
+    description: null,
+    alive: null
   },
   {
     slug: 'orc',
@@ -73,7 +113,8 @@ export const BUDDY_OFFICIAL_CATALOG: readonly BuddyOfficialCatalogEntry[] = [
     personality:
       'Loud, loyal and proud of the horde. Cheers every follower like a battle won and calls the chat his warband.',
     description:
-      'a burly, friendly green orc with small tusks, a braided top-knot, leather shoulder guards and a wide grin'
+      'a burly, friendly green orc with small tusks, a braided top-knot, leather shoulder guards and a wide grin',
+    alive: null
   },
   {
     slug: 'goblin',
@@ -84,7 +125,8 @@ export const BUDDY_OFFICIAL_CATALOG: readonly BuddyOfficialCatalogEntry[] = [
     personality:
       "Sly, quick and always after a good deal. Loves a joke at the streamer's expense, but never a mean one.",
     description:
-      'a small cheeky yellow-green goblin with huge pointed ears, a patched vest and a coin pouch on his belt'
+      'a small cheeky yellow-green goblin with huge pointed ears, a patched vest and a coin pouch on his belt',
+    alive: null
   },
   {
     slug: 'pirate',
@@ -95,7 +137,8 @@ export const BUDDY_OFFICIAL_CATALOG: readonly BuddyOfficialCatalogEntry[] = [
     personality:
       'Booming and theatrical. Calls viewers his crew, new followers new recruits, and every raid a boarding party.',
     description:
-      'a jolly round pirate captain with a tricorn hat, an eye patch, a striped shirt and a big bushy beard'
+      'a jolly round pirate captain with a tricorn hat, an eye patch, a striped shirt and a big bushy beard',
+    alive: null
   },
   {
     slug: 'robot',
@@ -106,7 +149,8 @@ export const BUDDY_OFFICIAL_CATALOG: readonly BuddyOfficialCatalogEntry[] = [
     personality:
       'Polite, precise and delighted by every stat. Counts followers out loud and celebrates round numbers.',
     description:
-      'a rounded retro robot with a screen for a face showing simple glowing eyes, a short antenna and chunky metal hands'
+      'a rounded retro robot with a screen for a face showing simple glowing eyes, a short antenna and chunky metal hands',
+    alive: null
   }
 ]
 
@@ -128,9 +172,33 @@ export interface BuddyLibraryEntry {
   /** Local `videorc-asset://buddy/library/<id>/<state>-<tag>.png` URLs of the
    * cached pictures, null until cached (idle on list, the rest on use). */
   poses: Record<BuddyPoseState, string | null>
+  /** The Buddy's alive pack (plan 172 D9): the pack it wears once used here,
+   * or null when it has none (Make it Alive). */
+  alive: BuddyLibraryEntryAlive | null
 }
 
-export type BuddyLibraryBusyKind = 'sync' | 'use' | 'delete' | 'update'
+/** An account Buddy's alive pack as the app shows it. */
+export interface BuddyLibraryEntryAlive {
+  /** The pack's uuid. */
+  packId: string
+  cellSize: number
+}
+
+/**
+ * The library job running now: `alive-upload` sends a Buddy's pack to the
+ * account, `alive-download` brings an official or account pack here, and
+ * `import` saves a Buddy made on this computer to the library (plan 172).
+ */
+export const BUDDY_LIBRARY_BUSY_KINDS = [
+  'sync',
+  'use',
+  'delete',
+  'update',
+  'alive-upload',
+  'alive-download',
+  'import'
+] as const
+export type BuddyLibraryBusyKind = (typeof BUDDY_LIBRARY_BUSY_KINDS)[number]
 
 /** The library job running now (one at a time). */
 export interface BuddyLibraryBusy {
@@ -199,6 +267,9 @@ export interface CohostLibraryAccepted {
   accepted: true
 }
 
+// `cohost.library.saveToLibrary` takes no params (plan 172 D10): it imports
+// the Buddy made only on this computer, links it, then sends its own pack.
+
 const USER_AVATAR_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 export function isBuddyOfficialSlug(value: unknown): value is BuddyOfficialSlug {
@@ -235,4 +306,26 @@ export function isBuddyLibraryId(value: unknown): value is BuddyLibraryId {
 export function officialBuddy(idOrSlug: unknown): BuddyOfficialCatalogEntry | null {
   const slug = isBuddyOfficialSlug(idOrSlug) ? idOrSlug : officialSlugFromId(idOrSlug)
   return slug ? (BUDDY_OFFICIAL_CATALOG.find((entry) => entry.slug === slug) ?? null) : null
+}
+
+/**
+ * The version of a downloadable official pack (`official:<slug>`, plan 172
+ * D4), or null for an unknown slug, a character without a pack, or the one
+ * that ships inside the app. Main resolves the pack's folder with it.
+ */
+export function officialAlivePackVersion(slug: unknown): number | null {
+  const alive = isBuddyOfficialSlug(slug) ? officialBuddy(slug)?.alive : null
+  return alive && !alive.bundled ? alive.version : null
+}
+
+/**
+ * The pack state the catalog alone implies, before the backend says where
+ * the pack is: a bundled pack is `bundled`, a downloadable one `available`,
+ * none `none`.
+ */
+export function officialAliveFallback(
+  entry: Pick<BuddyOfficialCatalogEntry, 'alive'>
+): BuddyOfficialAliveState {
+  if (!entry.alive) return 'none'
+  return entry.alive.bundled ? 'bundled' : 'available'
 }

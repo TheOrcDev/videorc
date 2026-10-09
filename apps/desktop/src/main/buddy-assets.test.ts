@@ -255,6 +255,32 @@ describe('buddy pet pack store (plan 168 S-A2)', () => {
     expect(await readBuddyPetFile(roots, 'p', 'bundled:buddy', 'manifest.json')).toBeNull()
   })
 
+  it('reads a downloaded official pack under the write root (plan 172 D4)', async () => {
+    const write = await root()
+    const bundled = await root()
+    const folder = join(write, 'official', 'orc', '2')
+    await mkdir(folder, { recursive: true })
+    await writeFile(join(folder, 'manifest.json'), '{"version":1}')
+    // The catalog names the version; the test pins it.
+    const pinned = (packId: unknown): string | null =>
+      packId === 'official:orc' ? 'official/orc/2' : null
+    const manifest = await readBuddyPetFile(
+      { write, bundled },
+      'p',
+      'official:orc',
+      'manifest.json',
+      pinned
+    )
+    expect(Buffer.from(manifest!).toString()).toBe('{"version":1}')
+    expect(
+      await readBuddyPetFile({ write, bundled }, 'p', 'official:goblin', 'manifest.json', pinned)
+    ).toBeNull()
+    // Without the pin, the catalog's version decides (not this folder's).
+    expect(await readBuddyPetFile({ write, bundled }, 'p', 'official:orc', 'manifest.json')).toBe(
+      null
+    )
+  })
+
   it('refuses an oversize file and a link that leaves the root', async () => {
     const write = await root()
     const outside = await root()

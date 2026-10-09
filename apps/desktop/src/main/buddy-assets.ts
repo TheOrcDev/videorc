@@ -12,6 +12,7 @@ import {
   BUDDY_PET_PACK_MAX_BYTES,
   BUDDY_PET_SKIPPED_FILES_MAX,
   buddyBundledPackName,
+  buddyOfficialPackFolder,
   isBuddyPetFileName,
   isBuddyUserPackId
 } from '../shared/buddy-assets'
@@ -273,7 +274,8 @@ export function buddyPackFolderToken(personaId: string, packId: string): string 
 
 /**
  * The bytes of one pack file for the renderer preview (plan 168 Phase D):
- * a user pack under the write root or a bundled pack under the bundled root,
+ * a user pack under the write root, a bundled pack under the bundled root,
+ * or a downloaded official pack (`official/<slug>/<version>/`, plan 172),
  * an allow-listed file name, a regular file inside that root (symlinks
  * resolved), at most 32 MB. Null, never a throw, for anything else.
  */
@@ -281,15 +283,21 @@ export async function readBuddyPetFile(
   roots: BuddyPetRoots,
   personaId: unknown,
   packId: unknown,
-  file: unknown
+  file: unknown,
+  officialFolder: (packId: unknown) => string | null = buddyOfficialPackFolder
 ): Promise<Uint8Array | null> {
   if (!isBuddyPersonaId(personaId) || !isBuddyPetFileName(file)) return null
   const bundled = buddyBundledPackName(packId)
+  const official = officialFolder(packId)
   let root: string
   let folder: string
   if (bundled) {
     root = roots.bundled
     folder = join(root, bundled)
+  } else if (official) {
+    // Plan 172 D4: a downloaded official pack, verified before it moved here.
+    root = roots.write
+    folder = join(root, ...official.split('/'))
   } else if (isBuddyUserPackId(packId)) {
     root = roots.write
     folder = join(root, personaId, 'pets', packId)

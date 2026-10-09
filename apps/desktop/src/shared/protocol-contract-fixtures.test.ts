@@ -79,7 +79,7 @@ import type {
   CohostLibraryUseParams,
   BuddyLibraryState
 } from './buddy-library'
-import { BUDDY_OFFICIAL_CATALOG } from './buddy-library'
+import { BUDDY_OFFICIAL_CATALOG, officialAliveFallback } from './buddy-library'
 import {
   validateBackendEventPayload,
   validateBackendRpcParams,
@@ -160,6 +160,9 @@ interface HighRiskContractFixtures {
     signedOut: BuddyLibraryState
     signedIn: BuddyLibraryState
     localOnly: BuddyLibraryState
+    importing: BuddyLibraryState
+    aliveUpload: BuddyLibraryState
+    aliveDownload: BuddyLibraryState
     syncParams: CohostLibrarySyncParams
     useParams: CohostLibraryUseParams
     useOfficialParams: CohostLibraryUseParams
@@ -1340,7 +1343,14 @@ describe('Buddy library wire (plan 170, Phase D)', () => {
 
   it('validates the library RPCs and event exactly as the backend round-trips them', () => {
     expect(validateBackendRpcParams('cohost.library.get', undefined)).toBeUndefined()
-    for (const state of [library.signedOut, library.signedIn, library.localOnly]) {
+    for (const state of [
+      library.signedOut,
+      library.signedIn,
+      library.localOnly,
+      library.importing,
+      library.aliveUpload,
+      library.aliveDownload
+    ]) {
       expect(validateBackendRpcResult('cohost.library.get', state)).toStrictEqual(state)
       expect(validateBackendEventPayload('cohost.library.changed', state)).toStrictEqual(state)
     }
@@ -1364,10 +1374,77 @@ describe('Buddy library wire (plan 170, Phase D)', () => {
     ] as const) {
       expect(validateBackendRpcResult(method, library.accepted)).toStrictEqual(library.accepted)
     }
-    // The signed-out state lists the whole official catalog, pictures by slug.
+    // The signed-out state lists the whole official catalog, pictures by
+    // slug; with no buddy roots, a bundled pack is not here and a pack that
+    // downloads is available (plan 172 D4).
     expect(library.signedOut.official).toStrictEqual(
-      BUDDY_OFFICIAL_CATALOG.map(({ description: _description, ...entry }) => entry)
+      BUDDY_OFFICIAL_CATALOG.map(({ description: _description, alive, ...entry }) => ({
+        ...entry,
+        alive: alive?.bundled ? 'none' : officialAliveFallback({ alive })
+      }))
     )
+  })
+
+  it('carries the alive packs, their jobs and Save to my library (plan 172)', () => {
+    expect(library.signedIn.mine![0]!.alive).toStrictEqual({
+      packId: '0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a',
+      cellSize: 640
+    })
+    expect(library.signedIn.mine![1]!.alive).toBeNull()
+    expect(library.aliveDownload.official.map((entry) => entry.alive)).toStrictEqual([
+      'bundled',
+      'available'
+    ])
+    expect(
+      [library.importing, library.aliveUpload, library.aliveDownload].map(
+        (state) => state.busy?.kind
+      )
+    ).toStrictEqual(['import', 'alive-upload', 'alive-download'])
+    expect(validateBackendRpcParams('cohost.library.saveToLibrary', undefined)).toBeUndefined()
+    expect(() => validateBackendRpcParams('cohost.library.saveToLibrary', {})).toThrow(
+      'cohost.library.saveToLibrary'
+    )
+    expect(
+      validateBackendRpcResult('cohost.library.saveToLibrary', library.accepted)
+    ).toStrictEqual(library.accepted)
+    const entry = library.signedIn.mine![0]!
+    for (const alive of [
+      { packId: 'bundled:buddy', cellSize: 640 },
+      { packId: entry.alive!.packId.toUpperCase(), cellSize: 640 },
+      { packId: entry.alive!.packId, cellSize: 64 },
+      { packId: entry.alive!.packId, cellSize: 640, version: 1 },
+      undefined
+    ]) {
+      const { alive: _alive, ...rest } = entry
+      expect(() =>
+        validateBackendEventPayload('cohost.library.changed', {
+          ...library.signedIn,
+          mine: [alive === undefined ? rest : { ...entry, alive }]
+        })
+      ).toThrow('cohost.library.changed')
+    }
+    const official = library.signedOut.official[0]!
+    for (const alive of ['alive', null, undefined]) {
+      expect(() =>
+        validateBackendRpcResult('cohost.library.get', {
+          ...library.signedOut,
+          official: [{ ...official, alive }]
+        })
+      ).toThrow('cohost.library.get')
+    }
+    // A persona may wear an official pack (official:<slug>), never a path.
+    const patch = fixtures.cohost.settingsPatch
+    const wearing = {
+      persona: { ...patch.persona!, avatar: { kind: 'alive', packId: 'official:orc' } }
+    }
+    expect(validateBackendRpcParams('cohost.settings.set', wearing)).toStrictEqual(wearing)
+    for (const packId of ['official:', 'official:Orc', 'official:../orc']) {
+      expect(() =>
+        validateBackendRpcParams('cohost.settings.set', {
+          persona: { ...patch.persona!, avatar: { kind: 'alive', packId } }
+        })
+      ).toThrow('cohost.settings.set')
+    }
   })
 
   it('carries the library on the persona, the create params and the draft', () => {
