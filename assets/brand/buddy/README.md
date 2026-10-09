@@ -92,3 +92,62 @@ makes its idle character 615 px tall, the golem's height inside the
 official character stands at the golem's size and its four poses match. The website serves the same WebP files
 from `public/buddy/official/<slug>/`, and Buddy the Golem's official files there
 are copies of `default/*.webp`.
+
+## Alive packs (plan 172)
+
+All five official Buddies are alive: each has a page-pet pack (40 frames of
+640 px: 25 gaze cells, 12 reactions, `talk-a`, `talk-b`, `wave`, one
+3200 × 5120 `mascot.webp`, `manifest.json`, `buddy.json`). Buddy the Golem's
+ships in the app as `bundled:buddy` (`apps/desktop/resources/buddy/buddy/`);
+Golmar, Nib, Captain Barnacle and Bolt (`official:<slug>`) download from
+videorc.com (`public/buddy/official/<slug>/alive/1/` in videorc-web) the
+first time they are used. The official catalog's `alive` block pins every
+file's size and SHA-256.
+
+They were made on 2026-10-09 by `pnpm buddy:alive`
+(`scripts/buddy-alive-generate.mjs`, pure parts and tests in
+`scripts/lib/buddy-alive.mjs`), which runs the in-app creator's pipeline
+headless, with the creator's own prompt words (a checked copy of videorc-web
+`lib/ai/cohost-pet-prompts.ts`):
+
+1. The reference: the official idle master (`golem-master.png`, or
+   `official/<slug>/idle-master.png` with its faint haze below 6 % alpha
+   cleared) trimmed onto a transparent 1024 px canvas, like the style anchor.
+2. Identity notes from `openai/gpt-5.5` (the web's identity request: strict
+   JSON schema, low reasoning effort, 2048 output tokens).
+3. A pilot, then eight sheets, each an image edit of the reference with
+   `openai/gpt-image-2.5-sunburst` through the Vercel AI Gateway: five gaze
+   strips (3072 × 1024), two reaction sheets (2304 × 1536, or 2048 × 2048
+   when the character is narrower than 0.9 of its height) and the extras
+   strip (2304 × 1024).
+4. The app's builder through `cargo run -p videorc-backend --example
+   buddy_pack`, which cuts, isolates, registers and packs, then loads the
+   pack with the app's own loader.
+5. Review files: a contact sheet per gaze row and reaction sheet with each
+   cell's intended pose, the 25 heads at atlas resolution, the gaze grid and
+   an animated WebP (gaze sweep, reactions, talk, wave).
+
+```sh
+pnpm buddy:alive --slug orc --web ../videorc-web           # the whole run
+pnpm buddy:alive --slug orc --web ../videorc-web --sheets gaze-up2,extras  # redo rows
+pnpm buddy:alive --slug orc --build-only --compare         # D3 side by side
+pnpm buddy:alive --slug orc --build-only --ship q92        # the shipped copy
+```
+
+Sources (the reference and every pilot and sheet version, never
+overwritten) live outside the repo in `~/videorc-assets/buddy-alive/<slug>/`
+(`sources/`, `identity.json`, `generations.jsonl` with size, alpha, wall time
+and cost per call, `build.json`); `sources/accepted.json` pins an older
+version of a sheet. Nothing there is committed; each pack's
+`provenance.json` records the SHA-256 of every source it was built from.
+
+**Size** (plan 172 D3, 6 MB line): Buddy the Golem (7.12 MB lossless) and Nib
+(6.22 MB) ship with lossy colour at quality 92 and lossless alpha
+(1.62 MB and 1.49 MB), which looked the same as lossless side by side at
+on-stream size and at twice that on the face; Golmar (5.80 MB), Captain
+Barnacle (5.80 MB) and Bolt (5.17 MB) are under the line and ship lossless.
+No pack needed 512 px cells.
+
+The owner approves every gaze row and reaction sheet of every pack from the
+contact sheets and the animated preview before it ships (plan 172 D6); a
+rejected row is redone, never hand-edited.
