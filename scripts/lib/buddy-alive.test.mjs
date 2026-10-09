@@ -67,8 +67,15 @@ test('the sheets of a pack: the pilot, five gaze rows top to bottom, two reactio
     version: 3,
     gazeImageSize: '3072x1024',
     sheetImageSize: '2304x1536',
-    extrasImageSize: '2304x1024'
+    extrasImageSize: '2304x1024',
+    narrowSheetImageSize: '2048x2048',
+    narrowReferenceAspect: 0.9
   })
+  assert.equal(buildSheetPrompt('reactions-b', NOTES, { referenceAspect: 1.02 }).size, '2304x1536')
+  assert.equal(buildSheetPrompt('reactions-a', NOTES, { referenceAspect: 0.81 }).size, '2048x2048')
+  assert.equal(buildSheetPrompt('reactions-a', NOTES, { referenceAspect: 0.9 }).size, '2304x1536')
+  assert.throws(() => buildSheetPrompt('reactions-a', NOTES), /silhouette aspect/)
+  assert.equal(buildSheetPrompt('extras', NOTES).size, '2304x1024')
   assert.equal(sheetSpec('gaze-down1').row, 'down1')
   assert.deepEqual([sheetSpec('reactions-b').columns, sheetSpec('reactions-b').rows], [3, 2])
   assert.throws(() => sheetSpec('gaze-sideways'), /Unknown sheet/)
@@ -164,7 +171,7 @@ test('sheet prompts: the house look, the layout, the cells in order, the row pit
   assert.match(gaze.prompt, /Every cell keeps the same pitch, looking strongly up:/)
   assert.match(buildSheetPrompt('gaze-down1', NOTES).prompt, /same pitch, looking slightly down:/)
 
-  const reactions = buildSheetPrompt('reactions-a', NOTES).prompt
+  const reactions = buildSheetPrompt('reactions-a', NOTES, { referenceAspect: 1 }).prompt
   assert.match(
     reactions,
     /as a grid of 3 columns and 2 rows, reading left to right, then top to bottom,/
@@ -175,7 +182,7 @@ test('sheet prompts: the house look, the layout, the cells in order, the row pit
   assert.match(pilot.prompt, /Cell 1: neutral, facing the viewer straight on/)
   assert.match(buildSheetPrompt('extras', NOTES).prompt, /Cell 3: waving hello/)
   for (const key of ['pilot', ...ATLAS_SHEET_KEYS]) {
-    const { prompt } = buildSheetPrompt(key, NOTES)
+    const { prompt } = buildSheetPrompt(key, NOTES, { referenceAspect: 1 })
     assert.equal(/\$\{/.test(prompt), false, `${key} has an unfilled placeholder`)
     assert.match(
       prompt,
@@ -230,7 +237,7 @@ test('the web check: version 2 owes the probe changes, version 3 must carry them
     petSource: PET_SOURCE
   })
   assert.deepEqual(before.problems, [])
-  assert.equal(before.owed.length, 6, before.owed.join('\n'))
+  assert.equal(before.owed.length, 7, before.owed.join('\n'))
   assert.match(before.owed.join('\n'), /gaze strips at 3072x1024/)
   assert.match(before.owed.join('\n'), /PET_PROMPT_VERSION 3 \(the web is still 2\)/)
 
@@ -240,7 +247,7 @@ test('the web check: version 2 owes the probe changes, version 3 must carry them
     `export const PET_IDENTITY_REASONING_EFFORT = "low";`,
     ...webPromptFragments()
   ].join('\n')
-  const mirroredPet = `${PET_SOURCE}\nexport const COHOST_PET_GAZE_IMAGE_SIZE = "3072x1024";\nexport const COHOST_PET_SHEET_IMAGE_SIZE = "2304x1536";\nexport const COHOST_PET_EXTRAS_IMAGE_SIZE = "2304x1024";`
+  const mirroredPet = `${PET_SOURCE}\nexport const COHOST_PET_GAZE_IMAGE_SIZE = "3072x1024";\nexport const COHOST_PET_SHEET_IMAGE_SIZE = "2304x1536";\nexport const COHOST_PET_EXTRAS_IMAGE_SIZE = "2304x1024";\nexport const COHOST_PET_NARROW_SHEET_IMAGE_SIZE = "2048x2048";`
   assert.deepEqual(
     checkWebPrompts({ promptsSource: mirrored, lookSource: LOOK_SOURCE, petSource: mirroredPet }),
     { problems: [], owed: [] }

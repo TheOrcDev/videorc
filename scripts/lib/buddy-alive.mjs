@@ -55,6 +55,34 @@ export const STRIP_IMAGE_SIZE = '1536x1024'
 export const GAZE_STRIP_IMAGE_SIZE = '3072x1024'
 export const SHEET_IMAGE_SIZE = '2304x1536'
 export const EXTRAS_IMAGE_SIZE = '2304x1024'
+
+/**
+ * Plan 172 probe, the other four Buddies (2026-10-09): in the square
+ * 768 x 768 cells of a 2304 x 1536 reaction sheet the model widens a
+ * character that is narrower than tall, so its blink (which alternates with
+ * the neutral every few seconds on stream) pops bigger: blink against
+ * neutral width was 1.13 for Golmar (reference 0.81 of its height wide),
+ * 1.14 to 1.18 for Nib (0.86) and 1.07 for Captain Barnacle (0.78) over
+ * three tries each, against 1.03 for Buddy the Golem (1.02) and 1.01 for
+ * Bolt (0.73, rigid). The model fills its cells, so narrower cells fix it:
+ * 613 x 1024 cells (1840 x 2048) brought Nib's blink to 0.79 against its
+ * neutral's 0.80 but made broad figures touch (two sheets of six); 683 x
+ * 1024 cells (2048 x 2048) gave Golmar's blink 0.76 against 0.78 with
+ * 11 px gaps or more. A wide character keeps the square cells, which the
+ * narrow ones would squeeze. The reference's silhouette aspect (alpha > 16,
+ * width over height) picks the size; the web computes it from the
+ * reference PNG it already receives.
+ */
+export const NARROW_SHEET_IMAGE_SIZE = '2048x2048'
+export const NARROW_REFERENCE_ASPECT = 0.9
+
+/** The reaction sheets' size for a reference of this silhouette aspect. */
+export function reactionSheetSize(referenceAspect) {
+  if (!Number.isFinite(referenceAspect) || referenceAspect <= 0) {
+    throw new Error('A reaction sheet needs the reference silhouette aspect.')
+  }
+  return referenceAspect < NARROW_REFERENCE_ASPECT ? NARROW_SHEET_IMAGE_SIZE : SHEET_IMAGE_SIZE
+}
 export const PILOT_IMAGE_SIZE = '1024x1024'
 export const MAX_PET_NOTE_ITEMS = 8
 export const MAX_PET_NOTE_ITEM_CHARS = 60
@@ -468,7 +496,9 @@ export const WEB_MIRROR_OWED = {
   version: PET_PROMPT_VERSION,
   gazeImageSize: GAZE_STRIP_IMAGE_SIZE,
   sheetImageSize: SHEET_IMAGE_SIZE,
-  extrasImageSize: EXTRAS_IMAGE_SIZE
+  extrasImageSize: EXTRAS_IMAGE_SIZE,
+  narrowSheetImageSize: NARROW_SHEET_IMAGE_SIZE,
+  narrowReferenceAspect: NARROW_REFERENCE_ASPECT
 }
 
 export function buildExtrasPrompt(notes) {
@@ -487,7 +517,7 @@ export function buildExtrasPrompt(notes) {
 }
 
 /** The web's buildCohostPetSheetPrompt, by builder sheet key: `{ prompt, size }`. */
-export function buildSheetPrompt(key, notes) {
+export function buildSheetPrompt(key, notes, { referenceAspect } = {}) {
   const spec = sheetSpec(key)
   switch (spec.kind) {
     case 'pilot':
@@ -497,12 +527,12 @@ export function buildSheetPrompt(key, notes) {
     case 'reactions-a':
       return {
         prompt: buildReactionsPrompt(notes, 'reactions-a', PET_REACTIONS_A_CELLS),
-        size: spec.size
+        size: reactionSheetSize(referenceAspect)
       }
     case 'reactions-b':
       return {
         prompt: buildReactionsPrompt(notes, 'reactions-b', PET_REACTIONS_B_CELLS),
-        size: spec.size
+        size: reactionSheetSize(referenceAspect)
       }
     default:
       return { prompt: buildExtrasPrompt(notes), size: spec.size }
@@ -570,7 +600,12 @@ export function checkWebPrompts({ promptsSource, lookSource, petSource }) {
   for (const [name, size, what] of [
     ['COHOST_PET_GAZE_IMAGE_SIZE', GAZE_STRIP_IMAGE_SIZE, 'gaze strips'],
     ['COHOST_PET_SHEET_IMAGE_SIZE', SHEET_IMAGE_SIZE, 'reaction sheets'],
-    ['COHOST_PET_EXTRAS_IMAGE_SIZE', EXTRAS_IMAGE_SIZE, 'the extras strip']
+    ['COHOST_PET_EXTRAS_IMAGE_SIZE', EXTRAS_IMAGE_SIZE, 'the extras strip'],
+    [
+      'COHOST_PET_NARROW_SHEET_IMAGE_SIZE',
+      NARROW_SHEET_IMAGE_SIZE,
+      `reaction sheets of a reference narrower than ${NARROW_REFERENCE_ASPECT}`
+    ]
   ]) {
     if (!petSource.includes(`export const ${name} = "${size}";`)) {
       ;(mirrored ? problems : owed).push(`${what} at ${size} (${name} in cohost-pet.ts)`)

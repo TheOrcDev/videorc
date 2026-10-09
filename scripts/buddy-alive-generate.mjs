@@ -205,6 +205,22 @@ function pngInfo(bytes) {
   return { width, height, hasAlphaChannel: colorType === 4 || colorType === 6 }
 }
 
+/** The reference's silhouette width over height (alpha > 16, as the builder sees pixels). */
+function silhouetteAspect(path) {
+  const out = magick([
+    path,
+    '-alpha',
+    'extract',
+    '-threshold',
+    '6.3%',
+    '-trim',
+    '-format',
+    '%[fx:w/h]',
+    'info:'
+  ])
+  return Number(Number(out.toString().trim()).toFixed(4))
+}
+
 /** Share of pixels with alpha under 50 % (the web's transparentPixelShare). */
 function alphaShare(path) {
   const out = magick([
@@ -273,9 +289,10 @@ async function generateSheet({
   paths,
   referencePath,
   notes,
+  referenceAspect,
   pricing
 }) {
-  const { prompt, size } = buildSheetPrompt(sheetKey, notes)
+  const { prompt, size } = buildSheetPrompt(sheetKey, notes, { referenceAspect })
   const body = sheetRequestBody({
     model: options.model,
     prompt,
@@ -312,6 +329,7 @@ async function generateSheet({
     promptVersion: PET_PROMPT_VERSION,
     promptSha256: sha256(Buffer.from(prompt)),
     requestedSize: size,
+    referenceAspect,
     width: info.width,
     height: info.height,
     hasAlphaChannel: info.hasAlphaChannel,
@@ -899,7 +917,11 @@ async function main() {
     const key = readKey()
     const pricing = await modelPricing(key, [options.model, options.visionModel])
     const referencePath = prepareReference(slug, paths)
-    log(slug, `reference ${referencePath} (${sha256(readFileSync(referencePath)).slice(0, 12)})`)
+    const referenceAspect = silhouetteAspect(referencePath)
+    log(
+      slug,
+      `reference ${referencePath} (${sha256(readFileSync(referencePath)).slice(0, 12)}), silhouette ${referenceAspect} wide`
+    )
 
     let identity = existsSync(paths.identity)
       ? JSON.parse(readFileSync(paths.identity, 'utf8'))
@@ -929,6 +951,7 @@ async function main() {
         paths,
         referencePath,
         notes: identity.notes,
+        referenceAspect,
         pricing
       })
     const failures = []
