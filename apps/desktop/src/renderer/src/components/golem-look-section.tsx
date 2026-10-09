@@ -527,7 +527,7 @@ function LookTile({
         }
       }}
     >
-      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+      <div className="flex min-h-5 flex-wrap items-center justify-between gap-x-2 gap-y-1">
         <span className="text-xs font-medium text-foreground">{label}</span>
         {badge ? <Badge variant="outline">{badge}</Badge> : null}
       </div>
@@ -570,9 +570,11 @@ function LookTile({
         >
           <RefreshIcon data-icon="inline-start" />
           Redo
-          <Kbd className="ml-0.5 hidden @min-[7.5rem]/golem-tile:group-focus/golem-tile:inline-flex">
-            R
-          </Kbd>
+          {redo.disabled || working ? null : (
+            <Kbd className="ml-0.5 hidden @min-[7.5rem]/golem-tile:group-focus/golem-tile:inline-flex">
+              R
+            </Kbd>
+          )}
         </Button>
       ) : null}
     </div>
