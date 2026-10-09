@@ -459,7 +459,16 @@ function GolemPersonalityField({
   )
 }
 
-/** One state: its image (or the bundled default), Upload and Generate. */
+/**
+ * One state: its image (or the bundled default), Upload and Generate.
+ *
+ * The tile is its own size container, because its width follows the
+ * Avatar section's column, not the window: four tiles beside the preview run
+ * from about 110 px wide (a 960 px window) to 350 px. Upload and Generate sit
+ * side by side only where both fit whole, and stack full width under that;
+ * the U chip shows only where it fits beside Upload's label, so nothing
+ * spills past the tile or cuts a word.
+ */
 function GolemStateTile({
   persona,
   state,
@@ -479,7 +488,7 @@ function GolemStateTile({
   const generating = progress.phase === 'generating'
   return (
     <div
-      className="flex flex-col gap-2 rounded-row border border-border bg-muted/20 p-2"
+      className="@container/golem-tile flex flex-col gap-2 rounded-row border border-border bg-muted/20 p-2"
       data-slot="golem-tile"
       data-state={state}
       tabIndex={0}
@@ -490,7 +499,7 @@ function GolemStateTile({
         }
       }}
     >
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-x-2">
         <span className="text-xs font-medium text-foreground">{GOLEM_STATE_LABELS[state]}</span>
         {!own ? <span className="text-xs text-subtle">Default</span> : null}
       </div>
@@ -513,9 +522,12 @@ function GolemStateTile({
           ) : null}
         </div>
       )}
-      <div className="flex items-center gap-1">
+      <div
+        className="grid grid-cols-1 gap-1 @min-[13.5rem]/golem-tile:grid-cols-2"
+        data-slot="golem-tile-actions"
+      >
         <Button
-          className="flex-1"
+          className="w-full"
           disabled={generating}
           size="xs"
           type="button"
@@ -524,10 +536,10 @@ function GolemStateTile({
         >
           <UploadIcon data-icon="inline-start" />
           Upload
-          <Kbd className="ml-0.5">U</Kbd>
+          <Kbd className="ml-0.5 hidden @min-[7.5rem]/golem-tile:inline-flex">U</Kbd>
         </Button>
         <Button
-          className="flex-1"
+          className="w-full"
           data-testid="golem-generate"
           disabled={!canGenerate || generating}
           size="xs"
