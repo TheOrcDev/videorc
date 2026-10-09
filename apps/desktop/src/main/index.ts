@@ -272,7 +272,20 @@ import {
   type DeferredPermissionRestartState
 } from './deferred-permission-restart'
 import { isPathInsideAnyRoot } from './managed-asset-paths'
-import { isGolemPersonaId, parseGolemAssetPath, parseGolemDraftPath } from '../shared/golem-assets'
+import {
+  GOLEM_LIBRARY_CACHE_DIR,
+  isGolemPersonaId,
+  parseGolemAssetPath,
+  parseGolemDraftPath,
+  parseGolemLibraryPosePath
+} from '../shared/golem-assets'
+import type { GolemDeepLinkNavigation } from '../shared/electron-ipc-contract'
+import {
+  createFocusSyncGate,
+  parseGolemDeepLink,
+  runGolemDeepLink,
+  type GolemDeepLink
+} from './golem-deep-link'
 import {
   managedImageDecodeScript,
   normalizeManagedImageDecodeResult
@@ -3932,8 +3945,9 @@ function restoreCaptionsWindowOnLaunch(): void {
   }
 }
 
-app.on('browser-window-focus', () => {
+app.on('browser-window-focus', (_event, window) => {
   void setNativePreviewSurfacesVisible(true)
+  if (window === mainWindow) syncGolemLibraryOnFocus()
 })
 
 function previewWindowIsOpenForSurface(): boolean {
@@ -8300,10 +8314,62 @@ function sendOAuthCallback(envelope: OAuthCallbackEnvelope): void {
   sendElectronEvent(mainWindow.webContents, 'oauth:callback-url', envelope)
 }
 
+// --- Golem deep link (plan 170 D18) ----------------------------------------
+// The shell opens the Golem tab (and the creator) on `golem:deep-link`; main
+// focuses the window and drives the library over its admin channel.
+let pendingGolemNavigation: GolemDeepLinkNavigation | null = null
+const golemFocusSyncGate = createFocusSyncGate()
+
+function sendGolemNavigation(navigation: GolemDeepLinkNavigation): void {
+  if (
+    !mainWindow ||
+    mainWindow.isDestroyed() ||
+    mainWindow.webContents.isDestroyed() ||
+    mainWindow.webContents.isLoading()
+  ) {
+    // Before the shell loaded: it is sent once it has (an open-creator ask
+    // wins over a plain open).
+    if (navigation.openCreator || !pendingGolemNavigation) pendingGolemNavigation = navigation
+    return
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+  sendElectronEvent(mainWindow.webContents, 'golem:deep-link', navigation)
+}
+
+function flushGolemNavigation(): void {
+  const navigation = pendingGolemNavigation
+  if (!navigation) return
+  pendingGolemNavigation = null
+  // The shell subscribes as it mounts, just after the page loaded.
+  setTimeout(() => sendGolemNavigation(navigation), 1_500)
+}
+
+function handleGolemDeepLink(link: GolemDeepLink): void {
+  void runGolemDeepLink(link, {
+    showGolemTab: (openCreator) => sendGolemNavigation({ openCreator }),
+    request: (method, params) => requestBackendAdmin(method, params, 30_000),
+    sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
+    log: (message) => logBackend('info', message)
+  }).catch((error) => {
+    logBackend('warn', `Golem deep link failed: ${errorMessage(error)}`)
+  })
+}
+
+/** D12: focusing the main window syncs the library, at most once a minute. */
+function syncGolemLibraryOnFocus(): void {
+  if (!backendAdminConnection || !golemFocusSyncGate()) return
+  void requestBackendAdmin('cohost.library.sync', { reason: 'focus' }, 10_000).catch(
+    () => undefined
+  )
+}
+
 function flushOAuthCallbackUrls(): void {
   if (!mainWindow || mainWindow.webContents.isDestroyed()) {
     return
   }
+  flushGolemNavigation()
 
   try {
     for (const envelope of providerOAuthCallbackCoordinator().pending()) {
@@ -8322,6 +8388,12 @@ function flushOAuthCallbackUrls(): void {
 }
 
 function dispatchOAuthCallbackUrl(rawUrl: string): void {
+  // Plan 170 D18: `videorc://golem` (Open in Videorc, Make it Alive).
+  const golemLink = parseGolemDeepLink(rawUrl, OAUTH_CALLBACK_PROTOCOL)
+  if (golemLink) {
+    handleGolemDeepLink(golemLink)
+    return
+  }
   let parsed: URL
   try {
     parsed = new URL(rawUrl)
@@ -9339,6 +9411,10 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'overlays.layout.migrate_highlight_anchor',
   // Plan 168 S-A3: register a pet pack folder main just copied.
   'cohost.pet.import',
+  // Plan 170 D12, D18: the focus sync and the videorc://golem deep link.
+  'cohost.library.get',
+  'cohost.library.sync',
+  'cohost.library.use',
   'preview.surface.take_native_host_commands',
   'sessions.comments.list',
   'sessions.comments.totals',
@@ -13539,6 +13615,23 @@ function resolveManagedGolemFile(relativePath: string): string | null {
   const parsed = parseGolemAssetPath(relativePath)
   if (parsed) {
     return resolveRegularFileInsideRoot(join(managedGolemRoot(), parsed.personaId), parsed.file)
+  }
+  // Plan 170 D12: a cached account library picture,
+  // `library/<avatarId>/<state>-<tag>.png`, shown in My Golems. The file must
+  // resolve inside the golem root itself.
+  const libraryPose = parseGolemLibraryPosePath(relativePath)
+  if (libraryPose) {
+    const resolved = resolveRegularFileInsideRoot(
+      join(managedGolemRoot(), GOLEM_LIBRARY_CACHE_DIR, libraryPose.avatarId),
+      libraryPose.file
+    )
+    try {
+      return resolved && isPathInsideAnyRoot(resolved, [realpathSync(managedGolemRoot())])
+        ? resolved
+        : null
+    } catch {
+      return null
+    }
   }
   // Plan 169 D8: a draft look's picture, `<personaId>/drafts/<requestId>/<state>.png`,
   // shown in the look panel's tiles and preview before it is kept. The file

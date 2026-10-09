@@ -7251,6 +7251,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('cohost.golem.state', (payload) => {
         setGolemOverlay(payload as GolemOverlaySnapshot)
       }),
+      // Plan 170 D12: a library job (use, sync, keep, delete) can change the
+      // Golem in the backend; the persona and notes are read again when it ends.
+      nextClient.on('cohost.library.changed', (library) => {
+        if (library.busy !== null) return
+        void nextClient
+          .requestTyped('cohost.settings.get')
+          .then((next) => setCohostSettings(next))
+          .catch(() => undefined)
+      }),
       // Clip that (plan 068 D6): one toast per mark, whether it came from a
       // spoken phrase, a shortcut, a deck key, or the Stream Manager.
       nextClient.on('clip.marked', (payload) => {

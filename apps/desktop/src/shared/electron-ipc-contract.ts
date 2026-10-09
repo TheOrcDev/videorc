@@ -238,6 +238,11 @@ export type ElectronInvokeResult<TChannel extends ElectronInvokeChannel> =
  * app unfocused — Stream Deck's native Hotkey action drives these). */
 export type { GlobalShortcutAction } from './global-shortcuts'
 
+/** Plan 170 D18: what a `videorc://golem` link asks the main window to show. */
+export interface GolemDeepLinkNavigation {
+  openCreator: boolean
+}
+
 export interface ElectronIpcEventMap {
   'account:callback': AccountCallbackEnvelope
   'backend:connection': BackendConnection
@@ -270,6 +275,7 @@ export interface ElectronIpcEventMap {
   'captions-window:lines': CaptionsUpdate[]
   'oauth:callback-url': OAuthCallbackEnvelope
   'shortcut:navigate': string
+  'golem:deep-link': GolemDeepLinkNavigation
   'shortcut:modifier': boolean
   'window:visible': boolean
   'global-shortcuts:triggered': GlobalShortcutAction
@@ -314,6 +320,7 @@ export const electronEventChannels = [
   'captions-window:lines',
   'oauth:callback-url',
   'shortcut:navigate',
+  'golem:deep-link',
   'shortcut:modifier',
   'window:visible',
   'global-shortcuts:triggered',
@@ -1592,6 +1599,9 @@ const specificRuntimeEventSchemas = {
   'notes-window:flush-request': undefinedSchema,
   'oauth:callback-url': oauthCallbackEnvelopeSchema,
   'shortcut:navigate': enumSchema(['1', '2', '3', '4', '5', '6', '7', '8', '9', ',']),
+  // Plan 170 D18: `videorc://golem` opens the Golem tab; `openCreator` also
+  // opens the creator once the "Make it Alive" avatar is worn.
+  'golem:deep-link': objectSchema({ openCreator: booleanSchema }, { allowUnknown: false }),
   // Whether the command modifier is physically down. Main is the only place
   // that can know: it intercepts ⌘1–⌘9 in before-input-event, so the renderer
   // never receives those chords — nor, in practice, the keyup that ends them.

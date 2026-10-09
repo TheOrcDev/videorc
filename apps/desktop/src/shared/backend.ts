@@ -4571,6 +4571,12 @@ export interface VideorcApi {
    * the raw key here ("1".."9" or ",").
    */
   onShortcutNavigate: (callback: (key: string) => void) => () => void
+  /**
+   * Plan 170 D18: a `videorc://golem` link arrived. Main has focused the
+   * window and synced the library; the shell opens the Golem tab, and the
+   * creator when `openCreator` (Make it Alive, after the avatar is worn).
+   */
+  onGolemDeepLink: (callback: (navigation: { openCreator: boolean }) => void) => () => void
   /** Whether the command modifier is physically down; see main's before-input-event. */
   onShortcutModifier: (callback: (held: boolean) => void) => () => void
   /** Whether the main window is on screen (minimise/hide aware, unlike the Page Visibility API here). */

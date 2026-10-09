@@ -32,6 +32,7 @@ import {
   type CleanCutTabRequest
 } from '@/lib/clean-cut-events'
 import { displayKeyGlyph } from '@/lib/platform'
+import { openGolemPetCreator } from '@/lib/golem-pet-creator-nav'
 import {
   isOrcleTabId,
   readLastOrcleTab,
@@ -386,6 +387,17 @@ export function AppShell(): ReactElement {
     window.addEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
     return () => window.removeEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
   }, [openOrcle, openSettings, setActive])
+
+  // Plan 170 D18: `videorc://golem` opens the Golem tab (main focused the
+  // window and synced the library); Make it Alive also opens the creator
+  // once main saw the avatar worn.
+  useEffect(() => {
+    const off = window.videorc?.onGolemDeepLink?.((navigation) => {
+      openOrcle('live')
+      if (navigation.openCreator) openGolemPetCreator({ reference: 'persona-idle' })
+    })
+    return off
+  }, [openOrcle])
 
   useEffect(() => {
     const onOpenCleanCut = (event: Event): void => {
