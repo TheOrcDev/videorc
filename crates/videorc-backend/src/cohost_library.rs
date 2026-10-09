@@ -195,7 +195,30 @@ pub const BUDDY_OFFICIAL_CATALOG: [BuddyOfficial; 5] = [
         tagline: "The original. Steady as stone.",
         personality: "Calm, warm and a little slow to speak. Greets every follower like an old friend and never rushes anyone.",
         description: None,
-        alive: None,
+        alive: Some(BuddyOfficialAlive {
+            version: 1,
+            pack_id: "bundled:buddy",
+            bundled: true,
+            cell_size: 640,
+            frames: 40,
+            files: &[
+                BuddyOfficialAliveFile {
+                    name: "manifest.json",
+                    bytes: 8000,
+                    sha256: "fd1e4cb03d537136b792586747a565b44a249e2284bb35cd715ac7da1db8fce4",
+                },
+                BuddyOfficialAliveFile {
+                    name: "mascot.webp",
+                    bytes: 1618096,
+                    sha256: "a3d5f512ae23381ae2295da817d2e3118145b1986ea906a8fad59647a0eef71c",
+                },
+                BuddyOfficialAliveFile {
+                    name: "buddy.json",
+                    bytes: 241,
+                    sha256: "a832d39fe8b9ad29ed0c575d242664619e3716f70da98b710c83d3edfad8201f",
+                },
+            ],
+        }),
     },
     BuddyOfficial {
         slug: BuddyOfficialSlug::Orc,
@@ -206,7 +229,30 @@ pub const BUDDY_OFFICIAL_CATALOG: [BuddyOfficial; 5] = [
         description: Some(
             "a burly, friendly green orc with small tusks, a braided top-knot, leather shoulder guards and a wide grin",
         ),
-        alive: None,
+        alive: Some(BuddyOfficialAlive {
+            version: 1,
+            pack_id: "official:orc",
+            bundled: false,
+            cell_size: 640,
+            frames: 40,
+            files: &[
+                BuddyOfficialAliveFile {
+                    name: "manifest.json",
+                    bytes: 8001,
+                    sha256: "72f0cdb6908516fb09d1b10b9f416e8d59a2b8b2530f4288361edfdc5fc65693",
+                },
+                BuddyOfficialAliveFile {
+                    name: "mascot.webp",
+                    bytes: 1400912,
+                    sha256: "71966f94042b2f69b4618a9384dd8e1ffa75302f672ab9a4da202e703ed97410",
+                },
+                BuddyOfficialAliveFile {
+                    name: "buddy.json",
+                    bytes: 241,
+                    sha256: "ddc2fbf5748bce6165b666c6bbc6086cfbf94bc06352a97f8ebeaa634f58f62e",
+                },
+            ],
+        }),
     },
     BuddyOfficial {
         slug: BuddyOfficialSlug::Goblin,
@@ -217,7 +263,30 @@ pub const BUDDY_OFFICIAL_CATALOG: [BuddyOfficial; 5] = [
         description: Some(
             "a small cheeky yellow-green goblin with huge pointed ears, a patched vest and a coin pouch on his belt",
         ),
-        alive: None,
+        alive: Some(BuddyOfficialAlive {
+            version: 1,
+            pack_id: "official:goblin",
+            bundled: false,
+            cell_size: 640,
+            frames: 40,
+            files: &[
+                BuddyOfficialAliveFile {
+                    name: "manifest.json",
+                    bytes: 7998,
+                    sha256: "9c80f9dfc715322763816a0d60539afc4347905de3a5b36663339ab3df926c83",
+                },
+                BuddyOfficialAliveFile {
+                    name: "mascot.webp",
+                    bytes: 1494608,
+                    sha256: "ab30105f92c04ead861a23cab9c88a8c068ea3a1bb2fee24fc67c301c3f051e1",
+                },
+                BuddyOfficialAliveFile {
+                    name: "buddy.json",
+                    bytes: 241,
+                    sha256: "a79619ed5e0ba539b1988626450e1b7f8fd2d6c3709c09a1aa189c03dfb40c8f",
+                },
+            ],
+        }),
     },
     BuddyOfficial {
         slug: BuddyOfficialSlug::Pirate,
@@ -228,7 +297,30 @@ pub const BUDDY_OFFICIAL_CATALOG: [BuddyOfficial; 5] = [
         description: Some(
             "a jolly round pirate captain with a tricorn hat, an eye patch, a striped shirt and a big bushy beard",
         ),
-        alive: None,
+        alive: Some(BuddyOfficialAlive {
+            version: 1,
+            pack_id: "official:pirate",
+            bundled: false,
+            cell_size: 640,
+            frames: 40,
+            files: &[
+                BuddyOfficialAliveFile {
+                    name: "manifest.json",
+                    bytes: 8011,
+                    sha256: "661e205bb7ecb6f378c547c4337418630eb47fd6829540f212e5f70dcbc3eff4",
+                },
+                BuddyOfficialAliveFile {
+                    name: "mascot.webp",
+                    bytes: 1357372,
+                    sha256: "da53d27ad21ac6e293bef9ef6ff0145a257840fa09dd270dd56e55e4d8618fa7",
+                },
+                BuddyOfficialAliveFile {
+                    name: "buddy.json",
+                    bytes: 241,
+                    sha256: "116e539792c321a67f582d6625d77a1645075c5d5668c104c64f2a8009c6ba71",
+                },
+            ],
+        }),
     },
     BuddyOfficial {
         slug: BuddyOfficialSlug::Robot,
@@ -239,7 +331,30 @@ pub const BUDDY_OFFICIAL_CATALOG: [BuddyOfficial; 5] = [
         description: Some(
             "a rounded retro robot with a screen for a face showing simple glowing eyes, a short antenna and chunky metal hands",
         ),
-        alive: None,
+        alive: Some(BuddyOfficialAlive {
+            version: 1,
+            pack_id: "official:robot",
+            bundled: false,
+            cell_size: 640,
+            frames: 40,
+            files: &[
+                BuddyOfficialAliveFile {
+                    name: "manifest.json",
+                    bytes: 7999,
+                    sha256: "f89efc2c8b1a546b25381a53280dab08ee6b7c5d03205ea956709ddbefba7433",
+                },
+                BuddyOfficialAliveFile {
+                    name: "mascot.webp",
+                    bytes: 1300458,
+                    sha256: "7ecff00c66964cc7811764b00cb1652dbc2687dd2857068b414a88e56b3dfdd8",
+                },
+                BuddyOfficialAliveFile {
+                    name: "buddy.json",
+                    bytes: 241,
+                    sha256: "11359b1294c35134f3e1dde5d13e98c5d76df032205b7b15f59e97fdeb044e61",
+                },
+            ],
+        }),
     },
 ];
 

@@ -1809,7 +1809,7 @@
           "kind": "Orc",
           "tagline": "Loud, loyal, all horde.",
           "personality": "Loud, loyal and proud of the horde. Cheers every follower like a battle won and calls the chat his warband.",
-          "alive": "none"
+          "alive": "available"
         },
         {
           "id": "official:goblin",
@@ -1818,7 +1818,7 @@
           "kind": "Goblin",
           "tagline": "Small, sly and in on the joke.",
           "personality": "Sly, quick and always after a good deal. Loves a joke at the streamer's expense, but never a mean one.",
-          "alive": "none"
+          "alive": "available"
         },
         {
           "id": "official:pirate",
@@ -1827,7 +1827,7 @@
           "kind": "Pirate",
           "tagline": "Calls your chat his crew.",
           "personality": "Booming and theatrical. Calls viewers his crew, new followers new recruits, and every raid a boarding party.",
-          "alive": "none"
+          "alive": "available"
         },
         {
           "id": "official:robot",
@@ -1836,7 +1836,7 @@
           "kind": "Robot",
           "tagline": "Polite, precise, loves a stat.",
           "personality": "Polite, precise and delighted by every stat. Counts followers out loud and celebrates round numbers.",
-          "alive": "none"
+          "alive": "available"
         }
       ],
       "mine": null,
