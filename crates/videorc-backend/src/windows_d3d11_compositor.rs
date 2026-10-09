@@ -300,8 +300,12 @@ pub(crate) enum WindowsD3d11SceneSourceKind {
     Image,
     CaptionOverlay,
     CommentHighlight,
-    /// The Golem avatar (plan 164 Phase C): between captions and the card.
+    /// The Golem's bubble (plan 168 D16; plan 164 Phase C's avatar raster
+    /// before): between the pet and the card.
     GolemOverlay,
+    /// The Golem's pet (plan 168 D7): one atlas cell drawn as a turned quad,
+    /// clipped (never squashed) at the canvas edge.
+    GolemSprite,
     SolidColor([u8; 4]),
     TestPattern,
     Unsupported(WindowsD3d11UnsupportedFeature),
@@ -325,6 +329,7 @@ impl WindowsD3d11SceneSourceKind {
             Self::CaptionOverlay => "caption-overlay",
             Self::CommentHighlight => "comment-highlight",
             Self::GolemOverlay => "golem-overlay",
+            Self::GolemSprite => "golem-sprite",
             Self::SolidColor(_) => "solid-color",
             Self::TestPattern => "test-pattern",
             Self::Unsupported(feature) => feature.as_str(),
@@ -341,6 +346,16 @@ pub(crate) struct WindowsD3d11ChromaKey {
     pub(crate) saturation_floor: f32,
 }
 
+/// The Golem sprite's turn (plan 168 S-B4): `SceneVs` applies the 2x2
+/// `affine` (CSS order `[a, b, c, d]`, output pixels, y down) to the quad
+/// around `pivot` (normalized output coordinates). Only `GolemSprite`
+/// layers carry one; every other layer's vertices are untouched.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct WindowsD3d11SpriteTransform {
+    pub(crate) affine: [f32; 4],
+    pub(crate) pivot: [f32; 2],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct WindowsD3d11LayerEffects {
     pub(crate) opacity: f32,
@@ -349,6 +364,8 @@ pub(crate) struct WindowsD3d11LayerEffects {
     pub(crate) vignette: f32,
     pub(crate) blur_radius_px: f32,
     pub(crate) chroma_key: Option<WindowsD3d11ChromaKey>,
+    /// `GolemSprite` layers only.
+    pub(crate) sprite: Option<WindowsD3d11SpriteTransform>,
 }
 
 impl Default for WindowsD3d11LayerEffects {
@@ -360,8 +377,39 @@ impl Default for WindowsD3d11LayerEffects {
             vignette: 0.0,
             blur_radius_px: 0.0,
             chroma_key: None,
+            sprite: None,
         }
     }
+}
+
+/// Where `SceneVs` puts one corner of a layer: `destination` (normalized
+/// output rect) at `unit`, then, for a sprite, the 2x2 turn about its pivot
+/// in output pixels (`texel` = 1 / output size). The Rust twin of the shader,
+/// so the vertex math is tested on every host.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn windows_d3d11_scene_vertex(
+    destination: [f32; 4],
+    sprite: Option<WindowsD3d11SpriteTransform>,
+    texel: [f32; 2],
+    unit: [f32; 2],
+) -> [f32; 2] {
+    let position = [
+        destination[0] + unit[0] * destination[2],
+        destination[1] + unit[1] * destination[3],
+    ];
+    let Some(sprite) = sprite else {
+        return position;
+    };
+    let texel = [texel[0].max(1.0e-6), texel[1].max(1.0e-6)];
+    let local = [
+        (position[0] - sprite.pivot[0]) / texel[0],
+        (position[1] - sprite.pivot[1]) / texel[1],
+    ];
+    let [a, b, c, d] = sprite.affine;
+    [
+        sprite.pivot[0] + (a * local[0] + c * local[1]) * texel[0],
+        sprite.pivot[1] + (b * local[0] + d * local[1]) * texel[1],
+    ]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -505,6 +553,10 @@ pub(crate) fn build_windows_d3d11_scene_plan(
     for (input_order, layer) in request.layers.into_iter().enumerate() {
         validate_layer(layer)?;
         let rect = normalized_rect_to_pixels(layer.transform, request.canvas_dimensions)?;
+        if layer.source_kind == WindowsD3d11SceneSourceKind::GolemSprite {
+            planned_layers.push((input_order, plan_sprite_layer(layer, rect)));
+            continue;
+        }
         let fit = source_fit(layer.source_dimensions, rect, layer.fit, layer.crop)?;
         planned_layers.push((
             input_order,
@@ -544,6 +596,43 @@ pub(crate) fn build_windows_d3d11_scene_plan(
         layers: planned_layers.into_iter().map(|(_, layer)| layer).collect(),
         encoded_outputs: request.encoded_outputs,
     })
+}
+
+/// The Golem sprite (plan 168 D7): the destination stays the unclamped
+/// normalized square (the rasterizer clips what hangs off the canvas; other
+/// layers are squashed into it by `normalized_rect_to_pixels`), and the
+/// source rect is the atlas cell exactly. `destination` (pixels) is the
+/// on-canvas part, for diagnostics only.
+fn plan_sprite_layer(
+    layer: WindowsD3d11SceneLayerInput,
+    on_canvas: WindowsD3d11PixelRect,
+) -> WindowsD3d11PlannedLayer {
+    let crop = layer.crop;
+    let clamp = |value: f32| finite_or_zero(value).clamp(0.0, 1.0);
+    let (left, top) = (clamp(crop.left), clamp(crop.top));
+    WindowsD3d11PlannedLayer {
+        source_id: layer.source_id,
+        source_kind: layer.source_kind,
+        source_dimensions: layer.source_dimensions,
+        destination: on_canvas,
+        destination_normalized: [
+            layer.transform.x,
+            layer.transform.y,
+            layer.transform.width,
+            layer.transform.height,
+        ],
+        source_uv: [
+            left,
+            top,
+            (1.0 - left - clamp(crop.right)).max(0.0),
+            (1.0 - top - clamp(crop.bottom)).max(0.0),
+        ],
+        mirror_x: false,
+        mask: WindowsD3d11SceneMask::None,
+        effects: layer.effects,
+        z_index: layer.z_index,
+        output_targets: layer.output_targets,
+    }
 }
 
 pub(crate) fn validate_windows_d3d11_compositor_authority(
@@ -694,6 +783,20 @@ fn validate_layer(layer: WindowsD3d11SceneLayerInput) -> Result<(), WindowsD3d11
     {
         return Err(WindowsD3d11CompositorError::invalid(format!(
             "{} layer {} has invalid chroma-key controls",
+            layer.source_kind.as_str(),
+            layer.source_id
+        )));
+    }
+    if let Some(sprite) = effects.sprite
+        && (layer.source_kind != WindowsD3d11SceneSourceKind::GolemSprite
+            || !sprite
+                .affine
+                .into_iter()
+                .chain(sprite.pivot)
+                .all(f32::is_finite))
+    {
+        return Err(WindowsD3d11CompositorError::invalid(format!(
+            "{} layer {} has an invalid sprite transform",
             layer.source_kind.as_str(),
             layer.source_id
         )));
@@ -997,6 +1100,10 @@ mod runtime {
         source_info: [f32; 4],
         solid_color: [f32; 4],
         frame_info: [f32; 4],
+        /// The Golem sprite's 2x2 turn, CSS order (plan 168 S-B4).
+        sprite_affine: [f32; 4],
+        /// Sprite pivot x, y (normalized output), enabled (1), reserved.
+        sprite_pivot: [f32; 4],
     }
 
     pub(crate) struct WindowsD3d11Compositor {
@@ -1441,6 +1548,14 @@ mod runtime {
             source_kind: WindowsD3d11SceneSourceKind,
             upload: WindowsD3d11BgraUpload<'_>,
         ) -> Result<ID3D11ShaderResourceView, WindowsD3d11CompositorError> {
+            if source_kind == WindowsD3d11SceneSourceKind::GolemSprite {
+                // A re-scaled pet atlas never goes back to its old size: drop
+                // the leg's stale texture now instead of holding it until the
+                // bounded cache evicts it (plan 168 D5).
+                self.uploads.retain(|entry| {
+                    entry.source_id != source_id || entry.dimensions == upload.dimensions
+                });
+            }
             let existing = self.uploads.iter().position(|entry| {
                 entry.source_id == source_id
                     && entry.dimensions == upload.dimensions
@@ -1873,6 +1988,15 @@ mod runtime {
                 (plan.sequence & 0x00ff_ffff) as f32,
                 0.0,
             ],
+            // Disabled (pivot.z = 0) for every layer but the Golem sprite,
+            // so their vertices are computed exactly as before.
+            sprite_affine: layer
+                .effects
+                .sprite
+                .map_or([1.0, 0.0, 0.0, 1.0], |sprite| sprite.affine),
+            sprite_pivot: layer.effects.sprite.map_or([0.0; 4], |sprite| {
+                [sprite.pivot[0], sprite.pivot[1], 1.0, 0.0]
+            }),
         }
     }
 
@@ -2746,6 +2870,38 @@ mod runtime {
                     "{operation} failed after device removal/reset; retire generation before fallback: {error}; removal={removed}"
                 ),
             ),
+        }
+    }
+
+    /// Plan 168 S-B4, Windows CI only: the shader file compiles (D3DCompile
+    /// needs no device), `SceneVs`'s sprite turn included, and the constant
+    /// buffer the Rust side writes has the HLSL layout (eleven float4s, the
+    /// sprite's two last).
+    #[cfg(test)]
+    mod sprite_shader_tests {
+        #[test]
+        fn windows_d3d11_shaders_compile_with_the_golem_sprite_turn() {
+            for (entry_point, target) in [
+                ("SceneVs", "vs_5_0"),
+                ("FullScreenVs", "vs_5_0"),
+                ("ScenePs", "ps_5_0"),
+                ("PointerPs", "ps_5_0"),
+                ("Nv12LumaPs", "ps_5_0"),
+                ("Nv12ChromaPs", "ps_5_0"),
+            ] {
+                let bytecode = super::compile_shader(entry_point, target)
+                    .unwrap_or_else(|error| panic!("{entry_point}: {}", error.detail));
+                assert!(!bytecode.is_empty(), "{entry_point} has bytecode");
+            }
+            assert_eq!(std::mem::size_of::<super::DrawConstants>(), 11 * 16);
+            assert_eq!(
+                std::mem::offset_of!(super::DrawConstants, sprite_affine),
+                9 * 16
+            );
+            assert_eq!(
+                std::mem::offset_of!(super::DrawConstants, sprite_pivot),
+                10 * 16
+            );
         }
     }
 }

@@ -68,6 +68,119 @@ fn windows_d3d11_overlay_layer_geometry(
     )
 }
 
+/// The Golem's bubble above the pet's head (plan 168 D16) as a normalized
+/// transform and crop: the same oracle as the CPU and Metal paths
+/// (`golem_sprite::golem_bubble_blit_layout`).
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_bubble_layer_geometry(
+    overlay_size: (u32, u32),
+    output_size: (u32, u32),
+    anchor: crate::golem_sprite::GolemBubbleAnchor,
+) -> (
+    crate::windows_d3d11_compositor::WindowsD3d11NormalizedTransform,
+    crate::windows_d3d11_compositor::WindowsD3d11Crop,
+) {
+    let overlay_width = overlay_size.0.max(1) as usize;
+    let overlay_height = overlay_size.1.max(1) as usize;
+    let output_width = output_size.0.max(1) as usize;
+    let output_height = output_size.1.max(1) as usize;
+    let (source_left, destination_left, destination_top, draw_width) =
+        crate::golem_sprite::golem_bubble_blit_layout(
+            overlay_width,
+            overlay_height,
+            output_width,
+            output_height,
+            anchor,
+        );
+    let draw_height = overlay_height.min(output_height);
+    (
+        crate::windows_d3d11_compositor::WindowsD3d11NormalizedTransform {
+            x: destination_left as f32 / output_width as f32,
+            y: destination_top as f32 / output_height as f32,
+            width: draw_width as f32 / output_width as f32,
+            height: draw_height as f32 / output_height as f32,
+        },
+        crate::windows_d3d11_compositor::WindowsD3d11Crop {
+            left: source_left as f32 / overlay_width as f32,
+            top: 0.0,
+            right: (overlay_width - source_left - draw_width) as f32 / overlay_width as f32,
+            bottom: (overlay_height - draw_height) as f32 / overlay_height as f32,
+        },
+    )
+}
+
+/// The Golem's pet as a D3D11 layer (plan 168 S-B4): the untransformed
+/// square (plus the draw's translation) normalized to the leg's output, the
+/// atlas cell as the crop, and the 2x2 turn about the pivot for `SceneVs`.
+/// The planner keeps the square unclamped so the edge clips, never squashes.
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_golem_sprite_layer(
+    source_id: u64,
+    sprite: &crate::golem_sprite::GolemSpriteLayer,
+    output_size: (u32, u32),
+    output_targets: crate::windows_d3d11_compositor::WindowsD3d11SceneOutputTargets,
+    z_index: i32,
+) -> Result<crate::windows_d3d11_compositor::WindowsD3d11SceneLayerInput, String> {
+    use crate::windows_d3d11_compositor::{
+        WindowsD3d11Crop, WindowsD3d11LayerEffects, WindowsD3d11NormalizedTransform,
+        WindowsD3d11OutputDimensions, WindowsD3d11SceneFit, WindowsD3d11SceneLayerInput,
+        WindowsD3d11SceneMask, WindowsD3d11SceneSourceKind, WindowsD3d11SpriteTransform,
+    };
+    let draw = &sprite.draw;
+    let atlas = &sprite.atlas;
+    let [cell_x, cell_y, cell_width, cell_height] = draw.cell;
+    if !draw.is_drawable()
+        || cell_x + cell_width > atlas.width
+        || cell_y + cell_height > atlas.height
+    {
+        return Err(format!(
+            "Golem sprite revision {} has an undrawable cell",
+            atlas.revision
+        ));
+    }
+    let width = output_size.0.max(1) as f32;
+    let height = output_size.1.max(1) as f32;
+    let left = draw.center[0] - draw.size / 2.0 + draw.translate[0];
+    let top = draw.center[1] - draw.size / 2.0 + draw.translate[1];
+    let pivot = draw.pivot_point();
+    let atlas_width = atlas.width as f32;
+    let atlas_height = atlas.height as f32;
+    Ok(WindowsD3d11SceneLayerInput {
+        source_id,
+        source_kind: WindowsD3d11SceneSourceKind::GolemSprite,
+        source_dimensions: WindowsD3d11OutputDimensions::new(atlas.width, atlas.height)
+            .map_err(|error| error.to_string())?,
+        transform: WindowsD3d11NormalizedTransform {
+            x: left / width,
+            y: top / height,
+            width: draw.size / width,
+            height: draw.size / height,
+        },
+        crop: WindowsD3d11Crop {
+            left: cell_x as f32 / atlas_width,
+            top: cell_y as f32 / atlas_height,
+            right: (atlas.width - cell_x - cell_width) as f32 / atlas_width,
+            bottom: (atlas.height - cell_y - cell_height) as f32 / atlas_height,
+        },
+        fit: WindowsD3d11SceneFit::Cover,
+        mirror_x: false,
+        mask: WindowsD3d11SceneMask::None,
+        effects: WindowsD3d11LayerEffects {
+            opacity: draw.opacity.clamp(0.0, 1.0),
+            sprite: Some(WindowsD3d11SpriteTransform {
+                affine: draw.affine,
+                pivot: [
+                    (pivot[0] + draw.translate[0]) / width,
+                    (pivot[1] + draw.translate[1]) / height,
+                ],
+            }),
+            ..Default::default()
+        },
+        z_index,
+        output_targets,
+    })
+}
+
 /// Presenter liveness follows the sources actually required by the effective
 /// scene. A valid intentional empty scene is distinct from a failed input.
 #[cfg(any(target_os = "windows", test))]
@@ -605,14 +718,20 @@ mod runtime {
     const CAPTION_AUXILIARY_SOURCE_ID: u64 = 11;
     const HIGHLIGHT_PRIMARY_SOURCE_ID: u64 = 12;
     const HIGHLIGHT_AUXILIARY_SOURCE_ID: u64 = 13;
+    /// The Golem's bubble per target (plan 168 D16).
     const GOLEM_PRIMARY_SOURCE_ID: u64 = 14;
     const GOLEM_AUXILIARY_SOURCE_ID: u64 = 15;
-    /// Overlay stacking (plan 164, owner answer 7): captions, then the Golem,
-    /// then the highlight card on top. `build_windows_d3d11_scene_plan` sorts
-    /// layers by z, so the numbers are the order.
+    /// The Golem's pet atlas per leg (plan 168 S-B4).
+    const GOLEM_SPRITE_PRIMARY_SOURCE_ID: u64 = 16;
+    const GOLEM_SPRITE_AUXILIARY_SOURCE_ID: u64 = 17;
+    /// Overlay stacking (plan 164 owner answer 7, plan 168 D9): captions,
+    /// then the Golem (pet, then bubble), then the highlight card on top.
+    /// `build_windows_d3d11_scene_plan` sorts layers by z, so the numbers are
+    /// the order.
     const CAPTION_Z_INDEX: i32 = 10;
-    const GOLEM_Z_INDEX: i32 = 11;
-    const HIGHLIGHT_Z_INDEX: i32 = 12;
+    const GOLEM_SPRITE_Z_INDEX: i32 = 11;
+    const GOLEM_Z_INDEX: i32 = 12;
+    const HIGHLIGHT_Z_INDEX: i32 = 13;
 
     /// Shared committed authority only; no recording/pump back-reference.
     pub(crate) struct WindowsLiveSources {
@@ -776,8 +895,11 @@ mod runtime {
     pub(crate) struct WindowsD3d11OverlayInput {
         pub(crate) captions: CaptionOverlaySlots,
         pub(crate) highlight: CaptionOverlaySlot,
-        /// The Golem avatar, one raster per target like captions (plan 164).
+        /// The Golem's bubble, one raster per target like captions (plan 164;
+        /// the bubble only since plan 168).
         pub(crate) golem: CaptionOverlaySlots,
+        /// The Golem's pet atlases and draws (plan 168 S-B4).
+        pub(crate) golem_sprite: crate::golem_sprite::GolemSpriteSlot,
         pub(crate) caption_on_primary: bool,
         pub(crate) caption_on_auxiliary: bool,
         pub(crate) highlight_on_primary: bool,
@@ -794,6 +916,19 @@ mod runtime {
         output_targets: WindowsD3d11SceneOutputTargets,
         output_dimensions: WindowsD3d11OutputDimensions,
         safe_inset: usize,
+        z_index: i32,
+        /// The Golem's bubble: anchored above the pet's head on its leg
+        /// (plan 168 D16) instead of inside its rect.
+        bubble_anchor: Option<crate::golem_sprite::GolemBubbleAnchor>,
+    }
+
+    /// The Golem's pet on one leg for one tick (plan 168 S-B4).
+    #[derive(Clone)]
+    struct WindowsD3d11SpriteFrame {
+        source_id: u64,
+        layer: crate::golem_sprite::GolemSpriteLayer,
+        output_targets: WindowsD3d11SceneOutputTargets,
+        output_dimensions: WindowsD3d11OutputDimensions,
         z_index: i32,
     }
 
@@ -1564,9 +1699,127 @@ mod runtime {
         })
     }
 
+    /// The Golem on each leg for this tick (plan 168 S-B4): the pet's draw
+    /// and the bubble's anchor, from the sprite slot, with the gaze targets
+    /// Phase C reads (the card's and the caption bar's blits on the leg).
+    /// `now_seconds` is the pump's deterministic clock.
+    fn current_golem_legs(
+        plan: &WindowsD3d11SessionPlan,
+        input: &WindowsD3d11OverlayInput,
+        now_seconds: f64,
+    ) -> [Option<crate::golem_sprite::GolemLegFrame>; 2] {
+        use crate::golem_sprite::{GolemLegRequest, GolemSpriteLeg};
+        if !input.golem_on_primary && !input.golem_on_auxiliary {
+            return [None, None];
+        }
+        let captions = current_caption_overlays(&input.captions);
+        let highlight = current_caption_overlay(&input.highlight);
+        let blit = |overlay: &CaptionOverlay, (width, height): (u32, u32), inset: usize| {
+            let (_, left, top, draw_width) = crate::overlay_layout::overlay_blit_layout(
+                overlay.width as usize,
+                overlay.height as usize,
+                width.max(1) as usize,
+                height.max(1) as usize,
+                overlay.blit_rect(width, height),
+                inset,
+            );
+            [
+                left as f32,
+                top as f32,
+                draw_width as f32,
+                overlay.height.min(height.max(1)) as f32,
+            ]
+        };
+        let leg = |leg: GolemSpriteLeg,
+                   canvas: (u32, u32),
+                   caption: Option<&CaptionOverlay>,
+                   card: Option<&CaptionOverlay>| {
+            input.golem_sprite.leg_frame(GolemLegRequest {
+                leg,
+                canvas,
+                now_seconds,
+                highlight_rect: card.map(|card| blit(card, canvas, 0)),
+                caption_rect: caption.map(|caption| {
+                    blit(
+                        caption,
+                        canvas,
+                        caption_overlay_safe_inset(Some(caption), card, canvas.0, canvas.1),
+                    )
+                }),
+            })
+        };
+        let primary = input.golem_on_primary.then(|| {
+            leg(
+                GolemSpriteLeg::Primary,
+                (plan.primary.width, plan.primary.height),
+                captions
+                    .primary
+                    .as_ref()
+                    .filter(|_| input.caption_on_primary),
+                highlight.as_ref().filter(|_| input.highlight_on_primary),
+            )
+        });
+        let auxiliary = plan
+            .auxiliary
+            .filter(|_| input.golem_on_auxiliary)
+            .map(|video| {
+                leg(
+                    GolemSpriteLeg::Auxiliary,
+                    (video.width, video.height),
+                    captions
+                        .auxiliary
+                        .as_ref()
+                        .filter(|_| input.caption_on_auxiliary),
+                    highlight.as_ref().filter(|_| input.highlight_on_auxiliary),
+                )
+            });
+        [primary, auxiliary]
+    }
+
+    /// The pet's layer per leg that has an atlas this tick.
+    fn golem_sprite_frames(
+        plan: &WindowsD3d11SessionPlan,
+        golem_legs: &[Option<crate::golem_sprite::GolemLegFrame>; 2],
+    ) -> Result<Vec<WindowsD3d11SpriteFrame>, String> {
+        let primary_dimensions =
+            WindowsD3d11OutputDimensions::new(plan.primary.width, plan.primary.height)
+                .map_err(|error| error.to_string())?;
+        let primary_targets = if plan.auxiliary.is_none() {
+            WindowsD3d11SceneOutputTargets::PRIMARY.union(WindowsD3d11SceneOutputTargets::PREVIEW)
+        } else {
+            WindowsD3d11SceneOutputTargets::PRIMARY
+        };
+        let mut frames = Vec::with_capacity(2);
+        if let Some(sprite) = golem_legs[0].as_ref().and_then(|leg| leg.sprite.clone()) {
+            frames.push(WindowsD3d11SpriteFrame {
+                source_id: GOLEM_SPRITE_PRIMARY_SOURCE_ID,
+                layer: sprite,
+                output_targets: primary_targets,
+                output_dimensions: primary_dimensions,
+                z_index: GOLEM_SPRITE_Z_INDEX,
+            });
+        }
+        if let (Some(sprite), Some(video)) = (
+            golem_legs[1].as_ref().and_then(|leg| leg.sprite.clone()),
+            plan.auxiliary,
+        ) {
+            frames.push(WindowsD3d11SpriteFrame {
+                source_id: GOLEM_SPRITE_AUXILIARY_SOURCE_ID,
+                layer: sprite,
+                output_targets: WindowsD3d11SceneOutputTargets::AUXILIARY
+                    .union(WindowsD3d11SceneOutputTargets::PREVIEW),
+                output_dimensions: WindowsD3d11OutputDimensions::new(video.width, video.height)
+                    .map_err(|error| error.to_string())?,
+                z_index: GOLEM_SPRITE_Z_INDEX,
+            });
+        }
+        Ok(frames)
+    }
+
     fn current_overlay_frames(
         plan: &WindowsD3d11SessionPlan,
         input: &WindowsD3d11OverlayInput,
+        golem_legs: &[Option<crate::golem_sprite::GolemLegFrame>; 2],
     ) -> Result<Vec<WindowsD3d11OverlayFrame>, String> {
         let captions = current_caption_overlays(&input.captions);
         let highlight = current_caption_overlay(&input.highlight);
@@ -1608,6 +1861,7 @@ mod runtime {
                 output_dimensions: primary_dimensions,
                 safe_inset,
                 z_index: CAPTION_Z_INDEX,
+                bubble_anchor: None,
             });
         }
         if input.caption_on_auxiliary
@@ -1631,6 +1885,7 @@ mod runtime {
                 output_dimensions,
                 safe_inset,
                 z_index: CAPTION_Z_INDEX,
+                bubble_anchor: None,
             });
         }
         if input.golem_on_primary
@@ -1644,6 +1899,7 @@ mod runtime {
                 output_dimensions: primary_dimensions,
                 safe_inset: 0,
                 z_index: GOLEM_Z_INDEX,
+                bubble_anchor: golem_legs[0].as_ref().map(|leg| leg.bubble_anchor),
             });
         }
         if input.golem_on_auxiliary
@@ -1658,6 +1914,7 @@ mod runtime {
                 output_dimensions,
                 safe_inset: 0,
                 z_index: GOLEM_Z_INDEX,
+                bubble_anchor: golem_legs[1].as_ref().map(|leg| leg.bubble_anchor),
             });
         }
         if input.highlight_on_primary
@@ -1671,6 +1928,7 @@ mod runtime {
                 output_dimensions: primary_dimensions,
                 safe_inset: 0,
                 z_index: HIGHLIGHT_Z_INDEX,
+                bubble_anchor: None,
             });
         }
         if input.highlight_on_auxiliary
@@ -1684,6 +1942,7 @@ mod runtime {
                 output_dimensions,
                 safe_inset: 0,
                 z_index: HIGHLIGHT_Z_INDEX,
+                bubble_anchor: None,
             });
         }
         Ok(frames)
@@ -1983,7 +2242,21 @@ mod runtime {
                 pace_render_tick(frame_started_at, frame_interval);
                 continue;
             }
-            let overlay_frames = match current_overlay_frames(&plan, &overlays) {
+            // Plan 168 S-B4: the Golem's pet per leg on the pump's own
+            // deterministic clock (Phase C's animator reads it).
+            let golem_legs = current_golem_legs(
+                &plan,
+                &overlays,
+                tick.output_sequence as f64 / f64::from(render_fps),
+            );
+            let overlay_frames = match current_overlay_frames(&plan, &overlays, &golem_legs) {
+                Ok(frames) => frames,
+                Err(error) => {
+                    finish_with_error(&snapshot, &mut startup_tx, error);
+                    break;
+                }
+            };
+            let sprite_frames = match golem_sprite_frames(&plan, &golem_legs) {
                 Ok(frames) => frames,
                 Err(error) => {
                     finish_with_error(&snapshot, &mut startup_tx, error);
@@ -1999,6 +2272,7 @@ mod runtime {
                     .map(|frame| (frame.width, frame.height)),
                 camera.as_ref().map(|input| &input.layout),
                 &overlay_frames,
+                &sprite_frames,
                 committed.as_ref(),
                 if retained_capture_ticket.is_some() {
                     Some((plan.source_width, plan.source_height))
@@ -2111,9 +2385,12 @@ mod runtime {
                     }
                 }
             }
-            let overlay_sources = overlay_frames
+            // The pet's atlas uploads once per revision (immutable, keyed
+            // by source id and revision); then the bubbles and cards.
+            let overlay_sources = sprite_frames
                 .iter()
-                .map(overlay_upload_source)
+                .map(sprite_upload_source)
+                .chain(overlay_frames.iter().map(overlay_upload_source))
                 .collect::<Result<Vec<_>, _>>();
             match overlay_sources {
                 Ok(overlay_sources) => sources.extend(overlay_sources),
@@ -2312,6 +2589,28 @@ mod runtime {
         })
     }
 
+    fn sprite_upload_source(
+        frame: &WindowsD3d11SpriteFrame,
+    ) -> Result<WindowsD3d11CompositionSource, String> {
+        let atlas = &frame.layer.atlas;
+        let row_pitch = atlas.width.checked_mul(4).ok_or_else(|| {
+            format!(
+                "D3D11 Golem sprite revision {} has an overflowing row pitch",
+                atlas.revision
+            )
+        })?;
+        Ok(WindowsD3d11CompositionSource::BgraUpload {
+            source_id: frame.source_id,
+            pixels: Arc::clone(&atlas.bgra),
+            dimensions: WindowsD3d11OutputDimensions::new(atlas.width, atlas.height)
+                .map_err(|error| error.to_string())?,
+            row_pitch,
+            pixel_order: WindowsD3d11UploadPixelOrder::Bgra,
+            content_revision: atlas.revision,
+            immutable: true,
+        })
+    }
+
     fn pace_render_tick(started_at: Instant, frame_interval: Duration) {
         if let Some(remaining) = frame_interval.checked_sub(started_at.elapsed()) {
             thread::sleep(remaining);
@@ -2399,6 +2698,7 @@ mod runtime {
         camera_dimensions: Option<(u32, u32)>,
         camera_layout: Option<&LayoutSettings>,
         overlays: &[WindowsD3d11OverlayFrame],
+        sprites: &[WindowsD3d11SpriteFrame],
         committed: Option<&WindowsLiveSnapshot>,
         capture_dimensions: Option<(u32, u32)>,
     ) -> Result<crate::windows_d3d11_compositor::WindowsD3d11ScenePlan, String> {
@@ -2628,19 +2928,41 @@ mod runtime {
         } else if capture_dimensions.is_none() {
             layers.retain(|layer| layer.source_id != CAPTURE_SOURCE_ID);
         }
-        for overlay in overlays {
-            let (transform, crop) = super::windows_d3d11_overlay_layer_geometry(
-                (overlay.overlay.width, overlay.overlay.height),
+        for sprite in sprites {
+            layers.push(super::windows_d3d11_golem_sprite_layer(
+                sprite.source_id,
+                &sprite.layer,
                 (
-                    overlay.output_dimensions.width,
-                    overlay.output_dimensions.height,
+                    sprite.output_dimensions.width,
+                    sprite.output_dimensions.height,
                 ),
-                overlay.overlay.blit_rect(
-                    overlay.output_dimensions.width,
-                    overlay.output_dimensions.height,
+                sprite.output_targets,
+                sprite.z_index,
+            )?);
+        }
+        for overlay in overlays {
+            let (transform, crop) = match overlay.bubble_anchor {
+                Some(anchor) => super::windows_d3d11_bubble_layer_geometry(
+                    (overlay.overlay.width, overlay.overlay.height),
+                    (
+                        overlay.output_dimensions.width,
+                        overlay.output_dimensions.height,
+                    ),
+                    anchor,
                 ),
-                overlay.safe_inset,
-            );
+                None => super::windows_d3d11_overlay_layer_geometry(
+                    (overlay.overlay.width, overlay.overlay.height),
+                    (
+                        overlay.output_dimensions.width,
+                        overlay.output_dimensions.height,
+                    ),
+                    overlay.overlay.blit_rect(
+                        overlay.output_dimensions.width,
+                        overlay.output_dimensions.height,
+                    ),
+                    overlay.safe_inset,
+                ),
+            };
             layers.push(WindowsD3d11SceneLayerInput {
                 source_id: overlay.source_id,
                 source_kind: overlay.source_kind,
@@ -2759,7 +3081,18 @@ mod runtime {
                 .collect(),
         };
         let map = |current: &WindowsLiveSnapshot, camera| {
-            build_scene_plan(&plan, 9, 4, camera, Some(&layout), &[], Some(current), None).unwrap()
+            build_scene_plan(
+                &plan,
+                9,
+                4,
+                camera,
+                Some(&layout),
+                &[],
+                &[],
+                Some(current),
+                None,
+            )
+            .unwrap()
         };
         assert!(
             map(&current, None).layers.is_empty(),
@@ -2870,6 +3203,11 @@ mod runtime {
             captions: crate::captions::new_caption_overlay_slots(),
             highlight: crate::captions::new_caption_overlay_slot(),
             golem: crate::captions::new_caption_overlay_slots(),
+            golem_sprite: crate::golem_sprite::GolemSpriteSlot::new(
+                &crate::cohost::CohostPersona::default(),
+                crate::overlay_layout::OverlayLayout::default().golem,
+                None,
+            ),
             caption_on_primary: true,
             caption_on_auxiliary: true,
             highlight_on_primary: true,
@@ -2904,7 +3242,7 @@ mod runtime {
             },
         )
         .unwrap();
-        let frames = current_overlay_frames(&plan, &input).unwrap();
+        let frames = current_overlay_frames(&plan, &input, &[None, None]).unwrap();
         let stack = |frames: &[WindowsD3d11OverlayFrame]| {
             frames
                 .iter()
@@ -2946,7 +3284,11 @@ mod runtime {
                 ),
             ]
         );
-        assert!(CAPTION_Z_INDEX < GOLEM_Z_INDEX && GOLEM_Z_INDEX < HIGHLIGHT_Z_INDEX);
+        assert!(
+            CAPTION_Z_INDEX < GOLEM_SPRITE_Z_INDEX
+                && GOLEM_SPRITE_Z_INDEX < GOLEM_Z_INDEX
+                && GOLEM_Z_INDEX < HIGHLIGHT_Z_INDEX
+        );
         let golem_primary = &frames[2];
         assert_eq!(
             golem_primary.output_targets,
@@ -2970,8 +3312,18 @@ mod runtime {
         assert_eq!(transform.x, 192.0 / 1280.0);
         assert_eq!(transform.y, 180.0 / 720.0);
         // The scene plan keeps the stack: z sorts captions, Golem, card.
-        let scene =
-            build_scene_plan(&plan, 1, 1, None, None, &frames, None, Some((1920, 1080))).unwrap();
+        let scene = build_scene_plan(
+            &plan,
+            1,
+            1,
+            None,
+            None,
+            &frames,
+            &[],
+            None,
+            Some((1920, 1080)),
+        )
+        .unwrap();
         let overlay_layers = scene
             .layers
             .iter()
@@ -2993,7 +3345,7 @@ mod runtime {
         // (the pump's start refuses an auxiliary flag without a leg).
         plan.auxiliary = None;
         assert_eq!(
-            stack(&current_overlay_frames(&plan, &input).unwrap()),
+            stack(&current_overlay_frames(&plan, &input, &[None, None]).unwrap()),
             vec![
                 (
                     CAPTION_PRIMARY_SOURCE_ID,

@@ -26,6 +26,10 @@ cbuffer DrawConstants : register(b0)
     float4 solidColor;
     // output texel X/Y, deterministic sequence low bits, reserved
     float4 frameInfo;
+    // Golem sprite only (plan 168 S-B4): the 2x2 turn a, b, c, d (CSS order,
+    // output pixels, y down) and its pivot x, y (normalized output), enabled.
+    float4 spriteAffine;
+    float4 spritePivot;
 };
 
 Texture2D<float4> sourceTexture : register(t0);
@@ -52,6 +56,18 @@ VertexOutput SceneVs(uint vertexId : SV_VertexID)
     VertexOutput output;
     float2 unit = QUAD[vertexId];
     float2 outputPosition = destination.xy + unit * destination.zw;
+    if (spritePivot.z > 0.5)
+    {
+        // Turn the sprite around its pivot in output pixels, so rotation and
+        // skew keep the true aspect; the rasterizer clips at the edge.
+        float2 texel = max(frameInfo.xy, float2(0.000001, 0.000001));
+        float2 pixelOffset = (outputPosition - spritePivot.xy) / texel;
+        float2 turned = float2(
+            spriteAffine.x * pixelOffset.x + spriteAffine.z * pixelOffset.y,
+            spriteAffine.y * pixelOffset.x + spriteAffine.w * pixelOffset.y
+        );
+        outputPosition = spritePivot.xy + turned * texel;
+    }
     output.position = float4(
         outputPosition.x * 2.0 - 1.0,
         1.0 - outputPosition.y * 2.0,
