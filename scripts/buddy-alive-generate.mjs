@@ -78,7 +78,7 @@ const GATEWAY = 'https://ai-gateway.vercel.sh/v1'
 const IDENTITY_TIMEOUT_MS = 120_000
 const SHEET_TIMEOUT_MS = 300_000
 const LABEL_FONT = '/System/Library/Fonts/Supplemental/Arial Unicode.ttf'
-const REVIEW_CELL = 360
+const REVIEW_CELL = 400
 /** On-stream check (D3): the character about 240 px tall, so the 0.65-occupancy cell is ~370 px. */
 const ON_STREAM_CELL = 370
 
@@ -112,11 +112,12 @@ function checkWeb(options) {
     )
   }
   const read = (name) => readFileSync(join(resolve(web), 'lib/ai', name), 'utf8')
-  const problems = checkWebPrompts({
+  const { problems, owed } = checkWebPrompts({
     promptsSource: read('cohost-pet-prompts.ts'),
     lookSource: read('buddy-look.ts'),
     petSource: read('cohost-pet.ts')
   })
+  for (const item of owed) console.warn(`buddy:alive: WEB MIRROR OWED: ${item}`)
   if (problems.length > 0) {
     throw new Error(
       `The prompt copy differs from ${web} (PET_PROMPT_VERSION ${PET_PROMPT_VERSION} here):\n  ${problems.join('\n  ')}`
@@ -309,6 +310,7 @@ async function generateSheet({
     model: options.model,
     responseModel: result.payload.model ?? null,
     promptVersion: PET_PROMPT_VERSION,
+    promptSha256: sha256(Buffer.from(prompt)),
     requestedSize: size,
     width: info.width,
     height: info.height,
@@ -406,7 +408,14 @@ function decodeAtlas(packDir, workDir, name = 'atlas.png') {
 }
 
 /** magick arguments for one labelled cell on a checkerboard (leaves one image on the stack). */
-function cellArgs(atlasPng, rect, label, size = REVIEW_CELL, background = 'checker') {
+function cellArgs(
+  atlasPng,
+  rect,
+  label,
+  size = REVIEW_CELL,
+  background = 'checker',
+  pointsize = 17
+) {
   const [x, y, w, h] = rect
   const back =
     background === 'checker'
@@ -417,6 +426,7 @@ function cellArgs(atlasPng, rect, label, size = REVIEW_CELL, background = 'check
     ...back,
     '(',
     atlasPng,
+    '+gravity',
     '-crop',
     `${w}x${h}+${x}+${y}`,
     '+repage',
@@ -439,7 +449,7 @@ function cellArgs(atlasPng, rect, label, size = REVIEW_CELL, background = 'check
           '-font',
           LABEL_FONT,
           '-pointsize',
-          '17',
+          String(pointsize),
           '-size',
           `${size}x34`,
           '-gravity',
@@ -493,7 +503,7 @@ function contactSheet({ atlasPng, rects, key, title, out, sourcePath }) {
         '(',
         '(',
         '-size',
-        `${width}x${Math.round((width * 2) / 3)}`,
+        `${width}x${REVIEW_CELL}`,
         'pattern:checkerboard',
         '-fill',
         '#d8d8d8',
@@ -503,7 +513,7 @@ function contactSheet({ atlasPng, rects, key, title, out, sourcePath }) {
         '(',
         sourcePath,
         '-resize',
-        `${width}x${Math.round((width * 2) / 3)}`,
+        `${width}x${REVIEW_CELL}`,
         ')',
         '-gravity',
         'center',
@@ -521,6 +531,8 @@ function contactSheet({ atlasPng, rects, key, title, out, sourcePath }) {
     '-background',
     '#0d0e10',
     '-append',
+    '-depth',
+    '8',
     out
   ])
 }
@@ -530,12 +542,85 @@ function gazeGrid({ atlasPng, rects, title, out }) {
   const rows = GAZE_ROWS.map((row) => [
     '(',
     ...reviewCells(`gaze-${row}`).flatMap((cell) =>
-      cellArgs(atlasPng, rects.get(cell.id), cell.label, size)
+      cellArgs(atlasPng, rects.get(cell.id), cell.label, size, 'checker', 13)
     ),
     '+append',
     ')'
   ])
-  magick([...titleArgs(title, size * 5), ...rows.flat(), '-background', '#0d0e10', '-append', out])
+  magick([
+    ...titleArgs(title, size * 5),
+    ...rows.flat(),
+    '-background',
+    '#0d0e10',
+    '-append',
+    '-depth',
+    '8',
+    out
+  ])
+}
+
+/**
+ * The 25 heads at full atlas resolution (the upper middle of each cell, where
+ * the neutral's head sits): the turn and the pitch are judged here.
+ */
+function gazeHeads({ atlasPng, rects, title, out }) {
+  const tile = (rect, label) => {
+    const [x, y, w, h] = rect
+    const crop = [Math.round(w * 0.6), Math.round(h * 0.36)]
+    const at = [x + Math.round(w * 0.2), y + Math.round(h * 0.2)]
+    return [
+      '(',
+      '(',
+      '-size',
+      `${crop[0]}x${crop[1]}`,
+      'xc:#8a8d93',
+      '(',
+      atlasPng,
+      '+gravity',
+      '-crop',
+      `${crop[0]}x${crop[1]}+${at[0]}+${at[1]}`,
+      '+repage',
+      ')',
+      '-compose',
+      'over',
+      '-composite',
+      ')',
+      '(',
+      '-background',
+      '#16181c',
+      '-fill',
+      '#f2f2f2',
+      '-font',
+      LABEL_FONT,
+      '-pointsize',
+      '16',
+      '-size',
+      `${crop[0]}x28`,
+      '-gravity',
+      'center',
+      `label:${label}`,
+      ')',
+      '-append',
+      ')'
+    ]
+  }
+  const width = Math.round([...rects.values()][0][2] * 0.6) * 5
+  const rows = GAZE_ROWS.map((row) => [
+    '(',
+    ...reviewCells(`gaze-${row}`).flatMap((cell) => tile(rects.get(cell.id), cell.label)),
+    '+append',
+    ')'
+  ])
+  magick([
+    ...titleArgs(title, width),
+    ...rows.flat(),
+    '-background',
+    '#0d0e10',
+    '-append',
+    '-depth',
+    '8',
+    out
+  ])
 }
 
 function pilotSheet({ pilotPath, title, out }) {
@@ -566,6 +651,8 @@ function pilotSheet({ pilotPath, title, out }) {
     '-background',
     '#0d0e10',
     '-append',
+    '-depth',
+    '8',
     out
   ])
 }
@@ -602,7 +689,7 @@ function writeReview({ slug, entry, paths, verdict }) {
       pilotSheet({
         pilotPath: join(paths.sources, pilot),
         title: `${entry.name} · pilot (${pilot}) · neutral | left | right / laugh`,
-        out: join(paths.review, 'pilot.png')
+        out: join(paths.review, pilot)
       })
     }
     if (!verdict.ok) return []
@@ -629,10 +716,17 @@ function writeReview({ slug, entry, paths, verdict }) {
       title: `${entry.name} · the 25 gaze cells (viewer's left is ←)`,
       out: grid
     })
+    const heads = join(paths.review, 'gaze-heads.png')
+    gazeHeads({
+      atlasPng,
+      rects,
+      title: `${entry.name} · the 25 heads at atlas resolution: does each one look where its label says?`,
+      out: heads
+    })
     const preview = join(paths.review, 'preview.webp')
     animatedPreview({ atlasPng, rects, out: preview, workDir })
     log(slug, `review in ${paths.review}`)
-    return [...written, grid, preview]
+    return [...written, grid, heads, preview]
   } finally {
     rmSync(workDir, { recursive: true, force: true })
   }
@@ -713,6 +807,7 @@ function compareVariants({ slug, entry, paths }) {
       const face = [
         '(',
         atlasPng,
+        '+gravity',
         '-crop',
         `${Math.round(rect[2] * 0.5)}x${Math.round(rect[3] * 0.4)}+${rect[0] + Math.round(rect[2] * 0.25)}+${rect[1] + Math.round(rect[3] * 0.18)}`,
         '+repage',
@@ -739,6 +834,8 @@ function compareVariants({ slug, entry, paths }) {
       '-background',
       '#0d0e10',
       '-append',
+      '-depth',
+      '8',
       out
     ])
     writeFileSync(join(paths.review, 'size-compare.json'), `${JSON.stringify(sizes, null, 2)}\n`)
@@ -855,7 +952,7 @@ async function main() {
       console.error(`${slug}: ${sheetKey} FAILED: ${reason?.message ?? reason}`)
       process.exitCode = 1
     }
-    if (options.until === 'pilot' && !options.sheets) {
+    if (options.until === 'pilot') {
       const pilot = sourceVersions(readdirSync(paths.sources)).pilot
       if (pilot) {
         mkdirSync(paths.review, { recursive: true })
@@ -863,9 +960,9 @@ async function main() {
         pilotSheet({
           pilotPath: join(paths.sources, file),
           title: `${entry.name} · pilot (${file}) · neutral | left | right / laugh`,
-          out: join(paths.review, 'pilot.png')
+          out: join(paths.review, file)
         })
-        log(slug, `pilot review in ${join(paths.review, 'pilot.png')}`)
+        log(slug, `pilot review in ${join(paths.review, file)}`)
       }
       return
     }

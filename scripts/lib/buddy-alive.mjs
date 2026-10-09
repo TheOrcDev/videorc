@@ -13,11 +13,48 @@
 import { join } from 'node:path'
 import { BUDDY_HOUSE_STYLE } from './buddy-official.mjs'
 
-export const PET_PROMPT_VERSION = 2
+/**
+ * 3 = videorc-web's version 2 with the plan 172 probe's sheet sizes
+ * (WEB_MIRROR_OWED, below): the words are unchanged, the art is not, so the
+ * web says 3 too once it mirrors them.
+ */
+export const PET_PROMPT_VERSION = 3
+/** The web version this copy was taken from (videorc-web #75). */
+export const WEB_BASE_PROMPT_VERSION = 2
 export const DEFAULT_IMAGE_MODEL = 'openai/gpt-image-2.5-sunburst'
 /** What videorc-web docs/ai-gateway.md names for VIDEORC_AI_PET_VISION_MODEL. */
 export const DEFAULT_VISION_MODEL = 'openai/gpt-5.5'
 export const STRIP_IMAGE_SIZE = '1536x1024'
+/**
+ * Plan 172 probe (Buddy the Golem, 2026-10-09): the sheet sizes, not the
+ * words, decide whether the frames that alternate on stream share one body.
+ *
+ * At 1536 x 1024 the model draws a gaze strip's figures ~470 px tall
+ * whatever the words say, so five across leave ~300 px each and a wide
+ * character comes out slimmed: the golem's front gaze cell (the neutral)
+ * was 0.81 of its height wide against 0.95 for its blink, which on stream
+ * fattens the Buddy at every blink. A sentence asking for narrower drawings
+ * changed nothing (0.81), and one asking for the reference proportions
+ * changed nothing measurable. Wider strips do: 2560 x 1024 gave 0.82 to
+ * 0.92 with gaps down to 1 px, 3072 x 1024 gives 0.87 to 0.99 (eight
+ * strips) with ~770 px figures and clear gaps, at the same token cost.
+ *
+ * The builder needs every reaction and extras figure at 0.645 to 1.333 of
+ * the neutral's source height; 1536 x 1024 reaction sheets draw ~450 px
+ * figures (0.57 of 790), so they grow 1.5x to 2304 x 1536, the same 3:2
+ * composition (~680 px figures). The 3 x 1 extras strip at 1536 x 1024 drew
+ * the golem with its fists touching the next drawing twice out of two (512
+ * px cells); at 2304 x 1024 it draws ~800 px figures at 0.92 to 0.94, the
+ * talk frames' match for the neutral.
+ *
+ * The web mirrors these as COHOST_PET_GAZE_IMAGE_SIZE,
+ * COHOST_PET_SHEET_IMAGE_SIZE and COHOST_PET_EXTRAS_IMAGE_SIZE. Their PNGs
+ * run ~3.5 to 5 MB, over Vercel's 4.5 MB response body cap once
+ * base64-encoded, so the sheet route needs another way to hand them back.
+ */
+export const GAZE_STRIP_IMAGE_SIZE = '3072x1024'
+export const SHEET_IMAGE_SIZE = '2304x1536'
+export const EXTRAS_IMAGE_SIZE = '2304x1024'
 export const PILOT_IMAGE_SIZE = '1024x1024'
 export const MAX_PET_NOTE_ITEMS = 8
 export const MAX_PET_NOTE_ITEM_CHARS = 60
@@ -39,11 +76,11 @@ export const PET_REACTIONS_B_CELLS = ['worried', 'annoyed', 'proud', 'confused',
 export const PET_EXTRAS_CELLS = ['talk-a', 'talk-b', 'wave']
 
 export const PET_SHEET_LAYOUTS = {
-  extras: { cells: PET_EXTRAS_CELLS, columns: 3, rows: 1, size: STRIP_IMAGE_SIZE },
-  gaze: { cells: PET_GAZE_CELLS, columns: 5, rows: 1, size: STRIP_IMAGE_SIZE },
+  extras: { cells: PET_EXTRAS_CELLS, columns: 3, rows: 1, size: EXTRAS_IMAGE_SIZE },
+  gaze: { cells: PET_GAZE_CELLS, columns: 5, rows: 1, size: GAZE_STRIP_IMAGE_SIZE },
   pilot: { cells: PET_PILOT_CELLS, columns: 2, rows: 2, size: PILOT_IMAGE_SIZE },
-  'reactions-a': { cells: PET_REACTIONS_A_CELLS, columns: 3, rows: 2, size: STRIP_IMAGE_SIZE },
-  'reactions-b': { cells: PET_REACTIONS_B_CELLS, columns: 3, rows: 2, size: STRIP_IMAGE_SIZE }
+  'reactions-a': { cells: PET_REACTIONS_A_CELLS, columns: 3, rows: 2, size: SHEET_IMAGE_SIZE },
+  'reactions-b': { cells: PET_REACTIONS_B_CELLS, columns: 3, rows: 2, size: SHEET_IMAGE_SIZE }
 }
 
 /** The sheets of one pack in atlas order (the builder's keys), the pilot first. */
@@ -79,7 +116,16 @@ export function fill(template, values) {
 }
 
 export const PET_IDENTITY_SCHEMA_NAME = 'videorc_pet_identity_notes'
-export const PET_IDENTITY_MAX_OUTPUT_TOKENS = 600
+/**
+ * Plan 172 probe (2026-10-09): openai/gpt-5.5 is a reasoning model. With the
+ * web's 600 output tokens and no reasoning effort it spent all 600 on
+ * reasoning and answered `incomplete` (max_output_tokens), so the identity
+ * route could never succeed with that model. This copy asks for low effort
+ * and leaves room for the answer; videorc-web must mirror both
+ * (`checkWebIdentityRequest` warns until it does).
+ */
+export const PET_IDENTITY_MAX_OUTPUT_TOKENS = 2048
+export const PET_IDENTITY_REASONING_EFFORT = 'low'
 
 export const PET_IDENTITY_JSON_SCHEMA = {
   additionalProperties: false,
@@ -141,6 +187,7 @@ export function identityRequestBody({ model, referenceBase64 }) {
     instructions: PET_IDENTITY_INSTRUCTIONS,
     max_output_tokens: PET_IDENTITY_MAX_OUTPUT_TOKENS,
     model,
+    reasoning: { effort: PET_IDENTITY_REASONING_EFFORT },
     text: {
       format: {
         name: PET_IDENTITY_SCHEMA_NAME,
@@ -417,6 +464,13 @@ function buildReactionsPrompt(notes, kind, cells) {
   ])
 }
 
+export const WEB_MIRROR_OWED = {
+  version: PET_PROMPT_VERSION,
+  gazeImageSize: GAZE_STRIP_IMAGE_SIZE,
+  sheetImageSize: SHEET_IMAGE_SIZE,
+  extrasImageSize: EXTRAS_IMAGE_SIZE
+}
+
 export function buildExtrasPrompt(notes) {
   return assemble([
     identityLock(),
@@ -489,21 +543,37 @@ export function webPromptFragments() {
 }
 
 /**
- * What differs between this copy and the web: `promptsSource` is
+ * This copy against the web module: `promptsSource` is
  * `lib/ai/cohost-pet-prompts.ts`, `lookSource` is `lib/ai/buddy-look.ts`,
- * `petSource` is `lib/ai/cohost-pet.ts`. Empty when they match.
+ * `petSource` is `lib/ai/cohost-pet.ts`. `problems` is drift (a word,
+ * size or cap that differs; a run must stop); `owed` is what this copy
+ * changed after the plan 172 probe and the web has not mirrored yet
+ * (WEB_MIRROR_OWED and the identity request knobs).
  */
 export function checkWebPrompts({ promptsSource, lookSource, petSource }) {
   const problems = []
-  const version = /export const PET_PROMPT_VERSION = (\d+);/.exec(promptsSource)?.[1]
-  if (Number(version) !== PET_PROMPT_VERSION) {
+  const owed = []
+  const version = Number(/export const PET_PROMPT_VERSION = (\d+);/.exec(promptsSource)?.[1])
+  const mirrored = version === PET_PROMPT_VERSION
+  if (!mirrored && version !== WEB_BASE_PROMPT_VERSION) {
     problems.push(
-      `PET_PROMPT_VERSION is ${version ?? 'missing'} on the web and ${PET_PROMPT_VERSION} here`
+      `PET_PROMPT_VERSION is ${version || 'missing'} on the web; this copy is ${PET_PROMPT_VERSION} (taken from ${WEB_BASE_PROMPT_VERSION})`
     )
+  } else if (!mirrored) {
+    owed.push(`PET_PROMPT_VERSION ${PET_PROMPT_VERSION} (the web is still ${version})`)
   }
   for (const fragment of webPromptFragments()) {
     if (!promptsSource.includes(fragment)) {
       problems.push(`not in cohost-pet-prompts.ts: ${fragment.slice(0, 90)}`)
+    }
+  }
+  for (const [name, size, what] of [
+    ['COHOST_PET_GAZE_IMAGE_SIZE', GAZE_STRIP_IMAGE_SIZE, 'gaze strips'],
+    ['COHOST_PET_SHEET_IMAGE_SIZE', SHEET_IMAGE_SIZE, 'reaction sheets'],
+    ['COHOST_PET_EXTRAS_IMAGE_SIZE', EXTRAS_IMAGE_SIZE, 'the extras strip']
+  ]) {
+    if (!petSource.includes(`export const ${name} = "${size}";`)) {
+      ;(mirrored ? problems : owed).push(`${what} at ${size} (${name} in cohost-pet.ts)`)
     }
   }
   if (!lookSource.includes(`"${BUDDY_HOUSE_STYLE}"`)) {
@@ -523,10 +593,23 @@ export function checkWebPrompts({ promptsSource, lookSource, petSource }) {
       problems.push(`${name} differs from cohost-pet.ts`)
     }
   }
-  if (!/PET_IDENTITY_MAX_OUTPUT_TOKENS = 600;/.test(promptsSource)) {
-    problems.push('PET_IDENTITY_MAX_OUTPUT_TOKENS differs from cohost-pet-prompts.ts')
+  if (
+    !promptsSource.includes(
+      `export const PET_IDENTITY_MAX_OUTPUT_TOKENS = ${PET_IDENTITY_MAX_OUTPUT_TOKENS};`
+    )
+  ) {
+    owed.push(
+      `PET_IDENTITY_MAX_OUTPUT_TOKENS ${PET_IDENTITY_MAX_OUTPUT_TOKENS} (a reasoning vision model spent the web's 600 on reasoning alone)`
+    )
   }
-  return problems
+  if (
+    !promptsSource.includes(
+      `export const PET_IDENTITY_REASONING_EFFORT = "${PET_IDENTITY_REASONING_EFFORT}";`
+    )
+  ) {
+    owed.push(`the identity call's reasoning effort "${PET_IDENTITY_REASONING_EFFORT}"`)
+  }
+  return { problems, owed }
 }
 
 // ---------------------------------------------------------------------------

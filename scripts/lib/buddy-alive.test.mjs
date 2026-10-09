@@ -8,6 +8,8 @@ import {
   ATLAS_SHEET_KEYS,
   PET_IDENTITY_INSTRUCTIONS,
   PET_PROMPT_VERSION,
+  WEB_BASE_PROMPT_VERSION,
+  WEB_MIRROR_OWED,
   aliveBlock,
   alivePaths,
   buildSheetPrompt,
@@ -53,9 +55,20 @@ test('the sheets of a pack: the pilot, five gaze rows top to bottom, two reactio
     'extras'
   ])
   assert.deepEqual(
-    [sheetSpec('pilot').size, sheetSpec('gaze-up2').size, sheetSpec('extras').size],
-    ['1024x1024', '1536x1024', '1536x1024']
+    [
+      sheetSpec('pilot').size,
+      sheetSpec('gaze-up2').size,
+      sheetSpec('reactions-a').size,
+      sheetSpec('extras').size
+    ],
+    ['1024x1024', '3072x1024', '2304x1536', '2304x1024']
   )
+  assert.deepEqual(WEB_MIRROR_OWED, {
+    version: 3,
+    gazeImageSize: '3072x1024',
+    sheetImageSize: '2304x1536',
+    extrasImageSize: '2304x1024'
+  })
   assert.equal(sheetSpec('gaze-down1').row, 'down1')
   assert.deepEqual([sheetSpec('reactions-b').columns, sheetSpec('reactions-b').rows], [3, 2])
   assert.throws(() => sheetSpec('gaze-sideways'), /Unknown sheet/)
@@ -71,7 +84,8 @@ test('fill substitutes every placeholder and refuses a missing value', () => {
 
 test('identity notes: the web request shape and its normalisation', () => {
   const body = identityRequestBody({ model: 'openai/gpt-5.5', referenceBase64: 'AAAA' })
-  assert.equal(body.max_output_tokens, 600)
+  assert.equal(body.max_output_tokens, 2048)
+  assert.deepEqual(body.reasoning, { effort: 'low' })
   assert.equal(body.text.format.strict, true)
   assert.equal(body.text.format.name, 'videorc_pet_identity_notes')
   assert.equal(body.input[0].content[1].image_url, 'data:image/png;base64,AAAA')
@@ -131,7 +145,7 @@ test('the identity lock names anatomical sides, or says the design is symmetric'
 
 test('sheet prompts: the house look, the layout, the cells in order, the row pitch', () => {
   const gaze = buildSheetPrompt('gaze-up2', NOTES)
-  assert.equal(gaze.size, '1536x1024')
+  assert.equal(gaze.size, '3072x1024')
   assert.match(gaze.prompt, /^Use the character in the provided image exactly as it is/)
   assert.match(gaze.prompt, /a stylised 3D cartoon character render/)
   assert.match(gaze.prompt, /Arrange exactly 5 drawings of the character as one row of 5,/)
@@ -193,51 +207,84 @@ test('the images/edits body: one reference, a transparent PNG for openai models'
   )
 })
 
-test('the web check passes on a source holding every fragment and names each drift', () => {
-  const promptsSource = [
-    'export const PET_PROMPT_VERSION = 2;',
-    'export const PET_IDENTITY_MAX_OUTPUT_TOKENS = 600;',
+const LOOK_SOURCE =
+  'export const BUDDY_HOUSE_STYLE =\n  "a stylised 3D cartoon character render: soft rounded chunky forms, smooth matte materials with subtle surface texture, warm soft studio lighting, gentle ambient occlusion, a clean readable silhouette, big friendly expressive eyes, sturdy proportions with a large head";'
+const PET_SOURCE = [
+  'export const COHOST_PET_STRIP_IMAGE_SIZE = "1536x1024";',
+  'export const COHOST_PET_PILOT_IMAGE_SIZE = "1024x1024";',
+  'export const MAX_PET_NOTE_ITEMS = 8;',
+  'export const MAX_PET_NOTE_ITEM_CHARS = 60;',
+  'export const MAX_PET_PROPORTIONS_CHARS = 400;',
+  'export const MAX_PET_ASYMMETRIC_ITEMS = 12;',
+  'export const MAX_PET_FEATURE_CHARS = 80;'
+].join('\n')
+
+test('the web check: version 2 owes the probe changes, version 3 must carry them, drift stops a run', () => {
+  const base = [
+    `export const PET_PROMPT_VERSION = ${WEB_BASE_PROMPT_VERSION};`,
     ...webPromptFragments()
   ].join('\n')
-  const lookSource =
-    'export const BUDDY_HOUSE_STYLE =\n  "a stylised 3D cartoon character render: soft rounded chunky forms, smooth matte materials with subtle surface texture, warm soft studio lighting, gentle ambient occlusion, a clean readable silhouette, big friendly expressive eyes, sturdy proportions with a large head";'
-  const petSource = [
-    'export const COHOST_PET_STRIP_IMAGE_SIZE = "1536x1024";',
-    'export const COHOST_PET_PILOT_IMAGE_SIZE = "1024x1024";',
-    'export const MAX_PET_NOTE_ITEMS = 8;',
-    'export const MAX_PET_NOTE_ITEM_CHARS = 60;',
-    'export const MAX_PET_PROPORTIONS_CHARS = 400;',
-    'export const MAX_PET_ASYMMETRIC_ITEMS = 12;',
-    'export const MAX_PET_FEATURE_CHARS = 80;'
-  ].join('\n')
-  assert.deepEqual(checkWebPrompts({ promptsSource, lookSource, petSource }), [])
-  const drifted = checkWebPrompts({
-    promptsSource: promptsSource
-      .replace('PET_PROMPT_VERSION = 2;', 'PET_PROMPT_VERSION = 3;')
-      .replace('nothing floats and nothing sinks', 'nothing floats'),
-    lookSource: lookSource.replace('large head', 'huge head'),
-    petSource: petSource.replace('= 8;', '= 9;')
+  const before = checkWebPrompts({
+    promptsSource: base,
+    lookSource: LOOK_SOURCE,
+    petSource: PET_SOURCE
   })
-  assert.equal(drifted.length, 4, drifted.join('\n'))
-  assert.match(drifted[0], /PET_PROMPT_VERSION is 3 on the web and 2 here/)
+  assert.deepEqual(before.problems, [])
+  assert.equal(before.owed.length, 6, before.owed.join('\n'))
+  assert.match(before.owed.join('\n'), /gaze strips at 3072x1024/)
+  assert.match(before.owed.join('\n'), /PET_PROMPT_VERSION 3 \(the web is still 2\)/)
+
+  const mirrored = [
+    `export const PET_PROMPT_VERSION = ${PET_PROMPT_VERSION};`,
+    `export const PET_IDENTITY_MAX_OUTPUT_TOKENS = 2048;`,
+    `export const PET_IDENTITY_REASONING_EFFORT = "low";`,
+    ...webPromptFragments()
+  ].join('\n')
+  const mirroredPet = `${PET_SOURCE}\nexport const COHOST_PET_GAZE_IMAGE_SIZE = "3072x1024";\nexport const COHOST_PET_SHEET_IMAGE_SIZE = "2304x1536";\nexport const COHOST_PET_EXTRAS_IMAGE_SIZE = "2304x1024";`
+  assert.deepEqual(
+    checkWebPrompts({ promptsSource: mirrored, lookSource: LOOK_SOURCE, petSource: mirroredPet }),
+    { problems: [], owed: [] }
+  )
+  const halfMirrored = checkWebPrompts({
+    promptsSource: mirrored,
+    lookSource: LOOK_SOURCE,
+    petSource: mirroredPet.replace('"2304x1024"', '"1536x1024"')
+  })
+  assert.deepEqual(halfMirrored.problems, [
+    'the extras strip at 2304x1024 (COHOST_PET_EXTRAS_IMAGE_SIZE in cohost-pet.ts)'
+  ])
+
+  const drifted = checkWebPrompts({
+    promptsSource: base
+      .replace('PET_PROMPT_VERSION = 2;', 'PET_PROMPT_VERSION = 1;')
+      .replace('nothing floats and nothing sinks', 'nothing floats'),
+    lookSource: LOOK_SOURCE.replace('large head', 'huge head'),
+    petSource: PET_SOURCE.replace('= 8;', '= 9;')
+  })
+  assert.equal(drifted.problems.length, 4, drifted.problems.join('\n'))
+  assert.match(
+    drifted.problems[0],
+    /PET_PROMPT_VERSION is 1 on the web; this copy is 3 \(taken from 2\)/
+  )
 })
 
 // The copy must equal the web module itself. Runs when a videorc-web checkout
 // is at VIDEORC_WEB_DIR (CI has none; `pnpm buddy:alive` checks it too).
 const webDir = process.env.VIDEORC_WEB_DIR
 const webPrompts = webDir ? join(webDir, 'lib/ai/cohost-pet-prompts.ts') : null
-test('the prompt copy equals videorc-web', { skip: !webPrompts || !existsSync(webPrompts) }, () => {
-  const read = (name) => readFileSync(join(webDir, 'lib/ai', name), 'utf8')
-  assert.deepEqual(
-    checkWebPrompts({
+test(
+  'the prompt copy matches videorc-web but for what it owes',
+  { skip: !webPrompts || !existsSync(webPrompts) },
+  () => {
+    const read = (name) => readFileSync(join(webDir, 'lib/ai', name), 'utf8')
+    const { problems } = checkWebPrompts({
       promptsSource: read('cohost-pet-prompts.ts'),
       lookSource: read('buddy-look.ts'),
       petSource: read('cohost-pet.ts')
-    }),
-    []
-  )
-  assert.equal(PET_PROMPT_VERSION, 2)
-})
+    })
+    assert.deepEqual(problems, [])
+  }
+)
 
 test('versioned sources: the creator names, the next version, unknown files ignored', () => {
   assert.equal(versionedName('gaze-up1', 3), 'gaze-up1-v3.png')
