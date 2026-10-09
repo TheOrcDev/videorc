@@ -1,4 +1,4 @@
-import { DeleteIcon, FolderIcon, SparkleIcon } from '@/components/icons'
+import { DeleteIcon, FolderIcon, SparkleIcon, ZoomInIcon } from '@/components/icons'
 import { useState, type KeyboardEvent, type ReactElement, type ReactNode, type Ref } from 'react'
 
 import type { GolemPetPreviewHandle, GolemPetPreviewInfo } from '@/components/golem-pet-preview'
@@ -35,6 +35,9 @@ import { ipcErrorMessage } from '@/lib/ipc-error-message'
 import type { GolemMotionSettings } from '../../../shared/golem-pet'
 
 export type GolemAvatarView = 'still' | 'alive'
+
+/** The preview in its zoom dialog: big enough to check the Golem out. */
+const ZOOM_PREVIEW_PX = 420
 
 export interface GolemAvatarSectionProps {
   persona: CohostPersona
@@ -106,6 +109,8 @@ export function GolemAvatarSection({
   // The pack the confirm names; it stays set while the dialog fades out.
   const [removeTarget, setRemoveTarget] = useState<GolemPetSummary | null>(null)
   const [removeOpen, setRemoveOpen] = useState(false)
+  const [zoomOpen, setZoomOpen] = useState(false)
+  const [zoomError, setZoomError] = useState<string | null>(null)
   const wornPackId = persona.avatar.kind === 'alive' ? persona.avatar.packId : null
 
   const importPack = async (): Promise<void> => {
@@ -218,7 +223,23 @@ export function GolemAvatarSection({
                 {previewError}
               </p>
             ) : (
-              <p className="text-[11px] text-subtle">Click it to react</p>
+              <div className="flex items-center gap-1">
+                <p className="text-[11px] text-subtle">Click it to react</p>
+                <Button
+                  aria-label={`Zoom in on ${persona.name}`}
+                  data-testid="golem-preview-zoom"
+                  size="icon-xs"
+                  title="Zoom in"
+                  type="button"
+                  variant="ghost"
+                  onClick={() => {
+                    setZoomError(null)
+                    setZoomOpen(true)
+                  }}
+                >
+                  <ZoomInIcon />
+                </Button>
+              </div>
             )}
           </div>
         ) : null}
@@ -248,6 +269,43 @@ export function GolemAvatarSection({
           ) : null}
         </div>
       </div>
+
+      {/* The living preview, large: it follows the pointer and reacts to a
+          click like the small one, with the same pack, motion and images. */}
+      {previewPackId ? (
+        <Dialog open={zoomOpen} onOpenChange={setZoomOpen}>
+          <DialogContent className="sm:max-w-lg" data-testid="golem-preview-zoom-dialog">
+            <DialogHeader>
+              <DialogTitle>{persona.name}</DialogTitle>
+              <DialogDescription>
+                It follows your pointer and reacts when you click it.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="flex justify-center">
+              <LazyGolemPetPreview
+                className="rounded-row border border-border bg-foreground/[0.03]"
+                label={persona.name}
+                motion={motion}
+                packId={previewPackId}
+                personaId={persona.id}
+                placeholder={<Skeleton className="size-full rounded-row" />}
+                size={ZOOM_PREVIEW_PX}
+                stillImages={persona.images}
+                onError={setZoomError}
+                onLoad={() => setZoomError(null)}
+              />
+            </div>
+            {zoomError ? (
+              <p
+                className="text-center text-xs text-destructive"
+                data-testid="golem-preview-zoom-error"
+              >
+                {zoomError}
+              </p>
+            ) : null}
+          </DialogContent>
+        </Dialog>
+      ) : null}
 
       <Dialog open={removeOpen} onOpenChange={setRemoveOpen}>
         <DialogContent showCloseButton={false}>

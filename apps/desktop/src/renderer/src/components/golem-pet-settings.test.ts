@@ -168,6 +168,30 @@ describe('GolemPetSettings: Avatar (plan 168 S-D2)', () => {
     expect(mocked.previews.at(-1)).toEqual({ packId: 'still', size: 160 })
   })
 
+  it('zooms the living preview into a dialog at 420 px, with the same pack', async () => {
+    await render({
+      cohost: settings({ avatar: { kind: 'alive', packId: PACK_A.packId } }),
+      list: pets([PACK_A])
+    })
+    const zoom = button('golem-preview-zoom')
+    expect(zoom.getAttribute('aria-label')).toBe('Zoom in on Grum')
+    expect(document.querySelector('[data-testid="golem-preview-zoom-dialog"]')).toBeNull()
+    mocked.previews.length = 0
+    await act(async () => zoom.click())
+    const dialog = document.querySelector('[data-testid="golem-preview-zoom-dialog"]')!
+    expect(dialog.getAttribute('role')).toBe('dialog')
+    expect(
+      dialog.querySelector('[data-testid="golem-pet-preview"]')?.getAttribute('data-pack')
+    ).toBe(PACK_A.packId)
+    expect(mocked.previews).toContainEqual({ packId: PACK_A.packId, size: 420 })
+    // The tab's own preview stays under it, at its own size.
+    expect(mocked.previews).toContainEqual({ packId: PACK_A.packId, size: 160 })
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    })
+    expect(document.querySelector('[data-testid="golem-preview-zoom-dialog"]')).toBeNull()
+  })
+
   it('persists Alive with the first own pack, and Still again', async () => {
     await render({ list: pets([PACK_A, { ...PACK_B, packId: 'bundled:golem' }]) })
     await act(async () => kindButton('Alive').click())
