@@ -697,6 +697,12 @@ fn set_pending(state: &AppState, pending: BuddyLibraryPendingAlive) {
     update_sync(state, |sync| sync.pending_alive = Some(pending));
 }
 
+/// The stored pending change is still this one (a later save or removal
+/// replaces it, and the job queued for the earlier one then does nothing).
+fn still_pending(state: &AppState, pending: &BuddyLibraryPendingAlive) -> bool {
+    load_library_sync(&state.database).pending_alive.as_ref() == Some(pending)
+}
+
 fn queue_pending(state: &AppState, pending: BuddyLibraryPendingAlive) {
     let kind = match pending.action {
         BuddyLibraryPendingAction::Upload => BuddyLibraryBusyKind::AliveUpload,
@@ -707,6 +713,9 @@ fn queue_pending(state: &AppState, pending: BuddyLibraryPendingAlive) {
         state,
         busy(kind, Some(&avatar_id)),
         move |state| async move {
+            if !still_pending(&state, &pending) {
+                return Ok(());
+            }
             match pending.action {
                 BuddyLibraryPendingAction::Upload => run_upload(&state, pending).await,
                 BuddyLibraryPendingAction::Delete => run_remove(&state, pending).await,

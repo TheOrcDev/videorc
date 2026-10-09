@@ -679,6 +679,35 @@ async fn buddy_library_a_failed_upload_is_tried_again_at_the_next_sync() {
 }
 
 #[tokio::test]
+async fn buddy_library_an_upload_replaced_by_a_removal_never_runs() {
+    let root = temp_root();
+    let web = spawn_fake_library().await;
+    let state = linked_grum(&root, &web).await;
+    own_pack(&root, PACK, 9);
+    let upload = BuddyLibraryPendingAlive {
+        avatar_id: AVATAR.to_string(),
+        pack_id: PACK.to_string(),
+        action: BuddyLibraryPendingAction::Upload,
+    };
+    // The pack was removed after its upload was queued: the removal is the
+    // stored change, so the queued upload does nothing.
+    set_pending(
+        &state,
+        BuddyLibraryPendingAlive {
+            action: BuddyLibraryPendingAction::Delete,
+            ..upload.clone()
+        },
+    );
+    queue_pending(&state, upload);
+    settle(&state, |_| true).await;
+    assert_eq!(
+        web.count(&format!("POST /api/buddy/avatars/{AVATAR}/alive")),
+        0
+    );
+    assert!(get(&state).await.error.is_none());
+}
+
+#[tokio::test]
 async fn buddy_library_a_pack_of_a_local_only_buddy_stays_local() {
     let root = temp_root();
     let web = spawn_fake_library().await;
