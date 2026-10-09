@@ -73,6 +73,23 @@ const COHOST_PET_SHEET_PATH: &str = "/api/ai/cohost/pet/sheet";
 const COHOST_PET_SMALL_RESPONSE_MAX_BYTES: usize = 256 * 1024;
 pub(crate) const COHOST_PET_SHEET_MAX_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
 // --- end Golem pets (plan 168, Phase F) ---
+// --- Golem library (plan 170 D5 to D8) ---
+/// Create and redo run the plan 169 generation (the route's `maxDuration` is
+/// 180 s), so the client waits as long as the set route's.
+pub(crate) const GOLEM_LIBRARY_GENERATE_TIMEOUT: std::time::Duration = COHOST_AVATAR_SET_TIMEOUT;
+/// The list, one avatar, an edit, a delete and the profile are plain rows.
+pub(crate) const GOLEM_LIBRARY_SHORT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(15);
+/// A pose is a 302 to a short-lived signed URL, then one PNG.
+pub(crate) const GOLEM_LIBRARY_POSE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
+const GOLEM_LIBRARY_AVATARS_PATH: &str = "/api/golem/avatars";
+const GOLEM_LIBRARY_PROFILE_PATH: &str = "/api/golem/profile";
+/// 30 avatars of text (a context is at most 4000 characters) stay far under this.
+const GOLEM_LIBRARY_SMALL_RESPONSE_MAX_BYTES: usize = 2 * 1024 * 1024;
+/// A stored pose is one PNG the generation made (8 MB at most, like a draft's).
+pub(crate) const GOLEM_LIBRARY_POSE_MAX_BYTES: usize = 8 * 1024 * 1024;
+// --- end Golem library (plan 170) ---
 /// Bounded well inside the provider-mutation RPC envelope: an update check must
 /// never wait on a slow web edge for long.
 pub(crate) const WINDOWS_PILOT_UPDATE_TOKEN_TIMEOUT: std::time::Duration =
@@ -623,6 +640,196 @@ pub struct CohostAvatarSetResponse {
         std::collections::BTreeMap<crate::cohost::CohostAvatarState, CohostAvatarSetFailure>,
 }
 
+// --- Golem library wire types (plan 170 D5 to D8; videorc-web lib/golem/library.ts) ---
+// Named `GolemLibraryWeb*` so they never meet the persona's `GolemAvatar`
+// (Still or Alive). The desktop renderer never sees these: the backend turns
+// them into `cohost_library::GolemLibraryEntry`.
+
+/// One pose of an account avatar: `/api/golem/avatars/<id>/<state>?v=<8 hex>`
+/// (the `v` changes exactly when the picture does).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GolemLibraryWebPose {
+    pub url: String,
+    #[serde(default)]
+    pub opaque: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GolemLibraryWebPoses {
+    pub idle: GolemLibraryWebPose,
+    #[serde(default)]
+    pub talk: Option<GolemLibraryWebPose>,
+    #[serde(default)]
+    pub laugh: Option<GolemLibraryWebPose>,
+    #[serde(default)]
+    pub think: Option<GolemLibraryWebPose>,
+}
+
+impl GolemLibraryWebPoses {
+    pub fn get(&self, state: crate::cohost::CohostAvatarState) -> Option<&GolemLibraryWebPose> {
+        use crate::cohost::CohostAvatarState;
+        match state {
+            CohostAvatarState::Idle => Some(&self.idle),
+            CohostAvatarState::Talk => self.talk.as_ref(),
+            CohostAvatarState::Laugh => self.laugh.as_ref(),
+            CohostAvatarState::Think => self.think.as_ref(),
+        }
+    }
+}
+
+/// A user's own avatar as the web returns it (the shapes' `GolemAvatar`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GolemLibraryWebAvatar {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub personality: String,
+    #[serde(default)]
+    pub context: String,
+    #[serde(default)]
+    pub look_version: u32,
+    pub created_at: String,
+    pub updated_at: String,
+    pub poses: GolemLibraryWebPoses,
+}
+
+/// `GET /api/golem/avatars`: newest first. One avatar the desktop cannot
+/// read is skipped, never the whole list.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GolemLibraryWebList {
+    #[serde(default, deserialize_with = "lenient_items")]
+    pub avatars: Vec<GolemLibraryWebAvatar>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub active_avatar_id: Option<String>,
+    #[serde(default)]
+    pub profile_updated_at: Option<String>,
+}
+
+/// `POST /api/golem/avatars`. `name` is required; a description or an
+/// inspiration picture (base64, at most 3 MB decoded) is too.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GolemLibraryWebCreateRequest {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspiration: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+}
+
+/// The create's streamed 200: the stored avatar and the PNGs, so the desktop
+/// needs no second download, and why any of talk, laugh or think is missing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GolemLibraryWebCreateResponse {
+    pub avatar: GolemLibraryWebAvatar,
+    #[serde(default)]
+    pub images: CohostAvatarSetImages,
+    #[serde(default)]
+    pub failed:
+        std::collections::BTreeMap<crate::cohost::CohostAvatarState, CohostAvatarSetFailure>,
+}
+
+impl GolemLibraryWebCreateResponse {
+    /// The pictures as the plan 169 draft store reads a set.
+    pub fn as_set(&self) -> CohostAvatarSetResponse {
+        CohostAvatarSetResponse {
+            images: self.images.clone(),
+            failed: self.failed.clone(),
+        }
+    }
+}
+
+/// `GET` and `PATCH /api/golem/avatars/:id`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GolemLibraryWebAvatarResponse {
+    pub avatar: GolemLibraryWebAvatar,
+}
+
+/// `PATCH /api/golem/avatars/:id`: at least one field.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GolemLibraryWebPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+}
+
+impl GolemLibraryWebPatch {
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none() && self.personality.is_none() && self.context.is_none()
+    }
+}
+
+/// `DELETE /api/golem/avatars/:id`: deleting the active one clears the
+/// profile and moves its clock.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GolemLibraryWebDeleted {
+    #[serde(default)]
+    pub deleted: bool,
+    #[serde(default)]
+    pub active_avatar_id: Option<String>,
+    #[serde(default)]
+    pub profile_updated_at: Option<String>,
+}
+
+/// `POST /api/golem/avatars/:id/redo`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GolemLibraryWebRedoRequest {
+    pub state: crate::cohost::CohostAvatarState,
+}
+
+/// The redo's streamed 200: the avatar with its new pose URL and the PNG.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GolemLibraryWebRedoResponse {
+    pub avatar: GolemLibraryWebAvatar,
+    #[serde(default)]
+    pub images: CohostAvatarSetImages,
+}
+
+/// `GET` and `PUT /api/golem/profile`: the account's choice and its clock.
+/// The request always carries `activeAvatarId` (null clears it).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GolemLibraryWebProfile {
+    #[serde(default)]
+    pub active_avatar_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_updated_at: Option<String>,
+}
+
+/// Whether `url` is a pose path this client may send the bearer to: a path
+/// under `/api/golem/avatars/` on the API host, never an absolute URL.
+pub(crate) fn golem_pose_path_ok(url: &str) -> bool {
+    url.starts_with("/api/golem/avatars/")
+        && !url.contains("..")
+        && !url.contains('\\')
+        && !url.contains("//")
+        && url.len() <= 512
+        && url.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+// --- end Golem library wire types (plan 170) ---
+
 // --- Golem pets (plan 168, Phase F) ---
 
 /// `POST /api/ai/cohost/pet/builds`: one creation's server-side session.
@@ -1038,6 +1245,58 @@ pub(crate) fn parse_retry_after_seconds(value: Option<&str>) -> Option<std::time
         .map(std::time::Duration::from_secs)
 }
 
+/// `/api/golem/avatars/<id>` for a user avatar id (a lowercase uuid); any
+/// other id is refused before anything is sent.
+fn golem_avatar_path(avatar_id: &str) -> std::result::Result<String, CohostApiError> {
+    if crate::cohost_library::user_avatar_id_ok(avatar_id) {
+        Ok(format!("{GOLEM_LIBRARY_AVATARS_PATH}/{avatar_id}"))
+    } else {
+        Err(CohostApiError {
+            kind: CohostApiErrorKind::InvalidRequest,
+            detail: CohostErrorDetail::new(
+                "invalid-request",
+                "That is not a library avatar id.",
+                None,
+            ),
+        })
+    }
+}
+
+/// A success body read whole, refused above `max_bytes` (by its length
+/// header first, then by what arrived).
+async fn read_capped_body(
+    response: reqwest::Response,
+    status: reqwest::StatusCode,
+    timeout: std::time::Duration,
+    max_bytes: usize,
+) -> std::result::Result<Vec<u8>, CohostApiError> {
+    let too_large = || {
+        CohostApiError::malformed_response(
+            status.as_u16(),
+            "The response is larger than this route ever sends.",
+        )
+    };
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(too_large());
+    }
+    let body = response.bytes().await.map_err(|error| {
+        if error.is_timeout() {
+            return CohostApiError::from_transport_within(error, timeout);
+        }
+        CohostApiError::malformed_response(
+            status.as_u16(),
+            format!("Could not read the response: {error}"),
+        )
+    })?;
+    if body.len() > max_bytes {
+        return Err(too_large());
+    }
+    Ok(body.to_vec())
+}
+
 pub(crate) fn classify_cohost_failure(
     status: u16,
     code: &str,
@@ -1404,6 +1663,222 @@ impl VideorcApiClient {
         .await
     }
 
+    // --- Golem library (plan 170 D5 to D8) ---
+
+    /// `GET /api/golem/avatars`: the account's avatars and its choice.
+    pub async fn get_golem_library(
+        &self,
+        bearer_token: &str,
+    ) -> std::result::Result<GolemLibraryWebList, CohostApiError> {
+        self.send_cohost_json::<(), _>(
+            reqwest::Method::GET,
+            GOLEM_LIBRARY_AVATARS_PATH,
+            bearer_token,
+            None,
+            GOLEM_LIBRARY_SHORT_TIMEOUT,
+            GOLEM_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// `POST /api/golem/avatars`: make a whole avatar and save it to the library.
+    pub async fn post_golem_avatar(
+        &self,
+        bearer_token: &str,
+        request: &GolemLibraryWebCreateRequest,
+    ) -> std::result::Result<GolemLibraryWebCreateResponse, CohostApiError> {
+        self.send_cohost_json(
+            reqwest::Method::POST,
+            GOLEM_LIBRARY_AVATARS_PATH,
+            bearer_token,
+            Some(request),
+            GOLEM_LIBRARY_GENERATE_TIMEOUT,
+            COHOST_AVATAR_SET_MAX_RESPONSE_BYTES,
+        )
+        .await
+    }
+
+    /// `GET /api/golem/avatars/:id`.
+    pub async fn get_golem_avatar(
+        &self,
+        bearer_token: &str,
+        avatar_id: &str,
+    ) -> std::result::Result<GolemLibraryWebAvatarResponse, CohostApiError> {
+        self.send_cohost_json::<(), _>(
+            reqwest::Method::GET,
+            &golem_avatar_path(avatar_id)?,
+            bearer_token,
+            None,
+            GOLEM_LIBRARY_SHORT_TIMEOUT,
+            GOLEM_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// `PATCH /api/golem/avatars/:id`.
+    pub async fn patch_golem_avatar(
+        &self,
+        bearer_token: &str,
+        avatar_id: &str,
+        patch: &GolemLibraryWebPatch,
+    ) -> std::result::Result<GolemLibraryWebAvatarResponse, CohostApiError> {
+        self.send_cohost_json(
+            reqwest::Method::PATCH,
+            &golem_avatar_path(avatar_id)?,
+            bearer_token,
+            Some(patch),
+            GOLEM_LIBRARY_SHORT_TIMEOUT,
+            GOLEM_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// `DELETE /api/golem/avatars/:id`.
+    pub async fn delete_golem_avatar(
+        &self,
+        bearer_token: &str,
+        avatar_id: &str,
+    ) -> std::result::Result<GolemLibraryWebDeleted, CohostApiError> {
+        self.send_cohost_json::<(), _>(
+            reqwest::Method::DELETE,
+            &golem_avatar_path(avatar_id)?,
+            bearer_token,
+            None,
+            GOLEM_LIBRARY_SHORT_TIMEOUT,
+            GOLEM_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// `POST /api/golem/avatars/:id/redo`: talk, laugh or think again from the
+    /// stored idle (one image of the daily allowance).
+    pub async fn post_golem_avatar_redo(
+        &self,
+        bearer_token: &str,
+        avatar_id: &str,
+        state: crate::cohost::CohostAvatarState,
+    ) -> std::result::Result<GolemLibraryWebRedoResponse, CohostApiError> {
+        let path = format!("{}/redo", golem_avatar_path(avatar_id)?);
+        self.send_cohost_json(
+            reqwest::Method::POST,
+            &path,
+            bearer_token,
+            Some(&GolemLibraryWebRedoRequest { state }),
+            GOLEM_LIBRARY_GENERATE_TIMEOUT,
+            COHOST_AVATAR_SET_MAX_RESPONSE_BYTES,
+        )
+        .await
+    }
+
+    /// `PUT /api/golem/profile`: a user avatar id, `official:<slug>` or None.
+    pub async fn put_golem_profile(
+        &self,
+        bearer_token: &str,
+        active_avatar_id: Option<&str>,
+    ) -> std::result::Result<GolemLibraryWebProfile, CohostApiError> {
+        self.send_cohost_json(
+            reqwest::Method::PUT,
+            GOLEM_LIBRARY_PROFILE_PATH,
+            bearer_token,
+            Some(&serde_json::json!({ "activeAvatarId": active_avatar_id })),
+            GOLEM_LIBRARY_SHORT_TIMEOUT,
+            GOLEM_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// One pose's PNG: `GET /api/golem/avatars/:id/:state` answers a 302 to a
+    /// short-lived signed URL, which the client follows (reqwest drops the
+    /// bearer when the redirect leaves the API host). Only a pose path the
+    /// web gave is ever requested.
+    pub async fn get_golem_pose(
+        &self,
+        bearer_token: &str,
+        pose_path: &str,
+    ) -> std::result::Result<Vec<u8>, CohostApiError> {
+        if !golem_pose_path_ok(pose_path) {
+            return Err(CohostApiError::malformed_response(
+                200,
+                "The library gave a picture address this app does not read.",
+            ));
+        }
+        let timeout = GOLEM_LIBRARY_POSE_TIMEOUT;
+        let response = self
+            .http
+            .get(self.endpoint(pose_path))
+            .bearer_auth(bearer_token)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|error| CohostApiError::from_transport_within(error, timeout))?;
+        let status = response.status();
+        if !status.is_success() {
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            let (code, message) = read_error_code_and_message(response).await;
+            return Err(classify_cohost_failure(
+                status.as_u16(),
+                &code,
+                message,
+                retry_after.as_deref(),
+            ));
+        }
+        read_capped_body(response, status, timeout, GOLEM_LIBRARY_POSE_MAX_BYTES).await
+    }
+
+    /// One JSON call to a co-host or Golem library route: the bearer, the
+    /// timeout, a response cap, and the `{ error: { code, message } }`
+    /// envelope classified like every co-host failure.
+    async fn send_cohost_json<Req: Serialize + ?Sized, Resp: DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        bearer_token: &str,
+        request: Option<&Req>,
+        timeout: std::time::Duration,
+        max_bytes: usize,
+    ) -> std::result::Result<Resp, CohostApiError> {
+        let mut builder = self
+            .http
+            .request(method, self.endpoint(path))
+            .bearer_auth(bearer_token)
+            .timeout(timeout);
+        if let Some(request) = request {
+            builder = builder.json(request);
+        }
+        let response = builder
+            .send()
+            .await
+            .map_err(|error| CohostApiError::from_transport_within(error, timeout))?;
+        let status = response.status();
+        if status.is_success() {
+            let body = read_capped_body(response, status, timeout, max_bytes).await?;
+            return serde_json::from_slice(&body).map_err(|error| {
+                CohostApiError::malformed_response(
+                    status.as_u16(),
+                    format!("Could not read the response: {error}"),
+                )
+            });
+        }
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let (code, message) = read_error_code_and_message(response).await;
+        Err(classify_cohost_failure(
+            status.as_u16(),
+            &code,
+            message,
+            retry_after.as_deref(),
+        ))
+    }
+
+    // --- end Golem library (plan 170) ---
+
     // --- Golem pets (plan 168, Phase F) ---
 
     /// Open a pet build session (`POST /api/ai/cohost/pet/builds`).
@@ -1465,60 +1940,15 @@ impl VideorcApiClient {
         timeout: std::time::Duration,
         max_bytes: usize,
     ) -> std::result::Result<Resp, CohostApiError> {
-        let response = self
-            .http
-            .post(self.endpoint(path))
-            .bearer_auth(bearer_token)
-            .json(request)
-            .timeout(timeout)
-            .send()
-            .await
-            .map_err(|error| CohostApiError::from_transport_within(error, timeout))?;
-        let status = response.status();
-        if status.is_success() {
-            let too_large = || {
-                CohostApiError::malformed_response(
-                    status.as_u16(),
-                    "The response is larger than this route ever sends.",
-                )
-            };
-            if response
-                .content_length()
-                .is_some_and(|length| length > max_bytes as u64)
-            {
-                return Err(too_large());
-            }
-            let body = response.bytes().await.map_err(|error| {
-                if error.is_timeout() {
-                    return CohostApiError::from_transport_within(error, timeout);
-                }
-                CohostApiError::malformed_response(
-                    status.as_u16(),
-                    format!("Could not read the response: {error}"),
-                )
-            })?;
-            if body.len() > max_bytes {
-                return Err(too_large());
-            }
-            return serde_json::from_slice(&body).map_err(|error| {
-                CohostApiError::malformed_response(
-                    status.as_u16(),
-                    format!("Could not read the response: {error}"),
-                )
-            });
-        }
-        let retry_after = response
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
-        let (code, message) = read_error_code_and_message(response).await;
-        Err(classify_cohost_failure(
-            status.as_u16(),
-            &code,
-            message,
-            retry_after.as_deref(),
-        ))
+        self.send_cohost_json(
+            reqwest::Method::POST,
+            path,
+            bearer_token,
+            Some(request),
+            timeout,
+            max_bytes,
+        )
+        .await
     }
 
     /// A client for a local fake web (tests only).
