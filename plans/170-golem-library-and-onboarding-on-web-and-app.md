@@ -1,7 +1,7 @@
 # Plan 170: Golem library and onboarding, the same on videorc.com and in the app
 
-> **Executor instructions**: one phase at a time, in order (B can run beside
-> A). Web work goes to the videorc-web repo, desktop work to this repo; both
+> **Executor instructions**: one phase at a time, in order (A and B can run
+> beside R; R lands before C and D because both edit files R renames). Web work goes to the videorc-web repo, desktop work to this repo; both
 > build on the Golem PRs (#647 desktop, #75 web) and their plans 164, 168 and 169. Run each phase's verification. Owner-overridable choices are marked
 > ⚑. Do not improvise on the data model or the routes.
 
@@ -9,20 +9,23 @@
 
 - **Priority**: P1 (the owner wants the Golem ready for people to see the
   final product)
-- **Effort**: XL, 5 phases
+- **Effort**: XL, 6 phases
 - **Risk**: MEDIUM-HIGH: a new account data store (user content on our
-  servers), a public marketing page, sync between two apps, image cost
+  servers), a public marketing page, sync between two apps, image cost, and
+  a rename across about 220 files in two repos (R)
 - **Depends on**: plan 169 (the house look, `POST /api/ai/cohost/avatar/set`,
   the desktop look panel), unmerged in #647 / #75
 - **Planned at**: desktop `56e18f1e` (`plan-164-golem-b`), web `912b32b4`
   (`plan-164-golem-web`), 2026-10-09
-- **Route**: Orchestrator. A (web data + routes) Implementation fit 9; B
+- **Route**: Orchestrator. R (rename) Implementation fit 8, mechanical
+  with a compatibility checklist; A (web data + routes) Implementation fit 9; B
   (official art) orchestrator + owner review; C (web pages) UI/Product Design
   fit 9; D (desktop) Implementation + UI fit 9; E orchestrator. Model lane
   `opus` (Fable credits out).
 
 | Phase                                                        | Where   | Status  |
 | ------------------------------------------------------------ | ------- | ------- |
+| R: Orcle becomes Golem everywhere                            | both    | PLANNED |
 | A: The account library and its routes                        | web     | PLANNED |
 | B: The official library (Golem + Orc, Goblin, Pirate, Robot) | both    | PLANNED |
 | C: `/golem`, `/golem/create`, `/account/golems`              | web     | PLANNED |
@@ -60,6 +63,13 @@ Owner answers (2026-10-09):
 - **Step 4 output**: the four still poses (idle, talk, laugh, think) in the
   house look, saved to the library. "Make it Alive" on a library avatar
   makes the animated pet later (the existing app creator).
+
+Owner answers to the plan's questions (2026-10-09, second round):
+
+- "30 avatars is the right cap" (D4).
+- "Don't call orc Grok, call him Golmar" (D11; the other three names stand).
+- "Replace Orcle with Golem everywhere" (D16 nav, and the rename in
+  D19 to D26, Phase R).
 
 ## What exists (facts)
 
@@ -132,7 +142,8 @@ Desktop (`plan-164-golem-b`):
   required, ownership checked, 302 to a short-lived signed URL; the desktop
   backend follows the redirect). Env `VIDEORC_GOLEM_STORAGE_*` falling back
   to the AI object storage env.
-- D4. Limits: **30 avatars per user** ⚑ (`VIDEORC_GOLEM_LIBRARY_LIMIT`); a
+- D4. Limits: **30 avatars per user**, owner-confirmed
+  (`VIDEORC_GOLEM_LIBRARY_LIMIT`); a
   create beyond it answers 409 `golem-library-full`. The daily image
   allowance is the existing avatar cap (a create = 4 images, a redo = 1),
   shared by web and app.
@@ -172,8 +183,8 @@ inspiration?, personality?, context? }` (description or inspiration
   its art is the existing default set.
 - D11. The four new official characters, made in the house look by the plan
   169 pipeline (style anchor + description), reviewed by the owner before
-  they ship ⚑ wording:
-  - **Orc** "Grok": "a burly, friendly green orc with small tusks, a
+  they ship (names owner-confirmed; descriptions ⚑):
+  - **Orc** "Golmar": "a burly, friendly green orc with small tusks, a
     braided top-knot, leather shoulder guards and a wide grin"; personality
     "Loud, loyal, cheers every follower like a battle won."
   - **Goblin** "Nib": "a small cheeky green goblin with huge ears, a patched
@@ -243,9 +254,11 @@ inspiration?, personality?, context? }` (description or inspiration
   free account sees the Premium offer and "Start from an official Golem"
   instead of Generate. In the app the same gates use the existing Premium
   and Cloud AI consent hints.
-- D16. Entry points: web `/golem` (marketing page: step 1's content with
-  SEO, OG, JSON-LD, llms.txt, nav "Golem" next to Orcle) with **Create
-  yours** → `/golem/create`; `/account/golems` (the library: mine + official,
+- D16. Entry points: web `/golem` is the Golem's one feature page. It is
+  today's `/orcle` page renamed (D20) with step 1's content on top (the live
+  demo, the official five, **Create yours** → `/golem/create`), then the
+  existing chat, voice-command, report and Clean cut sections; nav and
+  footer say "Golem" where they said "Orcle"; `/account/golems` (the library: mine + official,
   Use, Rename, edit personality / about you, Redo a pose, Delete, Make it
   Alive opens the app). In the app: the Golem tab shows **My Golems**
   (official + mine, with the active one marked) above the look panel; **New
@@ -260,6 +273,69 @@ inspiration?, personality?, context? }` (description or inspiration
   "Make it Alive" on the web uses the same link with `?alive=<avatarId>`,
   which opens the app's creator for that avatar after the sync.
 
+**Orcle becomes Golem everywhere (Phase R)**
+
+Plan 164 already renamed the app's on-screen text and made "Golem" (and the
+persona's own name) the wake word, with the Orcle spellings as hidden
+aliases until after 0.9.140. What still says Orcle (2026-10-09 count): the
+web, about 80 files and 770 lines (`/orcle`, `lib/orcle-guide.ts`, nav,
+footer, FAQ, premium and pricing copy, privacy and terms, six blog posts,
+metadata, structured data, OG images, `llms.txt`, API error messages the app
+shows, the command-parse prompt); the desktop, about 140 files and 1,350
+lines, nearly all code names, comments, docs, scripts and history.
+
+- D19. **Every word a person reads says Golem**: web pages, nav, footer,
+  FAQ, premium and pricing, privacy, terms, blog posts, `llms.txt`, page
+  titles and descriptions, structured data, OG and social images and their
+  alt text, API error messages ("Sign in to use Golem."), both repos' docs
+  and READMEs, the design skill, script output, and code comments.
+- D20. **URLs move with permanent redirects** in `next.config.ts`:
+  `/orcle` and `/orcle/:path*` → `/golem`; the blog post
+  `orcle-live-chat-moderation` → `golem-live-chat-moderation` (and its hero
+  image folder); the `#talk-to-orcle` anchor becomes `#talk-to-golem` with an
+  empty `<span id="talk-to-orcle">` beside it so old links still land.
+  `seoRoutes` ids, `tests/metadata.test.ts`, `tests/blog.test.ts`,
+  `llms.txt` and the sitemap follow.
+- D21. **Code names follow** in both repos: identifiers, file names, test
+  names, `data-` attributes used only by tests, and script names
+  (`OrcleIcon` → `GolemIcon`, `lib/orcle-tabs.ts` → `lib/golem-tabs.ts`,
+  `ORCLE_PATH` → `GOLEM_PATH`, `lib/orcle-guide.ts` → `lib/golem-guide.ts`,
+  `smoke:orcle-commands` → `smoke:golem-commands`, `docs/orcle-*.md` →
+  `docs/golem-*.md`). One mechanical commit per repo, no behaviour change
+  in it, so review reads as a rename.
+- D22. **Saved and wire values keep "orcle"**, because old data, older apps
+  and the strict schemas depend on them; none is ever shown:
+  - the moderation source `orcle-voice` (saved reports, RPC and IPC
+    schemas, `protocol-fixtures/high-risk-contracts.json`);
+  - the saved tab key `videorc.orcleTab` and anything else in settings or
+    `localStorage`;
+  - analytics values already recorded (`surface: "orcle"`,
+    `orcle_download`) stay in their unions for old rows, while new events
+    send `golem`;
+  - the hidden Orcle wake-word aliases, until the removal plan 164 set
+    (after 0.9.140).
+    Before renaming any quoted `orcle` value, check whether it is saved, sent
+    between processes, sent between app and web, or matched by an older app
+    version. If it is any of those, it stays and gets a one-line comment.
+- D23. **History keeps its words** ⚑: shipped changelog entries,
+  `docs/releases/*`, `docs/acceptance/*`, past plans and past blog post
+  dates describe what shipped under the old name. The next release's
+  changelog says "Orcle is now Golem".
+- D24. **The command-parse prompt** (`lib/ai/cohost-command.ts`) calls the
+  assistant "Golem, or the name the streamer gave it", lists Golem
+  mishearings ("Gollum", "go lem", "goal em") next to the Orcle ones the
+  aliases still accept, and keeps "the Oracle database, an orca" as
+  non-commands. The eval fixture (`tests/fixtures/cohost-command-eval.ts`)
+  gains Golem utterances; the command eval must not get worse.
+- D25. **Images**: `orcle-eye-emblem.webp` and `orcle-eye-emblem-og.png`
+  on the web are replaced by the Golem art; the `/golem` OG image shows
+  the Golem with the official four; the blog hero is regenerated if it
+  shows the eye or the word Orcle. Old files are deleted once nothing
+  references them.
+- D26. The "Orcle rename" rule in the design skill and the project memory
+  becomes "the companion is **Golem** in all copy; code and wire names stay
+  `cohost`, saved values keep `orcle` (D22)".
+
 **Copy and privacy**
 
 - D17. The web privacy page and the app's Cloud AI lines say: avatars you
@@ -267,6 +343,31 @@ inspiration?, personality?, context? }` (description or inspiration
   your Videorc account so you can use them on any computer; the picture you
   give for inspiration is used once and not kept; deleting an avatar or
   your account deletes them.
+
+## Phase R: Orcle becomes Golem everywhere (both repos)
+
+1. Web copy and URLs (D19, D20, D24, D25): move `/orcle` to `/golem` and
+   the blog post with redirects; rewrite every visible Orcle; regenerate the
+   OG images; update the command prompt and its eval fixture; update tests
+   that pin copy (`tests/orcle.test.ts` → `tests/golem.test.ts`,
+   `tests/blog.test.ts`, `tests/metadata.test.ts`,
+   `tests/premium-copy.test.ts`, `tests/account-plan-features.test.ts`).
+2. Web code names (D21) in their own commit.
+3. Desktop docs, README, design skill, scripts' printed text and comments
+   (D19), then code names (D21) in their own commit, with the D22
+   checklist applied to every quoted value.
+4. A guard test in each repo: no "Orcle" in rendered copy sources (web
+   `app/`, `components/`, `content/`, `lib/*-guide.ts`, `public/llms.txt`;
+   desktop `apps/desktop/src/renderer/`), with an allow-list for the D22
+   values and the D23 history folders.
+
+Gates: web `pnpm typecheck`, `pnpm lint`, `pnpm test`, `pnpm build`, and
+the redirects checked with `curl -I` on a preview deployment; desktop
+`pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm --filter
+@videorc/desktop test`, `pnpm test:scripts`, `cargo fmt --check --all`,
+`cargo clippy -p videorc-backend -- -D warnings`, targeted `cargo test -p
+videorc-backend -- cohost_command cohost`, `pnpm build`, and the renamed
+`smoke:golem-commands`.
 
 ## Phase A: The account library and its routes (web)
 
@@ -311,7 +412,8 @@ shadcn set; add via the shadcn CLI: `textarea`, `label`, `dialog`,
 `toggle-group`; a drop zone composed from `input[type=file]` + a styled
 label (the avatar form pattern).
 
-1. `/golem` (D16, D14 step 1): `lib/golem-guide.ts` copy, the live demo
+1. `/golem` (D16, D14 step 1), on top of the page R renamed:
+   `lib/golem-guide.ts` copy, the live demo
    component (`components/golem/stream-demo.tsx`: the four official poses +
    the bubble on a timeline; reduced-motion shows a static frame), the
    official gallery, "What it does", FAQ; metadata, OG/Twitter images,
@@ -371,6 +473,8 @@ of the library and each step in both themes.
   delete or an account deletion.
 - The official art is not owner-approved (Phase B gate).
 - The app overwrites a local-only Golem (no `libraryAvatarId`) during sync.
+- A D22 value is renamed, a strict schema rejects an old saved value, or an
+  old `/orcle` or blog URL answers 404 instead of redirecting.
 
 ## Out of scope
 
@@ -381,8 +485,6 @@ of the library and each step in both themes.
 
 ## Open questions for the owner
 
-1. D4: 30 avatars per user?
-2. D11: the four names and personalities (Grok, Nib, Captain Barnacle,
-   Bolt)?
-3. D16: should the web nav show "Golem" beside "Orcle", or replace it
-   (Orcle is the old name of the Golem)?
+None. The three questions were answered on 2026-10-09 (see the owner's
+answers above). D23 (history keeps its words) is the one call left open to
+override.
