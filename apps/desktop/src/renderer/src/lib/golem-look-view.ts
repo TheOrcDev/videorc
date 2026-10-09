@@ -16,14 +16,9 @@ import {
 // "Your Golem's look" (plan 169 D13): pure derivations the panel and its
 // tests share.
 
-/** The web route's description bound (D4). */
-export const GOLEM_LOOK_DESCRIPTION_MAX_CHARS = 600
 /** A new look is four pictures off the daily image cap (D6); a redo is one. */
 export const GOLEM_LOOK_CREATE_IMAGES = 4
 export const GOLEM_LOOK_REDO_STATES: readonly CohostAvatarRedoState[] = ['talk', 'laugh', 'think']
-
-export const GOLEM_LOOK_DESCRIPTION_PLACEHOLDER = 'A grumpy stone golem with a mossy back…'
-export const GOLEM_LOOK_PICTURE_HINT = 'Add a picture for inspiration: a pet, a logo, a sketch'
 
 export function isGolemLookRedoState(state: CohostAvatarState): state is CohostAvatarRedoState {
   return (GOLEM_LOOK_REDO_STATES as readonly string[]).includes(state)
@@ -83,11 +78,6 @@ export function golemLookAvailability({
 
 function golemImagesCount(count: number): string {
   return `${count} ${count === 1 ? 'image' : 'images'}`
-}
-
-/** "24 images left today · uses 4": the tertiary line beside Create. */
-export function golemLookAllowanceCopy(remaining: number): string {
-  return `${golemImagesCount(remaining)} left today · uses ${GOLEM_LOOK_CREATE_IMAGES}`
 }
 
 /**

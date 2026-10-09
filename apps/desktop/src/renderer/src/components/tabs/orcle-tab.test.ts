@@ -46,6 +46,14 @@ vi.mock('@/hooks/use-clean-cut', () => ({
     subscribe: () => () => undefined
   })
 }))
+// My Golems (plan 170) has its own tests; here a marker shows where it sits,
+// and the tab's tests stay fast under a loaded suite.
+vi.mock('@/components/golem-library-section', async () => {
+  const { createElement } = await import('react')
+  return {
+    GolemLibrarySection: () => createElement('section', { 'data-testid': 'golem-library' })
+  }
+})
 vi.mock('@/components/clean-cut/clean-cut-review', async () => {
   const { createElement } = await import('react')
   return {
@@ -269,8 +277,14 @@ describe('Golem tab (plan 119 S2)', () => {
   it('leads with the creation screen, then its status and its powers', async () => {
     await render()
     const text = document.body.textContent ?? ''
-    // Plan 164 S-A4: the creation screen leads the first tab.
-    expect(document.querySelector('[data-slot="golem-header"]')).toBeTruthy()
+    // Plan 170 D16: My Golems leads the first tab, the creation screen under it.
+    const library = document.querySelector('[data-testid="golem-library"]')
+    const header = document.querySelector('[data-slot="golem-header"]')
+    expect(library).toBeTruthy()
+    expect(header).toBeTruthy()
+    expect(
+      library!.compareDocumentPosition(header!) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
     expect(document.getElementById('golem-name')).toBeTruthy()
     expect(text).toContain('Joins my streams')
     expect(text).toContain('Alpha')
