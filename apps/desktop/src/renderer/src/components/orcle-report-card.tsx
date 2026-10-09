@@ -83,16 +83,35 @@ export function OrcleReportCard({
     shown ? { id: shown.sessionId, title: shown.title, date: shown.date ?? '' } : null
   )
   const selectedId = ask ?? shown?.sessionId ?? null
+  const showSwitcher = selectedId !== null && options.length > 0
+  // The report's own actions sit in its header, beside the stream picker.
+  const showMarkers = shown !== null && session !== null
 
   return (
     <PanelSection
       action={
-        selectedId && options.length > 0 ? (
-          <ReportSwitcher
-            options={options}
-            selectedId={selectedId}
-            onSelect={(id) => onSessionChange(reportSessionChoice(id, newestId))}
-          />
+        showMarkers || showSwitcher ? (
+          <>
+            {showMarkers ? (
+              <Button
+                data-testid="orcle-report-markers"
+                size="sm"
+                type="button"
+                variant="ghost"
+                onClick={() => setMarkersOpen(true)}
+              >
+                <ClipIcon data-icon="inline-start" />
+                Markers
+              </Button>
+            ) : null}
+            {showSwitcher ? (
+              <ReportSwitcher
+                options={options}
+                selectedId={selectedId}
+                onSelect={(id) => onSessionChange(reportSessionChoice(id, newestId))}
+              />
+            ) : null}
+          </>
         ) : null
       }
       description={ORCLE_REPORT_DESCRIPTION}
@@ -100,7 +119,7 @@ export function OrcleReportCard({
     >
       <div
         aria-busy={loading || undefined}
-        className="flex min-w-0 flex-col gap-4"
+        className="@container/orcle-report flex min-w-0 flex-col gap-4"
         data-slot="orcle-report"
         data-state={loading ? 'loading' : view.kind === 'empty' ? 'empty' : view.kind}
       >
@@ -117,12 +136,6 @@ export function OrcleReportCard({
         ) : null}
         {shown ? (
           <>
-            {session ? (
-              <Button size="sm" variant="ghost" onClick={() => setMarkersOpen(true)}>
-                <ClipIcon />
-                Markers
-              </Button>
-            ) : null}
             {markersOpen && session ? (
               <Suspense fallback={null}>
                 <SessionMarkersDialog session={session} onClose={() => setMarkersOpen(false)} />
@@ -386,17 +399,31 @@ function ReportCommands({ commands }: { commands: ShownReport['commands'] }): Re
   )
 }
 
-/** Monochrome counts, the number over its label. */
+/**
+ * The stats as a row of tiles (a KPI row): each tile the number over its
+ * label, in the grouped lists' tile (8 px, hairline, white 3%). Monochrome:
+ * the number in primary ink and proportional figures (it stands alone), the
+ * label and a ratio's whole in secondary ink; no deltas. The columns follow
+ * the report's own width (2, 3, 5, then all 9 in one row), and every tile in
+ * a row is as tall as the tallest.
+ */
 function ReportStats({ stats }: { stats: readonly OrcleReportStat[] }): ReactElement {
   return (
-    <dl className="flex flex-wrap gap-x-6 gap-y-3" data-slot="orcle-report-stats">
+    <dl
+      className="grid grid-cols-2 gap-2 @min-[30rem]/orcle-report:grid-cols-3 @min-[52rem]/orcle-report:grid-cols-5 @min-[90rem]/orcle-report:grid-cols-9"
+      data-slot="orcle-report-stats"
+    >
       {stats.map((stat) => (
-        <div key={stat.id} className="flex flex-col-reverse gap-0.5" data-stat={stat.id}>
-          <dt className="text-[11px] text-muted-foreground">{stat.label}</dt>
-          <dd className="text-[15px] leading-5 font-semibold text-foreground tabular-nums">
+        <div
+          key={stat.id}
+          className="flex min-w-0 flex-col-reverse justify-end gap-0.5 rounded-row border border-border bg-foreground/[0.03] px-3 py-2.5"
+          data-stat={stat.id}
+        >
+          <dt className="text-xs text-muted-foreground">{stat.label}</dt>
+          <dd className="text-xl leading-7 font-semibold text-foreground">
             {stat.value}
             {stat.of ? (
-              <span className="font-normal text-muted-foreground"> / {stat.of}</span>
+              <span className="text-base font-medium text-muted-foreground"> / {stat.of}</span>
             ) : null}
           </dd>
         </div>
