@@ -42,7 +42,6 @@ const api: VideorcApi = {
   pickScreenImage: () => invoke('screens:pick-image'),
   importBackgroundImage: () => invoke('backgrounds:import-image'),
   importScheduledThumbnail: () => invoke('scheduled-streams:import-thumbnail'),
-  importGolemImage: (personaId, state) => invoke('golem-assets:import-image', personaId, state),
   removeGolemPersona: (personaId) => invoke('golem-assets:remove', personaId),
   readGolemImage: (relativePath) => invoke('golem-assets:read-image', relativePath),
   readGolemPetFile: (personaId, packId, file) => invoke('golem-pets:read', personaId, packId, file),

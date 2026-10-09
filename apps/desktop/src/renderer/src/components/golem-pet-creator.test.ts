@@ -11,6 +11,7 @@ import type {
 } from '@/lib/backend'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { GOLEM_PET_REVIEW_ROWS } from '@/lib/golem-pet-creator-view'
+import { closeGolemPetCreator, openGolemPetCreator } from '@/lib/golem-pet-creator-nav'
 import type { GolemPetCreatorClient } from '@/hooks/use-golem-pet-creator'
 import { GOLEM_PET_ATLAS_SHEETS } from '../../../shared/golem-pet-creator'
 
@@ -249,6 +250,32 @@ describe('GolemPetCreator (plan 168 S-F5)', () => {
     expect(byTestId('golem-pet-gate')?.textContent).toContain(basic.reason)
     expect(byTestId<HTMLButtonElement>('golem-pet-read')?.disabled).toBe(true)
     expect(byTestId('golem-pet-step-reference')?.getAttribute('aria-current')).toBe('step')
+  })
+
+  it('opened by Make it Alive: the kept look is the reference, with its description', async () => {
+    openGolemPetCreator({ reference: 'persona-idle', notes: 'A mossy stone golem' })
+    try {
+      const backend = fakeBackend(null)
+      await render({ client: backend.client })
+      expect(byTestId('golem-pet-step-reference')?.getAttribute('aria-current')).toBe('step')
+      const persona = [...document.querySelectorAll('button')].find(
+        (button) => button.textContent === "My Golem's picture"
+      )
+      expect(persona?.getAttribute('data-state')).toBe('on')
+      // No Generate source any more: the look panel makes the character.
+      expect(document.body.textContent).not.toContain('Generate')
+      expect(byTestId('golem-pet-look-notes')?.textContent).toBe(
+        'Your look: \u201cA mossy stone golem\u201d'
+      )
+      expect(document.activeElement).toBe(byTestId('golem-pet-read'))
+      expect(backend.requestTyped).not.toHaveBeenCalledWith(
+        'cohost.pet.creation.start',
+        expect.anything(),
+        expect.anything()
+      )
+    } finally {
+      closeGolemPetCreator()
+    }
   })
 
   it("shows this month's allowance, and starts nothing when it is used up", async () => {

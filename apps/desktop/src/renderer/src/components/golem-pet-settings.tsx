@@ -1,8 +1,8 @@
 import { useRef, useState, type ReactElement } from 'react'
 
 import { GolemAvatarSection, type GolemAvatarView } from '@/components/golem-avatar-section'
+import { GolemLookSection } from '@/components/golem-look-section'
 import { GolemMotionSection } from '@/components/golem-motion-section'
-import { GolemStillLooks } from '@/components/golem-persona-section'
 import type { GolemPetPreviewHandle, GolemPetPreviewInfo } from '@/components/golem-pet-preview'
 import { GolemReactionsSection } from '@/components/golem-reactions-section'
 import { ConfigGrid } from '@/components/page'
@@ -78,7 +78,7 @@ export function GolemPetSettings({
         pets={pets}
         previewPackId={previewPackId}
         previewRef={previewRef}
-        stillPanel={<GolemStillLooks />}
+        stillPanel={<GolemLookSection />}
         view={view}
         onPreviewLoad={setPreviewInfo}
         onUnwear={async () => {

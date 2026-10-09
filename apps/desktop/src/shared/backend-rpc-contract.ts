@@ -23,9 +23,13 @@ import type {
   ChatEmotesSettingsPatch,
   YouTubeQuotaStatus,
   CohostAutoChat,
-  CohostAvatarGenerateAccepted,
-  CohostAvatarGenerateParams,
-  CohostAvatarGeneratedEvent,
+  CohostAvatarAccepted,
+  CohostAvatarCreateParams,
+  CohostAvatarDraft,
+  CohostAvatarDraftStatus,
+  CohostAvatarProgressEvent,
+  CohostAvatarRedoParams,
+  CohostAvatarRequestIdParams,
   CohostPersona,
   CohostPetImportParams,
   CohostPetReactAccepted,
@@ -139,7 +143,7 @@ import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { sessionChatIdentifierSchema, sessionChatTotalsSchema } from './session-chat-totals'
 import { LAYOUT_PRESET_VALUES } from './backend'
 import { TWITCH_GIF_MODES } from './chat-gif'
-import { isGolemPackId } from './golem-assets'
+import { isGolemPackId, parseGolemDraftPath } from './golem-assets'
 import {
   GOLEM_SLEEP_AFTER_MAX_SECONDS,
   GOLEM_SLEEP_AFTER_MIN_SECONDS,
@@ -376,10 +380,16 @@ export interface BackendRpcMethodMap {
     OverlayLayout
   >
   // --- end overlay layout (plan 164) ---
-  'cohost.avatar.generate': BackendRpcDefinition<
-    CohostAvatarGenerateParams,
-    CohostAvatarGenerateAccepted
+  // --- Golem look (plan 169 D9) ---
+  'cohost.avatar.create': BackendRpcDefinition<CohostAvatarCreateParams, CohostAvatarAccepted>
+  'cohost.avatar.redo': BackendRpcDefinition<CohostAvatarRedoParams, CohostAvatarAccepted>
+  'cohost.avatar.keep': BackendRpcDefinition<CohostAvatarRequestIdParams, CohostSettings>
+  'cohost.avatar.discard': BackendRpcDefinition<
+    CohostAvatarRequestIdParams,
+    CohostAvatarDraftStatus
   >
+  'cohost.avatar.draft.get': BackendRpcDefinition<undefined, CohostAvatarDraftStatus>
+  // --- end Golem look (plan 169 D9) ---
   // --- Golem overlay (plan 164) ---
   'cohost.golem.status': BackendRpcDefinition<undefined, GolemOverlaySnapshot>
   'golem.overlay.set': BackendRpcDefinition<SetGolemOverlayParams, OverlayTargetsInfo>
@@ -463,7 +473,10 @@ export interface BackendEventMap {
   // --- Overlay layout (plan 164) ---
   'overlays.layout': OverlayLayout
   // --- end overlay layout (plan 164) ---
-  'cohost.avatar.generated': CohostAvatarGeneratedEvent
+  // --- Golem look (plan 169 D9) ---
+  'cohost.avatar.progress': CohostAvatarProgressEvent
+  'cohost.avatar.draft': CohostAvatarDraft
+  // --- end Golem look (plan 169 D9) ---
   // --- Golem overlay (plan 164) ---
   'cohost.golem.state': GolemOverlaySnapshot
   // --- end Golem overlay (plan 164) ---
@@ -3366,32 +3379,107 @@ const cohostReportSavedEventSchema = objectSchema(
   { sessionId: boundedString },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostReportSavedEvent>
-// Plan 164 S-A6: avatar generation, accepted at once and answered by event.
+// Plan 169 D9: the Golem look, accepted at once and answered by events.
 const cohostAvatarStateSchema = enumSchema(['idle', 'talk', 'laugh', 'think'])
-const cohostAvatarGenerateParamsSchema = objectSchema(
+const cohostAvatarRequestIdSchema = runtimeSchema<string>(
+  'a look request id (a uuid)',
+  (value, path) => {
+    if (!isGolemUserPackId(value)) {
+      throw new RuntimeSchemaError(path, 'a look request id (a uuid)')
+    }
+    return value
+  }
+)
+const cohostAvatarDraftPathSchema = runtimeSchema<string>(
+  'a draft picture path (<personaId>/drafts/<requestId>/<state>.png)',
+  (value, path) => {
+    if (!parseGolemDraftPath(value)) {
+      throw new RuntimeSchemaError(
+        path,
+        'a draft picture path (<personaId>/drafts/<requestId>/<state>.png)'
+      )
+    }
+    return value as string
+  }
+)
+const cohostAvatarErrorDetailSchema = objectSchema(
+  { code: boundedString, message: boundedString },
+  { allowUnknown: false }
+)
+const cohostAvatarCreateParamsSchema = objectSchema(
   {
-    state: cohostAvatarStateSchema,
-    prompt: stringSchema({ minLength: 1, maxLength: 600 }),
-    style: enumSchema(['cartoon', 'pixel', 'painted', 'sticker'])
+    description: optionalSchema(stringSchema({ minLength: 1, maxLength: 600 })),
+    // 3 MB decoded (the backend's cap, under Vercel's 4.5 MB request body)
+    // is about 4.2 M base64 characters.
+    inspirationBase64: optionalSchema(stringSchema({ minLength: 1, maxLength: 4_200_000 }))
   },
   { allowUnknown: false }
-) as RuntimeSchema<CohostAvatarGenerateParams>
-const cohostAvatarGenerateAcceptedSchema = objectSchema(
-  { requestId: boundedString, state: cohostAvatarStateSchema },
-  { allowUnknown: false }
-) as RuntimeSchema<CohostAvatarGenerateAccepted>
-const cohostAvatarGeneratedEventSchema = objectSchema(
+) as RuntimeSchema<CohostAvatarCreateParams>
+const cohostAvatarRedoParamsSchema = objectSchema(
   {
-    requestId: boundedString,
+    requestId: cohostAvatarRequestIdSchema,
+    state: enumSchema(['talk', 'laugh', 'think'])
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostAvatarRedoParams>
+const cohostAvatarRequestIdParamsSchema = objectSchema(
+  { requestId: cohostAvatarRequestIdSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostAvatarRequestIdParams>
+const cohostAvatarAcceptedSchema = objectSchema(
+  { requestId: cohostAvatarRequestIdSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostAvatarAccepted>
+const cohostAvatarProgressEventSchema = objectSchema(
+  {
+    requestId: cohostAvatarRequestIdSchema,
     state: cohostAvatarStateSchema,
-    path: optionalSchema(stringSchema({ minLength: 1, maxLength: 256 })),
-    opaque: booleanSchema,
-    error: optionalSchema(
-      objectSchema({ code: boundedString, message: boundedString }, { allowUnknown: false })
+    phase: enumSchema(['working', 'done', 'failed']),
+    path: optionalSchema(cohostAvatarDraftPathSchema),
+    error: optionalSchema(cohostAvatarErrorDetailSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostAvatarProgressEvent>
+const cohostAvatarDraftSchema = objectSchema(
+  {
+    requestId: cohostAvatarRequestIdSchema,
+    images: objectSchema(
+      {
+        idle: optionalSchema(cohostAvatarDraftPathSchema),
+        talk: optionalSchema(cohostAvatarDraftPathSchema),
+        laugh: optionalSchema(cohostAvatarDraftPathSchema),
+        think: optionalSchema(cohostAvatarDraftPathSchema)
+      },
+      { allowUnknown: false }
+    ),
+    failed: objectSchema(
+      {
+        idle: optionalSchema(cohostAvatarErrorDetailSchema),
+        talk: optionalSchema(cohostAvatarErrorDetailSchema),
+        laugh: optionalSchema(cohostAvatarErrorDetailSchema),
+        think: optionalSchema(cohostAvatarErrorDetailSchema)
+      },
+      { allowUnknown: false }
     )
   },
   { allowUnknown: false }
-) as RuntimeSchema<CohostAvatarGeneratedEvent>
+) as RuntimeSchema<CohostAvatarDraft>
+const cohostAvatarDraftStatusSchema = objectSchema(
+  {
+    draft: optionalSchema(cohostAvatarDraftSchema),
+    running: optionalSchema(
+      objectSchema(
+        {
+          requestId: cohostAvatarRequestIdSchema,
+          kind: enumSchema(['create', 'redo']),
+          state: optionalSchema(cohostAvatarStateSchema)
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostAvatarDraftStatus>
 // --- Golem overlay (plan 164) ---
 const golemBubbleSchema = objectSchema(
   { text: stringSchema({ minLength: 1, maxLength: 200 }), until: timestamp },
@@ -3929,10 +4017,22 @@ const runtimeContracts = {
     result: overlayLayoutSchema
   },
   // --- end overlay layout (plan 164) ---
-  'cohost.avatar.generate': {
-    params: cohostAvatarGenerateParamsSchema,
-    result: cohostAvatarGenerateAcceptedSchema
+  // --- Golem look (plan 169 D9) ---
+  'cohost.avatar.create': {
+    params: cohostAvatarCreateParamsSchema,
+    result: cohostAvatarAcceptedSchema
   },
+  'cohost.avatar.redo': {
+    params: cohostAvatarRedoParamsSchema,
+    result: cohostAvatarAcceptedSchema
+  },
+  'cohost.avatar.keep': { params: cohostAvatarRequestIdParamsSchema, result: cohostSettingsSchema },
+  'cohost.avatar.discard': {
+    params: cohostAvatarRequestIdParamsSchema,
+    result: cohostAvatarDraftStatusSchema
+  },
+  'cohost.avatar.draft.get': { params: undefinedSchema, result: cohostAvatarDraftStatusSchema },
+  // --- end Golem look (plan 169 D9) ---
   // --- Golem overlay (plan 164) ---
   'cohost.golem.status': { params: undefinedSchema, result: golemOverlaySnapshotSchema },
   'golem.overlay.set': { params: setGolemOverlayParamsSchema, result: overlayTargetsInfoSchema },
@@ -4068,7 +4168,10 @@ const runtimeEventSchemas = {
   // --- Overlay layout (plan 164) ---
   'overlays.layout': overlayLayoutSchema,
   // --- end overlay layout (plan 164) ---
-  'cohost.avatar.generated': cohostAvatarGeneratedEventSchema,
+  // --- Golem look (plan 169 D9) ---
+  'cohost.avatar.progress': cohostAvatarProgressEventSchema,
+  'cohost.avatar.draft': cohostAvatarDraftSchema,
+  // --- end Golem look (plan 169 D9) ---
   // --- Golem overlay (plan 164) ---
   'cohost.golem.state': golemOverlaySnapshotSchema,
   // --- end Golem overlay (plan 164) ---

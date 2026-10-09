@@ -62,6 +62,15 @@ import type {
   GolemPetSheetGeneratedEvent
 } from './golem-pet-creator'
 import { normalizeSessionCommentsListParams } from './backend'
+import type {
+  CohostAvatarAccepted,
+  CohostAvatarCreateParams,
+  CohostAvatarDraft,
+  CohostAvatarDraftStatus,
+  CohostAvatarProgressEvent,
+  CohostAvatarRedoParams,
+  CohostAvatarRequestIdParams
+} from './backend'
 import {
   validateBackendEventPayload,
   validateBackendRpcParams,
@@ -122,6 +131,19 @@ interface HighRiskContractFixtures {
     removeParams: CohostPetRemoveParams
     reactParams: CohostPetReactParams
     reactAccepted: CohostPetReactAccepted
+  }
+  golemLook: {
+    createParams: CohostAvatarCreateParams
+    createDescriptionParams: CohostAvatarCreateParams
+    redoParams: CohostAvatarRedoParams
+    requestIdParams: CohostAvatarRequestIdParams
+    accepted: CohostAvatarAccepted
+    progressWorking: CohostAvatarProgressEvent
+    progressDone: CohostAvatarProgressEvent
+    progressFailed: CohostAvatarProgressEvent
+    draft: CohostAvatarDraft
+    status: CohostAvatarDraftStatus
+    statusNone: CohostAvatarDraftStatus
   }
   golemPetCreator: {
     status: GolemPetCreationStatus
@@ -1219,6 +1241,74 @@ describe('Golem pets wire (plan 168, Phase A)', () => {
         }
       })
     ).toThrow('cohost.settings.set')
+  })
+})
+
+describe('Golem look wire (plan 169, Phase B)', () => {
+  const look = fixtures.golemLook
+
+  it('validates the look RPCs and events exactly as the backend round-trips them', () => {
+    for (const params of [look.createParams, look.createDescriptionParams]) {
+      expect(validateBackendRpcParams('cohost.avatar.create', params)).toStrictEqual(params)
+    }
+    for (const method of ['cohost.avatar.create', 'cohost.avatar.redo'] as const) {
+      expect(validateBackendRpcResult(method, look.accepted)).toStrictEqual(look.accepted)
+    }
+    expect(validateBackendRpcParams('cohost.avatar.redo', look.redoParams)).toStrictEqual(
+      look.redoParams
+    )
+    for (const method of ['cohost.avatar.keep', 'cohost.avatar.discard'] as const) {
+      expect(validateBackendRpcParams(method, look.requestIdParams)).toStrictEqual(
+        look.requestIdParams
+      )
+    }
+    expect(validateBackendRpcResult('cohost.avatar.keep', fixtures.cohost.settings)).toStrictEqual(
+      fixtures.cohost.settings
+    )
+    expect(validateBackendRpcParams('cohost.avatar.draft.get', undefined)).toBeUndefined()
+    for (const method of ['cohost.avatar.draft.get', 'cohost.avatar.discard'] as const) {
+      for (const status of [look.status, look.statusNone]) {
+        expect(validateBackendRpcResult(method, status)).toStrictEqual(status)
+      }
+    }
+    for (const event of [look.progressWorking, look.progressDone, look.progressFailed]) {
+      expect(validateBackendEventPayload('cohost.avatar.progress', event)).toStrictEqual(event)
+    }
+    expect(validateBackendEventPayload('cohost.avatar.draft', look.draft)).toStrictEqual(look.draft)
+  })
+
+  it('refuses the old style menu, idle redo, bad ids and paths outside a draft', () => {
+    expect(() =>
+      validateBackendRpcParams('cohost.avatar.create', { ...look.createParams, style: 'pixel' })
+    ).toThrow('cohost.avatar.create')
+    expect(() => validateBackendRpcParams('cohost.avatar.create', { description: '' })).toThrow(
+      'cohost.avatar.create'
+    )
+    expect(() =>
+      validateBackendRpcParams('cohost.avatar.redo', { ...look.redoParams, state: 'idle' })
+    ).toThrow('cohost.avatar.redo')
+    const { requestId } = look.requestIdParams
+    for (const bad of ['../default', requestId.toUpperCase(), '']) {
+      expect(() => validateBackendRpcParams('cohost.avatar.keep', { requestId: bad })).toThrow(
+        'cohost.avatar.keep'
+      )
+    }
+    for (const path of ['default/idle.png', `../drafts/${requestId}/idle.png`]) {
+      expect(() =>
+        validateBackendEventPayload('cohost.avatar.progress', { ...look.progressDone, path })
+      ).toThrow('cohost.avatar.progress')
+    }
+    expect(() =>
+      validateBackendEventPayload('cohost.avatar.draft', {
+        ...look.draft,
+        images: { ...look.draft.images, idle: 'default/idle.png' }
+      })
+    ).toThrow('cohost.avatar.draft')
+    expect(() =>
+      validateBackendRpcResult('cohost.avatar.draft.get', {
+        running: { requestId, kind: 'build' }
+      })
+    ).toThrow('cohost.avatar.draft.get')
   })
 })
 

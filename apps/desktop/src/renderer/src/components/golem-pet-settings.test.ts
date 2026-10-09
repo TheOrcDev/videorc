@@ -164,7 +164,7 @@ describe('GolemPetSettings: Avatar (plan 168 S-D2)', () => {
   it('shows Still with the four state tiles and the Still preview at 160 px', async () => {
     await render()
     expect(kindButton('Still').getAttribute('data-state')).toBe('on')
-    expect(document.querySelectorAll('[data-slot="golem-tile"]')).toHaveLength(4)
+    expect(document.querySelectorAll('[data-testid="golem-look-tile"]')).toHaveLength(4)
     expect(mocked.previews.at(-1)).toEqual({ packId: 'still', size: 160 })
   })
 

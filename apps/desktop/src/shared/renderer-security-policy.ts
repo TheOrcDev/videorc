@@ -45,7 +45,6 @@ export const IPC_INVOKE_ROLES = {
   'backgrounds:import-image': MAIN_ONLY,
   'scheduled-streams:import-thumbnail': MAIN_ONLY,
   // The Golem's avatar images (plan 164 S-A3): the Studio renderer only.
-  'golem-assets:import-image': MAIN_ONLY,
   'golem-assets:remove': MAIN_ONLY,
   // The overlay raster decodes the persona's own files from bytes (S-C2).
   'golem-assets:read-image': MAIN_ONLY,
