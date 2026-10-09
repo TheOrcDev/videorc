@@ -195,6 +195,7 @@ fn env_for(root: &Path, web: &FakeWeb, shared: Arc<AvatarShared>) -> AvatarEnv {
         api: Some(web.client.clone()),
         token: Some("bearer-1".to_string()),
         premium: true,
+        library: false,
         shared,
     }
 }
@@ -1119,4 +1120,222 @@ fn shared_high_risk_contract_fixture_matches_golem_look_dtos() {
         )
         .is_err()
     );
+}
+
+// --- The library route (plan 170 D13) -------------------------------------------------------------
+
+mod library_route {
+    use super::*;
+    use crate::cohost_library::tests::{
+        FakeLibrary, settle, shade_of as library_shade, spawn_fake_library, use_fake_library,
+    };
+
+    const MADE: &str = "5b1d0c7e-2f3a-4b6c-9d8e-7f6a5b4c3d2e";
+
+    async fn library_env(root: &Path) -> (AppState, AvatarEnv, FakeLibrary) {
+        let web = spawn_fake_library().await;
+        let mut state = test_state();
+        use_fake_library(&mut state, root, &web).await;
+        let env = AvatarEnv {
+            root: Some(root.to_path_buf()),
+            api: Some(web.client.clone()),
+            token: Some("bearer-1".to_string()),
+            premium: true,
+            library: true,
+            shared: Arc::new(AvatarShared::default()),
+        };
+        (state, env, web)
+    }
+
+    async fn create_library_draft(
+        state: &AppState,
+        env: &AvatarEnv,
+        web: &FakeLibrary,
+    ) -> CohostAvatarDraft {
+        web.with(|fake| fake.next_id = Some(MADE.to_string()));
+        let (_, _, draft) = create_and_wait(
+            state,
+            env,
+            CohostAvatarCreateParams {
+                description: Some("a grumpy stone golem".to_string()),
+                name: Some("  Grum ".to_string()),
+                personality: Some("Grumbles, then helps.".to_string()),
+                context: Some("Speedruns on Tuesdays.".to_string()),
+                ..CohostAvatarCreateParams::default()
+            },
+        )
+        .await;
+        draft.expect("the library made a draft")
+    }
+
+    #[tokio::test]
+    async fn golem_look_with_the_library_on_creates_into_the_account() {
+        let root = temp_root();
+        let (state, env, web) = library_env(&root).await;
+        let draft = create_library_draft(&state, &env, &web).await;
+        // One library create with the whole sidekick; the set route is not used.
+        assert_eq!(
+            web.body_of("POST /api/golem/avatars"),
+            Some(serde_json::json!({
+                "name": "Grum",
+                "description": "a grumpy stone golem",
+                "personality": "Grumbles, then helps.",
+                "context": "Speedruns on Tuesdays."
+            }))
+        );
+        assert_eq!(draft.library_avatar_id.as_deref(), Some(MADE));
+        assert!(draft.failed.is_empty());
+        // The draft on disk remembers it (a restart offers it again, linked).
+        let again = draft_status_in(&state, env.clone()).await.unwrap();
+        assert_eq!(
+            again.draft.unwrap().library_avatar_id.as_deref(),
+            Some(MADE)
+        );
+        // It is in the library already, its pictures cached from the response.
+        settle(&state, |library| {
+            library.mine.as_ref().is_some_and(|mine| {
+                mine.first().is_some_and(|entry| {
+                    entry.id == MADE && entry.poses.idle.is_some() && entry.poses.think.is_some()
+                })
+            })
+        })
+        .await;
+        assert_eq!(web.count(&format!("GET /api/golem/avatars/{MADE}/idle")), 0);
+        // The Golem itself changes only on Keep.
+        assert_eq!(
+            crate::cohost::get_cohost_settings(&state).await.persona,
+            CohostPersona::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn golem_look_keep_on_a_library_draft_applies_it_and_tells_the_account() {
+        let root = temp_root();
+        let (state, env, web) = library_env(&root).await;
+        let draft = create_library_draft(&state, &env, &web).await;
+        let settings = keep_in(
+            &state,
+            env.clone(),
+            CohostAvatarRequestIdParams {
+                request_id: draft.request_id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(settings.persona.name, "Grum");
+        assert_eq!(settings.persona.personality, "Grumbles, then helps.");
+        assert_eq!(settings.persona.library_avatar_id.as_deref(), Some(MADE));
+        assert_eq!(settings.notes, "Speedruns on Tuesdays.");
+        let idle = settings.persona.images.idle.clone().unwrap();
+        assert_eq!(
+            std::fs::read(root.join(&idle)).unwrap(),
+            png_bytes(library_shade(CohostAvatarState::Idle))
+        );
+        settle(&state, |library| {
+            library.active_avatar_id.as_deref() == Some(MADE)
+        })
+        .await;
+        assert_eq!(
+            web.body_of("PUT /api/golem/profile"),
+            Some(serde_json::json!({ "activeAvatarId": MADE }))
+        );
+        assert!(
+            crate::cohost_library::load_library_sync(&state.database)
+                .profile_updated_at
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn golem_look_discard_on_a_library_draft_deletes_the_account_avatar() {
+        let root = temp_root();
+        let (state, env, web) = library_env(&root).await;
+        let draft = create_library_draft(&state, &env, &web).await;
+        let status = discard_in(
+            &state,
+            env.clone(),
+            CohostAvatarRequestIdParams {
+                request_id: draft.request_id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(status.draft.is_none());
+        settle(&state, |library| {
+            library.mine.as_ref().is_some_and(|mine| mine.is_empty())
+        })
+        .await;
+        assert_eq!(web.count(&format!("DELETE /api/golem/avatars/{MADE}")), 1);
+        assert!(!root.join("library").join(MADE).exists());
+    }
+
+    #[tokio::test]
+    async fn golem_look_redo_on_a_library_draft_uses_the_library_redo() {
+        let root = temp_root();
+        let (state, env, web) = library_env(&root).await;
+        let draft = create_library_draft(&state, &env, &web).await;
+        let mut events = state.events.subscribe();
+        redo_in(
+            &state,
+            env.clone(),
+            CohostAvatarRedoParams {
+                request_id: draft.request_id.clone(),
+                state: CohostAvatarState::Laugh,
+            },
+        )
+        .await
+        .unwrap();
+        let (progress, redone) = run_until_end(&mut events, Some(CohostAvatarState::Laugh)).await;
+        wait_idle(&env).await;
+        assert!(
+            progress
+                .iter()
+                .any(|step| step.phase == CohostAvatarPhase::Done)
+        );
+        assert_eq!(
+            web.body_of(&format!("POST /api/golem/avatars/{MADE}/redo")),
+            Some(serde_json::json!({ "state": "laugh" }))
+        );
+        // No base upload: the library redoes from its stored idle.
+        let redone = redone.unwrap();
+        let laugh = redone.images.laugh.unwrap();
+        assert_eq!(
+            std::fs::read(root.join(&laugh)).unwrap(),
+            png_bytes(library_shade(CohostAvatarState::Laugh) + 1)
+        );
+        settle(&state, |library| {
+            library.mine.as_ref().is_some_and(|mine| {
+                mine[0]
+                    .poses
+                    .laugh
+                    .as_deref()
+                    .is_some_and(|url| url.ends_with("laugh-abc00001.png"))
+            })
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn golem_look_library_fields_are_bounded_before_anything_is_sent() {
+        let root = temp_root();
+        let (state, env, web) = library_env(&root).await;
+        for params in [
+            CohostAvatarCreateParams {
+                name: Some("n".repeat(25)),
+                ..describe("a golem")
+            },
+            CohostAvatarCreateParams {
+                personality: Some("p".repeat(1201)),
+                ..describe("a golem")
+            },
+            CohostAvatarCreateParams {
+                context: Some("c".repeat(4001)),
+                ..describe("a golem")
+            },
+        ] {
+            let refused = create_in(&state, env.clone(), params).await.unwrap_err();
+            assert_eq!(refused.code, COHOST_AVATAR_INVALID);
+        }
+        assert!(web.seen().is_empty());
+    }
 }

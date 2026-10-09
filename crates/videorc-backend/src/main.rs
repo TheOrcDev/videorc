@@ -12906,6 +12906,8 @@ async fn refresh_account_entitlements(state: &AppState) {
     // Plan 164 S-D3: the same read tells the Golem which tick contract the
     // web speaks (4 adds the persona). Signed out reads as unknown.
     let mut tick_version: Option<Option<u32>> = None;
+    // Plan 170 D9: the same read turns the account Golem library on or off.
+    let mut golem_library: Option<Option<protocol::AiCapabilitiesGolemLibrary>> = None;
     let changed = match current_account_entitlement_refresh_identity(state) {
         Ok(current) => {
             commit_account_entitlement_refresh_if_current(&prepared.identity, &current, || {
@@ -12921,6 +12923,16 @@ async fn refresh_account_entitlements(state: &AppState) {
                     PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => {
                         Some(capabilities.cohost.as_ref().and_then(|cohost| cohost.tick))
                     }
+                    PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
+                };
+                golem_library = match &prepared.outcome {
+                    PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some(None),
+                    PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => Some(
+                        capabilities
+                            .cohost
+                            .as_ref()
+                            .and_then(|cohost| cohost.golem_library.clone()),
+                    ),
                     PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
                 };
                 apply_prepared_account_entitlement_refresh(prepared.outcome)
@@ -12944,6 +12956,9 @@ async fn refresh_account_entitlements(state: &AppState) {
     }
     if let Some(tick) = tick_version {
         cohost::set_tick_capability(state, tick).await;
+    }
+    if let Some(library) = golem_library {
+        cohost_library::set_capability(state, library).await;
     }
 }
 

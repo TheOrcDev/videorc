@@ -1448,7 +1448,7 @@ pub(crate) const BUNDLED_THINK_WEBP: &[u8] =
     include_bytes!("../../../apps/desktop/src/renderer/src/assets/golem/default/think.webp");
 
 /// The bundled image for `state` (the default Golem's).
-fn bundled_state_webp(state: crate::cohost::CohostAvatarState) -> &'static [u8] {
+pub(crate) fn bundled_state_webp(state: crate::cohost::CohostAvatarState) -> &'static [u8] {
     use crate::cohost::CohostAvatarState;
     match state {
         CohostAvatarState::Idle => BUNDLED_IDLE_WEBP,

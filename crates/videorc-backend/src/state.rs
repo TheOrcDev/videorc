@@ -1182,6 +1182,9 @@ pub struct AppState {
     /// Golem voice-command detector and the engine session it serves (plan
     /// 140 S2). Std mutex: the caption task observes a final and returns.
     pub cohost_commands: crate::cohost_command::CommandDetectorSlot,
+    /// Plan 170 D12: the account Golem library (its cache, job queue, sync
+    /// clock and pending edits).
+    pub golem_library: Arc<crate::cohost_library::LibraryShared>,
 }
 
 /// Masks the path of every `rtmp://` / `rtmps://` URL in a log line. FFmpeg
@@ -1387,6 +1390,7 @@ impl AppState {
             cohost_voice: crate::cohost::new_cohost_voice_slot(),
             clip_marks: crate::clip_marks::new_clip_mark_detector_slot(),
             cohost_commands: crate::cohost_command::new_command_detector_slot(),
+            golem_library: Arc::new(crate::cohost_library::LibraryShared::new()),
         }
     }
 

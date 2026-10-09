@@ -1,0 +1,1191 @@
+//! The Golem library against a fake videorc-web (plan 170 Phase D): the
+//! wire shapes, sync (apply, offer, hold while live, signed out), use,
+//! update, delete, the debounced PATCH of local edits, and the capability.
+//! `FakeLibrary` is shared with the look's library-route tests.
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
+
+use axum::http::{Method, StatusCode};
+use axum::response::IntoResponse;
+use base64::Engine as _;
+use tokio::sync::broadcast;
+
+use super::*;
+use crate::cohost::get_cohost_settings;
+use crate::storage::Database;
+
+pub(crate) const BEARER: &str = "bearer-1";
+const AVATAR: &str = "7c9e6679-7425-40de-944b-e07fc1ee9a51";
+const OTHER: &str = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d";
+
+pub(crate) fn test_state() -> AppState {
+    let (events, _) = broadcast::channel(512);
+    AppState::new(
+        "test-token".to_string(),
+        1234,
+        events,
+        Database::open_in_memory_for_tests(),
+    )
+}
+
+pub(crate) fn temp_root() -> PathBuf {
+    let root = std::env::temp_dir().join(format!("videorc-golem-library-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    root
+}
+
+/// A 4 x 4 PNG whose one opaque pixel has `shade`, so pictures are told apart.
+pub(crate) fn png_bytes(shade: u8) -> Vec<u8> {
+    let mut image = image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 0, 0]));
+    image.put_pixel(1, 1, image::Rgba([shade, shade, shade, 255]));
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    png
+}
+
+pub(crate) fn shade_of(state: CohostAvatarState) -> u8 {
+    match state {
+        CohostAvatarState::Idle => 10,
+        CohostAvatarState::Talk => 20,
+        CohostAvatarState::Laugh => 30,
+        CohostAvatarState::Think => 40,
+    }
+}
+
+// --- The fake web --------------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub(crate) struct FakeAvatar {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) personality: String,
+    pub(crate) context: String,
+    pub(crate) created_at: String,
+    pub(crate) updated_at: String,
+    /// The pose versions (8 hex), and the shade offset each picture draws.
+    pub(crate) poses: BTreeMap<CohostAvatarState, (String, u8)>,
+}
+
+impl FakeAvatar {
+    pub(crate) fn new(id: &str, name: &str, at: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: format!("{name}, described"),
+            personality: format!("{name} is cheerful."),
+            context: format!("{name} streams on Tuesdays."),
+            created_at: at.to_string(),
+            updated_at: at.to_string(),
+            poses: ALL_STATES
+                .iter()
+                .map(|state| (*state, (format!("{:08x}", shade_of(*state)), 0)))
+                .collect(),
+        }
+    }
+
+    fn json(&self) -> serde_json::Value {
+        let pose = |state: CohostAvatarState| {
+            self.poses.get(&state).map(|(version, _)| {
+                serde_json::json!({
+                    "url": format!("/api/golem/avatars/{}/{}?v={version}", self.id, state.as_str()),
+                    "opaque": false
+                })
+            })
+        };
+        serde_json::json!({
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "personality": self.personality,
+            "context": self.context,
+            "lookVersion": 1,
+            "createdAt": self.created_at,
+            "updatedAt": self.updated_at,
+            "poses": {
+                "idle": pose(CohostAvatarState::Idle),
+                "talk": pose(CohostAvatarState::Talk),
+                "laugh": pose(CohostAvatarState::Laugh),
+                "think": pose(CohostAvatarState::Think)
+            }
+        })
+    }
+
+    pub(crate) fn picture(&self, state: CohostAvatarState) -> Option<Vec<u8>> {
+        self.poses
+            .get(&state)
+            .map(|(_, offset)| png_bytes(shade_of(state) + offset))
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct FakeLibraryState {
+    pub(crate) avatars: Vec<FakeAvatar>,
+    pub(crate) active: Option<String>,
+    pub(crate) profile_updated_at: Option<String>,
+    pub(crate) clock: u32,
+    /// `METHOD path` of every call, in order.
+    pub(crate) seen: Vec<String>,
+    pub(crate) bodies: Vec<(String, serde_json::Value)>,
+    /// The next call answers this error instead.
+    pub(crate) fail_next: Option<(StatusCode, &'static str)>,
+    /// The id the next create gets.
+    pub(crate) next_id: Option<String>,
+    /// Pose pictures that answer 404 (`<id>/<state>`).
+    pub(crate) missing_pictures: Vec<String>,
+}
+
+impl FakeLibraryState {
+    fn tick(&mut self) -> String {
+        self.clock += 1;
+        format!("2026-10-09T10:{:02}:00.000Z", self.clock.min(59))
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct FakeLibrary {
+    pub(crate) inner: Arc<StdMutex<FakeLibraryState>>,
+    pub(crate) client: VideorcApiClient,
+}
+
+impl FakeLibrary {
+    pub(crate) fn with<R>(&self, edit: impl FnOnce(&mut FakeLibraryState) -> R) -> R {
+        edit(&mut self.inner.lock().unwrap())
+    }
+
+    pub(crate) fn seen(&self) -> Vec<String> {
+        self.with(|state| state.seen.clone())
+    }
+
+    pub(crate) fn count(&self, call: &str) -> usize {
+        self.seen()
+            .iter()
+            .filter(|seen| seen.as_str() == call)
+            .count()
+    }
+
+    pub(crate) fn body_of(&self, call: &str) -> Option<serde_json::Value> {
+        self.with(|state| {
+            state
+                .bodies
+                .iter()
+                .find(|(seen, _)| seen == call)
+                .map(|(_, body)| body.clone())
+        })
+    }
+
+    /// The account picks `id` now.
+    pub(crate) fn choose(&self, id: Option<&str>) {
+        self.with(|state| {
+            state.active = id.map(str::to_string);
+            state.profile_updated_at = Some(state.tick());
+        });
+    }
+
+    pub(crate) fn add(&self, avatar: FakeAvatar) {
+        self.with(|state| state.avatars.insert(0, avatar));
+    }
+}
+
+fn error_response(status: StatusCode, code: &str) -> axum::response::Response {
+    (
+        status,
+        axum::Json(serde_json::json!({
+            "error": { "code": code, "message": format!("server says {code}") }
+        })),
+    )
+        .into_response()
+}
+
+fn state_named(name: &str) -> Option<CohostAvatarState> {
+    serde_json::from_value(serde_json::json!(name)).ok()
+}
+
+fn picture_response(png: Vec<u8>) -> axum::response::Response {
+    ([(axum::http::header::CONTENT_TYPE, "image/png")], png).into_response()
+}
+
+fn handle(
+    fake: &mut FakeLibraryState,
+    method: &Method,
+    path: &str,
+    authorized: bool,
+    body: serde_json::Value,
+) -> axum::response::Response {
+    fake.seen.push(format!("{method} {path}"));
+    if !body.is_null() {
+        fake.bodies.push((format!("{method} {path}"), body.clone()));
+    }
+    if let Some(blob) = path.strip_prefix("/blob/") {
+        let mut parts = blob.split('/');
+        let (Some(id), Some(state)) = (parts.next(), parts.next().and_then(state_named)) else {
+            return error_response(StatusCode::NOT_FOUND, "missing");
+        };
+        return match fake
+            .avatars
+            .iter()
+            .find(|avatar| avatar.id == id)
+            .and_then(|avatar| avatar.picture(state))
+        {
+            Some(png) => picture_response(png),
+            None => error_response(StatusCode::NOT_FOUND, "missing"),
+        };
+    }
+    if !authorized {
+        return error_response(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+    if let Some((status, code)) = fake.fail_next.take() {
+        return error_response(status, code);
+    }
+    let profile = |fake: &FakeLibraryState| {
+        serde_json::json!({
+            "activeAvatarId": fake.active,
+            "profileUpdatedAt": fake.profile_updated_at
+        })
+    };
+    if path == "/api/golem/profile" && *method == Method::PUT {
+        fake.active = body["activeAvatarId"].as_str().map(str::to_string);
+        fake.profile_updated_at = Some(fake.tick());
+        return axum::Json(profile(fake)).into_response();
+    }
+    if path == "/api/golem/avatars" && *method == Method::GET {
+        let mut list = profile(fake);
+        list["avatars"] = fake.avatars.iter().map(FakeAvatar::json).collect();
+        list["limit"] = serde_json::json!(30);
+        return axum::Json(list).into_response();
+    }
+    if path == "/api/golem/avatars" && *method == Method::POST {
+        let id = fake
+            .next_id
+            .take()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().hyphenated().to_string());
+        let at = fake.tick();
+        let mut avatar = FakeAvatar::new(&id, body["name"].as_str().unwrap_or("Golem"), &at);
+        avatar.description = body["description"].as_str().unwrap_or("").to_string();
+        avatar.personality = body["personality"].as_str().unwrap_or("").to_string();
+        avatar.context = body["context"].as_str().unwrap_or("").to_string();
+        let images: serde_json::Map<String, serde_json::Value> = ALL_STATES
+            .iter()
+            .map(|state| {
+                (
+                    state.as_str().to_string(),
+                    serde_json::json!({
+                        "pngBase64": base64::engine::general_purpose::STANDARD
+                            .encode(avatar.picture(*state).unwrap()),
+                        "opaque": false
+                    }),
+                )
+            })
+            .collect();
+        let response =
+            serde_json::json!({ "avatar": avatar.json(), "images": images, "failed": {} });
+        fake.avatars.insert(0, avatar);
+        return axum::Json(response).into_response();
+    }
+    let Some(rest) = path.strip_prefix("/api/golem/avatars/") else {
+        return error_response(StatusCode::NOT_FOUND, "no-route");
+    };
+    let mut parts = rest.split('/');
+    let id = parts.next().unwrap_or_default().to_string();
+    let tail = parts.next();
+    let Some(index) = fake.avatars.iter().position(|avatar| avatar.id == id) else {
+        return error_response(StatusCode::NOT_FOUND, "golem-not-found");
+    };
+    match (method.clone(), tail) {
+        (Method::GET, None) => {
+            axum::Json(serde_json::json!({ "avatar": fake.avatars[index].json() })).into_response()
+        }
+        (Method::PATCH, None) => {
+            let at = fake.tick();
+            let avatar = &mut fake.avatars[index];
+            if let Some(name) = body["name"].as_str() {
+                avatar.name = name.to_string();
+            }
+            if let Some(personality) = body["personality"].as_str() {
+                avatar.personality = personality.to_string();
+            }
+            if let Some(context) = body["context"].as_str() {
+                avatar.context = context.to_string();
+            }
+            avatar.updated_at = at;
+            axum::Json(serde_json::json!({ "avatar": avatar.json() })).into_response()
+        }
+        (Method::DELETE, None) => {
+            fake.avatars.remove(index);
+            if fake.active.as_deref() == Some(id.as_str()) {
+                fake.active = None;
+                fake.profile_updated_at = Some(fake.tick());
+            }
+            let mut answer = profile(fake);
+            answer["deleted"] = serde_json::json!(true);
+            axum::Json(answer).into_response()
+        }
+        (Method::POST, Some("redo")) => {
+            let Some(state) = body["state"].as_str().and_then(state_named) else {
+                return error_response(StatusCode::BAD_REQUEST, "invalid-request");
+            };
+            let at = fake.tick();
+            let avatar = &mut fake.avatars[index];
+            let entry = avatar.poses.entry(state).or_insert((String::new(), 0));
+            entry.1 += 1;
+            entry.0 = format!("{:08x}", 0xabc0_0000_u32 + u32::from(entry.1));
+            avatar.updated_at = at;
+            let png = avatar.picture(state).unwrap();
+            axum::Json(serde_json::json!({
+                "avatar": avatar.json(),
+                "images": { state.as_str(): {
+                    "pngBase64": base64::engine::general_purpose::STANDARD.encode(png),
+                    "opaque": false
+                } }
+            }))
+            .into_response()
+        }
+        (Method::GET, Some(state_name)) => {
+            let Some(state) = state_named(state_name) else {
+                return error_response(StatusCode::NOT_FOUND, "golem-pose-missing");
+            };
+            if fake
+                .missing_pictures
+                .contains(&format!("{id}/{state_name}"))
+                || !fake.avatars[index].poses.contains_key(&state)
+            {
+                return error_response(StatusCode::NOT_FOUND, "golem-pose-missing");
+            }
+            (
+                StatusCode::FOUND,
+                [(
+                    axum::http::header::LOCATION,
+                    format!("/blob/{id}/{state_name}"),
+                )],
+            )
+                .into_response()
+        }
+        _ => error_response(StatusCode::NOT_FOUND, "no-route"),
+    }
+}
+
+pub(crate) async fn spawn_fake_library() -> FakeLibrary {
+    let inner = Arc::new(StdMutex::new(FakeLibraryState::default()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let route_state = inner.clone();
+    let app = axum::Router::new().fallback(
+        move |method: Method,
+              uri: axum::http::Uri,
+              headers: axum::http::HeaderMap,
+              body: axum::body::Bytes| {
+            let state = route_state.clone();
+            async move {
+                let authorized = headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    == Some(format!("Bearer {BEARER}").as_str());
+                let body: serde_json::Value = if body.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null)
+                };
+                let mut fake = state.lock().unwrap();
+                handle(&mut fake, &method, uri.path(), authorized, body)
+            }
+        },
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    FakeLibrary {
+        inner,
+        client: VideorcApiClient::for_base_url(format!("http://{address}")),
+    }
+}
+
+pub(crate) fn fast_timing() -> LibraryTiming {
+    LibraryTiming {
+        focus_interval: Duration::from_secs(60),
+        patch_debounce: Duration::from_millis(150),
+        live_poll: Duration::from_millis(20),
+    }
+}
+
+/// Point `state`'s library at `web` and `root`, signed in with the library on.
+pub(crate) async fn use_fake_library(state: &mut AppState, root: &Path, web: &FakeLibrary) {
+    state.golem_library = Arc::new(LibraryShared::for_tests(
+        LibraryEnv {
+            root: Some(root.to_path_buf()),
+            api: Some(web.client.clone()),
+            token: Some(BEARER.to_string()),
+        },
+        fast_timing(),
+    ));
+    *state.account_session.lock().await = crate::account::complete_mock_sign_in("orc_dev", true);
+    state.golem_library.cache().capability = Some(AiCapabilitiesGolemLibrary {
+        enabled: true,
+        count: 0,
+        limit: 30,
+    });
+}
+
+pub(crate) async fn library_state(root: &Path, web: &FakeLibrary) -> AppState {
+    let mut state = test_state();
+    use_fake_library(&mut state, root, web).await;
+    state
+}
+
+/// Poll the library until `done` holds and no job runs, or fail.
+pub(crate) async fn settle(state: &AppState, done: impl Fn(&GolemLibraryState) -> bool) {
+    for _ in 0..500 {
+        let library = get(state).await;
+        if library.busy.is_none()
+            && !state.golem_library.sync_queued.load(Ordering::Acquire)
+            && state.golem_library.jobs_pending.load(Ordering::Acquire) == 0
+            && done(&library)
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the library never settled: {:?}", get(state).await);
+}
+
+async fn persona(state: &AppState) -> CohostPersona {
+    get_cohost_settings(state).await.persona
+}
+
+async fn save_persona(state: &AppState, persona: CohostPersona) {
+    crate::cohost::set_cohost_settings(
+        state,
+        CohostSettingsPatch {
+            persona: Some(persona),
+            ..CohostSettingsPatch::default()
+        },
+    )
+    .await
+    .unwrap();
+}
+
+async fn save_notes(state: &AppState, notes: &str) {
+    crate::cohost::set_cohost_settings(
+        state,
+        CohostSettingsPatch {
+            notes: Some(notes.to_string()),
+            ..CohostSettingsPatch::default()
+        },
+    )
+    .await
+    .unwrap();
+}
+
+fn file_at(root: &Path, relative: &str) -> Vec<u8> {
+    std::fs::read(root.join(relative)).unwrap()
+}
+
+fn image_of(images: &CohostPersonaImages, state: CohostAvatarState) -> Option<String> {
+    match state {
+        CohostAvatarState::Idle => images.idle.clone(),
+        CohostAvatarState::Talk => images.talk.clone(),
+        CohostAvatarState::Laugh => images.laugh.clone(),
+        CohostAvatarState::Think => images.think.clone(),
+    }
+}
+
+fn use_params(id: &str) -> CohostLibraryAvatarParams {
+    CohostLibraryAvatarParams {
+        avatar_id: id.to_string(),
+    }
+}
+
+// --- The contract ------------------------------------------------------------------------------------
+
+fn high_risk_fixture(pointer: &str) -> serde_json::Value {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../protocol-fixtures/high-risk-contracts.json"
+    ))
+    .expect("shared high-risk protocol fixture must be valid JSON");
+    fixture
+        .pointer(pointer)
+        .unwrap_or_else(|| panic!("shared protocol fixture is missing {pointer}"))
+        .clone()
+}
+
+fn round_trips<T: serde::de::DeserializeOwned + Serialize>(pointer: &str) -> T {
+    let wire = high_risk_fixture(pointer);
+    let value: T =
+        serde_json::from_value(wire.clone()).unwrap_or_else(|error| panic!("{pointer}: {error}"));
+    assert_eq!(serde_json::to_value(&value).unwrap(), wire, "{pointer}");
+    value
+}
+
+/// The catalog equals the shared fixture, field for field (D10).
+#[test]
+fn golem_official_catalog_matches_the_shared_fixture() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../protocol-fixtures/golem-official-catalog.json"
+    ))
+    .expect("the official catalog fixture must be valid JSON");
+    assert_eq!(fixture["version"], 1);
+    let avatars = fixture["avatars"].as_array().unwrap();
+    assert_eq!(avatars.len(), GOLEM_OFFICIAL_CATALOG.len());
+    for (row, official) in avatars.iter().zip(GOLEM_OFFICIAL_CATALOG.iter()) {
+        assert_eq!(row["slug"], official.slug.as_str());
+        assert_eq!(row["id"], official.slug.id());
+        assert_eq!(row["name"], official.name);
+        assert_eq!(row["kind"], official.kind);
+        assert_eq!(row["tagline"], official.tagline);
+        assert_eq!(row["personality"], official.personality);
+        assert_eq!(row["description"].as_str(), official.description);
+    }
+    let slugs: Vec<_> = GOLEM_OFFICIAL_CATALOG.iter().map(|row| row.slug).collect();
+    assert_eq!(slugs, GolemOfficialSlug::ALL);
+}
+
+/// Every official pose is bundled and decodes as a WebP (D10).
+#[test]
+fn golem_official_art_is_bundled_for_every_slug_and_state() {
+    for slug in GolemOfficialSlug::ALL {
+        for state in ALL_STATES {
+            let bytes = official_webp(slug, state);
+            assert!(
+                image::load_from_memory_with_format(bytes, image::ImageFormat::WebP).is_ok(),
+                "{} {}",
+                slug.as_str(),
+                state.as_str()
+            );
+        }
+    }
+    assert_ne!(
+        official_webp(GolemOfficialSlug::Orc, CohostAvatarState::Idle),
+        official_webp(GolemOfficialSlug::Golem, CohostAvatarState::Idle)
+    );
+}
+
+#[test]
+fn golem_library_ids_are_user_uuids_or_known_official_slugs() {
+    assert_eq!(
+        official_slug_from_id("official:pirate"),
+        Some(GolemOfficialSlug::Pirate)
+    );
+    for bad in ["official:dragon", "official:", "golem", AVATAR] {
+        assert_eq!(official_slug_from_id(bad), None, "{bad}");
+    }
+    assert!(library_id_ok(AVATAR));
+    assert!(library_id_ok("official:robot"));
+    for bad in [
+        "official:dragon",
+        "",
+        "../official:golem",
+        "7C9E6679-7425-40DE-944B-E07FC1EE9A51",
+    ] {
+        assert!(!library_id_ok(bad), "{bad}");
+    }
+    // A persona link may name a slug a newer build knows.
+    assert!(persona_link_ok("official:dragon"));
+    assert!(!persona_link_ok("official:Dragon"));
+}
+
+#[test]
+fn golem_library_pose_tags_come_from_the_url_version() {
+    assert_eq!(
+        pose_tag(&format!("/api/golem/avatars/{AVATAR}/idle?v=0a1b2c3d")),
+        "0a1b2c3d"
+    );
+    // No usable `v`: a stable digest of the URL instead.
+    let url = format!("/api/golem/avatars/{AVATAR}/idle?v=ZZZ");
+    let digest = pose_tag(&url);
+    assert_eq!(digest.len(), 8);
+    assert_eq!(digest, pose_tag(&url));
+    assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+}
+
+/// Every library RPC and the event round-trip exactly as the TypeScript
+/// contract validates them (plan 170 Phase D).
+#[test]
+fn shared_high_risk_contract_fixture_matches_golem_library_dtos() {
+    for pointer in [
+        "/golemLibrary/signedOut",
+        "/golemLibrary/signedIn",
+        "/golemLibrary/localOnly",
+    ] {
+        round_trips::<GolemLibraryState>(pointer);
+    }
+    let signed_in: GolemLibraryState = round_trips("/golemLibrary/signedIn");
+    assert_eq!(
+        signed_in.mine.as_ref().unwrap()[1].poses,
+        GolemLibraryPoses::default()
+    );
+    let sync: CohostLibrarySyncParams = round_trips("/golemLibrary/syncParams");
+    assert_eq!(sync.reason, GolemLibrarySyncReason::DeepLink);
+    round_trips::<CohostLibraryAvatarParams>("/golemLibrary/useParams");
+    round_trips::<CohostLibraryAvatarParams>("/golemLibrary/useOfficialParams");
+    round_trips::<CohostLibraryUpdateParams>("/golemLibrary/updateParams");
+    round_trips::<CohostLibraryAvatarParams>("/golemLibrary/deleteParams");
+    let accepted: CohostLibraryAccepted = round_trips("/golemLibrary/accepted");
+    assert!(accepted.accepted);
+    assert!(
+        serde_json::from_value::<CohostLibrarySyncParams>(serde_json::json!({ "reason": "timer" }))
+            .is_err()
+    );
+    assert!(
+        serde_json::from_value::<CohostLibraryAvatarParams>(
+            serde_json::json!({ "avatarId": AVATAR, "extra": 1 })
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn golem_library_active_id_follows_the_persona_link() {
+    let mut persona = CohostPersona::default();
+    assert_eq!(
+        active_avatar_id(&persona).as_deref(),
+        Some("official:golem")
+    );
+    persona.source = CohostPersonaSource::Uploaded;
+    assert_eq!(active_avatar_id(&persona), None);
+    persona.library_avatar_id = Some(AVATAR.to_string());
+    assert_eq!(active_avatar_id(&persona).as_deref(), Some(AVATAR));
+    persona.library_avatar_id = Some("official:dragon".to_string());
+    assert_eq!(active_avatar_id(&persona), None);
+}
+
+#[test]
+fn golem_library_sync_clock_defaults_round_trips_and_compares() {
+    let database = Database::open_in_memory_for_tests();
+    assert_eq!(load_library_sync(&database), GolemLibrarySync::default());
+    let sync = GolemLibrarySync {
+        profile_updated_at: Some("2026-10-09T10:05:00.000Z".to_string()),
+    };
+    save_library_sync(&database, &sync).unwrap();
+    assert_eq!(load_library_sync(&database), sync);
+    assert_eq!(
+        serde_json::to_value(&sync).unwrap(),
+        serde_json::json!({ "profileUpdatedAt": "2026-10-09T10:05:00.000Z" })
+    );
+    assert!(is_newer(
+        Some("2026-10-09T10:06:00.000Z"),
+        Some("2026-10-09T10:05:00.000Z")
+    ));
+    assert!(!is_newer(
+        Some("2026-10-09T10:05:00.000Z"),
+        Some("2026-10-09T10:05:00.000Z")
+    ));
+    assert!(is_newer(Some("2026-10-09T10:05:00.000Z"), None));
+    assert!(!is_newer(None, None));
+}
+
+#[tokio::test]
+async fn golem_library_get_signed_out_is_the_official_catalog_and_the_default() {
+    let state = test_state();
+    *state.account_session.lock().await = Some(crate::account::signed_out_account());
+    assert_eq!(
+        serde_json::to_value(get(&state).await).unwrap(),
+        high_risk_fixture("/golemLibrary/signedOut")
+    );
+}
+
+// --- Sync --------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn golem_library_sync_lists_the_account_and_caches_each_idle() {
+    let root = temp_root();
+    let web = spawn_fake_library().await;
+    web.add(FakeAvatar::new(OTHER, "Pixel", "2026-10-08T09:00:00.000Z"));
+    web.add(FakeAvatar::new(AVATAR, "Grum", "2026-10-09T09:00:00.000Z"));
+    let state = library_state(&root, &web).await;
+    let mut events = state.events.subscribe();
+    sync(
+        &state,
+        CohostLibrarySyncParams {
+            reason: GolemLibrarySyncReason::Tab,
+        },
+    )
+    .await
+    .unwrap();
+    settle(&state, |library| {
+        library
+            .mine
+            .as_ref()
+            .is_some_and(|mine| mine.iter().all(|entry| entry.poses.idle.is_some()))
+    })
+    .await;
+    let library = get(&state).await;
+    let mine = library.mine.unwrap();
+    assert_eq!(
+        mine.iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Grum", "Pixel"]
+    );
+    assert_eq!(mine[0].context, "Grum streams on Tuesdays.");
+    // Each idle is cached under library/<id>/idle-<v>.png; the rest wait for use.
+    assert_eq!(
+        mine[0].poses.idle.as_deref(),
+        Some(format!("videorc-asset://golem/library/{AVATAR}/idle-0000000a.png").as_str())
+    );
+    assert_eq!(mine[0].poses.talk, None);
+    assert_eq!(
+        file_at(&root, &format!("library/{AVATAR}/idle-0000000a.png")),
+        png_bytes(10)
+    );
+    // No choice on the account: the untouched default stays.
+    assert_eq!(library.active_avatar_id.as_deref(), Some("official:golem"));
+    assert_eq!(persona(&state).await, CohostPersona::default());
+    // The renderer heard about it, and every event reads back as the state.
+    let mut changed = 0;
+    while let Ok(event) = events.try_recv() {
+        if event.event == COHOST_LIBRARY_CHANGED_EVENT {
+            serde_json::from_value::<GolemLibraryState>(event.payload).unwrap();
+            changed += 1;
+        }
+    }
+    assert!(changed >= 2);
+
+    // An avatar deleted elsewhere leaves the cache with its pictures.
+    web.with(|fake| fake.avatars.retain(|avatar| avatar.id != OTHER));
+    request_sync(&state, GolemLibrarySyncReason::Manual);
+    settle(&state, |library| {
+        library.mine.as_ref().is_some_and(|mine| mine.len() == 1)
+    })
+    .await;
+    assert!(!root.join("library").join(OTHER).exists());
+    assert!(root.join("library").join(AVATAR).exists());
+}
+
+#[tokio::test]
+async fn golem_library_sync_applies_a_newer_choice_to_the_untouched_default() {
+    let root = temp_root();
+    let web = spawn_fake_library().await;
+    web.add(FakeAvatar::new(AVATAR, "Grum", "2026-10-09T09:00:00.000Z"));
+    web.choose(Some(AVATAR));
+    let state = library_state(&root, &web).await;
+    request_sync(&state, GolemLibrarySyncReason::Launch);
+    settle(&state, |library| {
+        library.active_avatar_id.as_deref() == Some(AVATAR)
+    })
+    .await;
+    let settings = get_cohost_settings(&state).await;
+    let persona = settings.persona;
+    assert_eq!(persona.name, "Grum");
+    assert_eq!(persona.personality, "Grum is cheerful.");
+    assert_eq!(persona.source, CohostPersonaSource::Generated);
+    assert_eq!(persona.avatar, GolemAvatar::Still);
+    assert_eq!(persona.library_avatar_id.as_deref(), Some(AVATAR));
+    assert_eq!(settings.notes, "Grum streams on Tuesdays.");
+    // The four poses are the persona's still pictures.
+    for avatar_state in ALL_STATES {
+        let path = image_of(&persona.images, avatar_state)
+            .unwrap_or_else(|| panic!("{} missing", avatar_state.as_str()));
+        assert!(
+            path.starts_with("default/") && path.ends_with(".png"),
+            "{path}"
+        );
+        assert_eq!(file_at(&root, &path), png_bytes(shade_of(avatar_state)));
+    }
+    // The clock is stored: the same choice does not apply again, and sync
+    // never writes the account's choice itself.
+    assert_eq!(
+        load_library_sync(&state.database).profile_updated_at,
+        web.with(|fake| fake.profile_updated_at.clone())
+    );
+    let downloads = web.count(&format!("GET /api/golem/avatars/{AVATAR}/talk"));
+    request_sync(&state, GolemLibrarySyncReason::Manual);
+    settle(&state, |_| true).await;
+    assert_eq!(
+        web.count(&format!("GET /api/golem/avatars/{AVATAR}/talk")),
+        downloads
+    );
+    assert_eq!(web.count("GET /api/golem/avatars"), 2);
+    assert_eq!(web.count("PUT /api/golem/profile"), 0);
+}
+
+#[tokio::test]
+async fn golem_library_sync_never_overwrites_a_local_only_golem() {
+    let root = temp_root();
+    let web = spawn_fake_library().await;
+    web.add(FakeAvatar::new(AVATAR, "Grum", "2026-10-09T09:00:00.000Z"));
+    web.choose(Some(AVATAR));
+    let state = library_state(&root, &web).await;
+    let local = CohostPersona {
+        name: "Mossback".to_string(),
+        source: CohostPersonaSource::Uploaded,
+        ..CohostPersona::default()
+    };
+    save_persona(&state, local.clone()).await;
+    request_sync(&state, GolemLibrarySyncReason::Launch);
+    settle(&state, |library| library.server_active_avatar_id.is_some()).await;
+    let library = get(&state).await;
+    assert_eq!(library.server_active_avatar_id.as_deref(), Some(AVATAR));
+    assert_eq!(library.active_avatar_id, None);
+    assert_eq!(persona(&state).await, local);
+    // Declined: the clock stays, so the next sync offers it again.
+    assert_eq!(
+        load_library_sync(&state.database),
+        GolemLibrarySync::default()
+    );
+    // Use applies it on request and tells the account.
+    use_avatar(&state, use_params(AVATAR)).await.unwrap();
+    settle(&state, |library| {
+        library.active_avatar_id.as_deref() == Some(AVATAR)
+    })
+    .await;
+    assert_eq!(get(&state).await.server_active_avatar_id, None);
+    assert_eq!(web.count("PUT /api/golem/profile"), 1);
+}
+
+#[tokio::test]
+async fn golem_library_sync_holds_a_choice_while_live_and_applies_it_after() {
+    let root = temp_root();
+    let web = spawn_fake_library().await;
+    web.add(FakeAvatar::new(AVATAR, "Grum", "2026-10-09T09:00:00.000Z"));
+    web.choose(Some(AVATAR));
+    let state = library_state(&root, &web).await;
+    *state.recording.lock().await = Some(crate::recording::test_active_recording_stub("live-1"));
+    request_sync(&state, GolemLibrarySyncReason::Focus);
+    settle(&state, |library| library.mine.is_some()).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(persona(&state).await, CohostPersona::default());
+    assert!(state.golem_library.cache().pending_apply.is_some());
+    // The session ends: the held choice applies.
+    *state.recording.lock().await = None;
+    settle(&state, |library| {
+        library.active_avatar_id.as_deref() == Some(AVATAR)
+    })
+    .await;
+    assert_eq!(persona(&state).await.name, "Grum");
+    assert!(
+        load_library_sync(&state.database)
+            .profile_updated_at
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn golem_library_signed_out_changes_nothing_and_official_still_applies() {
+    let root = temp_root();
+    let web = spawn_fake_library().await;
+    web.add(FakeAvatar::new(AVATAR, "Grum", "2026-10-09T09:00:00.000Z"));
+    web.choose(Some(AVATAR));
+    let mut state = test_state();
+    state.golem_library = Arc::new(LibraryShared::for_tests(
+        LibraryEnv {
+            root: Some(root.clone()),
+            api: Some(web.client.clone()),
+            token: None,
+        },
+        fast_timing(),
+    ));
+    *state.account_session.lock().await = Some(crate::account::signed_out_account());
+    save_notes(&state, "My own notes").await;
+    request_sync(&state, GolemLibrarySyncReason::Launch);
+    settle(&state, |_| true).await;
+    let library = get(&state).await;
+    assert!(!library.signed_in);
+    assert_eq!(library.mine, None);
+    assert!(web.seen().is_empty(), "signed out never calls the web");
+    assert_eq!(persona(&state).await, CohostPersona::default());
+    // An account avatar needs a session; an official one does not.
+    let refused = use_avatar(&state, use_params(AVATAR)).await.unwrap_err();
+    assert_eq!(refused.code, COHOST_LIBRARY_SIGNED_OUT);
+    use_avatar(&state, use_params("official:orc"))
+        .await
+        .unwrap();
+    settle(&state, |library| {
+        library.active_avatar_id.as_deref() == Some("official:orc")
+    })
+    .await;
+    let settings = get_cohost_settings(&state).await;
+    assert_eq!(settings.persona.name, "Golmar");
+    assert_eq!(
+        settings.persona.personality,
+        official_golem(GolemOfficialSlug::Orc).personality
+    );
+    assert_eq!(
+        settings.notes, "My own notes",
+        "official avatars keep the notes"
+    );
+    let idle = settings.persona.images.idle.clone().unwrap();
+    assert!(idle.ends_with(".webp"), "{idle}");
+    assert_eq!(
+        file_at(&root, &idle),
+        official_webp(GolemOfficialSlug::Orc, CohostAvatarState::Idle)
+    );
+    // Back to the Golem: the bundled default, its pictures and source.
+    use_avatar(&state, use_params("official:golem"))
+        .await
+        .unwrap();
+    settle(&state, |library| {
+        library.active_avatar_id.as_deref() == Some("official:golem")
+    })
+    .await;
+    let golem = persona(&state).await;
+    assert_eq!(golem.images, CohostPersonaImages::default());
+    assert_eq!(golem.source, CohostPersonaSource::Default);
+    assert_eq!(golem.library_avatar_id.as_deref(), Some("official:golem"));
+    assert!(
+        !root.join(&idle).exists(),
+        "the orc's pictures went with it"
+    );
+    assert!(web.seen().is_empty());
+}
+
+#[tokio::test]
+async fn golem_library_use_downloads_the_poses_applies_and_tells_the_account() {
+    let root = temp_root();
+    let web = spawn_fake_library().await;
+    let mut grum = FakeAvatar::new(AVATAR, "Grum", "2026-10-09T09:00:00.000Z");
+    grum.poses.remove(&CohostAvatarState::Think);
+    grum.context = String::new();
+    web.add(grum);
+    let state = library_state(&root, &web).await;
+    save_notes(&state, "Keep these").await;
+    use_avatar(&state, use_params(AVATAR)).await.unwrap();
+    settle(&state, |library| {
+        library.active_avatar_id.as_deref() == Some(AVATAR)
+    })
+    .await;
+    let settings = get_cohost_settings(&state).await;
+    // Not listed yet: read on its own, then its pictures.
+    assert!(
+        web.seen()
+            .contains(&format!("GET /api/golem/avatars/{AVATAR}"))
+    );
+    assert!(
+        settings.persona.images.think.is_none(),
+        "think falls back to idle"
+    );
+    assert_eq!(
+        settings.notes, "Keep these",
+        "an empty About you keeps the notes"
+    );
+    assert_eq!(
+        web.body_of("PUT /api/golem/profile"),
+        Some(serde_json::json!({ "activeAvatarId": AVATAR }))
+    );
+    assert_eq!(
+        load_library_sync(&state.database).profile_updated_at,
+        web.with(|fake| fake.profile_updated_at.clone())
+    );
+}
+
+#[tokio::test]
+async fn golem_library_use_with_a_missing_idle_changes_nothing() {
+    let root = temp_root();
+    let web = spawn_fake_library().await;
+    web.add(FakeAvatar::new(AVATAR, "Grum", "2026-10-09T09:00:00.000Z"));
+    web.with(|fake| fake.missing_pictures.push(format!("{AVATAR}/idle")));
+    let state = library_state(&root, &web).await;
+    use_avatar(&state, use_params(AVATAR)).await.unwrap();
+    settle(&state, |library| library.error.is_some()).await;
+    assert_eq!(get(&state).await.error.unwrap().code, "golem-pose-missing");
+    assert_eq!(persona(&state).await, CohostPersona::default());
+    assert_eq!(web.count("PUT /api/golem/profile"), 0);
+}
+
+// --- Update, delete, local edits -----------------------------------------------------------------------
+
+async fn linked_state(root: &Path, web: &FakeLibrary) -> AppState {
+    web.add(FakeAvatar::new(AVATAR, "Grum", "2026-10-09T09:00:00.000Z"));
+    web.choose(Some(AVATAR));
+    let state = library_state(root, web).await;
+    request_sync(&state, GolemLibrarySyncReason::Launch);
+    settle(&state, |library| {
+        library.active_avatar_id.as_deref() == Some(AVATAR)
+    })
+    .await;
+    state
+}
+
+async fn wait_for_call(web: &FakeLibrary, call: &str) {
+    for _ in 0..300 {
+        if web.count(call) > 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no {call}: {:?}", web.seen());
+}
+
+#[tokio::test]
+async fn golem_library_local_edits_of_a_linked_avatar_are_pushed_once_after_a_pause() {
+    let root = temp_root();
+    let web = spawn_fake_library().await;
+    let state = linked_state(&root, &web).await;
+    let mut edited = persona(&state).await;
+    edited.name = "Grumble".to_string();
+    save_persona(&state, edited.clone()).await;
+    edited.personality = "Grumbles, then helps.".to_string();
+    save_persona(&state, edited).await;
+    save_notes(&state, "Speedruns on Fridays now.").await;
+    let patch_call = format!("PATCH /api/golem/avatars/{AVATAR}");
+    wait_for_call(&web, &patch_call).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    settle(&state, |_| true).await;
+    // One PATCH with the latest of each field (last write wins).
+    assert_eq!(web.count(&patch_call), 1);
+    assert_eq!(
+        web.body_of(&patch_call),
+        Some(serde_json::json!({
+            "name": "Grumble",
+            "personality": "Grumbles, then helps.",
+            "context": "Speedruns on Fridays now."
+        }))
+    );
+    assert_eq!(get(&state).await.mine.unwrap()[0].name, "Grumble");
+    // Saving the same values again pushes nothing.
+    save_persona(&state, persona(&state).await).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(web.count(&patch_call), 1);
+}
+
+#[tokio::test]
+async fn golem_library_edits_of_a_local_only_golem_stay_local() {
+    let root = temp_root();
+    let web = spawn_fake_library().await;
+    let state = library_state(&root, &web).await;
+    save_persona(
+        &state,
+        CohostPersona {
+            name: "Mossback".to_string(),
+            ..CohostPersona::default()
+        },
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(web.seen().is_empty());
+}
+
+#[tokio::test]
+async fn golem_library_update_edits_the_account_and_the_golem_follows() {
+    let root = temp_root();
+    let web = spawn_fake_library().await;
+    let state = linked_state(&root, &web).await;
+    update(
+        &state,
+        CohostLibraryUpdateParams {
+            avatar_id: AVATAR.to_string(),
+            name: Some("Sir Grum".to_string()),
+            personality: None,
+            context: Some(String::new()),
+        },
+    )
+    .await
+    .unwrap();
+    settle(&state, |library| {
+        library
+            .mine
+            .as_ref()
+            .is_some_and(|mine| mine[0].name == "Sir Grum")
+    })
+    .await;
+    let settings = get_cohost_settings(&state).await;
+    assert_eq!(settings.persona.name, "Sir Grum");
+    assert_eq!(settings.notes, "");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        web.count(&format!("PATCH /api/golem/avatars/{AVATAR}")),
+        1,
+        "the Golem following its avatar is not pushed back"
+    );
+}
+
+#[tokio::test]
+async fn golem_library_delete_removes_it_everywhere_and_unlinks_the_golem() {
+    let root = temp_root();
+    let web = spawn_fake_library().await;
+    let state = linked_state(&root, &web).await;
+    let pictures = persona(&state).await.images;
+    delete(&state, use_params(AVATAR)).await.unwrap();
+    settle(&state, |library| {
+        library.mine.as_ref().is_some_and(|mine| mine.is_empty())
+    })
+    .await;
+    assert!(!root.join("library").join(AVATAR).exists());
+    let after = persona(&state).await;
+    assert_eq!(
+        after.library_avatar_id, None,
+        "the Golem stays, now local only"
+    );
+    assert_eq!(after.images, pictures);
+    assert_eq!(get(&state).await.active_avatar_id, None);
+    // The account's choice was cleared with it, and so was its clock.
+    assert_eq!(
+        load_library_sync(&state.database).profile_updated_at,
+        web.with(|fake| fake.profile_updated_at.clone())
+    );
+}
+
+#[tokio::test]
+async fn golem_library_mutations_refuse_bad_ids_empty_edits_and_no_library() {
+    let root = temp_root();
+    let web = spawn_fake_library().await;
+    let state = library_state(&root, &web).await;
+    let unknown = use_avatar(&state, use_params("official:dragon"))
+        .await
+        .unwrap_err();
+    assert_eq!(unknown.code, COHOST_LIBRARY_INVALID);
+    let official = delete(&state, use_params("official:golem"))
+        .await
+        .unwrap_err();
+    assert_eq!(official.code, COHOST_LIBRARY_INVALID);
+    let edit = |name: Option<&str>| CohostLibraryUpdateParams {
+        avatar_id: AVATAR.to_string(),
+        name: name.map(str::to_string),
+        personality: None,
+        context: None,
+    };
+    assert_eq!(
+        update(&state, edit(None)).await.unwrap_err().code,
+        COHOST_LIBRARY_INVALID
+    );
+    assert_eq!(
+        update(&state, edit(Some(&"n".repeat(25))))
+            .await
+            .unwrap_err()
+            .code,
+        COHOST_LIBRARY_INVALID
+    );
+    state.golem_library.cache().capability = Some(AiCapabilitiesGolemLibrary::default());
+    let off = delete(&state, use_params(AVATAR)).await.unwrap_err();
+    assert_eq!(off.code, COHOST_LIBRARY_UNAVAILABLE);
+    assert!(web.seen().is_empty());
+}
+
+#[tokio::test]
+async fn golem_library_turning_on_syncs_and_turning_off_forgets_the_account() {
+    let root = temp_root();
+    let web = spawn_fake_library().await;
+    web.add(FakeAvatar::new(AVATAR, "Grum", "2026-10-09T09:00:00.000Z"));
+    let state = library_state(&root, &web).await;
+    state.golem_library.cache().capability = None;
+    // Off: the account's cap is known, nothing is listed or fetched.
+    set_capability(
+        &state,
+        Some(AiCapabilitiesGolemLibrary {
+            enabled: false,
+            count: 1,
+            limit: 25,
+        }),
+    )
+    .await;
+    assert_eq!(get(&state).await.limit, 25);
+    assert!(web.seen().is_empty());
+    let on = AiCapabilitiesGolemLibrary {
+        enabled: true,
+        count: 1,
+        limit: 30,
+    };
+    set_capability(&state, Some(on.clone())).await;
+    settle(&state, |library| library.mine.is_some()).await;
+    assert_eq!(get(&state).await.limit, 30);
+    assert_eq!(web.count("GET /api/golem/avatars"), 1);
+    set_capability(&state, None).await;
+    assert_eq!(get(&state).await.mine, None);
+    // A focus sync right after a sync is skipped (at most once a minute).
+    state.golem_library.cache().capability = Some(on);
+    request_sync(&state, GolemLibrarySyncReason::Focus);
+    settle(&state, |_| true).await;
+    assert_eq!(web.count("GET /api/golem/avatars"), 1);
+}

@@ -8628,12 +8628,15 @@ pub async fn set_cohost_settings(
     let patch = CohostSettings::validated_patch(patch)?;
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     let mut engine = state.cohost.lock().await;
-    let mut next = engine.settings.clone();
+    let previous = engine.settings.clone();
+    let mut next = previous.clone();
     next.apply(patch);
     state
         .database
         .save_setting(COHOST_SETTINGS_KEY, &next)
         .map_err(|error| CohostError::Storage(error.to_string()))?;
+    // Plan 170 D12: a local edit of a linked library avatar goes to the account.
+    crate::cohost_library::settings_saved(state, &previous, &next);
     let listen_changed = engine.settings.listen != next.listen;
     engine.settings = next.clone();
     // Plan 168 S-B1: the pet on stream follows the persona (avatar, pack,
