@@ -9,7 +9,7 @@
 # Videorc
 
 Videorc is an open-source, AI-native desktop studio for creators: record your
-screen and camera, stream to multiple platforms at once, and bring Orcle, an AI
+screen and camera, stream to multiple platforms at once, and bring Golem, an AI
 producer that keeps up with your chat while you're live. All from one window.
 
 **Current release tracks**
@@ -65,7 +65,7 @@ happens underneath.
 - **Rust backend** owns capture, composition, recording, and streaming; the
   shell talks to it over an authenticated localhost WebSocket protocol.
 - **FFmpeg** (an LGPL-compliant build, bundled) drives encoding and output.
-- **SQLite** local session library — your recordings and Orcle's stream
+- **SQLite** local session library — your recordings and Golem's stream
   reports stay on your machine.
 
 ## Open source & pricing
@@ -74,7 +74,7 @@ The desktop app — capture, scenes, recording, streaming, captions UI — is fr
 software under **AGPL-3.0**. You can build it, run it, and audit every line
 that touches your camera, microphone, and screen.
 
-Cloud AI features (live captions and Orcle) run through a signed-in Videorc
+Cloud AI features (live captions and Golem) run through a signed-in Videorc
 account: the desktop app never holds AI provider keys, and nothing goes to the
 cloud until you turn it on. Hosted AI is what funds the project.
 

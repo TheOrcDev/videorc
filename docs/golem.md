@@ -7,7 +7,10 @@ your chat, hears you, and, when you turn the modes on, posts to your chats as
 you. There is no voice: the Golem talks through its bubble.
 
 The code, wire and storage name is `cohost`. Everything a user reads says
-Golem, or the name you gave it, never co-host and no longer Orcle.
+Golem, or the name you gave it, never co-host and no longer Orcle. Saved
+and wire values keep `orcle` (plan 170 D22): the moderation source
+`orcle-voice`, the service-flags `orcle` key and the `videorc.orcleTab`
+storage key.
 
 ## The promise
 
@@ -308,7 +311,7 @@ from coders X", "Grum, put this one up". The name's words (lowercased,
 ASCII-folded, 3+ letters) all work, so "Grum the Goblin" answers to Grum and
 to Goblin; "golem" always works. The old "Orcle" spellings stay as hidden
 aliases for one release (remove after 0.9.140); "oracle" and "orca" are
-gone. The commands are in [orcle-commands.md](orcle-commands.md).
+gone. The commands are in [golem-commands.md](golem-commands.md).
 
 ## Reports
 
@@ -566,14 +569,14 @@ Code:
   `stop_session`, saved after the engine lock is released); `cohost_avatar.rs`
   the generation; `moments.rs` ranks moments; `transcript.rs` parses the
   `.srt`; `storage.rs` owns `cohost_reports`.
-- Renderer: `components/tabs/orcle-tab.tsx` with `lib/orcle-tab-view.ts` and
-  `lib/orcle-tabs.ts` (sub-tabs Golem, Chat, Voice, Reports, Clean cut);
+- Renderer: `components/tabs/golem-tab.tsx` with `lib/golem-tab-view.ts` and
+  `lib/golem-tabs.ts` (sub-tabs Golem, Chat, Voice, Reports, Clean cut);
   `components/golem-persona-section.tsx`, `golem-greetings-section.tsx`,
   `golem-bubble-sample.tsx`; `lib/golem-auto-chat-view.ts` (the pure side of
   the editor and the mode control); `components/cohost-pane.tsx` and
   `components/stream-manager/golem-chat-controls.tsx` in Stream Manager;
-  `components/orcle-report-card.tsx` with `lib/orcle-report-view.ts` and
-  `hooks/use-orcle-report.ts`, all under `apps/desktop/src/renderer/src/`.
+  `components/golem-report-card.tsx` with `lib/golem-report-view.ts` and
+  `hooks/use-golem-report.ts`, all under `apps/desktop/src/renderer/src/`.
 
 Checks:
 
@@ -584,7 +587,7 @@ Checks:
   templates in `auto` land exactly four greetings on the fake destinations
   (one per event, 5 s apart on Twitch), the report holds the four posts, and
   the same rows with the mode `off` send nothing.
-- `pnpm smoke:orcle-commands` covers the wake words.
+- `pnpm smoke:golem-commands` covers the wake words.
 - `cargo test -p videorc-backend cohost` covers the settings round trip, the
   greeting engine, the throttle (a 50-follow burst: one now, one collapsed at
   +10 s, the rest deduped), the lane and the bubble state machine.

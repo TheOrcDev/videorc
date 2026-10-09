@@ -2,13 +2,18 @@
 
 These are the binding shapes for plan 140's slices, which several agents build
 in parallel. Parts D and E cross the web ↔ desktop line; identical copies
-live in both repos at `docs/orcle-commands-contract.md`. Parts A–C are
+live in both repos at `docs/golem-commands-contract.md`. Parts A–C are
 desktop-internal, but every slice builds against them.
 
 All new serialized optional fields use
 `#[serde(default, skip_serializing_if = …)]` in Rust and `optionalSchema` in
 `backend-rpc-contract.ts`. Code, wire and storage names keep `cohost`;
-user-facing copy says "Golem".
+user-facing copy says "Golem" (it said "Orcle" until plans 164 and 170).
+Values that were already saved or sent between apps keep the old spelling
+(plan 170 D22): the moderation source `orcle-voice` (the Rust variant
+`GolemVoice` carries a serde rename) and the service-flags `orcle` section.
+The examples speak the wake word "golem"; the hidden Orcle aliases still
+work until they are removed after 0.9.140.
 
 ## Named session markers (desktop, plan 152)
 
@@ -49,7 +54,7 @@ Premium (Golem).
 ### Rust API (`live_chat_moderation.rs`), used by S3
 
 ```rust
-pub enum ModerationSource { Manual, OrcleVoice }          // wire: "manual" | "orcle-voice"
+pub enum ModerationSource { Manual, GolemVoice }          // wire: "manual" | "orcle-voice" (serde rename, plan 170 D22)
 pub enum RemoveConfirmMode { Confirm, Countdown }         // wire: "confirm" | "countdown"
 pub struct ModerationRequest {
     pub operation_id: String,      // UUID v4, minted by the caller (idempotency key)
@@ -65,7 +70,7 @@ pub struct ModerationRefusal { pub code: &'static str, pub message: String }
 ```
 
 **Refusal codes:** `not-found`, `not-eligible` (owner message, tombstone,
-notification row), `premium-required` (OrcleVoice only), `disabled` (kill
+notification row), `premium-required` (GolemVoice only), `disabled` (kill
 switch), `rate-limited` (more than 10 a minute), `already-pending`,
 `not-pending`, `invalid-params`.
 
@@ -109,7 +114,7 @@ every change. **Never add it to `LAN_EVENTS`.**
 **Phase rules:**
 
 - `Manual` requests go straight to `executing`.
-- `OrcleVoice` requests start in `pending-confirm`:
+- `GolemVoice` requests start in `pending-confirm`:
   - In `confirm` mode, `confirmBy` is 20 s out. With no answer the operation
     becomes `expired`.
   - In `countdown` mode, `executeAt` is 5 s out. The operation runs then
@@ -151,7 +156,7 @@ A provider's own deletion keeps its provider type (Twitch
 ```json
 {
   "id": "cmd-uuid",
-  "heard": "orcle highlight the comment from coders x",
+  "heard": "golem highlight the comment from coders x",
   "kind": "highlight|clear|remove|confirm|cancel|unknown",
   "status": "done|not-found|ambiguous|confirm|refused|unavailable|cancelled|expired",
   "message": "Highlighted coders_x's comment.",
@@ -248,7 +253,8 @@ an existing free string, so this is not a new enum value.
 
 ## D. Desktop service flags (web → desktop, S7 + S3/S4)
 
-`GET /api/desktop/service-flags` gains an optional top-level `orcle` object:
+`GET /api/desktop/service-flags` gains an optional top-level `orcle` object
+(the key keeps the old name, plan 170 D22):
 
 ```json
 { "orcle": { "voiceCommands": true, "remove": true } }
@@ -272,7 +278,7 @@ an existing free string, so this is not a new enum value.
   "sessionClientId": "…",
   "consentToProcessChat": true,
   "seq": 12,
-  "utterance": "orcle can you show what coders x just asked",
+  "utterance": "golem can you show what coders x just asked",
   "focusMessageId": "…?",
   "candidates": [{ "id": "m1", "author": "coders_x", "text": "…", "at": "ISO" }]
 }

@@ -6,7 +6,7 @@ tell it to.
 
 Voice commands are part of Golem, which is Videorc Premium. **Remove from
 chat** in a comment's ⋯ menu is free for everyone. The binding shapes live in
-[orcle-commands-contract.md](orcle-commands-contract.md); this page is how it
+[golem-commands-contract.md](golem-commands-contract.md); this page is how it
 works and how to check it.
 
 ## What you can say
@@ -164,7 +164,7 @@ and not found. Counts only, never names or words.
 | A "remove it from our chat" fires while you talk | The wake-word-free phrases are on.                                                     | Turn on Commands need “Golem” first.                           |
 | "Removing messages is paused by Videorc."        | Videorc's remote switch.                                                               | Use Remove from chat in the ⋯ menu.                            |
 
-Checks: `pnpm smoke:orcle-commands` (plan 140, S9) and the removal steps in
+Checks: `pnpm smoke:golem-commands` (plan 140, S9) and the removal steps in
 [live-chat-live-smoke-checklist.md](live-chat-live-smoke-checklist.md).
 
 The smoke drives the real debug backend with fakes only. Its fake chat lanes

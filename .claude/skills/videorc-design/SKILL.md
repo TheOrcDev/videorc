@@ -173,7 +173,7 @@ Everything except ⌘K uses the desktop scale.
 - **Sections** (`PanelSection`): flush. A 13 px / 600 header, a 12 px
   secondary description, a hairline between sections, and 16 px padding. No
   border, background, radius, or shadow.
-- **Pages with tabs** (Settings, plan 064; Orcle, plan 150): one segmented
+- **Pages with tabs** (Settings, plan 064; Golem, plan 150): one segmented
   `TabsList` in a pinned strip under the toolbar (`border-b px-gutter py-2`).
   Only the panel under it scrolls, and the shell turns `PaneBody` scroll
   off for the page. The last tab used is remembered on this device, deep
@@ -214,9 +214,9 @@ made it chat first: one thin stats bar and fewer words.
 - **Tiers by container query.** The body is `@container/stream-manager`,
   never JS resize state (`lib/stream-manager-layout.ts`):
   - Wide (1,040 px and up): the stats bar, then Chat beside a right pane
-    with an Activity / Orcle segmented control.
+    with an Activity / Golem segmented control.
   - Medium (640 to 1,039 px): the stats bar, then one pane behind
-    Chat / Activity / Orcle.
+    Chat / Activity / Golem.
   - Narrow (under 640 px, 320 minimum): the same, with the stats bar down to
     its main slots.
   - Every pane renders once; only its placement changes.
@@ -256,7 +256,7 @@ made it chat first: one thin stats bar and fewer words.
   `@tanstack/react-virtual`. While live, a row's time appears on hover.
   Filters are inline chips from 640 px and one Filters menu below it.
   A row paints at most one background, lowest to highest: a member's own
-  message `bg-member/8` (plan 154), Orcle's "Talking about this"
+  message `bg-member/8` (plan 154), Golem's "Talking about this"
   `bg-accent`, a paid message `bg-warning/10` with its ring; an on-stream
   row keeps its button fill. The Member chip stays on every tinted row and
   text stays monochrome.
@@ -385,19 +385,19 @@ moved onto the utility.
   Before adding a slot, check whether one already means the same thing: the
   set is licence-counted (100 glyphs). `docs/icon-set.md` holds the licence
   terms, the build pipeline (`pnpm icons:build`), and the semantic audit.
-- **The Orcle mark** (plan 149) is the cybernetic orc eye, always the
-  real artwork, never a redrawn glyph (owner call, 2026-10-04). The master
-  and its export commands live in `assets/brand/orcle/`.
-  - `OrcleIcon` is the emblem at icon size: an `<svg>` wrapping the image,
+- **The Golem mark** (plan 164) is the owner's stone golem, always the
+  real artwork, never a redrawn glyph (the plan 149 owner call, 2026-10-04).
+  The masters and their export commands live in `assets/brand/golem/`.
+  - `GolemIcon` is the emblem at icon size: an `<svg>` wrapping the image,
     so `svg`-based slot styles size it like its neighbours. It is the one
     full-colour icon in the registry. `weight` and `currentColor` never
     change it, so a selected row keeps the same image.
-  - `OrcleEmblem` is the emblem larger, at 32 px (`md`) or 56 px (`lg`)
-    tall: the Orcle tab's intro line and the Orcle Live consent dialog.
+  - `GolemEmblem` is the emblem larger, at 32 px (`md`) or 56 px (`lg`)
+    tall: the Golem tab's intro line and the Golem Live consent dialog.
   - It is never tinted or filtered, and one file serves both themes. Its
-    red iris is the brand, not a status: no other icon may borrow it.
-  - The Videorc app icon stays the orc-head orb. Orcle's eye is not the
-    app's logo.
+    colours are the art, not a status.
+  - The Videorc app icon stays the orc-head orb. The Golem is not the app's
+    logo.
 
 ## Motion
 
@@ -462,3 +462,7 @@ do not hand-roll it.
 - DON'T add a font, a component library, or a direct icon-package import.
 - DON'T ship an audio control with nothing behind it: no pan, solo, monitor
   or player volume until the backend can do it (plan 093).
+- DO call the companion **Golem** in all copy (or the name the streamer gave
+  it). Code and wire names stay `cohost`; saved values keep `orcle` (plan 170
+  D22), like the moderation source `orcle-voice`. A guard test fails on
+  "Orcle" anywhere in the renderer's sources.

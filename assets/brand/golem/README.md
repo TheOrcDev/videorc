@@ -5,9 +5,9 @@ The Golem feature's mark (plan 164, owner-supplied 2026-10-08).
 on a transparent background. It is outside every bundle; the app ships
 trimmed exports.
 
-- **`OrcleIcon`** (`apps/desktop/src/renderer/src/components/icons.tsx`)
+- **`GolemIcon`** (`apps/desktop/src/renderer/src/components/icons.tsx`)
   is the 64 px export at icon size (16 px slots), wrapped in an `<svg>`.
-- **`OrcleEmblem`** shows it larger, at 32 and 56 px tall.
+- **`GolemEmblem`** shows it larger, at 32 and 56 px tall.
 - **The default avatar pack** (`assets/golem/default/*.webp`): `idle` is
   the 640 px export of `golem-master.png`; `talk`, `laugh` and `think` come
   from `golem-talk-master.png`, `golem-laugh-master.png` and
@@ -56,7 +56,7 @@ done
 ```
 
 Each emblem file is the 2× asset for its display height. CI never runs
-these commands: the outputs are committed, and `orcle-emblem.test.ts` pins
+these commands: the outputs are committed, and `golem-emblem.test.ts` pins
 their format, heights and byte caps.
 
 ## Official characters (plan 170)
