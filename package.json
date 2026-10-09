@@ -233,6 +233,7 @@
     "smoke:oauth-guards": "node scripts/smoke-oauth-guards-app.mjs",
     "smoke:live-chat-fake-providers": "node scripts/smoke-live-chat-fake-providers.mjs",
     "smoke:comment-highlight-stream": "node scripts/smoke-comment-highlight-stream-app.mjs",
+    "golem:official": "node scripts/golem-official-generate.mjs",
     "smoke:golem-pet": "node scripts/smoke-golem-pet-app.mjs",
     "smoke:oauth": "node scripts/smoke-oauth-app.mjs",
     "smoke:screens": "node scripts/smoke-screens-app.mjs",

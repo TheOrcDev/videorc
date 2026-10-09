@@ -58,3 +58,37 @@ done
 Each emblem file is the 2× asset for its display height. CI never runs
 these commands: the outputs are committed, and `orcle-emblem.test.ts` pins
 their format, heights and byte caps.
+
+## Official characters (plan 170)
+
+Videorc's official Golem library is the Golem above plus four characters
+drawn in the same house look: Golmar the Orc, Nib the Goblin, Captain
+Barnacle the Pirate and Bolt the Robot. Their names, taglines,
+personalities and the descriptions they were drawn from live in
+`protocol-fixtures/golem-official-catalog.json`; the website and the app
+must match that file.
+
+`official/<slug>/<state>-master.png` are the 1024 × 1024 model outputs
+(idle, talk, laugh, think), made with `openai/gpt-image-2.5-sunburst`
+through the Vercel AI Gateway on 2026-10-09 by `pnpm golem:official`
+(`scripts/golem-official-generate.mjs`): the idle is an image edit of the
+style anchor (the Golem master trimmed onto a 1024 px transparent canvas,
+"art style only, not the character") with the plan 169 house-look prompt,
+and talk, laugh and think are edits of that idle with the same state
+directions as the default Golem. The owner reviews every set before it
+ships; to redo one pose:
+
+```sh
+pnpm golem:official --slug orc --states laugh \
+  --anchor ../videorc-web/lib/ai/golem-look/style-reference.png
+```
+
+The script exports each master to
+`apps/desktop/src/renderer/src/assets/golem/official/<slug>/<state>.webp`
+like the default states (haze below 6 % alpha cleared, trimmed, 2 % pad,
+`cwebp -q 90 -alpha_q 100`), with one scale per character: the factor that
+makes its idle character 615 px tall, the golem's height inside the
+640 px `default/idle.webp` (before the pad), so every
+official character stands at the Golem's size and its four poses match. The website serves the same WebP files
+from `public/golem/official/<slug>/`, and the Golem's official files there
+are copies of `default/*.webp`.
