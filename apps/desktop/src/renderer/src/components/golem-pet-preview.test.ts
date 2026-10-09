@@ -39,6 +39,7 @@ function fakePack(): GolemPreviewPack {
     cells: new Map(frames.map((frame) => [frame.id, cell()])),
     reactions: ['laugh', 'blink'],
     gazeCount: 3,
+    headTop: 0.2,
     notes: []
   }
 }
@@ -142,7 +143,18 @@ describe('GolemPetPreview (plan 168 S-D1)', () => {
       expect.objectContaining({ personaId: 'p-1', packId: 'bundled:golem', pixelSize: 160 })
     )
     expect(onLoad).toHaveBeenCalledWith(
-      expect.objectContaining({ name: 'Pebble', reactions: ['laugh', 'blink'], frameCount: 5 })
+      expect.objectContaining({
+        name: 'Pebble',
+        reactions: ['laugh', 'blink'],
+        frameCount: 5,
+        neutral: 'ahead',
+        gazes: [
+          { id: 'left', gaze: [-1, 0] },
+          { id: 'ahead', gaze: [0, 0] },
+          { id: 'right', gaze: [1, 0] }
+        ],
+        headTop: 0.2
+      })
     )
     expect(preview().dataset.status).toBe('ready')
     await flush()
@@ -238,6 +250,41 @@ describe('GolemPetPreview (plan 168 S-D1)', () => {
       played = ref.current!.react('wave')
     })
     expect(played).toBe(false)
+  })
+
+  it('holds a pose, plays a reaction over it and returns to it (plan 169 D14)', async () => {
+    const ref = createRef<GolemPetPreviewHandle>()
+    await render({ ref, pose: 'right', interactive: false })
+    await flush()
+    expect(preview().dataset.frame).toBe('right')
+    await act(async () => {
+      ref.current!.react('laugh')
+    })
+    await flush()
+    expect(preview().dataset.frame).toBe('laugh')
+    await render({ ref, pose: null, interactive: false })
+    await flush()
+    expect(preview().dataset.frame).toBe('ahead')
+  })
+
+  it('cycles talk frames while talking and stops when told (D12)', async () => {
+    mocked.load.mockImplementation(async () => {
+      const pack = fakePack()
+      const frames = [
+        ...pack.frames,
+        { id: 'talk-a', kind: 'reaction' as const },
+        { id: 'talk-b', kind: 'reaction' as const }
+      ]
+      return { ...pack, frames, cells: new Map(frames.map((frame) => [frame.id, cell()])) }
+    })
+    await render({ talking: true, interactive: false })
+    await flush()
+    expect(preview().dataset.frame).toBe('talk-a')
+    // Talking runs the loop every frame, not on the idle tick.
+    expect(frames.size).toBe(1)
+    await render({ talking: false, interactive: false })
+    await flush()
+    expect(preview().dataset.frame).toBe('ahead')
   })
 
   it('keeps the placeholder and names the reason when the pack cannot load', async () => {

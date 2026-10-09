@@ -7,8 +7,10 @@ import {
   GOLEM_PET_CELL_MAX,
   GOLEM_STILL_REACTION_IDS,
   golemPetSheetNames,
+  measureGolemPetHeadTop,
   parseGolemPetManifest,
   validateGolemPetSheetSizes,
+  type GolemPetSheetPixels,
   type GolemPetSheetSize
 } from '../../../shared/golem-pet'
 
@@ -53,6 +55,12 @@ export interface GolemPreviewPack {
   cells: ReadonlyMap<string, GolemPreviewCell>
   reactions: string[]
   gazeCount: number
+  /**
+   * The normalized top of the neutral silhouette in its cell (D16), where a
+   * bubble's tail points; 0 when it could not be measured (the backend's
+   * fallback too).
+   */
+  headTop: number
   /** Fallbacks taken while loading (a Still image that would not load). */
   notes: string[]
 }
@@ -68,6 +76,8 @@ export interface GolemPreviewPackDeps {
     box: readonly [number, number, number, number],
     pixelSize: number
   ) => Promise<GolemPreviewImage | null>
+  /** One cell drawn into a `side` square, as RGBA pixels; null when the host cannot read pixels. */
+  readCellPixels?: (cell: GolemPreviewCell, side: number) => GolemPetSheetPixels | null
 }
 
 export interface GolemPreviewPackRequest {
@@ -130,7 +140,62 @@ const browserDeps: GolemPreviewPackDeps = {
     )
     const bitmap = canvas.transferToImageBitmap()
     return { source: bitmap, width: pixelSize, height: pixelSize, close: () => bitmap.close() }
+  },
+  readCellPixels: (cell, side) => {
+    if (typeof OffscreenCanvas === 'undefined') return null
+    const canvas = new OffscreenCanvas(side, side)
+    const context = canvas.getContext('2d', { willReadFrequently: true })
+    if (!context) return null
+    context.drawImage(
+      cell.image.source,
+      cell.rect[0],
+      cell.rect[1],
+      cell.rect[2],
+      cell.rect[3],
+      cell.box[0] * side,
+      cell.box[1] * side,
+      cell.box[2] * side,
+      cell.box[3] * side
+    )
+    const pixels = context.getImageData(0, 0, side, side)
+    return { width: side, height: side, data: pixels.data }
   }
+}
+
+/** The side the head top is measured at: 1/256 of the cell is plenty for a bubble anchor. */
+const HEAD_TOP_SIDE = 256
+
+/**
+ * D16's head top of a loaded neutral cell, by the shared rule
+ * (`measureGolemPetHeadTop`: the first row with alpha above 16), or 0.
+ */
+export function measureGolemPreviewHeadTop(
+  cell: GolemPreviewCell | undefined,
+  readCellPixels: GolemPreviewPackDeps['readCellPixels']
+): number {
+  if (!cell || !readCellPixels) return 0
+  const pixels = readCellPixels(cell, HEAD_TOP_SIDE)
+  if (!pixels) return 0
+  const sheet = 'cell.png'
+  return (
+    measureGolemPetHeadTop(
+      {
+        version: 1,
+        name: 'cell',
+        neutral: 'neutral',
+        frames: [
+          {
+            id: 'neutral',
+            kind: 'gaze',
+            sheet,
+            rect: [0, 0, pixels.width, pixels.height],
+            gaze: [0, 0]
+          }
+        ]
+      },
+      new Map([[sheet, pixels]])
+    ) ?? 0
+  )
 }
 
 /** The square cell an image is contained in, bottom-aligned (`contain_bottom`). */
@@ -250,6 +315,7 @@ async function loadPetPack(
       .filter((frame) => frame.kind === 'reaction')
       .map((frame) => frame.id),
     gazeCount: manifest.frames.filter((frame) => frame.kind === 'gaze').length,
+    headTop: measureGolemPreviewHeadTop(cells.get(manifest.neutral), deps.readCellPixels),
     notes: []
   }
 }
@@ -326,6 +392,7 @@ async function loadStillPack(
     cells,
     reactions: [...GOLEM_STILL_REACTION_IDS],
     gazeCount: 1,
+    headTop: measureGolemPreviewHeadTop(cells.get('idle'), deps.readCellPixels),
     notes
   }
 }

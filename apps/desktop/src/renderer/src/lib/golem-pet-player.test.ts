@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest'
 import { isIdentityTransform } from '../../../shared/golem-motion'
 import {
   GOLEM_PREVIEW_BLINK_MS,
+  GOLEM_PREVIEW_TALK_STEP_JITTER_MS,
+  GOLEM_PREVIEW_TALK_STEP_MS,
   GolemPetPlayer,
   nearestGazeFrame,
   pointerGaze,
@@ -227,5 +229,105 @@ describe('Motion 0 and pose', () => {
     expect(pet.pose('missing', 5000)).toBe(false)
     expect(pet.pose(null, 6000)).toBe(true)
     expect(pet.frame.id).toBe('gaze-0-0')
+  })
+})
+
+describe('the Test dialog: holds and talking (plan 169 D14)', () => {
+  /** The still pack's shape: one gaze cell, talk, laugh and think. */
+  function stillPack(): GolemPetPlayerPack {
+    return {
+      neutral: 'idle',
+      frames: [
+        { id: 'idle', kind: 'gaze', gaze: [0, 0] },
+        { id: 'talk', kind: 'reaction' },
+        { id: 'laugh', kind: 'reaction' },
+        { id: 'think', kind: 'reaction' }
+      ]
+    }
+  }
+
+  it('plays a reaction over a posed frame and returns to it, still posed', () => {
+    const pet = player()
+    pet.pose('laugh', 0)
+    expect(pet.react('surprised', 100)).toBe(true)
+    expect(pet.frame.id).toBe('surprised')
+    expect(pet.isLocked).toBe(true)
+    pet.tick(1199)
+    expect(pet.frame.id).toBe('surprised')
+    expect(pet.tick(1201)).toBe(true)
+    expect(pet.frame.id).toBe('laugh')
+    // Still held: the pointer and the idle clock change nothing.
+    expect(pet.track(80 + 300, 80, RECT, 1300)).toBe(false)
+    pet.tick(60_000)
+    expect(pet.frame.id).toBe('laugh')
+  })
+
+  it('hops a posed frame in place', () => {
+    const pet = player({ pack: stillPack() })
+    pet.pose('talk', 0)
+    pet.advance(0)
+    expect(pet.hop('hop', 100)).toBe(true)
+    expect(pet.frame.id).toBe('talk')
+    expect(pet.cadence(100)).toBe('frame')
+    expect(isIdentityTransform(pet.advance(250))).toBe(false)
+  })
+
+  it('moves a hold without cutting the reaction over it', () => {
+    const pet = player()
+    pet.pose('laugh', 0)
+    pet.react('surprised', 100)
+    expect(pet.pose('wink', 200)).toBe(false)
+    expect(pet.frame.id).toBe('surprised')
+    pet.tick(1300)
+    expect(pet.frame.id).toBe('wink')
+    // Entering a hold from free play cuts a reaction at once.
+    const free = player()
+    free.react('surprised', 0)
+    expect(free.pose('laugh', 100)).toBe(true)
+    expect(free.frame.id).toBe('laugh')
+  })
+
+  it("cycles the pack's talk frames and the neutral cell every 110 to 150 ms", () => {
+    const pack = pagePetPack()
+    const pet = player({
+      pack: {
+        ...pack,
+        frames: [
+          ...pack.frames,
+          { id: 'talk-a', kind: 'reaction' },
+          { id: 'talk-b', kind: 'reaction' }
+        ]
+      }
+    })
+    expect(pet.setTalking(true, 0)).toBe(false)
+    expect(pet.cadence(0)).toBe('frame')
+    const seen: string[] = []
+    // random() is 0 here: every step is exactly 110 ms.
+    for (let at = 0; at < 6 * GOLEM_PREVIEW_TALK_STEP_MS; at += GOLEM_PREVIEW_TALK_STEP_MS) {
+      pet.advance(at)
+      seen.push(pet.frame.id)
+    }
+    expect(seen).toEqual(['talk-a', 'talk-b', 'gaze-0-0', 'talk-a', 'talk-b', 'gaze-0-0'])
+    expect(GOLEM_PREVIEW_TALK_STEP_JITTER_MS).toBe(40)
+    // Talking keeps it awake.
+    pet.tick(10 * 60_000)
+    expect(pet.frame.id).not.toBe('sleep')
+    // Stopped mid-word: back to where it looks.
+    pet.advance(6 * GOLEM_PREVIEW_TALK_STEP_MS)
+    expect(pet.frame.id).toBe('talk-a')
+    expect(pet.setTalking(false, 700)).toBe(true)
+    expect(pet.frame.id).toBe('gaze-0-0')
+  })
+
+  it('bobs the shown cell when the pack has no talk frames (Still)', () => {
+    const pet = player({ pack: stillPack() })
+    pet.pose('talk', 0)
+    pet.setTalking(true, 0)
+    pet.advance(0)
+    const bobbed = pet.advance(80)
+    expect(pet.frame.id).toBe('talk')
+    expect(isIdentityTransform(bobbed)).toBe(false)
+    pet.setTalking(false, 100)
+    expect(pet.frame.id).toBe('talk')
   })
 })

@@ -22,10 +22,24 @@ import type { GolemMotionSettings } from '../../../shared/golem-pet'
  * `prefers-reduced-motion`: no tracking, no idle, no transforms, but a click
  * still shows its drawn reaction. Motion comes from `shared/golem-motion.ts`
  * (S-C1), the same model the stream uses.
+ *
+ * Two additions for the Test dialog (plan 169 D14): a reaction or a hop
+ * asked for while a frame is posed plays over the held frame and returns to
+ * it (page-pet's `react` unlocks instead), and `setTalking` runs the
+ * on-stream talk cycle (D12): the pack's talk frames and the neutral cell
+ * every 110 to 150 ms, or a bob on the shown cell for a pack without them.
  */
 
 /** The motion pose of a motion-only hop; matches the Rust animator's `HOP_REACTION_ID`. */
 export const GOLEM_HOP_REACTION_ID = 'hop'
+
+/** The talk frames a pack may have (mirrors Rust `GOLEM_PET_TALK_IDS`, D12). */
+export const GOLEM_PET_TALK_IDS: readonly string[] = ['talk-a', 'talk-b']
+/** D12: one talk step lasts 110 to 150 ms (Rust `TALK_STEP_SECONDS`). */
+export const GOLEM_PREVIEW_TALK_STEP_MS = 110
+export const GOLEM_PREVIEW_TALK_STEP_JITTER_MS = 40
+/** The most talk steps one frame catches up on (Rust's catch-up cap). */
+const TALK_CATCH_UP_STEPS = 4
 
 export interface GolemPetPlayerFrame {
   id: string
@@ -135,7 +149,12 @@ export class GolemPetPlayer {
   private reactionUntil = 0
   private lastActivity: number
   private nextBlink: number
-  private locked = false
+  /** The posed frame (page-pet's lock), if any. */
+  private held: GolemPetPlayerFrame | null = null
+  private readonly talkFrames: GolemPetPlayerFrame[]
+  private talking = false
+  private talkSteps = 0
+  private nextTalkStep = 0
   private clickIndex = 0
   private lastClick = -Infinity
   private liveUntil = 0
@@ -143,6 +162,12 @@ export class GolemPetPlayer {
   constructor(options: GolemPetPlayerOptions) {
     this.pack = options.pack
     this.gazes = options.pack.frames.filter((frame) => frame.kind === 'gaze' && frame.gaze)
+    this.talkFrames = GOLEM_PET_TALK_IDS.flatMap((id) => {
+      const frame = options.pack.frames.find(
+        (candidate) => candidate.id === id && candidate.kind === 'reaction'
+      )
+      return frame ? [frame] : []
+    })
     const neutral = options.pack.frames.find(
       (frame) => frame.id === options.pack.neutral && frame.kind === 'gaze'
     )
@@ -175,7 +200,11 @@ export class GolemPetPlayer {
   }
 
   get isLocked(): boolean {
-    return this.locked
+    return this.held !== null
+  }
+
+  get isTalking(): boolean {
+    return this.talking
   }
 
   /** The pack's reaction ids, in manifest order. */
@@ -217,7 +246,7 @@ export class GolemPetPlayer {
    * pet wakes here).
    */
   track(pointerX: number, pointerY: number, rect: GolemPreviewRect, now: number): boolean {
-    if (this.locked || this.reduced) return false
+    if (this.held || this.reduced) return false
     this.lastActivity = now
     const [x, y] = pointerGaze(pointerX, pointerY, rect)
     const previous = this.gaze
@@ -235,7 +264,7 @@ export class GolemPetPlayer {
 
   /** page-pet's `center()`: the pointer left the window. */
   center(): boolean {
-    if (this.locked) return false
+    if (this.held) return false
     this.gaze = this.neutralFrame
     if (!this.reactionUntil && this.current !== this.gaze) {
       this.current = this.gaze
@@ -264,7 +293,8 @@ export class GolemPetPlayer {
    * page-pet's `react(id, duration, activity)`: show the reaction frame for
    * `durationMs` (160 ms to 30 s) or the motion envelope, whichever is
    * longer. A blink or a non-activity reaction never moves. False when the
-   * pack has no such reaction.
+   * pack has no such reaction. Over a posed frame it plays and then returns
+   * to that frame; the pose stays.
    */
   react(
     id: string,
@@ -274,7 +304,6 @@ export class GolemPetPlayer {
   ): boolean {
     const frame = this.reactionFrame(id)
     if (!frame) return false
-    this.locked = false
     if (activity) this.lastActivity = now
     this.reactionUntil =
       now + clamp(Number(durationMs) || GOLEM_PREVIEW_REACTION_HOLD_MS, 160, 30_000)
@@ -289,10 +318,11 @@ export class GolemPetPlayer {
   /**
    * D14's last fallback: a reaction the pack has no frame for plays as a
    * motion-only hop (the `hop` pose, as on stream) on the current frame.
-   * `id` names what was asked for. False under reduced motion or at Motion 0.
+   * `id` names what was asked for. A posed frame hops in place. False under
+   * reduced motion or at Motion 0.
    */
   hop(_id: string, now: number): boolean {
-    if (this.reduced || this.locked) return false
+    if (this.reduced) return false
     this.lastActivity = now
     // The same pose the on-stream animator plays for a motion-only hop.
     const seconds = this.motion.react(GOLEM_HOP_REACTION_ID, now / 1000)
@@ -301,13 +331,14 @@ export class GolemPetPlayer {
 
   /**
    * page-pet's `pose(id)` / `unlock()`: hold one frame (no tracking, no
-   * idle, motion at rest) until released with null. Returns whether the
-   * drawn frame changed.
+   * idle, motion at rest) until released with null. Moving a hold to
+   * another frame keeps the motion in flight, and a reaction playing over
+   * the hold finishes first. Returns whether the drawn frame changed.
    */
   pose(id: string | null, now: number): boolean {
     if (id === null) {
-      if (!this.locked) return false
-      this.locked = false
+      if (!this.held) return false
+      this.held = null
       this.reactionUntil = 0
       this.lastActivity = now
       const before = this.current
@@ -317,22 +348,51 @@ export class GolemPetPlayer {
     }
     const frame = this.pack.frames.find((candidate) => candidate.id === id)
     if (!frame) return false
-    this.motion.stop()
-    this.locked = true
-    this.reactionUntil = 0
+    const entering = this.held === null
+    this.held = frame
+    if (entering) {
+      this.motion.stop()
+      this.reactionUntil = 0
+    } else if (this.reactionUntil && now < this.reactionUntil) {
+      return false
+    }
     const changed = this.current !== frame
     this.current = frame
     return changed
   }
 
+  /**
+   * D12's talk cycle until stopped: every 110 to 150 ms the next of the
+   * pack's talk frames and the neutral cell, or, for a pack without talk
+   * frames (Still), a bob on the cell it shows. A drawn reaction wins while
+   * it plays. Returns whether the drawn frame changed.
+   */
+  setTalking(talking: boolean, now: number): boolean {
+    if (talking === this.talking) return false
+    this.talking = talking
+    this.talkSteps = 0
+    this.nextTalkStep = now
+    this.lastActivity = now
+    if (talking || this.reactionUntil) return false
+    const rest = this.held ?? this.gaze
+    const changed = this.current !== rest
+    this.current = rest
+    return changed
+  }
+
   /** page-pet's `tick()`, every 160 ms. Returns whether the drawn frame changed. */
   tick(now: number): boolean {
-    if (this.locked) return false
     const before = this.current
     if (this.reactionUntil) {
       if (now < this.reactionUntil) return false
       this.reactionUntil = 0
-      this.current = this.gaze
+      this.current = this.held ?? this.gaze
+    }
+    if (this.held) return this.current !== before
+    if (this.talking) {
+      // Talking is activity: no sleep, and the blink waits (D12, D13).
+      this.lastActivity = now
+      return this.current !== before
     }
     if (this.reduced) return this.current !== before
     const sleep = this.pack.frames.find((frame) => frame.id === 'sleep')
@@ -353,17 +413,45 @@ export class GolemPetPlayer {
 
   /** The transform to draw `frame` with at `now`; the identity under reduced motion. */
   advance(now: number): MotionTransform {
+    this.stepTalk(now)
     if (this.reduced) return identityTransform(this.pivot)
     // D15: breathing only while resting on a gaze cell.
-    this.motion.setIdle(this.current.kind === 'gaze' && !this.reactionUntil && !this.locked)
+    this.motion.setIdle(
+      this.current.kind === 'gaze' && !this.reactionUntil && !this.held && !this.talking
+    )
     return this.motion.advance(now / 1000)
   }
 
   /** How soon the canvas must run again for the motion to look smooth. */
   cadence(now: number): GolemPreviewCadence {
+    // A talk step is shorter than the idle tick.
+    if (this.talking) return this.reduced || this.settings.intensity <= 0 ? 'breath' : 'frame'
     if (this.reduced || this.settings.intensity <= 0) return 'tick'
     if (now < this.liveUntil || this.motion.reactionEndsAt() !== null) return 'frame'
     return this.motion.isResting() ? 'tick' : 'breath'
+  }
+
+  /** The talk steps due by `now` (at most a few per frame, like Rust's catch-up cap). */
+  private stepTalk(now: number): void {
+    if (!this.talking) return
+    let steps = 0
+    while (now >= this.nextTalkStep && steps < TALK_CATCH_UP_STEPS) {
+      steps += 1
+      this.talkSteps += 1
+      this.nextTalkStep +=
+        GOLEM_PREVIEW_TALK_STEP_MS + this.random() * GOLEM_PREVIEW_TALK_STEP_JITTER_MS
+      if (this.reactionUntil && now < this.reactionUntil) continue
+      if (this.talkFrames.length > 0) {
+        const step = (this.talkSteps - 1) % (this.talkFrames.length + 1)
+        this.current = this.talkFrames[step] ?? this.neutralFrame
+      } else if (!this.reduced) {
+        this.motion.talkBob()
+      }
+    }
+    if (now >= this.nextTalkStep) {
+      this.nextTalkStep =
+        now + GOLEM_PREVIEW_TALK_STEP_MS + this.random() * GOLEM_PREVIEW_TALK_STEP_JITTER_MS
+    }
   }
 
   private reactionFrame(id: string): GolemPetPlayerFrame | null {
