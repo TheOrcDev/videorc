@@ -17,8 +17,8 @@ import {
 import { startFakeTranscriptService } from './lib/fake-transcript-service.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
-// Orcle voice commands, end to end (plan 140 S9). Launches the real debug
-// backend against isolated profiles and local fakes (Orcle's tick and
+// Golem voice commands, end to end (plan 140 S9). Launches the real debug
+// backend against isolated profiles and local fakes (Golem's tick and
 // spotlight, the caption service with scripted realtime finals, the AI
 // capabilities with the cloud command parser off, and the desktop service
 // flags), drives the fake chat connectors, and proves over the WebSocket:
@@ -29,7 +29,7 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 //      removal hidden in Videorc -> "this one" highlight through the spotlight
 //      -> a removal left to expire after 20 s -> the report's command counts
 //      -> a voice removal left pending-confirm when the backend is killed.
-//   A'. The same profile restarted with the Orcle kill switches off: the
+//   A'. The same profile restarted with the Golem kill switches off: the
 //      restart sweep cancelled the pending removal, a spoken command does
 //      nothing, a voice removal is refused `disabled`, a manual one removes.
 //   B. Basic (VIDEORC_PREMIUM_FEATURES=0): cohost.start and a voice removal
@@ -116,7 +116,7 @@ try {
 
   const seconds = ((Date.now() - startedAt) / 1000).toFixed(1)
   console.log(
-    `Orcle voice commands smoke PASS in ${seconds}s\n${results.map((line) => `  ${line}`).join('\n')}`
+    `Golem voice commands smoke PASS in ${seconds}s\n${results.map((line) => `  ${line}`).join('\n')}`
   )
 } finally {
   for (const backend of launched.reverse()) await backend.stop().catch(() => {})
@@ -133,7 +133,7 @@ try {
 async function runPremiumScenario(profile) {
   const backend = await launchBackend(profile)
   const { ws, admin, events } = backend
-  phase('A: settings, chat session, captions and Orcle')
+  phase('A: settings, chat session, captions and Golem')
   const settings = await request(ws, timeoutMs, 'cohost.settings.set', {
     enabled: true,
     listen: true,
@@ -164,7 +164,7 @@ async function runPremiumScenario(profile) {
   const started = await request(ws, timeoutMs, 'cohost.start', {
     sessionId,
     consentToProcessChat: true,
-    streamTitle: 'Orcle commands smoke'
+    streamTitle: 'Golem commands smoke'
   })
   expect(
     started.status === 'listening' && started.sessionId === sessionId,
@@ -244,7 +244,7 @@ async function runPremiumScenario(profile) {
     pass('A0 named markers: no capture write, moderation card or cloud parser request')
 
     // 1. Highlight by name, one command split across two finals.
-    phase('A1: "Orcle, highlight the comment" | "from coders X."')
+    phase('A1: "Golem, highlight the comment" | "from coders X."')
     const highlightSince = Date.now()
     await say(events, GOLEM_COMMAND_FINALS.highlightByNameSplit)
     const highlighted = await waitForCommand(
@@ -256,7 +256,7 @@ async function runPremiumScenario(profile) {
     expect(
       highlighted.command.target?.messageId === codersNewest.id &&
         highlighted.command.target?.authorName === 'coders_x' &&
-        highlighted.command.heard === 'orcle highlight the comment from coders x',
+        highlighted.command.heard === 'golem highlight the comment from coders x',
       `Highlight by name picked the wrong comment: ${JSON.stringify(highlighted.command)}`
     )
     const autoHighlight = await waitForEvent(
@@ -276,7 +276,7 @@ async function runPremiumScenario(profile) {
     )
 
     // 2. Clear (before the 8 s apply timeout retires the unexecuted card).
-    phase('A2: "Orcle, clear the highlight."')
+    phase('A2: "Golem, clear the highlight."')
     const clearSince = Date.now()
     await say(events, GOLEM_COMMAND_FINALS.clear)
     const cleared = await waitForCommand(
@@ -371,9 +371,9 @@ async function runPremiumScenario(profile) {
     )
 
     // 4. A removal cancelled by voice.
-    phase('A4: "Orcle, delete the comment from ana dev." then "No."')
+    phase('A4: "Golem, delete the comment from ana dev." then "No."')
     const cancelSince = Date.now()
-    await say(events, ['Orcle, delete the comment from ana dev.'])
+    await say(events, ['Golem, delete the comment from ana dev.'])
     const cancelCard = await waitForCommand(
       events,
       (command) =>
@@ -409,9 +409,9 @@ async function runPremiumScenario(profile) {
     pass(`A4 cancel by voice: ${cancelled.outcome} / strip "${cancelDone.command.message}"`)
 
     // 5. Missing scope: the platform cannot delete it, Videorc hides it.
-    phase('A5: "Orcle, delete the comment from kick lurker." then "Yes." (missing scope)')
+    phase('A5: "Golem, delete the comment from kick lurker." then "Yes." (missing scope)')
     const hideSince = Date.now()
-    await say(events, ['Orcle, delete the comment from kick lurker.'])
+    await say(events, ['Golem, delete the comment from kick lurker.'])
     const hideCard = await waitForCommand(
       events,
       (command) =>
@@ -450,7 +450,7 @@ async function runPremiumScenario(profile) {
     pass(`A5 missing scope: ${hidden.outcome} / row "${hiddenRow.messageText}"`)
 
     // 6. "This one" highlight through the spotlight.
-    phase(`A6: the spotlight finds ana_dev's comment, then "Orcle, put this one up."`)
+    phase(`A6: the spotlight finds ana_dev's comment, then "Golem, put this one up."`)
     fakeCohost.setSpotlightMatches([
       { whenTranscriptIncludes: SPOTLIGHT_PHRASE, messageId: anaNewest.id, about: 0.95 }
     ])
@@ -489,9 +489,9 @@ async function runPremiumScenario(profile) {
     pass(`A6 "this one" via the spotlight: ${thisOne.command.message}`)
 
     // 7. Expiry: no answer in 20 s, nothing is removed.
-    phase('A7: "Orcle, remove the comment from coders X." and no answer for 20 s')
+    phase('A7: "Golem, remove the comment from coders X." and no answer for 20 s')
     const expirySince = Date.now()
-    await say(events, ['Orcle, remove the comment from coders X.'])
+    await say(events, ['Golem, remove the comment from coders X.'])
     const expiryCard = await waitForCommand(
       events,
       (command) =>
@@ -591,6 +591,7 @@ async function runPremiumScenario(profile) {
 // --- A'. Restart sweep and the kill switch ---------------------------------------
 
 async function runRestartAndKillSwitchScenario(profile, pendingAtKill) {
+  // The document's key stays `orcle` (plan 170 D22): the web serves it and older apps read it.
   serviceFlags.setDocument({ version: 1, orcle: { voiceCommands: false, remove: false } })
   const backend = await launchBackend(profile)
   const { ws, admin, events } = backend
@@ -656,8 +657,8 @@ async function runRestartAndKillSwitchScenario(profile, pendingAtKill) {
     )
     await waitUntil(() => captionFake.state.audioAppends > 0, 20_000, 'caption audio')
     const quietSince = Date.now()
-    await say(events, ['Orcle, highlight the comment from coders X.'])
-    // Orcle did hear it: the words reached its spotlight lane. Only the
+    await say(events, ['Golem, highlight the comment from coders X.'])
+    // Golem did hear it: the words reached its spotlight lane. Only the
     // command was switched off.
     await waitUntil(
       () =>
@@ -667,7 +668,7 @@ async function runRestartAndKillSwitchScenario(profile, pendingAtKill) {
             record.body?.transcript?.includes('highlight the comment from coders X')
         ),
       10_000,
-      'Orcle hearing the paused command (its spotlight request)'
+      'Golem hearing the paused command (its spotlight request)'
     )
     await sleep(Math.max(0, quietSince + KILL_SWITCH_QUIET_MS - Date.now()))
     const acted = events.list.filter(
@@ -743,7 +744,7 @@ async function runBasicScenario(profile) {
   })
   expect(
     !start.ok && start.error?.code === 'premium-required',
-    `A Basic account must not start Orcle: ${JSON.stringify(start)}`
+    `A Basic account must not start Golem: ${JSON.stringify(start)}`
   )
   const voice = await requestRaw(ws, 'liveChat.moderation.request', {
     operationId: randomUUID(),

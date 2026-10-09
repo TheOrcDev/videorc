@@ -16518,7 +16518,7 @@ mod tests {
                 target,
                 question: false,
             },
-            heard: "orcle test".to_string(),
+            heard: "golem test".to_string(),
             reason: None,
             wake_word: true,
         }
@@ -16528,7 +16528,7 @@ mod tests {
         NewCommand {
             intent: CommandIntent::Remove,
             spec: CommandTargetSpec::Resolved(vec![message_id.to_string()]),
-            heard: "orcle remove that one".to_string(),
+            heard: "golem remove that one".to_string(),
             reason: Some("toxic".to_string()),
             wake_word: true,
         }
@@ -16869,7 +16869,7 @@ mod tests {
         // A command: camelCase keys, kebab-case enums, empty optionals omitted.
         let command = CohostCommand {
             id: "cmd-1".to_string(),
-            heard: "orcle highlight coders x".to_string(),
+            heard: "golem highlight coders x".to_string(),
             kind: CohostCommandKind::Highlight,
             status: CohostCommandStatus::NotFound,
             message: "Golem couldn't find a comment from coders x.".to_string(),
@@ -16884,7 +16884,7 @@ mod tests {
             serde_json::to_value(&command).unwrap(),
             serde_json::json!({
                 "id": "cmd-1",
-                "heard": "orcle highlight coders x",
+                "heard": "golem highlight coders x",
                 "kind": "highlight",
                 "status": "not-found",
                 "message": "Golem couldn't find a comment from coders x.",
@@ -17140,7 +17140,7 @@ mod tests {
                 NewCommand {
                     intent: CommandIntent::Highlight,
                     spec: CommandTargetSpec::Resolved(vec![owner.id.clone(), raid.id.clone()]),
-                    heard: "orcle show that".to_string(),
+                    heard: "golem show that".to_string(),
                     reason: None,
                     wake_word: true,
                 },
@@ -17534,7 +17534,7 @@ mod tests {
                 NewCommand {
                     intent: CommandIntent::Highlight,
                     spec: CommandTargetSpec::Resolved(vec![rows[0].id.clone(), rows[1].id.clone()]),
-                    heard: "orcle show one of those".to_string(),
+                    heard: "golem show one of those".to_string(),
                     reason: None,
                     wake_word: true,
                 },
@@ -18735,7 +18735,7 @@ mod tests {
             "videorc-desktop/test",
             COMMAND_SESSION,
             seq,
-            "orcle show what they just asked",
+            "golem show what they just asked",
             None,
             ids.iter()
                 .map(|id| CohostCommandCandidate {
@@ -18907,7 +18907,7 @@ mod tests {
             session_id: COMMAND_SESSION.to_string(),
             generation,
         };
-        let heard = "  orcle show what ada asked ";
+        let heard = "  golem show what ada asked ";
         // Off until the capability read says otherwise.
         assert!(!engine.command_parser_ready(&scope, true, true, now));
         assert_eq!(
@@ -18934,7 +18934,7 @@ mod tests {
             .expect("a parse");
         let request = &prepared.request;
         assert_eq!(request.seq, 1);
-        assert_eq!(request.utterance, "orcle show what ada asked");
+        assert_eq!(request.utterance, "golem show what ada asked");
         assert!(request.consent_to_process_chat);
         assert_eq!(request.session_client_id, COMMAND_SESSION);
         assert_eq!(
@@ -18969,7 +18969,7 @@ mod tests {
         let prepared = engine
             .prepare_command_parse(
                 &scope,
-                "orcle that one",
+                "golem that one",
                 Some(rows[0].id.as_str()),
                 true,
                 true,
@@ -19014,7 +19014,7 @@ mod tests {
             command_row(2, "ada", StreamPlatform::Twitch, "hello"),
         ];
         let (state, scope) = command_state(&rows, None).await;
-        let heard = "orcle show what coders x just asked";
+        let heard = "golem show what coders x just asked";
         let tokens = Arc::new(AtomicUsize::new(0));
         let calls = Arc::new(AtomicUsize::new(0));
         let token = {
@@ -19160,7 +19160,7 @@ mod tests {
         let resolution = resolve_unknown_command_with(
             &state,
             &scope,
-            "orcle get rid of that nonsense",
+            "golem get rid of that nonsense",
             true,
             || Some("bearer".to_string()),
             move |_token: String, request: CohostCommandRequest| {

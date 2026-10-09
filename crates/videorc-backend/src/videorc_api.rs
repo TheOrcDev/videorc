@@ -3279,13 +3279,13 @@ mod tests {
             "videorc-desktop/0.9.130",
             "session-1",
             12,
-            &format!("  orcle {}", "u".repeat(400)),
+            &format!("  golem {}", "u".repeat(400)),
             Some("m-29"),
             candidates,
         )
         .expect("a request");
         assert_eq!(request.utterance.encode_utf16().count(), 300);
-        assert!(request.utterance.starts_with("orcle "));
+        assert!(request.utterance.starts_with("golem "));
         assert!(request.consent_to_process_chat);
         assert_eq!(request.seq, 12);
         assert_eq!(request.candidates.len(), 20);
@@ -3320,7 +3320,7 @@ mod tests {
             "videorc-desktop/0.9.130",
             "session-1",
             3,
-            "orcle show that",
+            "golem show that",
             Some("not-a-candidate"),
             vec![command_candidate("m-1", "ada", "hi")],
         )
@@ -3332,7 +3332,7 @@ mod tests {
                 "sessionClientId": "session-1",
                 "consentToProcessChat": true,
                 "seq": 3,
-                "utterance": "orcle show that",
+                "utterance": "golem show that",
                 "candidates": [
                     { "id": "m-1", "author": "ada", "text": "hi", "at": "2026-10-04T12:00:00Z" }
                 ]
@@ -3356,7 +3356,7 @@ mod tests {
                 "v",
                 "s",
                 1,
-                "orcle",
+                "golem",
                 None,
                 vec![command_candidate("m-1", "ada", " ")]
             ),
@@ -3369,7 +3369,7 @@ mod tests {
             .map(|index| command_candidate(&format!("w-{index}"), "viewer", &wide))
             .collect();
         many[19].id = "focus".to_string();
-        let fitted = CohostCommandRequest::shaped("v", "s", 1, "orcle", Some("focus"), many)
+        let fitted = CohostCommandRequest::shaped("v", "s", 1, "golem", Some("focus"), many)
             .expect("a request");
         assert!(serde_json::to_vec(&fitted).unwrap().len() <= COHOST_COMMAND_MAX_BODY_BYTES);
         assert!(fitted.candidates.len() < 20);
@@ -3497,7 +3497,7 @@ mod tests {
             "videorc-desktop/0.9.130",
             "session-1",
             12,
-            "orcle show what coders x asked",
+            "golem show what coders x asked",
             Some("m1"),
             vec![command_candidate(
                 "m1",

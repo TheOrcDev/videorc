@@ -48,14 +48,14 @@ if (themeArg) {
     process.exit(1)
   }
 }
-// Pages by tab id. The Orcle tab (id `ai`, ⌘9; plan 119) doubles as a probe:
-// it must render the Orcle Live switch (its Live tab, the first-run default;
+// Pages by tab id. The Golem tab (id `ai`, ⌘9; plan 119) doubles as a probe:
+// it must render the Golem Live switch (its Live tab, the first-run default;
 // plan 150), or the run fails at the end. The profile under the output folder
 // outlives a run and the tab reopens on the sub-tab used last, so the probe
 // selects Live itself.
 const pages = [
   { tab: 'studio' },
-  { tab: 'ai', name: 'orcle', subTab: 'live', mustShow: '[data-slot="golem-live-status"]' },
+  { tab: 'ai', name: 'golem', subTab: 'live', mustShow: '[data-slot="golem-live-status"]' },
   { tab: 'sources' },
   { tab: 'layout' },
   { tab: 'streaming' },
@@ -99,13 +99,13 @@ for (const id of settingsTabs) {
     console.log(shot.file)
   } catch (e) { console.log(`SKIP settings-${id}: ${e.message}`) }
 }
-// The Orcle tab has Settings' strip too (plan 150): shoot each of its tabs.
+// The Golem tab has Settings' strip too (plan 150): shoot each of its tabs.
 try {
   await cmd('open-tab', { tab: 'ai', waitFor: '[data-videorc-golem-tab]' })
   const golemTabs = await cmd('eval-js', {
     code: `return [...document.querySelectorAll('[data-videorc-golem-tab]')].map((el) => el.getAttribute('data-videorc-golem-tab'))`
   }).then(r => r.result ?? [], () => [])
-  if (golemTabs.length !== 5) failures.push(`orcle tabs: expected 5, found ${golemTabs.length}`)
+  if (golemTabs.length !== 5) failures.push(`golem tabs: expected 5, found ${golemTabs.length}`)
   for (const id of golemTabs) {
     try {
       await cmd('eval-js', {
@@ -116,7 +116,7 @@ try {
     } catch (e) { console.log(`SKIP golem-${id}: ${e.message}`) }
   }
 } catch (e) {
-  failures.push(`orcle tabs: ${e.message}`)
+  failures.push(`golem tabs: ${e.message}`)
 }
 await stopProcess(launched.process)
 if (failures.length > 0) {

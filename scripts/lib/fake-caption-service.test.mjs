@@ -314,7 +314,7 @@ describe('fake caption service', () => {
           .filter((event) => event.type === 'input-transcription-completed')
           .slice(2)
           .map((event) => event.transcript),
-        ['Orcle, highlight the comment', 'from coders X.']
+        ['Golem, highlight the comment', 'from coders X.']
       )
       socket.close()
 
@@ -336,7 +336,7 @@ describe('fake caption service', () => {
         [
           ['First scripted final.', 1],
           ['Second scripted final.', 1],
-          ['Orcle, highlight the comment', 1],
+          ['Golem, highlight the comment', 1],
           ['from coders X.', 1]
         ]
       )

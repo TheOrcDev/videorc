@@ -30,7 +30,7 @@ const target = {
 function command(patch: Partial<CohostCommand> = {}): CohostCommand {
   return {
     id: 'cmd-1',
-    heard: 'orcle highlight the comment from coders x',
+    heard: 'golem highlight the comment from coders x',
     kind: 'highlight',
     status: 'done',
     message: "Highlighted coders_x's comment.",
@@ -44,7 +44,7 @@ describe('commandStripView (plan 140, S6 part B)', () => {
   it('says what Golem heard, then what it did', () => {
     expect(commandStripView(command(), NOW)).toEqual({
       commandId: 'cmd-1',
-      heard: 'Heard: “orcle highlight the comment from coders x”',
+      heard: 'Heard: “golem highlight the comment from coders x”',
       message: "Highlighted coders_x's comment.",
       quiet: false,
       fading: false

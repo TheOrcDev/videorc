@@ -29,7 +29,7 @@ const QUIET_STATUSES: ReadonlySet<CohostCommandStatus> = new Set([
 
 export interface CommandStripView {
   commandId: string
-  /** "Heard: “orcle highlight the comment from coders x”". */
+  /** "Heard: “golem highlight the comment from coders x”". */
   heard: string
   message: string
   /** Not found, refused, unavailable: secondary text, never an alarm. */

@@ -145,7 +145,7 @@ type _RegistryIconProps = _AssertIconProps<
 /**
  * Navigation — one slot per sidebar destination. These are the icons the
  * 2026-08-25 semantic audit reviews first: several are placeholders inherited
- * from the pre-audit set (see the audit table in the Nucleo plan). The Orcle
+ * from the pre-audit set (see the audit table in the Nucleo plan). The Golem
  * tab's slot is `GolemIcon`, the Golem emblem, below.
  */
 export {
@@ -258,7 +258,7 @@ export {
   LinkSimple as LinkIcon
 } from '@phosphor-icons/react'
 /**
- * AI, tooling and appearance. Orcle (code name `cohost`) has its own mark,
+ * AI, tooling and appearance. Golem (code name `cohost`) has its own mark,
  * the real Golem artwork: `GolemIcon` below at icon size, `GolemEmblem` larger.
  */
 export {

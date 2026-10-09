@@ -12,7 +12,7 @@ import { inspectMultipartPcm16Wav } from './audio-amplitude.mjs'
  *
  * Chunk uploads carry an optional multipart `purpose` (plan 068 D5):
  * `captions` (the default when absent, like an older desktop) or `listen`
- * (Orcle's listen intent, metered apart on the real service). Anything else
+ * (Golem's listen intent, metered apart on the real service). Anything else
  * is refused with 400 like the web route. `state.chunkPurposes` records what
  * each accepted upload sent (`null` when the field was absent) and every
  * `state.chunkAudio` entry carries the effective purpose.
@@ -364,18 +364,18 @@ export async function startFakeCaptionService({
 const CHUNK_PURPOSES = new Set(['captions', 'listen'])
 
 /**
- * Plan 140 S9: Orcle voice commands as a speech model delivers them. The
+ * Plan 140 S9: Golem voice commands as a speech model delivers them. The
  * first is one command cut into two finals; the wake word starts the first.
  */
 export const GOLEM_COMMAND_FINALS = Object.freeze({
-  highlightByNameSplit: Object.freeze(['Orcle, highlight the comment', 'from coders X.']),
-  clear: Object.freeze(['Orcle, clear the highlight.']),
+  highlightByNameSplit: Object.freeze(['Golem, highlight the comment', 'from coders X.']),
+  clear: Object.freeze(['Golem, clear the highlight.']),
   removeThisOne: Object.freeze(['This one is toxic. Remove it from our chat.']),
   confirm: Object.freeze(['Yes.']),
   cancel: Object.freeze(['No.']),
-  highlightThisOne: Object.freeze(['Orcle, put this one up.']),
-  namedMarker: Object.freeze(['Orcle, make a marker here for Shadcn New Library.']),
-  negatedMarker: Object.freeze(["Orcle, don't make a marker for this topic."])
+  highlightThisOne: Object.freeze(['Golem, put this one up.']),
+  namedMarker: Object.freeze(['Golem, make a marker here for Shadcn New Library.']),
+  negatedMarker: Object.freeze(["Golem, don't make a marker for this topic."])
 })
 
 /**

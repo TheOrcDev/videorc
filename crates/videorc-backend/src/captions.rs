@@ -11632,7 +11632,7 @@ mod tests {
         let state = test_caption_app_state();
         let mut events = state.events.subscribe();
 
-        let listening = start_listen_with_bearer(&state, "orcle", || Some("b".into())).await;
+        let listening = start_listen_with_bearer(&state, "golem", || Some("b".into())).await;
         assert_eq!(
             listening.state,
             crate::cohost::CohostListeningState::Blocked
@@ -11642,7 +11642,7 @@ mod tests {
         *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
             "no-mic-session",
         ));
-        let listening = start_listen_with_bearer(&state, "orcle", || Some("b".into())).await;
+        let listening = start_listen_with_bearer(&state, "golem", || Some("b".into())).await;
         assert_eq!(listening.reason_code.as_deref(), Some("no-microphone"));
         {
             let coordinator = state.captions.lock().await;
@@ -11678,7 +11678,7 @@ mod tests {
         let recording_path = root.join("recording.mp4");
         let state = test_caption_app_state();
         let mut events = state.events.subscribe();
-        let mut heard = chunk(1, 0.0, "orcle heard this", &[]);
+        let mut heard = chunk(1, 0.0, "golem heard this", &[]);
         heard.presented = false;
         let artifact = FinalizedCaptionArtifact {
             chunks: vec![heard],
@@ -11694,7 +11694,7 @@ mod tests {
         let srt = tokio::fs::read_to_string(recording_path.with_extension("srt"))
             .await
             .expect("the Golem report's moments need the SRT even when captions never presented");
-        assert!(srt.contains("orcle heard this"));
+        assert!(srt.contains("golem heard this"));
         assert_eq!(artifact.presented_chunk_count(), 0);
         assert!(artifact.presented_chunks().is_empty());
         begin_caption_cue_render(&state, "listen-only", "ffmpeg", &recording_path, &artifact).await;
@@ -13252,7 +13252,7 @@ mod tests {
             coordinator.shadow_status.as_mut().unwrap().provider_ready = false;
         }
         let listening =
-            start_listen_with_bearer(&state, "orcle", || Some("test-bearer".into())).await;
+            start_listen_with_bearer(&state, "golem", || Some("test-bearer".into())).await;
         assert_eq!(listening, crate::cohost::CohostListening::starting());
         let session = test_caption_session(&state, true);
         session
@@ -13262,7 +13262,7 @@ mod tests {
             )
             .await;
         let listening =
-            start_listen_with_bearer(&state, "orcle", || Some("test-bearer".into())).await;
+            start_listen_with_bearer(&state, "golem", || Some("test-bearer".into())).await;
         assert_eq!(listening, crate::cohost::CohostListening::on(None));
         stop_captions(&state).await;
         stop_listen(&state).await;

@@ -197,7 +197,7 @@ try {
   const requestsBeforeCommand = fake.state.chunkRequests
   fake.state.chunkFinals.push(
     {
-      text: 'Orcle make a marker here for Voice Shadcn',
+      text: 'Golem make a marker here for Voice Shadcn',
       delayMs: 3500,
       segments: [{ text: 'make', startSecond: 0.2, endSecond: 0.4 }]
     },
@@ -244,7 +244,7 @@ try {
   )
   await ask('captions.test.inject-audio', { durationMs: 1000 })
   const timingHold = fake.holdNextRealtimeFinal()
-  const timedFinal = fake.emitRealtimeFinal('Orcle make a marker here for Realtime topic')
+  const timedFinal = fake.emitRealtimeFinal('Golem make a marker here for Realtime topic')
   await timingHold.arrived
   // Deliberate transcription latency, after the provider stamped speech time.
   await pause(3500)
@@ -260,7 +260,7 @@ try {
   assert.equal((await ask('clip.marks.list', { sessionId })).length, 0)
   // Consent retirement cancels an admitted, delayed provider completion.
   const hold = fake.holdNextRealtimeFinal()
-  const late = fake.emitRealtimeFinal('Orcle make a marker here for Cancelled title')
+  const late = fake.emitRealtimeFinal('Golem make a marker here for Cancelled title')
   await hold.arrived
   await ask('session.marker.voice.configure', { sessionId, consent: false })
   hold.release()
@@ -288,8 +288,8 @@ try {
   assert.equal(analysis.verdict.pass, true, analysis.verdict.failures.join('; '))
   const srt = readFileSync(completed.mp4Path.replace(/\.[^.]+$/, '.srt'), 'utf8')
   for (const [label, transcript] of [
-    ['Voice Shadcn New Library', 'Orcle make a marker here for Voice Shadcn'],
-    ['Realtime topic', 'Orcle make a marker here for Realtime topic']
+    ['Voice Shadcn New Library', 'Golem make a marker here for Voice Shadcn'],
+    ['Realtime topic', 'Golem make a marker here for Realtime topic']
   ]) {
     // The caption artifact independently retains the seeded audio window
     // and verb segment offset, even when transcription arrives seconds later.
@@ -415,7 +415,7 @@ try {
   await ask('session.marker.voice.configure', { sessionId: streamId, consent: true })
   await ask('captions.test.inject-audio', { durationMs: 3000, quiet: true })
   fake.state.chunkFinals.push({
-    text: 'Orcle make a marker here for Live voice topic',
+    text: 'Golem make a marker here for Live voice topic',
     segments: [{ text: 'make', startSecond: 0.2, endSecond: 0.4 }]
   })
   await ask('captions.test.inject-audio', { durationMs: 3000 })

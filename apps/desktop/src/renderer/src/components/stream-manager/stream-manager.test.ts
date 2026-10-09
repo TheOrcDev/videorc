@@ -251,7 +251,7 @@ describe('StreamManager removal cards (plan 140, S6)', () => {
         status: 'listening',
         command: {
           id: 'cmd-1',
-          heard: 'orcle remove it',
+          heard: 'golem remove it',
           kind: 'remove',
           status: 'ambiguous',
           message: 'Which comment?',
@@ -269,7 +269,7 @@ describe('StreamManager removal cards (plan 140, S6)', () => {
     expect(strip).toBeGreaterThan(-1)
     expect(chooser).toBeGreaterThan(strip)
     expect(golem.indexOf('data-slot="removal-cards"')).toBeGreaterThan(chooser)
-    expect(golem).toContain('Heard: “orcle remove it”')
+    expect(golem).toContain('Heard: “golem remove it”')
     // History never shows a command.
     expect(
       renderWith({

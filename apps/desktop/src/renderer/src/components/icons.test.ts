@@ -108,12 +108,12 @@ describe('semantic icon registry', () => {
   // icon slots that size and lay out through `svg` selectors still apply.
   it('draws Golem as the real emblem image inside an svg, whatever the weight', () => {
     const markup = (weight?: AppIconProps['weight']): string =>
-      renderToStaticMarkup(createElement(GolemIcon, { size: 16, weight, className: 'orcle' }))
+      renderToStaticMarkup(createElement(GolemIcon, { size: 16, weight, className: 'golem' }))
     const html = markup()
     expect(html).toMatch(/^<svg /)
     expect(html).toContain('viewBox="0 0 256 256"')
     expect(html).toContain('width="16"')
-    expect(html).toContain('class="orcle"')
+    expect(html).toContain('class="golem"')
     expect(html).toMatch(/<image href="[^"]*golem-emblem-64[^"]*"/)
     expect(html).toContain('preserveAspectRatio="xMidYMid meet"')
     expect(html).not.toContain('<path')

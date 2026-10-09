@@ -564,7 +564,7 @@ fn split_possessive(core: &str) -> (&str, bool) {
 }
 
 /// Unicode-aware lowercase words with their punctuation flags: "Golem," →
-/// `orcle` with a pause after it; "coders_x" is two words; "don't" is "dont".
+/// `golem` with a pause after it; "coders_x" is two words; "don't" is "dont".
 fn tokenize(text: &str, final_index: u64, at: Instant, next_ordinal: &mut u64) -> Vec<Word> {
     let mut words: Vec<Word> = Vec::new();
     let mut sentence_start = true;
@@ -2018,7 +2018,7 @@ mod tests {
 
     #[test]
     fn a_closed_command_never_extends_into_the_next_sentence() {
-        // Plan 140 S9 (smoke:orcle-commands): the clear's words used to read
+        // Plan 140 S9 (smoke:golem-commands): the clear's words used to read
         // the next final as its target, firing a second clear and losing the
         // removal.
         let mut detector = CommandDetector::default();

@@ -1082,7 +1082,7 @@ describe('applyCohostState: voice commands (plan 140, S6)', () => {
   const base = { ...EMPTY_COHOST_STATE, sessionId: 's1', status: 'listening' as const, tickSeq: 4 }
   const command = (status: 'confirm' | 'done', at: string) => ({
     id: 'cmd-1',
-    heard: 'orcle highlight the comment from coders x',
+    heard: 'golem highlight the comment from coders x',
     kind: 'highlight' as const,
     status,
     message: status === 'done' ? "Highlighted coders_x's comment." : 'Show it anyway?',
