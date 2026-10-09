@@ -1,9 +1,19 @@
-import { useEffect, useState, useSyncExternalStore } from 'react'
+import {
+  createContext,
+  createElement,
+  useContext,
+  useEffect,
+  useState,
+  useSyncExternalStore,
+  type ReactElement,
+  type ReactNode
+} from 'react'
 
 import { BackendClient } from '@/backendClient'
 import { useStudioCore } from '@/hooks/use-studio'
 import type {
   AiCapabilities,
+  CohostAvatarCreateParams,
   CohostAvatarDraft,
   CohostAvatarDraftStatus,
   CohostAvatarPhase,
@@ -77,8 +87,9 @@ export interface GolemLookController {
   getState: () => GolemLookState
   subscribe: (listener: () => void) => () => void
   refresh: () => Promise<void>
-  /** Make a new set (Create my Golem, Try again). */
-  create: (input: { description?: string; inspirationBase64?: string }) => Promise<void>
+  /** Make a new set (Create my Golem): the look, and the library avatar's
+   * name, personality and "About you" (plan 170 D13). Empty fields are left out. */
+  create: (input: CohostAvatarCreateParams) => Promise<void>
   /** Make one state of the draft again from its idle. */
   redo: (state: CohostAvatarRedoState) => Promise<void>
   /** The draft becomes the look; the saved settings, or null when refused. */
@@ -212,7 +223,7 @@ export function createGolemLookController(client: GolemLookClient): GolemLookCon
       await refresh()
       await refreshCapabilities()
     },
-    create: async ({ description, inspirationBase64 }) => {
+    create: async ({ description, inspirationBase64, name, personality, context }) => {
       if (state.pending || state.running) return
       set({ pending: 'create', problem: null, stateErrors: {}, phases: { idle: 'working' } })
       try {
@@ -220,7 +231,10 @@ export function createGolemLookController(client: GolemLookClient): GolemLookCon
           'cohost.avatar.create',
           {
             ...(description ? { description } : {}),
-            ...(inspirationBase64 ? { inspirationBase64 } : {})
+            ...(inspirationBase64 ? { inspirationBase64 } : {}),
+            ...(name ? { name } : {}),
+            ...(personality ? { personality } : {}),
+            ...(context ? { context } : {})
           },
           { timeoutMs: ACCEPT_TIMEOUT_MS }
         )
@@ -315,13 +329,13 @@ function failedLines(draft: CohostAvatarDraft): Partial<Record<CohostAvatarState
   return lines
 }
 
-/**
- * The look panel's own backend client while mounted (like the pet creator),
- * so the shell carries nothing for it. Null until it is connected.
- */
-export function useGolemLookClient(): BackendClient | null {
+/** The client the Golem tab shares (plan 170): undefined outside a provider. */
+const GolemLookClientContext = createContext<BackendClient | null | undefined>(undefined)
+
+/** A backend client of its own while `enabled` and connected; null otherwise. */
+function useOwnGolemLookClient(enabled: boolean): BackendClient | null {
   const { connection, wsStatus } = useStudioCore()
-  const online = wsStatus === 'connected' ? connection : null
+  const online = enabled && wsStatus === 'connected' ? connection : null
   const [client, setClient] = useState<BackendClient | null>(null)
   useEffect(() => {
     if (!online) return
@@ -342,7 +356,56 @@ export function useGolemLookClient(): BackendClient | null {
   return client
 }
 
-/** One controller per client, its state as React state. */
+/**
+ * One client for every Golem surface under it (the Golem tab: My Golems,
+ * the look panel and the onboarding sheet), so they share one connection
+ * and, through `useGolemLook`, one look controller: a Golem created in the
+ * sheet shows as working and then as a draft in the look panel too.
+ */
+export function GolemLookClientProvider({ children }: { children: ReactNode }): ReactElement {
+  const client = useOwnGolemLookClient(true)
+  return createElement(GolemLookClientContext.Provider, { value: client }, children)
+}
+
+/**
+ * The look panel's backend client: the provider's when there is one, else
+ * its own while mounted (like the pet creator), so the shell carries nothing
+ * for it. Null until it is connected.
+ */
+export function useGolemLookClient(): BackendClient | null {
+  const provided = useContext(GolemLookClientContext)
+  const own = useOwnGolemLookClient(provided === undefined)
+  return provided === undefined ? own : provided
+}
+
+/** One controller per client, counted by its users, so every surface on the
+ * same client sees the same draft, job and problem. */
+const sharedControllers = new WeakMap<
+  GolemLookClient,
+  { controller: GolemLookController; users: number }
+>()
+
+function acquireGolemLookController(client: GolemLookClient): GolemLookController {
+  const shared = sharedControllers.get(client)
+  if (shared) {
+    shared.users += 1
+    return shared.controller
+  }
+  const controller = createGolemLookController(client)
+  sharedControllers.set(client, { controller, users: 1 })
+  return controller
+}
+
+function releaseGolemLookController(client: GolemLookClient): void {
+  const shared = sharedControllers.get(client)
+  if (!shared) return
+  shared.users -= 1
+  if (shared.users > 0) return
+  sharedControllers.delete(client)
+  shared.controller.dispose()
+}
+
+/** The client's (shared) controller, its state as React state. */
 export function useGolemLook(client: GolemLookClient | null): {
   state: GolemLookState
   controller: GolemLookController | null
@@ -350,11 +413,11 @@ export function useGolemLook(client: GolemLookClient | null): {
   const [controller, setController] = useState<GolemLookController | null>(null)
   useEffect(() => {
     if (!client) return
-    const next = createGolemLookController(client)
+    const next = acquireGolemLookController(client)
     setController(next)
     void next.refresh()
     return () => {
-      next.dispose()
+      releaseGolemLookController(client)
       setController(null)
     }
   }, [client])

@@ -107,6 +107,31 @@ describe('createGolemLookController (plan 169 D9)', () => {
     controller.dispose()
   })
 
+  it('creates a library avatar with its name, personality and About you (plan 170 D13)', async () => {
+    const fake = fakeClient()
+    const controller = createGolemLookController(fake.client)
+    await controller.refresh()
+    await controller.create({
+      description: 'a goblin',
+      name: 'Nib',
+      personality: 'Sly.',
+      context: 'I stream on Fridays.',
+      inspirationBase64: 'AAAA'
+    })
+    expect(fake.requestTyped).toHaveBeenCalledWith(
+      'cohost.avatar.create',
+      {
+        description: 'a goblin',
+        inspirationBase64: 'AAAA',
+        name: 'Nib',
+        personality: 'Sly.',
+        context: 'I stream on Fridays.'
+      },
+      { timeoutMs: 15_000 }
+    )
+    controller.dispose()
+  })
+
   it('a create that fails its idle makes nothing and says why', async () => {
     const fake = fakeClient({ draft: draft() })
     const controller = createGolemLookController(fake.client)
