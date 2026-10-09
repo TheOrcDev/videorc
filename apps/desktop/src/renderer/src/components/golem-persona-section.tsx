@@ -147,7 +147,20 @@ export function GolemPersonaSection(): ReactElement | null {
               onChange={setBubbleStyle}
             />
             <div className="flex items-end gap-1">
-              <GolemBubbleSample persona={persona} style={persona.bubbleStyle} />
+              {/* The sample itself opens the zoom too (owner, 2026-10-09);
+                  the magnifier stays the keyboard path, so this one is
+                  out of the tab order. */}
+              <Button
+                aria-label="Zoom in on the bubble"
+                className="h-auto rounded-row p-0 hover:bg-transparent active:bg-transparent"
+                data-testid="golem-bubble-sample-zoom"
+                tabIndex={-1}
+                type="button"
+                variant="ghost"
+                onClick={() => setBubbleZoomOpen(true)}
+              >
+                <GolemBubbleSample persona={persona} style={persona.bubbleStyle} />
+              </Button>
               <Button
                 aria-label="Zoom in on the bubble"
                 data-testid="golem-bubble-zoom"

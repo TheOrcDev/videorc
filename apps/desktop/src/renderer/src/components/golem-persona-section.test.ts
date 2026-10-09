@@ -295,6 +295,18 @@ describe('GolemPersonaSection', () => {
     expect(document.querySelector('[data-testid="golem-bubble-zoom-dialog"]')).toBeNull()
   })
 
+  it('opens the zoom when the sample itself is clicked', async () => {
+    await render()
+    const sample = document.querySelector(
+      '[data-testid="golem-bubble-sample-zoom"]'
+    ) as HTMLButtonElement
+    expect(sample.querySelector('[data-slot="golem-bubble-sample"]')).not.toBeNull()
+    // The magnifier is the keyboard path; the sample is out of the tab order.
+    expect(sample.tabIndex).toBe(-1)
+    await act(async () => sample.click())
+    expect(document.querySelector('[data-testid="golem-bubble-zoom-dialog"]')).not.toBeNull()
+  })
+
   it('starts over behind a confirm: removes the folder and writes a fresh persona', async () => {
     await render({
       cohost: settings({ id: 'p-1', name: 'Grum', images: { idle: 'p-1/idle.png' } })
