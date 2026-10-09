@@ -27,6 +27,9 @@ vi.mock('@/components/golem-pet-preview-lazy', () => ({
         reactions: preview.reactions,
         gazeCount: 1,
         frameCount: 1 + preview.reactions.length,
+        neutral: 'idle',
+        gazes: [{ id: 'idle', gaze: [0, 0] }],
+        headTop: 0,
         notes: []
       })
     }, [onLoad, packId])

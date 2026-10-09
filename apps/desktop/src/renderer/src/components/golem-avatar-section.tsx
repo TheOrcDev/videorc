@@ -1,5 +1,13 @@
-import { DeleteIcon, FolderIcon, SparkleIcon, ZoomInIcon } from '@/components/icons'
-import { useState, type KeyboardEvent, type ReactElement, type ReactNode, type Ref } from 'react'
+import { DeleteIcon, FolderIcon, PlayIcon, SparkleIcon, ZoomInIcon } from '@/components/icons'
+import {
+  lazy,
+  Suspense,
+  useState,
+  type KeyboardEvent,
+  type ReactElement,
+  type ReactNode,
+  type Ref
+} from 'react'
 
 import type { GolemPetPreviewHandle, GolemPetPreviewInfo } from '@/components/golem-pet-preview'
 import { LazyGolemPetPreview } from '@/components/golem-pet-preview-lazy'
@@ -35,6 +43,9 @@ import { ipcErrorMessage } from '@/lib/ipc-error-message'
 import type { GolemMotionSettings } from '../../../shared/golem-pet'
 
 export type GolemAvatarView = 'still' | 'alive'
+
+// Test your Golem (plan 169 D14) is its own chunk, loaded on first open.
+const GolemTestDialog = lazy(() => import('@/components/golem-test-dialog'))
 
 /** The preview in its zoom dialog: big enough to check the Golem out. */
 const ZOOM_PREVIEW_PX = 420
@@ -74,7 +85,8 @@ function isTextEntry(target: EventTarget | null): boolean {
 
 /**
  * Avatar (plan 168 S-D2, D2): Still or Alive, with the living preview
- * beside it. Still is the four state images (the plan 164 tiles); Alive is
+ * beside it, its zoom and Test (plan 169 D14, T while the section has
+ * focus). Still is the four state images (the plan 164 tiles); Alive is
  * a pet pack, chosen from the persona's packs, imported from a page-pet
  * folder (free, `Kbd` I) or made with the creator (Premium, Phase F).
  * Everything persists through `patchCohostSettings` with no success toast:
@@ -111,6 +123,9 @@ export function GolemAvatarSection({
   const [removeOpen, setRemoveOpen] = useState(false)
   const [zoomOpen, setZoomOpen] = useState(false)
   const [zoomError, setZoomError] = useState<string | null>(null)
+  const [testOpen, setTestOpen] = useState(false)
+  // Each open starts a fresh test (Idle, the bubble on); 0 = never opened.
+  const [testSession, setTestSession] = useState(0)
   const wornPackId = persona.avatar.kind === 'alive' ? persona.avatar.packId : null
 
   const importPack = async (): Promise<void> => {
@@ -152,9 +167,18 @@ export function GolemAvatarSection({
     }
   }
 
+  const openTest = (): void => {
+    setTestSession((session) => session + 1)
+    setTestOpen(true)
+  }
+
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
-    if (view !== 'alive' || event.metaKey || event.ctrlKey || event.altKey) return
-    if ((event.key === 'i' || event.key === 'I') && !isTextEntry(event.target)) {
+    if (event.metaKey || event.ctrlKey || event.altKey || isTextEntry(event.target)) return
+    const key = event.key.toLowerCase()
+    if (key === 't' && previewPackId) {
+      event.preventDefault()
+      openTest()
+    } else if (key === 'i' && view === 'alive') {
       event.preventDefault()
       void importPack()
     }
@@ -192,7 +216,7 @@ export function GolemAvatarSection({
       title="Avatar"
     >
       <div
-        className="flex flex-col gap-4 sm:flex-row sm:items-start"
+        className="group/avatar flex flex-col gap-4 sm:flex-row sm:items-start"
         data-testid="golem-avatar"
         data-view={view}
         onKeyDown={onKeyDown}
@@ -223,23 +247,39 @@ export function GolemAvatarSection({
                 {previewError}
               </p>
             ) : (
-              <div className="flex items-center gap-1">
-                <p className="text-[11px] text-subtle">Click it to react</p>
+              <>
+                <div className="flex items-center gap-1">
+                  <p className="text-[11px] text-subtle">Click it to react</p>
+                  <Button
+                    aria-label={`Zoom in on ${persona.name}`}
+                    data-testid="golem-preview-zoom"
+                    size="icon-xs"
+                    title="Zoom in"
+                    type="button"
+                    variant="ghost"
+                    onClick={() => {
+                      setZoomError(null)
+                      setZoomOpen(true)
+                    }}
+                  >
+                    <ZoomInIcon />
+                  </Button>
+                </div>
                 <Button
-                  aria-label={`Zoom in on ${persona.name}`}
-                  data-testid="golem-preview-zoom"
-                  size="icon-xs"
-                  title="Zoom in"
+                  aria-keyshortcuts="T"
+                  data-testid="golem-test-open"
+                  size="xs"
+                  title="Test each state"
                   type="button"
                   variant="ghost"
-                  onClick={() => {
-                    setZoomError(null)
-                    setZoomOpen(true)
-                  }}
+                  onClick={openTest}
                 >
-                  <ZoomInIcon />
+                  <PlayIcon data-icon="inline-start" />
+                  Test
+                  {/* The key works while the section has focus; its chip shows then. */}
+                  <Kbd className="hidden group-focus-within/avatar:inline-flex">T</Kbd>
                 </Button>
-              </div>
+              </>
             )}
           </div>
         ) : null}
@@ -305,6 +345,19 @@ export function GolemAvatarSection({
             ) : null}
           </DialogContent>
         </Dialog>
+      ) : null}
+
+      {previewPackId && testSession > 0 ? (
+        <Suspense fallback={null}>
+          <GolemTestDialog
+            key={testSession}
+            motion={motion}
+            open={testOpen}
+            packId={previewPackId}
+            persona={persona}
+            onOpenChange={setTestOpen}
+          />
+        </Suspense>
       ) : null}
 
       <Dialog open={removeOpen} onOpenChange={setRemoveOpen}>

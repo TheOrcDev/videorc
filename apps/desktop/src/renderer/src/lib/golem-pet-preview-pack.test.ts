@@ -140,6 +140,37 @@ describe('loadGolemPreviewPack: a pet pack', () => {
   })
 })
 
+describe('the head top (D16, for the Test dialog bubble)', () => {
+  it("measures the neutral cell's first row with alpha above 16, else 0", async () => {
+    const files = {
+      'manifest.json': encoder.encode(JSON.stringify(MANIFEST)),
+      'pet.webp': new Uint8Array([1, 2, 3])
+    }
+    const { fake, scaled } = deps(files)
+    const read = vi.fn((_cell, side: number) => {
+      const data = new Uint8ClampedArray(side * side * 4)
+      // A faint row (alpha 16) at 10 %, the silhouette from 25 %.
+      for (let col = 0; col < side; col += 1)
+        data[(Math.round(side * 0.1) * side + col) * 4 + 3] = 16
+      data[(Math.round(side * 0.25) * side + side / 2) * 4 + 3] = 200
+      return { width: side, height: side, data }
+    })
+    const pack = await loadGolemPreviewPack(
+      { personaId: 'p-1', packId: 'bundled:golem', pixelSize: 320 },
+      { ...fake, readCellPixels: read }
+    )
+    expect(pack.headTop).toBe(0.25)
+    // The neutral cell, not the reaction.
+    expect(read.mock.calls[0]?.[0]?.image).toBe(scaled[0])
+    // A host that cannot read pixels anchors at the top of the box.
+    const blind = await loadGolemPreviewPack(
+      { personaId: 'p-1', packId: 'bundled:golem', pixelSize: 320 },
+      { ...deps(files).fake, readCellPixels: () => null }
+    )
+    expect(blind.headTop).toBe(0)
+  })
+})
+
 describe('loadGolemPreviewPack: Still (D2 flat pack)', () => {
   it('builds idle as the one gaze cell and talk, laugh, think as reactions falling back to idle', async () => {
     const { fake } = deps({})

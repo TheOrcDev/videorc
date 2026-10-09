@@ -40,6 +40,12 @@ export interface GolemPetPreviewInfo {
   reactions: string[]
   gazeCount: number
   frameCount: number
+  /** The neutral gaze cell's id. */
+  neutral: string
+  /** Every gaze cell and where it looks, in manifest order. */
+  gazes: { id: string; gaze: readonly [number, number] }[]
+  /** The top of the neutral silhouette in its box (0 to 1), where a bubble's tail points (D16). */
+  headTop: number
   /** Fallbacks taken while loading (a Still image that would not load). */
   notes: string[]
 }
@@ -60,6 +66,8 @@ export interface GolemPetPreviewProps {
   stillImages?: CohostPersona['images']
   /** Hold one frame while set (page-pet's `pose`), e.g. the state on air. */
   pose?: string | null
+  /** Run the on-stream talk cycle (D12) while true: talk frames, else a bob. */
+  talking?: boolean
   /** The pet's name for assistive tech. */
   label?: string
   /** Shown until the first frame is drawn, and when the pack cannot load. */
@@ -104,6 +112,7 @@ export function GolemPetPreview({
   motion = GOLEM_MOTION_DEFAULTS,
   stillImages,
   pose = null,
+  talking = false,
   label,
   placeholder,
   className,
@@ -135,8 +144,28 @@ export function GolemPetPreview({
   const active = pack !== null && pageVisible && onscreen
   activeRef.current = active
 
-  const latest = useRef({ onLoad, onError, motion, reduced, pose, size, stillImages, readFile })
-  latest.current = { onLoad, onError, motion, reduced, pose, size, stillImages, readFile }
+  const latest = useRef({
+    onLoad,
+    onError,
+    motion,
+    reduced,
+    pose,
+    talking,
+    size,
+    stillImages,
+    readFile
+  })
+  latest.current = {
+    onLoad,
+    onError,
+    motion,
+    reduced,
+    pose,
+    talking,
+    size,
+    stillImages,
+    readFile
+  }
 
   // The pack: loaded once per persona, pack, Still images and pixel size.
   useEffect(() => {
@@ -169,6 +198,11 @@ export function GolemPetPreview({
           reactions: loaded.reactions,
           gazeCount: loaded.gazeCount,
           frameCount: loaded.frames.length,
+          neutral: loaded.neutral,
+          gazes: loaded.frames.flatMap((frame) =>
+            frame.kind === 'gaze' && frame.gaze ? [{ id: frame.id, gaze: frame.gaze }] : []
+          ),
+          headTop: loaded.headTop,
           notes: loaded.notes
         })
       },
@@ -193,7 +227,13 @@ export function GolemPetPreview({
       playerRef.current = null
       return
     }
-    const { motion: settings, reduced: reducedNow, pose: held, size: drawnSize } = latest.current
+    const {
+      motion: settings,
+      reduced: reducedNow,
+      pose: held,
+      talking: talkingNow,
+      size: drawnSize
+    } = latest.current
     const player = new GolemPetPlayer({
       pack,
       size: drawnSize,
@@ -202,6 +242,7 @@ export function GolemPetPreview({
       now: performance.now()
     })
     if (held) player.pose(held, performance.now())
+    if (talkingNow) player.setTalking(true, performance.now())
     playerRef.current = player
     return () => {
       player.stop()
@@ -222,6 +263,10 @@ export function GolemPetPreview({
   useEffect(() => {
     if (playerRef.current?.pose(pose, performance.now())) kickRef.current?.()
   }, [pack, pose])
+  useEffect(() => {
+    playerRef.current?.setTalking(talking, performance.now())
+    kickRef.current?.()
+  }, [pack, talking])
 
   // Visible and on screen, like page-pet's `active`.
   useEffect(() => {
