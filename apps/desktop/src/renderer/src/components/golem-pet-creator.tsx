@@ -39,6 +39,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { LazyGolemPetPreview } from '@/components/golem-pet-preview-lazy'
 import { generateThroughClient } from '@/hooks/use-golem-avatar'
 import {
   useGolemPetCreator,
@@ -699,94 +700,6 @@ function AtlasCell({
       className={cn('shrink-0 rounded-chip bg-muted/30', className)}
       role="img"
       style={style}
-    />
-  )
-}
-
-/**
- * Placeholder for Phase D's live preview (`LazyGolemPetPreview`): the same
- * props, plus `readFile` so an unsaved pack in the creation folder can play.
- * It shows the pack's neutral cell, still.
- */
-export function GolemPetPreviewSlot({
-  personaId,
-  packId,
-  size,
-  readFile,
-  onLoad,
-  onError
-}: {
-  personaId: string
-  packId: string
-  size: number
-  interactive?: boolean
-  pose?: string
-  motion?: unknown
-  onLoad?: () => void
-  onError?: (message: string) => void
-  /** Reads one pack file (`manifest.json`, a sheet); defaults to the saved pack. */
-  readFile?: (file: string) => Promise<Uint8Array | null>
-}): ReactElement {
-  const [cell, setCell] = useState<{ key: string; atlas: CreationAtlas; frame: string } | null>(
-    null
-  )
-  const key = `${personaId}/${packId}`
-  useEffect(() => {
-    let disposed = false
-    let url: string | null = null
-    const read =
-      readFile ??
-      ((file: string) =>
-        window.videorc?.readGolemPetFile?.(personaId, packId, file) ?? Promise.resolve(null))
-    void (async () => {
-      const manifestBytes = await read('manifest.json')
-      if (!manifestBytes) throw new Error('The pack has no manifest.')
-      const manifest = JSON.parse(new TextDecoder().decode(manifestBytes)) as {
-        neutral: string
-        frames: { id: string; sheet: string; rect: [number, number, number, number] }[]
-      }
-      const neutral = manifest.frames.find((frame) => frame.id === manifest.neutral)
-      if (!neutral) throw new Error('The pack has no neutral pose.')
-      const sheet = await read(neutral.sheet)
-      if (!sheet || disposed) return
-      url = URL.createObjectURL(
-        new Blob([sheet as BlobPart], {
-          type: neutral.sheet.endsWith('.png') ? 'image/png' : 'image/webp'
-        })
-      )
-      const same = manifest.frames.filter((frame) => frame.sheet === neutral.sheet)
-      setCell({
-        key,
-        frame: neutral.id,
-        atlas: {
-          url,
-          neutral: neutral.id,
-          frames: new Map(same.map((frame) => [frame.id, frame.rect] as const)),
-          width: Math.max(...same.map((frame) => frame.rect[0] + frame.rect[2])),
-          height: Math.max(...same.map((frame) => frame.rect[1] + frame.rect[3]))
-        }
-      })
-      onLoad?.()
-    })().catch((error: unknown) => {
-      if (!disposed) onError?.(error instanceof Error ? error.message : 'The pack did not load.')
-    })
-    return () => {
-      disposed = true
-      if (url) URL.revokeObjectURL(url)
-    }
-    // The pack is the identity; the callbacks may change every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key])
-  if (!cell || cell.key !== key) {
-    return <Skeleton className="shrink-0 rounded-row" style={{ width: size, height: size }} />
-  }
-  return (
-    <AtlasCell
-      atlas={cell.atlas}
-      className="rounded-row"
-      frame={cell.frame}
-      label="Your Golem"
-      size={size}
     />
   )
 }
@@ -1465,10 +1378,11 @@ function ReviewStep({
           ))}
         </div>
         <aside className="flex flex-col items-center gap-2">
-          <GolemPetPreviewSlot
+          <LazyGolemPetPreview
             interactive
             packId={creation.buildId}
             personaId={personaId}
+            reloadKey={creation.build?.finishedAt ?? ''}
             readFile={(file) =>
               window.videorc?.readGolemCreationFile?.(
                 personaId,

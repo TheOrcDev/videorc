@@ -67,6 +67,13 @@ export interface GolemPetPreviewProps {
   className?: string
   onLoad?: (info: GolemPetPreviewInfo) => void
   onError?: (reason: string) => void
+  /**
+   * Reads one pack file (`manifest.json`, a sheet) instead of the saved pack
+   * under the managed root, e.g. the creator's unsaved build (plan 168 S-F5).
+   */
+  readFile?: (file: string) => Promise<Uint8Array | null>
+  /** Changing it reloads the pack under the same id (a rebuilt creation). */
+  reloadKey?: string
   ref?: Ref<GolemPetPreviewHandle>
 }
 
@@ -102,6 +109,8 @@ export function GolemPetPreview({
   className,
   onLoad,
   onError,
+  readFile,
+  reloadKey = '',
   ref
 }: GolemPetPreviewProps): ReactElement {
   const systemReduced = useReducedMotion()
@@ -125,20 +134,27 @@ export function GolemPetPreview({
   const active = pack !== null && pageVisible && onscreen
   activeRef.current = active
 
-  const latest = useRef({ onLoad, onError, motion, reduced, pose, size, stillImages })
-  latest.current = { onLoad, onError, motion, reduced, pose, size, stillImages }
+  const latest = useRef({ onLoad, onError, motion, reduced, pose, size, stillImages, readFile })
+  latest.current = { onLoad, onError, motion, reduced, pose, size, stillImages, readFile }
 
   // The pack: loaded once per persona, pack, Still images and pixel size.
   useEffect(() => {
     const controller = new AbortController()
     // The pack on screen keeps playing until its replacement is ready.
-    loadGolemPreviewPack({
+    const readOverride = latest.current.readFile
+    const request = {
       personaId,
       packId,
       stillImages: latest.current.stillImages,
       pixelSize,
       signal: controller.signal
-    }).then(
+    }
+    ;(readOverride
+      ? loadGolemPreviewPack(request, {
+          readPackFile: (_persona, _pack, file) => readOverride(file)
+        })
+      : loadGolemPreviewPack(request)
+    ).then(
       (loaded) => {
         if (controller.signal.aborted) {
           disposeGolemPreviewPack(loaded)
@@ -165,7 +181,7 @@ export function GolemPetPreview({
       }
     )
     return () => controller.abort()
-  }, [personaId, packId, stillKey, pixelSize])
+  }, [personaId, packId, stillKey, pixelSize, reloadKey])
 
   // A replaced or unmounted pack releases its bitmaps.
   useEffect(() => () => disposeGolemPreviewPack(pack), [pack])
