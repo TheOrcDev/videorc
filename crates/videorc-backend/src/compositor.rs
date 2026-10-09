@@ -17186,6 +17186,81 @@ mod golem_sprite_tests {
         }
     }
 
+    #[test]
+    fn both_legs_of_a_frame_draw_the_golem_at_one_clock() {
+        // Plan 168 S-C4: `publish_compositor_frame` reads the slot clock once
+        // per frame at `published_at` and hands it to both legs. At one clock
+        // the animator steps once: a leg asked again draws what it drew, and
+        // only the next frame moves on.
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            crate::storage::Database::open_in_memory_for_tests(),
+        );
+        let primary = (WIDTH, HEIGHT);
+        let auxiliary = (HEIGHT, WIDTH);
+        for (leg, canvas) in [
+            (crate::golem_sprite::GolemSpriteLeg::Primary, primary),
+            (crate::golem_sprite::GolemSpriteLeg::Auxiliary, auxiliary),
+        ] {
+            state.golem_sprite.install_atlas_for_test(
+                leg,
+                canvas,
+                crate::golem_animator::tests::alive(),
+            );
+        }
+        let published_at = Instant::now();
+        let draw = |leg, canvas, now| {
+            golem_leg_frame(&state, leg, canvas, now, None, None)
+                .sprite
+                .expect("the pet draws")
+                .draw
+        };
+        state
+            .golem_sprite
+            .notify(crate::golem_animator::GolemAnimatorEvent::React {
+                reaction: "surprised".to_string(),
+            });
+        let mut previous = None;
+        for frame in 0..20_u32 {
+            let at = published_at + Duration::from_millis(u64::from(frame) * 33);
+            let now = state.golem_sprite.clock_seconds(at);
+            assert_eq!(
+                now.to_bits(),
+                state.golem_sprite.clock_seconds(at).to_bits()
+            );
+            let first = (
+                draw(crate::golem_sprite::GolemSpriteLeg::Primary, primary, now),
+                draw(
+                    crate::golem_sprite::GolemSpriteLeg::Auxiliary,
+                    auxiliary,
+                    now,
+                ),
+            );
+            let again = (
+                draw(crate::golem_sprite::GolemSpriteLeg::Primary, primary, now),
+                draw(
+                    crate::golem_sprite::GolemSpriteLeg::Auxiliary,
+                    auxiliary,
+                    now,
+                ),
+            );
+            assert_eq!(first, again, "frame {frame}");
+            // Both legs turn the same body: one motion state, each at its size.
+            assert_eq!(first.0.affine, first.1.affine, "frame {frame}");
+            if (1..10).contains(&frame) {
+                assert_ne!(
+                    Some(first),
+                    previous,
+                    "frame {frame} moves with the reaction"
+                );
+            }
+            previous = Some(first);
+        }
+    }
+
     /// The pet's per-frame draw comes from the slot for the leg's canvas: no
     /// pet before its atlas exists (the bubble still has its anchor), then
     /// the state's cell at rest in the box.

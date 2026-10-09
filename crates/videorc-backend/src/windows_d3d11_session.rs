@@ -109,6 +109,15 @@ fn windows_d3d11_bubble_layer_geometry(
     )
 }
 
+/// The pump's Golem clock (plan 168 S-C4): `output_sequence / fps`, the
+/// pump's own deterministic time, the first animation clock on this path.
+/// Both legs of a tick read the same value, so the animator steps once per
+/// tick and a repeated tick draws exactly what it drew.
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_golem_clock_seconds(output_sequence: u64, render_fps: u32) -> f64 {
+    output_sequence as f64 / f64::from(render_fps.max(1))
+}
+
 /// The Golem's pet as a D3D11 layer (plan 168 S-B4): the untransformed
 /// square (plus the draw's translation) normalized to the leg's output, the
 /// atlas cell as the crop, and the 2x2 turn about the pivot for `SceneVs`.
@@ -2242,12 +2251,12 @@ mod runtime {
                 pace_render_tick(frame_started_at, frame_interval);
                 continue;
             }
-            // Plan 168 S-B4: the Golem's pet per leg on the pump's own
-            // deterministic clock (Phase C's animator reads it).
+            // Plan 168 S-B4 / S-C4: the Golem's pet per leg on the pump's
+            // own deterministic clock; the animator steps once per tick.
             let golem_legs = current_golem_legs(
                 &plan,
                 &overlays,
-                tick.output_sequence as f64 / f64::from(render_fps),
+                super::windows_d3d11_golem_clock_seconds(tick.output_sequence, render_fps),
             );
             let overlay_frames = match current_overlay_frames(&plan, &overlays, &golem_legs) {
                 Ok(frames) => frames,
@@ -3166,6 +3175,87 @@ mod runtime {
     /// Windows CI gate for it.
     #[cfg(test)]
     #[test]
+    fn windows_golem_legs_of_one_tick_share_the_animator_step() {
+        // Plan 168 S-C4: the pump asks both legs at one clock; asking again
+        // at that clock draws the same, the next tick moves on.
+        let video = super::WindowsD3d11VideoPlan {
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4500,
+        };
+        let plan = WindowsD3d11SessionPlan {
+            screen_id: "screen:dxgi:00000000000003f1:2".into(),
+            source_width: 1920,
+            source_height: 1080,
+            primary: video,
+            auxiliary: Some(video),
+            camera_required: false,
+            preview_required_at_startup: false,
+            primary_role: WindowsD3d11MediaRole::Record,
+            roles: [WindowsD3d11MediaRole::Record, WindowsD3d11MediaRole::Stream]
+                .into_iter()
+                .collect(),
+        };
+        let input = WindowsD3d11OverlayInput {
+            captions: crate::captions::new_caption_overlay_slots(),
+            highlight: crate::captions::new_caption_overlay_slot(),
+            golem: crate::captions::new_caption_overlay_slots(),
+            golem_sprite: crate::golem_sprite::GolemSpriteSlot::new(
+                &crate::cohost::CohostPersona::default(),
+                crate::overlay_layout::OverlayLayout::default().golem,
+                None,
+            ),
+            caption_on_primary: false,
+            caption_on_auxiliary: false,
+            highlight_on_primary: false,
+            highlight_on_auxiliary: false,
+            golem_on_primary: true,
+            golem_on_auxiliary: true,
+        };
+        input
+            .golem_sprite
+            .set_source(Box::new(crate::golem_animator::GolemAnimatorSource::new(
+                crate::golem_animator::GolemAnimatorSettings::default(),
+                7,
+            )));
+        for leg in crate::golem_sprite::GolemSpriteLeg::ALL {
+            input.golem_sprite.install_atlas_for_test(
+                leg,
+                (1280, 720),
+                crate::golem_animator::tests::alive(),
+            );
+        }
+        let draws = |clock: f64| {
+            current_golem_legs(&plan, &input, clock)
+                .map(|leg| leg.and_then(|leg| leg.sprite).map(|sprite| sprite.draw))
+        };
+        let mut previous = None;
+        for sequence in 1..=90_u64 {
+            if sequence == 10 {
+                input
+                    .golem_sprite
+                    .notify(crate::golem_animator::GolemAnimatorEvent::React {
+                        reaction: "surprised".to_string(),
+                    });
+            }
+            let clock = super::windows_d3d11_golem_clock_seconds(sequence, 30);
+            let first = draws(clock);
+            assert!(first.iter().all(Option::is_some), "tick {sequence}");
+            assert_eq!(draws(clock), first, "tick {sequence} asked twice");
+            if (11..20).contains(&sequence) {
+                assert_ne!(
+                    Some(first),
+                    previous,
+                    "tick {sequence} moves with the reaction"
+                );
+            }
+            previous = Some(first);
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
     fn windows_overlay_frames_stack_the_golem_between_captions_and_the_card() {
         use crate::captions::CaptionOverlayPosition;
         use crate::overlay_layout::OverlayRect;
@@ -3661,6 +3751,22 @@ pub(crate) use runtime::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_golem_clock_is_the_output_sequence_over_the_fps() {
+        assert_eq!(windows_d3d11_golem_clock_seconds(0, 30), 0.0);
+        assert_eq!(windows_d3d11_golem_clock_seconds(30, 30), 1.0);
+        assert_eq!(windows_d3d11_golem_clock_seconds(90, 60), 1.5);
+        // The same tick is the same time, to the bit.
+        assert_eq!(
+            windows_d3d11_golem_clock_seconds(1234, 30).to_bits(),
+            windows_d3d11_golem_clock_seconds(1234, 30).to_bits()
+        );
+        // A tick later is one frame later.
+        let step = windows_d3d11_golem_clock_seconds(1235, 30)
+            - windows_d3d11_golem_clock_seconds(1234, 30);
+        assert!((step - 1.0 / 30.0).abs() < 1e-12, "{step}");
+    }
 
     fn request() -> WindowsD3d11SessionRequest {
         WindowsD3d11SessionRequest {
