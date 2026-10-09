@@ -38,9 +38,9 @@ export interface GolemLibraryCard {
   /** Official cards are read-only: Use and Make it Alive only. */
   kind: 'official' | 'mine'
   name: string
-  /** The second line: the official character's kind, or what was asked for. */
+  /** The second line: the official character's tagline, or what was asked for. */
   subtitle: string
-  /** The tooltip on the card: the tagline, or the description in full. */
+  /** The tooltip on the card: the official personality, or the description in full. */
   hint: string
   /** Official cards carry their slug (the picture is bundled); mine carry a cached idle URL. */
   slug: GolemOfficialSlug | null
@@ -86,8 +86,8 @@ function officialCard(
     id: entry.id,
     kind: 'official',
     name: entry.name,
-    subtitle: entry.kind,
-    hint: entry.tagline,
+    subtitle: entry.tagline,
+    hint: entry.personality,
     slug: entry.slug,
     idleUrl: null,
     active: entry.id === activeId,

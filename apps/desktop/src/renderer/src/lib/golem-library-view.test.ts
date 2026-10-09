@@ -84,11 +84,11 @@ describe('golemLibraryView (plan 170 D16)', () => {
       'Bolt'
     ])
     expect(view.official.map((card) => card.subtitle)).toEqual([
-      'Golem',
-      'Orc',
-      'Goblin',
-      'Pirate',
-      'Robot'
+      'The original. Steady as stone.',
+      'Loud, loyal, all horde.',
+      'Small, sly and in on the joke.',
+      'Calls your chat his crew.',
+      'Polite, precise, loves a stat.'
     ])
     expect(view.official.every((card) => card.kind === 'official' && !card.active)).toBe(true)
     expect(view.mine?.map((card) => [card.name, card.active])).toEqual([
