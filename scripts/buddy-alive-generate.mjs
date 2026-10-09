@@ -491,7 +491,11 @@ function contactSheet({ atlasPng, rects, key, title, out, sourcePath }) {
     rows.push([
       '(',
       ...rowCells.flatMap((cell) =>
-        cellArgs(atlasPng, rects.get(cell.id), `${cell.id}  ${cell.label}`)
+        cellArgs(
+          atlasPng,
+          rects.get(cell.id),
+          cell.label === cell.id ? cell.id : `${cell.id}  ${cell.label}`
+        )
       ),
       '+append',
       ')'
