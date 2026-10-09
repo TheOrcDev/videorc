@@ -614,11 +614,12 @@ async fn golem_pet_creation_runs_from_pilot_to_a_saved_pack() {
     );
     // Every pack file passes the store's allow-list (main can read it back).
     for entry in walk(&pack) {
+        // Compare with `/` on every platform: Windows paths stringify with `\`.
         let relative = entry
             .strip_prefix(&pack)
             .unwrap()
             .to_string_lossy()
-            .to_string();
+            .replace('\\', "/");
         assert!(
             relative == "sources"
                 || relative.ends_with(".json")
