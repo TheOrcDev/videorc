@@ -4174,4 +4174,193 @@ mod tests {
             .is_err()
         );
     }
+    /// The S-B5 draw (the CPU and Metal parity fixture's): cell 4 of the 3 x
+    /// 2 atlas, 150 px from 120 px cells, turned 30 degrees, scaled 1.1 x 0.9
+    /// about page-pet's pivot and nudged by (12, -7).
+    fn golem_parity_sprite() -> crate::golem_sprite::GolemSpriteLayer {
+        let atlas = std::sync::Arc::new(crate::golem_sprite::tests::parity_atlas(120));
+        let (sin, cos) = 30.0_f32.to_radians().sin_cos();
+        let draw = crate::golem_sprite::GolemSpriteDraw {
+            affine: [cos * 1.1, sin * 1.1, -sin * 0.9, cos * 0.9],
+            translate: [12.0, -7.0],
+            ..crate::golem_sprite::GolemSpriteDraw::at_rest(
+                atlas.cell("cell-4").unwrap().rect,
+                [565.0, 285.0, 150.0, 150.0],
+                crate::golem_sprite::GOLEM_SPRITE_DEFAULT_PIVOT,
+            )
+        };
+        crate::golem_sprite::GolemSpriteLayer { atlas, draw }
+    }
+
+    fn plan_one_layer(
+        layer: crate::windows_d3d11_compositor::WindowsD3d11SceneLayerInput,
+        canvas: (u32, u32),
+    ) -> crate::windows_d3d11_compositor::WindowsD3d11PlannedLayer {
+        use crate::windows_d3d11_compositor::{
+            WindowsD3d11CanvasOrientation, WindowsD3d11OutputDimensions,
+            WindowsD3d11ScenePlanRequest, build_windows_d3d11_scene_plan,
+        };
+        build_windows_d3d11_scene_plan(WindowsD3d11ScenePlanRequest {
+            adapter_luid: crate::windows_d3d11_device::DxgiAdapterLuid::from_u64(1),
+            generation: 1,
+            sequence: 1,
+            orientation: if canvas.0 >= canvas.1 {
+                WindowsD3d11CanvasOrientation::Horizontal
+            } else {
+                WindowsD3d11CanvasOrientation::Vertical
+            },
+            canvas_dimensions: WindowsD3d11OutputDimensions::new(canvas.0, canvas.1).unwrap(),
+            layers: vec![layer],
+            encoded_outputs: vec![],
+        })
+        .unwrap()
+        .layers[0]
+    }
+
+    /// Plan 168 S-B4/S-B5, the D3D11 twin on every host: the planned sprite
+    /// layer and `SceneVs`'s turn (its Rust twin) put the quad's corners
+    /// where the CPU and Metal paths put them, on the leg's own output and on
+    /// a larger target of the same aspect; the source rect is the atlas cell.
+    #[test]
+    fn windows_d3d11_golem_sprite_vertices_match_the_cpu_and_metal_quad() {
+        use crate::windows_d3d11_compositor::{
+            WindowsD3d11SceneOutputTargets, WindowsD3d11SceneSourceKind, windows_d3d11_scene_vertex,
+        };
+        let sprite = golem_parity_sprite();
+        let layer = windows_d3d11_golem_sprite_layer(
+            16,
+            &sprite,
+            (1280, 720),
+            WindowsD3d11SceneOutputTargets::PRIMARY,
+            11,
+        )
+        .unwrap();
+        let planned = plan_one_layer(layer, (1280, 720));
+        assert_eq!(
+            planned.source_kind,
+            WindowsD3d11SceneSourceKind::GolemSprite
+        );
+        assert_eq!(planned.effects.opacity, 1.0);
+        let expected = sprite.draw.corners();
+        for (width, height) in [(1280.0_f32, 720.0_f32), (1920.0, 1080.0)] {
+            let scale = width / 1280.0;
+            for (unit, want) in [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]
+                .into_iter()
+                .zip(expected)
+            {
+                let [x, y] = windows_d3d11_scene_vertex(
+                    planned.destination_normalized,
+                    planned.effects.sprite,
+                    [1.0 / width, 1.0 / height],
+                    unit,
+                );
+                assert!(
+                    (x * width - want[0] * scale).abs() < 0.05
+                        && (y * height - want[1] * scale).abs() < 0.05,
+                    "corner {unit:?} at {width}x{height}: ({}, {}) vs {want:?}",
+                    x * width,
+                    y * height
+                );
+            }
+        }
+        let [cell_x, cell_y, cell_w, cell_h] = sprite.draw.cell;
+        let (atlas_w, atlas_h) = (sprite.atlas.width as f32, sprite.atlas.height as f32);
+        for (got, want) in planned.source_uv.into_iter().zip([
+            cell_x as f32 / atlas_w,
+            cell_y as f32 / atlas_h,
+            cell_w as f32 / atlas_w,
+            cell_h as f32 / atlas_h,
+        ]) {
+            assert!((got - want).abs() < 1e-6, "source uv {got} vs {want}");
+        }
+        // Every other layer keeps its exact axis-aligned vertices.
+        assert_eq!(
+            windows_d3d11_scene_vertex([0.25, 0.5, 0.5, 0.25], None, [1.0, 1.0], [1.0, 1.0]),
+            [0.75, 0.75]
+        );
+    }
+
+    /// D7: the pet hanging off the canvas edge is clipped by the rasterizer
+    /// (its square stays whole), where an ordinary layer is squashed into
+    /// the canvas by the planner.
+    #[test]
+    fn windows_d3d11_golem_sprite_clips_at_the_canvas_edge_instead_of_squashing() {
+        use crate::windows_d3d11_compositor::{
+            WindowsD3d11SceneOutputTargets, WindowsD3d11SceneSourceKind,
+        };
+        let mut sprite = golem_parity_sprite();
+        sprite.draw = crate::golem_sprite::GolemSpriteDraw::at_rest(
+            sprite.draw.cell,
+            [1200.0, 300.0, 120.0, 120.0],
+            crate::golem_sprite::GOLEM_SPRITE_DEFAULT_PIVOT,
+        );
+        let layer = windows_d3d11_golem_sprite_layer(
+            16,
+            &sprite,
+            (1280, 720),
+            WindowsD3d11SceneOutputTargets::PRIMARY,
+            11,
+        )
+        .unwrap();
+        let planned = plan_one_layer(layer, (1280, 720));
+        let [x, _, w, _] = planned.destination_normalized;
+        assert!((x - 1200.0 / 1280.0).abs() < 1e-6);
+        assert!(
+            (w - 120.0 / 1280.0).abs() < 1e-6,
+            "the square is not squashed"
+        );
+        assert!(
+            x + w > 1.0,
+            "it hangs off the right edge; the rasterizer clips it"
+        );
+        let mut squashed = layer;
+        squashed.source_kind = WindowsD3d11SceneSourceKind::GolemOverlay;
+        squashed.effects.sprite = None;
+        let ordinary = plan_one_layer(squashed, (1280, 720));
+        assert!(
+            ordinary.destination_normalized[0] + ordinary.destination_normalized[2] <= 1.0 + 1e-6
+        );
+        // A sprite transform on any other kind is refused.
+        let mut stray = layer;
+        stray.source_kind = WindowsD3d11SceneSourceKind::GolemOverlay;
+        assert!(
+            crate::windows_d3d11_compositor::build_windows_d3d11_scene_plan(
+                crate::windows_d3d11_compositor::WindowsD3d11ScenePlanRequest {
+                    adapter_luid: crate::windows_d3d11_device::DxgiAdapterLuid::from_u64(1),
+                    generation: 1,
+                    sequence: 1,
+                    orientation:
+                        crate::windows_d3d11_compositor::WindowsD3d11CanvasOrientation::Horizontal,
+                    canvas_dimensions:
+                        crate::windows_d3d11_compositor::WindowsD3d11OutputDimensions::new(
+                            1280, 720
+                        )
+                        .unwrap(),
+                    layers: vec![stray],
+                    encoded_outputs: vec![],
+                }
+            )
+            .is_err()
+        );
+    }
+
+    /// D16 on D3D11: the bubble sits above the pet's head through the same
+    /// oracle as the CPU and Metal paths.
+    #[test]
+    fn windows_d3d11_golem_bubble_sits_above_the_head_like_cpu_and_metal() {
+        let anchor = crate::golem_sprite::GolemBubbleAnchor { x: 650.0, y: 320.0 };
+        let (transform, crop) = windows_d3d11_bubble_layer_geometry((60, 40), (1280, 720), anchor);
+        assert_eq!(
+            crate::golem_sprite::golem_bubble_blit_layout(60, 40, 1280, 720, anchor),
+            (0, 620, 280, 60)
+        );
+        assert_eq!(transform.x, 620.0 / 1280.0);
+        assert_eq!(transform.y, 280.0 / 720.0);
+        assert_eq!(transform.width, 60.0 / 1280.0);
+        assert_eq!(transform.height, 40.0 / 720.0);
+        assert_eq!(
+            (crop.left, crop.top, crop.right, crop.bottom),
+            (0.0, 0.0, 0.0, 0.0)
+        );
+    }
 }

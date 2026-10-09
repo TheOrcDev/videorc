@@ -16939,6 +16939,123 @@ mod golem_sprite_tests {
         }
     }
 
+    /// Distance from a canvas point to the quad's outline, and whether the
+    /// point is inside.
+    fn edge_distance(corners: [[f32; 2]; 4], point: [f32; 2]) -> (f32, bool) {
+        // Outline order: top-left, top-right, bottom-right, bottom-left.
+        let outline = [corners[0], corners[1], corners[3], corners[2]];
+        let mut distance = f32::INFINITY;
+        let mut sign = None;
+        let mut inside = true;
+        for index in 0..4 {
+            let [ax, ay] = outline[index];
+            let [bx, by] = outline[(index + 1) % 4];
+            let (ex, ey) = (bx - ax, by - ay);
+            let (px, py) = (point[0] - ax, point[1] - ay);
+            let t = ((px * ex + py * ey) / (ex * ex + ey * ey)).clamp(0.0, 1.0);
+            let (dx, dy) = (px - t * ex, py - t * ey);
+            distance = distance.min((dx * dx + dy * dy).sqrt());
+            let cross = ex * py - ey * px;
+            let side = cross >= 0.0;
+            if *sign.get_or_insert(side) != side {
+                inside = false;
+            }
+        }
+        (distance, inside)
+    }
+
+    /// Plan 168 S-B5: the CPU and Metal paths draw the same sprite. A
+    /// synthetic 3 x 2 atlas of flat colours with a 1 px alpha ramp edge,
+    /// turned 30 degrees and scaled 1.1 x 0.9 on a 1280 x 720 canvas: the
+    /// two readbacks agree within 3 per channel inside the quad and 8 on its
+    /// edge ring, and the inside is the cell's colour on both.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cpu_and_metal_draw_the_same_sprite() {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
+            eprintln!("skipping: Metal compositor unavailable");
+            return;
+        };
+        let leg = parity_leg();
+        let draw = leg.sprite.as_ref().unwrap().draw;
+        let cpu = cpu_frame(inputs(1, None, None, None, Some(&leg)));
+        let metal = try_gpu_compose(
+            Some(&mut gpu),
+            &inputs(1, None, None, None, Some(&leg)),
+            true,
+        )
+        .expect("the sprite renders on Metal")
+        .yuv;
+        assert_eq!(metal.len(), cpu.len());
+        let corners = draw.corners();
+        let (width, height) = (WIDTH as usize, HEIGHT as usize);
+        let (uv_width, uv_height) = (width / 2, height / 2);
+        let close = |a: u8, b: u8, tolerance: i16| (i16::from(a) - i16::from(b)).abs() <= tolerance;
+        const EDGE_RING_PX: f32 = 2.0;
+        let (cell_y, cell_u, cell_v) = rgb_to_yuv(200, 60, 220);
+        let min_x = corners.iter().map(|c| c[0]).fold(f32::INFINITY, f32::min) as usize - 4;
+        let max_x = corners.iter().map(|c| c[0]).fold(0.0, f32::max) as usize + 4;
+        let min_y = corners.iter().map(|c| c[1]).fold(f32::INFINITY, f32::min) as usize - 4;
+        let max_y = corners.iter().map(|c| c[1]).fold(0.0, f32::max) as usize + 4;
+        let (mut inside_pixels, mut ring_pixels) = (0, 0);
+        let (mut worst_inside, mut worst_ring) = (0_i16, 0_i16);
+        for y in min_y..max_y {
+            for x in min_x..max_x {
+                let index = y * width + x;
+                let (distance, inside) = edge_distance(corners, [x as f32 + 0.5, y as f32 + 0.5]);
+                let difference = (i16::from(cpu[index]) - i16::from(metal[index])).abs();
+                let tolerance = if distance <= EDGE_RING_PX {
+                    ring_pixels += 1;
+                    worst_ring = worst_ring.max(difference);
+                    8
+                } else {
+                    if inside {
+                        inside_pixels += 1;
+                    }
+                    worst_inside = worst_inside.max(difference);
+                    3
+                };
+                assert!(
+                    close(cpu[index], metal[index], tolerance),
+                    "luma at {x},{y} (edge distance {distance:.2}, inside {inside}): cpu {} metal {}",
+                    cpu[index],
+                    metal[index]
+                );
+                if inside && distance > 3.0 {
+                    assert!(close(cpu[index], cell_y, 3), "cpu luma at {x},{y}");
+                }
+            }
+        }
+        assert!(inside_pixels > 10_000 && ring_pixels > 500);
+        eprintln!(
+            "sprite parity: worst luma difference {worst_inside} inside, {worst_ring} on the edge ring"
+        );
+        let (u_start, v_start) = (width * height, width * height + uv_width * uv_height);
+        for uv_y in min_y / 2..max_y / 2 {
+            for uv_x in min_x / 2..max_x / 2 {
+                let (distance, inside) =
+                    edge_distance(corners, [uv_x as f32 * 2.0 + 1.0, uv_y as f32 * 2.0 + 1.0]);
+                // The block's four pixels lie within 0.71 px of its centre.
+                let tolerance = if distance <= EDGE_RING_PX + 0.71 {
+                    8
+                } else {
+                    3
+                };
+                let uv_index = uv_y * uv_width + uv_x;
+                for (plane, start, expected) in [("u", u_start, cell_u), ("v", v_start, cell_v)] {
+                    let (a, b) = (cpu[start + uv_index], metal[start + uv_index]);
+                    assert!(
+                        close(a, b, tolerance),
+                        "{plane} at {uv_x},{uv_y} (edge distance {distance:.2}): cpu {a} metal {b}"
+                    );
+                    if inside && distance > 3.0 {
+                        assert!(close(a, expected, 3), "cpu {plane} at {uv_x},{uv_y}");
+                    }
+                }
+            }
+        }
+    }
+
     /// Plan 168 S-B2 / D8: the atlas lives in a key-addressed Metal slot, so
     /// a caption appearing and disappearing under it (shifting its layer
     /// index) never uploads it again: once across 100 frames.

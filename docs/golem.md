@@ -354,14 +354,22 @@ The Golem on stream (Phase C):
   became a bubble; `clear(app)` runs at every session start.
 - RPCs: `cohost.golem.status` (observation),
   `golem.overlay.set {target: 'primary' | 'auxiliary', pngBase64, rect}`
-  (mutation, the captions slot shape). Event `cohost.golem.state
-{personaId, state, bubble: {text, until} | null}`.
-- Renderer: `lib/golem-overlay.ts` (lazy) lays out and paints the avatar and
-  bubble per target canvas; `lib/golem-overlay-targets.ts` (eager, asset
-  free) plans the targets and keys the push. The Studio pushes on every
-  change of persona, images, state, bubble, placement or canvas, session or
-  not (the slot is app-global). Six paint-log snapshots in
-  `lib/__snapshots__/golem-overlay.test.ts.snap`.
+  (mutation, the captions slot shape; decoded off the async runtime) and
+  `golem.overlay.clear {target?}` (mutation, plan 168). Event
+  `cohost.golem.state {personaId, state, bubble: {text, until} | null}`.
+- The pet is drawn by the backend (plan 168 Phase B,
+  `crates/videorc-backend/src/golem_sprite.rs`): the persona's pack (Alive)
+  or its state images as a flat pack (Still) is pre-scaled per output leg
+  into a BGRA atlas and drawn as one quad per leg by the CPU, Metal and
+  D3D11 paths. The renderer pushes the bubble only.
+- Renderer: `lib/golem-overlay.ts` (lazy) lays out and paints the bubble per
+  target canvas (`renderGolemBubblePng`, its tail tip on the bitmap's
+  bottom-centre, which the compositor puts on the pet's head) and the
+  settings sample's avatar-plus-bubble composite; `lib/golem-overlay-targets.ts`
+  (eager, asset free) plans the targets and keys the push. The Studio pushes
+  on every change of bubble, style, placement or canvas, session or not (the
+  slot is app-global), and clears the slot when the bubble ends. Six
+  paint-log snapshots in `lib/__snapshots__/golem-overlay.test.ts.snap`.
 - Stream Manager relay: `CohostWindowState.golem?` (persona, state, bubble,
   `showOnStream`); `cohost-action` kinds `golem-say {text, state}` and
   `golem-show-on-stream {showOnStream}`; `golem-say` carries the live
