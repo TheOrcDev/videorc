@@ -303,8 +303,18 @@ describe('BuddyLibrarySection: My Buddies (plan 170 D16)', () => {
     expect(backend.calls('cohost.library.use')).toEqual([{ avatarId: PEBBLE }])
   })
 
-  it('menus: your own get Rename, Edit personality, Make it Alive and Delete; official only Make it Alive', async () => {
-    await render(fakeBackend().client)
+  it('menus: your own get Rename, Edit personality, Make it Alive and Delete; an official one without its pack only Make it Alive', async () => {
+    // Official Buddies whose pack is here or downloadable show Alive and no
+    // menu (plan 172 D12); the menu case is an official one with no pack.
+    await render(
+      fakeBackend(
+        library({
+          official: library().official.map((entry) =>
+            entry.slug === 'goblin' ? { ...entry, alive: 'none' as const } : entry
+          )
+        })
+      ).client
+    )
     const labels = (items: HTMLElement[]) => items.map((item) => item.textContent?.trim())
     expect(labels(await openMenu(PEBBLE))).toEqual([
       'Rename',

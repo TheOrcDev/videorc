@@ -106,6 +106,15 @@ mod cohost {
 
 /// Stand-in for `src/resource_authority.rs` (same body as the original).
 #[allow(dead_code)]
+/// `buddy_pet.rs` resolves `official:<slug>` pack ids through the library's
+/// catalog (plan 172 D4); this example only builds and verifies local packs,
+/// so no official version is known here.
+mod cohost_library {
+    pub fn official_pack_version(_slug: &str) -> Option<u32> {
+        None
+    }
+}
+
 mod resource_authority {
     use std::path::{Path, PathBuf};
 
