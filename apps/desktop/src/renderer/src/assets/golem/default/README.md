@@ -1,7 +1,11 @@
 # Default Golem pack
 
-The owner's friendly stone golem (plan 164 D22; master in
-`assets/brand/golem/`). `idle.webp` is the 640 px tall export; `talk`,
-`laugh` and `think` fall back to it until matching art exists (D16). The
-renderer loads it into a canvas `Image`, and it rides only the lazy Golem
-chunks, never the eager renderer bundle. Keep any state file under 200 KB.
+The owner's friendly stone golem (plan 164 D22; masters in
+`assets/brand/golem/`). `idle.webp` is the export of the original art;
+`talk.webp`, `laugh.webp` and `think.webp` were generated from it as image
+edits (Vercel AI Gateway, `openai/gpt-image-2.5-sunburst`, 2026-10-09) and
+exported at the same scale, so the golem is the same height in all four and
+stands on the same baseline. The renderer loads them into a canvas `Image`,
+and they ride only the lazy Golem chunks, never the eager renderer bundle.
+The backend builds the Still pack from the same files (`golem_pet.rs`,
+`include_bytes!`). Keep any state file under 200 KB.

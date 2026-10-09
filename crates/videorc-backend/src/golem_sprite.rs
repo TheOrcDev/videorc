@@ -2078,23 +2078,29 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_still_pack_of_the_default_persona_builds_a_neutral_cell_at_the_rect_size() {
+    fn the_still_pack_of_the_default_persona_builds_its_four_cells_at_the_rect_size() {
         let pack = crate::golem_pet::still_pack(&CohostPersona::default(), &[]).unwrap();
         let meta = Arc::new(pack_meta(&pack).unwrap());
-        // idle, plus talk / laugh / think falling back to the idle cell.
-        assert_eq!(meta.unique_cells, 1);
+        // idle, talk, laugh and think: the default Golem's four drawings.
+        assert_eq!(meta.unique_cells, 4);
         assert_eq!(meta.neutral, "idle");
         let atlas = build_atlas(&pack, &meta, 346.min(meta.source_cell_px)).unwrap();
         assert_eq!(atlas.cell_px, 346.min(meta.source_cell_px));
         let neutral = atlas.neutral().unwrap();
-        // Every state maps to the one cell.
+        // Idle maps to the neutral cell; each other state to its own cell.
+        assert_eq!(
+            atlas.cell_for_state(CohostAvatarState::Idle).unwrap().rect,
+            neutral.rect
+        );
+        let mut rects = vec![neutral.rect];
         for state in [
-            CohostAvatarState::Idle,
             CohostAvatarState::Talk,
             CohostAvatarState::Laugh,
             CohostAvatarState::Think,
         ] {
-            assert_eq!(atlas.cell_for_state(state).unwrap().rect, neutral.rect);
+            let rect = atlas.cell_for_state(state).unwrap().rect;
+            assert!(!rects.contains(&rect), "{state:?} has its own cell");
+            rects.push(rect);
         }
         // The idle image has a silhouette: some texel is opaque.
         let [x, y, w, h] = neutral.rect;

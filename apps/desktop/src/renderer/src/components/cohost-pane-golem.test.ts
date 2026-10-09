@@ -113,15 +113,13 @@ describe('CohostPane: the Golem header (plan 164 S-C4)', () => {
     await renderPane({ golem: golem({ state: 'laugh', bubble: 'Welcome to the horde' }) })
     const image = container.querySelector<HTMLImageElement>('[data-slot="golem-state-image"]')
     expect(image?.getAttribute('data-state')).toBe('laugh')
-    // The bundled pack ships one image (the owner's golem) for every state
-    // until matching art exists, so the state is what changes, not the src.
-    expect(image?.getAttribute('src')).toBeTruthy()
+    // The bundled pack's laughing drawing, not the idle one.
+    const laughing = image?.getAttribute('src')
+    expect(laughing).toBeTruthy()
     await renderPane({ golem: golem({ state: 'idle' }) })
-    expect(
-      container
-        .querySelector<HTMLImageElement>('[data-slot="golem-state-image"]')
-        ?.getAttribute('data-state')
-    ).toBe('idle')
+    const idle = container.querySelector<HTMLImageElement>('[data-slot="golem-state-image"]')
+    expect(idle?.getAttribute('data-state')).toBe('idle')
+    expect(idle?.getAttribute('src')).not.toBe(laughing)
     await renderPane({ golem: golem({ state: 'laugh', bubble: 'Welcome to the horde' }) })
     expect(container.querySelector('[data-slot="golem-name"]')?.textContent).toBe('Grum')
     expect(container.querySelector('[data-slot="golem-bubble"]')?.textContent).toContain(

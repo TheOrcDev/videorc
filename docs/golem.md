@@ -46,9 +46,10 @@ and points at Stream Manager; it has no switch of its own any more.
 
 Only idle is required (D16). A missing state falls back to the persona's
 idle image. With no images at all, the bundled default pack shows: the
-owner's stone golem (`assets/golem/default/idle.webp`, master art in
-`assets/brand/golem/`). The default pack ships the idle image only; talk,
-laugh and think fall back to it until matching art exists. The avatar
+owner's stone golem (`assets/golem/default/`, masters in
+`assets/brand/golem/`) with its own idle, talking, laughing and thinking
+pictures; the last three were generated from the idle art. A persona with
+its own idle never borrows them: its missing states show its own idle. The avatar
 generation cap is the web's (24 a day); the image model is a web
 environment variable, never hardcoded in the desktop.
 
@@ -421,9 +422,11 @@ The persona and its images (Phase A):
   on only when `/api/ai/capabilities` reports `cohost.avatar.enabled`, with
   `remainingToday` and `dailyLimit` from the web.
 - The bundled default pack is `lib/golem-default-pack.ts` (lazy chunks only,
-  never the eager shell): the owner's stone golem (master in
-  `assets/brand/golem/`) as the idle image, with the other states falling
-  back to it; `persona.source: 'default'` means "use it".
+  never the eager shell): the owner's stone golem in all four states
+  (masters in `assets/brand/golem/`). The backend's Still pack embeds the
+  same four files (`golem_pet.rs`, `include_bytes!`); a persona with its own
+  idle falls back to that idle for missing states, never to ours.
+  `persona.source: 'default'` means "use it".
 - Wake words: `cohost_command::wake_words(name)` = `["golem", <name tokens>,
 "orcle", "orkle", "orcel", "orkel", "orcl", "orcal"]`; the persona tokens
   live in a process-wide slot set on every settings change.

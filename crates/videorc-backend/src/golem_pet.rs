@@ -1436,6 +1436,42 @@ const STILL_IMAGE_MAX_PIXELS: u64 = 20_000_000;
 /// renderer.
 pub(crate) const BUNDLED_IDLE_WEBP: &[u8] =
     include_bytes!("../../../apps/desktop/src/renderer/src/assets/golem/default/idle.webp");
+/// The bundled talk, laugh and think images, generated from the idle art
+/// (2026-10-09): what the default Golem shows for those states. A persona
+/// with its own idle image never borrows them; its missing states fall back
+/// to its own idle, as the renderer does.
+pub(crate) const BUNDLED_TALK_WEBP: &[u8] =
+    include_bytes!("../../../apps/desktop/src/renderer/src/assets/golem/default/talk.webp");
+pub(crate) const BUNDLED_LAUGH_WEBP: &[u8] =
+    include_bytes!("../../../apps/desktop/src/renderer/src/assets/golem/default/laugh.webp");
+pub(crate) const BUNDLED_THINK_WEBP: &[u8] =
+    include_bytes!("../../../apps/desktop/src/renderer/src/assets/golem/default/think.webp");
+
+/// The bundled image for `state` (the default Golem's).
+fn bundled_state_webp(state: crate::cohost::CohostAvatarState) -> &'static [u8] {
+    use crate::cohost::CohostAvatarState;
+    match state {
+        CohostAvatarState::Idle => BUNDLED_IDLE_WEBP,
+        CohostAvatarState::Talk => BUNDLED_TALK_WEBP,
+        CohostAvatarState::Laugh => BUNDLED_LAUGH_WEBP,
+        CohostAvatarState::Think => BUNDLED_THINK_WEBP,
+    }
+}
+
+/// Decode one bundled default image.
+fn decode_bundled(state: crate::cohost::CohostAvatarState) -> Result<image::RgbaImage, PetError> {
+    image::load_from_memory_with_format(bundled_state_webp(state), image::ImageFormat::WebP)
+        .map(|image| image.into_rgba8())
+        .map_err(|error| {
+            PetError::new(
+                PetRule::SheetDecode,
+                format!(
+                    "The default Golem's {} image could not be decoded: {error}",
+                    state.as_str()
+                ),
+            )
+        })
+}
 
 /// One stored state image of the persona, decoded: a `<personaId>/<file>`
 /// under the write root, a regular file inside it, PNG, WebP or JPEG by its
@@ -1570,17 +1606,22 @@ pub fn still_pack(
             load(CohostAvatarState::Think, images.think.as_deref()),
         ),
     ];
+    // The default Golem (no idle of its own) shows the bundled image for
+    // every state it has no picture for; a persona with its own idle falls
+    // back to that idle instead (the frame rects below), never to ours.
+    let own_idle = idle.is_some();
     let idle = match idle {
         Some(idle) => idle,
-        None => image::load_from_memory_with_format(BUNDLED_IDLE_WEBP, image::ImageFormat::WebP)
-            .map_err(|error| {
-                PetError::new(
-                    PetRule::SheetDecode,
-                    format!("The default Golem image could not be decoded: {error}"),
-                )
-            })?
-            .into_rgba8(),
+        None => decode_bundled(CohostAvatarState::Idle)?,
     };
+    let others = others
+        .into_iter()
+        .map(|(state, image)| match image {
+            Some(image) => Ok((state, Some(image))),
+            None if !own_idle => decode_bundled(state).map(|image| (state, Some(image))),
+            None => Ok((state, None)),
+        })
+        .collect::<Result<Vec<_>, PetError>>()?;
 
     let mut cells: Vec<(CohostAvatarState, image::RgbaImage)> =
         vec![(CohostAvatarState::Idle, idle)];
@@ -2213,7 +2254,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn golem_still_pack_of_the_default_persona_falls_back_to_the_bundled_idle() {
+    fn golem_still_pack_of_the_default_persona_shows_the_bundled_states() {
         let pack = still_pack(&crate::cohost::CohostPersona::default(), &[]).unwrap();
         assert_valid_still(&pack);
         assert_eq!(pack.pack_id, STILL_PACK_ID);
@@ -2221,7 +2262,8 @@ pub(crate) mod tests {
         assert!(pack.notes.is_empty(), "{:?}", pack.notes);
         assert_eq!(pack.manifest.name, "Golem");
         assert_eq!(pack.manifest.neutral, "idle");
-        // One gaze cell, three reactions, all three on the idle cell.
+        // One gaze cell and three reactions, each on its own bundled cell:
+        // the default Golem talks, laughs and thinks with its own drawings.
         assert_eq!(pack.manifest.gaze_count(), 1);
         assert_eq!(
             pack.manifest.reaction_ids(),
@@ -2229,13 +2271,18 @@ pub(crate) mod tests {
         );
         let idle = pack.manifest.neutral_frame().unwrap().clone();
         assert_eq!(idle.gaze, Some([0.0, 0.0]));
-        for id in STILL_REACTION_IDS {
-            assert_eq!(pack.manifest.frame(id).unwrap().rect, idle.rect, "{id}");
-        }
-        // The bundled idle is 711 x 640: one 711 px cell, the image resting
-        // on its bottom edge, a measured head top below the cell's top.
+        // The bundled idle is 711 x 640, the widest side of the four, so the
+        // cells are 711 px; each image rests on its cell's bottom edge.
         assert_eq!(idle.rect, [0, 0, 711, 711]);
-        assert_eq!(pack.sheets[STILL_PACK_SHEET].dimensions(), (711, 711));
+        for (index, id) in STILL_REACTION_IDS.into_iter().enumerate() {
+            let x = 711 * (index as u32 + 1);
+            assert_eq!(
+                pack.manifest.frame(id).unwrap().rect,
+                [x, 0, 711, 711],
+                "{id}"
+            );
+        }
+        assert_eq!(pack.sheets[STILL_PACK_SHEET].dimensions(), (711 * 4, 711));
         assert!(
             pack.sidecar.head_top > 0.1 && pack.sidecar.head_top < 0.6,
             "{}",
@@ -2243,8 +2290,8 @@ pub(crate) mod tests {
         );
         let sheet = &pack.sheets[STILL_PACK_SHEET];
         assert!(
-            (0..711).all(|x| sheet.get_pixel(x, 0)[3] == 0),
-            "the band above the image is clear"
+            (0..711 * 4).all(|x| sheet.get_pixel(x, 0)[3] == 0),
+            "the band above the images is clear"
         );
     }
 
