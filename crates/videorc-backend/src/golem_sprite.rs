@@ -1555,6 +1555,212 @@ fn run_build(
     }
 }
 
+// --- CPU path (S-B3) ----------------------------------------------------------------
+
+/// The inverse map and bilinear fetch for one draw.
+struct SpriteSampler<'a> {
+    bgra: &'a [u8],
+    atlas_width: usize,
+    cell: [f32; 4],
+    /// Texel bounds a fetch is clamped to: the cell and its gutter, never a
+    /// neighbour's slot.
+    clamp: [i64; 4],
+    forward: [f32; 6],
+    inverse: [f32; 4],
+}
+
+impl<'a> SpriteSampler<'a> {
+    fn new(atlas: &'a GolemSpriteAtlas, draw: &GolemSpriteDraw) -> Option<Self> {
+        if !draw.is_drawable() {
+            return None;
+        }
+        let [x, y, w, h] = draw.cell;
+        if x.checked_add(w)? > atlas.width
+            || y.checked_add(h)? > atlas.height
+            || atlas.bgra.len() < atlas.width as usize * atlas.height as usize * 4
+        {
+            return None;
+        }
+        let forward = draw.unit_to_canvas();
+        let [m00, m10, m01, m11, _, _] = forward;
+        let determinant = m00 * m11 - m01 * m10;
+        if determinant.abs() < 1e-9 {
+            return None;
+        }
+        let gutter = i64::from(GOLEM_SPRITE_GUTTER_PX);
+        Some(Self {
+            bgra: &atlas.bgra,
+            atlas_width: atlas.width as usize,
+            cell: [x as f32, y as f32, w as f32, h as f32],
+            clamp: [
+                (i64::from(x) - gutter).max(0),
+                (i64::from(y) - gutter).max(0),
+                (i64::from(x + w) - 1 + gutter).min(i64::from(atlas.width) - 1),
+                (i64::from(y + h) - 1 + gutter).min(i64::from(atlas.height) - 1),
+            ],
+            forward,
+            inverse: [
+                m11 / determinant,
+                -m10 / determinant,
+                -m01 / determinant,
+                m00 / determinant,
+            ],
+        })
+    }
+
+    /// The canvas pixels the quad can touch: `(x0, y0, x1, y1)`, half open.
+    fn bounds(&self, width: usize, height: usize) -> Option<(usize, usize, usize, usize)> {
+        let [m00, m10, m01, m11, tx, ty] = self.forward;
+        let corners = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]
+            .map(|[u, v]: [f32; 2]| [m00 * u + m01 * v + tx, m10 * u + m11 * v + ty]);
+        let min_x = corners.iter().map(|c| c[0]).fold(f32::INFINITY, f32::min);
+        let max_x = corners
+            .iter()
+            .map(|c| c[0])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_y = corners.iter().map(|c| c[1]).fold(f32::INFINITY, f32::min);
+        let max_y = corners
+            .iter()
+            .map(|c| c[1])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let x0 = min_x.floor().max(0.0) as usize;
+        let y0 = min_y.floor().max(0.0) as usize;
+        let x1 = (max_x.ceil().max(0.0) as usize).min(width);
+        let y1 = (max_y.ceil().max(0.0) as usize).min(height);
+        (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
+    }
+
+    /// Straight RGBA (0..255) at a canvas point, or `None` outside the quad.
+    fn sample(&self, x: f32, y: f32) -> Option<[f32; 4]> {
+        let [_, _, _, _, tx, ty] = self.forward;
+        let [i00, i10, i01, i11] = self.inverse;
+        let (dx, dy) = (x - tx, y - ty);
+        let u = i00 * dx + i01 * dy;
+        let v = i10 * dx + i11 * dy;
+        if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+            return None;
+        }
+        let source_x = self.cell[0] + u * self.cell[2] - 0.5;
+        let source_y = self.cell[1] + v * self.cell[3] - 0.5;
+        let left = source_x.floor();
+        let top = source_y.floor();
+        let fx = source_x - left;
+        let fy = source_y - top;
+        let [min_x, min_y, max_x, max_y] = self.clamp;
+        let column = |offset: i64| (left as i64 + offset).clamp(min_x, max_x) as usize;
+        let row = |offset: i64| (top as i64 + offset).clamp(min_y, max_y) as usize;
+        let texel = |column: usize, row: usize| -> [f32; 4] {
+            let index = (row * self.atlas_width + column) * 4;
+            let pixel = &self.bgra[index..index + 4];
+            [
+                f32::from(pixel[2]),
+                f32::from(pixel[1]),
+                f32::from(pixel[0]),
+                f32::from(pixel[3]),
+            ]
+        };
+        let (c0, c1, r0, r1) = (column(0), column(1), row(0), row(1));
+        let (t00, t10, t01, t11) = (texel(c0, r0), texel(c1, r0), texel(c0, r1), texel(c1, r1));
+        Some(std::array::from_fn(|channel| {
+            let top_value = t00[channel] + (t10[channel] - t00[channel]) * fx;
+            let bottom_value = t01[channel] + (t11[channel] - t01[channel]) * fx;
+            top_value + (bottom_value - top_value) * fy
+        }))
+    }
+}
+
+/// CPU path (S-B3): source-over the sprite into a BT.709 video-range YUV420p
+/// frame. Over the transformed quad's bounding box, each pixel centre maps
+/// back into the cell (inverse affine), samples it bilinearly (the gutters
+/// and alpha bleed make the edge right) and blends with straight alpha;
+/// chroma averages the 2x2 block's four blends, as the Metal path's
+/// RGB-to-YUV conversion does. Rows run in parallel.
+pub(crate) fn blit_sprite_affine_to_yuv420p(
+    dest: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    atlas: &GolemSpriteAtlas,
+    draw: &GolemSpriteDraw,
+) {
+    let width = canvas_width.max(1) as usize;
+    let height = canvas_height.max(1) as usize;
+    let luma_len = width * height;
+    let chroma_width = width.div_ceil(2);
+    let chroma_len = chroma_width * height.div_ceil(2);
+    if dest.len() < luma_len + 2 * chroma_len {
+        return;
+    }
+    let Some(sampler) = SpriteSampler::new(atlas, draw) else {
+        return;
+    };
+    let Some((x0, y0, x1, y1)) = sampler.bounds(width, height) else {
+        return;
+    };
+    let opacity = draw.opacity.clamp(0.0, 1.0);
+    let (luma, chroma) = dest.split_at_mut(luma_len);
+    let (u_plane, v_plane) = chroma.split_at_mut(chroma_len);
+    let v_plane = &mut v_plane[..chroma_len];
+    let block_top = y0 / 2;
+    let block_bottom = y1.div_ceil(2);
+    luma.par_chunks_mut(width * 2)
+        .zip(u_plane.par_chunks_mut(chroma_width))
+        .zip(v_plane.par_chunks_mut(chroma_width))
+        .enumerate()
+        .skip(block_top)
+        .take(block_bottom - block_top)
+        .for_each(|(block_y, ((luma_rows, u_row), v_row))| {
+            for block_x in x0 / 2..x1.div_ceil(2) {
+                let mut alpha_sum = 0.0_f32;
+                let mut u_sum = 0.0_f32;
+                let mut v_sum = 0.0_f32;
+                for dy in 0..2 {
+                    let y = block_y * 2 + dy;
+                    if y < y0 || y >= y1 || (dy + 1) * width > luma_rows.len() {
+                        continue;
+                    }
+                    for dx in 0..2 {
+                        let x = block_x * 2 + dx;
+                        if x < x0 || x >= x1 {
+                            continue;
+                        }
+                        let Some([r, g, b, a]) = sampler.sample(x as f32 + 0.5, y as f32 + 0.5)
+                        else {
+                            continue;
+                        };
+                        let alpha = a / 255.0 * opacity;
+                        if alpha <= 0.0 {
+                            continue;
+                        }
+                        let (y_value, u_value, v_value) =
+                            crate::color::rgb_to_yuv_video_range_bt709(
+                                r.round().clamp(0.0, 255.0) as u8,
+                                g.round().clamp(0.0, 255.0) as u8,
+                                b.round().clamp(0.0, 255.0) as u8,
+                            );
+                        let index = dy * width + x;
+                        let current = f32::from(luma_rows[index]);
+                        luma_rows[index] = (current + (f32::from(y_value) - current) * alpha)
+                            .round()
+                            .clamp(0.0, 255.0) as u8;
+                        alpha_sum += alpha;
+                        u_sum += alpha * f32::from(u_value);
+                        v_sum += alpha * f32::from(v_value);
+                    }
+                }
+                if alpha_sum > 0.0 && block_x < u_row.len() {
+                    let blend = |current: u8, sum: f32| {
+                        let current = f32::from(current);
+                        (current + (sum - alpha_sum * current) / 4.0)
+                            .round()
+                            .clamp(0.0, 255.0) as u8
+                    };
+                    u_row[block_x] = blend(u_row[block_x], u_sum);
+                    v_row[block_x] = blend(v_row[block_x], v_sum);
+                }
+            }
+        });
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1906,6 +2112,36 @@ pub(crate) mod tests {
             source.draw(&context(CohostAvatarState::Talk)).unwrap().cell,
             idle.cell
         );
+    }
+
+    #[test]
+    fn an_identity_draw_blits_the_cell_pixel_for_pixel() {
+        let atlas = parity_atlas(16);
+        let draw = GolemSpriteDraw::at_rest(
+            atlas.cell("cell-2").unwrap().rect,
+            [10.0, 6.0, 16.0, 16.0],
+            GOLEM_SPRITE_DEFAULT_PIVOT,
+        );
+        let (width, height) = (40_u32, 30_u32);
+        let mut frame = vec![0_u8; (width * height + 2 * (width / 2) * (height / 2)) as usize];
+        frame[..(width * height) as usize].fill(16);
+        frame[(width * height) as usize..].fill(128);
+        blit_sprite_affine_to_yuv420p(&mut frame, width, height, &atlas, &draw);
+        let (blue_y, blue_u, blue_v) = crate::color::rgb_to_yuv_video_range_bt709(50, 70, 230);
+        // An inner pixel is the cell colour exactly; outside is untouched.
+        assert_eq!(frame[(14 * width + 18) as usize], blue_y);
+        assert_eq!(frame[(3 * width + 3) as usize], 16);
+        assert_eq!(frame[(14 * width + 30) as usize], 16);
+        let chroma = (width * height) as usize;
+        let block = (7 * (width / 2) + 9) as usize;
+        assert_eq!(frame[chroma + block], blue_u);
+        assert_eq!(
+            frame[chroma + ((width / 2) * (height / 2)) as usize + block],
+            blue_v
+        );
+        // The 1 px ring is half alpha: its luma lies between black and blue.
+        let ring = frame[(6 * width + 18) as usize];
+        assert!(ring > 16 && ring < blue_y, "ring luma {ring}");
     }
 
     #[test]

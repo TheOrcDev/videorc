@@ -8080,6 +8080,15 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
             ),
         );
     }
+    if let Some(sprite) = inputs.golem_leg.and_then(|leg| leg.sprite.as_ref()) {
+        crate::golem_sprite::blit_sprite_affine_to_yuv420p(
+            bytes,
+            inputs.width,
+            inputs.height,
+            &sprite.atlas,
+            &sprite.draw,
+        );
+    }
     if let Some(overlay) = inputs.golem_overlay {
         let layout = golem_bubble_layout(overlay, inputs.golem_leg, inputs.width, inputs.height);
         composite_overlay_at(overlay, inputs.width, inputs.height, bytes, layout);
@@ -16851,7 +16860,8 @@ mod tests {
 mod golem_sprite_tests {
     use super::*;
     use crate::golem_sprite::{
-        GOLEM_SPRITE_DEFAULT_PIVOT, GolemLegFrame, GolemSpriteDraw, GolemSpriteLayer,
+        GOLEM_SPRITE_DEFAULT_PIVOT, GolemBubbleAnchor, GolemLegFrame, GolemSpriteDraw,
+        GolemSpriteLayer,
     };
 
     const WIDTH: u32 = 1280;
@@ -16898,6 +16908,12 @@ mod golem_sprite_tests {
             golem_overlay: bubble,
             golem_leg,
         }
+    }
+
+    fn cpu_frame(inputs: CompositorRenderInputs<'_>) -> Vec<u8> {
+        let mut bytes = vec![0; raw_yuv420p_len(inputs.width, inputs.height)];
+        render_compositor_yuv420p_frame(inputs, &mut bytes);
+        bytes
     }
 
     /// The S-B5 draw: cell 4 of the 3 x 2 fixture (neighbours on three
@@ -16971,5 +16987,131 @@ mod golem_sprite_tests {
         )
         .expect("metal frame");
         assert_eq!(gpu.keyed_texture_uploads(), 2);
+    }
+
+    /// D9 on both paths: the pet over the caption bar, its bubble over the
+    /// pet, the highlight card over everything.
+    #[test]
+    fn the_pet_sits_under_its_bubble_and_the_card() {
+        let atlas = Arc::new(crate::golem_sprite::tests::parity_atlas(100));
+        let golem_box = [600.0, 300.0, 100.0, 100.0];
+        let leg = GolemLegFrame {
+            golem_box,
+            sprite: Some(GolemSpriteLayer {
+                draw: GolemSpriteDraw::at_rest(
+                    atlas.cell("cell-1").unwrap().rect,
+                    golem_box,
+                    GOLEM_SPRITE_DEFAULT_PIVOT,
+                ),
+                atlas,
+            }),
+            // Head top at 20 %: the bubble's bottom rows overlap the pet.
+            bubble_anchor: GolemBubbleAnchor { x: 650.0, y: 320.0 },
+        };
+        let bubble = solid_overlay(
+            60,
+            40,
+            [250, 250, 251, 255],
+            crate::golem_overlay::golem_overlay_placement(None),
+            1,
+        );
+        // The card covers the pet's bottom-right corner.
+        let card = solid_overlay(
+            100,
+            40,
+            [255, 0, 0, 255],
+            crate::captions::OverlayPlacement::new(
+                Some(crate::overlay_layout::OverlayRect::new(
+                    680.0 / 1280.0,
+                    380.0 / 720.0,
+                    100.0 / 1280.0,
+                    40.0 / 720.0,
+                )),
+                crate::captions::CaptionOverlayPosition::Top,
+            ),
+            1,
+        );
+        let check = |frame: &[u8], path: &str| {
+            let luma = |x: usize, y: usize| frame[y * WIDTH as usize + x];
+            let (pet_y, _, _) = rgb_to_yuv(40, 200, 60);
+            let (bubble_y, _, _) = rgb_to_yuv(250, 250, 251);
+            let (card_y, _, _) = rgb_to_yuv(255, 0, 0);
+            let near = |a: u8, b: u8| (i16::from(a) - i16::from(b)).abs() <= 3;
+            assert!(near(luma(620, 350), pet_y), "{path}: the pet");
+            assert!(
+                near(luma(650, 310), bubble_y),
+                "{path}: the bubble over the pet"
+            );
+            assert!(
+                near(luma(650, 290), bubble_y),
+                "{path}: the bubble above the head"
+            );
+            assert!(
+                near(luma(690, 390), card_y),
+                "{path}: the card over the pet"
+            );
+        };
+        let frame_inputs = || inputs(1, None, Some(&card), Some(&bubble), Some(&leg));
+        // The bubble's raster bottom-centre sits on the anchor.
+        assert_eq!(
+            golem_bubble_layout(&bubble, Some(&leg), WIDTH, HEIGHT),
+            (0, 620, 280, 60)
+        );
+        check(&cpu_frame(frame_inputs()), "cpu");
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(mut gpu) = new_gpu_compositor(false) {
+                let metal = try_gpu_compose(Some(&mut gpu), &frame_inputs(), true)
+                    .expect("metal frame")
+                    .yuv;
+                check(&metal, "metal");
+            }
+        }
+    }
+
+    /// The pet's per-frame draw comes from the slot for the leg's canvas: no
+    /// pet before its atlas exists (the bubble still has its anchor), then
+    /// the state's cell at rest in the box.
+    #[test]
+    fn a_leg_frame_draws_the_installed_atlas_in_the_golem_box() {
+        let layout = crate::overlay_layout::OverlayLayout::default().golem;
+        let slot = crate::golem_sprite::GolemSpriteSlot::new(
+            &crate::cohost::CohostPersona::default(),
+            layout,
+            None,
+        );
+        let atlas = slot.install_atlas_for_test(
+            crate::golem_sprite::GolemSpriteLeg::Primary,
+            (WIDTH, HEIGHT),
+            crate::golem_sprite::tests::parity_atlas(64),
+        );
+        let frame = slot.leg_frame(crate::golem_sprite::GolemLegRequest {
+            leg: crate::golem_sprite::GolemSpriteLeg::Primary,
+            canvas: (WIDTH, HEIGHT),
+            now_seconds: 2.0,
+            highlight_rect: None,
+            caption_rect: None,
+        });
+        let sprite = frame.sprite.expect("the installed atlas draws");
+        assert_eq!(sprite.atlas.revision, atlas.revision);
+        assert_eq!(sprite.draw.cell, atlas.neutral().unwrap().rect);
+        assert_eq!(
+            frame.golem_box,
+            crate::golem_sprite::golem_box(layout.horizontal, WIDTH, HEIGHT)
+        );
+        assert_eq!(
+            slot.resident_atlas(crate::golem_sprite::GolemSpriteLeg::Primary)
+                .map(|resident| resident.revision),
+            Some(atlas.revision)
+        );
+        // The CPU path draws the neutral cell's colour in the box.
+        let leg = GolemLegFrame {
+            sprite: Some(sprite),
+            ..frame
+        };
+        let cpu = cpu_frame(inputs(1, None, None, None, Some(&leg)));
+        let [x, y, w, h] = leg.golem_box;
+        let centre = (y + h / 2.0) as usize * WIDTH as usize + (x + w / 2.0) as usize;
+        assert_eq!(cpu[centre], rgb_to_yuv(230, 40, 40).0);
     }
 }
