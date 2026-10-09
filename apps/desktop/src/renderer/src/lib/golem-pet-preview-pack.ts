@@ -116,6 +116,10 @@ const browserDeps: GolemPreviewPackDeps = {
   loadUrl: async (url) => {
     const image = new Image()
     image.decoding = 'async'
+    // Persona pictures come from the app's own asset scheme, which answers
+    // CORS reads; without this the head-top measure taints the canvas
+    // ("getImageData ... tainted by cross-origin data") and the preview fails.
+    if (url.startsWith('videorc-asset:')) image.crossOrigin = 'anonymous'
     image.src = url
     await image.decode()
     return { source: image, width: image.naturalWidth, height: image.naturalHeight }

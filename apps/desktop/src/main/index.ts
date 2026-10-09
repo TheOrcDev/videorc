@@ -13842,6 +13842,17 @@ function resolveManagedScreenFile(fileName: string): string | null {
   return resolveRegularFileInsideRoot(join(app.getPath('userData'), 'Screens'), fileName)
 }
 
+async function withGolemCorsHeader(pending: Promise<Response>): Promise<Response> {
+  const response = await pending
+  const headers = new Headers(response.headers)
+  headers.set('Access-Control-Allow-Origin', '*')
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  })
+}
+
 function registerManagedAssetProtocol(): void {
   protocol.handle(MANAGED_ASSET_SCHEME, (request) => {
     try {
@@ -13874,6 +13885,12 @@ function registerManagedAssetProtocol(): void {
                   : null
       if (!resolved) {
         return new Response('Not found', { status: 404 })
+      }
+      if (url.host === 'golem') {
+        // Golem pictures (persona looks, drafts, the library cache) are read
+        // back on a canvas by the living preview, so they allow CORS reads.
+        // Only files inside the managed Golem roots reach this branch.
+        return withGolemCorsHeader(net.fetch(pathToFileURL(resolved).toString()))
       }
       return net.fetch(pathToFileURL(resolved).toString())
     } catch {
@@ -14192,7 +14209,17 @@ async function openOAuthUrl(authUrl: string): Promise<void> {
 protocol.registerSchemesAsPrivileged([
   {
     scheme: MANAGED_ASSET_SCHEME,
-    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true }
+    // `corsEnabled` lets the Golem host answer CORS reads (see the handler):
+    // the living preview measures a still picture's pixels on a canvas, which a
+    // cross-origin image without CORS taints. Plain <img>/<video> loads are
+    // no-cors and unchanged.
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+      corsEnabled: true
+    }
   }
 ])
 
