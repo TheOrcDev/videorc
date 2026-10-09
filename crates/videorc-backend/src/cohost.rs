@@ -23,6 +23,7 @@ use thiserror::Error;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio::task::JoinHandle;
 
+pub use crate::buddy_pet::{BuddyAvatar, BuddyMotionSettings, BuddyTrigger};
 use crate::captions::{CaptionUpdateKind, CaptionsUpdate, ListenStop};
 use crate::cohost_ack::{
     AuthorLedger, DeadAirLane, GreetedHow, dead_air_due, dead_air_text, match_candidates,
@@ -33,7 +34,6 @@ use crate::cohost_command::{
     CommandKind, CommandSession, CommandTarget, DetectContext, DetectedCommand, is_command_word,
 };
 use crate::comment_highlight::{CommentHighlightPhase, CommentHighlightState};
-pub use crate::buddy_pet::{BuddyAvatar, BuddyMotionSettings, BuddyTrigger};
 use crate::live_chat::{
     LiveChatEventType, LiveChatMessage, LiveChatMessageFragment, comments_destination_id,
 };

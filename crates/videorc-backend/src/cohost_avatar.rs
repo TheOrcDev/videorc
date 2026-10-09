@@ -41,8 +41,8 @@ use crate::cohost::{
 use crate::protocol::{CohostAvatarErrorDetail, CohostSettingsPatch};
 use crate::state::AppState;
 use crate::videorc_api::{
-    CohostApiError, CohostApiErrorKind, CohostAvatarSetRequest, CohostAvatarSetResponse,
-    BuddyLibraryWebAvatar, BuddyLibraryWebCreateRequest, VideorcApiClient,
+    BuddyLibraryWebAvatar, BuddyLibraryWebCreateRequest, CohostApiError, CohostApiErrorKind,
+    CohostAvatarSetRequest, CohostAvatarSetResponse, VideorcApiClient,
 };
 
 pub const COHOST_AVATAR_PROGRESS_EVENT: &str = "cohost.avatar.progress";

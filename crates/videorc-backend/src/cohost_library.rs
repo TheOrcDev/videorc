@@ -38,18 +38,18 @@ use std::time::{Duration, Instant};
 use futures_util::StreamExt as _;
 use serde::{Deserialize, Serialize};
 
+use crate::buddy_pet::BuddyAvatar;
 use crate::cohost::{
     CohostAvatarState, CohostPersona, CohostPersonaImages, CohostPersonaSource, CohostSettings,
 };
 use crate::cohost_avatar::{ALL_STATES, blocking, store_error};
-use crate::buddy_pet::BuddyAvatar;
 use crate::protocol::{
     AccountStatus, AiCapabilitiesBuddyLibrary, CohostAvatarErrorDetail, CohostSettingsPatch,
 };
 use crate::state::AppState;
 use crate::storage::Database;
 use crate::videorc_api::{
-    CohostApiError, CohostApiErrorKind, BuddyLibraryWebAvatar, BuddyLibraryWebPatch,
+    BuddyLibraryWebAvatar, BuddyLibraryWebPatch, CohostApiError, CohostApiErrorKind,
     VideorcApiClient,
 };
 
@@ -457,8 +457,8 @@ pub(crate) fn official_webp(slug: BuddyOfficialSlug, state: CohostAvatarState) -
             ))
         };
     }
-    use CohostAvatarState::{Idle, Laugh, Talk, Think};
     use BuddyOfficialSlug::{Goblin, Golem, Orc, Pirate, Robot};
+    use CohostAvatarState::{Idle, Laugh, Talk, Think};
     match (slug, state) {
         (Golem, state) => crate::buddy_pet::bundled_state_webp(state),
         (Orc, Idle) => art!("orc", "idle"),

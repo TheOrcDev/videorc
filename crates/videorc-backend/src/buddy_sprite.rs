@@ -30,8 +30,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use rayon::prelude::*;
 
-use crate::cohost::{CohostAvatarState, CohostPersona, BuddyAvatar};
 use crate::buddy_pet::{LoadedPack, PetFrameKind};
+use crate::cohost::{BuddyAvatar, CohostAvatarState, CohostPersona};
 use crate::overlay_layout::{OverlayItemLayout, OverlayOrientation, OverlayRect};
 
 /// Transparent gutter around every atlas cell (D5).

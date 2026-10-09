@@ -536,7 +536,7 @@ function MeetStep({
       <div className="grid gap-5 @2xl/onboarding:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         <section className="flex flex-col gap-2">
           <SubHeading>{BUDDY_ONBOARDING_STEP1.demoHeading}</SubHeading>
-          <BuddyStreamDemo poses={BUDDY_OFFICIAL_ART.buddy} />
+          <BuddyStreamDemo poses={BUDDY_OFFICIAL_ART.golem} />
         </section>
         <section className="flex flex-col gap-2">
           <SubHeading>{BUDDY_ONBOARDING_STEP1.whatItDoesHeading}</SubHeading>

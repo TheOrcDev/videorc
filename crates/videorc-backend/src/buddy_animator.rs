@@ -52,15 +52,15 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
-use crate::cohost::{
-    CohostActivityTemplateKind, CohostAutoChat, CohostAutoChatMode, CohostAvatarState,
-    CohostPersona, CohostUtteranceState,
-};
 use crate::buddy_motion::{BuddyMotion, MotionConfig};
 use crate::buddy_pet::{BUDDY_REACTION_NONE, BuddyMotionSettings, BuddyTrigger, PetFrameKind};
 use crate::buddy_sprite::{
     BuddySpriteAtlas, BuddySpriteCell, BuddySpriteDraw, BuddySpriteLeg, BuddySpriteLegContext,
     BuddySpriteSource,
+};
+use crate::cohost::{
+    CohostActivityTemplateKind, CohostAutoChat, CohostAutoChatMode, CohostAvatarState,
+    CohostPersona, CohostUtteranceState,
 };
 use crate::live_chat::{LiveChatEventType, LiveChatMessage};
 

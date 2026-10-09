@@ -96,6 +96,11 @@ const GOLEM_ALLOWED: readonly Allowed[] = [
     reason: OFFICIAL_SLUG
   },
   {
+    file: 'src/components/buddy-onboarding.tsx',
+    text: 'BUDDY_OFFICIAL_ART.golem',
+    reason: OFFICIAL_SLUG
+  },
+  {
     file: 'src/lib/buddy-official-assets.test.ts',
     text: "slug === 'golem'",
     reason: OFFICIAL_SLUG

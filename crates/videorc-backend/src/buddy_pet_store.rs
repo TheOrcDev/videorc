@@ -13,8 +13,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::cohost::{CohostSettings, BuddyAvatar};
 use crate::buddy_pet::{self, BuddyPetSummary, PetError, PetRule};
+use crate::cohost::{BuddyAvatar, CohostSettings};
 use crate::protocol::CohostSettingsPatch;
 use crate::state::AppState;
 
@@ -321,8 +321,8 @@ async fn request_reaction_in(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cohost::{CohostPersona, get_cohost_settings, set_cohost_settings};
     use crate::buddy_pet::tests::{PACK_ID, synthetic_manifest, temp_roots, write_pack};
+    use crate::cohost::{CohostPersona, get_cohost_settings, set_cohost_settings};
     use crate::storage::Database;
     use tokio::sync::broadcast;
 

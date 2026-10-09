@@ -23,6 +23,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::buddy_animator::BuddyAnimatorEvent;
 use crate::captions::{
     CaptionOverlaySlots, CaptionOverlayTarget, CaptionOverlayTargetsInfo, OverlayFallbackPlacement,
     OverlayPlacement,
@@ -31,7 +32,6 @@ use crate::cohost::{
     CohostAvatarState, CohostUtterance, CohostUtteranceState, CohostUtteranceStatus,
     CohostUtteranceTriggerKind,
 };
-use crate::buddy_animator::BuddyAnimatorEvent;
 use crate::overlay_layout::{OverlayItem, OverlayRect, OverlaySnap, load_overlay_layout};
 use crate::state::AppState;
 

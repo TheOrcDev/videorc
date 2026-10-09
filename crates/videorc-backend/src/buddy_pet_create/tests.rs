@@ -12,8 +12,8 @@ use axum::response::IntoResponse;
 use tokio::sync::broadcast;
 
 use super::*;
-use crate::cohost::get_cohost_settings;
 use crate::buddy_pet_build::tests::{CELL_H, Figure, TEST_CELL_SIZE, draw_figure, sheet_image};
+use crate::cohost::get_cohost_settings;
 use crate::protocol::ServerEvent;
 use crate::storage::Database;
 

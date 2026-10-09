@@ -2428,7 +2428,12 @@ mod tests {
     fn thanks_buddy_without_a_command_phrase_does_nothing() {
         // Plan 171 D5: "buddy" is an everyday word. It only wakes the
         // detector; a command still needs its structured phrase after it.
-        for text in ["thanks buddy", "Thanks, buddy.", "thanks buddy!", "Thanks buddy"] {
+        for text in [
+            "thanks buddy",
+            "Thanks, buddy.",
+            "thanks buddy!",
+            "Thanks buddy",
+        ] {
             for ctx in [&PLAIN, &ANSWERING, &WAKE_REQUIRED] {
                 assert_eq!(
                     detect_one(text, ctx).map(|command| command.kind),

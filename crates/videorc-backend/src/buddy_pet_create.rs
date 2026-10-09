@@ -34,11 +34,11 @@ use base64::Engine as _;
 use chrono::{DateTime, Datelike, SecondsFormat, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::cohost::{CohostPersona, CohostSettings, BuddyAvatar};
 use crate::buddy_pet::{self, BuddyPetSummary};
 use crate::buddy_pet_build::{
     self, BuildError, BuildInput, BuildStage, BuildStep, GazeRow, SheetInput, SheetKind, SourceFile,
 };
+use crate::cohost::{BuddyAvatar, CohostPersona, CohostSettings};
 use crate::protocol::CohostSettingsPatch;
 use crate::state::AppState;
 use crate::videorc_api::{
