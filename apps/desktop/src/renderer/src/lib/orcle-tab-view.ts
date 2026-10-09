@@ -273,12 +273,18 @@ const REMOVE_MESSAGES_PLATFORM_LABELS: Record<(typeof REMOVE_MESSAGES_PLATFORMS)
     x: 'X'
   }
 
+/** The row's short status: the row stays one line, the fix is the button. */
+export const REMOVE_MESSAGES_READY = 'Ready'
+export const REMOVE_MESSAGES_NEEDS_ACCESS = 'Needs access'
+
 export interface RemoveMessagesRow {
   platform: (typeof REMOVE_MESSAGES_PLATFORMS)[number]
   label: string
   accountLabel: string | null
   ready: boolean
-  /** "Ready", or what fixes it. */
+  /** The short status the row shows: "Ready" or "Needs access". */
+  status: typeof REMOVE_MESSAGES_READY | typeof REMOVE_MESSAGES_NEEDS_ACCESS
+  /** "Ready", or the whole fix as a sentence (the button's label and tooltip). */
   message: string
   action: { kind: 'reconnect'; label: 'Reconnect' } | { kind: 'authorize-x'; label: string } | null
 }
@@ -298,7 +304,19 @@ export function removeMessagesRows(
     const label = REMOVE_MESSAGES_PLATFORM_LABELS[platform]
     const ready = removeMessagesReadiness(platform, account, { xLiveAuthorized }) === 'ready'
     const accountLabel = account.accountLabel?.trim() || null
-    if (ready) return [{ platform, label, accountLabel, ready, message: 'Ready', action: null }]
+    if (ready) {
+      return [
+        {
+          platform,
+          label,
+          accountLabel,
+          ready,
+          status: REMOVE_MESSAGES_READY,
+          message: REMOVE_MESSAGES_READY,
+          action: null
+        }
+      ]
+    }
     if (platform === 'x') {
       return [
         {
@@ -306,6 +324,7 @@ export function removeMessagesRows(
           label,
           accountLabel,
           ready,
+          status: REMOVE_MESSAGES_NEEDS_ACCESS,
           message: 'Authorize X Live to let Golem remove messages.',
           action: { kind: 'authorize-x', label: 'Authorize X Live' }
         }
@@ -317,6 +336,7 @@ export function removeMessagesRows(
         label,
         accountLabel,
         ready,
+        status: REMOVE_MESSAGES_NEEDS_ACCESS,
         message: `Reconnect ${label} to let Golem remove messages.`,
         action: { kind: 'reconnect', label: 'Reconnect' }
       }

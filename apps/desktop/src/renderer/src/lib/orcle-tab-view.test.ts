@@ -328,11 +328,19 @@ describe('Voice commands (plan 140, S6 part A)', () => {
       ],
       { xLiveAuthorized: false }
     )
-    expect(rows.map((row) => [row.platform, row.ready, row.message, row.action?.label])).toEqual([
-      ['youtube', true, 'Ready', undefined],
-      ['twitch', true, 'Ready', undefined],
-      ['kick', false, 'Reconnect Kick to let Golem remove messages.', 'Reconnect'],
-      ['x', false, 'Authorize X Live to let Golem remove messages.', 'Authorize X Live']
+    expect(
+      rows.map((row) => [row.platform, row.ready, row.status, row.message, row.action?.label])
+    ).toEqual([
+      ['youtube', true, 'Ready', 'Ready', undefined],
+      ['twitch', true, 'Ready', 'Ready', undefined],
+      ['kick', false, 'Needs access', 'Reconnect Kick to let Golem remove messages.', 'Reconnect'],
+      [
+        'x',
+        false,
+        'Needs access',
+        'Authorize X Live to let Golem remove messages.',
+        'Authorize X Live'
+      ]
     ])
     expect(rows[0].accountLabel).toBe('youtube-channel')
   })

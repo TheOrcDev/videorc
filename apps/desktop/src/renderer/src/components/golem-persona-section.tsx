@@ -1,4 +1,4 @@
-import { ImageIcon, ResetIcon, SparkleIcon, UploadIcon } from '@/components/icons'
+import { ImageIcon, ResetIcon, SparkleIcon, UploadIcon, ZoomInIcon } from '@/components/icons'
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
@@ -89,8 +89,12 @@ export function GolemPersonaSection(): ReactElement | null {
   }
 
   const [startOverOpen, setStartOverOpen] = useState(false)
+  const [bubbleZoomOpen, setBubbleZoomOpen] = useState(false)
 
   if (!persona) return null
+  const setBubbleStyle = (bubbleStyle: CohostBubbleStyle): void => {
+    if (bubbleStyle !== persona.bubbleStyle) saveQuietly({ ...persona, bubbleStyle })
+  }
 
   const startOver = async (): Promise<void> => {
     setStartOverOpen(false)
@@ -137,28 +141,49 @@ export function GolemPersonaSection(): ReactElement | null {
             How your Golem talks on stream: no voice, a comic bubble above it.
           </FieldDescription>
           <div className="flex flex-wrap items-center gap-4">
-            <ToggleGroup
-              className="w-fit"
+            <GolemBubbleStyleToggle
               id="golem-bubble-style"
-              size="sm"
-              type="single"
               value={persona.bubbleStyle}
-              onValueChange={(next) => {
-                if (next && next !== persona.bubbleStyle) {
-                  saveQuietly({ ...persona, bubbleStyle: next as CohostBubbleStyle })
-                }
-              }}
-            >
-              {GOLEM_BUBBLE_STYLES.map((bubble) => (
-                <ToggleGroupItem key={bubble} className="px-3 text-xs" value={bubble}>
-                  {GOLEM_BUBBLE_LABELS[bubble]}
-                </ToggleGroupItem>
-              ))}
-            </ToggleGroup>
-            <GolemBubbleSample persona={persona} style={persona.bubbleStyle} />
+              onChange={setBubbleStyle}
+            />
+            <div className="flex items-end gap-1">
+              <GolemBubbleSample persona={persona} style={persona.bubbleStyle} />
+              <Button
+                aria-label="Zoom in on the bubble"
+                data-testid="golem-bubble-zoom"
+                size="icon-sm"
+                title="Zoom in"
+                type="button"
+                variant="ghost"
+                onClick={() => setBubbleZoomOpen(true)}
+              >
+                <ZoomInIcon />
+              </Button>
+            </div>
           </div>
         </Field>
       </FieldGroup>
+
+      {/* The sample is a stream-sized bitmap shown small; zoomed, it is drawn
+          again at twice the size so the bubble reads. */}
+      <Dialog open={bubbleZoomOpen} onOpenChange={setBubbleZoomOpen}>
+        <DialogContent className="sm:max-w-lg" data-testid="golem-bubble-zoom-dialog">
+          <DialogHeader>
+            <DialogTitle>Bubble</DialogTitle>
+            <DialogDescription>
+              How {persona.name} talks on stream, drawn the way your stream gets it.
+            </DialogDescription>
+          </DialogHeader>
+          <GolemBubbleStyleToggle
+            aria-label="Bubble style"
+            value={persona.bubbleStyle}
+            onChange={setBubbleStyle}
+          />
+          <div className="flex h-112 items-end justify-center rounded-row border border-border bg-foreground/[0.03] p-3">
+            <GolemBubbleSample persona={persona} size="zoomed" style={persona.bubbleStyle} />
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={startOverOpen} onOpenChange={setStartOverOpen}>
         <DialogContent showCloseButton={false}>
@@ -341,6 +366,39 @@ export function GolemStillLooks({
   )
 }
 
+/** Speech, Thought or Shout: beside the sample, and again in its zoom. */
+function GolemBubbleStyleToggle({
+  id,
+  'aria-label': ariaLabel,
+  value,
+  onChange
+}: {
+  id?: string
+  'aria-label'?: string
+  value: CohostBubbleStyle
+  onChange: (next: CohostBubbleStyle) => void
+}): ReactElement {
+  return (
+    <ToggleGroup
+      aria-label={ariaLabel}
+      className="w-fit"
+      id={id}
+      size="sm"
+      type="single"
+      value={value}
+      onValueChange={(next) => {
+        if (next) onChange(next as CohostBubbleStyle)
+      }}
+    >
+      {GOLEM_BUBBLE_STYLES.map((bubble) => (
+        <ToggleGroupItem key={bubble} className="px-3 text-xs" value={bubble}>
+          {GOLEM_BUBBLE_LABELS[bubble]}
+        </ToggleGroupItem>
+      ))}
+    </ToggleGroup>
+  )
+}
+
 /** The name, saved on blur or Enter; empty never saves and says why. */
 function GolemNameField({
   persona,
@@ -459,7 +517,16 @@ function GolemPersonalityField({
   )
 }
 
-/** One state: its image (or the bundled default), Upload and Generate. */
+/**
+ * One state: its image (or the bundled default), Upload and Generate.
+ *
+ * The tile is its own size container, because its width follows the
+ * Avatar section's column, not the window: four tiles beside the preview run
+ * from about 110 px wide (a 960 px window) to 350 px. Upload and Generate sit
+ * side by side only where both fit whole, and stack full width under that;
+ * the U chip shows only where it fits beside Upload's label, so nothing
+ * spills past the tile or cuts a word.
+ */
 function GolemStateTile({
   persona,
   state,
@@ -479,7 +546,7 @@ function GolemStateTile({
   const generating = progress.phase === 'generating'
   return (
     <div
-      className="flex flex-col gap-2 rounded-row border border-border bg-muted/20 p-2"
+      className="@container/golem-tile flex flex-col gap-2 rounded-row border border-border bg-muted/20 p-2"
       data-slot="golem-tile"
       data-state={state}
       tabIndex={0}
@@ -490,7 +557,7 @@ function GolemStateTile({
         }
       }}
     >
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center justify-between gap-x-2">
         <span className="text-xs font-medium text-foreground">{GOLEM_STATE_LABELS[state]}</span>
         {!own ? <span className="text-xs text-subtle">Default</span> : null}
       </div>
@@ -513,9 +580,12 @@ function GolemStateTile({
           ) : null}
         </div>
       )}
-      <div className="flex items-center gap-1">
+      <div
+        className="grid grid-cols-1 gap-1 @min-[13.5rem]/golem-tile:grid-cols-2"
+        data-slot="golem-tile-actions"
+      >
         <Button
-          className="flex-1"
+          className="w-full"
           disabled={generating}
           size="xs"
           type="button"
@@ -524,10 +594,10 @@ function GolemStateTile({
         >
           <UploadIcon data-icon="inline-start" />
           Upload
-          <Kbd className="ml-0.5">U</Kbd>
+          <Kbd className="ml-0.5 hidden @min-[7.5rem]/golem-tile:inline-flex">U</Kbd>
         </Button>
         <Button
-          className="flex-1"
+          className="w-full"
           data-testid="golem-generate"
           disabled={!canGenerate || generating}
           size="xs"

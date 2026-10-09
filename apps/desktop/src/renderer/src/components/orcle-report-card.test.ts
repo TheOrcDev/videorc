@@ -400,6 +400,44 @@ describe('Reports tab layout (plan 150 S6)', () => {
     )
   })
 
+  it('shows the stats as one tile each, the number over its label', async () => {
+    await render()
+    const tiles = [
+      ...document.querySelectorAll<HTMLElement>('[data-slot="orcle-report-stats"] > [data-stat]')
+    ]
+    expect(tiles.map((tile) => tile.dataset.stat)).toEqual([
+      'questions',
+      'answered-on-air',
+      'replied',
+      'missed',
+      'flags',
+      'promises-kept',
+      'promises-open',
+      'first-timers',
+      'on-screen'
+    ])
+    const greeted = tiles[7]
+    expect(greeted.querySelector('dt')?.textContent).toBe('First-timers greeted')
+    // The whole of a ratio is muted, beside the number.
+    expect(greeted.querySelector('dd span')?.textContent).toBe(' / 3')
+    expect(greeted.querySelector('dd span')?.className).toContain('text-muted-foreground')
+    // A big standalone number keeps proportional figures.
+    expect(greeted.querySelector('dd')?.className).not.toContain('tabular-nums')
+  })
+
+  it('puts Markers in the header beside the stream picker', async () => {
+    await render()
+    const header = document.querySelector('[data-slot="panel-section"] > header') as HTMLElement
+    const markers = header.querySelector('[data-testid="orcle-report-markers"]')
+    expect(markers?.textContent).toBe('Markers')
+    expect(header.querySelector('[aria-label="Stream"]')).toBeTruthy()
+    expect(card().querySelector('[data-testid="orcle-report-markers"]')).toBeNull()
+
+    // No Markers without a session to mark (the report outlived it).
+    await render({ sessions: [] })
+    expect(document.querySelector('[data-testid="orcle-report-markers"]')).toBeNull()
+  })
+
   it('sets what needs you beside what happened', async () => {
     await render()
     const lists = document.querySelector('[data-slot="orcle-report-lists"]') as HTMLElement

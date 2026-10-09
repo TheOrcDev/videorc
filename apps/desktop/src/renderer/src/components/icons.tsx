@@ -100,6 +100,7 @@ type _RegistryIconProps = _AssertIconProps<
     | 'LinkSimple'
     | 'LockKey'
     | 'MagnifyingGlass'
+    | 'MagnifyingGlassPlus'
     | 'Microphone'
     | 'MinusCircle'
     | 'Monitor'
@@ -187,6 +188,9 @@ export {
   X as CloseIcon,
   DotsThree as MoreIcon,
   MagnifyingGlass as SearchIcon,
+  // Opens a small picture larger to look at it (the Golem's bubble sample
+  // and its preview); never a zoom level control.
+  MagnifyingGlassPlus as ZoomInIcon,
   SlidersHorizontal as AdjustIcon,
   Layout as LayoutIcon
 } from '@phosphor-icons/react'
