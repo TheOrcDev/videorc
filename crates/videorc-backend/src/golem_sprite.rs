@@ -1149,14 +1149,28 @@ impl GolemSpriteSlot {
         self.inner.lock().layout = layout;
     }
 
-    /// Plan 164's state changed (`cohost.golem.state`).
-    pub fn set_avatar_state(&self, avatar_state: CohostAvatarState) {
-        self.inner.lock().avatar_state = avatar_state;
-    }
-
     /// `AppState::new` installs the animator here (plan 168 Phase C).
     pub fn set_source(&self, source: Box<dyn GolemSpriteSource>) {
         self.inner.lock().source = source;
+    }
+
+    /// Hand the source an event (plan 168 S-C3); it applies at the next frame.
+    pub fn notify(&self, event: crate::golem_animator::GolemAnimatorEvent) {
+        self.inner.lock().source.notify(Instant::now(), event);
+    }
+
+    /// Plan 164's state changed (`cohost.golem.state`), with the event that
+    /// changed it, in one step: no frame sees the state without its event.
+    pub fn set_avatar_state_and_notify(
+        &self,
+        avatar_state: CohostAvatarState,
+        event: Option<crate::golem_animator::GolemAnimatorEvent>,
+    ) {
+        let mut state = self.inner.lock();
+        state.avatar_state = avatar_state;
+        if let Some(event) = event {
+            state.source.notify(Instant::now(), event);
+        }
     }
 
     /// Seconds since this slot was made, for the CPU/Metal frame clock.
@@ -2203,7 +2217,7 @@ pub(crate) mod tests {
             .expect("the resize rebuilds the atlas");
         assert_eq!(rebuilt.cell_px, golem_cell_px(layout.horizontal, 1280));
         // A talk state picks the still pack's talk cell (here: the idle image).
-        slot.set_avatar_state(CohostAvatarState::Talk);
+        slot.set_avatar_state_and_notify(CohostAvatarState::Talk, None);
         assert!(slot.leg_frame(request).sprite.is_some());
     }
 }

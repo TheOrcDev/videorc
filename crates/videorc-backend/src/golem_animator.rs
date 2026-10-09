@@ -52,13 +52,17 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
-use crate::cohost::{CohostAvatarState, CohostPersona, CohostUtteranceState};
+use crate::cohost::{
+    CohostActivityTemplateKind, CohostAutoChat, CohostAutoChatMode, CohostAvatarState,
+    CohostPersona, CohostUtteranceState,
+};
 use crate::golem_motion::{GolemMotion, MotionConfig};
 use crate::golem_pet::{GOLEM_REACTION_NONE, GolemMotionSettings, GolemTrigger, PetFrameKind};
 use crate::golem_sprite::{
     GolemSpriteAtlas, GolemSpriteCell, GolemSpriteDraw, GolemSpriteLeg, GolemSpriteLegContext,
     GolemSpriteSource,
 };
+use crate::live_chat::{LiveChatEventType, LiveChatMessage};
 
 // --- The numbers (D11 to D15) ---------------------------------------------------------
 
@@ -101,6 +105,10 @@ pub const REACTION_QUEUE_MAX: usize = 2;
 /// ... for at most this long.
 pub const REACTION_MAX_AGE_SECONDS: f64 = 6.0;
 
+/// An Activity row older than this plays no reaction (a chat backfill on
+/// connect is history, not news). Greetings keep their own 10 minute window.
+pub const ACTIVITY_REACTION_FRESH_SECONDS: i64 = 60;
+
 /// The motion-only hop (D14's last fallback): an id the pose table does not
 /// know, so page-pet's default pose `[-8, 3, -0.05]` plays.
 pub const HOP_REACTION_ID: &str = "hop";
@@ -126,7 +134,6 @@ const TALK_CATCH_UP_STEPS: usize = 32;
 
 /// Something the pet may react to (S-C3 wires each one).
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(not(test), allow(dead_code))] // S-C3 sends every variant.
 pub enum GolemAnimatorEvent {
     /// A bubble went up (`golem_overlay::show_bubble`): its mood, its text
     /// length and how long it stays.
@@ -1014,5 +1021,88 @@ impl GolemSpriteSource for GolemAnimatorSource {
     }
 }
 
+// --- Chat (S-C3) ------------------------------------------------------------------------------
+
+/// The trigger an Activity kind fires (D14's table).
+pub fn trigger_for_activity(kind: CohostActivityTemplateKind) -> GolemTrigger {
+    use CohostActivityTemplateKind as Kind;
+    match kind {
+        Kind::Follow => GolemTrigger::Follow,
+        Kind::Sub | Kind::Resub | Kind::Membership => GolemTrigger::Subscription,
+        Kind::SubGift | Kind::CommunitySubGift => GolemTrigger::Gift,
+        Kind::Cheer | Kind::Kicks | Kind::SuperChat | Kind::SuperSticker | Kind::PowerUp => {
+            GolemTrigger::Tip
+        }
+        Kind::Raid => GolemTrigger::Raid,
+        Kind::WatchStreak => GolemTrigger::WatchStreak,
+        Kind::Redemption => GolemTrigger::Redemption,
+    }
+}
+
+/// The animator's view of rows just delivered to chat: one
+/// [`GolemAnimatorEvent::Trigger`] per fresh Activity row (with the reaction
+/// of the greeting template that answers it, when one sets it), and one
+/// [`GolemAnimatorEvent::ChatSeen`] when any other fresh row came. Tombstones
+/// and moderation rows are private and never count.
+pub fn live_chat_events(
+    messages: &[LiveChatMessage],
+    auto_chat: &CohostAutoChat,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<GolemAnimatorEvent> {
+    let mut events = Vec::new();
+    let mut chat = false;
+    for message in messages {
+        if message.is_deleted
+            || matches!(
+                message.event_type,
+                LiveChatEventType::Deleted | LiveChatEventType::Moderation
+            )
+            || !reaction_fresh(message, now)
+        {
+            continue;
+        }
+        match crate::cohost_greetings::activity_facts(message) {
+            Some(facts) => events.push(GolemAnimatorEvent::Trigger {
+                trigger: trigger_for_activity(facts.kind),
+                reaction: greeting_reaction(auto_chat, facts.kind, facts.platform),
+            }),
+            None => chat = true,
+        }
+    }
+    if chat {
+        events.push(GolemAnimatorEvent::ChatSeen);
+    }
+    events
+}
+
+/// A row counts when it was published within
+/// [`ACTIVITY_REACTION_FRESH_SECONDS`]; an unparseable time counts.
+fn reaction_fresh(message: &LiveChatMessage, now: chrono::DateTime<chrono::Utc>) -> bool {
+    chrono::DateTime::parse_from_rfc3339(&message.published_at).map_or(true, |published| {
+        now.signed_duration_since(published).num_seconds() <= ACTIVITY_REACTION_FRESH_SECONDS
+    })
+}
+
+/// The reaction a greeting template sets for this kind and platform, when
+/// greetings answer it (D14: the greeting's own reaction wins). Several
+/// matching templates: the first that sets one.
+fn greeting_reaction(
+    auto_chat: &CohostAutoChat,
+    kind: CohostActivityTemplateKind,
+    platform: crate::streaming::StreamPlatform,
+) -> Option<String> {
+    if auto_chat.mode == CohostAutoChatMode::Off || !auto_chat.greetings.enabled {
+        return None;
+    }
+    let platform = crate::cohost_greetings::greeting_platform(platform);
+    auto_chat
+        .greetings
+        .templates
+        .iter()
+        .filter(|template| template.enabled && template.kind == kind)
+        .filter(|template| template.platform.is_none() || template.platform == platform)
+        .find_map(|template| template.reaction.clone())
+}
+
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

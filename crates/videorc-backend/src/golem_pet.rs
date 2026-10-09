@@ -1303,8 +1303,8 @@ pub enum GolemTrigger {
     DestinationFailed,
 }
 
-#[allow(dead_code)] // Phase C maps activity to triggers; Phase D lists them.
 impl GolemTrigger {
+    #[cfg_attr(not(test), allow(dead_code))] // tests walk every trigger
     pub const ALL: [GolemTrigger; 8] = [
         Self::Follow,
         Self::Subscription,
@@ -1332,7 +1332,6 @@ impl GolemTrigger {
 }
 
 /// A reaction override that turns a trigger's reaction off.
-#[allow(dead_code)] // Phase C resolves overrides.
 pub const GOLEM_REACTION_NONE: &str = "none";
 /// A reaction id a persona may name (a reaction table entry, a greeting's
 /// `reaction`): 1 to 40 characters of `[a-z0-9-]`.

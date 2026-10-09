@@ -284,11 +284,9 @@ async fn active_reactions(
 }
 
 /// `cohost.pet.react` (the preview's Try buttons, the Say box chips): play
-/// one reaction of the active pack on air.
-///
-/// Phase A checks the id against the active pack and accepts it. Plan 168
-/// Phase C fills this in: the accepted reaction goes to the animator
-/// (`golem_animator.rs`), queued like any event reaction (D14).
+/// one reaction of the active pack on air. The id is checked against the
+/// active pack, then the reaction goes to the animator (`golem_animator`,
+/// plan 168 S-C3), queued like any event reaction (D14).
 pub async fn request_reaction(
     state: &AppState,
     reaction: &str,
@@ -309,6 +307,12 @@ async fn request_reaction_in(
             format!("The Golem's pack has no {reaction} reaction."),
         ));
     }
+    // Queued like any event reaction (D14): it plays after the one on air.
+    state
+        .golem_sprite
+        .notify(crate::golem_animator::GolemAnimatorEvent::React {
+            reaction: reaction.to_string(),
+        });
     Ok(CohostPetReactAccepted {
         reaction: reaction.to_string(),
     })

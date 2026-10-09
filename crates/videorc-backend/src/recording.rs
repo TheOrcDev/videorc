@@ -21777,6 +21777,7 @@ async fn publish_stream_target_failure_if_active(
             "stream-target-failed",
             &format!("Streaming to {label} stopped: {reason}"),
         );
+        note_golem_destination_failed(state);
         state.emit_event("stream.targets", snapshot);
     }
 }
@@ -22062,8 +22063,22 @@ pub(crate) async fn observe_platform_stream(
             ),
         };
         let _ = emit_health_event(state, Some(session_id), level, code, &text);
+        if next == StreamTargetState::Failed {
+            note_golem_destination_failed(state);
+        }
         state.emit_event("stream.targets", snapshot);
     }
+}
+
+/// Plan 168 D14: a destination failed; the Golem reacts only when the persona
+/// chose a reaction for it (owner default: none).
+fn note_golem_destination_failed(state: &AppState) {
+    state
+        .golem_sprite
+        .notify(crate::golem_animator::GolemAnimatorEvent::Trigger {
+            trigger: crate::golem_pet::GolemTrigger::DestinationFailed,
+            reaction: None,
+        });
 }
 
 pub(crate) const STREAM_TARGET_NOT_RECEIVING_CODE: &str = "stream-target-not-receiving";

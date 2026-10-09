@@ -84,7 +84,7 @@ fn atlas_with(grid: bool, reactions: &[&str], talk: &[&str]) -> GolemSpriteAtlas
 }
 
 /// A creator-made pack: every gaze cell, page-pet's reactions, talk frames, wave.
-fn alive() -> GolemSpriteAtlas {
+pub(crate) fn alive() -> GolemSpriteAtlas {
     atlas_with(true, &ALL_REACTIONS, &["talk-a", "talk-b"])
 }
 
@@ -1358,4 +1358,272 @@ fn the_source_drops_reactions_that_waited_too_long_for_a_frame() {
         source.notify(Instant::now(), GolemAnimatorEvent::ChatSeen);
     }
     assert_eq!(source.pending.len(), PENDING_MAX);
+}
+
+// --- S-C3: chat rows as animator events -------------------------------------------------------
+
+fn twitch_activity() -> Vec<LiveChatMessage> {
+    crate::live_chat::fake_events_for_tests(
+        "golem-session",
+        crate::streaming::StreamPlatform::Twitch,
+        None,
+    )
+}
+
+#[test]
+fn activity_rows_become_their_triggers_and_chat_becomes_activity() {
+    use CohostActivityTemplateKind as Kind;
+    for (kind, trigger) in [
+        (Kind::Follow, GolemTrigger::Follow),
+        (Kind::Sub, GolemTrigger::Subscription),
+        (Kind::Resub, GolemTrigger::Subscription),
+        (Kind::Membership, GolemTrigger::Subscription),
+        (Kind::SubGift, GolemTrigger::Gift),
+        (Kind::CommunitySubGift, GolemTrigger::Gift),
+        (Kind::Cheer, GolemTrigger::Tip),
+        (Kind::Kicks, GolemTrigger::Tip),
+        (Kind::SuperChat, GolemTrigger::Tip),
+        (Kind::SuperSticker, GolemTrigger::Tip),
+        (Kind::PowerUp, GolemTrigger::Tip),
+        (Kind::Raid, GolemTrigger::Raid),
+        (Kind::WatchStreak, GolemTrigger::WatchStreak),
+        (Kind::Redemption, GolemTrigger::Redemption),
+    ] {
+        assert_eq!(trigger_for_activity(kind), trigger, "{kind:?}");
+    }
+    let rows = twitch_activity();
+    let events = live_chat_events(&rows, &CohostAutoChat::default(), chrono::Utc::now());
+    let triggers = events
+        .iter()
+        .filter_map(|event| match event {
+            GolemAnimatorEvent::Trigger { trigger, reaction } => {
+                assert_eq!(*reaction, None);
+                Some(*trigger)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(triggers.contains(&GolemTrigger::Follow), "{triggers:?}");
+    assert!(triggers.contains(&GolemTrigger::Raid), "{triggers:?}");
+    assert!(triggers.contains(&GolemTrigger::Redemption), "{triggers:?}");
+    // Plain chat: one ChatSeen per batch; tombstones, moderation rows and
+    // stale rows count for nothing.
+    let mut chat = rows[0].clone();
+    chat.details = None;
+    chat.event_type = LiveChatEventType::Message;
+    let mut deleted = chat.clone();
+    deleted.is_deleted = true;
+    let mut moderation = chat.clone();
+    moderation.event_type = LiveChatEventType::Moderation;
+    let mut stale = rows[0].clone();
+    stale.published_at = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+    let events = live_chat_events(
+        &[chat.clone(), chat, deleted, moderation, stale],
+        &CohostAutoChat::default(),
+        chrono::Utc::now(),
+    );
+    assert_eq!(events, vec![GolemAnimatorEvent::ChatSeen]);
+}
+
+#[test]
+fn a_greeting_that_answers_the_row_brings_its_own_reaction() {
+    use crate::cohost::{CohostGreetingPlatform, CohostGreetingTemplate, CohostGreetingsSettings};
+    let follow = twitch_activity()
+        .into_iter()
+        .find(|row| row.event_type == LiveChatEventType::Follow)
+        .unwrap();
+    let template = |id: &str, platform, reaction: Option<&str>, enabled| CohostGreetingTemplate {
+        id: id.to_string(),
+        kind: CohostActivityTemplateKind::Follow,
+        platform,
+        text: "Welcome {name}!".to_string(),
+        state: CohostUtteranceState::Talk,
+        enabled,
+        reaction: reaction.map(str::to_string),
+    };
+    let mut auto_chat = CohostAutoChat {
+        mode: CohostAutoChatMode::Auto,
+        greetings: CohostGreetingsSettings {
+            enabled: true,
+            templates: vec![
+                template("off", None, Some("laugh"), false),
+                template(
+                    "kick-only",
+                    Some(CohostGreetingPlatform::Kick),
+                    Some("calm"),
+                    true,
+                ),
+                template("plain", None, None, true),
+                template(
+                    "proud",
+                    Some(CohostGreetingPlatform::Twitch),
+                    Some("proud"),
+                    true,
+                ),
+            ],
+        },
+        ..CohostAutoChat::default()
+    };
+    let reaction = |auto_chat: &CohostAutoChat| match live_chat_events(
+        std::slice::from_ref(&follow),
+        auto_chat,
+        chrono::Utc::now(),
+    )
+    .as_slice()
+    {
+        [GolemAnimatorEvent::Trigger { reaction, .. }] => reaction.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(reaction(&auto_chat), Some("proud".to_string()));
+    // Greetings off (or the mode off): the trigger's own reaction.
+    auto_chat.greetings.enabled = false;
+    assert_eq!(reaction(&auto_chat), None);
+    auto_chat.greetings.enabled = true;
+    auto_chat.mode = CohostAutoChatMode::Off;
+    assert_eq!(reaction(&auto_chat), None);
+}
+
+// --- S-C3: the events reach the pet on stream -------------------------------------------------
+
+mod wiring {
+    use super::*;
+    use crate::golem_sprite::GolemLegRequest;
+    use crate::state::AppState;
+    use crate::storage::Database;
+
+    fn test_state() -> AppState {
+        let (events, _) = tokio::sync::broadcast::channel(256);
+        AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            Database::open_in_memory_for_tests(),
+        )
+    }
+
+    /// The pet on the primary 1080p leg at `now`, with the card at `card`.
+    fn on_stream(state: &AppState, now: f64, card: Option<[f32; 4]>) -> (String, [f32; 4]) {
+        let frame = state.golem_sprite.leg_frame(GolemLegRequest {
+            leg: GolemSpriteLeg::Primary,
+            canvas: PRIMARY_CANVAS,
+            now_seconds: now,
+            highlight_rect: card,
+            caption_rect: None,
+        });
+        let sprite = frame.sprite.expect("the pet draws");
+        (cell_id(&sprite.atlas, &sprite.draw), frame.golem_box)
+    }
+
+    fn wear_alive(state: &AppState) {
+        state
+            .golem_sprite
+            .install_atlas_for_test(GolemSpriteLeg::Primary, PRIMARY_CANVAS, alive());
+    }
+
+    #[tokio::test]
+    async fn a_fake_follow_plays_the_follow_reaction_on_stream() {
+        let state = test_state();
+        wear_alive(&state);
+        assert_eq!(on_stream(&state, 10.0, None).0, NEUTRAL);
+        // The Twitch fake activity's follow, through the chat delivery hook.
+        let follow = crate::live_chat::fake_events_for_tests(
+            "golem-session",
+            crate::streaming::StreamPlatform::Twitch,
+            Some("twitch-target"),
+        )
+        .into_iter()
+        .find(|message| message.event_type == LiveChatEventType::Follow)
+        .expect("the fake activity has a follow");
+        let delivery = state.live_chat_persistence.begin_delivery().await;
+        crate::cohost::note_messages_under_lifecycle_fence(&state, &delivery, &[follow]).await;
+        drop(delivery);
+        assert_eq!(
+            on_stream(&state, 10.0, None).0,
+            NEUTRAL,
+            "not before the next frame"
+        );
+        assert_eq!(on_stream(&state, 10.033, None).0, "wave");
+        assert_eq!(on_stream(&state, 11.0, None).0, "wave");
+        assert_eq!(on_stream(&state, 11.2, None).0, NEUTRAL);
+    }
+
+    #[tokio::test]
+    async fn plain_chat_wakes_the_pet_and_a_tombstone_does_not() {
+        let state = test_state();
+        wear_alive(&state);
+        let mut sleepy = GolemAnimatorSettings::default();
+        sleepy.motion.sleep_after_seconds = 30;
+        state
+            .golem_sprite
+            .notify(GolemAnimatorEvent::Settings(sleepy));
+        for frame in 0..=320 {
+            on_stream(&state, f64::from(frame) / 10.0, None);
+        }
+        assert_eq!(on_stream(&state, 32.1, None).0, "sleep");
+        let mut chat = crate::live_chat::fake_events_for_tests(
+            "golem-session",
+            crate::streaming::StreamPlatform::Twitch,
+            None,
+        )
+        .remove(0);
+        chat.details = None;
+        chat.event_type = LiveChatEventType::Message;
+        let mut tombstone = chat.clone();
+        tombstone.is_deleted = true;
+        let delivery = state.live_chat_persistence.begin_delivery().await;
+        crate::cohost::note_messages_under_lifecycle_fence(&state, &delivery, &[tombstone]).await;
+        drop(delivery);
+        assert_eq!(on_stream(&state, 32.2, None).0, "sleep");
+        let delivery = state.live_chat_persistence.begin_delivery().await;
+        crate::cohost::note_messages_under_lifecycle_fence(&state, &delivery, &[chat]).await;
+        drop(delivery);
+        assert_eq!(on_stream(&state, 32.3, None).0, "surprised");
+    }
+
+    #[tokio::test]
+    async fn the_say_box_talks_and_a_manual_reaction_plays() {
+        let state = test_state();
+        wear_alive(&state);
+        on_stream(&state, 5.0, None);
+        crate::golem_overlay::show_bubble(
+            &state,
+            "Thanks for hanging out tonight, everyone!",
+            CohostUtteranceState::Talk,
+        )
+        .await
+        .unwrap();
+        let talked = (1..40)
+            .map(|frame| on_stream(&state, 5.0 + f64::from(frame) / 30.0, None).0)
+            .collect::<Vec<_>>();
+        assert_eq!(talked[0], "talk-a");
+        assert!(talked.iter().any(|id| id == "talk-b"), "{talked:?}");
+        // A Stream Manager chip (`cohost.pet.react`): the still persona's
+        // `laugh` passes the pack check and plays.
+        crate::golem_pet_store::request_reaction(&state, "laugh")
+            .await
+            .unwrap();
+        assert_eq!(on_stream(&state, 6.5, None).0, "laugh");
+    }
+
+    #[tokio::test]
+    async fn a_live_highlight_turns_the_gaze_toward_the_card() {
+        let state = test_state();
+        wear_alive(&state);
+        let (_, golem_box) = on_stream(&state, 1.0, None);
+        // The card left of the pet, as the compositor passes its blit.
+        let card = [
+            (golem_box[0] - 700.0).max(0.0),
+            golem_box[1],
+            500.0,
+            golem_box[3],
+        ];
+        crate::comment_highlight::tests::install_live_highlight_for_test(&state).await;
+        let (looked, _) = on_stream(&state, 1.05, Some(card));
+        let gaze = gaze_of(&alive(), &looked).expect("a gaze cell");
+        assert!(gaze[0] < 0.0, "{looked} {gaze:?}");
+        // 1.5 s later: back to the viewer; the card leaving changes nothing.
+        assert_eq!(on_stream(&state, 2.6, Some(card)).0, NEUTRAL);
+        crate::comment_highlight::clear_comment_highlight(&state).await;
+        assert_eq!(on_stream(&state, 2.7, None).0, NEUTRAL);
+    }
 }

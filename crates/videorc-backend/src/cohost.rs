@@ -9065,10 +9065,22 @@ pub(crate) async fn note_messages_under_lifecycle_fence(
     }
     // Plan 164 Phase D: greetings run with or without the tick session. The
     // sends are spawned, never awaited under the delivery fence.
-    let auto_chat = {
+    let (auto_chat, golem_events) = {
         let mut engine = state.cohost.lock().await;
-        engine.note_activity(messages, Instant::now(), &chrono::Utc::now().to_rfc3339())
+        // Plan 168 S-C3: Activity rows make the Golem react on stream (the
+        // greeting's own reaction wins), any chat keeps it awake.
+        let golem_events = crate::golem_animator::live_chat_events(
+            messages,
+            &engine.settings.auto_chat,
+            chrono::Utc::now(),
+        );
+        let auto_chat =
+            engine.note_activity(messages, Instant::now(), &chrono::Utc::now().to_rfc3339());
+        (auto_chat, golem_events)
     };
+    for event in golem_events {
+        state.golem_sprite.notify(event);
+    }
     apply_auto_chat_pass(state, auto_chat, Some(lifecycle_delivery)).await;
     let snapshot = {
         let mut engine = state.cohost.lock().await;

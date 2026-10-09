@@ -31,6 +31,7 @@ use crate::cohost::{
     CohostAvatarState, CohostUtterance, CohostUtteranceState, CohostUtteranceStatus,
     CohostUtteranceTriggerKind,
 };
+use crate::golem_animator::GolemAnimatorEvent;
 use crate::overlay_layout::{OverlayItem, OverlayRect, OverlaySnap, load_overlay_layout};
 use crate::state::AppState;
 
@@ -290,13 +291,22 @@ pub async fn show_bubble(
     let text = validate_say_text(text)?;
     let persona_id = crate::cohost::get_cohost_settings(app).await.persona.id;
     let duration = golem_bubble_duration(&text);
+    let chars = text.chars().count();
     let (snapshot, generation) = {
         let mut golem = app.golem_overlay_state.lock().await;
         golem.set_persona(persona_id);
         let generation = golem.show_bubble(text, state, duration, Utc::now());
         (golem.snapshot(), generation)
     };
-    publish_state(app, snapshot.clone());
+    publish_state(
+        app,
+        snapshot.clone(),
+        Some(GolemAnimatorEvent::UtteranceStart {
+            state,
+            chars,
+            bubble_seconds: duration.as_secs_f64(),
+        }),
+    );
     let app = app.clone();
     tokio::spawn(async move {
         tokio::time::sleep(duration).await;
@@ -305,10 +315,15 @@ pub async fn show_bubble(
     Ok(snapshot)
 }
 
-/// Tell every window, and the pet on stream (plan 168 S-B1: until Phase C's
-/// animator the sprite shows the state's cell).
-fn publish_state(app: &AppState, snapshot: GolemOverlaySnapshot) {
-    app.golem_sprite.set_avatar_state(snapshot.state);
+/// Tell every window, and the pet on stream: the state and the event that
+/// changed it reach the animator together (plan 168 S-C3).
+fn publish_state(
+    app: &AppState,
+    snapshot: GolemOverlaySnapshot,
+    animator_event: Option<GolemAnimatorEvent>,
+) {
+    app.golem_sprite
+        .set_avatar_state_and_notify(snapshot.state, animator_event);
     app.emit_event(GOLEM_STATE_EVENT, snapshot);
 }
 
@@ -320,7 +335,7 @@ async fn expire_bubble(app: &AppState, generation: u64) {
         }
         golem.snapshot()
     };
-    publish_state(app, snapshot);
+    publish_state(app, snapshot, Some(GolemAnimatorEvent::UtteranceEnd));
 }
 
 /// `idle` → `think` while an answer is pending (D18): the send path calls
@@ -333,7 +348,7 @@ pub async fn think(app: &AppState) -> GolemOverlaySnapshot {
         (golem.snapshot(), changed)
     };
     if changed {
-        publish_state(app, snapshot.clone());
+        publish_state(app, snapshot.clone(), Some(GolemAnimatorEvent::ThinkStart));
     }
     snapshot
 }
@@ -347,7 +362,7 @@ pub async fn settle(app: &AppState) -> GolemOverlaySnapshot {
         (golem.snapshot(), changed)
     };
     if changed {
-        publish_state(app, snapshot.clone());
+        publish_state(app, snapshot.clone(), Some(GolemAnimatorEvent::ThinkSettle));
     }
     snapshot
 }
@@ -361,7 +376,12 @@ pub async fn clear(app: &AppState) -> GolemOverlaySnapshot {
         (golem.snapshot(), changed)
     };
     if changed {
-        publish_state(app, snapshot.clone());
+        // Idle at once: the animator drops the bubble and the pending answer.
+        publish_state(
+            app,
+            snapshot.clone(),
+            Some(GolemAnimatorEvent::UtteranceEnd),
+        );
     }
     snapshot
 }

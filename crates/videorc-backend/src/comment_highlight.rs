@@ -294,7 +294,29 @@ fn next_generation(generation: u64) -> u64 {
 }
 
 fn emit_state(state: &AppState, highlight: &CommentHighlightState) {
+    // Plan 168 S-C3: the Golem looks at the card while it shows (the card's
+    // rect per leg reaches the animator with every frame).
+    state.golem_sprite.notify(match highlight.phase {
+        CommentHighlightPhase::Live => crate::golem_animator::GolemAnimatorEvent::HighlightLive {
+            ttl_seconds: highlight_ttl_seconds(highlight),
+        },
+        CommentHighlightPhase::Idle | CommentHighlightPhase::Failed => {
+            crate::golem_animator::GolemAnimatorEvent::HighlightIdle
+        }
+    });
     state.emit_event("comments.highlight.status", highlight.clone());
+}
+
+/// Seconds the live card has left, from its `expires_at` (the full TTL when
+/// that is missing or unreadable).
+fn highlight_ttl_seconds(highlight: &CommentHighlightState) -> f64 {
+    highlight
+        .expires_at
+        .as_deref()
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .map(|at| (at.with_timezone(&Utc) - Utc::now()).num_milliseconds() as f64 / 1000.0)
+        .filter(|seconds| *seconds > 0.0)
+        .unwrap_or(COMMENT_HIGHLIGHT_TTL.as_secs_f64())
 }
 
 pub async fn comment_highlight_status(state: &AppState) -> CommentHighlightState {
@@ -618,7 +640,7 @@ pub(crate) async fn invalidate_comment_highlight_for_compositor_non_live(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::captions::CaptionOverlayPosition;
     use tokio::sync::broadcast;
@@ -1078,6 +1100,24 @@ mod tests {
             );
             state.recording.lock().await.take();
         }
+    }
+
+    /// A card live on a stream session through the real `set` path (the
+    /// Golem's animator tests watch the pet look at it, plan 168 S-C3).
+    pub(crate) async fn install_live_highlight_for_test(state: &AppState) -> CommentHighlightState {
+        state.compositor.lock().await.status.state = CompositorState::Live;
+        {
+            let mut chat = state.live_chat.lock().await;
+            chat.start_session("session-1".to_string(), Vec::new());
+            chat.ingest(message(LiveChatEventType::Message, false));
+        }
+        let mut active = crate::recording::test_active_recording_stub("session-1");
+        active.mode = "record+stream".to_string();
+        active.comment_highlight_available = true;
+        *state.recording.lock().await = Some(active);
+        let status = set_comment_highlight(state, params()).await.unwrap();
+        assert_eq!(status.phase, CommentHighlightPhase::Live);
+        status
     }
 
     #[tokio::test]
