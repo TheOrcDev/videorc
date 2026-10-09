@@ -19,25 +19,25 @@ const flush = async (): Promise<void> => {
 
 describe('overlay stage helpers', () => {
   it('round-trips the stage id and lists every item with its badge', () => {
-    expect(overlayItemFromStageId(overlayStageId('golem'))).toBe('golem')
+    expect(overlayItemFromStageId(overlayStageId('buddy'))).toBe('buddy')
     expect(overlayItemFromStageId('overlay:nope')).toBeNull()
     expect(overlayItemFromStageId('source:camera')).toBeNull()
     expect(overlayItemFromStageId(null)).toBeNull()
     const layout: OverlayLayout = {
       ...DEFAULT_OVERLAY_LAYOUT,
-      golem: { ...DEFAULT_OVERLAY_LAYOUT.golem, showOnStream: true, showInRecording: false }
+      buddy: { ...DEFAULT_OVERLAY_LAYOUT.buddy, showOnStream: true, showInRecording: false }
     }
     const items = overlayStageItems(layout, 'vertical')
-    expect(items.map((item) => item.item)).toEqual(['highlight', 'captions', 'golem'])
+    expect(items.map((item) => item.item)).toEqual(['highlight', 'captions', 'buddy'])
     expect(items[2]).toMatchObject({
-      stageId: 'overlay:golem',
+      stageId: 'overlay:buddy',
       label: 'Golem',
       badge: 'stream only',
       rect: {
-        x: layout.golem.vertical.x,
-        y: layout.golem.vertical.y,
-        width: layout.golem.vertical.w,
-        height: layout.golem.vertical.h
+        x: layout.buddy.vertical.x,
+        y: layout.buddy.vertical.y,
+        width: layout.buddy.vertical.w,
+        height: layout.buddy.vertical.h
       }
     })
     expect(items[0]!.badge).toBeNull()
@@ -82,7 +82,7 @@ describe('OverlayEdits', () => {
     expect(commit).toHaveBeenCalledTimes(1)
     const sent = commit.mock.calls[0]![0]
     expect(sent.highlight.horizontal).toStrictEqual({ x: 0.6, y: 0.05, w: 0.4, h: 0.2 })
-    expect(sent.golem).toStrictEqual(DEFAULT_OVERLAY_LAYOUT.golem)
+    expect(sent.buddy).toStrictEqual(DEFAULT_OVERLAY_LAYOUT.buddy)
     // The draft stays until the committed layout echoes the rect.
     edits.observe(DEFAULT_OVERLAY_LAYOUT)
     expect(edits.draft).not.toBeNull()
@@ -95,13 +95,13 @@ describe('OverlayEdits', () => {
       .fn<(layout: OverlayLayout) => Promise<void>>()
       .mockRejectedValue(new Error('offline'))
     const edits = new OverlayEdits(commit, () => {})
-    edits.submit(DEFAULT_OVERLAY_LAYOUT, 'golem', 'vertical', {
+    edits.submit(DEFAULT_OVERLAY_LAYOUT, 'buddy', 'vertical', {
       x: 0.1,
       y: 0.1,
       width: 0.3,
       height: 0.2
     })
-    expect(edits.draft?.item).toBe('golem')
+    expect(edits.draft?.item).toBe('buddy')
     await flush()
     await flush()
     expect(commit).toHaveBeenCalledTimes(1)

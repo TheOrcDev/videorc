@@ -1091,7 +1091,7 @@
       "questionsTotal": 0,
       "command": {
         "id": "cmd-11111111-1111-4111-8111-111111111111",
-        "heard": "golem highlight the comment from coders",
+        "heard": "buddy highlight the comment from coders",
         "kind": "highlight",
         "status": "ambiguous",
         "message": "Which comment? Say 'the first one' or press 1 or 2.",
@@ -1525,7 +1525,7 @@
         "showOnStream": false,
         "showInRecording": false
       },
-      "golem": {
+      "buddy": {
         "horizontal": { "x": 0.7975, "y": 0.64, "w": 0.18, "h": 0.32 },
         "vertical": { "x": 0.608889, "y": 0.6, "w": 0.32, "h": 0.18 },
         "showOnStream": false,
@@ -1545,7 +1545,7 @@
         "showOnStream": true,
         "showInRecording": true
       },
-      "golem": {
+      "buddy": {
         "horizontal": { "x": 0.1, "y": 0.2, "w": 0.25, "h": 0.2 },
         "vertical": { "x": 0.6, "y": 0.6, "w": 0.32, "h": 0.18 },
         "showOnStream": false,
@@ -1553,7 +1553,7 @@
       }
     }
   },
-  "golemPets": {
+  "buddyPets": {
     "summary": {
       "packId": "0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a",
       "name": "Synthetic Pip",
@@ -1564,7 +1564,7 @@
       "hasTalk": true
     },
     "bundledSummary": {
-      "packId": "bundled:golem",
+      "packId": "bundled:buddy",
       "name": "Golem",
       "cellSize": 640,
       "gazeCount": 25,
@@ -1577,7 +1577,7 @@
     "reactParams": { "reaction": "laugh" },
     "reactAccepted": { "reaction": "laugh" }
   },
-  "golemPetCreator": {
+  "buddyPetCreator": {
     "status": {
       "creation": {
         "buildId": "5f0c2a8e-3b1d-4c6e-9a7f-2d8b1e4c6a90",
@@ -1724,7 +1724,7 @@
       "hasTalk": true
     }
   },
-  "golemLook": {
+  "buddyLook": {
     "createParams": {
       "description": "A grumpy stone golem with a mossy back",
       "inspirationBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
@@ -1789,7 +1789,7 @@
       "libraryAvatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51"
     }
   },
-  "golemLibrary": {
+  "buddyLibrary": {
     "signedOut": {
       "signedIn": false,
       "official": [
@@ -1862,8 +1862,8 @@
           "createdAt": "2026-10-09T10:00:00.000Z",
           "updatedAt": "2026-10-09T10:05:00.000Z",
           "poses": {
-            "idle": "videorc-asset://golem/library/7c9e6679-7425-40de-944b-e07fc1ee9a51/idle-0a1b2c3d.png",
-            "talk": "videorc-asset://golem/library/7c9e6679-7425-40de-944b-e07fc1ee9a51/talk-4e5f6a7b.png",
+            "idle": "videorc-asset://buddy/library/7c9e6679-7425-40de-944b-e07fc1ee9a51/idle-0a1b2c3d.png",
+            "talk": "videorc-asset://buddy/library/7c9e6679-7425-40de-944b-e07fc1ee9a51/talk-4e5f6a7b.png",
             "laugh": null,
             "think": null
           }

@@ -197,7 +197,7 @@ export type CohostPaneMode =
  * from the user agent, as the Stream Manager reads its ⌘J, so this pure view
  * module stays free of lib/platform.ts.
  */
-const GOLEM_TAB_KEY = /Macintosh/.test(globalThis.navigator?.userAgent ?? '') ? '⌘9' : 'Ctrl+9'
+const BUDDY_TAB_KEY = /Macintosh/.test(globalThis.navigator?.userAgent ?? '') ? '⌘9' : 'Ctrl+9'
 
 /**
  * Which single-line explanation (if any) replaces the pane. Premium is checked
@@ -231,7 +231,7 @@ export function cohostPaneMode({
     // The Comments window cannot switch the main window's tab: copy only.
     return {
       kind: 'disabled',
-      reason: `Golem is off. Turn it on in the Golem tab (${GOLEM_TAB_KEY}).`
+      reason: `Golem is off. Turn it on in the Golem tab (${BUDDY_TAB_KEY}).`
     }
   }
   return { kind: 'live' }

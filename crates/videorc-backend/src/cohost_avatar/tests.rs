@@ -27,7 +27,7 @@ fn test_state() -> AppState {
 }
 
 fn temp_root() -> PathBuf {
-    let root = std::env::temp_dir().join(format!("videorc-golem-look-{}", uuid::Uuid::new_v4()));
+    let root = std::env::temp_dir().join(format!("videorc-buddy-look-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
     root
 }
@@ -307,7 +307,7 @@ fn draft_entries(root: &Path) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn golem_look_create_lands_as_a_draft_and_keep_makes_it_the_look() {
+async fn buddy_look_create_lands_as_a_draft_and_keep_makes_it_the_look() {
     let state = test_state();
     let root = temp_root();
     let web = spawn_fake_web().await;
@@ -442,7 +442,7 @@ async fn golem_look_create_lands_as_a_draft_and_keep_makes_it_the_look() {
 }
 
 #[tokio::test]
-async fn golem_look_a_second_keep_gets_new_paths_and_drops_the_first_look() {
+async fn buddy_look_a_second_keep_gets_new_paths_and_drops_the_first_look() {
     let state = test_state();
     let root = temp_root();
     let web = spawn_fake_web().await;
@@ -453,7 +453,7 @@ async fn golem_look_a_second_keep_gets_new_paths_and_drops_the_first_look() {
             round,
             made: ALL_STATES.to_vec(),
         });
-        let (request_id, _, _) = create_and_wait(&state, &env, describe("a golem")).await;
+        let (request_id, _, _) = create_and_wait(&state, &env, describe("a buddy")).await;
         let settings = keep_in(
             &state,
             env.clone(),
@@ -488,7 +488,7 @@ async fn golem_look_a_second_keep_gets_new_paths_and_drops_the_first_look() {
 }
 
 #[tokio::test]
-async fn golem_look_discard_leaves_nothing_behind() {
+async fn buddy_look_discard_leaves_nothing_behind() {
     let state = test_state();
     let root = temp_root();
     let web = spawn_fake_web().await;
@@ -498,7 +498,7 @@ async fn golem_look_discard_leaves_nothing_behind() {
         made: ALL_STATES.to_vec(),
     });
     let before = get_cohost_settings(&state).await.persona;
-    let (request_id, _, draft) = create_and_wait(&state, &env, describe("a golem")).await;
+    let (request_id, _, draft) = create_and_wait(&state, &env, describe("a buddy")).await;
     assert!(draft.is_some());
     let status = discard_in(
         &state,
@@ -534,7 +534,7 @@ async fn golem_look_discard_leaves_nothing_behind() {
 }
 
 #[tokio::test]
-async fn golem_look_redo_replaces_one_draft_state_from_the_draft_idle() {
+async fn buddy_look_redo_replaces_one_draft_state_from_the_draft_idle() {
     let state = test_state();
     let root = temp_root();
     let web = spawn_fake_web().await;
@@ -548,7 +548,7 @@ async fn golem_look_redo_replaces_one_draft_state_from_the_draft_idle() {
             CohostAvatarState::Laugh,
         ],
     });
-    let (request_id, progress, draft) = create_and_wait(&state, &env, describe("a golem")).await;
+    let (request_id, progress, draft) = create_and_wait(&state, &env, describe("a buddy")).await;
     let think = progress
         .iter()
         .find(|step| step.state == CohostAvatarState::Think)
@@ -666,7 +666,7 @@ async fn golem_look_redo_replaces_one_draft_state_from_the_draft_idle() {
 }
 
 #[tokio::test]
-async fn golem_look_second_create_replaces_the_draft_and_a_failed_one_keeps_it() {
+async fn buddy_look_second_create_replaces_the_draft_and_a_failed_one_keeps_it() {
     let state = test_state();
     let root = temp_root();
     let web = spawn_fake_web().await;
@@ -675,7 +675,7 @@ async fn golem_look_second_create_replaces_the_draft_and_a_failed_one_keeps_it()
         round: 0,
         made: ALL_STATES.to_vec(),
     });
-    let (first, _, _) = create_and_wait(&state, &env, describe("a golem")).await;
+    let (first, _, _) = create_and_wait(&state, &env, describe("a buddy")).await;
     web.answer(Canned::Set {
         round: 1,
         made: ALL_STATES.to_vec(),
@@ -723,7 +723,7 @@ async fn golem_look_second_create_replaces_the_draft_and_a_failed_one_keeps_it()
 }
 
 #[tokio::test]
-async fn golem_look_failed_idle_leaves_no_draft() {
+async fn buddy_look_failed_idle_leaves_no_draft() {
     let state = test_state();
     let root = temp_root();
     let web = spawn_fake_web().await;
@@ -735,7 +735,7 @@ async fn golem_look_failed_idle_leaves_no_draft() {
         code: "ai-gateway-error",
         retry_after: None,
     });
-    let (_, progress, draft) = create_and_wait(&state, &env, describe("a golem")).await;
+    let (_, progress, draft) = create_and_wait(&state, &env, describe("a buddy")).await;
     assert!(draft.is_none());
     assert_eq!(
         progress.last().unwrap().error.as_ref().unwrap().message,
@@ -745,7 +745,7 @@ async fn golem_look_failed_idle_leaves_no_draft() {
         round: 0,
         made: vec![CohostAvatarState::Talk],
     });
-    let (_, progress, draft) = create_and_wait(&state, &env, describe("a golem")).await;
+    let (_, progress, draft) = create_and_wait(&state, &env, describe("a buddy")).await;
     assert!(draft.is_none());
     assert_eq!(
         progress.last().unwrap().error.as_ref().unwrap().message,
@@ -763,7 +763,7 @@ async fn golem_look_failed_idle_leaves_no_draft() {
 }
 
 #[tokio::test]
-async fn golem_look_restart_offers_the_draft_on_disk_again() {
+async fn buddy_look_restart_offers_the_draft_on_disk_again() {
     let state = test_state();
     let root = temp_root();
     let web = spawn_fake_web().await;
@@ -776,7 +776,7 @@ async fn golem_look_restart_offers_the_draft_on_disk_again() {
             CohostAvatarState::Think,
         ],
     });
-    let (request_id, _, draft) = create_and_wait(&state, &env, describe("a golem")).await;
+    let (request_id, _, draft) = create_and_wait(&state, &env, describe("a buddy")).await;
     let draft = draft.unwrap();
 
     // A new process: fresh job state, a fresh app state, the same disk. A
@@ -812,7 +812,7 @@ async fn golem_look_restart_offers_the_draft_on_disk_again() {
 }
 
 #[tokio::test]
-async fn golem_look_refuses_before_sending_anything() {
+async fn buddy_look_refuses_before_sending_anything() {
     let state = test_state();
     let root = temp_root();
     let web = spawn_fake_web().await;
@@ -860,7 +860,7 @@ async fn golem_look_refuses_before_sending_anything() {
         ..env.clone()
     };
     assert_eq!(
-        refused(describe("a golem"), basic).await.code,
+        refused(describe("a buddy"), basic).await.code,
         "premium-required"
     );
     let signed_out = AvatarEnv {
@@ -868,7 +868,7 @@ async fn golem_look_refuses_before_sending_anything() {
         ..env.clone()
     };
     assert_eq!(
-        refused(describe("a golem"), signed_out).await.code,
+        refused(describe("a buddy"), signed_out).await.code,
         "signed-out"
     );
     let rootless = AvatarEnv {
@@ -876,7 +876,7 @@ async fn golem_look_refuses_before_sending_anything() {
         ..env.clone()
     };
     assert_eq!(
-        refused(describe("a golem"), rootless).await.code,
+        refused(describe("a buddy"), rootless).await.code,
         COHOST_AVATAR_ROOT_UNCONFIGURED
     );
     // One job at a time: a second create while one runs is refused.
@@ -886,7 +886,7 @@ async fn golem_look_refuses_before_sending_anything() {
         made: ALL_STATES.to_vec(),
     });
     let mut events = state.events.subscribe();
-    create_in(&state, env.clone(), describe("a golem"))
+    create_in(&state, env.clone(), describe("a buddy"))
         .await
         .unwrap();
     let running = draft_status_in(&state, env.clone())
@@ -904,7 +904,7 @@ async fn golem_look_refuses_before_sending_anything() {
 }
 
 #[tokio::test]
-async fn golem_look_web_errors_become_the_hints_the_plan_names() {
+async fn buddy_look_web_errors_become_the_hints_the_plan_names() {
     let state = test_state();
     let root = temp_root();
     let web = spawn_fake_web().await;
@@ -953,7 +953,7 @@ async fn golem_look_web_errors_become_the_hints_the_plan_names() {
             code,
             retry_after,
         });
-        let (_, progress, draft) = create_and_wait(&state, &env, describe("a golem")).await;
+        let (_, progress, draft) = create_and_wait(&state, &env, describe("a buddy")).await;
         assert!(draft.is_none(), "{code}");
         let error = progress.last().unwrap().error.clone().unwrap();
         assert_eq!(error.code, code);
@@ -1034,14 +1034,14 @@ fn generated_pictures_are_checked_before_they_are_written() {
 #[test]
 fn set_request_wire_shape_matches_the_route() {
     let create = CohostAvatarSetRequest {
-        description: Some("a golem".to_string()),
+        description: Some("a buddy".to_string()),
         inspiration: Some("AAAA".to_string()),
         redo: None,
         base: None,
     };
     assert_eq!(
         serde_json::to_value(&create).unwrap(),
-        serde_json::json!({ "description": "a golem", "inspiration": "AAAA" })
+        serde_json::json!({ "description": "a buddy", "inspiration": "AAAA" })
     );
     let redo = CohostAvatarSetRequest {
         redo: Some(CohostAvatarState::Laugh),
@@ -1084,26 +1084,26 @@ fn round_trips<T: serde::de::DeserializeOwned + Serialize>(pointer: &str) {
 /// The look's RPC and event shapes round-trip exactly as the TypeScript
 /// contract validates them (plan 169 Phase B).
 #[test]
-fn shared_high_risk_contract_fixture_matches_golem_look_dtos() {
-    round_trips::<CohostAvatarCreateParams>("/golemLook/createParams");
-    round_trips::<CohostAvatarCreateParams>("/golemLook/createDescriptionParams");
-    round_trips::<CohostAvatarRedoParams>("/golemLook/redoParams");
-    round_trips::<CohostAvatarRequestIdParams>("/golemLook/requestIdParams");
-    round_trips::<CohostAvatarAccepted>("/golemLook/accepted");
-    round_trips::<CohostAvatarProgressEvent>("/golemLook/progressWorking");
-    round_trips::<CohostAvatarProgressEvent>("/golemLook/progressDone");
-    round_trips::<CohostAvatarProgressEvent>("/golemLook/progressFailed");
-    round_trips::<CohostAvatarDraft>("/golemLook/draft");
-    round_trips::<CohostAvatarDraftStatus>("/golemLook/status");
-    round_trips::<CohostAvatarDraftStatus>("/golemLook/statusNone");
+fn shared_high_risk_contract_fixture_matches_buddy_look_dtos() {
+    round_trips::<CohostAvatarCreateParams>("/buddyLook/createParams");
+    round_trips::<CohostAvatarCreateParams>("/buddyLook/createDescriptionParams");
+    round_trips::<CohostAvatarRedoParams>("/buddyLook/redoParams");
+    round_trips::<CohostAvatarRequestIdParams>("/buddyLook/requestIdParams");
+    round_trips::<CohostAvatarAccepted>("/buddyLook/accepted");
+    round_trips::<CohostAvatarProgressEvent>("/buddyLook/progressWorking");
+    round_trips::<CohostAvatarProgressEvent>("/buddyLook/progressDone");
+    round_trips::<CohostAvatarProgressEvent>("/buddyLook/progressFailed");
+    round_trips::<CohostAvatarDraft>("/buddyLook/draft");
+    round_trips::<CohostAvatarDraftStatus>("/buddyLook/status");
+    round_trips::<CohostAvatarDraftStatus>("/buddyLook/statusNone");
     // Plan 170 D13: the library fields on create and on the draft.
-    round_trips::<CohostAvatarCreateParams>("/golemLook/createLibraryParams");
-    round_trips::<CohostAvatarDraft>("/golemLook/libraryDraft");
+    round_trips::<CohostAvatarCreateParams>("/buddyLook/createLibraryParams");
+    round_trips::<CohostAvatarDraft>("/buddyLook/libraryDraft");
     let create: CohostAvatarCreateParams =
-        serde_json::from_value(high_risk_fixture("/golemLook/createLibraryParams")).unwrap();
+        serde_json::from_value(high_risk_fixture("/buddyLook/createLibraryParams")).unwrap();
     assert_eq!(create.name.as_deref(), Some("Grum"));
     let draft: CohostAvatarDraft =
-        serde_json::from_value(high_risk_fixture("/golemLook/libraryDraft")).unwrap();
+        serde_json::from_value(high_risk_fixture("/buddyLook/libraryDraft")).unwrap();
     assert_eq!(
         draft.library_avatar_id.as_deref(),
         Some("7c9e6679-7425-40de-944b-e07fc1ee9a51")
@@ -1169,13 +1169,13 @@ mod library_route {
     }
 
     #[tokio::test]
-    async fn golem_look_with_the_library_on_creates_into_the_account() {
+    async fn buddy_look_with_the_library_on_creates_into_the_account() {
         let root = temp_root();
         let (state, env, web) = library_env(&root).await;
         let draft = create_library_draft(&state, &env, &web).await;
         // One library create with the whole sidekick; the set route is not used.
         assert_eq!(
-            web.body_of("POST /api/golem/avatars"),
+            web.body_of("POST /api/buddy/avatars"),
             Some(serde_json::json!({
                 "name": "Grum",
                 "description": "a grumpy stone golem",
@@ -1200,7 +1200,7 @@ mod library_route {
             })
         })
         .await;
-        assert_eq!(web.count(&format!("GET /api/golem/avatars/{MADE}/idle")), 0);
+        assert_eq!(web.count(&format!("GET /api/buddy/avatars/{MADE}/idle")), 0);
         // The Golem itself changes only on Keep.
         assert_eq!(
             crate::cohost::get_cohost_settings(&state).await.persona,
@@ -1209,7 +1209,7 @@ mod library_route {
     }
 
     #[tokio::test]
-    async fn golem_look_keep_on_a_library_draft_applies_it_and_tells_the_account() {
+    async fn buddy_look_keep_on_a_library_draft_applies_it_and_tells_the_account() {
         let root = temp_root();
         let (state, env, web) = library_env(&root).await;
         let draft = create_library_draft(&state, &env, &web).await;
@@ -1236,7 +1236,7 @@ mod library_route {
         })
         .await;
         assert_eq!(
-            web.body_of("PUT /api/golem/profile"),
+            web.body_of("PUT /api/buddy/profile"),
             Some(serde_json::json!({ "activeAvatarId": MADE }))
         );
         assert!(
@@ -1247,7 +1247,7 @@ mod library_route {
     }
 
     #[tokio::test]
-    async fn golem_look_discard_on_a_library_draft_deletes_the_account_avatar() {
+    async fn buddy_look_discard_on_a_library_draft_deletes_the_account_avatar() {
         let root = temp_root();
         let (state, env, web) = library_env(&root).await;
         let draft = create_library_draft(&state, &env, &web).await;
@@ -1265,12 +1265,12 @@ mod library_route {
             library.mine.as_ref().is_some_and(|mine| mine.is_empty())
         })
         .await;
-        assert_eq!(web.count(&format!("DELETE /api/golem/avatars/{MADE}")), 1);
+        assert_eq!(web.count(&format!("DELETE /api/buddy/avatars/{MADE}")), 1);
         assert!(!root.join("library").join(MADE).exists());
     }
 
     #[tokio::test]
-    async fn golem_look_redo_on_a_library_draft_uses_the_library_redo() {
+    async fn buddy_look_redo_on_a_library_draft_uses_the_library_redo() {
         let root = temp_root();
         let (state, env, web) = library_env(&root).await;
         let draft = create_library_draft(&state, &env, &web).await;
@@ -1293,7 +1293,7 @@ mod library_route {
                 .any(|step| step.phase == CohostAvatarPhase::Done)
         );
         assert_eq!(
-            web.body_of(&format!("POST /api/golem/avatars/{MADE}/redo")),
+            web.body_of(&format!("POST /api/buddy/avatars/{MADE}/redo")),
             Some(serde_json::json!({ "state": "laugh" }))
         );
         // No base upload: the library redoes from its stored idle.
@@ -1316,21 +1316,21 @@ mod library_route {
     }
 
     #[tokio::test]
-    async fn golem_look_library_fields_are_bounded_before_anything_is_sent() {
+    async fn buddy_look_library_fields_are_bounded_before_anything_is_sent() {
         let root = temp_root();
         let (state, env, web) = library_env(&root).await;
         for params in [
             CohostAvatarCreateParams {
                 name: Some("n".repeat(25)),
-                ..describe("a golem")
+                ..describe("a buddy")
             },
             CohostAvatarCreateParams {
                 personality: Some("p".repeat(1201)),
-                ..describe("a golem")
+                ..describe("a buddy")
             },
             CohostAvatarCreateParams {
                 context: Some("c".repeat(4001)),
-                ..describe("a golem")
+                ..describe("a buddy")
             },
         ] {
             let refused = create_in(&state, env.clone(), params).await.unwrap_err();

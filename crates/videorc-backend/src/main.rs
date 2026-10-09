@@ -41,15 +41,15 @@ mod ffmpeg;
 mod ffmpeg_work;
 mod fifo;
 mod frame_store;
-mod golem_animator;
-mod golem_motion;
-mod golem_overlay;
-mod golem_pet;
-mod golem_pet_store;
-mod golem_sprite;
+mod buddy_animator;
+mod buddy_motion;
+mod buddy_overlay;
+mod buddy_pet;
+mod buddy_pet_store;
+mod buddy_sprite;
 // Plan 168 Phase F: the pet builder (S-F1 to S-F3) and the creator's RPCs (S-F4).
-mod golem_pet_build;
-mod golem_pet_create;
+mod buddy_pet_build;
+mod buddy_pet_create;
 mod h264_profile;
 mod host_pressure;
 mod kick;
@@ -5377,8 +5377,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.library.use"
         | "cohost.library.update"
         | "cohost.library.delete"
-        | "golem.overlay.set"
-        | "golem.overlay.clear"
+        | "buddy.overlay.set"
+        | "buddy.overlay.clear"
         | "cohost.pet.import"
         | "cohost.pet.remove"
         | "cohost.pet.react"
@@ -5582,7 +5582,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "overlays.layout.get"
         | "cohost.status"
         | "cohost.settings.get"
-        | "cohost.golem.status"
+        | "cohost.buddy.status"
         | "cohost.pet.list"
         | "cohost.pet.creation.status"
         | "cohost.avatar.draft.get"
@@ -9463,15 +9463,15 @@ async fn handle_text_message_with_role(
             ServerResponse::ok(command.id, cohost::get_cohost_settings(state).await)
         }
         // --- Golem overlay (plan 164 Phase C) ---
-        "cohost.golem.status" => ServerResponse::ok(command.id, golem_overlay::status(state).await),
-        "golem.overlay.set" => {
-            match serde_json::from_value::<golem_overlay::SetGolemOverlayParams>(command.params) {
+        "cohost.buddy.status" => ServerResponse::ok(command.id, buddy_overlay::status(state).await),
+        "buddy.overlay.set" => {
+            match serde_json::from_value::<buddy_overlay::SetBuddyOverlayParams>(command.params) {
                 Ok(params) => {
-                    match golem_overlay::set_golem_overlay(&state.golem_overlay, params).await {
+                    match buddy_overlay::set_buddy_overlay(&state.buddy_overlay, params).await {
                         Ok(info) => ServerResponse::ok(command.id, info),
                         Err(error) => ServerResponse::error(
                             command.id,
-                            "golem-overlay-invalid",
+                            "buddy-overlay-invalid",
                             error.to_string(),
                         ),
                     }
@@ -9482,14 +9482,14 @@ async fn handle_text_message_with_role(
             }
         }
         // --- Golem pets (plan 168, Phase B) ---
-        "golem.overlay.clear" => {
-            match serde_json::from_value::<golem_overlay::ClearGolemOverlayParams>(command.params) {
+        "buddy.overlay.clear" => {
+            match serde_json::from_value::<buddy_overlay::ClearBuddyOverlayParams>(command.params) {
                 Ok(params) => {
-                    match golem_overlay::clear_golem_overlay(&state.golem_overlay, params) {
+                    match buddy_overlay::clear_buddy_overlay(&state.buddy_overlay, params) {
                         Ok(info) => ServerResponse::ok(command.id, info),
                         Err(error) => ServerResponse::error(
                             command.id,
-                            "golem-overlay-invalid",
+                            "buddy-overlay-invalid",
                             error.to_string(),
                         ),
                     }
@@ -9637,13 +9637,13 @@ async fn handle_text_message_with_role(
         }
         // --- end Golem library (plan 170) ---
         // --- Golem pets (plan 168, Phase A) ---
-        "cohost.pet.list" => match golem_pet_store::list(state).await {
+        "cohost.pet.list" => match buddy_pet_store::list(state).await {
             Ok(packs) => ServerResponse::ok(command.id, packs),
             Err(error) => ServerResponse::error(command.id, error.code, error.message),
         },
         "cohost.pet.import" => {
-            match serde_json::from_value::<golem_pet_store::CohostPetImportParams>(command.params) {
-                Ok(params) => match golem_pet_store::import(state, params).await {
+            match serde_json::from_value::<buddy_pet_store::CohostPetImportParams>(command.params) {
+                Ok(params) => match buddy_pet_store::import(state, params).await {
                     Ok(summary) => ServerResponse::ok(command.id, summary),
                     Err(error) => ServerResponse::error(command.id, error.code, error.message),
                 },
@@ -9653,8 +9653,8 @@ async fn handle_text_message_with_role(
             }
         }
         "cohost.pet.remove" => {
-            match serde_json::from_value::<golem_pet_store::CohostPetRemoveParams>(command.params) {
-                Ok(params) => match golem_pet_store::remove(state, params).await {
+            match serde_json::from_value::<buddy_pet_store::CohostPetRemoveParams>(command.params) {
+                Ok(params) => match buddy_pet_store::remove(state, params).await {
                     Ok(removed) => ServerResponse::ok(command.id, removed),
                     Err(error) => ServerResponse::error(command.id, error.code, error.message),
                 },
@@ -9664,9 +9664,9 @@ async fn handle_text_message_with_role(
             }
         }
         "cohost.pet.react" => {
-            match serde_json::from_value::<golem_pet_store::CohostPetReactParams>(command.params) {
+            match serde_json::from_value::<buddy_pet_store::CohostPetReactParams>(command.params) {
                 Ok(params) => {
-                    match golem_pet_store::request_reaction(state, &params.reaction).await {
+                    match buddy_pet_store::request_reaction(state, &params.reaction).await {
                         Ok(accepted) => ServerResponse::ok(command.id, accepted),
                         Err(error) => ServerResponse::error(command.id, error.code, error.message),
                     }
@@ -9678,18 +9678,18 @@ async fn handle_text_message_with_role(
         }
         // --- end Golem pets (plan 168, Phase A) ---
         // --- Golem pets (plan 168, Phase F) ---
-        "cohost.pet.creation.start" => match golem_pet_create::start(state).await {
+        "cohost.pet.creation.start" => match buddy_pet_create::start(state).await {
             Ok(status) => ServerResponse::ok(command.id, status),
             Err(error) => ServerResponse::error(command.id, error.code, error.message),
         },
-        "cohost.pet.creation.status" => match golem_pet_create::status(state).await {
+        "cohost.pet.creation.status" => match buddy_pet_create::status(state).await {
             Ok(status) => ServerResponse::ok(command.id, status),
             Err(error) => ServerResponse::error(command.id, error.code, error.message),
         },
         "cohost.pet.creation.cancel" => {
-            match serde_json::from_value::<golem_pet_create::CohostPetBuildIdParams>(command.params)
+            match serde_json::from_value::<buddy_pet_create::CohostPetBuildIdParams>(command.params)
             {
-                Ok(params) => match golem_pet_create::cancel(state, params).await {
+                Ok(params) => match buddy_pet_create::cancel(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
                     Err(error) => ServerResponse::error(command.id, error.code, error.message),
                 },
@@ -9699,10 +9699,10 @@ async fn handle_text_message_with_role(
             }
         }
         "cohost.pet.identity" => {
-            match serde_json::from_value::<golem_pet_create::CohostPetIdentityParams>(
+            match serde_json::from_value::<buddy_pet_create::CohostPetIdentityParams>(
                 command.params,
             ) {
-                Ok(params) => match golem_pet_create::identity(state, params).await {
+                Ok(params) => match buddy_pet_create::identity(state, params).await {
                     Ok(accepted) => ServerResponse::ok(command.id, accepted),
                     Err(error) => ServerResponse::error(command.id, error.code, error.message),
                 },
@@ -9712,10 +9712,10 @@ async fn handle_text_message_with_role(
             }
         }
         "cohost.pet.sheet.generate" => {
-            match serde_json::from_value::<golem_pet_create::CohostPetSheetGenerateParams>(
+            match serde_json::from_value::<buddy_pet_create::CohostPetSheetGenerateParams>(
                 command.params,
             ) {
-                Ok(params) => match golem_pet_create::generate_sheet(state, params).await {
+                Ok(params) => match buddy_pet_create::generate_sheet(state, params).await {
                     Ok(accepted) => ServerResponse::ok(command.id, accepted),
                     Err(error) => ServerResponse::error(command.id, error.code, error.message),
                 },
@@ -9725,9 +9725,9 @@ async fn handle_text_message_with_role(
             }
         }
         "cohost.pet.build" => {
-            match serde_json::from_value::<golem_pet_create::CohostPetBuildIdParams>(command.params)
+            match serde_json::from_value::<buddy_pet_create::CohostPetBuildIdParams>(command.params)
             {
-                Ok(params) => match golem_pet_create::build(state, params).await {
+                Ok(params) => match buddy_pet_create::build(state, params).await {
                     Ok(accepted) => ServerResponse::ok(command.id, accepted),
                     Err(error) => ServerResponse::error(command.id, error.code, error.message),
                 },
@@ -9737,8 +9737,8 @@ async fn handle_text_message_with_role(
             }
         }
         "cohost.pet.save" => {
-            match serde_json::from_value::<golem_pet_create::CohostPetSaveParams>(command.params) {
-                Ok(params) => match golem_pet_create::save(state, params).await {
+            match serde_json::from_value::<buddy_pet_create::CohostPetSaveParams>(command.params) {
+                Ok(params) => match buddy_pet_create::save(state, params).await {
                     Ok(saved) => ServerResponse::ok(command.id, saved),
                     Err(error) => ServerResponse::error(command.id, error.code, error.message),
                 },
@@ -12907,7 +12907,7 @@ async fn refresh_account_entitlements(state: &AppState) {
     // web speaks (4 adds the persona). Signed out reads as unknown.
     let mut tick_version: Option<Option<u32>> = None;
     // Plan 170 D9: the same read turns the account Golem library on or off.
-    let mut golem_library: Option<Option<protocol::AiCapabilitiesGolemLibrary>> = None;
+    let mut buddy_library: Option<Option<protocol::AiCapabilitiesBuddyLibrary>> = None;
     let changed = match current_account_entitlement_refresh_identity(state) {
         Ok(current) => {
             commit_account_entitlement_refresh_if_current(&prepared.identity, &current, || {
@@ -12925,13 +12925,13 @@ async fn refresh_account_entitlements(state: &AppState) {
                     }
                     PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
                 };
-                golem_library = match &prepared.outcome {
+                buddy_library = match &prepared.outcome {
                     PreparedAccountEntitlementRefreshOutcome::NoStoredSession => Some(None),
                     PreparedAccountEntitlementRefreshOutcome::Capabilities(capabilities) => Some(
                         capabilities
                             .cohost
                             .as_ref()
-                            .and_then(|cohost| cohost.golem_library.clone()),
+                            .and_then(|cohost| cohost.buddy_library.clone()),
                     ),
                     PreparedAccountEntitlementRefreshOutcome::KeepCached(_) => None,
                 };
@@ -12957,7 +12957,7 @@ async fn refresh_account_entitlements(state: &AppState) {
     if let Some(tick) = tick_version {
         cohost::set_tick_capability(state, tick).await;
     }
-    if let Some(library) = golem_library {
+    if let Some(library) = buddy_library {
         cohost_library::set_capability(state, library).await;
     }
 }
@@ -19514,8 +19514,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
-                golem_overlay_on_primary: false,
-                golem_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;

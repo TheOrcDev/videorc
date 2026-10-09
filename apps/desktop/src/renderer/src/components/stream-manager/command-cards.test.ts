@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { CohostCommand, ModerationOperation } from '@/lib/backend'
 import { removalPaneView } from '@/lib/chat-removal-view'
-import { commandChooserView, commandConfirmView, commandStripView } from '@/lib/golem-command-view'
+import { commandChooserView, commandConfirmView, commandStripView } from '@/lib/buddy-command-view'
 
 import { CommandCards, CommandStrip, type CommandAnswer } from './command-cards'
 import { RemovalCards } from './removal-cards'
@@ -20,7 +20,7 @@ const candidates = [
 function command(patch: Partial<CohostCommand> = {}): CohostCommand {
   return {
     id: 'cmd-1',
-    heard: 'golem highlight the comment from coders',
+    heard: 'buddy highlight the comment from coders',
     kind: 'highlight',
     status: 'ambiguous',
     message: 'Which comment from coders?',
@@ -95,7 +95,7 @@ describe('CommandStrip (plan 140, S6 part B)', () => {
     await render(command({ status: 'done', message: "Highlighted coders_x's comment." }))
     const strip = slot('command-strip')!
     expect(strip.getAttribute('role')).toBe('status')
-    expect(strip.textContent).toContain('Heard: “golem highlight the comment from coders”')
+    expect(strip.textContent).toContain('Heard: “buddy highlight the comment from coders”')
     expect(strip.textContent).toContain("Highlighted coders_x's comment.")
     expect(strip.dataset.quiet).toBeUndefined()
 

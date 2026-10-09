@@ -8,7 +8,7 @@ import { removeMessagesReconnectStarted } from '@/components/stream-manager/remo
 import { WindowFrame } from '@/components/window-frame'
 import type {
   CohostActionKind,
-  CohostGolemActionCommand,
+  CohostBuddyActionCommand,
   CohostAutoChatRelayPatch,
   CohostQuestion,
   CohostState,
@@ -33,7 +33,7 @@ import { DEFAULT_TWITCH_GIF_MODE, type TwitchGifMode } from '../../shared/chat-g
 import type { CommandAnswer } from '@/components/stream-manager/command-cards'
 
 /** A Golem action before main's request id (distributive, one per kind). */
-type GolemActionBody = CohostGolemActionCommand extends infer Command
+type BuddyActionBody = CohostBuddyActionCommand extends infer Command
   ? Command extends { requestId: string }
     ? Omit<Command, 'requestId'>
     : never
@@ -423,33 +423,33 @@ function CommentsWindowApp(): ReactElement {
   // names the live session when there is one so the line can also be posted
   // per the chat mode (D7). Studio makes the call and the window state push
   // follows.
-  const [golemPending, setGolemPending] = useState(false)
-  const sendGolemAction = (command: GolemActionBody): Promise<void> => {
+  const [buddyPending, setBuddyPending] = useState(false)
+  const sendBuddyAction = (command: BuddyActionBody): Promise<void> => {
     const send = window.videorc?.sendCohostAction
     if (!send) return Promise.resolve()
-    setGolemPending(true)
-    return send({ requestId: crypto.randomUUID(), ...command } as CohostGolemActionCommand)
+    setBuddyPending(true)
+    return send({ requestId: crypto.randomUUID(), ...command } as CohostBuddyActionCommand)
       .then(() => undefined)
       .catch((error) => {
         toast.error(error instanceof Error ? error.message : 'Golem action failed.', {
-          id: 'golem-action'
+          id: 'buddy-action'
         })
       })
-      .finally(() => setGolemPending(false))
+      .finally(() => setBuddyPending(false))
   }
-  const sayGolem = (text: string, state: CohostUtteranceState): Promise<void> =>
-    sendGolemAction({
-      kind: 'golem-say',
+  const sayBuddy = (text: string, state: CohostUtteranceState): Promise<void> =>
+    sendBuddyAction({
+      kind: 'buddy-say',
       text,
       state,
       ...(live && snapshot.sessionId ? { sessionId: snapshot.sessionId } : {})
     })
-  const setGolemShowOnStream = (showOnStream: boolean): void => {
-    void sendGolemAction({ kind: 'golem-show-on-stream', showOnStream })
+  const setBuddyShowOnStream = (showOnStream: boolean): void => {
+    void sendBuddyAction({ kind: 'buddy-show-on-stream', showOnStream })
   }
   // Plan 168 S-D3: a reaction chip plays on air (Studio calls cohost.pet.react).
-  const reactGolem = (reaction: string): void => {
-    void sendGolemAction({ kind: 'golem-react', reaction })
+  const reactBuddy = (reaction: string): void => {
+    void sendBuddyAction({ kind: 'buddy-react', reaction })
   }
 
   // Answers to Golem's voice command cards (plan 140, S6 part B). The reply
@@ -478,7 +478,7 @@ function CommentsWindowApp(): ReactElement {
   // the same command; the consent CTA also grants cloud-AI consent in the same
   // click. The settings are main-renderer owned, and the relay reply carries
   // the truth back so the switch reflects what happened, not what was clicked.
-  const setGolemLive = (on: boolean, grantConsent = false): void => {
+  const setBuddyLive = (on: boolean, grantConsent = false): void => {
     void window.videorc
       ?.sendCohostEnable?.({
         requestId: crypto.randomUUID(),
@@ -502,7 +502,7 @@ function CommentsWindowApp(): ReactElement {
   // {enabled, listen} save as the switch), Off turns it off; a behaviour
   // switch keeps `enabled` as it is. The templates and cooldowns live in
   // the Golem tab and ride along untouched (Studio merges the block).
-  const setGolemAutoChat = (patch: CohostAutoChatRelayPatch): void => {
+  const setBuddyAutoChat = (patch: CohostAutoChatRelayPatch): void => {
     const enabled = patch.mode === undefined ? cohost.enabled : patch.mode !== 'off'
     void window.videorc
       ?.sendCohostEnable?.({
@@ -569,7 +569,7 @@ function CommentsWindowApp(): ReactElement {
           cohostGate={cohostGate}
           cohostListen={cohost.listen}
           cohostAutoChat={cohost.autoChat}
-          onCohostAutoChatChange={setGolemAutoChat}
+          onCohostAutoChatChange={setBuddyAutoChat}
           onCohostUtteranceApprove={(utterance) =>
             void sendCohostAction('approve-utterance')(utterance.id)
           }
@@ -579,11 +579,11 @@ function CommentsWindowApp(): ReactElement {
           cohostNudgeDismissedForever={cohostNudgeDismissed}
           cohostStarting={cohostStarting}
           cohostState={cohost.state}
-          cohostGolem={cohost.golem}
-          golemPending={golemPending}
-          onGolemSay={sayGolem}
-          onGolemShowOnStream={setGolemShowOnStream}
-          onGolemReact={reactGolem}
+          cohostBuddy={cohost.buddy}
+          buddyPending={buddyPending}
+          onBuddySay={sayBuddy}
+          onBuddyShowOnStream={setBuddyShowOnStream}
+          onBuddyReact={reactBuddy}
           moderationOperations={moderationOperations}
           removalAnsweringIds={removalAnsweringIds}
           removalRequestIds={removalRequestIds}
@@ -602,9 +602,9 @@ function CommentsWindowApp(): ReactElement {
           onCohostAuthorGreeted={(entry) =>
             void sendCohostAction('author-greeted')(entry.authorKey)
           }
-          onCohostEnable={(enabled) => setGolemLive(enabled)}
-          onCohostEnableConsent={() => setGolemLive(true, true)}
-          onCohostListenOn={() => setGolemLive(true)}
+          onCohostEnable={(enabled) => setBuddyLive(enabled)}
+          onCohostEnableConsent={() => setBuddyLive(true, true)}
+          onCohostListenOn={() => setBuddyLive(true)}
           onCohostNudgeDismiss={() => {
             setCohostNudgeDismissed(true)
             localStorage.setItem(COHOST_NUDGE_STORAGE_KEY, '1')

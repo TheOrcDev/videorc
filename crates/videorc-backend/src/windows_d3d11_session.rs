@@ -70,12 +70,12 @@ fn windows_d3d11_overlay_layer_geometry(
 
 /// The Golem's bubble above the pet's head (plan 168 D16) as a normalized
 /// transform and crop: the same oracle as the CPU and Metal paths
-/// (`golem_sprite::golem_bubble_blit_layout`).
+/// (`buddy_sprite::buddy_bubble_blit_layout`).
 #[cfg(any(target_os = "windows", test))]
 fn windows_d3d11_bubble_layer_geometry(
     overlay_size: (u32, u32),
     output_size: (u32, u32),
-    anchor: crate::golem_sprite::GolemBubbleAnchor,
+    anchor: crate::buddy_sprite::BuddyBubbleAnchor,
 ) -> (
     crate::windows_d3d11_compositor::WindowsD3d11NormalizedTransform,
     crate::windows_d3d11_compositor::WindowsD3d11Crop,
@@ -85,7 +85,7 @@ fn windows_d3d11_bubble_layer_geometry(
     let output_width = output_size.0.max(1) as usize;
     let output_height = output_size.1.max(1) as usize;
     let (source_left, destination_left, destination_top, draw_width) =
-        crate::golem_sprite::golem_bubble_blit_layout(
+        crate::buddy_sprite::buddy_bubble_blit_layout(
             overlay_width,
             overlay_height,
             output_width,
@@ -114,7 +114,7 @@ fn windows_d3d11_bubble_layer_geometry(
 /// Both legs of a tick read the same value, so the animator steps once per
 /// tick and a repeated tick draws exactly what it drew.
 #[cfg(any(target_os = "windows", test))]
-fn windows_d3d11_golem_clock_seconds(output_sequence: u64, render_fps: u32) -> f64 {
+fn windows_d3d11_buddy_clock_seconds(output_sequence: u64, render_fps: u32) -> f64 {
     output_sequence as f64 / f64::from(render_fps.max(1))
 }
 
@@ -123,9 +123,9 @@ fn windows_d3d11_golem_clock_seconds(output_sequence: u64, render_fps: u32) -> f
 /// atlas cell as the crop, and the 2x2 turn about the pivot for `SceneVs`.
 /// The planner keeps the square unclamped so the edge clips, never squashes.
 #[cfg(any(target_os = "windows", test))]
-fn windows_d3d11_golem_sprite_layer(
+fn windows_d3d11_buddy_sprite_layer(
     source_id: u64,
-    sprite: &crate::golem_sprite::GolemSpriteLayer,
+    sprite: &crate::buddy_sprite::BuddySpriteLayer,
     output_size: (u32, u32),
     output_targets: crate::windows_d3d11_compositor::WindowsD3d11SceneOutputTargets,
     z_index: i32,
@@ -156,7 +156,7 @@ fn windows_d3d11_golem_sprite_layer(
     let atlas_height = atlas.height as f32;
     Ok(WindowsD3d11SceneLayerInput {
         source_id,
-        source_kind: WindowsD3d11SceneSourceKind::GolemSprite,
+        source_kind: WindowsD3d11SceneSourceKind::BuddySprite,
         source_dimensions: WindowsD3d11OutputDimensions::new(atlas.width, atlas.height)
             .map_err(|error| error.to_string())?,
         transform: WindowsD3d11NormalizedTransform {
@@ -728,18 +728,18 @@ mod runtime {
     const HIGHLIGHT_PRIMARY_SOURCE_ID: u64 = 12;
     const HIGHLIGHT_AUXILIARY_SOURCE_ID: u64 = 13;
     /// The Golem's bubble per target (plan 168 D16).
-    const GOLEM_PRIMARY_SOURCE_ID: u64 = 14;
-    const GOLEM_AUXILIARY_SOURCE_ID: u64 = 15;
+    const BUDDY_PRIMARY_SOURCE_ID: u64 = 14;
+    const BUDDY_AUXILIARY_SOURCE_ID: u64 = 15;
     /// The Golem's pet atlas per leg (plan 168 S-B4).
-    const GOLEM_SPRITE_PRIMARY_SOURCE_ID: u64 = 16;
-    const GOLEM_SPRITE_AUXILIARY_SOURCE_ID: u64 = 17;
+    const BUDDY_SPRITE_PRIMARY_SOURCE_ID: u64 = 16;
+    const BUDDY_SPRITE_AUXILIARY_SOURCE_ID: u64 = 17;
     /// Overlay stacking (plan 164 owner answer 7, plan 168 D9): captions,
     /// then the Golem (pet, then bubble), then the highlight card on top.
     /// `build_windows_d3d11_scene_plan` sorts layers by z, so the numbers are
     /// the order.
     const CAPTION_Z_INDEX: i32 = 10;
-    const GOLEM_SPRITE_Z_INDEX: i32 = 11;
-    const GOLEM_Z_INDEX: i32 = 12;
+    const BUDDY_SPRITE_Z_INDEX: i32 = 11;
+    const BUDDY_Z_INDEX: i32 = 12;
     const HIGHLIGHT_Z_INDEX: i32 = 13;
 
     /// Shared committed authority only; no recording/pump back-reference.
@@ -906,15 +906,15 @@ mod runtime {
         pub(crate) highlight: CaptionOverlaySlot,
         /// The Golem's bubble, one raster per target like captions (plan 164;
         /// the bubble only since plan 168).
-        pub(crate) golem: CaptionOverlaySlots,
+        pub(crate) buddy: CaptionOverlaySlots,
         /// The Golem's pet atlases and draws (plan 168 S-B4).
-        pub(crate) golem_sprite: crate::golem_sprite::GolemSpriteSlot,
+        pub(crate) buddy_sprite: crate::buddy_sprite::BuddySpriteSlot,
         pub(crate) caption_on_primary: bool,
         pub(crate) caption_on_auxiliary: bool,
         pub(crate) highlight_on_primary: bool,
         pub(crate) highlight_on_auxiliary: bool,
-        pub(crate) golem_on_primary: bool,
-        pub(crate) golem_on_auxiliary: bool,
+        pub(crate) buddy_on_primary: bool,
+        pub(crate) buddy_on_auxiliary: bool,
     }
 
     #[derive(Clone)]
@@ -928,14 +928,14 @@ mod runtime {
         z_index: i32,
         /// The Golem's bubble: anchored above the pet's head on its leg
         /// (plan 168 D16) instead of inside its rect.
-        bubble_anchor: Option<crate::golem_sprite::GolemBubbleAnchor>,
+        bubble_anchor: Option<crate::buddy_sprite::BuddyBubbleAnchor>,
     }
 
     /// The Golem's pet on one leg for one tick (plan 168 S-B4).
     #[derive(Clone)]
     struct WindowsD3d11SpriteFrame {
         source_id: u64,
-        layer: crate::golem_sprite::GolemSpriteLayer,
+        layer: crate::buddy_sprite::BuddySpriteLayer,
         output_targets: WindowsD3d11SceneOutputTargets,
         output_dimensions: WindowsD3d11OutputDimensions,
         z_index: i32,
@@ -1346,7 +1346,7 @@ mod runtime {
             if plan.auxiliary.is_none()
                 && (overlays.caption_on_auxiliary
                     || overlays.highlight_on_auxiliary
-                    || overlays.golem_on_auxiliary)
+                    || overlays.buddy_on_auxiliary)
             {
                 return Err(
                     "D3D11 overlay plan targets an auxiliary leg that this session did not create"
@@ -1712,13 +1712,13 @@ mod runtime {
     /// and the bubble's anchor, from the sprite slot, with the gaze targets
     /// Phase C reads (the card's and the caption bar's blits on the leg).
     /// `now_seconds` is the pump's deterministic clock.
-    fn current_golem_legs(
+    fn current_buddy_legs(
         plan: &WindowsD3d11SessionPlan,
         input: &WindowsD3d11OverlayInput,
         now_seconds: f64,
-    ) -> [Option<crate::golem_sprite::GolemLegFrame>; 2] {
-        use crate::golem_sprite::{GolemLegRequest, GolemSpriteLeg};
-        if !input.golem_on_primary && !input.golem_on_auxiliary {
+    ) -> [Option<crate::buddy_sprite::BuddyLegFrame>; 2] {
+        use crate::buddy_sprite::{BuddyLegRequest, BuddySpriteLeg};
+        if !input.buddy_on_primary && !input.buddy_on_auxiliary {
             return [None, None];
         }
         let captions = current_caption_overlays(&input.captions);
@@ -1739,11 +1739,11 @@ mod runtime {
                 overlay.height.min(height.max(1)) as f32,
             ]
         };
-        let leg = |leg: GolemSpriteLeg,
+        let leg = |leg: BuddySpriteLeg,
                    canvas: (u32, u32),
                    caption: Option<&CaptionOverlay>,
                    card: Option<&CaptionOverlay>| {
-            input.golem_sprite.leg_frame(GolemLegRequest {
+            input.buddy_sprite.leg_frame(BuddyLegRequest {
                 leg,
                 canvas,
                 now_seconds,
@@ -1757,9 +1757,9 @@ mod runtime {
                 }),
             })
         };
-        let primary = input.golem_on_primary.then(|| {
+        let primary = input.buddy_on_primary.then(|| {
             leg(
-                GolemSpriteLeg::Primary,
+                BuddySpriteLeg::Primary,
                 (plan.primary.width, plan.primary.height),
                 captions
                     .primary
@@ -1770,10 +1770,10 @@ mod runtime {
         });
         let auxiliary = plan
             .auxiliary
-            .filter(|_| input.golem_on_auxiliary)
+            .filter(|_| input.buddy_on_auxiliary)
             .map(|video| {
                 leg(
-                    GolemSpriteLeg::Auxiliary,
+                    BuddySpriteLeg::Auxiliary,
                     (video.width, video.height),
                     captions
                         .auxiliary
@@ -1786,9 +1786,9 @@ mod runtime {
     }
 
     /// The pet's layer per leg that has an atlas this tick.
-    fn golem_sprite_frames(
+    fn buddy_sprite_frames(
         plan: &WindowsD3d11SessionPlan,
-        golem_legs: &[Option<crate::golem_sprite::GolemLegFrame>; 2],
+        buddy_legs: &[Option<crate::buddy_sprite::BuddyLegFrame>; 2],
     ) -> Result<Vec<WindowsD3d11SpriteFrame>, String> {
         let primary_dimensions =
             WindowsD3d11OutputDimensions::new(plan.primary.width, plan.primary.height)
@@ -1799,27 +1799,27 @@ mod runtime {
             WindowsD3d11SceneOutputTargets::PRIMARY
         };
         let mut frames = Vec::with_capacity(2);
-        if let Some(sprite) = golem_legs[0].as_ref().and_then(|leg| leg.sprite.clone()) {
+        if let Some(sprite) = buddy_legs[0].as_ref().and_then(|leg| leg.sprite.clone()) {
             frames.push(WindowsD3d11SpriteFrame {
-                source_id: GOLEM_SPRITE_PRIMARY_SOURCE_ID,
+                source_id: BUDDY_SPRITE_PRIMARY_SOURCE_ID,
                 layer: sprite,
                 output_targets: primary_targets,
                 output_dimensions: primary_dimensions,
-                z_index: GOLEM_SPRITE_Z_INDEX,
+                z_index: BUDDY_SPRITE_Z_INDEX,
             });
         }
         if let (Some(sprite), Some(video)) = (
-            golem_legs[1].as_ref().and_then(|leg| leg.sprite.clone()),
+            buddy_legs[1].as_ref().and_then(|leg| leg.sprite.clone()),
             plan.auxiliary,
         ) {
             frames.push(WindowsD3d11SpriteFrame {
-                source_id: GOLEM_SPRITE_AUXILIARY_SOURCE_ID,
+                source_id: BUDDY_SPRITE_AUXILIARY_SOURCE_ID,
                 layer: sprite,
                 output_targets: WindowsD3d11SceneOutputTargets::AUXILIARY
                     .union(WindowsD3d11SceneOutputTargets::PREVIEW),
                 output_dimensions: WindowsD3d11OutputDimensions::new(video.width, video.height)
                     .map_err(|error| error.to_string())?,
-                z_index: GOLEM_SPRITE_Z_INDEX,
+                z_index: BUDDY_SPRITE_Z_INDEX,
             });
         }
         Ok(frames)
@@ -1828,11 +1828,11 @@ mod runtime {
     fn current_overlay_frames(
         plan: &WindowsD3d11SessionPlan,
         input: &WindowsD3d11OverlayInput,
-        golem_legs: &[Option<crate::golem_sprite::GolemLegFrame>; 2],
+        buddy_legs: &[Option<crate::buddy_sprite::BuddyLegFrame>; 2],
     ) -> Result<Vec<WindowsD3d11OverlayFrame>, String> {
         let captions = current_caption_overlays(&input.captions);
         let highlight = current_caption_overlay(&input.highlight);
-        let golem = current_caption_overlays(&input.golem);
+        let buddy = current_caption_overlays(&input.buddy);
         let primary_dimensions =
             WindowsD3d11OutputDimensions::new(plan.primary.width, plan.primary.height)
                 .map_err(|error| error.to_string())?;
@@ -1897,33 +1897,33 @@ mod runtime {
                 bubble_anchor: None,
             });
         }
-        if input.golem_on_primary
-            && let Some(overlay) = golem.primary
+        if input.buddy_on_primary
+            && let Some(overlay) = buddy.primary
         {
             frames.push(WindowsD3d11OverlayFrame {
-                source_id: GOLEM_PRIMARY_SOURCE_ID,
-                source_kind: WindowsD3d11SceneSourceKind::GolemOverlay,
+                source_id: BUDDY_PRIMARY_SOURCE_ID,
+                source_kind: WindowsD3d11SceneSourceKind::BuddyOverlay,
                 overlay,
                 output_targets: primary_targets,
                 output_dimensions: primary_dimensions,
                 safe_inset: 0,
-                z_index: GOLEM_Z_INDEX,
-                bubble_anchor: golem_legs[0].as_ref().map(|leg| leg.bubble_anchor),
+                z_index: BUDDY_Z_INDEX,
+                bubble_anchor: buddy_legs[0].as_ref().map(|leg| leg.bubble_anchor),
             });
         }
-        if input.golem_on_auxiliary
+        if input.buddy_on_auxiliary
             && let (Some(overlay), Some(output_dimensions)) =
-                (golem.auxiliary, auxiliary_dimensions)
+                (buddy.auxiliary, auxiliary_dimensions)
         {
             frames.push(WindowsD3d11OverlayFrame {
-                source_id: GOLEM_AUXILIARY_SOURCE_ID,
-                source_kind: WindowsD3d11SceneSourceKind::GolemOverlay,
+                source_id: BUDDY_AUXILIARY_SOURCE_ID,
+                source_kind: WindowsD3d11SceneSourceKind::BuddyOverlay,
                 overlay,
                 output_targets: auxiliary_targets,
                 output_dimensions,
                 safe_inset: 0,
-                z_index: GOLEM_Z_INDEX,
-                bubble_anchor: golem_legs[1].as_ref().map(|leg| leg.bubble_anchor),
+                z_index: BUDDY_Z_INDEX,
+                bubble_anchor: buddy_legs[1].as_ref().map(|leg| leg.bubble_anchor),
             });
         }
         if input.highlight_on_primary
@@ -2253,19 +2253,19 @@ mod runtime {
             }
             // Plan 168 S-B4 / S-C4: the Golem's pet per leg on the pump's
             // own deterministic clock; the animator steps once per tick.
-            let golem_legs = current_golem_legs(
+            let buddy_legs = current_buddy_legs(
                 &plan,
                 &overlays,
-                super::windows_d3d11_golem_clock_seconds(tick.output_sequence, render_fps),
+                super::windows_d3d11_buddy_clock_seconds(tick.output_sequence, render_fps),
             );
-            let overlay_frames = match current_overlay_frames(&plan, &overlays, &golem_legs) {
+            let overlay_frames = match current_overlay_frames(&plan, &overlays, &buddy_legs) {
                 Ok(frames) => frames,
                 Err(error) => {
                     finish_with_error(&snapshot, &mut startup_tx, error);
                     break;
                 }
             };
-            let sprite_frames = match golem_sprite_frames(&plan, &golem_legs) {
+            let sprite_frames = match buddy_sprite_frames(&plan, &buddy_legs) {
                 Ok(frames) => frames,
                 Err(error) => {
                     finish_with_error(&snapshot, &mut startup_tx, error);
@@ -2938,7 +2938,7 @@ mod runtime {
             layers.retain(|layer| layer.source_id != CAPTURE_SOURCE_ID);
         }
         for sprite in sprites {
-            layers.push(super::windows_d3d11_golem_sprite_layer(
+            layers.push(super::windows_d3d11_buddy_sprite_layer(
                 sprite.source_id,
                 &sprite.layer,
                 (
@@ -3175,7 +3175,7 @@ mod runtime {
     /// Windows CI gate for it.
     #[cfg(test)]
     #[test]
-    fn windows_golem_legs_of_one_tick_share_the_animator_step() {
+    fn windows_buddy_legs_of_one_tick_share_the_animator_step() {
         // Plan 168 S-C4: the pump asks both legs at one clock; asking again
         // at that clock draws the same, the next tick moves on.
         let video = super::WindowsD3d11VideoPlan {
@@ -3200,46 +3200,46 @@ mod runtime {
         let input = WindowsD3d11OverlayInput {
             captions: crate::captions::new_caption_overlay_slots(),
             highlight: crate::captions::new_caption_overlay_slot(),
-            golem: crate::captions::new_caption_overlay_slots(),
-            golem_sprite: crate::golem_sprite::GolemSpriteSlot::new(
+            buddy: crate::captions::new_caption_overlay_slots(),
+            buddy_sprite: crate::buddy_sprite::BuddySpriteSlot::new(
                 &crate::cohost::CohostPersona::default(),
-                crate::overlay_layout::OverlayLayout::default().golem,
+                crate::overlay_layout::OverlayLayout::default().buddy,
                 None,
             ),
             caption_on_primary: false,
             caption_on_auxiliary: false,
             highlight_on_primary: false,
             highlight_on_auxiliary: false,
-            golem_on_primary: true,
-            golem_on_auxiliary: true,
+            buddy_on_primary: true,
+            buddy_on_auxiliary: true,
         };
         input
-            .golem_sprite
-            .set_source(Box::new(crate::golem_animator::GolemAnimatorSource::new(
-                crate::golem_animator::GolemAnimatorSettings::default(),
+            .buddy_sprite
+            .set_source(Box::new(crate::buddy_animator::BuddyAnimatorSource::new(
+                crate::buddy_animator::BuddyAnimatorSettings::default(),
                 7,
             )));
-        for leg in crate::golem_sprite::GolemSpriteLeg::ALL {
-            input.golem_sprite.install_atlas_for_test(
+        for leg in crate::buddy_sprite::BuddySpriteLeg::ALL {
+            input.buddy_sprite.install_atlas_for_test(
                 leg,
                 (1280, 720),
-                crate::golem_animator::tests::alive(),
+                crate::buddy_animator::tests::alive(),
             );
         }
         let draws = |clock: f64| {
-            current_golem_legs(&plan, &input, clock)
+            current_buddy_legs(&plan, &input, clock)
                 .map(|leg| leg.and_then(|leg| leg.sprite).map(|sprite| sprite.draw))
         };
         let mut previous = None;
         for sequence in 1..=90_u64 {
             if sequence == 10 {
                 input
-                    .golem_sprite
-                    .notify(crate::golem_animator::GolemAnimatorEvent::React {
+                    .buddy_sprite
+                    .notify(crate::buddy_animator::BuddyAnimatorEvent::React {
                         reaction: "surprised".to_string(),
                     });
             }
-            let clock = super::windows_d3d11_golem_clock_seconds(sequence, 30);
+            let clock = super::windows_d3d11_buddy_clock_seconds(sequence, 30);
             let first = draws(clock);
             assert!(first.iter().all(Option::is_some), "tick {sequence}");
             assert_eq!(draws(clock), first, "tick {sequence} asked twice");
@@ -3256,7 +3256,7 @@ mod runtime {
 
     #[cfg(test)]
     #[test]
-    fn windows_overlay_frames_stack_the_golem_between_captions_and_the_card() {
+    fn windows_overlay_frames_stack_the_buddy_between_captions_and_the_card() {
         use crate::captions::CaptionOverlayPosition;
         use crate::overlay_layout::OverlayRect;
         let video = super::WindowsD3d11VideoPlan {
@@ -3292,18 +3292,18 @@ mod runtime {
         let input = WindowsD3d11OverlayInput {
             captions: crate::captions::new_caption_overlay_slots(),
             highlight: crate::captions::new_caption_overlay_slot(),
-            golem: crate::captions::new_caption_overlay_slots(),
-            golem_sprite: crate::golem_sprite::GolemSpriteSlot::new(
+            buddy: crate::captions::new_caption_overlay_slots(),
+            buddy_sprite: crate::buddy_sprite::BuddySpriteSlot::new(
                 &crate::cohost::CohostPersona::default(),
-                crate::overlay_layout::OverlayLayout::default().golem,
+                crate::overlay_layout::OverlayLayout::default().buddy,
                 None,
             ),
             caption_on_primary: true,
             caption_on_auxiliary: true,
             highlight_on_primary: true,
             highlight_on_auxiliary: true,
-            golem_on_primary: true,
-            golem_on_auxiliary: true,
+            buddy_on_primary: true,
+            buddy_on_auxiliary: true,
         };
         crate::captions::install_caption_overlays(
             &input.captions,
@@ -3322,13 +3322,13 @@ mod runtime {
             CaptionOverlayPosition::Top,
         )
         .unwrap();
-        let golem_rect = OverlayRect::new(0.15, 0.25, 0.25, 0.2);
-        crate::golem_overlay::install_golem_overlay(
-            &input.golem,
-            crate::golem_overlay::SetGolemOverlayParams {
+        let buddy_rect = OverlayRect::new(0.15, 0.25, 0.25, 0.2);
+        crate::buddy_overlay::install_buddy_overlay(
+            &input.buddy,
+            crate::buddy_overlay::SetBuddyOverlayParams {
                 png_base64: png,
                 target: None,
-                rect: Some(golem_rect),
+                rect: Some(buddy_rect),
             },
         )
         .unwrap();
@@ -3353,14 +3353,14 @@ mod runtime {
                     WindowsD3d11SceneSourceKind::CaptionOverlay
                 ),
                 (
-                    GOLEM_PRIMARY_SOURCE_ID,
-                    GOLEM_Z_INDEX,
-                    WindowsD3d11SceneSourceKind::GolemOverlay
+                    BUDDY_PRIMARY_SOURCE_ID,
+                    BUDDY_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::BuddyOverlay
                 ),
                 (
-                    GOLEM_AUXILIARY_SOURCE_ID,
-                    GOLEM_Z_INDEX,
-                    WindowsD3d11SceneSourceKind::GolemOverlay
+                    BUDDY_AUXILIARY_SOURCE_ID,
+                    BUDDY_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::BuddyOverlay
                 ),
                 (
                     HIGHLIGHT_PRIMARY_SOURCE_ID,
@@ -3375,13 +3375,13 @@ mod runtime {
             ]
         );
         assert!(
-            CAPTION_Z_INDEX < GOLEM_SPRITE_Z_INDEX
-                && GOLEM_SPRITE_Z_INDEX < GOLEM_Z_INDEX
-                && GOLEM_Z_INDEX < HIGHLIGHT_Z_INDEX
+            CAPTION_Z_INDEX < BUDDY_SPRITE_Z_INDEX
+                && BUDDY_SPRITE_Z_INDEX < BUDDY_Z_INDEX
+                && BUDDY_Z_INDEX < HIGHLIGHT_Z_INDEX
         );
-        let golem_primary = &frames[2];
+        let buddy_primary = &frames[2];
         assert_eq!(
-            golem_primary.output_targets,
+            buddy_primary.output_targets,
             WindowsD3d11SceneOutputTargets::PRIMARY
         );
         assert_eq!(
@@ -3389,14 +3389,14 @@ mod runtime {
             WindowsD3d11SceneOutputTargets::AUXILIARY
                 .union(WindowsD3d11SceneOutputTargets::PREVIEW)
         );
-        assert_eq!(golem_primary.overlay.blit_rect(1280, 720), golem_rect);
-        assert_eq!(golem_primary.safe_inset, 0);
+        assert_eq!(buddy_primary.overlay.blit_rect(1280, 720), buddy_rect);
+        assert_eq!(buddy_primary.safe_inset, 0);
         // The same geometry oracle as the CPU and Metal paths: the parity
         // fixture's Golem lands at (192, 180).
         let (transform, _) = super::windows_d3d11_overlay_layer_geometry(
             (200, 100),
             (1280, 720),
-            golem_primary.overlay.blit_rect(1280, 720),
+            buddy_primary.overlay.blit_rect(1280, 720),
             0,
         );
         assert_eq!(transform.x, 192.0 / 1280.0);
@@ -3425,8 +3425,8 @@ mod runtime {
             vec![
                 CAPTION_PRIMARY_SOURCE_ID,
                 CAPTION_AUXILIARY_SOURCE_ID,
-                GOLEM_PRIMARY_SOURCE_ID,
-                GOLEM_AUXILIARY_SOURCE_ID,
+                BUDDY_PRIMARY_SOURCE_ID,
+                BUDDY_AUXILIARY_SOURCE_ID,
                 HIGHLIGHT_PRIMARY_SOURCE_ID,
                 HIGHLIGHT_AUXILIARY_SOURCE_ID,
             ]
@@ -3443,9 +3443,9 @@ mod runtime {
                     WindowsD3d11SceneSourceKind::CaptionOverlay
                 ),
                 (
-                    GOLEM_PRIMARY_SOURCE_ID,
-                    GOLEM_Z_INDEX,
-                    WindowsD3d11SceneSourceKind::GolemOverlay
+                    BUDDY_PRIMARY_SOURCE_ID,
+                    BUDDY_Z_INDEX,
+                    WindowsD3d11SceneSourceKind::BuddyOverlay
                 ),
                 (
                     HIGHLIGHT_PRIMARY_SOURCE_ID,
@@ -3753,18 +3753,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_golem_clock_is_the_output_sequence_over_the_fps() {
-        assert_eq!(windows_d3d11_golem_clock_seconds(0, 30), 0.0);
-        assert_eq!(windows_d3d11_golem_clock_seconds(30, 30), 1.0);
-        assert_eq!(windows_d3d11_golem_clock_seconds(90, 60), 1.5);
+    fn the_buddy_clock_is_the_output_sequence_over_the_fps() {
+        assert_eq!(windows_d3d11_buddy_clock_seconds(0, 30), 0.0);
+        assert_eq!(windows_d3d11_buddy_clock_seconds(30, 30), 1.0);
+        assert_eq!(windows_d3d11_buddy_clock_seconds(90, 60), 1.5);
         // The same tick is the same time, to the bit.
         assert_eq!(
-            windows_d3d11_golem_clock_seconds(1234, 30).to_bits(),
-            windows_d3d11_golem_clock_seconds(1234, 30).to_bits()
+            windows_d3d11_buddy_clock_seconds(1234, 30).to_bits(),
+            windows_d3d11_buddy_clock_seconds(1234, 30).to_bits()
         );
         // A tick later is one frame later.
-        let step = windows_d3d11_golem_clock_seconds(1235, 30)
-            - windows_d3d11_golem_clock_seconds(1234, 30);
+        let step = windows_d3d11_buddy_clock_seconds(1235, 30)
+            - windows_d3d11_buddy_clock_seconds(1234, 30);
         assert!((step - 1.0 / 30.0).abs() < 1e-12, "{step}");
     }
 
@@ -4283,19 +4283,19 @@ mod tests {
     /// The S-B5 draw (the CPU and Metal parity fixture's): cell 4 of the 3 x
     /// 2 atlas, 150 px from 120 px cells, turned 30 degrees, scaled 1.1 x 0.9
     /// about page-pet's pivot and nudged by (12, -7).
-    fn golem_parity_sprite() -> crate::golem_sprite::GolemSpriteLayer {
-        let atlas = std::sync::Arc::new(crate::golem_sprite::tests::parity_atlas(120));
+    fn buddy_parity_sprite() -> crate::buddy_sprite::BuddySpriteLayer {
+        let atlas = std::sync::Arc::new(crate::buddy_sprite::tests::parity_atlas(120));
         let (sin, cos) = 30.0_f32.to_radians().sin_cos();
-        let draw = crate::golem_sprite::GolemSpriteDraw {
+        let draw = crate::buddy_sprite::BuddySpriteDraw {
             affine: [cos * 1.1, sin * 1.1, -sin * 0.9, cos * 0.9],
             translate: [12.0, -7.0],
-            ..crate::golem_sprite::GolemSpriteDraw::at_rest(
+            ..crate::buddy_sprite::BuddySpriteDraw::at_rest(
                 atlas.cell("cell-4").unwrap().rect,
                 [565.0, 285.0, 150.0, 150.0],
-                crate::golem_sprite::GOLEM_SPRITE_DEFAULT_PIVOT,
+                crate::buddy_sprite::BUDDY_SPRITE_DEFAULT_PIVOT,
             )
         };
-        crate::golem_sprite::GolemSpriteLayer { atlas, draw }
+        crate::buddy_sprite::BuddySpriteLayer { atlas, draw }
     }
 
     fn plan_one_layer(
@@ -4328,12 +4328,12 @@ mod tests {
     /// where the CPU and Metal paths put them, on the leg's own output and on
     /// a larger target of the same aspect; the source rect is the atlas cell.
     #[test]
-    fn windows_d3d11_golem_sprite_vertices_match_the_cpu_and_metal_quad() {
+    fn windows_d3d11_buddy_sprite_vertices_match_the_cpu_and_metal_quad() {
         use crate::windows_d3d11_compositor::{
             WindowsD3d11SceneOutputTargets, WindowsD3d11SceneSourceKind, windows_d3d11_scene_vertex,
         };
-        let sprite = golem_parity_sprite();
-        let layer = windows_d3d11_golem_sprite_layer(
+        let sprite = buddy_parity_sprite();
+        let layer = windows_d3d11_buddy_sprite_layer(
             16,
             &sprite,
             (1280, 720),
@@ -4344,7 +4344,7 @@ mod tests {
         let planned = plan_one_layer(layer, (1280, 720));
         assert_eq!(
             planned.source_kind,
-            WindowsD3d11SceneSourceKind::GolemSprite
+            WindowsD3d11SceneSourceKind::BuddySprite
         );
         assert_eq!(planned.effects.opacity, 1.0);
         let expected = sprite.draw.corners();
@@ -4390,17 +4390,17 @@ mod tests {
     /// (its square stays whole), where an ordinary layer is squashed into
     /// the canvas by the planner.
     #[test]
-    fn windows_d3d11_golem_sprite_clips_at_the_canvas_edge_instead_of_squashing() {
+    fn windows_d3d11_buddy_sprite_clips_at_the_canvas_edge_instead_of_squashing() {
         use crate::windows_d3d11_compositor::{
             WindowsD3d11SceneOutputTargets, WindowsD3d11SceneSourceKind,
         };
-        let mut sprite = golem_parity_sprite();
-        sprite.draw = crate::golem_sprite::GolemSpriteDraw::at_rest(
+        let mut sprite = buddy_parity_sprite();
+        sprite.draw = crate::buddy_sprite::BuddySpriteDraw::at_rest(
             sprite.draw.cell,
             [1200.0, 300.0, 120.0, 120.0],
-            crate::golem_sprite::GOLEM_SPRITE_DEFAULT_PIVOT,
+            crate::buddy_sprite::BUDDY_SPRITE_DEFAULT_PIVOT,
         );
-        let layer = windows_d3d11_golem_sprite_layer(
+        let layer = windows_d3d11_buddy_sprite_layer(
             16,
             &sprite,
             (1280, 720),
@@ -4420,7 +4420,7 @@ mod tests {
             "it hangs off the right edge; the rasterizer clips it"
         );
         let mut squashed = layer;
-        squashed.source_kind = WindowsD3d11SceneSourceKind::GolemOverlay;
+        squashed.source_kind = WindowsD3d11SceneSourceKind::BuddyOverlay;
         squashed.effects.sprite = None;
         let ordinary = plan_one_layer(squashed, (1280, 720));
         assert!(
@@ -4428,7 +4428,7 @@ mod tests {
         );
         // A sprite transform on any other kind is refused.
         let mut stray = layer;
-        stray.source_kind = WindowsD3d11SceneSourceKind::GolemOverlay;
+        stray.source_kind = WindowsD3d11SceneSourceKind::BuddyOverlay;
         assert!(
             crate::windows_d3d11_compositor::build_windows_d3d11_scene_plan(
                 crate::windows_d3d11_compositor::WindowsD3d11ScenePlanRequest {
@@ -4453,11 +4453,11 @@ mod tests {
     /// D16 on D3D11: the bubble sits above the pet's head through the same
     /// oracle as the CPU and Metal paths.
     #[test]
-    fn windows_d3d11_golem_bubble_sits_above_the_head_like_cpu_and_metal() {
-        let anchor = crate::golem_sprite::GolemBubbleAnchor { x: 650.0, y: 320.0 };
+    fn windows_d3d11_buddy_bubble_sits_above_the_head_like_cpu_and_metal() {
+        let anchor = crate::buddy_sprite::BuddyBubbleAnchor { x: 650.0, y: 320.0 };
         let (transform, crop) = windows_d3d11_bubble_layer_geometry((60, 40), (1280, 720), anchor);
         assert_eq!(
-            crate::golem_sprite::golem_bubble_blit_layout(60, 40, 1280, 720, anchor),
+            crate::buddy_sprite::buddy_bubble_blit_layout(60, 40, 1280, 720, anchor),
             (0, 620, 280, 60)
         );
         assert_eq!(transform.x, 620.0 / 1280.0);

@@ -96,8 +96,8 @@ describe('StreamManager: a Golem removal card comes forward (plan 140, S6)', () 
     expect(activeTab('pane-tabs-wide')).toBe('activity')
 
     await render({ moderationOperations: [pending] })
-    expect(activeTab('pane-tabs-narrow')).toBe('golem')
-    expect(activeTab('pane-tabs-wide')).toBe('golem')
+    expect(activeTab('pane-tabs-narrow')).toBe('buddy')
+    expect(activeTab('pane-tabs-wide')).toBe('buddy')
     expect(container.querySelector('[data-testid="removal-card"]')).toBeTruthy()
     // It never takes focus from wherever the streamer is typing.
     expect(document.activeElement).toBe(document.body)

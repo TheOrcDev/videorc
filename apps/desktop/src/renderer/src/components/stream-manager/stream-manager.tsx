@@ -17,8 +17,8 @@ import {
 import { toast } from '@/lib/toast'
 
 import { CohostListenPrompt, CohostPane } from '@/components/cohost-pane'
-import { GolemChatControls } from '@/components/stream-manager/golem-chat-controls'
-import { GolemUtteranceCards } from '@/components/stream-manager/golem-utterance-cards'
+import { BuddyChatControls } from '@/components/stream-manager/buddy-chat-controls'
+import { BuddyUtteranceCards } from '@/components/stream-manager/buddy-utterance-cards'
 import { CohostListeningIndicator, CohostStatus } from '@/components/cohost-status'
 import { ActivityPane } from '@/components/stream-manager/activity-pane'
 import {
@@ -43,7 +43,7 @@ import type {
   CohostSayHi,
   CohostState,
   CohostUtteranceState,
-  CohostWindowGolem,
+  CohostWindowBuddy,
   CohostUtterance,
   CommentHighlightAnchor,
   CommentHighlightState,
@@ -101,7 +101,7 @@ import {
   CommandStrip,
   type CommandAnswer
 } from '@/components/stream-manager/command-cards'
-import { commandChooserView, commandConfirmView, commandStripView } from '@/lib/golem-command-view'
+import { commandChooserView, commandConfirmView, commandStripView } from '@/lib/buddy-command-view'
 import {
   removalPaneView,
   removeFromChatAvailable,
@@ -118,7 +118,7 @@ import { latestModerationOperationByMessage } from '../../../../shared/chat-mode
  * here, not imported: importing that module moves it into the chunk this
  * window shares with the main window and grows the main window's eager bytes.
  */
-const GOLEM_SHORTCUT = /Macintosh/.test(globalThis.navigator?.userAgent ?? '') ? '⌘J' : 'Ctrl+J'
+const BUDDY_SHORTCUT = /Macintosh/.test(globalThis.navigator?.userAgent ?? '') ? '⌘J' : 'Ctrl+J'
 
 const NO_MODERATION_OPERATIONS: readonly ModerationOperation[] = []
 
@@ -280,15 +280,15 @@ export interface StreamManagerProps {
   cohostListen?: boolean
   /** The Golem on stream (plan 164 S-C4): the pane's header shows and
    * operates it; absent hides the header. */
-  cohostGolem?: CohostWindowGolem
+  cohostBuddy?: CohostWindowBuddy
   /** A Golem action is on its way through the relay. */
-  golemPending?: boolean
+  buddyPending?: boolean
   /** Say something in the bubble (D7): ↵ talks, ⌘↵ laughs. */
-  onGolemSay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
-  /** `overlayLayout.golem.showOnStream`, through the Studio relay. */
-  onGolemShowOnStream?: (showOnStream: boolean) => void
+  onBuddySay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
+  /** `overlayLayout.buddy.showOnStream`, through the Studio relay. */
+  onBuddyShowOnStream?: (showOnStream: boolean) => void
   /** A reaction chip (plan 168 S-D3), through the Studio relay. */
-  onGolemReact?: (reaction: string) => void
+  onBuddyReact?: (reaction: string) => void
   /** Persisted `cohost.settings.autoChat` (plan 164 S-D6): the pane's mode
    * control and behaviour switches; unknown hides them. */
   cohostAutoChat?: CohostAutoChat
@@ -367,11 +367,11 @@ export function StreamManager({
   cohostStarting = false,
   cohostNudgeDismissedForever = false,
   cohostListen,
-  cohostGolem,
-  golemPending = false,
-  onGolemSay,
-  onGolemShowOnStream,
-  onGolemReact,
+  cohostBuddy,
+  buddyPending = false,
+  onBuddySay,
+  onBuddyShowOnStream,
+  onBuddyReact,
   cohostAutoChat,
   onCohostAutoChatChange,
   onCohostUtteranceApprove,
@@ -426,14 +426,14 @@ export function StreamManager({
     command !== null && command.id === commandAnsweringId
   )
   const commandCardId = commandChooser || commandConfirm ? (command?.id ?? '') : ''
-  const golemCardsActive = removalPane.active || commandStrip !== null || commandCardId !== ''
+  const buddyCardsActive = removalPane.active || commandStrip !== null || commandCardId !== ''
   useEffect(() => {
     const timer = setInterval(
       () => setNowMs(Date.now()),
-      onAir || golemCardsActive ? 1_000 : 15_000
+      onAir || buddyCardsActive ? 1_000 : 15_000
     )
     return () => clearInterval(timer)
-  }, [onAir, golemCardsActive])
+  }, [onAir, buddyCardsActive])
 
   // --- Golem (unchanged behaviour, moved into its own pane: D5) ---
   const cohostSensitivity = useCohostSensitivity()
@@ -470,7 +470,7 @@ export function StreamManager({
       paneOpen: cohostPaneOpenRef.current,
       lastToastAtMs: cohostToastAtRef.current,
       nowMs: Date.now(),
-      shortcut: GOLEM_SHORTCUT
+      shortcut: BUDDY_SHORTCUT
     })
     if (questionToast) {
       cohostToastAtRef.current = questionToast.atMs
@@ -523,13 +523,13 @@ export function StreamManager({
   const [searchFocus, setSearchFocus] = useState(0)
   const chatRef = useRef<HTMLDivElement>(null)
   const activityRef = useRef<HTMLDivElement>(null)
-  const golemRef = useRef<HTMLDivElement>(null)
+  const buddyRef = useRef<HTMLDivElement>(null)
   const chatVisible = usePaneVisible(chatRef)
   const activityVisible = usePaneVisible(activityRef)
-  const golemVisible = usePaneVisible(golemRef)
+  const buddyVisible = usePaneVisible(buddyRef)
   useEffect(() => {
-    cohostPaneOpenRef.current = golemVisible
-  }, [golemVisible])
+    cohostPaneOpenRef.current = buddyVisible
+  }, [buddyVisible])
 
   const activityAudience = inHistory ? (history?.audience ?? null) : (dashboard?.audience ?? null)
   const items = useMemo(
@@ -579,10 +579,10 @@ export function StreamManager({
     messages.some(
       (message) => message.id === liveHighlightId && isActivityOnlyEvent(message.eventType)
     )
-  const golemUnseen = useUnseen(
+  const buddyUnseen = useUnseen(
     undefined,
     `${arrivalKey}:${cohostSensitivity}`,
-    golemVisible,
+    buddyVisible,
     () => false,
     shownCohostState?.questions.map((question) => question.id) ?? []
   )
@@ -633,9 +633,9 @@ export function StreamManager({
     saveStatsLayout(browserStorage(), next)
   }, [])
 
-  const showGolem = useCallback((): void => {
-    setNarrowPane('golem')
-    setRightPane('golem')
+  const showBuddy = useCallback((): void => {
+    setNarrowPane('buddy')
+    setRightPane('buddy')
     setCohostExpand((value) => value + 1)
   }, [])
 
@@ -643,7 +643,7 @@ export function StreamManager({
   // a tab, without taking focus from the composer. Once the cards and their
   // result lines are gone, the pane the streamer was on comes back, unless
   // they moved on themselves.
-  const golemCardIds = [
+  const buddyCardIds = [
     ...removalPane.cards.map((card) => card.operationId),
     ...(commandCardId ? [commandCardId] : [])
   ].join(' ')
@@ -653,21 +653,21 @@ export function StreamManager({
     right: StreamManagerRightPane
   } | null>(null)
   useEffect(() => {
-    const ids = golemCardIds ? golemCardIds.split(' ') : []
+    const ids = buddyCardIds ? buddyCardIds.split(' ') : []
     const fresh = ids.filter((id) => !seenRemovalCardsRef.current.has(id))
     for (const id of fresh) seenRemovalCardsRef.current.add(id)
-    if (fresh.length === 0 || golemVisible || !cohostPresent) return
+    if (fresh.length === 0 || buddyVisible || !cohostPresent) return
     revealedFromRef.current ??= { narrow: narrowPane, right: rightPane }
-    setNarrowPane('golem')
-    setRightPane('golem')
-  }, [cohostPresent, narrowPane, golemVisible, golemCardIds, rightPane])
+    setNarrowPane('buddy')
+    setRightPane('buddy')
+  }, [cohostPresent, narrowPane, buddyVisible, buddyCardIds, rightPane])
   useEffect(() => {
     const from = revealedFromRef.current
-    if (golemCardsActive || !from) return
+    if (buddyCardsActive || !from) return
     revealedFromRef.current = null
-    setNarrowPane((current) => (current === 'golem' ? from.narrow : current))
-    setRightPane((current) => (current === 'golem' ? from.right : current))
-  }, [golemCardsActive])
+    setNarrowPane((current) => (current === 'buddy' ? from.narrow : current))
+    setRightPane((current) => (current === 'buddy' ? from.right : current))
+  }, [buddyCardsActive])
 
   // ⌘J focuses Golem wherever it sits; ⌘F searches chat. The pane is shown
   // first, so its own focus handling lands on a visible element.
@@ -677,7 +677,7 @@ export function StreamManager({
       const key = event.key.toLowerCase()
       if (key === 'j' && cohostVisible) {
         event.preventDefault()
-        showGolem()
+        showBuddy()
       } else if (key === 'f') {
         event.preventDefault()
         setNarrowPane('chat')
@@ -686,7 +686,7 @@ export function StreamManager({
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [cohostVisible, showGolem])
+  }, [cohostVisible, showBuddy])
 
   // Flagged messages Remove from chat can act on: still in chat, removable,
   // and with no removal in flight.
@@ -730,14 +730,14 @@ export function StreamManager({
     if (message) onHighlight?.(message)
   }
 
-  const golemPane = cohostPresent ? (
-    <div className="flex min-h-0 flex-1 flex-col" data-slot="golem-pane">
+  const buddyPane = cohostPresent ? (
+    <div className="flex min-h-0 flex-1 flex-col" data-slot="buddy-pane">
       <div
         className={cn(
           CHAT_HEADER_CONTAINER,
           'flex h-9 shrink-0 items-center gap-2 overflow-hidden border-b border-border px-3'
         )}
-        data-slot="golem-pane-header"
+        data-slot="buddy-pane-header"
       >
         <span className="shrink-0 text-xs font-medium">Golem</span>
         {/* Whether Golem hears you (plan 068); nothing while listening is off. */}
@@ -760,7 +760,7 @@ export function StreamManager({
       {/* Plan 164 S-D6: the chat mode and the three behaviours. The pane's
           enable is the mode: Off means the Golem does not join. */}
       {cohostPresent && cohostAutoChat && onCohostAutoChatChange ? (
-        <GolemChatControls
+        <BuddyChatControls
           autoChat={cohostAutoChat}
           consented={cohostConsented}
           gate={cohostGate!}
@@ -770,7 +770,7 @@ export function StreamManager({
       {/* Plan 164 S-D2: what the Golem wants to post as you (Suggest), and
           the last lines it said. */}
       {live && onCohostUtteranceApprove && onCohostUtteranceDismiss ? (
-        <GolemUtteranceCards
+        <BuddyUtteranceCards
           pending={cohostActionPending}
           utterances={shownCohostState?.utterances ?? []}
           onApprove={onCohostUtteranceApprove}
@@ -824,11 +824,11 @@ export function StreamManager({
             actionPending={cohostActionPending}
             consented={cohostConsented}
             enabled={cohostEnabled}
-            golem={cohostGolem ?? null}
-            sayPending={golemPending}
-            onSay={onGolemSay}
-            onShowOnStreamChange={onGolemShowOnStream}
-            onReact={onGolemReact}
+            buddy={cohostBuddy ?? null}
+            sayPending={buddyPending}
+            onSay={onBuddySay}
+            onShowOnStreamChange={onBuddyShowOnStream}
+            onReact={onBuddyReact}
             expandSignal={cohostExpand}
             flash={cohostFlash}
             gate={cohostGate!}
@@ -959,8 +959,8 @@ export function StreamManager({
                 <PaneLabel label="Activity" onStream={activityOnStream} unseen={activityUnseen} />
               </TabsTrigger>
               {cohostPresent ? (
-                <TabsTrigger value="golem">
-                  <PaneLabel dot={cohostTone(cohostState)} label="Golem" unseen={golemUnseen} />
+                <TabsTrigger value="buddy">
+                  <PaneLabel dot={cohostTone(cohostState)} label="Golem" unseen={buddyUnseen} />
                 </TabsTrigger>
               ) : null}
             </TabsList>
@@ -983,8 +983,8 @@ export function StreamManager({
                 <PaneLabel label="Activity" onStream={activityOnStream} unseen={activityUnseen} />
               </TabsTrigger>
               {cohostPresent ? (
-                <TabsTrigger value="golem">
-                  <PaneLabel dot={cohostTone(cohostState)} label="Golem" unseen={golemUnseen} />
+                <TabsTrigger value="buddy">
+                  <PaneLabel dot={cohostTone(cohostState)} label="Golem" unseen={buddyUnseen} />
                 </TabsTrigger>
               ) : null}
             </TabsList>
@@ -1056,13 +1056,13 @@ export function StreamManager({
             onAutoShowChange={onAutoShowActivityChange}
           />
         </div>
-        {golemPane ? (
+        {buddyPane ? (
           <div
-            ref={golemRef}
-            className={cn('min-h-0 flex-col', paneClasses('golem', narrowPane, rightPane))}
-            data-pane="golem"
+            ref={buddyRef}
+            className={cn('min-h-0 flex-col', paneClasses('buddy', narrowPane, rightPane))}
+            data-pane="buddy"
           >
-            {golemPane}
+            {buddyPane}
           </div>
         ) : null}
       </div>

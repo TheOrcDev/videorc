@@ -25,7 +25,7 @@
 //! persona; `cohost.avatar.discard` deletes it;
 //! `cohost.avatar.redo` remakes talk, laugh or think from the draft's idle;
 //! `cohost.avatar.draft.get` offers a draft left on disk again (after a
-//! restart). Nothing is written outside the managed golem root.
+//! restart). Nothing is written outside the managed buddy root.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -42,7 +42,7 @@ use crate::protocol::{CohostAvatarErrorDetail, CohostSettingsPatch};
 use crate::state::AppState;
 use crate::videorc_api::{
     CohostApiError, CohostApiErrorKind, CohostAvatarSetRequest, CohostAvatarSetResponse,
-    GolemLibraryWebAvatar, GolemLibraryWebCreateRequest, VideorcApiClient,
+    BuddyLibraryWebAvatar, BuddyLibraryWebCreateRequest, VideorcApiClient,
 };
 
 pub const COHOST_AVATAR_PROGRESS_EVENT: &str = "cohost.avatar.progress";
@@ -71,9 +71,9 @@ pub const COHOST_AVATAR_INVALID: &str = "cohost-avatar-invalid";
 pub const COHOST_AVATAR_PICTURE_TOO_LARGE: &str = "cohost-avatar-picture-too-large";
 /// No draft with that request id for the active Golem.
 pub const COHOST_AVATAR_DRAFT_NONE: &str = "cohost-avatar-draft-none";
-/// This process has no golem root (bare `cargo run`).
+/// This process has no buddy root (bare `cargo run`).
 pub const COHOST_AVATAR_ROOT_UNCONFIGURED: &str = "cohost-avatar-root-unconfigured";
-/// A file under the golem root could not be read or written.
+/// A file under the buddy root could not be read or written.
 pub const COHOST_AVATAR_STORE_FAILED: &str = "cohost-avatar-store-failed";
 /// The draft was discarded while its redo ran; the result was dropped.
 pub const COHOST_AVATAR_CANCELLED: &str = "cohost-avatar-cancelled";
@@ -147,7 +147,7 @@ pub enum CohostAvatarPhase {
 }
 
 /// `cohost.avatar.progress`: one state's step. `path` (the draft file,
-/// relative to the golem root) on `done`, `error` on `failed`; each is
+/// relative to the buddy root) on `done`, `error` on `failed`; each is
 /// absent, never null.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -324,7 +324,7 @@ pub(crate) struct AvatarEnv {
     token: Option<String>,
     premium: bool,
     /// Plan 170 D13: the web's account library is on, so a new look is made
-    /// by `POST /api/golem/avatars` and saved to the library; otherwise the
+    /// by `POST /api/buddy/avatars` and saved to the library; otherwise the
     /// plan 169 set route stays the path.
     library: bool,
     shared: Arc<AvatarShared>,
@@ -333,11 +333,11 @@ pub(crate) struct AvatarEnv {
 impl AvatarEnv {
     fn process(state: &AppState) -> Self {
         Self {
-            root: managed_golem_root(),
+            root: managed_buddy_root(),
             api: VideorcApiClient::new().ok(),
             token: crate::account::stored_session_token(),
             premium: crate::cohost::premium_entitled(),
-            library: state.golem_library.enabled(),
+            library: state.buddy_library.enabled(),
             shared: PROCESS_AVATAR.clone(),
         }
     }
@@ -376,9 +376,9 @@ impl AvatarEnv {
     }
 }
 
-/// The first configured golem-assets root: where every image is written.
-pub(crate) fn managed_golem_root() -> Option<PathBuf> {
-    crate::resource_authority::configured_managed_golem_roots()
+/// The first configured buddy-assets root: where every image is written.
+pub(crate) fn managed_buddy_root() -> Option<PathBuf> {
+    crate::resource_authority::configured_managed_buddy_roots()
         .into_iter()
         .next()
 }
@@ -801,8 +801,8 @@ pub(crate) fn tile_error(error: &CohostApiError) -> CohostAvatarErrorDetail {
         | "avatar-style-anchor-missing"
         | "cohost-disabled"
         | "ai-gateway-not-configured"
-        | "golem-storage-unconfigured" => COHOST_AVATAR_UNAVAILABLE_HINT.to_string(),
-        "golem-not-found" => "That Golem is not in your library any more.".to_string(),
+        | "buddy-storage-unconfigured" => COHOST_AVATAR_UNAVAILABLE_HINT.to_string(),
+        "buddy-not-found" => "That Golem is not in your library any more.".to_string(),
         "unauthorized" => "Sign in again to make your Golem's look.".to_string(),
         "premium-required" => "Making your Golem's look requires Videorc Premium.".to_string(),
         "ai-user-disabled" => "Cloud AI is turned off for this account.".to_string(),
@@ -916,7 +916,7 @@ async fn create_in(
     // Plan 170 D13: with the account library on, the look is made by the
     // library route and saved to the account at once.
     let route = if env.library {
-        CreateRoute::Library(GolemLibraryWebCreateRequest {
+        CreateRoute::Library(BuddyLibraryWebCreateRequest {
             name,
             description,
             inspiration,
@@ -951,8 +951,8 @@ async fn create_in(
 enum CreateRoute {
     /// Plan 169: `POST /api/ai/cohost/avatar/set` (stores nothing).
     Set(CohostAvatarSetRequest),
-    /// Plan 170 D13: `POST /api/golem/avatars` (saved to the account).
-    Library(GolemLibraryWebCreateRequest),
+    /// Plan 170 D13: `POST /api/buddy/avatars` (saved to the account).
+    Library(BuddyLibraryWebCreateRequest),
 }
 
 /// Which web route remakes one state of a draft.
@@ -1021,7 +1021,7 @@ impl SetJob {
                 }
             }
             CreateRoute::Library(request) => {
-                match self.api.post_golem_avatar(&self.token, &request).await {
+                match self.api.post_buddy_avatar(&self.token, &request).await {
                     Ok(created) => {
                         if !crate::cohost_library::user_avatar_id_ok(&created.avatar.id) {
                             return fail(CohostAvatarErrorDetail::new(
@@ -1104,7 +1104,7 @@ impl SetJob {
                 .map(|response| (response, None)),
             RedoRoute::Library { avatar_id } => self
                 .api
-                .post_golem_avatar_redo(&self.token, &avatar_id, avatar_state)
+                .post_buddy_avatar_redo(&self.token, &avatar_id, avatar_state)
                 .await
                 .map(|redone| {
                     (
@@ -1117,7 +1117,7 @@ impl SetJob {
                 }),
         };
         let mut redone_avatar: Option<(
-            GolemLibraryWebAvatar,
+            BuddyLibraryWebAvatar,
             BTreeMap<CohostAvatarState, Vec<u8>>,
         )> = None;
         let outcome = match made {
@@ -1478,7 +1478,7 @@ async fn keep_in(
         }
         next.personality =
             crate::cohost::truncate_utf16(&library.personality, LIBRARY_PERSONALITY_MAX_CHARS);
-        next.avatar = crate::golem_pet::GolemAvatar::Still;
+        next.avatar = crate::buddy_pet::BuddyAvatar::Still;
         next.library_avatar_id = Some(library.library_avatar_id.clone());
         notes = (!library.context.trim().is_empty())
             .then(|| crate::cohost::truncate_utf16(&library.context, LIBRARY_CONTEXT_MAX_CHARS));
@@ -1510,7 +1510,7 @@ async fn keep_in(
     })
     .await;
     // Plan 168 S-B1: the still pet on stream re-reads the persona's images.
-    state.golem_sprite.invalidate();
+    state.buddy_sprite.invalidate();
     state.emit_log("info", "Golem look kept.");
     if let Some(library) = library {
         crate::cohost_library::select_after_keep(state, &library.library_avatar_id);

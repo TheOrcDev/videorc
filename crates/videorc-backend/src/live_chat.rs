@@ -2720,7 +2720,7 @@ async fn execute_send_live_chat_message(
     if matches!(
         operation.phase,
         CommentsSendOperationPhase::Sent | CommentsSendOperationPhase::Partial
-    ) && !crate::cohost::is_golem_operation(state, &operation.id).await
+    ) && !crate::cohost::is_buddy_operation(state, &operation.id).await
     {
         crate::cohost::note_own_send_delivered(
             state,
@@ -7317,7 +7317,7 @@ mod tests {
     /// words reach the SRT and Clip that); with no capture running, or on an
     /// explicit `liveChat.stop`, it ends at once.
     #[tokio::test]
-    async fn session_stop_lets_golems_listen_task_drain_with_the_capture() {
+    async fn session_stop_lets_buddys_listen_task_drain_with_the_capture() {
         let _caption_test_guard = crate::captions::caption_lifecycle_test_lock().lock().await;
         let state = test_state();
         *state.recording.lock().await =

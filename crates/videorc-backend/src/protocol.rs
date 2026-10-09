@@ -5421,15 +5421,15 @@ pub struct AiCapabilitiesCohost {
     /// The account Golem library (plan 170 D9). Older servers omit it: the
     /// library is off and the look falls back to the plan 169 route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub golem_library: Option<AiCapabilitiesGolemLibrary>,
+    pub buddy_library: Option<AiCapabilitiesBuddyLibrary>,
 }
 
-/// `cohost.golemLibrary` from `GET /api/ai/capabilities` (plan 170 D9):
+/// `cohost.buddyLibrary` from `GET /api/ai/capabilities` (plan 170 D9):
 /// `enabled` when signed in and the web's library store is configured
 /// (creating still follows `avatar.enabled`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct AiCapabilitiesGolemLibrary {
+pub struct AiCapabilitiesBuddyLibrary {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]

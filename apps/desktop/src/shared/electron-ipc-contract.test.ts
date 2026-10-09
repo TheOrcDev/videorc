@@ -36,9 +36,9 @@ describe('Electron IPC contract', () => {
     expectTypeOf<ElectronInvokeMappingInvariant>().toEqualTypeOf<true>()
     // 127: plan 164 S-A3 adds the Golem avatar store pair (import, remove).
     // 128: plan 164 S-C2 adds the Golem image bytes read for the overlay raster.
-    // 129: plan 168 S-A2 adds golem-pets:read (pet pack files for the preview).
-    // 130: plan 168 S-A3 adds golem-pets:import-folder (Import pack…).
-    // 131: plan 168 S-F5 adds golem-pets:read-creation (the creator's sheets).
+    // 129: plan 168 S-A2 adds buddy-pets:read (pet pack files for the preview).
+    // 130: plan 168 S-A3 adds buddy-pets:import-folder (Import pack…).
+    // 131: plan 168 S-F5 adds buddy-pets:read-creation (the creator's sheets).
     // 124: plan 155 adds chat-gifs:cache and the GIF mode relay (push, get).
     // 121: plan 152 adds marker request/reply and capture context get/push.
     // 117: plan 151 added chat:open-link.
@@ -50,7 +50,7 @@ describe('Electron IPC contract', () => {
     // the Stream Manager Show who followed channel; plan 068 the mark-clip
     // relay pair; plan 062 the shortcut recorder arm; plan 055 the dashboard
     // push and get; plan 050 retired glass:wallpaper:get).
-    // 130: plan 169 D10 retired golem-assets:import-image (no per-state uploads).
+    // 130: plan 169 D10 retired buddy-assets:import-image (no per-state uploads).
     expect(Object.keys(electronInvokeApiMethods)).toHaveLength(130)
     expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(130)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<

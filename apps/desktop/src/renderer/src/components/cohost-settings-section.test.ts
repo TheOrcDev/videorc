@@ -10,8 +10,8 @@ import type { CohostListening, CohostSettings } from '@/lib/backend'
 import {
   COHOST_SHOW_ON_STREAM_PATCHES,
   CohostListenField,
-  GolemModerationSection,
-  GolemRepliesSection,
+  BuddyModerationSection,
+  BuddyRepliesSection,
   cohostShowOnStreamMode
 } from './cohost-settings-section'
 
@@ -89,8 +89,8 @@ async function render(
         Fragment,
         null,
         createElement(CohostListenField),
-        createElement(GolemRepliesSection),
-        createElement(GolemModerationSection)
+        createElement(BuddyRepliesSection),
+        createElement(BuddyModerationSection)
       )
     )
   )

@@ -4,12 +4,12 @@ import type { GlobalShortcutAction } from './global-shortcuts'
 import type { BackgroundImportResult } from './background-import'
 import type { TwitchGifMode } from './chat-gif'
 import type {
-  GolemAvatar,
-  GolemMotionSettings,
-  GolemPetImportResult,
-  GolemReactionTable
-} from './golem-pet'
-import type { GolemLibraryId } from './golem-library'
+  BuddyAvatar,
+  BuddyMotionSettings,
+  BuddyPetImportResult,
+  BuddyReactionTable
+} from './buddy-pet'
+import type { BuddyLibraryId } from './buddy-library'
 export type { BackgroundImportResult } from './background-import'
 export type { TwitchGifMode } from './chat-gif'
 
@@ -3349,7 +3349,7 @@ export interface AiCapabilities {
     /** The account Golem library (plan 170 D9): `enabled` when signed in and
      * the web's library store is configured (creating still follows
      * `avatar.enabled`). Older servers omit it: the library is off. */
-    golemLibrary?: {
+    buddyLibrary?: {
       enabled: boolean
       count: number
       limit: number
@@ -4319,24 +4319,24 @@ export interface VideorcApi {
   importBackgroundImage: () => Promise<BackgroundImportResult | null>
   importScheduledThumbnail: () => Promise<ScheduledThumbnail | null>
   /** "Start over": deletes the persona's managed folder. */
-  removeGolemPersona: (personaId: string) => Promise<void>
+  removeBuddyPersona: (personaId: string) => Promise<void>
   /** The bytes of one stored persona image (`<personaId>/<state>.<ext>`) for
    * the Golem overlay raster to decode (plan 164 S-C2); null when there is
    * no such file. The renderer cannot fetch the managed scheme itself. */
-  readGolemImage: (relativePath: string) => Promise<Uint8Array | null>
-  /** One file of a pet pack (plan 168): `manifest.json`, `golem.json`, a
+  readBuddyImage: (relativePath: string) => Promise<Uint8Array | null>
+  /** One file of a pet pack (plan 168): `manifest.json`, `buddy.json`, a
    * sheet, for the living preview (Phase D). `packId` is a uuid or
    * `bundled:<name>`; null when there is no such file. */
-  readGolemPetFile: (personaId: string, packId: string, file: string) => Promise<Uint8Array | null>
+  readBuddyPetFile: (personaId: string, packId: string, file: string) => Promise<Uint8Array | null>
   /** Picks a page-pet pack folder, copies its pack files into the persona's
    * `pets/<uuid>/` and registers it with the backend (plan 168 S-A3); null
    * when the picker was cancelled. Throws the backend's reason on refusal. */
-  importGolemPetFolder: (personaId: string) => Promise<GolemPetImportResult | null>
+  importBuddyPetFolder: (personaId: string) => Promise<BuddyPetImportResult | null>
   /** One file of a pet creation (plan 168 S-F5): a stored source
    * (`sources/<sheet>-v<n>.png`) or the build's `pack/mascot.webp` and
    * `pack/manifest.json`, from `<personaId>/creations/<buildId>/` under the
    * write root; null when there is no such file. */
-  readGolemCreationFile: (
+  readBuddyCreationFile: (
     personaId: string,
     buildId: string,
     file: string
@@ -4573,11 +4573,11 @@ export interface VideorcApi {
    */
   onShortcutNavigate: (callback: (key: string) => void) => () => void
   /**
-   * Plan 170 D18: a `videorc://golem` link arrived. Main has focused the
+   * Plan 170 D18: a `videorc://buddy` link arrived. Main has focused the
    * window and synced the library; the shell opens the Golem tab, and the
    * creator when `openCreator` (Make it Alive, after the avatar is worn).
    */
-  onGolemDeepLink: (callback: (navigation: { openCreator: boolean }) => void) => () => void
+  onBuddyDeepLink: (callback: (navigation: { openCreator: boolean }) => void) => () => void
   /** Whether the command modifier is physically down; see main's before-input-event. */
   onShortcutModifier: (callback: (held: boolean) => void) => () => void
   /** Whether the main window is on screen (minimise/hide aware, unlike the Page Visibility API here). */
@@ -5071,7 +5071,7 @@ export type CohostPersonaSource = 'default' | 'uploaded' | 'generated'
 
 /**
  * The user's creature (plan 164): name, personality and looks. `images` are
- * relative paths under the managed golem-assets root (`<personaId>/<state>.<ext>`),
+ * relative paths under the managed buddy-assets root (`<personaId>/<state>.<ext>`),
  * absent (never null) for a state with no image.
  */
 export interface CohostPersona {
@@ -5085,11 +5085,11 @@ export interface CohostPersona {
   images: Partial<Record<CohostAvatarState, string>>
   source: CohostPersonaSource
   /** Still or Alive (plan 168 D2). The backend always sends it. */
-  avatar: GolemAvatar
+  avatar: BuddyAvatar
   /** How the Golem moves on air (plan 168 D10, D13, D15). */
-  motion: GolemMotionSettings
+  motion: BuddyMotionSettings
   /** Per-trigger reaction overrides (plan 168 D14); `{}` uses D14's defaults. */
-  reactions: GolemReactionTable
+  reactions: BuddyReactionTable
   /**
    * The library avatar this Golem is (plan 170 D12): a user avatar's uuid or
    * `official:<slug>`. Absent (never null) for a Golem made only on this
@@ -5097,7 +5097,7 @@ export interface CohostPersona {
    * untouched default; sync never overwrites a Golem without it unless it is
    * the untouched default. 1 to 64 characters.
    */
-  libraryAvatarId?: GolemLibraryId
+  libraryAvatarId?: BuddyLibraryId
 }
 
 /** The chat posting mode (plan 164 D4). */
@@ -5212,7 +5212,7 @@ export interface CohostAvatarErrorDetail {
 export type CohostAvatarPhase = 'working' | 'done' | 'failed'
 
 /** `cohost.avatar.progress`: one state's step. `path` (the draft picture,
- * relative to the golem root) on `done`, `error` on `failed`. */
+ * relative to the buddy root) on `done`, `error` on `failed`. */
 export interface CohostAvatarProgressEvent {
   requestId: string
   state: CohostAvatarState
@@ -5291,7 +5291,7 @@ export interface OverlayItemLayout {
   showInRecording: boolean
 }
 
-export const OVERLAY_ITEMS = ['highlight', 'captions', 'golem'] as const
+export const OVERLAY_ITEMS = ['highlight', 'captions', 'buddy'] as const
 export type OverlayItem = (typeof OVERLAY_ITEMS)[number]
 
 export type OverlayLayout = Record<OverlayItem, OverlayItemLayout>
@@ -5317,32 +5317,32 @@ export interface MigrateHighlightAnchorParams {
 // --- Golem overlay (plan 164) ---------------------------------------------
 // The Golem on stream (Phase C): the backend owns which avatar state shows
 // and the bubble that is up; the renderer rasterizes the avatar per output
-// canvas and pushes the PNG through `golem.overlay.set`.
+// canvas and pushes the PNG through `buddy.overlay.set`.
 
 /** One output canvas of the session: the recording (or the only stream) and
  * the split / vertical stream leg. */
 export type OverlayTarget = 'primary' | 'auxiliary'
 
 /** The bubble that is up: its text and when it ends (RFC 3339). */
-export interface GolemBubble {
+export interface BuddyBubble {
   text: string
   until: string
 }
 
-/** `cohost.golem.state` (event) and `cohost.golem.status` (RPC): which
+/** `cohost.buddy.state` (event) and `cohost.buddy.status` (RPC): which
  * persona's images to draw, the state to draw and the bubble, or null. */
-export interface GolemOverlaySnapshot {
+export interface BuddyOverlaySnapshot {
   personaId: string
   state: CohostAvatarState
-  bubble: GolemBubble | null
+  bubble: BuddyBubble | null
 }
 
-/** `golem.overlay.set`: the renderer's raster of the bubble for one output
+/** `buddy.overlay.set`: the renderer's raster of the bubble for one output
  * canvas (plan 168 D16: the bubble only, its tail tip on the bitmap's
  * bottom-centre; the backend draws the pet and anchors the bubble above its
  * head). `rect` is the Golem's placed rect for that canvas orientation, the
  * width the bubble wraps to. Mirrors `captions.overlay.set`. */
-export interface SetGolemOverlayParams {
+export interface SetBuddyOverlayParams {
   target: OverlayTarget
   pngBase64: string
   rect: OverlayRect
@@ -5366,17 +5366,17 @@ export interface OverlayTargetsInfo {
 
 // --- Golem pets (plan 168, Phase A) ---
 // The persona's pet packs (D1 to D4): page-pet manifest v1 folders under the
-// managed golem roots. The pack contract and its validators live in
-// `./golem-pet`; these are the RPC shapes.
+// managed buddy roots. The pack contract and its validators live in
+// `./buddy-pet`; these are the RPC shapes.
 export type {
-  GolemAvatar,
-  GolemMotionSettings,
-  GolemPetImportResult,
-  GolemPetSource,
-  GolemPetSummary,
-  GolemReactionTable,
-  GolemTrigger
-} from './golem-pet'
+  BuddyAvatar,
+  BuddyMotionSettings,
+  BuddyPetImportResult,
+  BuddyPetSource,
+  BuddyPetSummary,
+  BuddyReactionTable,
+  BuddyTrigger
+} from './buddy-pet'
 
 /** `cohost.pet.import` (main only, after it copied the folder): the folder
  * as `<personaId>/pets/<packId>` under the write root. */
@@ -5408,65 +5408,65 @@ export interface CohostPetReactAccepted {
 // --- end Golem pets (plan 168, Phase A) ---
 
 // --- Golem library (plan 170 D12, D13) ---
-// The account library and the official avatars: the wire lives in `./golem-library`.
+// The account library and the official avatars: the wire lives in `./buddy-library`.
 export type {
   CohostLibraryAccepted,
   CohostLibraryDeleteParams,
   CohostLibrarySyncParams,
   CohostLibraryUpdateParams,
   CohostLibraryUseParams,
-  GolemLibraryBusy,
-  GolemLibraryBusyKind,
-  GolemLibraryEntry,
-  GolemLibraryError,
-  GolemLibraryId,
-  GolemLibraryState,
-  GolemLibrarySyncReason,
-  GolemOfficialCatalogEntry,
-  GolemOfficialEntry,
-  GolemOfficialId,
-  GolemOfficialSlug,
-  GolemPoseState
-} from './golem-library'
+  BuddyLibraryBusy,
+  BuddyLibraryBusyKind,
+  BuddyLibraryEntry,
+  BuddyLibraryError,
+  BuddyLibraryId,
+  BuddyLibraryState,
+  BuddyLibrarySyncReason,
+  BuddyOfficialCatalogEntry,
+  BuddyOfficialEntry,
+  BuddyOfficialId,
+  BuddyOfficialSlug,
+  BuddyPoseState
+} from './buddy-library'
 // --- end Golem library (plan 170) ---
 
 // --- Golem pets (plan 168, Phase F) ---
-// The creator (S-F4): the wire lives in `./golem-pet-creator`.
+// The creator (S-F4): the wire lives in `./buddy-pet-creator`.
 export type {
   CohostPetBuildIdParams,
   CohostPetIdentityParams,
   CohostPetSaveParams,
   CohostPetSheetGenerateParams,
-  GolemPetBuildFailure,
-  GolemPetBuildProgressEvent,
-  GolemPetBuildProgressStep,
-  GolemPetCreation,
-  GolemPetCreationAccepted,
-  GolemPetCreationBuild,
-  GolemPetCreationSource,
-  GolemPetCreationStatus,
-  GolemPetCreationStep,
-  GolemPetCreatorError,
-  GolemPetGazeRow,
-  GolemPetIdentityNotes,
-  GolemPetIdentityReadEvent,
-  GolemPetReference,
-  GolemPetSheetGeneratedEvent,
-  GolemPetSheetKey,
-  GolemPetSheetKindName
-} from './golem-pet-creator'
+  BuddyPetBuildFailure,
+  BuddyPetBuildProgressEvent,
+  BuddyPetBuildProgressStep,
+  BuddyPetCreation,
+  BuddyPetCreationAccepted,
+  BuddyPetCreationBuild,
+  BuddyPetCreationSource,
+  BuddyPetCreationStatus,
+  BuddyPetCreationStep,
+  BuddyPetCreatorError,
+  BuddyPetGazeRow,
+  BuddyPetIdentityNotes,
+  BuddyPetIdentityReadEvent,
+  BuddyPetReference,
+  BuddyPetSheetGeneratedEvent,
+  BuddyPetSheetKey,
+  BuddyPetSheetKindName
+} from './buddy-pet-creator'
 
 /** What `cohost.pet.save` hands back: the saved pack and the settings with
  * the persona now Alive in it. */
 export interface CohostPetSaved {
-  pack: import('./golem-pet').GolemPetSummary
+  pack: import('./buddy-pet').BuddyPetSummary
   settings: CohostSettings
 }
 // --- end Golem pets (plan 168, Phase F) ---
 // --- Golem pets (plan 168, Phase B) ---
-/** `golem.overlay.clear`: the bubble ended; drop its raster from one target,
+/** `buddy.overlay.clear`: the bubble ended; drop its raster from one target,
  * or from both without a target. */
-export interface ClearGolemOverlayParams {
+export interface ClearBuddyOverlayParams {
   target?: OverlayTarget
 }
 // --- end Golem pets (plan 168, Phase B) ---
@@ -6183,12 +6183,12 @@ export interface CohostWindowState {
   /** The Golem on stream (plan 164 Phase C): what the pane's header shows
    * and operates. Absent from a relay seeded without it (older Studio,
    * smokes); the window then shows no header. */
-  golem?: CohostWindowGolem
+  buddy?: CohostWindowBuddy
 }
 
 /** The Golem as the Stream Manager operates it (plan 164 S-C4). The window
  * resolves the state image itself (its own file or the bundled pack). */
-export interface CohostWindowGolem {
+export interface CohostWindowBuddy {
   /** Plan 168 S-D3 adds `avatar` and `motion` for the header's living
    * preview; optional so a window seeded by an older Studio still renders. */
   persona: Pick<CohostPersona, 'id' | 'name' | 'images' | 'bubbleStyle' | 'source'> &
@@ -6196,7 +6196,7 @@ export interface CohostWindowGolem {
   state: CohostAvatarState
   /** The bubble's text while one is up. */
   bubble: string | null
-  /** `overlayLayout.golem.showOnStream`. */
+  /** `overlayLayout.buddy.showOnStream`. */
   showOnStream: boolean
 }
 
@@ -6248,28 +6248,28 @@ export const COHOST_ACTION_KINDS: readonly CohostActionKind[] = [
 
 /** The Golem's own actions from the Stream Manager (plan 164 S-C4): the Say
  * box (D7) and the Show on stream switch. Not chat commands, so they need no
- * live session: Studio routes `golem-say` to `cohost.utterance.say` (one
+ * live session: Studio routes `buddy-say` to `cohost.utterance.say` (one
  * utterance that posts per the chat mode when a live session is named, and
  * bubbles) and the switch to the overlay layout. */
-export type CohostGolemActionCommand =
+export type CohostBuddyActionCommand =
   | {
       requestId: string
-      kind: 'golem-say'
+      kind: 'buddy-say'
       /** 1 to 200 characters. */
       text: string
       state: CohostUtteranceState
       /** The live session the line may be posted to; absent = bubble-only. */
       sessionId?: string
     }
-  | { requestId: string; kind: 'golem-show-on-stream'; showOnStream: boolean }
+  | { requestId: string; kind: 'buddy-show-on-stream'; showOnStream: boolean }
   /** Plan 168 S-D3: a reaction chip beside the Say box; Studio routes it to
    * `cohost.pet.react`. `reaction` is a reaction id (`[a-z0-9-]{1,40}`). */
-  | { requestId: string; kind: 'golem-react'; reaction: string }
+  | { requestId: string; kind: 'buddy-react'; reaction: string }
 
-export const COHOST_GOLEM_ACTION_KINDS = [
-  'golem-say',
-  'golem-show-on-stream',
-  'golem-react'
+export const COHOST_BUDDY_ACTION_KINDS = [
+  'buddy-say',
+  'buddy-show-on-stream',
+  'buddy-react'
 ] as const
 
 /** Correlated co-host action from the Comments window, brokered through main
@@ -6311,7 +6311,7 @@ export interface CohostSessionActionCommand {
   state?: CohostUtteranceState
 }
 
-export type CohostActionCommand = CohostSessionActionCommand | CohostGolemActionCommand
+export type CohostActionCommand = CohostSessionActionCommand | CohostBuddyActionCommand
 
 /**
  * Correlated "turn the co-host on/off" from the Comments window (presence W2).

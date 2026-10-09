@@ -513,8 +513,8 @@ pub struct CompositorStartParams {
     /// aux when a split stream leg exists, else primary when it carries the stream.
     pub highlight_overlay_on_primary: bool,
     pub highlight_overlay_on_aux: bool,
-    pub golem_overlay_on_primary: bool,
-    pub golem_overlay_on_aux: bool,
+    pub buddy_overlay_on_primary: bool,
+    pub buddy_overlay_on_aux: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -549,8 +549,8 @@ pub struct CompositorLoopConfig {
     pub caption_overlay_on_aux: bool,
     pub highlight_overlay_on_primary: bool,
     pub highlight_overlay_on_aux: bool,
-    pub golem_overlay_on_primary: bool,
-    pub golem_overlay_on_aux: bool,
+    pub buddy_overlay_on_primary: bool,
+    pub buddy_overlay_on_aux: bool,
 }
 
 /// Capture ownership of the preview compositor run.
@@ -576,8 +576,8 @@ pub struct CompositorArmParams {
     pub caption_overlay_on_aux: bool,
     pub highlight_overlay_on_primary: bool,
     pub highlight_overlay_on_aux: bool,
-    pub golem_overlay_on_primary: bool,
-    pub golem_overlay_on_aux: bool,
+    pub buddy_overlay_on_primary: bool,
+    pub buddy_overlay_on_aux: bool,
 }
 
 /// The per-leg flags of the two layout-driven overlays (plan 164): the
@@ -586,8 +586,8 @@ pub struct CompositorArmParams {
 pub struct OverlayLegFlags {
     pub highlight_on_primary: bool,
     pub highlight_on_aux: bool,
-    pub golem_on_primary: bool,
-    pub golem_on_aux: bool,
+    pub buddy_on_primary: bool,
+    pub buddy_on_aux: bool,
 }
 
 /// Plan 164 (S-B3.4, S-C1): swap the highlight and Golem flags of the live
@@ -602,8 +602,8 @@ pub async fn update_overlay_flags(state: &AppState, flags: OverlayLegFlags) -> b
     let next = CompositorLoopConfig {
         highlight_overlay_on_primary: flags.highlight_on_primary,
         highlight_overlay_on_aux: flags.highlight_on_aux,
-        golem_overlay_on_primary: flags.golem_on_primary,
-        golem_overlay_on_aux: flags.golem_on_aux,
+        buddy_overlay_on_primary: flags.buddy_on_primary,
+        buddy_overlay_on_aux: flags.buddy_on_aux,
         ..current
     };
     if next == current {
@@ -2154,8 +2154,8 @@ mod editor_draft_tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
-                golem_overlay_on_primary: false,
-                golem_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         });
         assert_eq!(
@@ -2238,8 +2238,8 @@ mod editor_draft_tests {
             screen_frame: None,
             caption_overlay: None,
             highlight_overlay: None,
-            golem_overlay: None,
-            golem_leg: None,
+            buddy_overlay: None,
+            buddy_leg: None,
         };
         let mut via_frame = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame_with_chrome(inputs, &quads, &mut via_frame);
@@ -2704,8 +2704,8 @@ async fn start_synthetic_compositor_with_lifecycle(
         caption_overlay_on_aux: params.caption_overlay_on_aux,
         highlight_overlay_on_primary: params.highlight_overlay_on_primary,
         highlight_overlay_on_aux: params.highlight_overlay_on_aux,
-        golem_overlay_on_primary: params.golem_overlay_on_primary,
-        golem_overlay_on_aux: params.golem_overlay_on_aux,
+        buddy_overlay_on_primary: params.buddy_overlay_on_primary,
+        buddy_overlay_on_aux: params.buddy_overlay_on_aux,
     });
     let stream_frame_store = params
         .stream_output
@@ -3055,8 +3055,8 @@ pub async fn arm_compositor_for_capture(
             caption_overlay_on_aux: params.caption_overlay_on_aux,
             highlight_overlay_on_primary: params.highlight_overlay_on_primary,
             highlight_overlay_on_aux: params.highlight_overlay_on_aux,
-            golem_overlay_on_primary: params.golem_overlay_on_primary,
-            golem_overlay_on_aux: params.golem_overlay_on_aux,
+            buddy_overlay_on_primary: params.buddy_overlay_on_primary,
+            buddy_overlay_on_aux: params.buddy_overlay_on_aux,
         };
         let config_sent = compositor
             .loop_config_tx
@@ -4982,8 +4982,8 @@ async fn run_synthetic_compositor_loop(
         mut caption_overlay_on_aux,
         mut highlight_overlay_on_primary,
         mut highlight_overlay_on_aux,
-        mut golem_overlay_on_primary,
-        mut golem_overlay_on_aux,
+        mut buddy_overlay_on_primary,
+        mut buddy_overlay_on_aux,
     } = *config_rx.borrow_and_update();
     let mut pending_loop_config: Option<CompositorLoopConfig> = None;
     let mut loop_config_closed = false;
@@ -5096,8 +5096,8 @@ async fn run_synthetic_compositor_loop(
             caption_overlay_on_aux = next.caption_overlay_on_aux;
             highlight_overlay_on_primary = next.highlight_overlay_on_primary;
             highlight_overlay_on_aux = next.highlight_overlay_on_aux;
-            golem_overlay_on_primary = next.golem_overlay_on_primary;
-            golem_overlay_on_aux = next.golem_overlay_on_aux;
+            buddy_overlay_on_primary = next.buddy_overlay_on_primary;
+            buddy_overlay_on_aux = next.buddy_overlay_on_aux;
             tracing::info!(
                 "compositor {run_id} loop config swapped in place: {} fps, consumer {}",
                 target_fps,
@@ -5210,8 +5210,8 @@ async fn run_synthetic_compositor_loop(
                         caption_overlay_on_aux,
                         highlight_overlay_on_primary,
                         highlight_overlay_on_aux,
-                        golem_overlay_on_primary,
-                        golem_overlay_on_aux,
+                        buddy_overlay_on_primary,
+                        buddy_overlay_on_aux,
                     )
                         .await;
                 // Adoption at the publish boundary uses the same recovery/
@@ -6182,7 +6182,7 @@ fn push_overlay_gpu_source_at<'a>(
 #[cfg(target_os = "macos")]
 const _: () = assert!(
     crate::metal_compositor::KEYED_TEXTURE_NAMESPACES[0]
-        == crate::golem_sprite::GOLEM_SPRITE_METAL_NAMESPACE
+        == crate::buddy_sprite::BUDDY_SPRITE_METAL_NAMESPACE
 );
 
 /// The Golem on the Metal path (plan 168 S-B2): the pet as one turned,
@@ -6190,30 +6190,30 @@ const _: () = assert!(
 /// that never re-uploads when another layer appears), then the bubble
 /// (namespace 8) above its head. Captions draw before, the card after (D9).
 #[cfg(target_os = "macos")]
-fn push_golem_gpu_sources<'a>(
+fn push_buddy_gpu_sources<'a>(
     prepared_sources: &mut Vec<PreparedGpuSource<'a>>,
     inputs: &CompositorRenderInputs<'a>,
 ) {
-    if let Some(sprite) = inputs.golem_leg.and_then(|leg| leg.sprite.as_ref()) {
-        push_golem_sprite_gpu_source(prepared_sources, sprite, inputs.width, inputs.height);
+    if let Some(sprite) = inputs.buddy_leg.and_then(|leg| leg.sprite.as_ref()) {
+        push_buddy_sprite_gpu_source(prepared_sources, sprite, inputs.width, inputs.height);
     }
-    if let Some(overlay) = inputs.golem_overlay {
-        let layout = golem_bubble_layout(overlay, inputs.golem_leg, inputs.width, inputs.height);
+    if let Some(overlay) = inputs.buddy_overlay {
+        let layout = buddy_bubble_layout(overlay, inputs.buddy_leg, inputs.width, inputs.height);
         push_overlay_gpu_source_at(
             prepared_sources,
             overlay,
             layout,
             inputs.width,
             inputs.height,
-            crate::golem_sprite::GOLEM_BUBBLE_METAL_NAMESPACE,
+            crate::buddy_sprite::BUDDY_BUBBLE_METAL_NAMESPACE,
         );
     }
 }
 
 #[cfg(target_os = "macos")]
-fn push_golem_sprite_gpu_source<'a>(
+fn push_buddy_sprite_gpu_source<'a>(
     prepared_sources: &mut Vec<PreparedGpuSource<'a>>,
-    sprite: &'a crate::golem_sprite::GolemSpriteLayer,
+    sprite: &'a crate::buddy_sprite::BuddySpriteLayer,
     canvas_width: u32,
     canvas_height: u32,
 ) {
@@ -6250,7 +6250,7 @@ fn push_golem_sprite_gpu_source<'a>(
         pixels: PreparedGpuSourcePixels::Borrowed(&atlas.bgra),
         kind: crate::metal_compositor::GpuSourceKind::Image,
         content_key: Some(crate::metal_compositor::GpuSourceContentKey {
-            namespace: crate::golem_sprite::GOLEM_SPRITE_METAL_NAMESPACE,
+            namespace: crate::buddy_sprite::BUDDY_SPRITE_METAL_NAMESPACE,
             revision: atlas.revision,
             variant: 0,
         }),
@@ -6530,7 +6530,7 @@ fn try_gpu_compose_with_chrome(
                 safe_inset,
             );
         }
-        push_golem_gpu_sources(&mut prepared_sources, inputs);
+        push_buddy_gpu_sources(&mut prepared_sources, inputs);
         if let Some(overlay) = inputs.highlight_overlay {
             push_caption_overlay_gpu_source(
                 &mut prepared_sources,
@@ -6609,7 +6609,7 @@ fn try_gpu_compose_with_chrome(
                 safe_inset,
             );
         }
-        push_golem_gpu_sources(&mut prepared_sources, inputs);
+        push_buddy_gpu_sources(&mut prepared_sources, inputs);
         if let Some(overlay) = inputs.highlight_overlay {
             push_caption_overlay_gpu_source(
                 &mut prepared_sources,
@@ -6880,7 +6880,7 @@ fn try_gpu_compose_with_chrome(
             safe_inset,
         );
     }
-    push_golem_gpu_sources(&mut prepared_sources, inputs);
+    push_buddy_gpu_sources(&mut prepared_sources, inputs);
     if let Some(overlay) = inputs.highlight_overlay {
         push_caption_overlay_gpu_source(
             &mut prepared_sources,
@@ -7536,8 +7536,8 @@ async fn publish_compositor_frame(
     caption_overlay_on_aux: bool,
     highlight_overlay_on_primary: bool,
     highlight_overlay_on_aux: bool,
-    golem_overlay_on_primary: bool,
-    golem_overlay_on_aux: bool,
+    buddy_overlay_on_primary: bool,
+    buddy_overlay_on_aux: bool,
 ) -> CompositorPublishResult {
     let source_fetch_started_at = Instant::now();
     let scene_snapshot_started_at = Instant::now();
@@ -7655,7 +7655,7 @@ async fn publish_compositor_frame(
     // auxiliary bars without scaling one leg's pixels onto the other.
     let caption_overlays = crate::captions::current_caption_overlays(&state.caption_overlay);
     let highlight_overlay = crate::captions::current_caption_overlay(&state.highlight_overlay);
-    let golem_overlays = crate::captions::current_caption_overlays(&state.golem_overlay);
+    let buddy_overlays = crate::captions::current_caption_overlays(&state.buddy_overlay);
     // The vertical leg needs its own portrait-sized card; the horizontal
     // raster is up to 60% of a landscape width and would crop.
     let simulcast_highlight_overlay = stream_output
@@ -7664,17 +7664,17 @@ async fn publish_compositor_frame(
     // Plan 168 S-B1: the pet on each leg that carries the Golem, drawn from
     // the sprite slot once per composed frame at `published_at` (both legs
     // share the clock; the atlas is built off this thread).
-    let golem_now = if golem_overlay_on_primary || golem_overlay_on_aux {
-        state.golem_sprite.clock_seconds(published_at)
+    let buddy_now = if buddy_overlay_on_primary || buddy_overlay_on_aux {
+        state.buddy_sprite.clock_seconds(published_at)
     } else {
         0.0
     };
-    let primary_golem = golem_overlay_on_primary.then(|| {
-        golem_leg_frame(
+    let primary_buddy = buddy_overlay_on_primary.then(|| {
+        buddy_leg_frame(
             state,
-            crate::golem_sprite::GolemSpriteLeg::Primary,
+            crate::buddy_sprite::BuddySpriteLeg::Primary,
             (width, height),
-            golem_now,
+            buddy_now,
             caption_overlay_for_output(
                 &caption_overlays,
                 crate::captions::CaptionOverlayTarget::Primary,
@@ -7706,12 +7706,12 @@ async fn publish_compositor_frame(
             } else {
                 None
             },
-            golem_overlay: caption_overlay_for_output(
-                &golem_overlays,
+            buddy_overlay: caption_overlay_for_output(
+                &buddy_overlays,
                 crate::captions::CaptionOverlayTarget::Primary,
-                golem_overlay_on_primary,
+                buddy_overlay_on_primary,
             ),
-            golem_leg: primary_golem.as_ref(),
+            buddy_leg: primary_buddy.as_ref(),
         };
         // GPU path for the cases it reproduces exactly; otherwise the CPU compositor.
         match try_gpu_compose_with_chrome(
@@ -7808,12 +7808,12 @@ async fn publish_compositor_frame(
         } else {
             highlight_overlay.as_ref()
         };
-        let aux_golem = golem_overlay_on_aux.then(|| {
-            golem_leg_frame(
+        let aux_buddy = buddy_overlay_on_aux.then(|| {
+            buddy_leg_frame(
                 state,
-                crate::golem_sprite::GolemSpriteLeg::Auxiliary,
+                crate::buddy_sprite::BuddySpriteLeg::Auxiliary,
                 (stream_output.width.max(1), stream_output.height.max(1)),
-                golem_now,
+                buddy_now,
                 caption_overlay_for_output(
                     &caption_overlays,
                     crate::captions::CaptionOverlayTarget::Auxiliary,
@@ -7848,12 +7848,12 @@ async fn publish_compositor_frame(
             // The bubble is rasterized per target like the caption bar (plan
             // 164 S-C2), so the auxiliary leg always has its own raster; the
             // pet has its own atlas per leg (plan 168 D5).
-            golem_overlay: caption_overlay_for_output(
-                &golem_overlays,
+            buddy_overlay: caption_overlay_for_output(
+                &buddy_overlays,
                 crate::captions::CaptionOverlayTarget::Auxiliary,
-                golem_overlay_on_aux,
+                buddy_overlay_on_aux,
             ),
-            golem_leg: aux_golem.as_ref(),
+            buddy_leg: aux_buddy.as_ref(),
         };
         let proof_store = stream_frame_store.clone();
         if let Some(aux_timings) = publish_auxiliary_compositor_frame(
@@ -8054,11 +8054,11 @@ struct CompositorRenderInputs<'a> {
     /// raster before): composited after the pet and BEFORE the highlight
     /// card, so the card wins an overlap (owner answer 7: the most urgent
     /// thing on screen stays on top).
-    golem_overlay: Option<&'a crate::captions::CaptionOverlay>,
+    buddy_overlay: Option<&'a crate::captions::CaptionOverlay>,
     /// The Golem's pet on this leg and where its bubble anchors (plan 168
     /// S-B1): the pet draws after the caption bar, then the bubble (D9).
     /// `None` blits a bubble inside its own rect (tests, no pet frame).
-    golem_leg: Option<&'a crate::golem_sprite::GolemLegFrame>,
+    buddy_leg: Option<&'a crate::buddy_sprite::BuddyLegFrame>,
 }
 
 /// Full frame render: the scene, then the caption overlay topmost — applied
@@ -8080,8 +8080,8 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
             ),
         );
     }
-    if let Some(sprite) = inputs.golem_leg.and_then(|leg| leg.sprite.as_ref()) {
-        crate::golem_sprite::blit_sprite_affine_to_yuv420p(
+    if let Some(sprite) = inputs.buddy_leg.and_then(|leg| leg.sprite.as_ref()) {
+        crate::buddy_sprite::blit_sprite_affine_to_yuv420p(
             bytes,
             inputs.width,
             inputs.height,
@@ -8089,8 +8089,8 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
             &sprite.draw,
         );
     }
-    if let Some(overlay) = inputs.golem_overlay {
-        let layout = golem_bubble_layout(overlay, inputs.golem_leg, inputs.width, inputs.height);
+    if let Some(overlay) = inputs.buddy_overlay {
+        let layout = buddy_bubble_layout(overlay, inputs.buddy_leg, inputs.width, inputs.height);
         composite_overlay_at(overlay, inputs.width, inputs.height, bytes, layout);
     }
     if let Some(overlay) = inputs.highlight_overlay {
@@ -8101,14 +8101,14 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
 /// Where the Golem's bubble lands: above the pet's head on a leg that has a
 /// pet frame (plan 168 D16), else inside its own rect like any overlay. The
 /// tuple of `overlay_layout::overlay_blit_layout`; shared by CPU and Metal.
-fn golem_bubble_layout(
+fn buddy_bubble_layout(
     overlay: &crate::captions::CaptionOverlay,
-    golem_leg: Option<&crate::golem_sprite::GolemLegFrame>,
+    buddy_leg: Option<&crate::buddy_sprite::BuddyLegFrame>,
     canvas_width: u32,
     canvas_height: u32,
 ) -> (usize, usize, usize, usize) {
-    match golem_leg {
-        Some(leg) => crate::golem_sprite::golem_bubble_blit_layout(
+    match buddy_leg {
+        Some(leg) => crate::buddy_sprite::buddy_bubble_blit_layout(
             overlay.width as usize,
             overlay.height as usize,
             canvas_width.max(1) as usize,
@@ -8149,18 +8149,18 @@ fn overlay_canvas_rect(
 /// The Golem on one leg for this frame (plan 168 S-B1): the pet's draw from
 /// the sprite slot plus the gaze targets Phase C reads, the highlight card's
 /// and the caption bar's blits on this canvas.
-fn golem_leg_frame(
+fn buddy_leg_frame(
     state: &AppState,
-    leg: crate::golem_sprite::GolemSpriteLeg,
+    leg: crate::buddy_sprite::BuddySpriteLeg,
     canvas: (u32, u32),
     now_seconds: f64,
     caption: Option<&crate::captions::CaptionOverlay>,
     highlight: Option<&crate::captions::CaptionOverlay>,
-) -> crate::golem_sprite::GolemLegFrame {
+) -> crate::buddy_sprite::BuddyLegFrame {
     let (width, height) = canvas;
     state
-        .golem_sprite
-        .leg_frame(crate::golem_sprite::GolemLegRequest {
+        .buddy_sprite
+        .leg_frame(crate::buddy_sprite::BuddyLegRequest {
             leg,
             canvas,
             now_seconds,
@@ -8260,8 +8260,8 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
         screen_frame,
         caption_overlay: _,
         highlight_overlay: _,
-        golem_overlay: _,
-        golem_leg: _,
+        buddy_overlay: _,
+        buddy_leg: _,
     } = inputs;
     fill_yuv420p(bytes, width, height, 16, 128, 128);
 
@@ -8980,7 +8980,7 @@ fn composite_caption_overlay(
 }
 
 /// Straight-alpha blit of an overlay bitmap at a layout from
-/// `overlay_blit_layout` (or `golem_bubble_blit_layout`): `(source_left,
+/// `overlay_blit_layout` (or `buddy_bubble_blit_layout`): `(source_left,
 /// dest_left, dest_top, draw_width)`, rows cut at the canvas height.
 fn composite_overlay_at(
     overlay: &crate::captions::CaptionOverlay,
@@ -10746,8 +10746,8 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
-                golem_overlay: None,
-                golem_leg: None,
+                buddy_overlay: None,
+                buddy_leg: None,
             },
             true,
         )
@@ -10765,8 +10765,8 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
-                golem_overlay: None,
-                golem_leg: None,
+                buddy_overlay: None,
+                buddy_leg: None,
             },
             true,
         )
@@ -10855,8 +10855,8 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
-                golem_overlay: None,
-                golem_leg: None,
+                buddy_overlay: None,
+                buddy_leg: None,
             },
             true,
         )
@@ -10985,8 +10985,8 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
-                golem_overlay: None,
-                golem_leg: None,
+                buddy_overlay: None,
+                buddy_leg: None,
             },
             true,
         )
@@ -11085,8 +11085,8 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
-                golem_overlay: None,
-                golem_leg: None,
+                buddy_overlay: None,
+                buddy_leg: None,
             },
             false,
         )
@@ -11491,8 +11491,8 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
-                golem_overlay: None,
-                golem_leg: None,
+                buddy_overlay: None,
+                buddy_leg: None,
             },
             true,
         ) {
@@ -11543,8 +11543,8 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
-                golem_overlay: None,
-                golem_leg: None,
+                buddy_overlay: None,
+                buddy_leg: None,
             },
             true,
         ) {
@@ -11641,13 +11641,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overlay_flags_swap_in_place_for_the_highlight_and_the_golem() {
+    async fn overlay_flags_swap_in_place_for_the_highlight_and_the_buddy() {
         let state = test_state();
         let flags = OverlayLegFlags {
             highlight_on_primary: true,
             highlight_on_aux: false,
-            golem_on_primary: false,
-            golem_on_aux: true,
+            buddy_on_primary: false,
+            buddy_on_aux: true,
         };
         // No live run: nothing to swap; the next session reads the layout.
         assert!(!update_overlay_flags(&state, flags).await);
@@ -11658,8 +11658,8 @@ mod tests {
             caption_overlay_on_aux: false,
             highlight_overlay_on_primary: false,
             highlight_overlay_on_aux: false,
-            golem_overlay_on_primary: false,
-            golem_overlay_on_aux: false,
+            buddy_overlay_on_primary: false,
+            buddy_overlay_on_aux: false,
         });
         state.compositor.lock().await.loop_config_tx = Some(loop_config_tx);
         assert!(update_overlay_flags(&state, flags).await);
@@ -11669,8 +11669,8 @@ mod tests {
             (
                 next.highlight_overlay_on_primary,
                 next.highlight_overlay_on_aux,
-                next.golem_overlay_on_primary,
-                next.golem_overlay_on_aux
+                next.buddy_overlay_on_primary,
+                next.buddy_overlay_on_aux
             ),
             (true, false, false, true)
         );
@@ -11689,13 +11689,13 @@ mod tests {
             update_overlay_flags(
                 &state,
                 OverlayLegFlags {
-                    golem_on_aux: false,
+                    buddy_on_aux: false,
                     ..flags
                 }
             )
             .await
         );
-        assert!(!loop_config_rx.borrow_and_update().golem_overlay_on_aux);
+        assert!(!loop_config_rx.borrow_and_update().buddy_overlay_on_aux);
     }
 
     #[tokio::test(start_paused = true)]
@@ -11719,8 +11719,8 @@ mod tests {
             caption_overlay_on_aux: false,
             highlight_overlay_on_primary: false,
             highlight_overlay_on_aux: false,
-            golem_overlay_on_primary: false,
-            golem_overlay_on_aux: false,
+            buddy_overlay_on_primary: false,
+            buddy_overlay_on_aux: false,
         });
         let supervisor_state = state.clone();
         let supervisor = state.spawn_process_task(run_compositor_health_supervisor(
@@ -12553,8 +12553,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
-                golem_overlay_on_primary: false,
-                golem_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;
@@ -12610,8 +12610,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
-                golem_overlay_on_primary: false,
-                golem_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;
@@ -12703,8 +12703,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
-                golem_overlay_on_primary: false,
-                golem_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;
@@ -13726,8 +13726,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
-                golem_overlay_on_primary: false,
-                golem_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;
@@ -13750,8 +13750,8 @@ mod tests {
             caption_overlay_on_aux: false,
             highlight_overlay_on_primary: false,
             highlight_overlay_on_aux: false,
-            golem_overlay_on_primary: false,
-            golem_overlay_on_aux: false,
+            buddy_overlay_on_primary: false,
+            buddy_overlay_on_aux: false,
         };
 
         let first = start_synthetic_compositor(state.clone(), params(64)).await;
@@ -13779,8 +13779,8 @@ mod tests {
             caption_overlay_on_aux: false,
             highlight_overlay_on_primary: false,
             highlight_overlay_on_aux: false,
-            golem_overlay_on_primary: false,
-            golem_overlay_on_aux: false,
+            buddy_overlay_on_primary: false,
+            buddy_overlay_on_aux: false,
         }
     }
 
@@ -13794,8 +13794,8 @@ mod tests {
             caption_overlay_on_aux: false,
             highlight_overlay_on_primary: false,
             highlight_overlay_on_aux: false,
-            golem_overlay_on_primary: false,
-            golem_overlay_on_aux: false,
+            buddy_overlay_on_primary: false,
+            buddy_overlay_on_aux: false,
         }
     }
 
@@ -13969,8 +13969,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
-                golem_overlay_on_primary: false,
-                golem_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;
@@ -14003,8 +14003,8 @@ mod tests {
             caption_overlay_on_aux: false,
             highlight_overlay_on_primary: false,
             highlight_overlay_on_aux: false,
-            golem_overlay_on_primary: false,
-            golem_overlay_on_aux: false,
+            buddy_overlay_on_primary: false,
+            buddy_overlay_on_aux: false,
         };
         let (left, right) = tokio::join!(
             start_synthetic_compositor(state.clone(), params(64)),
@@ -14037,8 +14037,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
-                golem_overlay_on_primary: false,
-                golem_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;
@@ -14073,8 +14073,8 @@ mod tests {
                 caption_overlay_on_aux: false,
                 highlight_overlay_on_primary: false,
                 highlight_overlay_on_aux: false,
-                golem_overlay_on_primary: false,
-                golem_overlay_on_aux: false,
+                buddy_overlay_on_primary: false,
+                buddy_overlay_on_aux: false,
             },
         )
         .await;
@@ -14574,8 +14574,8 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
-                golem_overlay: None,
-                golem_leg: None,
+                buddy_overlay: None,
+                buddy_leg: None,
             },
             &mut bytes,
         );
@@ -14654,8 +14654,8 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: caption,
                 highlight_overlay: None,
-                golem_overlay: None,
-                golem_leg: None,
+                buddy_overlay: None,
+                buddy_leg: None,
             }
         }
         render_compositor_yuv420p_frame(inputs(canvas_w, canvas_h, None), &mut baseline);
@@ -14749,8 +14749,8 @@ mod tests {
             screen_frame: None,
             caption_overlay: None,
             highlight_overlay: None,
-            golem_overlay: None,
-            golem_leg: None,
+            buddy_overlay: None,
+            buddy_leg: None,
         };
         let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame(base_inputs, &mut baseline);
@@ -14759,8 +14759,8 @@ mod tests {
             CompositorRenderInputs {
                 caption_overlay: Some(&caption),
                 highlight_overlay: Some(&highlight),
-                golem_overlay: None,
-                golem_leg: None,
+                buddy_overlay: None,
+                buddy_leg: None,
                 ..base_inputs
             },
             &mut with_both,
@@ -15094,22 +15094,22 @@ mod tests {
                 crate::captions::CaptionOverlayPosition::Top,
             ),
         );
-        let golem = test_caption_overlay(
+        let buddy = test_caption_overlay(
             200,
             100,
             [0, 255, 0, 255],
-            crate::golem_overlay::golem_overlay_placement(Some(
+            crate::buddy_overlay::buddy_overlay_placement(Some(
                 crate::overlay_layout::OverlayRect::new(0.15, 0.25, 0.25, 0.2),
             )),
         );
         let card = overlay_draw_rect(&highlight, 1280, 720, 0);
-        let avatar = overlay_draw_rect(&golem, 1280, 720, 0);
+        let avatar = overlay_draw_rect(&buddy, 1280, 720, 0);
         assert_eq!(card, (128, 144, 328, 244));
         assert_eq!(avatar, (192, 180, 392, 280));
         fn inputs<'a>(
             snapshot: &'a CompositorSceneSnapshot,
             highlight: Option<&'a crate::captions::CaptionOverlay>,
-            golem: Option<&'a crate::captions::CaptionOverlay>,
+            buddy: Option<&'a crate::captions::CaptionOverlay>,
             sequence: u64,
         ) -> CompositorRenderInputs<'a> {
             CompositorRenderInputs {
@@ -15123,15 +15123,15 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: highlight,
-                golem_overlay: golem,
-                golem_leg: None,
+                buddy_overlay: buddy,
+                buddy_leg: None,
             }
         }
         let mut cpu_clean = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame(inputs(&snapshot, None, None, 1), &mut cpu_clean);
         let mut cpu = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame(
-            inputs(&snapshot, Some(&highlight), Some(&golem), 1),
+            inputs(&snapshot, Some(&highlight), Some(&buddy), 1),
             &mut cpu,
         );
         // The same sequence for every render: the test pattern animates by
@@ -15141,7 +15141,7 @@ mod tests {
             .yuv;
         let metal = try_gpu_compose(
             Some(&mut gpu),
-            &inputs(&snapshot, Some(&highlight), Some(&golem), 1),
+            &inputs(&snapshot, Some(&highlight), Some(&buddy), 1),
             true,
         )
         .expect("overlay scene renders on Metal")
@@ -15221,7 +15221,7 @@ mod tests {
             (avatar.0, card.3, avatar.2, avatar.3),
             green_u,
             green_v,
-            "golem",
+            "buddy",
         );
         // The overlap itself is the card's red on both paths.
         chroma(
@@ -15248,8 +15248,8 @@ mod tests {
             screen_frame: None,
             caption_overlay: None,
             highlight_overlay: None,
-            golem_overlay: None,
-            golem_leg: None,
+            buddy_overlay: None,
+            buddy_leg: None,
         };
         let mut baseline = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
         render_compositor_yuv420p_frame(base_inputs, &mut baseline);
@@ -15275,8 +15275,8 @@ mod tests {
             render_compositor_yuv420p_frame(
                 CompositorRenderInputs {
                     highlight_overlay: Some(&highlight),
-                    golem_overlay: None,
-                    golem_leg: None,
+                    buddy_overlay: None,
+                    buddy_leg: None,
                     ..base_inputs
                 },
                 &mut frame,
@@ -15381,8 +15381,8 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: Some(&overlay),
                 highlight_overlay: None,
-                golem_overlay: None,
-                golem_leg: None,
+                buddy_overlay: None,
+                buddy_leg: None,
             },
             &mut bytes,
         );
@@ -15401,8 +15401,8 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
-                golem_overlay: None,
-                golem_leg: None,
+                buddy_overlay: None,
+                buddy_leg: None,
             },
             &mut scene_only,
         );
@@ -15437,8 +15437,8 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: Some(&overlay),
                 highlight_overlay: None,
-                golem_overlay: None,
-                golem_leg: None,
+                buddy_overlay: None,
+                buddy_leg: None,
             },
             &mut bytes,
         );
@@ -15464,8 +15464,8 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
-                golem_overlay: None,
-                golem_leg: None,
+                buddy_overlay: None,
+                buddy_leg: None,
             },
             &mut baseline,
         );
@@ -15555,8 +15555,8 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
-                golem_overlay: None,
-                golem_leg: None,
+                buddy_overlay: None,
+                buddy_leg: None,
             },
             &mut bytes,
         );
@@ -15651,8 +15651,8 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
-                golem_overlay: None,
-                golem_leg: None,
+                buddy_overlay: None,
+                buddy_leg: None,
             },
             &mut bytes,
         );
@@ -15759,8 +15759,8 @@ mod tests {
                 screen_frame: Some(&screen_frame),
                 caption_overlay: None,
                 highlight_overlay: None,
-                golem_overlay: None,
-                golem_leg: None,
+                buddy_overlay: None,
+                buddy_leg: None,
             },
             &mut bytes,
         );
@@ -16012,8 +16012,8 @@ mod tests {
                 screen_frame: None,
                 caption_overlay: None,
                 highlight_overlay: None,
-                golem_overlay: None,
-                golem_leg: None,
+                buddy_overlay: None,
+                buddy_leg: None,
             },
             &mut bytes,
         );
@@ -16857,11 +16857,11 @@ mod tests {
 
 /// Plan 168 Phase B: the Golem's pet through the CPU and Metal paths.
 #[cfg(test)]
-mod golem_sprite_tests {
+mod buddy_sprite_tests {
     use super::*;
-    use crate::golem_sprite::{
-        GOLEM_SPRITE_DEFAULT_PIVOT, GolemBubbleAnchor, GolemLegFrame, GolemSpriteDraw,
-        GolemSpriteLayer,
+    use crate::buddy_sprite::{
+        BUDDY_SPRITE_DEFAULT_PIVOT, BuddyBubbleAnchor, BuddyLegFrame, BuddySpriteDraw,
+        BuddySpriteLayer,
     };
 
     const WIDTH: u32 = 1280;
@@ -16892,7 +16892,7 @@ mod golem_sprite_tests {
         caption: Option<&'a crate::captions::CaptionOverlay>,
         highlight: Option<&'a crate::captions::CaptionOverlay>,
         bubble: Option<&'a crate::captions::CaptionOverlay>,
-        golem_leg: Option<&'a GolemLegFrame>,
+        buddy_leg: Option<&'a BuddyLegFrame>,
     ) -> CompositorRenderInputs<'a> {
         CompositorRenderInputs {
             sequence,
@@ -16905,8 +16905,8 @@ mod golem_sprite_tests {
             screen_frame: None,
             caption_overlay: caption,
             highlight_overlay: highlight,
-            golem_overlay: bubble,
-            golem_leg,
+            buddy_overlay: bubble,
+            buddy_leg,
         }
     }
 
@@ -16919,23 +16919,23 @@ mod golem_sprite_tests {
     /// The S-B5 draw: cell 4 of the 3 x 2 fixture (neighbours on three
     /// sides), 150 px on canvas from 120 px cells, turned 30 degrees and
     /// scaled 1.1 x 0.9 about page-pet's pivot, nudged by (12, -7).
-    fn parity_leg() -> GolemLegFrame {
-        let atlas = Arc::new(crate::golem_sprite::tests::parity_atlas(120));
-        let golem_box = [565.0, 285.0, 150.0, 150.0];
+    fn parity_leg() -> BuddyLegFrame {
+        let atlas = Arc::new(crate::buddy_sprite::tests::parity_atlas(120));
+        let buddy_box = [565.0, 285.0, 150.0, 150.0];
         let (sin, cos) = 30.0_f32.to_radians().sin_cos();
-        let draw = GolemSpriteDraw {
+        let draw = BuddySpriteDraw {
             affine: [cos * 1.1, sin * 1.1, -sin * 0.9, cos * 0.9],
             translate: [12.0, -7.0],
-            ..GolemSpriteDraw::at_rest(
+            ..BuddySpriteDraw::at_rest(
                 atlas.cell("cell-4").unwrap().rect,
-                golem_box,
-                GOLEM_SPRITE_DEFAULT_PIVOT,
+                buddy_box,
+                BUDDY_SPRITE_DEFAULT_PIVOT,
             )
         };
-        GolemLegFrame {
-            golem_box,
-            sprite: Some(GolemSpriteLayer { atlas, draw }),
-            bubble_anchor: crate::golem_sprite::golem_bubble_anchor(golem_box, 0.25),
+        BuddyLegFrame {
+            buddy_box,
+            sprite: Some(BuddySpriteLayer { atlas, draw }),
+            bubble_anchor: crate::buddy_sprite::buddy_bubble_anchor(buddy_box, 0.25),
         }
     }
 
@@ -17061,7 +17061,7 @@ mod golem_sprite_tests {
     /// index) never uploads it again: once across 100 frames.
     #[cfg(target_os = "macos")]
     #[test]
-    fn metal_uploads_the_golem_atlas_once_while_a_caption_comes_and_goes() {
+    fn metal_uploads_the_buddy_atlas_once_while_a_caption_comes_and_goes() {
         let Some(mut gpu) = new_gpu_compositor(false) else {
             eprintln!("skipping: Metal compositor unavailable");
             return;
@@ -17090,7 +17090,7 @@ mod golem_sprite_tests {
         // A new atlas revision uploads once more, into the same slot.
         let mut next = parity_leg();
         let atlas = next.sprite.as_mut().unwrap();
-        atlas.atlas = Arc::new(crate::golem_sprite::tests::parity_atlas(120));
+        atlas.atlas = Arc::new(crate::buddy_sprite::tests::parity_atlas(120));
         try_gpu_compose(
             Some(&mut gpu),
             &inputs(100, None, None, None, Some(&next)),
@@ -17110,26 +17110,26 @@ mod golem_sprite_tests {
     /// pet, the highlight card over everything.
     #[test]
     fn the_pet_sits_under_its_bubble_and_the_card() {
-        let atlas = Arc::new(crate::golem_sprite::tests::parity_atlas(100));
-        let golem_box = [600.0, 300.0, 100.0, 100.0];
-        let leg = GolemLegFrame {
-            golem_box,
-            sprite: Some(GolemSpriteLayer {
-                draw: GolemSpriteDraw::at_rest(
+        let atlas = Arc::new(crate::buddy_sprite::tests::parity_atlas(100));
+        let buddy_box = [600.0, 300.0, 100.0, 100.0];
+        let leg = BuddyLegFrame {
+            buddy_box,
+            sprite: Some(BuddySpriteLayer {
+                draw: BuddySpriteDraw::at_rest(
                     atlas.cell("cell-1").unwrap().rect,
-                    golem_box,
-                    GOLEM_SPRITE_DEFAULT_PIVOT,
+                    buddy_box,
+                    BUDDY_SPRITE_DEFAULT_PIVOT,
                 ),
                 atlas,
             }),
             // Head top at 20 %: the bubble's bottom rows overlap the pet.
-            bubble_anchor: GolemBubbleAnchor { x: 650.0, y: 320.0 },
+            bubble_anchor: BuddyBubbleAnchor { x: 650.0, y: 320.0 },
         };
         let bubble = solid_overlay(
             60,
             40,
             [250, 250, 251, 255],
-            crate::golem_overlay::golem_overlay_placement(None),
+            crate::buddy_overlay::buddy_overlay_placement(None),
             1,
         );
         // The card covers the pet's bottom-right corner.
@@ -17171,7 +17171,7 @@ mod golem_sprite_tests {
         let frame_inputs = || inputs(1, None, Some(&card), Some(&bubble), Some(&leg));
         // The bubble's raster bottom-centre sits on the anchor.
         assert_eq!(
-            golem_bubble_layout(&bubble, Some(&leg), WIDTH, HEIGHT),
+            buddy_bubble_layout(&bubble, Some(&leg), WIDTH, HEIGHT),
             (0, 620, 280, 60)
         );
         check(&cpu_frame(frame_inputs()), "cpu");
@@ -17187,7 +17187,7 @@ mod golem_sprite_tests {
     }
 
     #[test]
-    fn both_legs_of_a_frame_draw_the_golem_at_one_clock() {
+    fn both_legs_of_a_frame_draw_the_buddy_at_one_clock() {
         // Plan 168 S-C4: `publish_compositor_frame` reads the slot clock once
         // per frame at `published_at` and hands it to both legs. At one clock
         // the animator steps once: a leg asked again draws what it drew, and
@@ -17202,47 +17202,47 @@ mod golem_sprite_tests {
         let primary = (WIDTH, HEIGHT);
         let auxiliary = (HEIGHT, WIDTH);
         for (leg, canvas) in [
-            (crate::golem_sprite::GolemSpriteLeg::Primary, primary),
-            (crate::golem_sprite::GolemSpriteLeg::Auxiliary, auxiliary),
+            (crate::buddy_sprite::BuddySpriteLeg::Primary, primary),
+            (crate::buddy_sprite::BuddySpriteLeg::Auxiliary, auxiliary),
         ] {
-            state.golem_sprite.install_atlas_for_test(
+            state.buddy_sprite.install_atlas_for_test(
                 leg,
                 canvas,
-                crate::golem_animator::tests::alive(),
+                crate::buddy_animator::tests::alive(),
             );
         }
         let published_at = Instant::now();
         let draw = |leg, canvas, now| {
-            golem_leg_frame(&state, leg, canvas, now, None, None)
+            buddy_leg_frame(&state, leg, canvas, now, None, None)
                 .sprite
                 .expect("the pet draws")
                 .draw
         };
         state
-            .golem_sprite
-            .notify(crate::golem_animator::GolemAnimatorEvent::React {
+            .buddy_sprite
+            .notify(crate::buddy_animator::BuddyAnimatorEvent::React {
                 reaction: "surprised".to_string(),
             });
         let mut previous = None;
         for frame in 0..20_u32 {
             let at = published_at + Duration::from_millis(u64::from(frame) * 33);
-            let now = state.golem_sprite.clock_seconds(at);
+            let now = state.buddy_sprite.clock_seconds(at);
             assert_eq!(
                 now.to_bits(),
-                state.golem_sprite.clock_seconds(at).to_bits()
+                state.buddy_sprite.clock_seconds(at).to_bits()
             );
             let first = (
-                draw(crate::golem_sprite::GolemSpriteLeg::Primary, primary, now),
+                draw(crate::buddy_sprite::BuddySpriteLeg::Primary, primary, now),
                 draw(
-                    crate::golem_sprite::GolemSpriteLeg::Auxiliary,
+                    crate::buddy_sprite::BuddySpriteLeg::Auxiliary,
                     auxiliary,
                     now,
                 ),
             );
             let again = (
-                draw(crate::golem_sprite::GolemSpriteLeg::Primary, primary, now),
+                draw(crate::buddy_sprite::BuddySpriteLeg::Primary, primary, now),
                 draw(
-                    crate::golem_sprite::GolemSpriteLeg::Auxiliary,
+                    crate::buddy_sprite::BuddySpriteLeg::Auxiliary,
                     auxiliary,
                     now,
                 ),
@@ -17265,20 +17265,20 @@ mod golem_sprite_tests {
     /// pet before its atlas exists (the bubble still has its anchor), then
     /// the state's cell at rest in the box.
     #[test]
-    fn a_leg_frame_draws_the_installed_atlas_in_the_golem_box() {
-        let layout = crate::overlay_layout::OverlayLayout::default().golem;
-        let slot = crate::golem_sprite::GolemSpriteSlot::new(
+    fn a_leg_frame_draws_the_installed_atlas_in_the_buddy_box() {
+        let layout = crate::overlay_layout::OverlayLayout::default().buddy;
+        let slot = crate::buddy_sprite::BuddySpriteSlot::new(
             &crate::cohost::CohostPersona::default(),
             layout,
             None,
         );
         let atlas = slot.install_atlas_for_test(
-            crate::golem_sprite::GolemSpriteLeg::Primary,
+            crate::buddy_sprite::BuddySpriteLeg::Primary,
             (WIDTH, HEIGHT),
-            crate::golem_sprite::tests::parity_atlas(64),
+            crate::buddy_sprite::tests::parity_atlas(64),
         );
-        let frame = slot.leg_frame(crate::golem_sprite::GolemLegRequest {
-            leg: crate::golem_sprite::GolemSpriteLeg::Primary,
+        let frame = slot.leg_frame(crate::buddy_sprite::BuddyLegRequest {
+            leg: crate::buddy_sprite::BuddySpriteLeg::Primary,
             canvas: (WIDTH, HEIGHT),
             now_seconds: 2.0,
             highlight_rect: None,
@@ -17288,21 +17288,21 @@ mod golem_sprite_tests {
         assert_eq!(sprite.atlas.revision, atlas.revision);
         assert_eq!(sprite.draw.cell, atlas.neutral().unwrap().rect);
         assert_eq!(
-            frame.golem_box,
-            crate::golem_sprite::golem_box(layout.horizontal, WIDTH, HEIGHT)
+            frame.buddy_box,
+            crate::buddy_sprite::buddy_box(layout.horizontal, WIDTH, HEIGHT)
         );
         assert_eq!(
-            slot.resident_atlas(crate::golem_sprite::GolemSpriteLeg::Primary)
+            slot.resident_atlas(crate::buddy_sprite::BuddySpriteLeg::Primary)
                 .map(|resident| resident.revision),
             Some(atlas.revision)
         );
         // The CPU path draws the neutral cell's colour in the box.
-        let leg = GolemLegFrame {
+        let leg = BuddyLegFrame {
             sprite: Some(sprite),
             ..frame
         };
         let cpu = cpu_frame(inputs(1, None, None, None, Some(&leg)));
-        let [x, y, w, h] = leg.golem_box;
+        let [x, y, w, h] = leg.buddy_box;
         let centre = (y + h / 2.0) as usize * WIDTH as usize + (x + w / 2.0) as usize;
         assert_eq!(cpu[centre], rgb_to_yuv(230, 40, 40).0);
     }

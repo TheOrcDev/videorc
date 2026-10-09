@@ -5,7 +5,7 @@ import {
   DarkModeIcon,
   DesktopIcon,
   LightModeIcon,
-  GolemIcon,
+  BuddyIcon,
   SettingsIcon,
   StopIcon
 } from '@/components/icons'
@@ -23,7 +23,7 @@ import {
   CommandShortcut
 } from '@/components/ui/command'
 import { Kbd } from '@/components/ui/kbd'
-import { GOLEM_TABS } from '@/lib/golem-tabs'
+import { BUDDY_TABS } from '@/lib/buddy-tabs'
 import { displayKeyGlyph } from '@/lib/platform'
 import { SETTINGS_TABS } from '@/lib/settings-tabs'
 import {
@@ -43,7 +43,7 @@ export function CommandPalette({
   open: boolean
   onOpenChange: (open: boolean) => void
 }): ReactElement {
-  const { setActive, openStudioPanel, openSettings, openGolem } = useWorkspaceNav()
+  const { setActive, openStudioPanel, openSettings, openBuddy } = useWorkspaceNav()
   const {
     runtimeInfo,
     savedScenes,
@@ -158,13 +158,13 @@ export function CommandPalette({
 
         {/* Plan 150: every Golem tab is one jump away, like Settings'. */}
         <CommandGroup heading="Golem">
-          {GOLEM_TABS.map((tab) => (
+          {BUDDY_TABS.map((tab) => (
             <CommandItem
               key={tab.id}
               value={`Golem ${tab.label}`}
-              onSelect={() => run(() => openGolem(tab.id))}
+              onSelect={() => run(() => openBuddy(tab.id))}
             >
-              <GolemIcon className="size-4" />
+              <BuddyIcon className="size-4" />
               {tab.label}
             </CommandItem>
           ))}

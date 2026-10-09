@@ -48,19 +48,19 @@ import type {
   CohostPetReactAccepted,
   CohostPetReactParams,
   CohostPetRemoveParams,
-  GolemPetSummary
+  BuddyPetSummary
 } from './backend'
 import type {
   CohostPetBuildIdParams,
   CohostPetIdentityParams,
   CohostPetSaveParams,
   CohostPetSheetGenerateParams,
-  GolemPetBuildProgressEvent,
-  GolemPetCreationAccepted,
-  GolemPetCreationStatus,
-  GolemPetIdentityReadEvent,
-  GolemPetSheetGeneratedEvent
-} from './golem-pet-creator'
+  BuddyPetBuildProgressEvent,
+  BuddyPetCreationAccepted,
+  BuddyPetCreationStatus,
+  BuddyPetIdentityReadEvent,
+  BuddyPetSheetGeneratedEvent
+} from './buddy-pet-creator'
 import { normalizeSessionCommentsListParams } from './backend'
 import type {
   CohostAvatarAccepted,
@@ -77,9 +77,9 @@ import type {
   CohostLibrarySyncParams,
   CohostLibraryUpdateParams,
   CohostLibraryUseParams,
-  GolemLibraryState
-} from './golem-library'
-import { GOLEM_OFFICIAL_CATALOG } from './golem-library'
+  BuddyLibraryState
+} from './buddy-library'
+import { BUDDY_OFFICIAL_CATALOG } from './buddy-library'
 import {
   validateBackendEventPayload,
   validateBackendRpcParams,
@@ -133,15 +133,15 @@ interface HighRiskContractFixtures {
     defaults: OverlayLayout
     placed: OverlayLayout
   }
-  golemPets: {
-    summary: GolemPetSummary
-    bundledSummary: GolemPetSummary
+  buddyPets: {
+    summary: BuddyPetSummary
+    bundledSummary: BuddyPetSummary
     importParams: CohostPetImportParams
     removeParams: CohostPetRemoveParams
     reactParams: CohostPetReactParams
     reactAccepted: CohostPetReactAccepted
   }
-  golemLook: {
+  buddyLook: {
     createParams: CohostAvatarCreateParams
     createDescriptionParams: CohostAvatarCreateParams
     redoParams: CohostAvatarRedoParams
@@ -156,10 +156,10 @@ interface HighRiskContractFixtures {
     createLibraryParams: CohostAvatarCreateParams
     libraryDraft: CohostAvatarDraft
   }
-  golemLibrary: {
-    signedOut: GolemLibraryState
-    signedIn: GolemLibraryState
-    localOnly: GolemLibraryState
+  buddyLibrary: {
+    signedOut: BuddyLibraryState
+    signedIn: BuddyLibraryState
+    localOnly: BuddyLibraryState
     syncParams: CohostLibrarySyncParams
     useParams: CohostLibraryUseParams
     useOfficialParams: CohostLibraryUseParams
@@ -167,22 +167,22 @@ interface HighRiskContractFixtures {
     deleteParams: CohostLibraryDeleteParams
     accepted: CohostLibraryAccepted
   }
-  golemPetCreator: {
-    status: GolemPetCreationStatus
-    statusNone: GolemPetCreationStatus
+  buddyPetCreator: {
+    status: BuddyPetCreationStatus
+    statusNone: BuddyPetCreationStatus
     identityParams: CohostPetIdentityParams
     identityUploadParams: CohostPetIdentityParams
     sheetParams: CohostPetSheetGenerateParams
     pilotParams: CohostPetSheetGenerateParams
     buildParams: CohostPetBuildIdParams
     saveParams: CohostPetSaveParams
-    accepted: GolemPetCreationAccepted
-    identityRead: GolemPetIdentityReadEvent
-    sheetGenerated: GolemPetSheetGeneratedEvent
-    sheetFailed: GolemPetSheetGeneratedEvent
-    buildProgress: GolemPetBuildProgressEvent
-    buildFailed: GolemPetBuildProgressEvent
-    savedPack: GolemPetSummary
+    accepted: BuddyPetCreationAccepted
+    identityRead: BuddyPetIdentityReadEvent
+    sheetGenerated: BuddyPetSheetGeneratedEvent
+    sheetFailed: BuddyPetSheetGeneratedEvent
+    buildProgress: BuddyPetBuildProgressEvent
+    buildFailed: BuddyPetBuildProgressEvent
+    savedPack: BuddyPetSummary
   }
   cohost: {
     startParams: CohostStartParams
@@ -710,14 +710,14 @@ describe('shared high-risk protocol fixture', () => {
     expect(() =>
       validateBackendRpcParams('overlays.layout.set', {
         ...fixtures.overlayLayout.defaults,
-        golem: { ...fixtures.overlayLayout.defaults.golem, horizontal: { x: 2, y: 0, w: 1, h: 1 } }
+        buddy: { ...fixtures.overlayLayout.defaults.buddy, horizontal: { x: 2, y: 0, w: 1, h: 1 } }
       })
     ).toThrow()
     // The shipped defaults: highlight bottom-left on both outputs, captions
     // off (today's burnTarget default), the Golem bottom-right.
     expect(fixtures.overlayLayout.defaults.highlight.showOnStream).toBe(true)
     expect(fixtures.overlayLayout.defaults.captions.showOnStream).toBe(false)
-    expect(fixtures.overlayLayout.defaults.golem.horizontal.x).toBeCloseTo(0.7975, 6)
+    expect(fixtures.overlayLayout.defaults.buddy.horizontal.x).toBeCloseTo(0.7975, 6)
   })
 
   it('keeps the Golem overlay wire shapes strict (plan 164 Phase C)', () => {
@@ -728,17 +728,17 @@ describe('shared high-risk protocol fixture', () => {
       bubble: { text: 'Welcome to the horde', until: '2026-10-08T12:00:03.000Z' }
     }
     for (const snapshot of [idle, talking]) {
-      expect(validateBackendRpcResult('cohost.golem.status', snapshot)).toStrictEqual(snapshot)
-      expect(validateBackendEventPayload('cohost.golem.state', snapshot)).toStrictEqual(snapshot)
+      expect(validateBackendRpcResult('cohost.buddy.status', snapshot)).toStrictEqual(snapshot)
+      expect(validateBackendEventPayload('cohost.buddy.state', snapshot)).toStrictEqual(snapshot)
     }
     // The bubble is null or whole, never absent, and no field rides along.
     expect(() =>
-      validateBackendEventPayload('cohost.golem.state', { personaId: 'x', state: 'idle' })
+      validateBackendEventPayload('cohost.buddy.state', { personaId: 'x', state: 'idle' })
     ).toThrow()
     expect(() =>
-      validateBackendEventPayload('cohost.golem.state', { ...idle, bubble: { text: 'x' } })
+      validateBackendEventPayload('cohost.buddy.state', { ...idle, bubble: { text: 'x' } })
     ).toThrow()
-    expect(() => validateBackendEventPayload('cohost.golem.state', { ...idle, extra: 1 })).toThrow()
+    expect(() => validateBackendEventPayload('cohost.buddy.state', { ...idle, extra: 1 })).toThrow()
     // The Say box is one utterance (`cohost.utterance.say`): a session when
     // the line may be posted, none when it is bubble-only.
     const say = { sessionId: 'session-1', text: 'Hello horde', state: 'talk' }
@@ -754,25 +754,25 @@ describe('shared high-risk protocol fixture', () => {
       pngBase64: 'iVBORw0KGgo=',
       rect: { x: 0.7975, y: 0.64, w: 0.18, h: 0.32 }
     }
-    expect(validateBackendRpcParams('golem.overlay.set', set)).toStrictEqual(set)
+    expect(validateBackendRpcParams('buddy.overlay.set', set)).toStrictEqual(set)
     expect(() =>
-      validateBackendRpcParams('golem.overlay.set', { ...set, rect: undefined })
+      validateBackendRpcParams('buddy.overlay.set', { ...set, rect: undefined })
     ).toThrow()
     const info = {
       active: true,
       primary: { active: true, width: 400, height: 520, revision: 3, styleRevision: 0 },
       auxiliary: { active: false, width: 0, height: 0, revision: 0, styleRevision: 0 }
     }
-    expect(validateBackendRpcResult('golem.overlay.set', info)).toStrictEqual(info)
+    expect(validateBackendRpcResult('buddy.overlay.set', info)).toStrictEqual(info)
     // Plan 168 S-B1: the bubble's raster is cleared when it ends, one target
     // or both; nothing else rides along.
-    expect(validateBackendRpcParams('golem.overlay.clear', {})).toStrictEqual({})
-    expect(validateBackendRpcParams('golem.overlay.clear', { target: 'primary' })).toStrictEqual({
+    expect(validateBackendRpcParams('buddy.overlay.clear', {})).toStrictEqual({})
+    expect(validateBackendRpcParams('buddy.overlay.clear', { target: 'primary' })).toStrictEqual({
       target: 'primary'
     })
-    expect(() => validateBackendRpcParams('golem.overlay.clear', { target: 'vertical' })).toThrow()
-    expect(() => validateBackendRpcParams('golem.overlay.clear', { rect: null })).toThrow()
-    expect(validateBackendRpcResult('golem.overlay.clear', info)).toStrictEqual(info)
+    expect(() => validateBackendRpcParams('buddy.overlay.clear', { target: 'vertical' })).toThrow()
+    expect(() => validateBackendRpcParams('buddy.overlay.clear', { rect: null })).toThrow()
+    expect(validateBackendRpcResult('buddy.overlay.clear', info)).toStrictEqual(info)
   })
 
   it('keeps Golem voice commands, their answers and settings identical across languages (plan 140 S3)', () => {
@@ -1161,7 +1161,7 @@ describe('shared high-risk protocol fixture', () => {
 })
 
 describe('Golem pets wire (plan 168, Phase A)', () => {
-  const pets = fixtures.golemPets
+  const pets = fixtures.buddyPets
 
   it('validates the pet RPCs exactly as the backend round-trips them', () => {
     expect(validateBackendRpcParams('cohost.pet.list', undefined)).toBeUndefined()
@@ -1189,7 +1189,7 @@ describe('Golem pets wire (plan 168, Phase A)', () => {
     expect(() =>
       validateBackendRpcParams('cohost.pet.import', { ...pets.importParams, path: '/tmp/x' })
     ).toThrow('cohost.pet.import')
-    for (const packId of ['bundled:', '../x', pets.summary.packId.toUpperCase(), 'golem']) {
+    for (const packId of ['bundled:', '../x', pets.summary.packId.toUpperCase(), 'buddy']) {
       expect(() => validateBackendRpcParams('cohost.pet.remove', { packId })).toThrow(
         'cohost.pet.remove'
       )
@@ -1267,7 +1267,7 @@ describe('Golem pets wire (plan 168, Phase A)', () => {
 })
 
 describe('Golem look wire (plan 169, Phase B)', () => {
-  const look = fixtures.golemLook
+  const look = fixtures.buddyLook
 
   it('validates the look RPCs and events exactly as the backend round-trips them', () => {
     for (const params of [look.createParams, look.createDescriptionParams]) {
@@ -1335,8 +1335,8 @@ describe('Golem look wire (plan 169, Phase B)', () => {
 })
 
 describe('Golem library wire (plan 170, Phase D)', () => {
-  const library = fixtures.golemLibrary
-  const look = fixtures.golemLook
+  const library = fixtures.buddyLibrary
+  const look = fixtures.buddyLook
 
   it('validates the library RPCs and event exactly as the backend round-trips them', () => {
     expect(validateBackendRpcParams('cohost.library.get', undefined)).toBeUndefined()
@@ -1366,7 +1366,7 @@ describe('Golem library wire (plan 170, Phase D)', () => {
     }
     // The signed-out state lists the whole official catalog, pictures by slug.
     expect(library.signedOut.official).toStrictEqual(
-      GOLEM_OFFICIAL_CATALOG.map(({ description: _description, ...entry }) => entry)
+      BUDDY_OFFICIAL_CATALOG.map(({ description: _description, ...entry }) => entry)
     )
   })
 
@@ -1442,9 +1442,9 @@ describe('Golem library wire (plan 170, Phase D)', () => {
     )
     const entry = library.signedIn.mine![0]!
     for (const idle of [
-      'videorc-asset://golem/default/idle.png',
-      `videorc-asset://golem/library/${entry.id}/idle.png`,
-      `videorc-asset://golem/library/${entry.id}/../idle-0a1b2c3d.png`,
+      'videorc-asset://buddy/default/idle.png',
+      `videorc-asset://buddy/library/${entry.id}/idle.png`,
+      `videorc-asset://buddy/library/${entry.id}/../idle-0a1b2c3d.png`,
       `file:///library/${entry.id}/idle-0a1b2c3d.png`
     ]) {
       expect(() =>
@@ -1467,7 +1467,7 @@ describe('Golem library wire (plan 170, Phase D)', () => {
 })
 
 describe('Golem pet creator wire (plan 168, Phase F)', () => {
-  const creator = fixtures.golemPetCreator
+  const creator = fixtures.buddyPetCreator
 
   it('validates the creator RPCs and events exactly as the backend round-trips them', () => {
     for (const method of ['cohost.pet.creation.start', 'cohost.pet.creation.status'] as const) {
@@ -1512,7 +1512,7 @@ describe('Golem pet creator wire (plan 168, Phase F)', () => {
 
   it('refuses unknown fields, bad ids, paths and out-of-bounds notes', () => {
     const { buildId } = creator.buildParams
-    for (const bad of ['../pets', buildId.toUpperCase(), 'bundled:golem', '']) {
+    for (const bad of ['../pets', buildId.toUpperCase(), 'bundled:buddy', '']) {
       expect(() => validateBackendRpcParams('cohost.pet.build', { buildId: bad })).toThrow(
         'cohost.pet.build'
       )
@@ -1552,7 +1552,7 @@ describe('Golem pet creator wire (plan 168, Phase F)', () => {
       '../build-state.json',
       'sources/../x.png',
       '/tmp/a.png',
-      'pack/golem.json'
+      'pack/buddy.json'
     ]) {
       expect(() =>
         validateBackendRpcResult('cohost.pet.creation.status', {

@@ -290,7 +290,7 @@ pub enum GpuSourceSampler {
 /// Content namespaces whose texture lives in a key-addressed slot rather than
 /// the per-index cache (plan 168 D8): a layer whose index shifts (a caption
 /// appearing below it) never re-uploads. One slot per namespace.
-/// Namespace 7 is the Golem sprite atlas (`golem_sprite::GOLEM_SPRITE_METAL_NAMESPACE`;
+/// Namespace 7 is the Golem sprite atlas (`buddy_sprite::BUDDY_SPRITE_METAL_NAMESPACE`;
 /// the compositor asserts the two agree at compile time).
 pub const KEYED_TEXTURE_NAMESPACES: [u64; 1] = [7];
 

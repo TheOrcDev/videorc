@@ -76,19 +76,19 @@ pub(crate) const COHOST_PET_SHEET_MAX_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
 // --- Golem library (plan 170 D5 to D8) ---
 /// Create and redo run the plan 169 generation (the route's `maxDuration` is
 /// 180 s), so the client waits as long as the set route's.
-pub(crate) const GOLEM_LIBRARY_GENERATE_TIMEOUT: std::time::Duration = COHOST_AVATAR_SET_TIMEOUT;
+pub(crate) const BUDDY_LIBRARY_GENERATE_TIMEOUT: std::time::Duration = COHOST_AVATAR_SET_TIMEOUT;
 /// The list, one avatar, an edit, a delete and the profile are plain rows.
-pub(crate) const GOLEM_LIBRARY_SHORT_TIMEOUT: std::time::Duration =
+pub(crate) const BUDDY_LIBRARY_SHORT_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(15);
 /// A pose is a 302 to a short-lived signed URL, then one PNG.
-pub(crate) const GOLEM_LIBRARY_POSE_TIMEOUT: std::time::Duration =
+pub(crate) const BUDDY_LIBRARY_POSE_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(30);
-const GOLEM_LIBRARY_AVATARS_PATH: &str = "/api/golem/avatars";
-const GOLEM_LIBRARY_PROFILE_PATH: &str = "/api/golem/profile";
+const BUDDY_LIBRARY_AVATARS_PATH: &str = "/api/buddy/avatars";
+const BUDDY_LIBRARY_PROFILE_PATH: &str = "/api/buddy/profile";
 /// 30 avatars of text (a context is at most 4000 characters) stay far under this.
-const GOLEM_LIBRARY_SMALL_RESPONSE_MAX_BYTES: usize = 2 * 1024 * 1024;
+const BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES: usize = 2 * 1024 * 1024;
 /// A stored pose is one PNG the generation made (8 MB at most, like a draft's).
-pub(crate) const GOLEM_LIBRARY_POSE_MAX_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const BUDDY_LIBRARY_POSE_MAX_BYTES: usize = 8 * 1024 * 1024;
 // --- end Golem library (plan 170) ---
 /// Bounded well inside the provider-mutation RPC envelope: an update check must
 /// never wait on a slow web edge for long.
@@ -640,16 +640,16 @@ pub struct CohostAvatarSetResponse {
         std::collections::BTreeMap<crate::cohost::CohostAvatarState, CohostAvatarSetFailure>,
 }
 
-// --- Golem library wire types (plan 170 D5 to D8; videorc-web lib/golem/library.ts) ---
-// Named `GolemLibraryWeb*` so they never meet the persona's `GolemAvatar`
+// --- Golem library wire types (plan 170 D5 to D8; videorc-web lib/buddy/library.ts) ---
+// Named `BuddyLibraryWeb*` so they never meet the persona's `BuddyAvatar`
 // (Still or Alive). The desktop renderer never sees these: the backend turns
-// them into `cohost_library::GolemLibraryEntry`.
+// them into `cohost_library::BuddyLibraryEntry`.
 
-/// One pose of an account avatar: `/api/golem/avatars/<id>/<state>?v=<8 hex>`
+/// One pose of an account avatar: `/api/buddy/avatars/<id>/<state>?v=<8 hex>`
 /// (the `v` changes exactly when the picture does).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct GolemLibraryWebPose {
+pub struct BuddyLibraryWebPose {
     pub url: String,
     #[serde(default)]
     pub opaque: bool,
@@ -657,18 +657,18 @@ pub struct GolemLibraryWebPose {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct GolemLibraryWebPoses {
-    pub idle: GolemLibraryWebPose,
+pub struct BuddyLibraryWebPoses {
+    pub idle: BuddyLibraryWebPose,
     #[serde(default)]
-    pub talk: Option<GolemLibraryWebPose>,
+    pub talk: Option<BuddyLibraryWebPose>,
     #[serde(default)]
-    pub laugh: Option<GolemLibraryWebPose>,
+    pub laugh: Option<BuddyLibraryWebPose>,
     #[serde(default)]
-    pub think: Option<GolemLibraryWebPose>,
+    pub think: Option<BuddyLibraryWebPose>,
 }
 
-impl GolemLibraryWebPoses {
-    pub fn get(&self, state: crate::cohost::CohostAvatarState) -> Option<&GolemLibraryWebPose> {
+impl BuddyLibraryWebPoses {
+    pub fn get(&self, state: crate::cohost::CohostAvatarState) -> Option<&BuddyLibraryWebPose> {
         use crate::cohost::CohostAvatarState;
         match state {
             CohostAvatarState::Idle => Some(&self.idle),
@@ -679,10 +679,10 @@ impl GolemLibraryWebPoses {
     }
 }
 
-/// A user's own avatar as the web returns it (the shapes' `GolemAvatar`).
+/// A user's own avatar as the web returns it (the shapes' `BuddyAvatar`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct GolemLibraryWebAvatar {
+pub struct BuddyLibraryWebAvatar {
     pub id: String,
     pub name: String,
     #[serde(default)]
@@ -695,16 +695,16 @@ pub struct GolemLibraryWebAvatar {
     pub look_version: u32,
     pub created_at: String,
     pub updated_at: String,
-    pub poses: GolemLibraryWebPoses,
+    pub poses: BuddyLibraryWebPoses,
 }
 
-/// `GET /api/golem/avatars`: newest first. One avatar the desktop cannot
+/// `GET /api/buddy/avatars`: newest first. One avatar the desktop cannot
 /// read is skipped, never the whole list.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct GolemLibraryWebList {
+pub struct BuddyLibraryWebList {
     #[serde(default, deserialize_with = "lenient_items")]
-    pub avatars: Vec<GolemLibraryWebAvatar>,
+    pub avatars: Vec<BuddyLibraryWebAvatar>,
     #[serde(default)]
     pub limit: Option<u32>,
     #[serde(default)]
@@ -713,11 +713,11 @@ pub struct GolemLibraryWebList {
     pub profile_updated_at: Option<String>,
 }
 
-/// `POST /api/golem/avatars`. `name` is required; a description or an
+/// `POST /api/buddy/avatars`. `name` is required; a description or an
 /// inspiration picture (base64, at most 3 MB decoded) is too.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct GolemLibraryWebCreateRequest {
+pub struct BuddyLibraryWebCreateRequest {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -733,8 +733,8 @@ pub struct GolemLibraryWebCreateRequest {
 /// needs no second download, and why any of talk, laugh or think is missing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct GolemLibraryWebCreateResponse {
-    pub avatar: GolemLibraryWebAvatar,
+pub struct BuddyLibraryWebCreateResponse {
+    pub avatar: BuddyLibraryWebAvatar,
     #[serde(default)]
     pub images: CohostAvatarSetImages,
     #[serde(default)]
@@ -742,7 +742,7 @@ pub struct GolemLibraryWebCreateResponse {
         std::collections::BTreeMap<crate::cohost::CohostAvatarState, CohostAvatarSetFailure>,
 }
 
-impl GolemLibraryWebCreateResponse {
+impl BuddyLibraryWebCreateResponse {
     /// The pictures as the plan 169 draft store reads a set.
     pub fn as_set(&self) -> CohostAvatarSetResponse {
         CohostAvatarSetResponse {
@@ -752,17 +752,17 @@ impl GolemLibraryWebCreateResponse {
     }
 }
 
-/// `GET` and `PATCH /api/golem/avatars/:id`.
+/// `GET` and `PATCH /api/buddy/avatars/:id`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct GolemLibraryWebAvatarResponse {
-    pub avatar: GolemLibraryWebAvatar,
+pub struct BuddyLibraryWebAvatarResponse {
+    pub avatar: BuddyLibraryWebAvatar,
 }
 
-/// `PATCH /api/golem/avatars/:id`: at least one field.
+/// `PATCH /api/buddy/avatars/:id`: at least one field.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct GolemLibraryWebPatch {
+pub struct BuddyLibraryWebPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -771,17 +771,17 @@ pub struct GolemLibraryWebPatch {
     pub context: Option<String>,
 }
 
-impl GolemLibraryWebPatch {
+impl BuddyLibraryWebPatch {
     pub fn is_empty(&self) -> bool {
         self.name.is_none() && self.personality.is_none() && self.context.is_none()
     }
 }
 
-/// `DELETE /api/golem/avatars/:id`: deleting the active one clears the
+/// `DELETE /api/buddy/avatars/:id`: deleting the active one clears the
 /// profile and moves its clock.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct GolemLibraryWebDeleted {
+pub struct BuddyLibraryWebDeleted {
     #[serde(default)]
     pub deleted: bool,
     #[serde(default)]
@@ -790,27 +790,27 @@ pub struct GolemLibraryWebDeleted {
     pub profile_updated_at: Option<String>,
 }
 
-/// `POST /api/golem/avatars/:id/redo`.
+/// `POST /api/buddy/avatars/:id/redo`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct GolemLibraryWebRedoRequest {
+pub struct BuddyLibraryWebRedoRequest {
     pub state: crate::cohost::CohostAvatarState,
 }
 
 /// The redo's streamed 200: the avatar with its new pose URL and the PNG.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct GolemLibraryWebRedoResponse {
-    pub avatar: GolemLibraryWebAvatar,
+pub struct BuddyLibraryWebRedoResponse {
+    pub avatar: BuddyLibraryWebAvatar,
     #[serde(default)]
     pub images: CohostAvatarSetImages,
 }
 
-/// `GET` and `PUT /api/golem/profile`: the account's choice and its clock.
+/// `GET` and `PUT /api/buddy/profile`: the account's choice and its clock.
 /// The request always carries `activeAvatarId` (null clears it).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct GolemLibraryWebProfile {
+pub struct BuddyLibraryWebProfile {
     #[serde(default)]
     pub active_avatar_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -818,9 +818,9 @@ pub struct GolemLibraryWebProfile {
 }
 
 /// Whether `url` is a pose path this client may send the bearer to: a path
-/// under `/api/golem/avatars/` on the API host, never an absolute URL.
-pub(crate) fn golem_pose_path_ok(url: &str) -> bool {
-    url.starts_with("/api/golem/avatars/")
+/// under `/api/buddy/avatars/` on the API host, never an absolute URL.
+pub(crate) fn buddy_pose_path_ok(url: &str) -> bool {
+    url.starts_with("/api/buddy/avatars/")
         && !url.contains("..")
         && !url.contains('\\')
         && !url.contains("//")
@@ -856,7 +856,7 @@ pub struct CohostPetIdentityRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostPetIdentityResponse {
-    pub notes: crate::golem_pet_create::GolemPetIdentityNotes,
+    pub notes: crate::buddy_pet_create::BuddyPetIdentityNotes,
 }
 
 /// `POST /api/ai/cohost/pet/sheet`: one generated sheet, an edit of the
@@ -865,11 +865,11 @@ pub struct CohostPetIdentityResponse {
 #[serde(rename_all = "camelCase")]
 pub struct CohostPetSheetRequest {
     pub build_id: String,
-    pub kind: crate::golem_pet_create::GolemPetSheetKindName,
+    pub kind: crate::buddy_pet_create::BuddyPetSheetKindName,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub row: Option<crate::golem_pet_build::GazeRow>,
+    pub row: Option<crate::buddy_pet_build::GazeRow>,
     pub reference: String,
-    pub notes: crate::golem_pet_create::GolemPetIdentityNotes,
+    pub notes: crate::buddy_pet_create::BuddyPetIdentityNotes,
     pub redo: bool,
 }
 
@@ -1245,11 +1245,11 @@ pub(crate) fn parse_retry_after_seconds(value: Option<&str>) -> Option<std::time
         .map(std::time::Duration::from_secs)
 }
 
-/// `/api/golem/avatars/<id>` for a user avatar id (a lowercase uuid); any
+/// `/api/buddy/avatars/<id>` for a user avatar id (a lowercase uuid); any
 /// other id is refused before anything is sent.
-fn golem_avatar_path(avatar_id: &str) -> std::result::Result<String, CohostApiError> {
+fn buddy_avatar_path(avatar_id: &str) -> std::result::Result<String, CohostApiError> {
     if crate::cohost_library::user_avatar_id_ok(avatar_id) {
-        Ok(format!("{GOLEM_LIBRARY_AVATARS_PATH}/{avatar_id}"))
+        Ok(format!("{BUDDY_LIBRARY_AVATARS_PATH}/{avatar_id}"))
     } else {
         Err(CohostApiError {
             kind: CohostApiErrorKind::InvalidRequest,
@@ -1665,144 +1665,144 @@ impl VideorcApiClient {
 
     // --- Golem library (plan 170 D5 to D8) ---
 
-    /// `GET /api/golem/avatars`: the account's avatars and its choice.
-    pub async fn get_golem_library(
+    /// `GET /api/buddy/avatars`: the account's avatars and its choice.
+    pub async fn get_buddy_library(
         &self,
         bearer_token: &str,
-    ) -> std::result::Result<GolemLibraryWebList, CohostApiError> {
+    ) -> std::result::Result<BuddyLibraryWebList, CohostApiError> {
         self.send_cohost_json::<(), _>(
             reqwest::Method::GET,
-            GOLEM_LIBRARY_AVATARS_PATH,
+            BUDDY_LIBRARY_AVATARS_PATH,
             bearer_token,
             None,
-            GOLEM_LIBRARY_SHORT_TIMEOUT,
-            GOLEM_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+            BUDDY_LIBRARY_SHORT_TIMEOUT,
+            BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
         )
         .await
     }
 
-    /// `POST /api/golem/avatars`: make a whole avatar and save it to the library.
-    pub async fn post_golem_avatar(
+    /// `POST /api/buddy/avatars`: make a whole avatar and save it to the library.
+    pub async fn post_buddy_avatar(
         &self,
         bearer_token: &str,
-        request: &GolemLibraryWebCreateRequest,
-    ) -> std::result::Result<GolemLibraryWebCreateResponse, CohostApiError> {
+        request: &BuddyLibraryWebCreateRequest,
+    ) -> std::result::Result<BuddyLibraryWebCreateResponse, CohostApiError> {
         self.send_cohost_json(
             reqwest::Method::POST,
-            GOLEM_LIBRARY_AVATARS_PATH,
+            BUDDY_LIBRARY_AVATARS_PATH,
             bearer_token,
             Some(request),
-            GOLEM_LIBRARY_GENERATE_TIMEOUT,
+            BUDDY_LIBRARY_GENERATE_TIMEOUT,
             COHOST_AVATAR_SET_MAX_RESPONSE_BYTES,
         )
         .await
     }
 
-    /// `GET /api/golem/avatars/:id`.
-    pub async fn get_golem_avatar(
+    /// `GET /api/buddy/avatars/:id`.
+    pub async fn get_buddy_avatar(
         &self,
         bearer_token: &str,
         avatar_id: &str,
-    ) -> std::result::Result<GolemLibraryWebAvatarResponse, CohostApiError> {
+    ) -> std::result::Result<BuddyLibraryWebAvatarResponse, CohostApiError> {
         self.send_cohost_json::<(), _>(
             reqwest::Method::GET,
-            &golem_avatar_path(avatar_id)?,
+            &buddy_avatar_path(avatar_id)?,
             bearer_token,
             None,
-            GOLEM_LIBRARY_SHORT_TIMEOUT,
-            GOLEM_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+            BUDDY_LIBRARY_SHORT_TIMEOUT,
+            BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
         )
         .await
     }
 
-    /// `PATCH /api/golem/avatars/:id`.
-    pub async fn patch_golem_avatar(
+    /// `PATCH /api/buddy/avatars/:id`.
+    pub async fn patch_buddy_avatar(
         &self,
         bearer_token: &str,
         avatar_id: &str,
-        patch: &GolemLibraryWebPatch,
-    ) -> std::result::Result<GolemLibraryWebAvatarResponse, CohostApiError> {
+        patch: &BuddyLibraryWebPatch,
+    ) -> std::result::Result<BuddyLibraryWebAvatarResponse, CohostApiError> {
         self.send_cohost_json(
             reqwest::Method::PATCH,
-            &golem_avatar_path(avatar_id)?,
+            &buddy_avatar_path(avatar_id)?,
             bearer_token,
             Some(patch),
-            GOLEM_LIBRARY_SHORT_TIMEOUT,
-            GOLEM_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+            BUDDY_LIBRARY_SHORT_TIMEOUT,
+            BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
         )
         .await
     }
 
-    /// `DELETE /api/golem/avatars/:id`.
-    pub async fn delete_golem_avatar(
+    /// `DELETE /api/buddy/avatars/:id`.
+    pub async fn delete_buddy_avatar(
         &self,
         bearer_token: &str,
         avatar_id: &str,
-    ) -> std::result::Result<GolemLibraryWebDeleted, CohostApiError> {
+    ) -> std::result::Result<BuddyLibraryWebDeleted, CohostApiError> {
         self.send_cohost_json::<(), _>(
             reqwest::Method::DELETE,
-            &golem_avatar_path(avatar_id)?,
+            &buddy_avatar_path(avatar_id)?,
             bearer_token,
             None,
-            GOLEM_LIBRARY_SHORT_TIMEOUT,
-            GOLEM_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+            BUDDY_LIBRARY_SHORT_TIMEOUT,
+            BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
         )
         .await
     }
 
-    /// `POST /api/golem/avatars/:id/redo`: talk, laugh or think again from the
+    /// `POST /api/buddy/avatars/:id/redo`: talk, laugh or think again from the
     /// stored idle (one image of the daily allowance).
-    pub async fn post_golem_avatar_redo(
+    pub async fn post_buddy_avatar_redo(
         &self,
         bearer_token: &str,
         avatar_id: &str,
         state: crate::cohost::CohostAvatarState,
-    ) -> std::result::Result<GolemLibraryWebRedoResponse, CohostApiError> {
-        let path = format!("{}/redo", golem_avatar_path(avatar_id)?);
+    ) -> std::result::Result<BuddyLibraryWebRedoResponse, CohostApiError> {
+        let path = format!("{}/redo", buddy_avatar_path(avatar_id)?);
         self.send_cohost_json(
             reqwest::Method::POST,
             &path,
             bearer_token,
-            Some(&GolemLibraryWebRedoRequest { state }),
-            GOLEM_LIBRARY_GENERATE_TIMEOUT,
+            Some(&BuddyLibraryWebRedoRequest { state }),
+            BUDDY_LIBRARY_GENERATE_TIMEOUT,
             COHOST_AVATAR_SET_MAX_RESPONSE_BYTES,
         )
         .await
     }
 
-    /// `PUT /api/golem/profile`: a user avatar id, `official:<slug>` or None.
-    pub async fn put_golem_profile(
+    /// `PUT /api/buddy/profile`: a user avatar id, `official:<slug>` or None.
+    pub async fn put_buddy_profile(
         &self,
         bearer_token: &str,
         active_avatar_id: Option<&str>,
-    ) -> std::result::Result<GolemLibraryWebProfile, CohostApiError> {
+    ) -> std::result::Result<BuddyLibraryWebProfile, CohostApiError> {
         self.send_cohost_json(
             reqwest::Method::PUT,
-            GOLEM_LIBRARY_PROFILE_PATH,
+            BUDDY_LIBRARY_PROFILE_PATH,
             bearer_token,
             Some(&serde_json::json!({ "activeAvatarId": active_avatar_id })),
-            GOLEM_LIBRARY_SHORT_TIMEOUT,
-            GOLEM_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+            BUDDY_LIBRARY_SHORT_TIMEOUT,
+            BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
         )
         .await
     }
 
-    /// One pose's PNG: `GET /api/golem/avatars/:id/:state` answers a 302 to a
+    /// One pose's PNG: `GET /api/buddy/avatars/:id/:state` answers a 302 to a
     /// short-lived signed URL, which the client follows (reqwest drops the
     /// bearer when the redirect leaves the API host). Only a pose path the
     /// web gave is ever requested.
-    pub async fn get_golem_pose(
+    pub async fn get_buddy_pose(
         &self,
         bearer_token: &str,
         pose_path: &str,
     ) -> std::result::Result<Vec<u8>, CohostApiError> {
-        if !golem_pose_path_ok(pose_path) {
+        if !buddy_pose_path_ok(pose_path) {
             return Err(CohostApiError::malformed_response(
                 200,
                 "The library gave a picture address this app does not read.",
             ));
         }
-        let timeout = GOLEM_LIBRARY_POSE_TIMEOUT;
+        let timeout = BUDDY_LIBRARY_POSE_TIMEOUT;
         let response = self
             .http
             .get(self.endpoint(pose_path))
@@ -1826,7 +1826,7 @@ impl VideorcApiClient {
                 retry_after.as_deref(),
             ));
         }
-        read_capped_body(response, status, timeout, GOLEM_LIBRARY_POSE_MAX_BYTES).await
+        read_capped_body(response, status, timeout, BUDDY_LIBRARY_POSE_MAX_BYTES).await
     }
 
     /// One JSON call to a co-host or Golem library route: the bearer, the
@@ -2698,7 +2698,7 @@ mod tests {
             "servers before plan 168 omit the pet block"
         );
         assert!(
-            cohost.golem_library.is_none(),
+            cohost.buddy_library.is_none(),
             "servers before plan 170 omit the library block"
         );
     }
@@ -2727,20 +2727,20 @@ mod tests {
             value["cohost"]["pet"]
         );
         // Plan 170 D9: the library block rides the same proxy, field for field.
-        value["cohost"]["golemLibrary"] =
+        value["cohost"]["buddyLibrary"] =
             serde_json::json!({ "enabled": true, "count": 3, "limit": 30 });
         let with: AiCapabilities = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(
-            with.cohost.as_ref().unwrap().golem_library,
-            Some(crate::protocol::AiCapabilitiesGolemLibrary {
+            with.cohost.as_ref().unwrap().buddy_library,
+            Some(crate::protocol::AiCapabilitiesBuddyLibrary {
                 enabled: true,
                 count: 3,
                 limit: 30
             })
         );
         assert_eq!(
-            serde_json::to_value(&with).unwrap()["cohost"]["golemLibrary"],
-            value["cohost"]["golemLibrary"]
+            serde_json::to_value(&with).unwrap()["cohost"]["buddyLibrary"],
+            value["cohost"]["buddyLibrary"]
         );
         // Basic: the block is present and off.
         value["cohost"]["pet"] = serde_json::json!({ "enabled": false, "creationsRemainingThisMonth": 0, "monthlyLimit": 0 });
@@ -3279,13 +3279,13 @@ mod tests {
             "videorc-desktop/0.9.130",
             "session-1",
             12,
-            &format!("  golem {}", "u".repeat(400)),
+            &format!("  buddy {}", "u".repeat(400)),
             Some("m-29"),
             candidates,
         )
         .expect("a request");
         assert_eq!(request.utterance.encode_utf16().count(), 300);
-        assert!(request.utterance.starts_with("golem "));
+        assert!(request.utterance.starts_with("buddy "));
         assert!(request.consent_to_process_chat);
         assert_eq!(request.seq, 12);
         assert_eq!(request.candidates.len(), 20);
@@ -3320,7 +3320,7 @@ mod tests {
             "videorc-desktop/0.9.130",
             "session-1",
             3,
-            "golem show that",
+            "buddy show that",
             Some("not-a-candidate"),
             vec![command_candidate("m-1", "ada", "hi")],
         )
@@ -3332,7 +3332,7 @@ mod tests {
                 "sessionClientId": "session-1",
                 "consentToProcessChat": true,
                 "seq": 3,
-                "utterance": "golem show that",
+                "utterance": "buddy show that",
                 "candidates": [
                     { "id": "m-1", "author": "ada", "text": "hi", "at": "2026-10-04T12:00:00Z" }
                 ]
@@ -3356,7 +3356,7 @@ mod tests {
                 "v",
                 "s",
                 1,
-                "golem",
+                "buddy",
                 None,
                 vec![command_candidate("m-1", "ada", " ")]
             ),
@@ -3369,7 +3369,7 @@ mod tests {
             .map(|index| command_candidate(&format!("w-{index}"), "viewer", &wide))
             .collect();
         many[19].id = "focus".to_string();
-        let fitted = CohostCommandRequest::shaped("v", "s", 1, "golem", Some("focus"), many)
+        let fitted = CohostCommandRequest::shaped("v", "s", 1, "buddy", Some("focus"), many)
             .expect("a request");
         assert!(serde_json::to_vec(&fitted).unwrap().len() <= COHOST_COMMAND_MAX_BODY_BYTES);
         assert!(fitted.candidates.len() < 20);
@@ -3497,7 +3497,7 @@ mod tests {
             "videorc-desktop/0.9.130",
             "session-1",
             12,
-            "golem show what coders x asked",
+            "buddy show what coders x asked",
             Some("m1"),
             vec![command_candidate(
                 "m1",

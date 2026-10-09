@@ -146,7 +146,7 @@ export const SMOKE_BACKEND_RPC_METHOD_NAMES = new Set([
   'audio.test.inject-pcm',
   'captions.test.inject-audio',
   'captions.test.snapshot',
-  // Plan 168 S-C5: `smoke:golem-pet` registers its synthetic pack the way
+  // Plan 168 S-C5: `smoke:buddy-pet` registers its synthetic pack the way
   // main does after copying a folder (admin only in the backend).
   'cohost.pet.import',
   'compositor.scene.update',

@@ -8,10 +8,10 @@
 //! work runs on a task, one library job at a time, in the order accepted (a
 //! `use` sent right after a `sync` runs after it).
 //!
-//! - **Pictures**: the account's pictures are cached under the golem write
+//! - **Pictures**: the account's pictures are cached under the buddy write
 //!   root as `library/<avatarId>/<state>-<tag>.png` (the tag is the web pose
 //!   URL's `v`, so a changed picture gets a new path); main serves them under
-//!   `videorc-asset://golem/`. Each idle is cached on sync, the rest on use.
+//!   `videorc-asset://buddy/`. Each idle is cached on sync, the rest on use.
 //! - **Apply** (use, sync, keep): the poses become the persona's still
 //!   pictures (`<personaId>/<state>-<tag>.<ext>`, plan 169), the name and
 //!   personality follow, a non-empty "About you" becomes the Golem's notes,
@@ -42,28 +42,28 @@ use crate::cohost::{
     CohostAvatarState, CohostPersona, CohostPersonaImages, CohostPersonaSource, CohostSettings,
 };
 use crate::cohost_avatar::{ALL_STATES, blocking, store_error};
-use crate::golem_pet::GolemAvatar;
+use crate::buddy_pet::BuddyAvatar;
 use crate::protocol::{
-    AccountStatus, AiCapabilitiesGolemLibrary, CohostAvatarErrorDetail, CohostSettingsPatch,
+    AccountStatus, AiCapabilitiesBuddyLibrary, CohostAvatarErrorDetail, CohostSettingsPatch,
 };
 use crate::state::AppState;
 use crate::storage::Database;
 use crate::videorc_api::{
-    CohostApiError, CohostApiErrorKind, GolemLibraryWebAvatar, GolemLibraryWebPatch,
+    CohostApiError, CohostApiErrorKind, BuddyLibraryWebAvatar, BuddyLibraryWebPatch,
     VideorcApiClient,
 };
 
-/// The event that carries the whole `GolemLibraryState` after every change.
+/// The event that carries the whole `BuddyLibraryState` after every change.
 pub const COHOST_LIBRARY_CHANGED_EVENT: &str = "cohost.library.changed";
 /// At most this many avatars per account (D4, owner-confirmed); the web's
 /// capabilities and list say what the account's cap is.
-pub const GOLEM_LIBRARY_LIMIT: u32 = 30;
+pub const BUDDY_LIBRARY_LIMIT: u32 = 30;
 /// A persona's `libraryAvatarId` is at most this long (a uuid is 36).
-pub const GOLEM_LIBRARY_ID_MAX_CHARS: usize = 64;
-pub const GOLEM_OFFICIAL_ID_PREFIX: &str = "official:";
+pub const BUDDY_LIBRARY_ID_MAX_CHARS: usize = 64;
+pub const BUDDY_OFFICIAL_ID_PREFIX: &str = "official:";
 /// The backend-private `app_settings` row holding the sync clock. It never
 /// crosses to the renderer.
-pub const GOLEM_LIBRARY_SYNC_KEY: &str = "golemLibrarySync";
+pub const BUDDY_LIBRARY_SYNC_KEY: &str = "buddyLibrarySync";
 
 /// A library id is neither a user avatar's uuid nor a known official one.
 pub const COHOST_LIBRARY_INVALID: &str = "cohost-library-invalid";
@@ -71,8 +71,8 @@ pub const COHOST_LIBRARY_INVALID: &str = "cohost-library-invalid";
 pub const COHOST_LIBRARY_UNAVAILABLE: &str = "cohost-library-unavailable";
 /// No Videorc session on this computer.
 pub const COHOST_LIBRARY_SIGNED_OUT: &str = "signed-out";
-/// The cache folder under the golem write root (`golem-assets.ts` mirrors it).
-pub const GOLEM_LIBRARY_CACHE_DIR: &str = "library";
+/// The cache folder under the buddy write root (`buddy-assets.ts` mirrors it).
+pub const BUDDY_LIBRARY_CACHE_DIR: &str = "library";
 
 /// A focus sync runs at most once a minute (D12).
 const FOCUS_SYNC_INTERVAL: Duration = Duration::from_secs(60);
@@ -88,7 +88,7 @@ const CACHE_CONCURRENCY: usize = 4;
 /// Videorc's official avatars (D10, D11), in catalog order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum GolemOfficialSlug {
+pub enum BuddyOfficialSlug {
     Golem,
     Orc,
     Goblin,
@@ -96,7 +96,7 @@ pub enum GolemOfficialSlug {
     Robot,
 }
 
-impl GolemOfficialSlug {
+impl BuddyOfficialSlug {
     pub const ALL: [Self; 5] = [
         Self::Golem,
         Self::Orc,
@@ -121,15 +121,15 @@ impl GolemOfficialSlug {
 
     /// `official:<slug>`.
     pub fn id(self) -> String {
-        format!("{GOLEM_OFFICIAL_ID_PREFIX}{}", self.as_str())
+        format!("{BUDDY_OFFICIAL_ID_PREFIX}{}", self.as_str())
     }
 }
 
 /// One catalog row. `description` is what the image model was asked for;
 /// the Golem's art is the owner's original, so it has none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GolemOfficial {
-    pub slug: GolemOfficialSlug,
+pub struct BuddyOfficial {
+    pub slug: BuddyOfficialSlug,
     pub name: &'static str,
     pub kind: &'static str,
     pub tagline: &'static str,
@@ -138,18 +138,18 @@ pub struct GolemOfficial {
     pub description: Option<&'static str>,
 }
 
-/// Plan 170 D10, D11: equal to `protocol-fixtures/golem-official-catalog.json`.
-pub const GOLEM_OFFICIAL_CATALOG: [GolemOfficial; 5] = [
-    GolemOfficial {
-        slug: GolemOfficialSlug::Golem,
+/// Plan 170 D10, D11: equal to `protocol-fixtures/buddy-official-catalog.json`.
+pub const BUDDY_OFFICIAL_CATALOG: [BuddyOfficial; 5] = [
+    BuddyOfficial {
+        slug: BuddyOfficialSlug::Golem,
         name: "Golem",
         kind: "Golem",
         tagline: "The original. Steady as stone.",
         personality: "Calm, warm and a little slow to speak. Greets every follower like an old friend and never rushes anyone.",
         description: None,
     },
-    GolemOfficial {
-        slug: GolemOfficialSlug::Orc,
+    BuddyOfficial {
+        slug: BuddyOfficialSlug::Orc,
         name: "Golmar",
         kind: "Orc",
         tagline: "Loud, loyal, all horde.",
@@ -158,8 +158,8 @@ pub const GOLEM_OFFICIAL_CATALOG: [GolemOfficial; 5] = [
             "a burly, friendly green orc with small tusks, a braided top-knot, leather shoulder guards and a wide grin",
         ),
     },
-    GolemOfficial {
-        slug: GolemOfficialSlug::Goblin,
+    BuddyOfficial {
+        slug: BuddyOfficialSlug::Goblin,
         name: "Nib",
         kind: "Goblin",
         tagline: "Small, sly and in on the joke.",
@@ -168,8 +168,8 @@ pub const GOLEM_OFFICIAL_CATALOG: [GolemOfficial; 5] = [
             "a small cheeky yellow-green goblin with huge pointed ears, a patched vest and a coin pouch on his belt",
         ),
     },
-    GolemOfficial {
-        slug: GolemOfficialSlug::Pirate,
+    BuddyOfficial {
+        slug: BuddyOfficialSlug::Pirate,
         name: "Captain Barnacle",
         kind: "Pirate",
         tagline: "Calls your chat his crew.",
@@ -178,8 +178,8 @@ pub const GOLEM_OFFICIAL_CATALOG: [GolemOfficial; 5] = [
             "a jolly round pirate captain with a tricorn hat, an eye patch, a striped shirt and a big bushy beard",
         ),
     },
-    GolemOfficial {
-        slug: GolemOfficialSlug::Robot,
+    BuddyOfficial {
+        slug: BuddyOfficialSlug::Robot,
         name: "Bolt",
         kind: "Robot",
         tagline: "Polite, precise, loves a stat.",
@@ -191,9 +191,9 @@ pub const GOLEM_OFFICIAL_CATALOG: [GolemOfficial; 5] = [
 ];
 
 /// The slug of a known `official:<slug>` id, or None for anything else.
-pub fn official_slug_from_id(id: &str) -> Option<GolemOfficialSlug> {
-    id.strip_prefix(GOLEM_OFFICIAL_ID_PREFIX)
-        .and_then(GolemOfficialSlug::parse)
+pub fn official_slug_from_id(id: &str) -> Option<BuddyOfficialSlug> {
+    id.strip_prefix(BUDDY_OFFICIAL_ID_PREFIX)
+        .and_then(BuddyOfficialSlug::parse)
 }
 
 /// A user avatar id: the web's lowercase hyphenated uuid.
@@ -211,7 +211,7 @@ pub fn library_id_ok(id: &str) -> bool {
 /// knows). Saved rows are never re-validated on load.
 pub fn persona_link_ok(id: &str) -> bool {
     !id.is_empty()
-        && id.len() <= GOLEM_LIBRARY_ID_MAX_CHARS
+        && id.len() <= BUDDY_LIBRARY_ID_MAX_CHARS
         && id
             .bytes()
             .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'-' | b':'))
@@ -219,21 +219,21 @@ pub fn persona_link_ok(id: &str) -> bool {
 
 // --- Wire types ------------------------------------------------------------------------
 
-/// An official avatar as `GolemLibraryState.official` lists it; its pictures
+/// An official avatar as `BuddyLibraryState.official` lists it; its pictures
 /// are bundled with the app, addressed by slug.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GolemOfficialEntry {
+pub struct BuddyOfficialEntry {
     pub id: String,
-    pub slug: GolemOfficialSlug,
+    pub slug: BuddyOfficialSlug,
     pub name: String,
     pub kind: String,
     pub tagline: String,
     pub personality: String,
 }
 
-impl From<&GolemOfficial> for GolemOfficialEntry {
-    fn from(official: &GolemOfficial) -> Self {
+impl From<&BuddyOfficial> for BuddyOfficialEntry {
+    fn from(official: &BuddyOfficial) -> Self {
         Self {
             id: official.slug.id(),
             slug: official.slug,
@@ -246,12 +246,12 @@ impl From<&GolemOfficial> for GolemOfficialEntry {
 }
 
 /// The cached pictures of one account avatar: managed
-/// `videorc-asset://golem/library/<id>/<state>-<tag>.png` URLs. Each state is
+/// `videorc-asset://buddy/library/<id>/<state>-<tag>.png` URLs. Each state is
 /// always present and null until cached (the renderer schema is nullable
 /// here, not optional).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GolemLibraryPoses {
+pub struct BuddyLibraryPoses {
     pub idle: Option<String>,
     pub talk: Option<String>,
     pub laugh: Option<String>,
@@ -261,7 +261,7 @@ pub struct GolemLibraryPoses {
 /// One avatar of the account's own library, as the app caches it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GolemLibraryEntry {
+pub struct BuddyLibraryEntry {
     pub id: String,
     pub name: String,
     pub description: String,
@@ -269,12 +269,12 @@ pub struct GolemLibraryEntry {
     pub context: String,
     pub created_at: String,
     pub updated_at: String,
-    pub poses: GolemLibraryPoses,
+    pub poses: BuddyLibraryPoses,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum GolemLibraryBusyKind {
+pub enum BuddyLibraryBusyKind {
     Sync,
     Use,
     Delete,
@@ -284,8 +284,8 @@ pub enum GolemLibraryBusyKind {
 /// The library job running now; `avatarId` absent (never null) for a sync.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GolemLibraryBusy {
-    pub kind: GolemLibraryBusyKind,
+pub struct BuddyLibraryBusy {
+    pub kind: BuddyLibraryBusyKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar_id: Option<String>,
 }
@@ -296,18 +296,18 @@ pub struct GolemLibraryBusy {
 /// null).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GolemLibraryState {
+pub struct BuddyLibraryState {
     pub signed_in: bool,
-    pub official: Vec<GolemOfficialEntry>,
+    pub official: Vec<BuddyOfficialEntry>,
     /// Newest first; None when signed out or never loaded.
-    pub mine: Option<Vec<GolemLibraryEntry>>,
+    pub mine: Option<Vec<BuddyLibraryEntry>>,
     /// What the persona is linked to, or `official:golem` for the untouched
     /// default; None for a Golem made only on this computer.
     pub active_avatar_id: Option<String>,
     /// The account's choice when it differs and sync would not apply it.
     pub server_active_avatar_id: Option<String>,
     pub limit: u32,
-    pub busy: Option<GolemLibraryBusy>,
+    pub busy: Option<BuddyLibraryBusy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<CohostAvatarErrorDetail>,
 }
@@ -315,7 +315,7 @@ pub struct GolemLibraryState {
 /// Why a sync runs (D12, D18).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum GolemLibrarySyncReason {
+pub enum BuddyLibrarySyncReason {
     Launch,
     Tab,
     Focus,
@@ -327,7 +327,7 @@ pub enum GolemLibrarySyncReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CohostLibrarySyncParams {
-    pub reason: GolemLibrarySyncReason,
+    pub reason: BuddyLibrarySyncReason,
 }
 
 /// `cohost.library.use` (a user avatar or a known official id) and
@@ -360,10 +360,10 @@ pub struct CohostLibraryAccepted {
 }
 
 /// The sync clock (D12): the account profile's `updatedAt` as last applied
-/// or seen. Backend-private (`app_settings` row `golemLibrarySync`).
+/// or seen. Backend-private (`app_settings` row `buddyLibrarySync`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GolemLibrarySync {
+pub struct BuddyLibrarySync {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_updated_at: Option<String>,
 }
@@ -388,26 +388,26 @@ impl CohostLibraryRefusal {
 
 /// The stored sync clock; the default when none is stored or the row is
 /// unreadable (the next sync then treats the account's choice as new).
-pub fn load_library_sync(database: &Database) -> GolemLibrarySync {
-    match database.load_setting::<GolemLibrarySync>(GOLEM_LIBRARY_SYNC_KEY) {
+pub fn load_library_sync(database: &Database) -> BuddyLibrarySync {
+    match database.load_setting::<BuddyLibrarySync>(BUDDY_LIBRARY_SYNC_KEY) {
         Ok(Some(sync)) => sync,
-        Ok(None) => GolemLibrarySync::default(),
+        Ok(None) => BuddyLibrarySync::default(),
         Err(error) => {
             tracing::warn!("Could not read the Golem library sync clock: {error:#}");
-            GolemLibrarySync::default()
+            BuddyLibrarySync::default()
         }
     }
 }
 
-pub fn save_library_sync(database: &Database, sync: &GolemLibrarySync) -> anyhow::Result<()> {
-    database.save_setting(GOLEM_LIBRARY_SYNC_KEY, sync)
+pub fn save_library_sync(database: &Database, sync: &BuddyLibrarySync) -> anyhow::Result<()> {
+    database.save_setting(BUDDY_LIBRARY_SYNC_KEY, sync)
 }
 
 fn store_clock(state: &AppState, profile_updated_at: Option<String>) {
     if profile_updated_at.is_none() {
         return;
     }
-    if let Err(error) = save_library_sync(&state.database, &GolemLibrarySync { profile_updated_at })
+    if let Err(error) = save_library_sync(&state.database, &BuddyLibrarySync { profile_updated_at })
     {
         tracing::warn!("Could not save the Golem library sync clock: {error:#}");
     }
@@ -434,22 +434,22 @@ fn is_newer(server: Option<&str>, stored: Option<&str>) -> bool {
 // --- Official art ----------------------------------------------------------------------------
 
 /// The catalog row of a slug.
-pub fn official_golem(slug: GolemOfficialSlug) -> &'static GolemOfficial {
-    GOLEM_OFFICIAL_CATALOG
+pub fn official_buddy(slug: BuddyOfficialSlug) -> &'static BuddyOfficial {
+    BUDDY_OFFICIAL_CATALOG
         .iter()
         .find(|official| official.slug == slug)
-        .unwrap_or(&GOLEM_OFFICIAL_CATALOG[0])
+        .unwrap_or(&BUDDY_OFFICIAL_CATALOG[0])
 }
 
 /// An official avatar's bundled pose: the Golem is the default set (the
 /// stream overlay's `BUNDLED_*`), the others ship in the renderer's
-/// `assets/golem/official/<slug>/<state>.webp`, so official avatars apply
+/// `assets/buddy/official/<slug>/<state>.webp`, so official avatars apply
 /// offline and signed out.
-pub(crate) fn official_webp(slug: GolemOfficialSlug, state: CohostAvatarState) -> &'static [u8] {
+pub(crate) fn official_webp(slug: BuddyOfficialSlug, state: CohostAvatarState) -> &'static [u8] {
     macro_rules! art {
         ($slug:literal, $state:literal) => {
             include_bytes!(concat!(
-                "../../../apps/desktop/src/renderer/src/assets/golem/official/",
+                "../../../apps/desktop/src/renderer/src/assets/buddy/official/",
                 $slug,
                 "/",
                 $state,
@@ -458,9 +458,9 @@ pub(crate) fn official_webp(slug: GolemOfficialSlug, state: CohostAvatarState) -
         };
     }
     use CohostAvatarState::{Idle, Laugh, Talk, Think};
-    use GolemOfficialSlug::{Goblin, Golem, Orc, Pirate, Robot};
+    use BuddyOfficialSlug::{Goblin, Golem, Orc, Pirate, Robot};
     match (slug, state) {
-        (Golem, state) => crate::golem_pet::bundled_state_webp(state),
+        (Golem, state) => crate::buddy_pet::bundled_state_webp(state),
         (Orc, Idle) => art!("orc", "idle"),
         (Orc, Talk) => art!("orc", "talk"),
         (Orc, Laugh) => art!("orc", "laugh"),
@@ -494,7 +494,7 @@ pub(crate) struct LibraryEnv {
 impl LibraryEnv {
     fn process() -> Self {
         Self {
-            root: crate::cohost_avatar::managed_golem_root(),
+            root: crate::cohost_avatar::managed_buddy_root(),
             api: VideorcApiClient::new().ok(),
             token: crate::account::stored_session_token(),
         }
@@ -542,23 +542,23 @@ struct PendingApply {
 #[derive(Default)]
 struct LibraryCache {
     /// The web's library capability; None until the first read.
-    capability: Option<AiCapabilitiesGolemLibrary>,
+    capability: Option<AiCapabilitiesBuddyLibrary>,
     /// The account's avatars as the web last listed them, newest first;
     /// None when signed out or never loaded.
-    web: Option<Vec<GolemLibraryWebAvatar>>,
+    web: Option<Vec<BuddyLibraryWebAvatar>>,
     /// The cached pictures of each, by avatar id.
-    poses: BTreeMap<String, GolemLibraryPoses>,
+    poses: BTreeMap<String, BuddyLibraryPoses>,
     /// The account's choice a local-only Golem was not overwritten with.
     offer: Option<String>,
-    busy: Option<GolemLibraryBusy>,
+    busy: Option<BuddyLibraryBusy>,
     error: Option<CohostAvatarErrorDetail>,
     limit: Option<u32>,
     last_sync: Option<Instant>,
     pending_apply: Option<PendingApply>,
-    pending_patch: Option<(String, GolemLibraryWebPatch)>,
+    pending_patch: Option<(String, BuddyLibraryWebPatch)>,
 }
 
-/// The library's process state (`AppState::golem_library`).
+/// The library's process state (`AppState::buddy_library`).
 pub struct LibraryShared {
     cache: StdMutex<LibraryCache>,
     /// One library job at a time, in the order accepted.
@@ -636,7 +636,7 @@ pub fn active_avatar_id(persona: &CohostPersona) -> Option<String> {
         Some(id) if library_id_ok(id) => Some(id.to_string()),
         Some(_) => None,
         None if persona.source == CohostPersonaSource::Default => {
-            Some(GolemOfficialSlug::Golem.id())
+            Some(BuddyOfficialSlug::Golem.id())
         }
         None => None,
     }
@@ -647,21 +647,21 @@ fn untouched_default(persona: &CohostPersona) -> bool {
     persona.library_avatar_id.is_none() && persona.source == CohostPersonaSource::Default
 }
 
-fn official_entries() -> Vec<GolemOfficialEntry> {
-    GOLEM_OFFICIAL_CATALOG
+fn official_entries() -> Vec<BuddyOfficialEntry> {
+    BUDDY_OFFICIAL_CATALOG
         .iter()
-        .map(GolemOfficialEntry::from)
+        .map(BuddyOfficialEntry::from)
         .collect()
 }
 
 /// The web's avatar as the renderer contract bounds it (the web keeps the
 /// same bounds; this only guards the strict schema).
 fn entry_of(
-    avatar: &GolemLibraryWebAvatar,
-    poses: Option<&GolemLibraryPoses>,
-) -> GolemLibraryEntry {
+    avatar: &BuddyLibraryWebAvatar,
+    poses: Option<&BuddyLibraryPoses>,
+) -> BuddyLibraryEntry {
     use crate::cohost::truncate_utf16;
-    GolemLibraryEntry {
+    BuddyLibraryEntry {
         id: avatar.id.clone(),
         name: library_name(&avatar.name).unwrap_or_else(|| "Golem".to_string()),
         description: truncate_utf16(&avatar.description, 600),
@@ -683,7 +683,7 @@ fn library_name(name: &str) -> Option<String> {
 
 /// An avatar the desktop can show and cache: a lowercase uuid, timestamps,
 /// and pose paths on the API host.
-fn web_avatar_ok(avatar: &GolemLibraryWebAvatar) -> bool {
+fn web_avatar_ok(avatar: &BuddyLibraryWebAvatar) -> bool {
     let timestamp_ok = |value: &str| !value.is_empty() && value.len() <= 128;
     user_avatar_id_ok(&avatar.id)
         && timestamp_ok(&avatar.created_at)
@@ -692,7 +692,7 @@ fn web_avatar_ok(avatar: &GolemLibraryWebAvatar) -> bool {
             avatar
                 .poses
                 .get(*state)
-                .is_none_or(|pose| crate::videorc_api::golem_pose_path_ok(&pose.url))
+                .is_none_or(|pose| crate::videorc_api::buddy_pose_path_ok(&pose.url))
         })
 }
 
@@ -711,11 +711,11 @@ async fn session_live(state: &AppState) -> bool {
 
 /// `cohost.library.get`: the library as this process knows it, without the
 /// network.
-pub async fn get(state: &AppState) -> GolemLibraryState {
+pub async fn get(state: &AppState) -> BuddyLibraryState {
     let signed_in = signed_in(state).await;
     let persona = current_persona(state).await;
     let active = active_avatar_id(&persona);
-    let cache = state.golem_library.cache();
+    let cache = state.buddy_library.cache();
     let mine = if signed_in {
         cache.web.as_ref().map(|avatars| {
             avatars
@@ -726,7 +726,7 @@ pub async fn get(state: &AppState) -> GolemLibraryState {
     } else {
         None
     };
-    GolemLibraryState {
+    BuddyLibraryState {
         signed_in,
         official: official_entries(),
         mine,
@@ -738,7 +738,7 @@ pub async fn get(state: &AppState) -> GolemLibraryState {
         limit: cache
             .limit
             .filter(|limit| *limit > 0)
-            .unwrap_or(GOLEM_LIBRARY_LIMIT),
+            .unwrap_or(BUDDY_LIBRARY_LIMIT),
         busy: cache.busy.clone(),
         error: cache.error.clone(),
     }
@@ -754,10 +754,10 @@ pub(crate) fn library_error(error: &CohostApiError) -> CohostAvatarErrorDetail {
     let code = error.detail.code.as_str();
     let message = match code {
         "unauthorized" => "Sign in again to use your Golem library.".to_string(),
-        "golem-storage-unconfigured" | "cohost-disabled" | "ai-gateway-not-configured" => {
+        "buddy-storage-unconfigured" | "cohost-disabled" | "ai-gateway-not-configured" => {
             "The Golem library is not available right now.".to_string()
         }
-        "golem-not-found" => "That Golem is not in your library any more.".to_string(),
+        "buddy-not-found" => "That Golem is not in your library any more.".to_string(),
         "network" => "Could not reach Videorc. Check your connection and try again.".to_string(),
         "timeout" => "Videorc took too long to answer. Try again.".to_string(),
         _ if error.kind == CohostApiErrorKind::MalformedResponse => {
@@ -784,18 +784,18 @@ fn accepted() -> CohostLibraryAccepted {
 /// Run `work` as a library job: after every earlier one, with `busy` set
 /// and an event at its start and its end. A failure becomes the state's
 /// `error` until the next job starts.
-fn spawn_job<F, Fut>(state: &AppState, busy: GolemLibraryBusy, work: F)
+fn spawn_job<F, Fut>(state: &AppState, busy: BuddyLibraryBusy, work: F)
 where
     F: FnOnce(AppState) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Result<(), CohostAvatarErrorDetail>> + Send + 'static,
 {
     let state = state.clone();
     state
-        .golem_library
+        .buddy_library
         .jobs_pending
         .fetch_add(1, Ordering::AcqRel);
     tokio::spawn(async move {
-        let shared = state.golem_library.clone();
+        let shared = state.buddy_library.clone();
         let _turn = shared.jobs.lock().await;
         {
             let mut cache = shared.cache();
@@ -820,8 +820,8 @@ where
     });
 }
 
-fn busy(kind: GolemLibraryBusyKind, avatar_id: Option<&str>) -> GolemLibraryBusy {
-    GolemLibraryBusy {
+fn busy(kind: BuddyLibraryBusyKind, avatar_id: Option<&str>) -> BuddyLibraryBusy {
+    BuddyLibraryBusy {
         kind,
         avatar_id: avatar_id.map(str::to_string),
     }
@@ -830,13 +830,13 @@ fn busy(kind: GolemLibraryBusyKind, avatar_id: Option<&str>) -> GolemLibraryBusy
 /// The account library is reachable: a session and, once the web said so,
 /// the library on.
 fn check_library(state: &AppState) -> Result<(), CohostLibraryRefusal> {
-    if state.golem_library.env().token.is_none() {
+    if state.buddy_library.env().token.is_none() {
         return Err(CohostLibraryRefusal::new(
             COHOST_LIBRARY_SIGNED_OUT,
             "Sign in to use your Golem library.",
         ));
     }
-    if state.golem_library.known_disabled() {
+    if state.buddy_library.known_disabled() {
         return Err(CohostLibraryRefusal::new(
             COHOST_LIBRARY_UNAVAILABLE,
             "The Golem library is not available right now.",
@@ -868,9 +868,9 @@ pub async fn sync(
 }
 
 /// Queue a sync: a focus sync at most once a minute, and never two waiting.
-pub(crate) fn request_sync(state: &AppState, reason: GolemLibrarySyncReason) {
-    let shared = state.golem_library.clone();
-    if reason == GolemLibrarySyncReason::Focus
+pub(crate) fn request_sync(state: &AppState, reason: BuddyLibrarySyncReason) {
+    let shared = state.buddy_library.clone();
+    if reason == BuddyLibrarySyncReason::Focus
         && shared
             .cache()
             .last_sync
@@ -883,10 +883,10 @@ pub(crate) fn request_sync(state: &AppState, reason: GolemLibrarySyncReason) {
     }
     spawn_job(
         state,
-        busy(GolemLibraryBusyKind::Sync, None),
+        busy(BuddyLibraryBusyKind::Sync, None),
         move |state| async move {
             state
-                .golem_library
+                .buddy_library
                 .sync_queued
                 .store(false, Ordering::Release);
             run_sync(&state).await
@@ -895,7 +895,7 @@ pub(crate) fn request_sync(state: &AppState, reason: GolemLibrarySyncReason) {
 }
 
 async fn run_sync(state: &AppState) -> Result<(), CohostAvatarErrorDetail> {
-    let shared = state.golem_library.clone();
+    let shared = state.buddy_library.clone();
     shared.cache().last_sync = Some(Instant::now());
     let env = shared.env();
     let web = env.web().filter(|_| shared.enabled());
@@ -908,10 +908,10 @@ async fn run_sync(state: &AppState) -> Result<(), CohostAvatarErrorDetail> {
         return Ok(());
     };
     let list = api
-        .get_golem_library(&token)
+        .get_buddy_library(&token)
         .await
         .map_err(|error| library_error(&error))?;
-    let avatars: Vec<GolemLibraryWebAvatar> =
+    let avatars: Vec<BuddyLibraryWebAvatar> =
         list.avatars.into_iter().filter(web_avatar_ok).collect();
     let poses = match env.root.clone() {
         Some(root) => {
@@ -957,9 +957,9 @@ async fn decide(
     env: &LibraryEnv,
     server_active: Option<String>,
     profile_updated_at: Option<String>,
-    avatars: &[GolemLibraryWebAvatar],
+    avatars: &[BuddyLibraryWebAvatar],
 ) -> Result<(), CohostAvatarErrorDetail> {
-    let shared = state.golem_library.clone();
+    let shared = state.buddy_library.clone();
     let listed = |id: &str| avatars.iter().any(|avatar| avatar.id == id);
     // A choice this build cannot show (an unknown slug, a missing avatar)
     // reads as none.
@@ -1018,7 +1018,7 @@ async fn decide(
 
 /// Wait for the session to end, then apply the choice it held back.
 fn ensure_live_watcher(state: &AppState) {
-    let shared = state.golem_library.clone();
+    let shared = state.buddy_library.clone();
     if shared.watcher_running.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -1038,7 +1038,7 @@ fn ensure_live_watcher(state: &AppState) {
             if let Some(pending) = pending {
                 spawn_job(
                     &state,
-                    busy(GolemLibraryBusyKind::Sync, None),
+                    busy(BuddyLibraryBusyKind::Sync, None),
                     move |state| async move { apply_pending(&state, pending).await },
                 );
             }
@@ -1057,17 +1057,17 @@ async fn apply_pending(
         return Ok(());
     }
     if persona.library_avatar_id.is_none() && !untouched_default(&persona) {
-        state.golem_library.cache().offer = Some(pending.avatar_id);
+        state.buddy_library.cache().offer = Some(pending.avatar_id);
         return Ok(());
     }
     if session_live(state).await {
-        state.golem_library.cache().pending_apply = Some(pending);
+        state.buddy_library.cache().pending_apply = Some(pending);
         ensure_live_watcher(state);
         return Ok(());
     }
-    let env = state.golem_library.env();
+    let env = state.buddy_library.env();
     apply_choice(state, &env, &pending.avatar_id).await?;
-    state.golem_library.cache().offer = None;
+    state.buddy_library.cache().offer = None;
     store_clock(state, pending.profile_updated_at);
     Ok(())
 }
@@ -1094,14 +1094,14 @@ pub async fn use_avatar(
     let job_id = id.clone();
     spawn_job(
         state,
-        busy(GolemLibraryBusyKind::Use, Some(&id)),
+        busy(BuddyLibraryBusyKind::Use, Some(&id)),
         move |state| async move { run_use(&state, &job_id).await },
     );
     Ok(accepted())
 }
 
 async fn run_use(state: &AppState, id: &str) -> Result<(), CohostAvatarErrorDetail> {
-    let shared = state.golem_library.clone();
+    let shared = state.buddy_library.clone();
     let env = shared.env();
     apply_choice(state, &env, id).await?;
     {
@@ -1116,7 +1116,7 @@ async fn run_use(state: &AppState, id: &str) -> Result<(), CohostAvatarErrorDeta
     Ok(())
 }
 
-/// `PUT /api/golem/profile` and its clock. The Golem has already changed
+/// `PUT /api/buddy/profile` and its clock. The Golem has already changed
 /// here; a failure only means the account did not hear of it.
 async fn select_on_account(
     state: &AppState,
@@ -1124,7 +1124,7 @@ async fn select_on_account(
     token: &str,
     id: &str,
 ) -> Result<(), CohostAvatarErrorDetail> {
-    match api.put_golem_profile(token, Some(id)).await {
+    match api.put_buddy_profile(token, Some(id)).await {
         Ok(profile) => {
             store_clock(state, profile.profile_updated_at);
             Ok(())
@@ -1163,9 +1163,9 @@ async fn web_avatar(
     api: &VideorcApiClient,
     token: &str,
     id: &str,
-) -> Result<GolemLibraryWebAvatar, CohostAvatarErrorDetail> {
+) -> Result<BuddyLibraryWebAvatar, CohostAvatarErrorDetail> {
     let listed = state
-        .golem_library
+        .buddy_library
         .cache()
         .web
         .as_ref()
@@ -1174,7 +1174,7 @@ async fn web_avatar(
         return Ok(avatar);
     }
     let avatar = api
-        .get_golem_avatar(token, id)
+        .get_buddy_avatar(token, id)
         .await
         .map_err(|error| library_error(&error))?
         .avatar;
@@ -1189,8 +1189,8 @@ async fn web_avatar(
 }
 
 /// Put `avatar` into the listed library (first when it is new).
-fn remember_avatar(state: &AppState, avatar: &GolemLibraryWebAvatar) {
-    let mut cache = state.golem_library.cache();
+fn remember_avatar(state: &AppState, avatar: &BuddyLibraryWebAvatar) {
+    let mut cache = state.buddy_library.cache();
     if let Some(avatars) = cache.web.as_mut() {
         match avatars.iter_mut().find(|listed| listed.id == avatar.id) {
             Some(listed) => *listed = avatar.clone(),
@@ -1207,7 +1207,7 @@ async fn fetch_poses(
     env: &LibraryEnv,
     api: &VideorcApiClient,
     token: &str,
-    avatar: &GolemLibraryWebAvatar,
+    avatar: &BuddyLibraryWebAvatar,
 ) -> Result<BTreeMap<CohostAvatarState, Vec<u8>>, CohostAvatarErrorDetail> {
     let root = env.root()?;
     let mut pictures = BTreeMap::new();
@@ -1269,7 +1269,7 @@ async fn pose_bytes(
         return Ok(bytes);
     }
     let downloaded = api
-        .get_golem_pose(token, url)
+        .get_buddy_pose(token, url)
         .await
         .map_err(|error| library_error(&error))?;
     let bytes = blocking(move || crate::cohost_avatar::checked_png(downloaded)).await?;
@@ -1295,7 +1295,7 @@ async fn cache_pose(
     };
     match written {
         Ok(()) => {
-            let mut cache = state.golem_library.cache();
+            let mut cache = state.buddy_library.cache();
             let poses = cache.poses.entry(avatar_id.to_string()).or_default();
             set_pose(
                 poses,
@@ -1313,10 +1313,10 @@ async fn cache_idles(
     root: &Path,
     api: &VideorcApiClient,
     token: &str,
-    avatars: &[GolemLibraryWebAvatar],
+    avatars: &[BuddyLibraryWebAvatar],
 ) {
     let missing: Vec<(String, String)> = {
-        let cache = state.golem_library.cache();
+        let cache = state.buddy_library.cache();
         avatars
             .iter()
             .filter(|avatar| {
@@ -1472,7 +1472,7 @@ async fn save_applied(
     .await;
     if outcome.is_ok() {
         // Plan 168 S-B1: the still pet on stream re-reads the persona's images.
-        state.golem_sprite.invalidate();
+        state.buddy_sprite.invalidate();
     }
     outcome
 }
@@ -1482,7 +1482,7 @@ async fn save_applied(
 async fn apply_account_avatar(
     state: &AppState,
     env: &LibraryEnv,
-    avatar: &GolemLibraryWebAvatar,
+    avatar: &BuddyLibraryWebAvatar,
     pictures: BTreeMap<CohostAvatarState, Vec<u8>>,
 ) -> Result<(), CohostAvatarErrorDetail> {
     let root = env.root()?;
@@ -1504,7 +1504,7 @@ async fn apply_account_avatar(
     let mut next = persona;
     next.images = look.images.clone();
     next.source = CohostPersonaSource::Generated;
-    next.avatar = GolemAvatar::Still;
+    next.avatar = BuddyAvatar::Still;
     if let Some(name) = library_name(&avatar.name) {
         next.name = name;
     }
@@ -1523,9 +1523,9 @@ async fn apply_account_avatar(
 async fn apply_official(
     state: &AppState,
     env: &LibraryEnv,
-    slug: GolemOfficialSlug,
+    slug: BuddyOfficialSlug,
 ) -> Result<(), CohostAvatarErrorDetail> {
-    let official = official_golem(slug);
+    let official = official_buddy(slug);
     let persona = current_persona(state).await;
     if !crate::cohost_avatar::persona_id_ok(&persona.id) {
         return Err(CohostAvatarErrorDetail::new(
@@ -1534,7 +1534,7 @@ async fn apply_official(
         ));
     }
     let look = match (slug, env.root.clone()) {
-        (GolemOfficialSlug::Golem, root) => {
+        (BuddyOfficialSlug::Golem, root) => {
             let stale = match root {
                 Some(root) => {
                     let folder = root.join(&persona.id);
@@ -1568,12 +1568,12 @@ async fn apply_official(
     };
     let mut next = persona;
     next.images = look.images.clone();
-    next.source = if slug == GolemOfficialSlug::Golem {
+    next.source = if slug == BuddyOfficialSlug::Golem {
         CohostPersonaSource::Default
     } else {
         CohostPersonaSource::Generated
     };
-    next.avatar = GolemAvatar::Still;
+    next.avatar = BuddyAvatar::Still;
     next.name = official.name.to_string();
     next.personality = official.personality.to_string();
     next.library_avatar_id = Some(slug.id());
@@ -1615,7 +1615,7 @@ pub async fn update(
     params: CohostLibraryUpdateParams,
 ) -> Result<CohostLibraryAccepted, CohostLibraryRefusal> {
     check_user_avatar(&params.avatar_id)?;
-    let patch = GolemLibraryWebPatch {
+    let patch = BuddyLibraryWebPatch {
         name: params.name,
         personality: params.personality,
         context: params.context,
@@ -1632,13 +1632,13 @@ pub async fn update(
     let job_id = id.clone();
     spawn_job(
         state,
-        busy(GolemLibraryBusyKind::Update, Some(&id)),
+        busy(BuddyLibraryBusyKind::Update, Some(&id)),
         move |state| async move { run_update(&state, &job_id, patch, true).await },
     );
     Ok(accepted())
 }
 
-fn check_patch_bounds(patch: &GolemLibraryWebPatch) -> Result<(), CohostLibraryRefusal> {
+fn check_patch_bounds(patch: &BuddyLibraryWebPatch) -> Result<(), CohostLibraryRefusal> {
     let units = |text: &str| text.chars().map(char::len_utf16).sum::<usize>();
     let refuse = |message: &str| Err(CohostLibraryRefusal::new(COHOST_LIBRARY_INVALID, message));
     if let Some(name) = &patch.name
@@ -1666,13 +1666,13 @@ fn check_patch_bounds(patch: &GolemLibraryWebPatch) -> Result<(), CohostLibraryR
 async fn run_update(
     state: &AppState,
     id: &str,
-    patch: GolemLibraryWebPatch,
+    patch: BuddyLibraryWebPatch,
     apply_here: bool,
 ) -> Result<(), CohostAvatarErrorDetail> {
-    let env = state.golem_library.env();
+    let env = state.buddy_library.env();
     let (api, token) = env.web().ok_or_else(signed_out_detail)?;
     let avatar = api
-        .patch_golem_avatar(&token, id, &patch)
+        .patch_buddy_avatar(&token, id, &patch)
         .await
         .map_err(|error| library_error(&error))?
         .avatar;
@@ -1727,7 +1727,7 @@ pub(crate) fn settings_saved(state: &AppState, previous: &CohostSettings, next: 
     if previous.persona.library_avatar_id != next.persona.library_avatar_id {
         return;
     }
-    let shared = state.golem_library.clone();
+    let shared = state.buddy_library.clone();
     {
         let mut cache = shared.cache();
         if !cache
@@ -1744,7 +1744,7 @@ pub(crate) fn settings_saved(state: &AppState, previous: &CohostSettings, next: 
             .cloned();
         let differs =
             |previous: &str, next: &str, held: Option<&str>| previous != next && held != Some(next);
-        let mut patch = GolemLibraryWebPatch::default();
+        let mut patch = BuddyLibraryWebPatch::default();
         if differs(
             &previous.persona.name,
             &next.persona.name,
@@ -1770,7 +1770,7 @@ pub(crate) fn settings_saved(state: &AppState, previous: &CohostSettings, next: 
             return;
         }
         let merged = match cache.pending_patch.take() {
-            Some((pending_id, pending)) if pending_id == id => GolemLibraryWebPatch {
+            Some((pending_id, pending)) if pending_id == id => BuddyLibraryWebPatch {
                 name: patch.name.or(pending.name),
                 personality: patch.personality.or(pending.personality),
                 context: patch.context.or(pending.context),
@@ -1792,7 +1792,7 @@ pub(crate) fn settings_saved(state: &AppState, previous: &CohostSettings, next: 
         let job_id = id.clone();
         spawn_job(
             &state,
-            busy(GolemLibraryBusyKind::Update, Some(&id)),
+            busy(BuddyLibraryBusyKind::Update, Some(&id)),
             move |state| async move { run_update(&state, &job_id, patch, false).await },
         );
     });
@@ -1812,19 +1812,19 @@ pub async fn delete(
     let job_id = id.clone();
     spawn_job(
         state,
-        busy(GolemLibraryBusyKind::Delete, Some(&id)),
+        busy(BuddyLibraryBusyKind::Delete, Some(&id)),
         move |state| async move { run_delete(&state, &job_id).await },
     );
     Ok(accepted())
 }
 
 async fn run_delete(state: &AppState, id: &str) -> Result<(), CohostAvatarErrorDetail> {
-    let env = state.golem_library.env();
+    let env = state.buddy_library.env();
     let (api, token) = env.web().ok_or_else(signed_out_detail)?;
-    let deleted = match api.delete_golem_avatar(&token, id).await {
+    let deleted = match api.delete_buddy_avatar(&token, id).await {
         Ok(deleted) => Some(deleted),
         // Already gone: clean up here all the same.
-        Err(error) if error.detail.code == "golem-not-found" => None,
+        Err(error) if error.detail.code == "buddy-not-found" => None,
         Err(error) => return Err(library_error(&error)),
     };
     forget_avatar(state, &env, id).await;
@@ -1840,7 +1840,7 @@ async fn run_delete(state: &AppState, id: &str) -> Result<(), CohostAvatarErrorD
 /// Drop an avatar from the cache, its pictures and anything waiting for it.
 async fn forget_avatar(state: &AppState, env: &LibraryEnv, id: &str) {
     {
-        let mut cache = state.golem_library.cache();
+        let mut cache = state.buddy_library.cache();
         if let Some(avatars) = cache.web.as_mut() {
             avatars.retain(|avatar| avatar.id != id);
         }
@@ -1888,10 +1888,10 @@ async fn forget_avatar(state: &AppState, env: &LibraryEnv, id: &str) {
 /// (launch, sign-in) syncs; turning off forgets the account's avatars.
 pub(crate) async fn set_capability(
     state: &AppState,
-    capability: Option<AiCapabilitiesGolemLibrary>,
+    capability: Option<AiCapabilitiesBuddyLibrary>,
 ) {
     let (was, now) = {
-        let mut cache = state.golem_library.cache();
+        let mut cache = state.buddy_library.cache();
         let was = cache
             .capability
             .as_ref()
@@ -1919,7 +1919,7 @@ pub(crate) async fn set_capability(
         emit_changed(state).await;
     }
     if now && !was {
-        request_sync(state, GolemLibrarySyncReason::Launch);
+        request_sync(state, BuddyLibrarySyncReason::Launch);
     }
 }
 
@@ -1927,14 +1927,14 @@ pub(crate) async fn set_capability(
 /// account library already. Its pictures are cached from the response.
 pub(crate) async fn note_created(
     state: &AppState,
-    avatar: &GolemLibraryWebAvatar,
+    avatar: &BuddyLibraryWebAvatar,
     pictures: &BTreeMap<CohostAvatarState, Vec<u8>>,
 ) {
     if !web_avatar_ok(avatar) {
         return;
     }
     {
-        let mut cache = state.golem_library.cache();
+        let mut cache = state.buddy_library.cache();
         match cache.web.as_mut() {
             Some(avatars) => {
                 avatars.retain(|listed| listed.id != avatar.id);
@@ -1950,7 +1950,7 @@ pub(crate) async fn note_created(
 /// A pose the library redo made: the avatar's new URL and its picture.
 pub(crate) async fn note_redone(
     state: &AppState,
-    avatar: &GolemLibraryWebAvatar,
+    avatar: &BuddyLibraryWebAvatar,
     pictures: &BTreeMap<CohostAvatarState, Vec<u8>>,
 ) {
     if !web_avatar_ok(avatar) {
@@ -1963,10 +1963,10 @@ pub(crate) async fn note_redone(
 
 async fn cache_response_poses(
     state: &AppState,
-    avatar: &GolemLibraryWebAvatar,
+    avatar: &BuddyLibraryWebAvatar,
     pictures: &BTreeMap<CohostAvatarState, Vec<u8>>,
 ) {
-    let Some(root) = state.golem_library.env().root else {
+    let Some(root) = state.buddy_library.env().root else {
         return;
     };
     for (avatar_state, bytes) in pictures {
@@ -1982,14 +1982,14 @@ pub(crate) fn select_after_keep(state: &AppState, id: &str) {
     let job_id = id.to_string();
     spawn_job(
         state,
-        busy(GolemLibraryBusyKind::Use, Some(id)),
+        busy(BuddyLibraryBusyKind::Use, Some(id)),
         move |state| async move {
             {
-                let mut cache = state.golem_library.cache();
+                let mut cache = state.buddy_library.cache();
                 cache.offer = None;
                 cache.pending_apply = None;
             }
-            let env = state.golem_library.env();
+            let env = state.buddy_library.env();
             match env.web() {
                 Some((api, token)) => select_on_account(&state, &api, &token, &job_id).await,
                 None => Ok(()),
@@ -2003,7 +2003,7 @@ pub(crate) fn delete_after_discard(state: &AppState, id: &str) {
     let job_id = id.to_string();
     spawn_job(
         state,
-        busy(GolemLibraryBusyKind::Delete, Some(id)),
+        busy(BuddyLibraryBusyKind::Delete, Some(id)),
         move |state| async move { run_delete(&state, &job_id).await },
     );
 }
@@ -2011,17 +2011,17 @@ pub(crate) fn delete_after_discard(state: &AppState, id: &str) {
 // --- The picture cache -------------------------------------------------------------------------------
 
 fn cache_dir(root: &Path, avatar_id: &str) -> PathBuf {
-    root.join(GOLEM_LIBRARY_CACHE_DIR).join(avatar_id)
+    root.join(BUDDY_LIBRARY_CACHE_DIR).join(avatar_id)
 }
 
 fn cache_file_name(avatar_state: CohostAvatarState, tag: &str) -> String {
     format!("{}-{tag}.png", avatar_state.as_str())
 }
 
-/// The managed URL of a cached picture (`parseGolemLibraryPoseUrl`).
+/// The managed URL of a cached picture (`parseBuddyLibraryPoseUrl`).
 fn pose_url(avatar_id: &str, avatar_state: CohostAvatarState, tag: &str) -> String {
     format!(
-        "videorc-asset://golem/{GOLEM_LIBRARY_CACHE_DIR}/{avatar_id}/{}",
+        "videorc-asset://buddy/{BUDDY_LIBRARY_CACHE_DIR}/{avatar_id}/{}",
         cache_file_name(avatar_state, tag)
     )
 }
@@ -2052,7 +2052,7 @@ pub(crate) fn pose_tag(url: &str) -> String {
     }
 }
 
-fn set_pose(poses: &mut GolemLibraryPoses, avatar_state: CohostAvatarState, url: Option<String>) {
+fn set_pose(poses: &mut BuddyLibraryPoses, avatar_state: CohostAvatarState, url: Option<String>) {
     match avatar_state {
         CohostAvatarState::Idle => poses.idle = url,
         CohostAvatarState::Talk => poses.talk = url,
@@ -2064,12 +2064,12 @@ fn set_pose(poses: &mut GolemLibraryPoses, avatar_state: CohostAvatarState, url:
 /// The pictures already cached for each listed avatar, by their pose tags.
 fn cached_poses_of(
     root: &Path,
-    avatars: &[GolemLibraryWebAvatar],
-) -> BTreeMap<String, GolemLibraryPoses> {
+    avatars: &[BuddyLibraryWebAvatar],
+) -> BTreeMap<String, BuddyLibraryPoses> {
     avatars
         .iter()
         .map(|avatar| {
-            let mut poses = GolemLibraryPoses::default();
+            let mut poses = BuddyLibraryPoses::default();
             for avatar_state in ALL_STATES {
                 if let Some(pose) = avatar.poses.get(avatar_state) {
                     let tag = pose_tag(&pose.url);
@@ -2116,7 +2116,7 @@ fn write_cached_pose(
 /// Remove the cache of every avatar no longer in the library (uuid folders
 /// only; nothing else under the root is touched).
 fn prune_cache(root: &Path, keep: &BTreeSet<String>) {
-    let Ok(entries) = std::fs::read_dir(root.join(GOLEM_LIBRARY_CACHE_DIR)) else {
+    let Ok(entries) = std::fs::read_dir(root.join(BUDDY_LIBRARY_CACHE_DIR)) else {
         return;
     };
     for entry in entries.flatten() {

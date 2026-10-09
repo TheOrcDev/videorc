@@ -98,13 +98,13 @@ pub struct OverlayItemLayout {
     pub show_in_recording: bool,
 }
 
-/// The three placeable overlay items. `golem` is carried from Phase B on so
+/// The three placeable overlay items. `buddy` is carried from Phase B on so
 /// the leg plan and the canvas already know it; Phase C adds its slot.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct OverlayLayout {
     pub highlight: OverlayItemLayout,
     pub captions: OverlayItemLayout,
-    pub golem: OverlayItemLayout,
+    pub buddy: OverlayItemLayout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,7 +269,7 @@ impl Default for OverlayLayout {
                 false,
                 false,
             ),
-            golem: snapped_item(OverlayItem::Golem, OverlaySnap::BottomRight, false, false),
+            buddy: snapped_item(OverlayItem::Golem, OverlaySnap::BottomRight, false, false),
         }
     }
 }
@@ -279,7 +279,7 @@ impl OverlayLayout {
         match item {
             OverlayItem::Highlight => &self.highlight,
             OverlayItem::Captions => &self.captions,
-            OverlayItem::Golem => &self.golem,
+            OverlayItem::Golem => &self.buddy,
         }
     }
 
@@ -500,13 +500,13 @@ pub struct OverlaySessionShape {
 
 /// Per-item plans for the session, with the D13 fallbacks already applied:
 /// an item whose switches disagree on a shared leg burns on that leg
-/// (`highlight`, `golem`). Captions keep their own path
+/// (`highlight`, `buddy`). Captions keep their own path
 /// (`captions::caption_overlay_leg_plan_with_vertical_leg`), so the plan here
 /// is what the compositor flags are built from for the other two items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OverlaySessionPlans {
     pub highlight: OverlayLegPlan,
-    pub golem: OverlayLegPlan,
+    pub buddy: OverlayLegPlan,
 }
 
 impl OverlaySessionPlans {
@@ -514,7 +514,7 @@ impl OverlaySessionPlans {
     pub fn plan(&self, item: OverlayItem) -> Option<OverlayLegPlan> {
         match item {
             OverlayItem::Highlight => Some(self.highlight),
-            OverlayItem::Golem => Some(self.golem),
+            OverlayItem::Golem => Some(self.buddy),
             OverlayItem::Captions => None,
         }
     }
@@ -541,7 +541,7 @@ pub fn overlay_session_plans(
 ) -> OverlaySessionPlans {
     OverlaySessionPlans {
         highlight: resolved_item_plan(shape, &layout.highlight),
-        golem: resolved_item_plan(shape, &layout.golem),
+        buddy: resolved_item_plan(shape, &layout.buddy),
     }
 }
 
@@ -638,7 +638,7 @@ pub const OVERLAY_LAYOUT_EVENT: &str = "overlays.layout";
 pub async fn set_overlay_layout(state: &AppState, layout: OverlayLayout) -> Result<OverlayLayout> {
     let saved = save_overlay_layout(&state.database, &layout)?;
     // Plan 168 S-B1: the pet's box and atlas size follow the Golem's rect.
-    state.golem_sprite.set_layout(saved.golem);
+    state.buddy_sprite.set_layout(saved.buddy);
     crate::recording::apply_overlay_layout_to_active_session(state, &saved).await;
     state.emit_event(OVERLAY_LAYOUT_EVENT, saved);
     Ok(saved)
@@ -749,16 +749,16 @@ mod tests {
         assert_close(layout.captions.vertical.x, 0.12);
         // Golem: bottom right, square in pixels.
         assert_close(
-            layout.golem.horizontal.w * 16.0,
-            layout.golem.horizontal.h * 9.0,
+            layout.buddy.horizontal.w * 16.0,
+            layout.buddy.horizontal.h * 9.0,
         );
         assert_close(
-            layout.golem.horizontal.x + layout.golem.horizontal.w,
+            layout.buddy.horizontal.x + layout.buddy.horizontal.w,
             1.0 - 43.2 / 1920.0,
         );
         assert_close(
-            layout.golem.vertical.w * 9.0,
-            layout.golem.vertical.h * 16.0,
+            layout.buddy.vertical.w * 9.0,
+            layout.buddy.vertical.h * 16.0,
         );
         layout.validate().expect("defaults validate");
         for item in OverlayItem::ALL {
@@ -802,7 +802,7 @@ mod tests {
     #[test]
     fn validation_rejects_rects_outside_the_canvas_or_too_small() {
         let mut layout = OverlayLayout::default();
-        layout.golem.horizontal = OverlayRect::new(0.9, 0.9, 0.2, 0.2);
+        layout.buddy.horizontal = OverlayRect::new(0.9, 0.9, 0.2, 0.2);
         assert!(
             layout
                 .validate()
@@ -810,7 +810,7 @@ mod tests {
                 .to_string()
                 .contains("inside the canvas")
         );
-        layout.golem.horizontal = OverlayRect::new(0.1, 0.1, 0.01, 0.2);
+        layout.buddy.horizontal = OverlayRect::new(0.1, 0.1, 0.01, 0.2);
         assert!(
             layout
                 .validate()
@@ -818,9 +818,9 @@ mod tests {
                 .to_string()
                 .contains("at least")
         );
-        layout.golem.horizontal = OverlayRect::new(-0.1, 0.1, 0.2, 0.2);
+        layout.buddy.horizontal = OverlayRect::new(-0.1, 0.1, 0.2, 0.2);
         assert!(layout.validate().is_err());
-        layout.golem.horizontal = OverlayRect::new(f64::NAN, 0.1, 0.2, 0.2);
+        layout.buddy.horizontal = OverlayRect::new(f64::NAN, 0.1, 0.2, 0.2);
         assert!(
             layout
                 .validate()
@@ -828,7 +828,7 @@ mod tests {
                 .to_string()
                 .contains("finite")
         );
-        layout.golem.horizontal = OverlayRect::new(0.0, 0.0, 1.0, 1.0);
+        layout.buddy.horizontal = OverlayRect::new(0.0, 0.0, 1.0, 1.0);
         layout.validate().expect("the full canvas is a valid rect");
     }
 
@@ -941,9 +941,9 @@ mod tests {
         let mut layout = OverlayLayout::default();
         layout.highlight.show_in_recording = false;
         // The Golem is opt-in: both switches ship off.
-        assert!(!layout.golem.show_on_stream && !layout.golem.show_in_recording);
-        layout.golem.show_on_stream = true;
-        layout.golem.show_in_recording = true;
+        assert!(!layout.buddy.show_on_stream && !layout.buddy.show_in_recording);
+        layout.buddy.show_on_stream = true;
+        layout.buddy.show_in_recording = true;
         let shared = shape(true, true, OverlayAuxLeg::None);
         let plans = overlay_session_plans(shared, &layout);
         assert_eq!(
@@ -955,7 +955,7 @@ mod tests {
             },
             "a highlight that wants the stream only burns the shared leg"
         );
-        assert_eq!(plans.golem.primary, true);
+        assert_eq!(plans.buddy.primary, true);
         assert!(overlay_layout_needs_split(shared, &layout));
         assert_eq!(plans.plan(OverlayItem::Captions), None);
 
@@ -979,7 +979,7 @@ mod tests {
         let mut layout = OverlayLayout::default();
         assert!(overlay_start_notices(shape(true, true, OverlayAuxLeg::None), &layout).is_empty());
         layout.highlight.show_in_recording = false;
-        layout.golem.show_in_recording = true;
+        layout.buddy.show_in_recording = true;
         layout.captions.show_on_stream = true;
         // A split leg honours everything.
         assert!(
@@ -1187,8 +1187,8 @@ mod tests {
         let database = Database::open_in_memory_for_tests();
         assert_eq!(load_overlay_layout(&database), OverlayLayout::default());
         let mut layout = OverlayLayout::default();
-        layout.golem.horizontal = OverlayRect::new(0.1, 0.2, 0.25, 0.3);
-        layout.golem.show_in_recording = false;
+        layout.buddy.horizontal = OverlayRect::new(0.1, 0.2, 0.25, 0.3);
+        layout.buddy.show_in_recording = false;
         save_overlay_layout(&database, &layout).unwrap();
         assert_eq!(load_overlay_layout(&database), layout);
         let mut invalid = layout;

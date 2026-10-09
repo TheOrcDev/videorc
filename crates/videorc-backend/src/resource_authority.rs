@@ -529,12 +529,12 @@ pub fn configured_managed_background_roots() -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// The Golem's avatar store (plan 164 S-A3): `userData/golem-assets`, handed
-/// over by main as `VIDEORC_MANAGED_GOLEM_ROOTS`. Uploads land there through
+/// The Golem's avatar store (plan 164 S-A3): `userData/buddy-assets`, handed
+/// over by main as `VIDEORC_MANAGED_BUDDY_ROOTS`. Uploads land there through
 /// main; generated images (S-A6) are written by the backend under the first
 /// root, so a process without one cannot generate.
-pub fn configured_managed_golem_roots() -> Vec<PathBuf> {
-    std::env::var_os("VIDEORC_MANAGED_GOLEM_ROOTS")
+pub fn configured_managed_buddy_roots() -> Vec<PathBuf> {
+    std::env::var_os("VIDEORC_MANAGED_BUDDY_ROOTS")
         .map(|value| std::env::split_paths(&value).collect())
         .unwrap_or_default()
 }

@@ -302,10 +302,10 @@ pub(crate) enum WindowsD3d11SceneSourceKind {
     CommentHighlight,
     /// The Golem's bubble (plan 168 D16; plan 164 Phase C's avatar raster
     /// before): between the pet and the card.
-    GolemOverlay,
+    BuddyOverlay,
     /// The Golem's pet (plan 168 D7): one atlas cell drawn as a turned quad,
     /// clipped (never squashed) at the canvas edge.
-    GolemSprite,
+    BuddySprite,
     SolidColor([u8; 4]),
     TestPattern,
     Unsupported(WindowsD3d11UnsupportedFeature),
@@ -328,8 +328,8 @@ impl WindowsD3d11SceneSourceKind {
             Self::Image => "image",
             Self::CaptionOverlay => "caption-overlay",
             Self::CommentHighlight => "comment-highlight",
-            Self::GolemOverlay => "golem-overlay",
-            Self::GolemSprite => "golem-sprite",
+            Self::BuddyOverlay => "buddy-overlay",
+            Self::BuddySprite => "buddy-sprite",
             Self::SolidColor(_) => "solid-color",
             Self::TestPattern => "test-pattern",
             Self::Unsupported(feature) => feature.as_str(),
@@ -348,7 +348,7 @@ pub(crate) struct WindowsD3d11ChromaKey {
 
 /// The Golem sprite's turn (plan 168 S-B4): `SceneVs` applies the 2x2
 /// `affine` (CSS order `[a, b, c, d]`, output pixels, y down) to the quad
-/// around `pivot` (normalized output coordinates). Only `GolemSprite`
+/// around `pivot` (normalized output coordinates). Only `BuddySprite`
 /// layers carry one; every other layer's vertices are untouched.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct WindowsD3d11SpriteTransform {
@@ -364,7 +364,7 @@ pub(crate) struct WindowsD3d11LayerEffects {
     pub(crate) vignette: f32,
     pub(crate) blur_radius_px: f32,
     pub(crate) chroma_key: Option<WindowsD3d11ChromaKey>,
-    /// `GolemSprite` layers only.
+    /// `BuddySprite` layers only.
     pub(crate) sprite: Option<WindowsD3d11SpriteTransform>,
 }
 
@@ -553,7 +553,7 @@ pub(crate) fn build_windows_d3d11_scene_plan(
     for (input_order, layer) in request.layers.into_iter().enumerate() {
         validate_layer(layer)?;
         let rect = normalized_rect_to_pixels(layer.transform, request.canvas_dimensions)?;
-        if layer.source_kind == WindowsD3d11SceneSourceKind::GolemSprite {
+        if layer.source_kind == WindowsD3d11SceneSourceKind::BuddySprite {
             planned_layers.push((input_order, plan_sprite_layer(layer, rect)));
             continue;
         }
@@ -788,7 +788,7 @@ fn validate_layer(layer: WindowsD3d11SceneLayerInput) -> Result<(), WindowsD3d11
         )));
     }
     if let Some(sprite) = effects.sprite
-        && (layer.source_kind != WindowsD3d11SceneSourceKind::GolemSprite
+        && (layer.source_kind != WindowsD3d11SceneSourceKind::BuddySprite
             || !sprite
                 .affine
                 .into_iter()
@@ -1548,7 +1548,7 @@ mod runtime {
             source_kind: WindowsD3d11SceneSourceKind,
             upload: WindowsD3d11BgraUpload<'_>,
         ) -> Result<ID3D11ShaderResourceView, WindowsD3d11CompositorError> {
-            if source_kind == WindowsD3d11SceneSourceKind::GolemSprite {
+            if source_kind == WindowsD3d11SceneSourceKind::BuddySprite {
                 // A re-scaled pet atlas never goes back to its old size: drop
                 // the leg's stale texture now instead of holding it until the
                 // bounded cache evicts it (plan 168 D5).
@@ -2880,7 +2880,7 @@ mod runtime {
     #[cfg(test)]
     mod sprite_shader_tests {
         #[test]
-        fn windows_d3d11_shaders_compile_with_the_golem_sprite_turn() {
+        fn windows_d3d11_shaders_compile_with_the_buddy_sprite_turn() {
             for (entry_point, target) in [
                 ("SceneVs", "vs_5_0"),
                 ("FullScreenVs", "vs_5_0"),

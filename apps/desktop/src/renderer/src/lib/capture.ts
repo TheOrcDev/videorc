@@ -489,7 +489,7 @@ export const STORAGE_KEYS = {
   // The Golem tab's own tab used last (plan 150), so Golem reopens where it was left.
   // The stored key keeps its old name (plan 170 D22): renaming it would
   // forget every saved Golem sub-tab.
-  golemTab: 'videorc.orcleTab'
+  buddyTab: 'videorc.orcleTab'
 } as const
 
 // Permissions onboarding: ANY stored value means "seen/dismissed" — the gate

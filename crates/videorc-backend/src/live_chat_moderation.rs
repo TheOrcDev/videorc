@@ -9,7 +9,7 @@
 //!   `live_chat_moderation_operations`, persisted before any provider call.
 //!   The `operationId` is an idempotency key: the same id returns the same row.
 //! - `Manual` requests (the row menu's "Remove from chat") are express consent
-//!   and run at once. `GolemVoice` requests start in `pending-confirm` and run
+//!   and run at once. `BuddyVoice` requests start in `pending-confirm` and run
 //!   only when confirmed, or when an opt-in 5 s countdown passes uncancelled.
 //!   YouTube targets always need an explicit confirmation (API policy §III.E),
 //!   so their countdown never runs.
@@ -128,7 +128,7 @@ pub enum ModerationSource {
     /// The wire value stays `orcle-voice` (plan 170 D22): saved reports, the
     /// strict RPC/IPC schemas and older apps carry it.
     #[serde(rename = "orcle-voice")]
-    GolemVoice,
+    BuddyVoice,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -423,7 +423,7 @@ pub(crate) fn initial_schedule(
             confirm_by: None,
             execute_at: None,
         },
-        ModerationSource::GolemVoice => {
+        ModerationSource::BuddyVoice => {
             // YouTube's express-consent rule: the countdown never runs there.
             let explicit =
                 confirm_mode == RemoveConfirmMode::Confirm || platform == StreamPlatform::Youtube;
@@ -499,7 +499,7 @@ fn now_iso() -> String {
 // --- Public API (contract part A) -----------------------------------------------------
 
 /// Start a removal. `Manual` runs at once and returns the terminal operation;
-/// `GolemVoice` returns the pending operation and the backend owns its timer.
+/// `BuddyVoice` returns the pending operation and the backend owns its timer.
 pub async fn request(
     state: &AppState,
     req: ModerationRequest,
@@ -545,8 +545,8 @@ pub async fn request(
         return Ok(existing);
     }
 
-    if req.source == ModerationSource::GolemVoice {
-        if !crate::service_flags::golem_remove_enabled(state) {
+    if req.source == ModerationSource::BuddyVoice {
+        if !crate::service_flags::buddy_remove_enabled(state) {
             return Err(ModerationRefusal::new("disabled", REMOVE_PAUSED_MESSAGE));
         }
         let premium = state
@@ -912,8 +912,8 @@ async fn run_execution(
     let label = stream_platform_label(operation.platform);
 
     // Voice-sourced removals re-check Premium and the kill switch at execution.
-    if operation.source == ModerationSource::GolemVoice {
-        if !crate::service_flags::golem_remove_enabled(state) {
+    if operation.source == ModerationSource::BuddyVoice {
+        if !crate::service_flags::buddy_remove_enabled(state) {
             operation.phase = ModerationPhase::Cancelled;
             operation.outcome = Some(format!("{REMOVE_PAUSED_MESSAGE} Nothing was removed."));
             return finish(state, operation).await;
@@ -1546,7 +1546,7 @@ mod tests {
         assert_eq!((manual.confirm_by, manual.execute_at), (None, None));
 
         let confirm = initial_schedule(
-            ModerationSource::GolemVoice,
+            ModerationSource::BuddyVoice,
             StreamPlatform::Twitch,
             RemoveConfirmMode::Confirm,
             now,
@@ -1560,7 +1560,7 @@ mod tests {
         assert_eq!(confirm.execute_at, None);
 
         let countdown = initial_schedule(
-            ModerationSource::GolemVoice,
+            ModerationSource::BuddyVoice,
             StreamPlatform::Twitch,
             RemoveConfirmMode::Countdown,
             now,
@@ -1572,7 +1572,7 @@ mod tests {
 
         // YouTube: the countdown never runs, even when asked for.
         let youtube = initial_schedule(
-            ModerationSource::GolemVoice,
+            ModerationSource::BuddyVoice,
             StreamPlatform::Youtube,
             RemoveConfirmMode::Countdown,
             now,
@@ -1626,7 +1626,7 @@ mod tests {
             provider_message_id: "p-1".to_string(),
             author_name: "coders_x".to_string(),
             excerpt: "hello".to_string(),
-            source: ModerationSource::GolemVoice,
+            source: ModerationSource::BuddyVoice,
             reason: Some("toxic".to_string()),
             phase: ModerationPhase::PendingConfirm,
             confirm_mode: RemoveConfirmMode::Confirm,
@@ -1718,7 +1718,7 @@ mod tests {
         }
         let params: ModerationRequestParams =
             serde_json::from_value(moderation.get("requestParams").unwrap().clone()).unwrap();
-        assert_eq!(params.source, ModerationSource::GolemVoice);
+        assert_eq!(params.source, ModerationSource::BuddyVoice);
         let params: ModerationOperationParams =
             serde_json::from_value(moderation.get("confirmParams").unwrap().clone()).unwrap();
         assert!(!params.operation_id.is_empty());
@@ -1838,7 +1838,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn golem_voice_waits_for_confirmation_and_confirm_runs_it() {
+    async fn buddy_voice_waits_for_confirmation_and_confirm_runs_it() {
         let (state, mut events) = test_state();
         let target = message(StreamPlatform::Twitch, 1);
         let (base, script) = twitch_server(&[204]).await;
@@ -1850,7 +1850,7 @@ mod tests {
         )
         .await;
 
-        let pending = request(&state, request_for(&target, ModerationSource::GolemVoice))
+        let pending = request(&state, request_for(&target, ModerationSource::BuddyVoice))
             .await
             .unwrap();
         assert_eq!(pending.phase, ModerationPhase::PendingConfirm);
@@ -1865,7 +1865,7 @@ mod tests {
         assert!(!buffered_message(&state, &target.id).await.is_deleted);
 
         // A second request for the same message waits behind the first.
-        let duplicate = request(&state, request_for(&target, ModerationSource::GolemVoice))
+        let duplicate = request(&state, request_for(&target, ModerationSource::BuddyVoice))
             .await
             .unwrap_err();
         assert_eq!(duplicate.code, "already-pending");
@@ -1921,7 +1921,7 @@ mod tests {
         );
         // The message is free for a new operation now (it is a tombstone, so
         // that one is refused on eligibility, not on pending state).
-        let after = request(&state, request_for(&target, ModerationSource::GolemVoice))
+        let after = request(&state, request_for(&target, ModerationSource::BuddyVoice))
             .await
             .unwrap_err();
         assert_eq!(after.code, "not-eligible");
@@ -1939,7 +1939,7 @@ mod tests {
             &[target.clone()],
         )
         .await;
-        let pending = request(&state, request_for(&target, ModerationSource::GolemVoice))
+        let pending = request(&state, request_for(&target, ModerationSource::BuddyVoice))
             .await
             .unwrap();
         let cancelled = cancel(&state, &pending.operation_id).await.unwrap();
@@ -1978,7 +1978,7 @@ mod tests {
             &[target.clone()],
         )
         .await;
-        let pending = request(&state, request_for(&target, ModerationSource::GolemVoice))
+        let pending = request(&state, request_for(&target, ModerationSource::BuddyVoice))
             .await
             .unwrap();
         tokio::time::sleep(CONFIRM_WINDOW + Duration::from_millis(150)).await;
@@ -2030,7 +2030,7 @@ mod tests {
             &state,
             ModerationRequest {
                 confirm_mode: RemoveConfirmMode::Countdown,
-                ..request_for(&target, ModerationSource::GolemVoice)
+                ..request_for(&target, ModerationSource::BuddyVoice)
             },
         )
         .await
@@ -2065,7 +2065,7 @@ mod tests {
             &state,
             ModerationRequest {
                 confirm_mode: RemoveConfirmMode::Countdown,
-                ..request_for(&target, ModerationSource::GolemVoice)
+                ..request_for(&target, ModerationSource::BuddyVoice)
             },
         )
         .await
@@ -2100,7 +2100,7 @@ mod tests {
             provider_message_id: "p".to_string(),
             author_name: "viewer".to_string(),
             excerpt: "hello".to_string(),
-            source: ModerationSource::GolemVoice,
+            source: ModerationSource::BuddyVoice,
             reason: None,
             phase: ModerationPhase::PendingConfirm,
             confirm_mode: RemoveConfirmMode::Confirm,
@@ -2371,7 +2371,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn golem_voice_needs_premium_while_manual_is_free() {
+    async fn buddy_voice_needs_premium_while_manual_is_free() {
         let (state, _events) = test_state();
         let premium = Arc::new(AtomicBool::new(false));
         let check = premium.clone();
@@ -2392,7 +2392,7 @@ mod tests {
 
         let refused = request(
             &state,
-            request_for(&targets[0], ModerationSource::GolemVoice),
+            request_for(&targets[0], ModerationSource::BuddyVoice),
         )
         .await
         .unwrap_err();
@@ -2417,7 +2417,7 @@ mod tests {
         premium.store(true, Ordering::SeqCst);
         let pending = request(
             &state,
-            request_for(&targets[1], ModerationSource::GolemVoice),
+            request_for(&targets[1], ModerationSource::BuddyVoice),
         )
         .await
         .unwrap();
@@ -2457,12 +2457,12 @@ mod tests {
         )
         .unwrap();
         crate::youtube_quota::apply_service_flags(&state, flags);
-        assert!(!crate::service_flags::golem_remove_enabled(&state));
-        assert!(crate::service_flags::golem_voice_commands_enabled(&state));
+        assert!(!crate::service_flags::buddy_remove_enabled(&state));
+        assert!(crate::service_flags::buddy_voice_commands_enabled(&state));
 
         let refused = request(
             &state,
-            request_for(&targets[0], ModerationSource::GolemVoice),
+            request_for(&targets[0], ModerationSource::BuddyVoice),
         )
         .await
         .unwrap_err();
@@ -2480,7 +2480,7 @@ mod tests {
         crate::youtube_quota::apply_service_flags(&state, enabled);
         let pending = request(
             &state,
-            request_for(&targets[1], ModerationSource::GolemVoice),
+            request_for(&targets[1], ModerationSource::BuddyVoice),
         )
         .await
         .unwrap();
@@ -2575,7 +2575,7 @@ mod tests {
             &[target.clone()],
         )
         .await;
-        let pending = request(&state, request_for(&target, ModerationSource::GolemVoice))
+        let pending = request(&state, request_for(&target, ModerationSource::BuddyVoice))
             .await
             .unwrap();
         note_session_ended(&state, SESSION.to_string());

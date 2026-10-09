@@ -152,7 +152,7 @@ export function buildRecordingStudioGateSteps({
         // reaction, gaze at the card, talk frames, Motion on and off, sleep).
         label: 'living Golem pet recording artifact smoke',
         command: 'pnpm',
-        args: ['smoke:golem-pet']
+        args: ['smoke:buddy-pet']
       },
       {
         label: 'detached Comments command relay probe',

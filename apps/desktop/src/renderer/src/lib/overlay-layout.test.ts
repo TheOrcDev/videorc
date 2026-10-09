@@ -151,12 +151,12 @@ describe('overlay leg plan (D12)', () => {
     const shared = { recordEnabled: true, streamEnabled: true, auxLeg: 'none' as const }
     expect(overlayLayoutNeedsSplit(shared, DEFAULT_OVERLAY_LAYOUT)).toBe(false)
     expect(
-      overlayLayoutNeedsSplit(shared, withSwitches(DEFAULT_OVERLAY_LAYOUT, 'golem', true, false))
+      overlayLayoutNeedsSplit(shared, withSwitches(DEFAULT_OVERLAY_LAYOUT, 'buddy', true, false))
     ).toBe(true)
     expect(
       overlayLayoutNeedsSplit(
         { ...shared, auxLeg: 'stream' },
-        withSwitches(DEFAULT_OVERLAY_LAYOUT, 'golem', true, false)
+        withSwitches(DEFAULT_OVERLAY_LAYOUT, 'buddy', true, false)
       )
     ).toBe(false)
   })
@@ -166,7 +166,7 @@ describe('overlay start notices (D13)', () => {
   const layout = withSwitches(
     withSwitches(
       withSwitches(DEFAULT_OVERLAY_LAYOUT, 'highlight', true, false),
-      'golem',
+      'buddy',
       false,
       true
     ),
@@ -203,7 +203,7 @@ describe('overlay start notices (D13)', () => {
           'Both the stream and the recording will include highlights: this computer shares one encode for them.'
       },
       {
-        item: 'golem',
+        item: 'buddy',
         notice:
           'Both the stream and the recording will include the Golem: this computer shares one encode for them.'
       }
@@ -225,7 +225,7 @@ describe('overlay start notices (D13)', () => {
 
   it('badges an item whose switches differ', () => {
     expect(overlayItemOutputBadge(layout.highlight)).toBe('stream only')
-    expect(overlayItemOutputBadge(layout.golem)).toBe('recording only')
-    expect(overlayItemOutputBadge(DEFAULT_OVERLAY_LAYOUT.golem)).toBeNull()
+    expect(overlayItemOutputBadge(layout.buddy)).toBe('recording only')
+    expect(overlayItemOutputBadge(DEFAULT_OVERLAY_LAYOUT.buddy)).toBeNull()
   })
 })

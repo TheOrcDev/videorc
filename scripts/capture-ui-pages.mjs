@@ -55,7 +55,7 @@ if (themeArg) {
 // selects Live itself.
 const pages = [
   { tab: 'studio' },
-  { tab: 'ai', name: 'golem', subTab: 'live', mustShow: '[data-slot="golem-live-status"]' },
+  { tab: 'ai', name: 'buddy', subTab: 'live', mustShow: '[data-slot="buddy-live-status"]' },
   { tab: 'sources' },
   { tab: 'layout' },
   { tab: 'streaming' },
@@ -70,7 +70,7 @@ for (const { tab, name = tab, subTab, mustShow } of pages) {
       // The Golem tab is a lazy chunk: its first open in the dev app can take
       // longer than open-tab's 8 s wait on a busy machine.
       await cmd('open-tab', { tab })
-      const trigger = `[data-videorc-golem-tab="${subTab}"]`
+      const trigger = `[data-videorc-buddy-tab="${subTab}"]`
       await cmd('eval-js', {
         code: `(await waitFor(${JSON.stringify(trigger)}, 30000)).dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 })); await waitFor(${JSON.stringify(mustShow)}, 30000); return true`
       })
@@ -101,22 +101,22 @@ for (const id of settingsTabs) {
 }
 // The Golem tab has Settings' strip too (plan 150): shoot each of its tabs.
 try {
-  await cmd('open-tab', { tab: 'ai', waitFor: '[data-videorc-golem-tab]' })
-  const golemTabs = await cmd('eval-js', {
-    code: `return [...document.querySelectorAll('[data-videorc-golem-tab]')].map((el) => el.getAttribute('data-videorc-golem-tab'))`
+  await cmd('open-tab', { tab: 'ai', waitFor: '[data-videorc-buddy-tab]' })
+  const buddyTabs = await cmd('eval-js', {
+    code: `return [...document.querySelectorAll('[data-videorc-buddy-tab]')].map((el) => el.getAttribute('data-videorc-buddy-tab'))`
   }).then(r => r.result ?? [], () => [])
-  if (golemTabs.length !== 5) failures.push(`golem tabs: expected 5, found ${golemTabs.length}`)
-  for (const id of golemTabs) {
+  if (buddyTabs.length !== 5) failures.push(`buddy tabs: expected 5, found ${buddyTabs.length}`)
+  for (const id of buddyTabs) {
     try {
       await cmd('eval-js', {
-        code: `document.querySelector('[data-videorc-golem-tab="${id}"]').dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 })); await sleep(600); return true`
+        code: `document.querySelector('[data-videorc-buddy-tab="${id}"]').dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 })); await sleep(600); return true`
       })
-      const shot = await cmd('capture-page', { name: `golem-${id}${suffix}` })
+      const shot = await cmd('capture-page', { name: `buddy-${id}${suffix}` })
       console.log(shot.file)
-    } catch (e) { console.log(`SKIP golem-${id}: ${e.message}`) }
+    } catch (e) { console.log(`SKIP buddy-${id}: ${e.message}`) }
   }
 } catch (e) {
-  failures.push(`golem tabs: ${e.message}`)
+  failures.push(`buddy tabs: ${e.message}`)
 }
 await stopProcess(launched.process)
 if (failures.length > 0) {

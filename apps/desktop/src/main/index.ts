@@ -1,18 +1,18 @@
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
 import {
-  importGolemPetFolder,
-  readGolemImage,
-  readGolemPetFile,
-  readGolemCreationFile,
-  removeGolemPersona,
-  type GolemPetRoots
-} from './golem-assets'
+  importBuddyPetFolder,
+  readBuddyImage,
+  readBuddyPetFile,
+  readBuddyCreationFile,
+  removeBuddyPersona,
+  type BuddyPetRoots
+} from './buddy-assets'
 import {
-  GOLEM_REACTION_NONE,
-  isGolemReactionId,
-  type GolemPetImportResult,
-  type GolemPetSummary
-} from '../shared/golem-pet'
+  BUDDY_REACTION_NONE,
+  isBuddyReactionId,
+  type BuddyPetImportResult,
+  type BuddyPetSummary
+} from '../shared/buddy-pet'
 import { globalShortcutEntries, isGlobalShortcutAction } from '../shared/global-shortcuts'
 import { normalizeAccelerator } from '../shared/accelerator'
 import { openableChatLink } from '../shared/chat-link'
@@ -273,14 +273,14 @@ import {
 } from './deferred-permission-restart'
 import { isPathInsideAnyRoot } from './managed-asset-paths'
 import {
-  GOLEM_LIBRARY_CACHE_DIR,
-  isGolemPersonaId,
-  parseGolemAssetPath,
-  parseGolemDraftPath,
-  parseGolemLibraryPosePath
-} from '../shared/golem-assets'
-import type { GolemDeepLinkNavigation } from '../shared/electron-ipc-contract'
-import { parseGolemDeepLink, runGolemDeepLink, type GolemDeepLink } from './golem-deep-link'
+  BUDDY_LIBRARY_CACHE_DIR,
+  isBuddyPersonaId,
+  parseBuddyAssetPath,
+  parseBuddyDraftPath,
+  parseBuddyLibraryPosePath
+} from '../shared/buddy-assets'
+import type { BuddyDeepLinkNavigation } from '../shared/electron-ipc-contract'
+import { parseBuddyDeepLink, runBuddyDeepLink, type BuddyDeepLink } from './buddy-deep-link'
 import {
   managedImageDecodeScript,
   normalizeManagedImageDecodeResult
@@ -488,7 +488,7 @@ import type {
   CaptionsUpdate,
   CaptionsWindowState,
   CohostActionCommand,
-  CohostGolemActionCommand,
+  CohostBuddyActionCommand,
   CohostSessionActionCommand,
   CohostAutoChatRelayPatch,
   CohostCommandRelayCommand,
@@ -3106,13 +3106,13 @@ function currentCommentsView(): CommentsViewSnapshot | null {
  * reach Studio: null when `value` is not one, an Error when it is one with a
  * bad shape, else the command to relay.
  */
-function golemActionCommand(
+function buddyActionCommand(
   requestId: string,
   value: unknown
-): CohostGolemActionCommand | Error | null {
+): CohostBuddyActionCommand | Error | null {
   if (!value || typeof value !== 'object' || !('kind' in value)) return null
   const { kind } = value as { kind: unknown }
-  if (kind === 'golem-say') {
+  if (kind === 'buddy-say') {
     const { text, state, sessionId } = value as {
       text?: unknown
       state?: unknown
@@ -3137,7 +3137,7 @@ function golemActionCommand(
     }
     return { requestId, kind, text: trimmed, state, sessionId }
   }
-  if (kind === 'golem-show-on-stream') {
+  if (kind === 'buddy-show-on-stream') {
     const { showOnStream } = value as { showOnStream?: unknown }
     if (typeof showOnStream !== 'boolean') {
       return new Error('Show on stream needs true or false.')
@@ -3146,9 +3146,9 @@ function golemActionCommand(
   }
   // Plan 168 S-D3: a reaction chip. Like the Say box it needs no live
   // session; the backend checks the id against the worn pack.
-  if (kind === 'golem-react') {
+  if (kind === 'buddy-react') {
     const { reaction } = value as { reaction?: unknown }
-    if (!isGolemReactionId(reaction) || reaction === GOLEM_REACTION_NONE) {
+    if (!isBuddyReactionId(reaction) || reaction === BUDDY_REACTION_NONE) {
       return new Error('Golem react needs a reaction id.')
     }
     return { requestId, kind, reaction }
@@ -8309,11 +8309,11 @@ function sendOAuthCallback(envelope: OAuthCallbackEnvelope): void {
 }
 
 // --- Golem deep link (plan 170 D18) ----------------------------------------
-// The shell opens the Golem tab (and the creator) on `golem:deep-link`; main
+// The shell opens the Golem tab (and the creator) on `buddy:deep-link`; main
 // focuses the window and drives the library over its admin channel.
-let pendingGolemNavigation: GolemDeepLinkNavigation | null = null
+let pendingBuddyNavigation: BuddyDeepLinkNavigation | null = null
 
-function sendGolemNavigation(navigation: GolemDeepLinkNavigation): void {
+function sendBuddyNavigation(navigation: BuddyDeepLinkNavigation): void {
   if (
     !mainWindow ||
     mainWindow.isDestroyed() ||
@@ -8322,26 +8322,26 @@ function sendGolemNavigation(navigation: GolemDeepLinkNavigation): void {
   ) {
     // Before the shell loaded: it is sent once it has (an open-creator ask
     // wins over a plain open).
-    if (navigation.openCreator || !pendingGolemNavigation) pendingGolemNavigation = navigation
+    if (navigation.openCreator || !pendingBuddyNavigation) pendingBuddyNavigation = navigation
     return
   }
   if (mainWindow.isMinimized()) mainWindow.restore()
   mainWindow.show()
   mainWindow.focus()
-  sendElectronEvent(mainWindow.webContents, 'golem:deep-link', navigation)
+  sendElectronEvent(mainWindow.webContents, 'buddy:deep-link', navigation)
 }
 
-function flushGolemNavigation(): void {
-  const navigation = pendingGolemNavigation
+function flushBuddyNavigation(): void {
+  const navigation = pendingBuddyNavigation
   if (!navigation) return
-  pendingGolemNavigation = null
+  pendingBuddyNavigation = null
   // The shell subscribes as it mounts, just after the page loaded.
-  setTimeout(() => sendGolemNavigation(navigation), 1_500)
+  setTimeout(() => sendBuddyNavigation(navigation), 1_500)
 }
 
-function handleGolemDeepLink(link: GolemDeepLink): void {
-  void runGolemDeepLink(link, {
-    showGolemTab: (openCreator) => sendGolemNavigation({ openCreator }),
+function handleBuddyDeepLink(link: BuddyDeepLink): void {
+  void runBuddyDeepLink(link, {
+    showBuddyTab: (openCreator) => sendBuddyNavigation({ openCreator }),
     request: (method, params) => requestBackendAdmin(method, params, 30_000),
     sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
     log: (message) => logBackend('info', message)
@@ -8354,7 +8354,7 @@ function flushOAuthCallbackUrls(): void {
   if (!mainWindow || mainWindow.webContents.isDestroyed()) {
     return
   }
-  flushGolemNavigation()
+  flushBuddyNavigation()
 
   try {
     for (const envelope of providerOAuthCallbackCoordinator().pending()) {
@@ -8373,10 +8373,10 @@ function flushOAuthCallbackUrls(): void {
 }
 
 function dispatchOAuthCallbackUrl(rawUrl: string): void {
-  // Plan 170 D18: `videorc://golem` (Open in Videorc, Make it Alive).
-  const golemLink = parseGolemDeepLink(rawUrl, OAUTH_CALLBACK_PROTOCOL)
-  if (golemLink) {
-    handleGolemDeepLink(golemLink)
+  // Plan 170 D18: `videorc://buddy` (Open in Videorc, Make it Alive).
+  const buddyLink = parseBuddyDeepLink(rawUrl, OAUTH_CALLBACK_PROTOCOL)
+  if (buddyLink) {
+    handleBuddyDeepLink(buddyLink)
     return
   }
   let parsed: URL
@@ -9031,7 +9031,7 @@ function startBackendWithRegistryLock(): void {
       // main, generated images through the backend (S-A6). The first root is
       // the write root; the second is the read-only bundled pet root (plan
       // 168 D3).
-      VIDEORC_MANAGED_GOLEM_ROOTS: managedGolemRoots().join(delimiter),
+      VIDEORC_MANAGED_BUDDY_ROOTS: managedBuddyRoots().join(delimiter),
       // Debug smoke/test RPCs are a second, explicit capability boundary in
       // addition to the admin backend credential. Release builds compile the
       // handlers out regardless of this value.
@@ -9396,7 +9396,7 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'overlays.layout.migrate_highlight_anchor',
   // Plan 168 S-A3: register a pet pack folder main just copied.
   'cohost.pet.import',
-  // Plan 170 D18: the videorc://golem deep link syncs, uses and polls.
+  // Plan 170 D18: the videorc://buddy deep link syncs, uses and polls.
   'cohost.library.get',
   'cohost.library.sync',
   'cohost.library.use',
@@ -11245,7 +11245,7 @@ async function runSmokePreviewMotionCommand(
             (element) => (element.textContent ?? '').trim() === text
           );
         const panes = Object.fromEntries(
-          ['chat', 'activity', 'golem'].map((pane) => [
+          ['chat', 'activity', 'buddy'].map((pane) => [
             pane,
             visible(document.querySelector('[data-pane="' + pane + '"]'))
           ])
@@ -13540,37 +13540,37 @@ function resolveManagedBackgroundFile(fileName: string): string | null {
 }
 
 // --- Golem avatar images (plan 164 S-A3) --------------------------------------
-// `userData/golem-assets/<personaId>/<state>.<ext>`, served under the `golem`
+// `userData/buddy-assets/<personaId>/<state>.<ext>`, served under the `buddy`
 // host by the relative path the persona stores. Exactly one folder and one
 // file; anything else is not found.
-function managedGolemRoot(): string {
-  return join(app.getPath('userData'), 'golem-assets')
+function managedBuddyRoot(): string {
+  return join(app.getPath('userData'), 'buddy-assets')
 }
 
 // Plan 168 D3: shipped pet packs (`bundled:<name>`) live in a read-only second
-// golem root, `golem-assets/bundled` in the packaged app (electron-builder.yml)
+// buddy root, `buddy-assets/bundled` in the packaged app (electron-builder.yml)
 // and the source tree in dev, the backgrounds precedent.
-function bundledGolemDirectory(): string {
+function bundledBuddyDirectory(): string {
   return app.isPackaged
-    ? join(process.resourcesPath, 'golem-assets', 'bundled')
-    : resolve(workspaceRoot(), 'apps/desktop/resources/golem')
+    ? join(process.resourcesPath, 'buddy-assets', 'bundled')
+    : resolve(workspaceRoot(), 'apps/desktop/resources/buddy')
 }
 
 /** Write root first (uploads, generation, imported packs), bundled root second. */
-function managedGolemRoots(): string[] {
-  return [managedGolemRoot(), bundledGolemDirectory()]
+function managedBuddyRoots(): string[] {
+  return [managedBuddyRoot(), bundledBuddyDirectory()]
 }
 
-function golemPetRoots(): GolemPetRoots {
-  return { write: managedGolemRoot(), bundled: bundledGolemDirectory() }
+function buddyPetRoots(): BuddyPetRoots {
+  return { write: managedBuddyRoot(), bundled: bundledBuddyDirectory() }
 }
 
 // Plan 168 S-A3: Import pack… picks a page-pet folder; main sizes and copies
 // its pack files into the persona's `pets/<uuid>/`, then the backend
 // validates and decodes it (`cohost.pet.import`). A refusal removes the copy
 // and reaches the Golem tab as the backend's reason.
-async function pickGolemPetFolder(personaId: unknown): Promise<GolemPetImportResult | null> {
-  if (!isGolemPersonaId(personaId)) throw new Error('Golem pack import needs a persona id.')
+async function pickBuddyPetFolder(personaId: unknown): Promise<BuddyPetImportResult | null> {
+  if (!isBuddyPersonaId(personaId)) throw new Error('Golem pack import needs a persona id.')
   const options: Electron.OpenDialogOptions = {
     title: 'Choose a page-pet pack folder',
     buttonLabel: 'Import',
@@ -13580,12 +13580,12 @@ async function pickGolemPetFolder(personaId: unknown): Promise<GolemPetImportRes
     ? await dialog.showOpenDialog(mainWindow, options)
     : await dialog.showOpenDialog(options)
   if (result.canceled || !result.filePaths[0]) return null
-  const imported = await importGolemPetFolder(
+  const imported = await importBuddyPetFolder(
     result.filePaths[0],
-    managedGolemRoot(),
+    managedBuddyRoot(),
     personaId,
     (folderToken) =>
-      requestBackendAdmin<GolemPetSummary>('cohost.pet.import', { folderToken }, 60_000)
+      requestBackendAdmin<BuddyPetSummary>('cohost.pet.import', { folderToken }, 60_000)
   )
   if (imported.skippedFiles.length > 0) {
     logBackend(
@@ -13596,22 +13596,22 @@ async function pickGolemPetFolder(personaId: unknown): Promise<GolemPetImportRes
   return imported
 }
 
-function resolveManagedGolemFile(relativePath: string): string | null {
-  const parsed = parseGolemAssetPath(relativePath)
+function resolveManagedBuddyFile(relativePath: string): string | null {
+  const parsed = parseBuddyAssetPath(relativePath)
   if (parsed) {
-    return resolveRegularFileInsideRoot(join(managedGolemRoot(), parsed.personaId), parsed.file)
+    return resolveRegularFileInsideRoot(join(managedBuddyRoot(), parsed.personaId), parsed.file)
   }
   // Plan 170 D12: a cached account library picture,
   // `library/<avatarId>/<state>-<tag>.png`, shown in My Golems. The file must
-  // resolve inside the golem root itself.
-  const libraryPose = parseGolemLibraryPosePath(relativePath)
+  // resolve inside the buddy root itself.
+  const libraryPose = parseBuddyLibraryPosePath(relativePath)
   if (libraryPose) {
     const resolved = resolveRegularFileInsideRoot(
-      join(managedGolemRoot(), GOLEM_LIBRARY_CACHE_DIR, libraryPose.avatarId),
+      join(managedBuddyRoot(), BUDDY_LIBRARY_CACHE_DIR, libraryPose.avatarId),
       libraryPose.file
     )
     try {
-      return resolved && isPathInsideAnyRoot(resolved, [realpathSync(managedGolemRoot())])
+      return resolved && isPathInsideAnyRoot(resolved, [realpathSync(managedBuddyRoot())])
         ? resolved
         : null
     } catch {
@@ -13620,15 +13620,15 @@ function resolveManagedGolemFile(relativePath: string): string | null {
   }
   // Plan 169 D8: a draft look's picture, `<personaId>/drafts/<requestId>/<state>.png`,
   // shown in the look panel's tiles and preview before it is kept. The file
-  // must still resolve inside the golem root itself.
-  const draft = parseGolemDraftPath(relativePath)
+  // must still resolve inside the buddy root itself.
+  const draft = parseBuddyDraftPath(relativePath)
   if (!draft) return null
   const resolved = resolveRegularFileInsideRoot(
-    join(managedGolemRoot(), draft.personaId, 'drafts', draft.requestId),
+    join(managedBuddyRoot(), draft.personaId, 'drafts', draft.requestId),
     `${draft.state}.png`
   )
   try {
-    return resolved && isPathInsideAnyRoot(resolved, [realpathSync(managedGolemRoot())])
+    return resolved && isPathInsideAnyRoot(resolved, [realpathSync(managedBuddyRoot())])
       ? resolved
       : null
   } catch {
@@ -13842,7 +13842,7 @@ function resolveManagedScreenFile(fileName: string): string | null {
   return resolveRegularFileInsideRoot(join(app.getPath('userData'), 'Screens'), fileName)
 }
 
-async function withGolemCorsHeader(pending: Promise<Response>): Promise<Response> {
+async function withBuddyCorsHeader(pending: Promise<Response>): Promise<Response> {
   const response = await pending
   const headers = new Headers(response.headers)
   headers.set('Access-Control-Allow-Origin', '*')
@@ -13880,17 +13880,17 @@ function registerManagedAssetProtocol(): void {
               ? resolveManagedAvatarFile(fileName)
               : url.host === 'screen'
                 ? resolveManagedScreenFile(fileName)
-                : url.host === 'golem'
-                  ? resolveManagedGolemFile(fileName)
+                : url.host === 'buddy'
+                  ? resolveManagedBuddyFile(fileName)
                   : null
       if (!resolved) {
         return new Response('Not found', { status: 404 })
       }
-      if (url.host === 'golem') {
+      if (url.host === 'buddy') {
         // Golem pictures (persona looks, drafts, the library cache) are read
         // back on a canvas by the living preview, so they allow CORS reads.
         // Only files inside the managed Golem roots reach this branch.
-        return withGolemCorsHeader(net.fetch(pathToFileURL(resolved).toString()))
+        return withBuddyCorsHeader(net.fetch(pathToFileURL(resolved).toString()))
       }
       return net.fetch(pathToFileURL(resolved).toString())
     } catch {
@@ -14409,27 +14409,27 @@ app.whenReady().then(async () => {
   secureIpcHandle('scheduled-streams:import-thumbnail', () => pickScheduledThumbnail())
   // The Golem's avatar images (plan 164 S-A3): Start over removes the
   // persona's folder. The look is generated by the backend (plan 169).
-  secureIpcHandle('golem-assets:remove', async (_event, personaId: unknown) => {
-    if (!isGolemPersonaId(personaId)) throw new Error('Golem removal needs a persona id.')
-    await removeGolemPersona(managedGolemRoot(), personaId)
+  secureIpcHandle('buddy-assets:remove', async (_event, personaId: unknown) => {
+    if (!isBuddyPersonaId(personaId)) throw new Error('Golem removal needs a persona id.')
+    await removeBuddyPersona(managedBuddyRoot(), personaId)
   })
   // The overlay raster decodes the persona's own files from bytes (S-C2).
-  secureIpcHandle('golem-assets:read-image', (_event, relativePath: unknown) =>
-    readGolemImage(managedGolemRoot(), relativePath)
+  secureIpcHandle('buddy-assets:read-image', (_event, relativePath: unknown) =>
+    readBuddyImage(managedBuddyRoot(), relativePath)
   )
-  secureIpcHandle('golem-pets:import-folder', (_event, personaId: unknown) =>
-    pickGolemPetFolder(personaId)
+  secureIpcHandle('buddy-pets:import-folder', (_event, personaId: unknown) =>
+    pickBuddyPetFolder(personaId)
   )
   // Plan 168: one pet pack file for the in-app preview (Phase D), from the
   // persona's packs or the bundled root; null for anything else.
-  secureIpcHandle('golem-pets:read', (_event, personaId: unknown, packId: unknown, file: unknown) =>
-    readGolemPetFile(golemPetRoots(), personaId, packId, file)
+  secureIpcHandle('buddy-pets:read', (_event, personaId: unknown, packId: unknown, file: unknown) =>
+    readBuddyPetFile(buddyPetRoots(), personaId, packId, file)
   )
   // Plan 168 S-F5: one file of the persona's creation for the creator wizard.
   secureIpcHandle(
-    'golem-pets:read-creation',
+    'buddy-pets:read-creation',
     (_event, personaId: unknown, buildId: unknown, file: unknown) =>
-      readGolemCreationFile(managedGolemRoot(), personaId, buildId, file)
+      readBuddyCreationFile(managedBuddyRoot(), personaId, buildId, file)
   )
   secureIpcHandle('backgrounds:bundled-assets', () => bundledBackgroundAssets())
   secureIpcHandle('backgrounds:asset-exists', (_event, assetId: unknown) =>
@@ -14708,9 +14708,9 @@ app.whenReady().then(async () => {
       // The Golem's own actions (plan 164 S-C4) are not chat commands: the
       // bubble goes to the overlay and the switch to the overlay layout, so
       // they need no live session. Main checks the shape before relaying.
-      const golem = golemActionCommand(requestId, value)
-      if (golem !== null) {
-        return golem instanceof Error ? Promise.reject(golem) : relay(golem)
+      const buddy = buddyActionCommand(requestId, value)
+      if (buddy !== null) {
+        return buddy instanceof Error ? Promise.reject(buddy) : relay(buddy)
       }
       if (
         !value ||

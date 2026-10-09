@@ -65,7 +65,7 @@ export const AUXILIARY_API_KEYS = {
     'sendCohostCommand',
     'sendCohostEnable',
     // The Golem pane's living preview reads its pet pack (plan 168 Phase D).
-    'readGolemPetFile'
+    'readBuddyPetFile'
   ],
   captions: [
     'getCaptionsWindowState',

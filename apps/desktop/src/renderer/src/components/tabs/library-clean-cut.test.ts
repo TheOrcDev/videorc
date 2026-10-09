@@ -21,7 +21,7 @@ vi.mock('@/hooks/use-studio', () => ({
 
 let root: Root
 let container: HTMLDivElement
-const onOpenGolemReport = vi.fn((_sessionId: string) => undefined)
+const onOpenBuddyReport = vi.fn((_sessionId: string) => undefined)
 const onOpenCleanCut = vi.fn((_sessionId: string) => undefined)
 
 function session(overrides: Partial<CleanCutSession>): CleanCutSession {
@@ -92,7 +92,7 @@ const SESSIONS: CleanCutSession[] = [
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
-  onOpenGolemReport.mockClear()
+  onOpenBuddyReport.mockClear()
   onOpenCleanCut.mockClear()
   mocked.recording = { state: 'idle' }
   mocked.core = {
@@ -139,7 +139,7 @@ async function render(focusSessionId: string | null = null): Promise<void> {
     openStudioPanel: vi.fn(),
     closeStudioPanel: vi.fn(),
     openSettings: vi.fn(),
-    openGolem: vi.fn()
+    openBuddy: vi.fn()
   }
   await act(async () =>
     root.render(
@@ -149,7 +149,7 @@ async function render(focusSessionId: string | null = null): Promise<void> {
         createElement(
           TooltipProvider,
           null,
-          createElement(LibraryTab, { onOpenGolemReport, onOpenCleanCut, focusSessionId })
+          createElement(LibraryTab, { onOpenBuddyReport, onOpenCleanCut, focusSessionId })
         )
       )
     )

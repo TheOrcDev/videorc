@@ -1,4 +1,4 @@
-import { MicrophoneIcon, GolemIcon } from '@/components/icons'
+import { MicrophoneIcon, BuddyIcon } from '@/components/icons'
 import { useState, type ReactElement } from 'react'
 
 import { Badge } from '@/components/ui/badge'
@@ -97,7 +97,7 @@ export function CohostStatus({
       <PopoverContent align="end" className="w-72">
         <PopoverHeader>
           <PopoverTitle className="flex items-center gap-2 text-sm">
-            <GolemIcon aria-hidden className="size-4 shrink-0" weight="duotone" />
+            <BuddyIcon aria-hidden className="size-4 shrink-0" weight="duotone" />
             Golem
           </PopoverTitle>
           <PopoverDescription>

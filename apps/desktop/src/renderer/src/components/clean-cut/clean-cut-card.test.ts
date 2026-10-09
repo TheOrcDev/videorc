@@ -13,7 +13,7 @@ import {
   type CleanCutCapabilities
 } from '@/lib/clean-cut-view'
 import { DEFAULT_BASIC_ENTITLEMENTS } from '@/lib/entitlements'
-import { CLOUD_AI_USES } from '@/lib/golem-tab-view'
+import { CLOUD_AI_USES } from '@/lib/buddy-tab-view'
 
 import { CleanCutCard, type CleanCutFocus } from './clean-cut-card'
 

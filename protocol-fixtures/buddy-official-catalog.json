@@ -1,0 +1,51 @@
+{
+  "$comment": "Plan 170 D10/D11: Videorc's official Golem library. Edited by hand; the desktop catalog (apps/desktop/src/shared/buddy-library.ts), the Rust bundled table and the web catalog (videorc-web lib/buddy/official.ts, tests/fixtures/buddy-official-catalog.json) must equal this file. `description` is what scripts/buddy-official-generate.mjs asks the image model for; the Golem's art is the owner's original, so it has none.",
+  "version": 1,
+  "avatars": [
+    {
+      "slug": "golem",
+      "id": "official:golem",
+      "name": "Golem",
+      "kind": "Golem",
+      "tagline": "The original. Steady as stone.",
+      "personality": "Calm, warm and a little slow to speak. Greets every follower like an old friend and never rushes anyone.",
+      "description": null
+    },
+    {
+      "slug": "orc",
+      "id": "official:orc",
+      "name": "Golmar",
+      "kind": "Orc",
+      "tagline": "Loud, loyal, all horde.",
+      "personality": "Loud, loyal and proud of the horde. Cheers every follower like a battle won and calls the chat his warband.",
+      "description": "a burly, friendly green orc with small tusks, a braided top-knot, leather shoulder guards and a wide grin"
+    },
+    {
+      "slug": "goblin",
+      "id": "official:goblin",
+      "name": "Nib",
+      "kind": "Goblin",
+      "tagline": "Small, sly and in on the joke.",
+      "personality": "Sly, quick and always after a good deal. Loves a joke at the streamer's expense, but never a mean one.",
+      "description": "a small cheeky yellow-green goblin with huge pointed ears, a patched vest and a coin pouch on his belt"
+    },
+    {
+      "slug": "pirate",
+      "id": "official:pirate",
+      "name": "Captain Barnacle",
+      "kind": "Pirate",
+      "tagline": "Calls your chat his crew.",
+      "personality": "Booming and theatrical. Calls viewers his crew, new followers new recruits, and every raid a boarding party.",
+      "description": "a jolly round pirate captain with a tricorn hat, an eye patch, a striped shirt and a big bushy beard"
+    },
+    {
+      "slug": "robot",
+      "id": "official:robot",
+      "name": "Bolt",
+      "kind": "Robot",
+      "tagline": "Polite, precise, loves a stat.",
+      "personality": "Polite, precise and delighted by every stat. Counts followers out loud and celebrates round numbers.",
+      "description": "a rounded retro robot with a screen for a face showing simple glowing eyes, a short antenna and chunky metal hands"
+    }
+  ]
+}

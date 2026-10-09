@@ -141,7 +141,7 @@ import {
   overlayOrientationForCanvas,
   overlaySnapRect
 } from '@/lib/overlay-layout'
-import { golemOverlayKey, golemOverlayTargetPlan } from '@/lib/golem-overlay-targets'
+import { buddyOverlayKey, buddyOverlayTargetPlan } from '@/lib/buddy-overlay-targets'
 import {
   autoApplyPreset,
   isShippedDefaultOutput,
@@ -239,7 +239,7 @@ import type {
   CohostSettingsPatch,
   CohostState,
   CohostWindowState,
-  GolemOverlaySnapshot,
+  BuddyOverlaySnapshot,
   CommentHighlightAnchor,
   CommentHighlightCanvases,
   CommentHighlightCommand,
@@ -420,7 +420,7 @@ import {
   cohostHighlightMessageId,
   cohostStoppedToast,
   mergeAutoChatRelayPatch,
-  golemLiveSettingsPatch
+  buddyLiveSettingsPatch
 } from '@/lib/cohost-state'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import { upsertNoiseCleanupJob } from '@/lib/noise-cleanup-jobs'
@@ -550,8 +550,8 @@ function loadCaptionOverlay() {
 }
 
 // The Golem's bubble rasterizer: lazy, never in the eager shell.
-function loadGolemOverlay() {
-  return import('@/lib/golem-overlay')
+function loadBuddyOverlay() {
+  return import('@/lib/buddy-overlay')
 }
 
 // Steady-state telemetry (surface counters, diagnostics stats) commits to
@@ -563,7 +563,7 @@ function loadGolemOverlay() {
 const TELEMETRY_UI_COMMIT_INTERVAL_MS = 1000
 const SIGNED_IN_ENTITLEMENT_REFRESH_INTERVAL_MS = 5 * 60_000
 /** Window focus syncs the Golem library at most this often (plan 170 D12). */
-const GOLEM_LIBRARY_FOCUS_SYNC_MS = 60_000
+const BUDDY_LIBRARY_FOCUS_SYNC_MS = 60_000
 // Main and the renderer hear the idle status on separate sockets. A short settle
 // keeps the post-capture replay from racing Main into a second deferral.
 const ACCOUNT_REFRESH_IDLE_REPLAY_DELAY_MS = 1_000
@@ -1159,23 +1159,23 @@ export type StudioContextValue = {
   overlayLayout: OverlayLayout
   setOverlayLayout: (layout: OverlayLayout) => Promise<void>
   /** The Golem on stream (plan 164 Phase C): which state shows and the bubble
-   * that is up (`cohost.golem.state`); null until the backend reported. */
-  golemOverlay: GolemOverlaySnapshot | null
+   * that is up (`cohost.buddy.state`); null until the backend reported. */
+  buddyOverlay: BuddyOverlaySnapshot | null
   cohostGate: EntitlementUiGate
   cohostActionPending: boolean
   patchCohostSettings: (patch: CohostSettingsPatch) => Promise<void>
   /**
    * Golem Live's one switch (plan 119). On without cloud-AI consent only
-   * raises `golemConsentRequested` (the Golem tab's consent dialog) and writes
+   * raises `buddyConsentRequested` (the Golem tab's consent dialog) and writes
    * nothing; on with consent writes `{enabled: true, listen: true}` in one
    * `cohost.settings.set`; off writes `{enabled: false}`.
    */
-  setGolemLive: (on: boolean) => Promise<void>
+  setBuddyLive: (on: boolean) => Promise<void>
   /** The consent dialog Golem Live asked for is waiting for an answer. */
-  golemConsentRequested: boolean
+  buddyConsentRequested: boolean
   /** Accept: grant cloud-AI consent, then the one Golem Live patch. Decline:
    * close the dialog and change nothing. */
-  answerGolemConsent: (accepted: boolean) => Promise<void>
+  answerBuddyConsent: (accepted: boolean) => Promise<void>
   markCohostQuestionAnswered: (questionId: string, sessionId?: string) => void
   dismissCohostQuestion: (questionId: string, sessionId?: string) => void
   /** Put a voice-resolved question back (`cohost.question.restore`, plan 060 D9). */
@@ -4153,7 +4153,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // talks to the web.
   const [cohostState, setCohostState] = useState<CohostState | null>(null)
   const [cohostSettings, setCohostSettings] = useState<CohostSettings | null>(null)
-  const [golemOverlay, setGolemOverlay] = useState<GolemOverlaySnapshot | null>(null)
+  const [buddyOverlay, setBuddyOverlay] = useState<BuddyOverlaySnapshot | null>(null)
   const cohostSettingsRef = useRef(cohostSettings)
   cohostSettingsRef.current = cohostSettings
   const [cohostActionPending, setCohostActionPending] = useState(false)
@@ -4200,12 +4200,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       client.request<CohostSettings>('cohost.settings.get').catch(() => null),
       client.request<CohostState>('cohost.status').catch(() => null),
       // An older backend has no Golem overlay (plan 164); the avatar stays off.
-      client.requestTyped('cohost.golem.status').catch(() => null)
-    ]).then(([nextSettings, nextState, nextGolem]) => {
+      client.requestTyped('cohost.buddy.status').catch(() => null)
+    ]).then(([nextSettings, nextState, nextBuddy]) => {
       if (cancelled) return
       if (nextSettings) setCohostSettings(nextSettings)
       if (nextState) commitCohostState(nextState)
-      if (nextGolem) setGolemOverlay(nextGolem)
+      if (nextBuddy) setBuddyOverlay(nextBuddy)
     })
     return () => {
       cancelled = true
@@ -4258,16 +4258,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // The Golem on stream (plan 164 S-C2, plan 168 S-B1). The backend owns the
   // state and the bubble and draws the pet itself from its atlas; this
   // renderer rasterizes the bubble only, once per output canvas, and pushes
-  // each PNG into the `golem_overlay` slot (the backend anchors it above the
+  // each PNG into the `buddy_overlay` slot (the backend anchors it above the
   // pet's head), or clears the slot when the bubble ends. A push happens on
   // every change of bubble, style, placement or canvas, whether or not a
   // session runs: the slot is app-global. Latest wins: a stale raster never
   // lands after a newer state.
-  const golemPersona = cohostSettings?.persona ?? null
-  const golemTargetsKey = useMemo(
+  const buddyPersona = cohostSettings?.persona ?? null
+  const buddyTargetsKey = useMemo(
     () =>
       JSON.stringify(
-        golemOverlayTargetPlan({
+        buddyOverlayTargetPlan({
           streamEnabled: captureConfig.streamEnabled,
           recordingVideo: captureConfig.video,
           streamVideo: auxiliaryStreamOutputVideoSettings(
@@ -4275,51 +4275,51 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             captureConfig.streamEnabled ? captureConfig.streaming : undefined
           ),
           verticalLeg: simulcastLegLiveRequest(captureConfig)?.video,
-          layout: overlayLayout.golem
+          layout: overlayLayout.buddy
         })
       ),
-    [captureConfig, overlayLayout.golem]
+    [captureConfig, overlayLayout.buddy]
   )
-  const golemPushEpochRef = useRef(0)
-  const golemPushedKeyRef = useRef<string | null>(null)
+  const buddyPushEpochRef = useRef(0)
+  const buddyPushedKeyRef = useRef<string | null>(null)
   useEffect(() => {
-    if (wsStatus !== 'connected') golemPushedKeyRef.current = null
+    if (wsStatus !== 'connected') buddyPushedKeyRef.current = null
   }, [wsStatus])
   useEffect(() => {
-    if (!client || wsStatus !== 'connected' || !golemPersona) return
-    const targets = JSON.parse(golemTargetsKey) as ReturnType<typeof golemOverlayTargetPlan>
+    if (!client || wsStatus !== 'connected' || !buddyPersona) return
+    const targets = JSON.parse(buddyTargetsKey) as ReturnType<typeof buddyOverlayTargetPlan>
     if (targets.length === 0) return
-    const bubble = golemOverlay?.bubble?.text ?? null
-    const style = golemPersona.bubbleStyle
-    const key = golemOverlayKey({ bubble, style, targets })
-    if (key === golemPushedKeyRef.current) return
-    const epoch = ++golemPushEpochRef.current
+    const bubble = buddyOverlay?.bubble?.text ?? null
+    const style = buddyPersona.bubbleStyle
+    const key = buddyOverlayKey({ bubble, style, targets })
+    if (key === buddyPushedKeyRef.current) return
+    const epoch = ++buddyPushEpochRef.current
     void (async () => {
       if (bubble === null) {
-        await client.requestTyped('golem.overlay.clear', {})
+        await client.requestTyped('buddy.overlay.clear', {})
       } else {
-        const golem = await loadGolemOverlay()
+        const buddy = await loadBuddyOverlay()
         for (const target of targets) {
-          if (epoch !== golemPushEpochRef.current) return
-          const pngBase64 = await golem.renderGolemBubblePng({
+          if (epoch !== buddyPushEpochRef.current) return
+          const pngBase64 = await buddy.renderBuddyBubblePng({
             bubble,
             style,
             canvas: { width: target.canvasWidth, height: target.canvasHeight },
             rect: target.rect
           })
-          if (!pngBase64 || epoch !== golemPushEpochRef.current) return
-          await client.requestTyped('golem.overlay.set', {
+          if (!pngBase64 || epoch !== buddyPushEpochRef.current) return
+          await client.requestTyped('buddy.overlay.set', {
             target: target.target,
             pngBase64,
             rect: target.rect
           })
         }
       }
-      if (epoch === golemPushEpochRef.current) golemPushedKeyRef.current = key
+      if (epoch === buddyPushEpochRef.current) buddyPushedKeyRef.current = key
     })().catch((error: unknown) => {
       console.warn(`Golem overlay: ${error instanceof Error ? error.message : String(error)}`)
     })
-  }, [client, wsStatus, golemPersona, golemOverlay, golemTargetsKey])
+  }, [client, wsStatus, buddyPersona, buddyOverlay, buddyTargetsKey])
 
   // Start with the live-chat session, and re-assert on a consent flip.
   // The backend applies changed consent in place and returns its confirmed
@@ -4366,23 +4366,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Golem Live's one switch (plan 119 S2). Consent comes first: on without it
   // only asks (the Golem tab's consent dialog), and nothing is written until
   // the streamer accepts. On is one save: chat and listening together.
-  const [golemConsentRequested, setGolemConsentRequested] = useState(false)
-  const setGolemLive = useCallback(
+  const [buddyConsentRequested, setBuddyConsentRequested] = useState(false)
+  const setBuddyLive = useCallback(
     async (on: boolean): Promise<void> => {
       if (on && !aiConsent) {
-        setGolemConsentRequested(true)
+        setBuddyConsentRequested(true)
         return
       }
-      await patchCohostSettings(golemLiveSettingsPatch(on))
+      await patchCohostSettings(buddyLiveSettingsPatch(on))
     },
     [aiConsent, patchCohostSettings]
   )
-  const answerGolemConsent = useCallback(
+  const answerBuddyConsent = useCallback(
     async (accepted: boolean): Promise<void> => {
-      setGolemConsentRequested(false)
+      setBuddyConsentRequested(false)
       if (!accepted) return
       setAiConsent(true)
-      await patchCohostSettings(golemLiveSettingsPatch(true))
+      await patchCohostSettings(buddyLiveSettingsPatch(true))
     },
     [patchCohostSettings, setAiConsent]
   )
@@ -4608,7 +4608,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // re-derives Premium or consent, it renders what the main renderer resolved.
   // Presence is unconditional: before the engine reports (or when it is off)
   // the relay carries the off shape, never null.
-  const golemShowOnStream = overlayLayout.golem.showOnStream
+  const buddyShowOnStream = overlayLayout.buddy.showOnStream
   const cohostAutoChat = cohostSettings?.autoChat
   const cohostWindowState = useMemo<CohostWindowState>(
     () => ({
@@ -4620,22 +4620,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       enabled: cohostEnabled,
       listen: cohostListen,
       // The Golem on stream (plan 164 S-C4): the pane's header operates it.
-      ...(golemPersona
+      ...(buddyPersona
         ? {
-            golem: {
+            buddy: {
               persona: {
-                id: golemPersona.id,
-                name: golemPersona.name,
-                images: golemPersona.images,
-                bubbleStyle: golemPersona.bubbleStyle,
-                source: golemPersona.source,
+                id: buddyPersona.id,
+                name: buddyPersona.name,
+                images: buddyPersona.images,
+                bubbleStyle: buddyPersona.bubbleStyle,
+                source: buddyPersona.source,
                 // Plan 168 S-D3: the header's living preview wears the same pack.
-                avatar: golemPersona.avatar,
-                motion: golemPersona.motion
+                avatar: buddyPersona.avatar,
+                motion: buddyPersona.motion
               },
-              state: golemOverlay?.state ?? 'idle',
-              bubble: golemOverlay?.bubble?.text ?? null,
-              showOnStream: golemShowOnStream
+              state: buddyOverlay?.state ?? 'idle',
+              bubble: buddyOverlay?.bubble?.text ?? null,
+              showOnStream: buddyShowOnStream
             }
           }
         : {}),
@@ -4648,9 +4648,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cohostGate,
       cohostListen,
       cohostState,
-      golemOverlay,
-      golemPersona,
-      golemShowOnStream
+      buddyOverlay,
+      buddyPersona,
+      buddyShowOnStream
     ]
   )
 
@@ -4678,7 +4678,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           ? mergeAutoChatRelayPatch(cohostSettingsRef.current?.autoChat ?? null, command.autoChat)
           : null
         const next = await client.request<CohostSettings>('cohost.settings.set', {
-          ...golemLiveSettingsPatch(command.enabled),
+          ...buddyLiveSettingsPatch(command.enabled),
           ...(autoChat ? { autoChat } : {})
         })
         setCohostSettings(next)
@@ -4716,7 +4716,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // switch. The Say box is one utterance (D7): it posts per the chat
         // mode when the window named its live session, and bubbles at once
         // when the Golem is on some output. The backend owns the bubble.
-        if (command.kind === 'golem-say') {
+        if (command.kind === 'buddy-say') {
           return runCohostAction('cohost.utterance.say', {
             ...(command.sessionId ? { sessionId: command.sessionId } : {}),
             text: command.text,
@@ -4724,16 +4724,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           })
         }
         // Plan 168 S-D3: a reaction chip; the backend plays it on air.
-        if (command.kind === 'golem-react') {
+        if (command.kind === 'buddy-react') {
           await client.requestTyped('cohost.pet.react', { reaction: command.reaction })
           return cohostStateRef.current ?? offCohostState()
         }
-        if (command.kind === 'golem-show-on-stream') {
+        if (command.kind === 'buddy-show-on-stream') {
           const current = overlayLayoutRef.current
-          if (current.golem.showOnStream !== command.showOnStream) {
+          if (current.buddy.showOnStream !== command.showOnStream) {
             await setOverlayLayout({
               ...current,
-              golem: { ...current.golem, showOnStream: command.showOnStream }
+              buddy: { ...current.buddy, showOnStream: command.showOnStream }
             })
           }
           return cohostStateRef.current ?? offCohostState()
@@ -7250,8 +7250,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('cohost.state', (payload) => {
         commitCohostState(payload as CohostState)
       }),
-      nextClient.on('cohost.golem.state', (payload) => {
-        setGolemOverlay(payload as GolemOverlaySnapshot)
+      nextClient.on('cohost.buddy.state', (payload) => {
+        setBuddyOverlay(payload as BuddyOverlaySnapshot)
       }),
       // Plan 170 D12: a library job (use, sync, keep, delete) can change the
       // Golem in the backend; the persona and notes are read again when it ends.
@@ -8205,19 +8205,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // focused, at most once a minute (the Golem tab also syncs as it opens; the
   // backend syncs at launch and never applies a choice while live). A sync the
   // backend refuses changes nothing; the Golem tab shows the library's state.
-  const golemLibrarySyncAtRef = useRef(0)
-  const golemLibrarySignedIn = account?.status === 'signed-in'
+  const buddyLibrarySyncAtRef = useRef(0)
+  const buddyLibrarySignedIn = account?.status === 'signed-in'
   useEffect(() => {
-    if (!client || wsStatus !== 'connected' || !golemLibrarySignedIn) return
+    if (!client || wsStatus !== 'connected' || !buddyLibrarySignedIn) return
     const syncOnFocus = (): void => {
       const now = Date.now()
-      if (now - golemLibrarySyncAtRef.current < GOLEM_LIBRARY_FOCUS_SYNC_MS) return
-      golemLibrarySyncAtRef.current = now
+      if (now - buddyLibrarySyncAtRef.current < BUDDY_LIBRARY_FOCUS_SYNC_MS) return
+      buddyLibrarySyncAtRef.current = now
       void client.requestTyped('cohost.library.sync', { reason: 'focus' }).catch(() => undefined)
     }
     window.addEventListener('focus', syncOnFocus)
     return () => window.removeEventListener('focus', syncOnFocus)
-  }, [client, golemLibrarySignedIn, wsStatus])
+  }, [client, buddyLibrarySignedIn, wsStatus])
 
   // Main defers account maintenance while capture is active. When the session
   // goes idle, replay exactly one deferred refresh so a purchase or avatar
@@ -15505,13 +15505,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cohostSettings,
       overlayLayout,
       setOverlayLayout,
-      golemOverlay,
+      buddyOverlay,
       cohostGate,
       cohostActionPending,
       patchCohostSettings,
-      setGolemLive,
-      golemConsentRequested,
-      answerGolemConsent,
+      setBuddyLive,
+      buddyConsentRequested,
+      answerBuddyConsent,
       markCohostQuestionAnswered,
       dismissCohostQuestion,
       restoreCohostQuestion,
@@ -15739,13 +15739,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cohostSettings,
       overlayLayout,
       setOverlayLayout,
-      golemOverlay,
+      buddyOverlay,
       cohostGate,
       cohostActionPending,
       patchCohostSettings,
-      setGolemLive,
-      golemConsentRequested,
-      answerGolemConsent,
+      setBuddyLive,
+      buddyConsentRequested,
+      answerBuddyConsent,
       markCohostQuestionAnswered,
       dismissCohostQuestion,
       restoreCohostQuestion,

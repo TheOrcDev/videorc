@@ -10,7 +10,7 @@ import {
   DialogTitle
 } from '@/components/ui/dialog'
 import type { CleanCutMode } from '@/lib/backend'
-import { CLOUD_AI_KEEPS, CLOUD_AI_USES } from '@/lib/golem-tab-view'
+import { CLOUD_AI_KEEPS, CLOUD_AI_USES } from '@/lib/buddy-tab-view'
 
 /** What asked for consent: the "every recording" switch, or one cut. */
 export type CleanCutConsentAsk =

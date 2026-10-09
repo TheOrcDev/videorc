@@ -4,7 +4,7 @@ import {
   ChatIcon,
   DisplayIcon,
   ExternalLinkIcon,
-  GolemIcon,
+  BuddyIcon,
   PreviewIcon
 } from '@/components/icons'
 import {
@@ -115,7 +115,7 @@ export interface StageOverlays {
 const OVERLAY_ICONS: Record<OverlayItem, ElementType> = {
   highlight: ChatIcon,
   captions: CaptionsIcon,
-  golem: GolemIcon
+  buddy: BuddyIcon
 }
 type StageGhost = GhostResult & { sourceId: string }
 

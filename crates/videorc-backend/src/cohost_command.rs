@@ -9,7 +9,7 @@
 //! command or nothing. Resolving names and acting is S3's
 //! (`cohost::dispatch_detected_command`).
 //!
-//! Grammar (plan 140 decisions 2 and 3; plan 164 D2). The wake word "golem",
+//! Grammar (plan 140 decisions 2 and 3; plan 164 D2). The wake word "buddy",
 //! or a word of the persona's own name (`wake_words`), starts a command;
 //! words before it are ignored. The old "Orcle" spellings stay as hidden
 //! aliases for one release. Two structured phrases work
@@ -53,7 +53,7 @@ const HEARD_MAX_CHARS: usize = 140;
 /// after 0.9.140). The weak "oracle"/"orca" entries are gone: a real word
 /// never wakes the Golem. The persona's own name is added per process by
 /// `set_persona_wake_tokens`.
-const WAKE_WORDS: &[&str] = &["golem", "orcle", "orkle", "orcel", "orkel", "orcl", "orcal"];
+const WAKE_WORDS: &[&str] = &["buddy", "orcle", "orkle", "orcel", "orkel", "orcl", "orcal"];
 /// The shortest name word that can wake the Golem.
 const NAME_TOKEN_MIN_LETTERS: usize = 3;
 
@@ -564,7 +564,7 @@ fn split_possessive(core: &str) -> (&str, bool) {
 }
 
 /// Unicode-aware lowercase words with their punctuation flags: "Golem," →
-/// `golem` with a pause after it; "coders_x" is two words; "don't" is "dont".
+/// `buddy` with a pause after it; "coders_x" is two words; "don't" is "dont".
 fn tokenize(text: &str, final_index: u64, at: Instant, next_ordinal: &mut u64) -> Vec<Word> {
     let mut words: Vec<Word> = Vec::new();
     let mut sentence_start = true;
@@ -1962,7 +1962,7 @@ mod tests {
     #[test]
     fn heard_and_wake_word_describe_what_was_said() {
         let command = detect_one("Golem, highlight the comment from coders X!", &PLAIN).unwrap();
-        assert_eq!(command.heard, "golem highlight the comment from coders x");
+        assert_eq!(command.heard, "buddy highlight the comment from coders x");
         assert!(command.wake_word);
         let command = detect_one("This one is toxic. Remove it from our chat.", &PLAIN).unwrap();
         assert_eq!(command.heard, "remove it from our chat");
@@ -1976,7 +1976,7 @@ mod tests {
         let command = detect_one("Golem, you are amazing.", &PLAIN).unwrap();
         assert_eq!(command.heard, "you are amazing");
         let command = detect_one("Golem, yes", &ANSWERING).unwrap();
-        assert_eq!(command.heard, "golem yes");
+        assert_eq!(command.heard, "buddy yes");
         assert!(command.wake_word);
         let command = detect_one("yes", &ANSWERING).unwrap();
         assert!(!command.wake_word);
@@ -2001,7 +2001,7 @@ mod tests {
             .expect("the second final completes the command");
         assert_eq!(found.kind, CommandKind::Highlight);
         assert_eq!(found.target, name("coders x"));
-        assert_eq!(found.heard, "golem highlight the comment from coders x");
+        assert_eq!(found.heard, "buddy highlight the comment from coders x");
         assert!(found.wake_word);
         // A later final with other words never re-matches it.
         assert_eq!(
@@ -2018,7 +2018,7 @@ mod tests {
 
     #[test]
     fn a_closed_command_never_extends_into_the_next_sentence() {
-        // Plan 140 S9 (smoke:golem-commands): the clear's words used to read
+        // Plan 140 S9 (smoke:buddy-commands): the clear's words used to read
         // the next final as its target, firing a second clear and losing the
         // removal.
         let mut detector = CommandDetector::default();
@@ -2342,7 +2342,7 @@ mod tests {
         assert_eq!(
             texts,
             vec![
-                "hey", "golem", "show", "codersx", "question", "its", "coders", "x"
+                "hey", "buddy", "show", "codersx", "question", "its", "coders", "x"
             ]
         );
         assert!(words[1].pause_after && !words[1].sentence_end);
@@ -2373,21 +2373,21 @@ mod tests {
     }
 
     #[test]
-    fn the_wake_words_are_golem_the_persona_name_and_the_hidden_orcle_aliases() {
+    fn the_wake_words_are_buddy_the_persona_name_and_the_hidden_orcle_aliases() {
         assert_eq!(
             wake_name_tokens("Grum the Goblin"),
             vec!["grum".to_string(), "goblin".to_string()]
         );
         // Lowercased, ASCII-folded, three letters or more, digits dropped,
         // never a duplicate of a wake word.
-        assert_eq!(wake_name_tokens("Bö Golem99"), Vec::<String>::new());
+        assert_eq!(wake_name_tokens("Bö Buddy99"), Vec::<String>::new());
         assert_eq!(wake_name_tokens("Bö Vexlar99"), vec!["vexlar".to_string()]);
         assert_eq!(wake_name_tokens("Zoë"), vec!["zoe".to_string()]);
         assert_eq!(wake_name_tokens("Golem"), Vec::<String>::new());
         assert_eq!(wake_name_tokens("Al"), Vec::<String>::new());
-        // "golem" always works; the "Orcle" spellings stay as hidden aliases
+        // "buddy" always works; the "Orcle" spellings stay as hidden aliases
         // for one release; the weak real words are gone.
-        assert_eq!(WAKE_WORDS[0], "golem");
+        assert_eq!(WAKE_WORDS[0], "buddy");
         assert!(WAKE_WORDS.contains(&"orcle"));
         assert!(WAKE_WORDS.contains(&"orkle"));
         assert!(!WAKE_WORDS.contains(&"oracle"));
@@ -2395,7 +2395,7 @@ mod tests {
     }
 
     #[test]
-    fn golem_and_the_persona_name_wake_the_detector_and_oracle_does_not() {
+    fn buddy_and_the_persona_name_wake_the_detector_and_oracle_does_not() {
         let highlight =
             |text: &str| detect_one(text, &PLAIN).map(|command| (command.kind, command.wake_word));
         assert_eq!(

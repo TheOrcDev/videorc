@@ -8004,7 +8004,7 @@ describe('real StudioProvider lifecycle', () => {
   // Plan 119 S2: Golem Live is one switch. On asks for cloud-AI consent first
   // (the Golem tab's dialog), then writes chat AND listening in ONE save; off
   // writes `enabled` alone. Cloud AI is its own choice and never rewrites them.
-  async function mountGolemLiveProvider(consent: '0' | '1'): Promise<{
+  async function mountBuddyLiveProvider(consent: '0' | '1'): Promise<{
     backend: StudioBackend
     latest: () => StudioObservation | undefined
     settingsWrites: () => unknown[]
@@ -8051,24 +8051,24 @@ describe('real StudioProvider lifecycle', () => {
   }
 
   it('turns Golem Live on only through the consent dialog, then in one save with listening', async () => {
-    const { latest, settingsWrites } = await mountGolemLiveProvider('0')
+    const { latest, settingsWrites } = await mountBuddyLiveProvider('0')
 
-    await act(async () => latest()!.core.setGolemLive(true))
-    await waitForObservation(() => latest()?.core.golemConsentRequested === true)
+    await act(async () => latest()!.core.setBuddyLive(true))
+    await waitForObservation(() => latest()?.core.buddyConsentRequested === true)
     // Asking writes nothing: no consent and no settings until the answer.
     expect(settingsWrites()).toEqual([])
     expect(localStorage.getItem('videorc.aiConsent')).toBe('0')
 
-    await act(async () => latest()!.core.answerGolemConsent(true))
+    await act(async () => latest()!.core.answerBuddyConsent(true))
     await waitForObservation(() => latest()?.core.cohostSettings?.enabled === true)
-    expect(latest()!.core.golemConsentRequested).toBe(false)
+    expect(latest()!.core.buddyConsentRequested).toBe(false)
     expect(latest()!.core.aiConsent).toBe(true)
     expect(localStorage.getItem('videorc.aiConsent')).toBe('1')
     expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
     expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: true })
 
     // Off is `enabled` alone: listening and consent stay as they were.
-    await act(async () => latest()!.core.setGolemLive(false))
+    await act(async () => latest()!.core.setBuddyLive(false))
     await waitForObservation(() => latest()?.core.cohostSettings?.enabled === false)
     expect(settingsWrites()).toEqual([{ enabled: true, listen: true }, { enabled: false }])
     expect(latest()!.core.cohostSettings?.listen).toBe(true)
@@ -8077,12 +8077,12 @@ describe('real StudioProvider lifecycle', () => {
   }, 15_000)
 
   it('changes nothing when the Golem Live consent dialog is declined', async () => {
-    const { latest, settingsWrites } = await mountGolemLiveProvider('0')
+    const { latest, settingsWrites } = await mountBuddyLiveProvider('0')
 
-    await act(async () => latest()!.core.setGolemLive(true))
-    await waitForObservation(() => latest()?.core.golemConsentRequested === true)
-    await act(async () => latest()!.core.answerGolemConsent(false))
-    await waitForObservation(() => latest()?.core.golemConsentRequested === false)
+    await act(async () => latest()!.core.setBuddyLive(true))
+    await waitForObservation(() => latest()?.core.buddyConsentRequested === true)
+    await act(async () => latest()!.core.answerBuddyConsent(false))
+    await waitForObservation(() => latest()?.core.buddyConsentRequested === false)
 
     expect(latest()!.core.aiConsent).toBe(false)
     expect(localStorage.getItem('videorc.aiConsent')).toBe('0')
@@ -8091,17 +8091,17 @@ describe('real StudioProvider lifecycle', () => {
   }, 15_000)
 
   it('turns Golem Live on without a dialog once cloud AI is allowed', async () => {
-    const { latest, settingsWrites } = await mountGolemLiveProvider('1')
+    const { latest, settingsWrites } = await mountBuddyLiveProvider('1')
 
-    await act(async () => latest()!.core.setGolemLive(true))
+    await act(async () => latest()!.core.setBuddyLive(true))
     await waitForObservation(() => latest()?.core.cohostSettings?.enabled === true)
-    expect(latest()!.core.golemConsentRequested).toBe(false)
+    expect(latest()!.core.buddyConsentRequested).toBe(false)
     expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
   }, 15_000)
 
   it('revokes cloud AI without rewriting Golem settings, and asks again on the next on', async () => {
-    const { latest, settingsWrites } = await mountGolemLiveProvider('1')
-    await act(async () => latest()!.core.setGolemLive(true))
+    const { latest, settingsWrites } = await mountBuddyLiveProvider('1')
+    await act(async () => latest()!.core.setBuddyLive(true))
     await waitForObservation(() => latest()?.core.cohostSettings?.enabled === true)
 
     await act(async () => latest()!.core.setAiConsent(false))
@@ -8110,14 +8110,14 @@ describe('real StudioProvider lifecycle', () => {
     expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
     expect(latest()!.core.cohostSettings?.enabled).toBe(true)
 
-    await act(async () => latest()!.core.setGolemLive(true))
-    await waitForObservation(() => latest()?.core.golemConsentRequested === true)
+    await act(async () => latest()!.core.setBuddyLive(true))
+    await waitForObservation(() => latest()?.core.buddyConsentRequested === true)
     expect(settingsWrites()).toEqual([{ enabled: true, listen: true }])
   }, 15_000)
 
   it('applies the same Golem Live save to every Comments-window way on', async () => {
     const { latest, settingsWrites, emitApi, pushCohostEnableResult } =
-      await mountGolemLiveProvider('0')
+      await mountBuddyLiveProvider('0')
 
     // The consent CTA: grant consent and turn on in the same click.
     await act(async () => {
@@ -8151,7 +8151,7 @@ describe('real StudioProvider lifecycle', () => {
     await waitForObservation(() => pushCohostEnableResult.mock.calls.length === 3)
     expect(settingsWrites().at(-1)).toEqual({ enabled: true, listen: true })
     expect(latest()!.core.cohostSettings).toMatchObject({ enabled: true, listen: true })
-    expect(latest()!.core.golemConsentRequested).toBe(false)
+    expect(latest()!.core.buddyConsentRequested).toBe(false)
   }, 15_000)
 
   // Stop never starts a cloud job on its own: a streamed, recorded session

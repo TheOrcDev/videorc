@@ -3,7 +3,7 @@ import { describe, it } from 'node:test'
 
 import WebSocket from 'ws'
 
-import { GOLEM_COMMAND_FINALS, startFakeCaptionService } from './fake-caption-service.mjs'
+import { BUDDY_COMMAND_FINALS, startFakeCaptionService } from './fake-caption-service.mjs'
 
 describe('fake caption service', () => {
   it(
@@ -306,7 +306,7 @@ describe('fake caption service', () => {
       assert.equal(await fake.emitRealtimeFinal('Second scripted final.'), 1)
       await waitFor(() => received.length === 4)
       // Plan 140 S9: one spoken command split across two finals, in order.
-      const split = GOLEM_COMMAND_FINALS.highlightByNameSplit
+      const split = BUDDY_COMMAND_FINALS.highlightByNameSplit
       assert.deepEqual(await fake.emitRealtimeFinals(split, { gapMs: 5 }), [1, 1])
       await waitFor(() => received.length === 8)
       assert.deepEqual(

@@ -13,7 +13,7 @@ import {
   StudioIcon,
   BrainIcon,
   KickIcon,
-  GolemIcon,
+  BuddyIcon,
   YOUTUBE_MARK_ASPECT,
   YOUTUBE_MARK_MIN_PX,
   XPlatformIcon,
@@ -108,19 +108,19 @@ describe('semantic icon registry', () => {
   // icon slots that size and lay out through `svg` selectors still apply.
   it('draws Golem as the real emblem image inside an svg, whatever the weight', () => {
     const markup = (weight?: AppIconProps['weight']): string =>
-      renderToStaticMarkup(createElement(GolemIcon, { size: 16, weight, className: 'golem' }))
+      renderToStaticMarkup(createElement(BuddyIcon, { size: 16, weight, className: 'buddy' }))
     const html = markup()
     expect(html).toMatch(/^<svg /)
     expect(html).toContain('viewBox="0 0 256 256"')
     expect(html).toContain('width="16"')
-    expect(html).toContain('class="golem"')
-    expect(html).toMatch(/<image href="[^"]*golem-emblem-64[^"]*"/)
+    expect(html).toContain('class="buddy"')
+    expect(html).toMatch(/<image href="[^"]*buddy-emblem-64[^"]*"/)
     expect(html).toContain('preserveAspectRatio="xMidYMid meet"')
     expect(html).not.toContain('<path')
     for (const weight of ['thin', 'light', 'regular', 'duotone', 'fill', 'bold'] as const) {
       expect(markup(weight)).toBe(html)
     }
-    expect(renderToStaticMarkup(createElement(GolemIcon))).toContain('width="1em"')
+    expect(renderToStaticMarkup(createElement(BuddyIcon))).toContain('width="1em"')
   })
   // Plan 165 (Google's ToS report, III.F.2a): the YouTube mark is YouTube's
   // own file, unmodified, and never drawn shorter than 20px.

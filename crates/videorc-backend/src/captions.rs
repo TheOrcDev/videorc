@@ -3548,14 +3548,14 @@ async fn publish_status(session: &CaptionSession, status: CaptionsStatus) {
 
 /// Called under the co-host lifecycle fence. Retirement shares the lock used
 /// by synchronous transcript appends; clear the old transcript before granting.
-pub(crate) async fn retire_golem_speech(state: &AppState) {
+pub(crate) async fn retire_buddy_speech(state: &AppState) {
     let mut coordinator = state.captions.lock().await;
     coordinator.speech_admitted = false;
     coordinator.speech_epoch = coordinator.speech_epoch.saturating_add(1);
     coordinator.speech_started_at = None;
 }
 
-pub(crate) async fn grant_golem_speech(state: &AppState) {
+pub(crate) async fn grant_buddy_speech(state: &AppState) {
     if state.process_shutdown_requested() {
         return;
     }
@@ -3640,7 +3640,7 @@ pub(crate) async fn configure_marker_voice(
             "signed-out",
             "Sign in to use Golem voice markers.",
         ))
-    } else if !crate::service_flags::golem_voice_commands_enabled(state) {
+    } else if !crate::service_flags::buddy_voice_commands_enabled(state) {
         Some(CohostListening::blocked(
             "voice-disabled",
             "Golem voice commands are temporarily unavailable.",
@@ -3686,7 +3686,7 @@ pub(crate) async fn configure_marker_voice(
 
 fn marker_audio_owned(
     session: &CaptionSession,
-    admission: AdmittedGolemAudio,
+    admission: AdmittedBuddyAudio,
     coordinator: &CaptionsCoordinator,
     target: Option<&crate::clip_marks::MarkTarget>,
 ) -> bool {
@@ -3694,7 +3694,7 @@ fn marker_audio_owned(
         && !session.stop.load(Ordering::Acquire)
         && crate::cohost::premium_entitled()
         && crate::account::stored_session_token().is_some()
-        && crate::service_flags::golem_voice_commands_enabled(&session.state)
+        && crate::service_flags::buddy_voice_commands_enabled(&session.state)
 }
 fn publish_marker_outcome(
     session: &CaptionSession,
@@ -3778,13 +3778,13 @@ fn note_chunk_marker(
 /// Two independent owners travel with input audio. A Listen setting change
 /// retires readiness without retiring speech admitted by the same consent.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct AdmittedGolemAudio {
+struct AdmittedBuddyAudio {
     speech_epoch: Option<u64>,
     listen_epoch: Option<u64>,
     marker_epoch: Option<u64>,
 }
 
-impl AdmittedGolemAudio {
+impl AdmittedBuddyAudio {
     fn owns_marker(
         self,
         coordinator: &CaptionsCoordinator,
@@ -3838,7 +3838,7 @@ mod marker_ownership_tests {
             marker_started_at: Some(std::time::Instant::now()),
             ..Default::default()
         };
-        let admitted = AdmittedGolemAudio {
+        let admitted = AdmittedBuddyAudio {
             marker_epoch: Some(1),
             ..Default::default()
         };
@@ -3850,7 +3850,7 @@ mod marker_ownership_tests {
         coordinator.marker_epoch += 1;
         assert!(!admitted.owns_marker(&coordinator, Some("capture-a")));
         assert!(!admitted.owns_marker(&coordinator, Some("capture-b")));
-        let fresh = AdmittedGolemAudio {
+        let fresh = AdmittedBuddyAudio {
             marker_epoch: Some(2),
             ..Default::default()
         };
@@ -3860,7 +3860,7 @@ mod marker_ownership_tests {
         assert!(!fresh.owns_marker(&coordinator, Some("capture-b")));
         coordinator.marker_started_at = Some(std::time::Instant::now());
         assert!(!fresh.owns_marker(&coordinator, Some("capture-b")));
-        let new_grant = AdmittedGolemAudio {
+        let new_grant = AdmittedBuddyAudio {
             marker_epoch: Some(3),
             ..Default::default()
         };
@@ -4931,9 +4931,9 @@ impl CaptionSession {
             .then_some(coordinator.listen_epoch)
     }
 
-    async fn admitted_golem_audio(&self) -> AdmittedGolemAudio {
+    async fn admitted_buddy_audio(&self) -> AdmittedBuddyAudio {
         let coordinator = self.state.captions.lock().await;
-        AdmittedGolemAudio {
+        AdmittedBuddyAudio {
             marker_epoch: coordinator
                 .marker_started_at
                 .map(|_| coordinator.marker_epoch),
@@ -4946,15 +4946,15 @@ impl CaptionSession {
         }
     }
 
-    async fn admitted_golem_audio_for_frame(&self, frame: &AudioFrame) -> AdmittedGolemAudio {
+    async fn admitted_buddy_audio_for_frame(&self, frame: &AudioFrame) -> AdmittedBuddyAudio {
         let coordinator = self.state.captions.lock().await;
         // Some producers stamp the buffer end. Requiring the entire frame
         // after grant excludes queued old audio and crossing frames. Caption
         // audio, capture timestamps, and recording clip marks stay unchanged.
         let Some(earliest) = frame.captured_at.checked_sub(frame.duration()) else {
-            return AdmittedGolemAudio::default();
+            return AdmittedBuddyAudio::default();
         };
-        AdmittedGolemAudio {
+        AdmittedBuddyAudio {
             marker_epoch: coordinator
                 .marker_started_at
                 .filter(|grant| earliest >= *grant)
@@ -5199,7 +5199,7 @@ struct RealtimeCaptionTimeline {
     socket_audio_base_ms: f64,
     ms_sent: f64,
     capture_epoch: u64,
-    admission: AdmittedGolemAudio,
+    admission: AdmittedBuddyAudio,
 }
 
 /// A VAD item keeps its admission ownership and original file coordinates
@@ -5212,7 +5212,7 @@ struct RealtimeCaptionItem {
     offset_seconds: f64,
     capture_epoch: u64,
     capture_end_seconds: Option<f64>,
-    admission: AdmittedGolemAudio,
+    admission: AdmittedBuddyAudio,
     mark_target: Option<crate::clip_marks::MarkTarget>,
     clip_processed: bool,
 }
@@ -5238,12 +5238,12 @@ impl RealtimeCaptionTimeline {
 /// bounded number of boundaries; older or missing offsets have no Golem owner.
 #[derive(Default)]
 struct RealtimeAudioAdmissions {
-    boundaries: std::collections::VecDeque<(f64, AdmittedGolemAudio)>,
+    boundaries: std::collections::VecDeque<(f64, AdmittedBuddyAudio)>,
     sent_ms: f64,
 }
 
 impl RealtimeAudioAdmissions {
-    fn record(&mut self, duration_ms: f64, admission: AdmittedGolemAudio) {
+    fn record(&mut self, duration_ms: f64, admission: AdmittedBuddyAudio) {
         if self
             .boundaries
             .back()
@@ -5257,12 +5257,12 @@ impl RealtimeAudioAdmissions {
         self.sent_ms += duration_ms;
     }
 
-    fn at(&self, audio_start_ms: Option<f64>) -> AdmittedGolemAudio {
+    fn at(&self, audio_start_ms: Option<f64>) -> AdmittedBuddyAudio {
         let Some(start) = audio_start_ms.filter(|start| start.is_finite() && *start >= 0.0) else {
-            return AdmittedGolemAudio::default();
+            return AdmittedBuddyAudio::default();
         };
         if start >= self.sent_ms {
-            return AdmittedGolemAudio::default();
+            return AdmittedBuddyAudio::default();
         }
         self.boundaries
             .iter()
@@ -5276,8 +5276,8 @@ impl RealtimeAudioAdmissions {
         &self,
         event: &RealtimeCaptionEvent,
         items: &std::collections::HashMap<String, RealtimeCaptionItem>,
-        socket_admission: AdmittedGolemAudio,
-    ) -> AdmittedGolemAudio {
+        socket_admission: AdmittedBuddyAudio,
+    ) -> AdmittedBuddyAudio {
         match event {
             RealtimeCaptionEvent::SpeechStarted { audio_start_ms, .. } => self.at(*audio_start_ms),
             RealtimeCaptionEvent::Partial { item_id, .. }
@@ -5286,7 +5286,7 @@ impl RealtimeAudioAdmissions {
                 .map(|item| item.admission)
                 .unwrap_or_default(),
             RealtimeCaptionEvent::ConfigurationAcknowledged => socket_admission,
-            _ => AdmittedGolemAudio::default(),
+            _ => AdmittedBuddyAudio::default(),
         }
     }
 }
@@ -5672,7 +5672,7 @@ async fn run_realtime_caption_session(
             return RealtimeOutcome::Ended;
         }
 
-        let socket_admission = session.admitted_golem_audio().await;
+        let socket_admission = session.admitted_buddy_audio().await;
         let token = match session
             .client
             .mint_caption_realtime_token(&session.bearer, &session.session_client_id)
@@ -5889,7 +5889,7 @@ async fn run_realtime_caption_session(
                     {
                         speech_watchdog_since = Some(tokio::time::Instant::now());
                     }
-                    let input_admission = session.admitted_golem_audio_for_frame(&frame).await;
+                    let input_admission = session.admitted_buddy_audio_for_frame(&frame).await;
                     let frame_seconds = mono.len() as f64 / f64::from(CAPTION_SAMPLE_RATE);
                     audio_admissions.record(frame_seconds * 1000.0, input_admission);
                     ms_sent += frame_seconds * 1000.0;
@@ -6616,7 +6616,7 @@ fn realtime_item_entry(
     item_id: &str,
     offset: f64,
     capture_epoch: u64,
-    admission: AdmittedGolemAudio,
+    admission: AdmittedBuddyAudio,
     mark_target: Option<crate::clip_marks::MarkTarget>,
 ) -> Option<RealtimeCaptionItem> {
     if !items.contains_key(item_id) && items.len() == MAX_REALTIME_CAPTION_ITEMS {
@@ -6673,7 +6673,7 @@ struct BufferedCaptionChunk {
     offset_seconds: f64,
     duration_seconds: f64,
     capture_epoch: u64,
-    admission: AdmittedGolemAudio,
+    admission: AdmittedBuddyAudio,
 }
 
 struct CaptionChunkBuffer {
@@ -6683,7 +6683,7 @@ struct CaptionChunkBuffer {
     /// Compressed input ownership, consumed with exactly the same PCM. Merge
     /// speech and readiness independently; mixed owners lose only that field.
     /// Caption presentation and recording ownership remain independent.
-    pcm_ownership: std::collections::VecDeque<(usize, AdmittedGolemAudio)>,
+    pcm_ownership: std::collections::VecDeque<(usize, AdmittedBuddyAudio)>,
     pending: std::collections::VecDeque<BufferedCaptionChunk>,
 }
 
@@ -6704,7 +6704,7 @@ impl CaptionChunkBuffer {
         &mut self,
         samples: Vec<i16>,
         capture_epoch: u64,
-        admission: AdmittedGolemAudio,
+        admission: AdmittedBuddyAudio,
         sequence: &CaptionSequence,
         timeline: &mut CaptionTimeline,
     ) -> f64 {
@@ -6787,7 +6787,7 @@ impl CaptionChunkBuffer {
     fn stamp_chunk(
         samples: Vec<i16>,
         capture_epoch: u64,
-        admission: AdmittedGolemAudio,
+        admission: AdmittedBuddyAudio,
         sequence: &CaptionSequence,
         timeline: &mut CaptionTimeline,
     ) -> BufferedCaptionChunk {
@@ -6804,7 +6804,7 @@ impl CaptionChunkBuffer {
         }
     }
 
-    fn take_ownership(&mut self, mut count: usize) -> AdmittedGolemAudio {
+    fn take_ownership(&mut self, mut count: usize) -> AdmittedBuddyAudio {
         let mut owner = self
             .pcm_ownership
             .front()
@@ -6812,7 +6812,7 @@ impl CaptionChunkBuffer {
             .unwrap_or_default();
         while count > 0 {
             let Some((available, epoch)) = self.pcm_ownership.front_mut() else {
-                return AdmittedGolemAudio::default();
+                return AdmittedBuddyAudio::default();
             };
             owner = owner.merge(*epoch);
             let taken = count.min(*available);
@@ -7191,7 +7191,7 @@ async fn run_chunked_caption_session(
         }
         if !receiver_open && in_flight.is_none() && buffer.is_empty() {
             let coordinator = session.state.captions.lock().await;
-            let admission = AdmittedGolemAudio {
+            let admission = AdmittedBuddyAudio {
                 marker_epoch: *session
                     .marker_buffer_epoch
                     .lock()
@@ -7279,7 +7279,7 @@ async fn run_chunked_caption_session(
                 let dropped_seconds = buffer.push_samples(
                     mono,
                     capture_epoch,
-                    session.admitted_golem_audio_for_frame(&frame).await,
+                    session.admitted_buddy_audio_for_frame(&frame).await,
                     sequence,
                     timeline,
                 );
@@ -7624,7 +7624,7 @@ mod tests {
         let mut session = test_caption_session(&state, false);
         let outcome: Result<_> = async {
             start_caption_contract_listen_grant(&state).await?;
-            let expected = session.admitted_golem_audio().await;
+            let expected = session.admitted_buddy_audio().await;
             let mut receiver = {
                 let _control = CAPTION_CONTROL.lock().await;
                 install_tap()
@@ -7658,7 +7658,7 @@ mod tests {
                         .ok_or_else(|| {
                             anyhow::anyhow!("Owned caption tap closed before its frames drained.")
                         })?;
-                let admission = session.admitted_golem_audio_for_frame(&frame).await;
+                let admission = session.admitted_buddy_audio_for_frame(&frame).await;
                 capture_times.push((frame.captured_at, frame.duration(), frame.timestamp_micros));
                 admissions.push(admission);
                 buffer.push_samples(
@@ -7910,7 +7910,7 @@ mod tests {
         same_capture_epoch: bool,
         held_cue_presented: bool,
         held_final_emitted: bool,
-        held_golem_final: bool,
+        held_buddy_final: bool,
         before_control: bool,
         after_control: bool,
         backwards_clock_retired: bool,
@@ -7936,7 +7936,7 @@ mod tests {
             let initial_epoch = state.captions.lock().await.capture_epoch;
             let mut capture_epoch = initial_epoch;
             let mut timestamps = Vec::new();
-            let mut admission = AdmittedGolemAudio::default();
+            let mut admission = AdmittedBuddyAudio::default();
             let mut events = state.events.subscribe();
             for batch in 0..2 {
                 // Same actual paced producer and same installed tap as the
@@ -7971,7 +7971,7 @@ mod tests {
                     }
                     last_frame_timestamp = Some(frame.timestamp_micros);
                     batch_timestamps.push(frame.timestamp_micros);
-                    admission = session.admitted_golem_audio_for_frame(&frame).await;
+                    admission = session.admitted_buddy_audio_for_frame(&frame).await;
                     let mono = downmix_resample_to_16k_mono(
                         &frame.samples,
                         frame.channels,
@@ -8072,7 +8072,7 @@ mod tests {
             };
             let speech = crate::cohost::recent_speech_since(&state, None)
                 .ok_or_else(|| anyhow::anyhow!("Owned Golem speech snapshot was unavailable."))?;
-            let exact_golem = |text: &str| speech.finals.iter().any(|item| item.text == text);
+            let exact_buddy = |text: &str| speech.finals.iter().any(|item| item.text == text);
             let held_cue_presented = state.captions.lock().await.chunks.iter().any(|cue| {
                 cue.text == "fixture retained utterance"
                     && cue.capture_epoch == initial_epoch
@@ -8083,11 +8083,11 @@ mod tests {
                 same_capture_epoch: initial_epoch == capture_epoch,
                 held_cue_presented,
                 held_final_emitted: exact_ui("fixture retained utterance"),
-                held_golem_final: exact_golem("fixture retained utterance"),
+                held_buddy_final: exact_buddy("fixture retained utterance"),
                 before_control: exact_ui("fixture before batch")
-                    && exact_golem("fixture before batch"),
+                    && exact_buddy("fixture before batch"),
                 after_control: exact_ui("fixture after batch")
-                    && exact_golem("fixture after batch"),
+                    && exact_buddy("fixture after batch"),
                 backwards_clock_retired: false,
             };
             // Genuine source-clock regression still retires presentation and
@@ -8200,11 +8200,11 @@ mod tests {
 
     #[cfg(debug_assertions)]
     #[tokio::test]
-    async fn caption_contract_fixture_repeated_batch_preserves_exact_golem_final() {
+    async fn caption_contract_fixture_repeated_batch_preserves_exact_buddy_final() {
         let result = repeated_caption_fixture_outcome().await;
         assert!(result.before_control && result.after_control && result.backwards_clock_retired);
         assert!(
-            result.held_golem_final,
+            result.held_buddy_final,
             "The consenting same-session Golem owner must receive the exact final held across another fixture batch."
         );
     }
@@ -8256,7 +8256,7 @@ mod tests {
                                 "Owned caption tap closed before control frames drained."
                             )
                         })?;
-                admissions.push(session.admitted_golem_audio_for_frame(&frame).await);
+                admissions.push(session.admitted_buddy_audio_for_frame(&frame).await);
             }
             Ok(admissions)
         }
@@ -8265,7 +8265,7 @@ mod tests {
         crate::cohost::stop_cohost(&state).await;
         assert_eq!(
             outcome.expect("actual old/crossing control frames should reach the installed tap"),
-            vec![AdmittedGolemAudio::default(); 2],
+            vec![AdmittedBuddyAudio::default(); 2],
         );
         assert!(!TAP_ACTIVE.load(Ordering::Acquire));
     }
@@ -8295,7 +8295,7 @@ mod tests {
             Some("voice-disabled")
         );
         assert!(
-            !AdmittedGolemAudio {
+            !AdmittedBuddyAudio {
                 marker_epoch: Some(7),
                 ..Default::default()
             }
@@ -8763,7 +8763,7 @@ mod tests {
             "item-1",
             0.25,
             0,
-            AdmittedGolemAudio::test_epoch(0),
+            AdmittedBuddyAudio::test_epoch(0),
             None,
         )
         .unwrap();
@@ -8777,7 +8777,7 @@ mod tests {
                 "item-1",
                 0.5,
                 1,
-                AdmittedGolemAudio::test_epoch(1),
+                AdmittedBuddyAudio::test_epoch(1),
                 None,
             ),
             Some(first_item),
@@ -8847,7 +8847,7 @@ mod tests {
             socket_audio_base_ms: 0.0,
             ms_sent: 1_500.0,
             capture_epoch: 0,
-            admission: AdmittedGolemAudio::test_epoch(0),
+            admission: AdmittedBuddyAudio::test_epoch(0),
         };
 
         assert_eq!(realtime.cue_offset_seconds(Some(500.0)), 42.5);
@@ -9429,7 +9429,7 @@ mod tests {
             buffer.push_samples(
                 vec![1, 2, 3, 4],
                 7,
-                AdmittedGolemAudio::test_epoch(0),
+                AdmittedBuddyAudio::test_epoch(0),
                 &sequence,
                 &mut timeline
             ),
@@ -9444,7 +9444,7 @@ mod tests {
             buffer.push_samples(
                 vec![5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
                 7,
-                AdmittedGolemAudio::test_epoch(0),
+                AdmittedBuddyAudio::test_epoch(0),
                 &sequence,
                 &mut timeline,
             ),
@@ -9491,7 +9491,7 @@ mod tests {
         policy_buffer.push_samples(
             vec![1; 8],
             3,
-            AdmittedGolemAudio::test_epoch(0),
+            AdmittedBuddyAudio::test_epoch(0),
             &sequence,
             &mut timeline,
         );
@@ -9558,7 +9558,7 @@ mod tests {
         buffer.push_samples(
             vec![1; 4],
             3,
-            AdmittedGolemAudio::test_epoch(0),
+            AdmittedBuddyAudio::test_epoch(0),
             &final_sequence,
             &mut timeline,
         );
@@ -9571,7 +9571,7 @@ mod tests {
         buffer.push_samples(
             vec![2; MAX_BUFFERED_CAPTION_CHUNKS * 4 + 2],
             3,
-            AdmittedGolemAudio::test_epoch(0),
+            AdmittedBuddyAudio::test_epoch(0),
             &final_sequence,
             &mut timeline,
         );
@@ -9604,7 +9604,7 @@ mod tests {
         buffer.push_samples(
             vec![1; 4],
             9,
-            AdmittedGolemAudio::test_epoch(0),
+            AdmittedBuddyAudio::test_epoch(0),
             &sequence,
             &mut timeline,
         );
@@ -9616,7 +9616,7 @@ mod tests {
         buffer.push_samples(
             vec![2; 12],
             9,
-            AdmittedGolemAudio::test_epoch(0),
+            AdmittedBuddyAudio::test_epoch(0),
             &sequence,
             &mut timeline,
         );
@@ -9729,7 +9729,7 @@ mod tests {
         let dropped = buffer.push_samples(
             vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
             1,
-            AdmittedGolemAudio::test_epoch(0),
+            AdmittedBuddyAudio::test_epoch(0),
             &sequence,
             &mut timeline,
         );
@@ -11232,21 +11232,21 @@ mod tests {
         buffer.push_samples(
             vec![0; 1_600],
             1,
-            AdmittedGolemAudio::test_epoch(0),
+            AdmittedBuddyAudio::test_epoch(0),
             &sequence,
             &mut timeline,
         );
         buffer.push_samples(
             tone(1_600, loud),
             1,
-            AdmittedGolemAudio::test_epoch(0),
+            AdmittedBuddyAudio::test_epoch(0),
             &sequence,
             &mut timeline,
         );
         buffer.push_samples(
             vec![0; 1_600],
             1,
-            AdmittedGolemAudio::test_epoch(0),
+            AdmittedBuddyAudio::test_epoch(0),
             &sequence,
             &mut timeline,
         );
@@ -11281,7 +11281,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn listen_only_task_presents_nothing_but_golem_hears_every_final() {
+    async fn listen_only_task_presents_nothing_but_buddy_hears_every_final() {
         let state = test_caption_app_state();
         {
             let mut coordinator = state.captions.lock().await;
@@ -11327,7 +11327,7 @@ mod tests {
             socket_audio_base_ms: 0.0,
             ms_sent: 6_000.0,
             capture_epoch: 0,
-            admission: AdmittedGolemAudio::test_epoch(0),
+            admission: AdmittedBuddyAudio::test_epoch(0),
         };
         handle_realtime_event(
             &session,
@@ -11402,7 +11402,7 @@ mod tests {
             socket_audio_base_ms: 0.0,
             ms_sent: 2_000.0,
             capture_epoch: 0,
-            admission: AdmittedGolemAudio::test_epoch(0),
+            admission: AdmittedBuddyAudio::test_epoch(0),
         };
         handle_realtime_event(
             &session,
@@ -11612,7 +11612,7 @@ mod tests {
         assert!(state.captions.lock().await.task.as_ref().is_some());
         drain_events(&mut events);
         let listening =
-            start_listen_with_bearer(&state, "golem-session", || Some("test-bearer".into())).await;
+            start_listen_with_bearer(&state, "buddy-session", || Some("test-bearer".into())).await;
         assert_eq!(listening, crate::cohost::CohostListening::on(None));
         {
             let coordinator = state.captions.lock().await;
@@ -11632,7 +11632,7 @@ mod tests {
         let state = test_caption_app_state();
         let mut events = state.events.subscribe();
 
-        let listening = start_listen_with_bearer(&state, "golem", || Some("b".into())).await;
+        let listening = start_listen_with_bearer(&state, "buddy", || Some("b".into())).await;
         assert_eq!(
             listening.state,
             crate::cohost::CohostListeningState::Blocked
@@ -11642,7 +11642,7 @@ mod tests {
         *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
             "no-mic-session",
         ));
-        let listening = start_listen_with_bearer(&state, "golem", || Some("b".into())).await;
+        let listening = start_listen_with_bearer(&state, "buddy", || Some("b".into())).await;
         assert_eq!(listening.reason_code.as_deref(), Some("no-microphone"));
         {
             let coordinator = state.captions.lock().await;
@@ -11678,7 +11678,7 @@ mod tests {
         let recording_path = root.join("recording.mp4");
         let state = test_caption_app_state();
         let mut events = state.events.subscribe();
-        let mut heard = chunk(1, 0.0, "golem heard this", &[]);
+        let mut heard = chunk(1, 0.0, "buddy heard this", &[]);
         heard.presented = false;
         let artifact = FinalizedCaptionArtifact {
             chunks: vec![heard],
@@ -11694,7 +11694,7 @@ mod tests {
         let srt = tokio::fs::read_to_string(recording_path.with_extension("srt"))
             .await
             .expect("the Golem report's moments need the SRT even when captions never presented");
-        assert!(srt.contains("golem heard this"));
+        assert!(srt.contains("buddy heard this"));
         assert_eq!(artifact.presented_chunk_count(), 0);
         assert!(artifact.presented_chunks().is_empty());
         begin_caption_cue_render(&state, "listen-only", "ffmpeg", &recording_path, &artifact).await;
@@ -11771,7 +11771,7 @@ mod tests {
     /// switch ends captions (with the caption block, exactly as before) and
     /// the same task keeps transcribing for Golem, metered as listen.
     #[tokio::test]
-    async fn caption_scoped_failures_never_stop_golem_listening() {
+    async fn caption_scoped_failures_never_stop_buddy_listening() {
         let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
         let state = test_caption_app_state();
         let mut events = state.events.subscribe();
@@ -11929,7 +11929,7 @@ mod tests {
             offset_seconds,
             duration_seconds: 3.0,
             capture_epoch: 0,
-            admission: AdmittedGolemAudio::test_epoch(0),
+            admission: AdmittedBuddyAudio::test_epoch(0),
         }
     }
 
@@ -12345,7 +12345,7 @@ mod tests {
             capture_epoch: 0,
             ms_at_anchor: 0.0,
             socket_audio_base_ms: 0.0,
-            admission: AdmittedGolemAudio::default(),
+            admission: AdmittedBuddyAudio::default(),
         };
         handle_realtime_event(
             &session,
@@ -12448,7 +12448,7 @@ mod tests {
                 socket_audio_base_ms: 0.0,
                 ms_sent: 2_000.0,
                 capture_epoch: 0,
-                admission: AdmittedGolemAudio::default(),
+                admission: AdmittedBuddyAudio::default(),
             };
             let sequence = CaptionSequence::default();
             let mut items = std::collections::HashMap::new();
@@ -12731,7 +12731,7 @@ mod tests {
             socket_audio_base_ms: 0.0,
             ms_sent: 2_000.0,
             capture_epoch: 0,
-            admission: AdmittedGolemAudio::test_epoch(0),
+            admission: AdmittedBuddyAudio::test_epoch(0),
         };
         handle_realtime_event(
             &session,
@@ -12854,7 +12854,7 @@ mod tests {
                     &format!("item-{index}"),
                     10.0,
                     0,
-                    AdmittedGolemAudio::default(),
+                    AdmittedBuddyAudio::default(),
                     Some(target.clone())
                 )
                 .is_some()
@@ -12867,7 +12867,7 @@ mod tests {
                 "overflow",
                 10.0,
                 0,
-                AdmittedGolemAudio::default(),
+                AdmittedBuddyAudio::default(),
                 Some(target.clone())
             )
             .is_none()
@@ -12881,7 +12881,7 @@ mod tests {
                 "fresh-item",
                 10.0,
                 1,
-                AdmittedGolemAudio::default(),
+                AdmittedBuddyAudio::default(),
                 Some(target)
             )
             .is_some()
@@ -12901,7 +12901,7 @@ mod tests {
             ms_at_anchor: 0.0,
             socket_audio_base_ms: 0.0,
             capture_epoch: 1,
-            admission: AdmittedGolemAudio::default(),
+            admission: AdmittedBuddyAudio::default(),
         };
         let mut events = state.events.subscribe();
         for id in ["unknown", "item-0", "item-1"] {
@@ -13252,7 +13252,7 @@ mod tests {
             coordinator.shadow_status.as_mut().unwrap().provider_ready = false;
         }
         let listening =
-            start_listen_with_bearer(&state, "golem", || Some("test-bearer".into())).await;
+            start_listen_with_bearer(&state, "buddy", || Some("test-bearer".into())).await;
         assert_eq!(listening, crate::cohost::CohostListening::starting());
         let session = test_caption_session(&state, true);
         session
@@ -13262,7 +13262,7 @@ mod tests {
             )
             .await;
         let listening =
-            start_listen_with_bearer(&state, "golem", || Some("test-bearer".into())).await;
+            start_listen_with_bearer(&state, "buddy", || Some("test-bearer".into())).await;
         assert_eq!(listening, crate::cohost::CohostListening::on(None));
         stop_captions(&state).await;
         stop_listen(&state).await;
@@ -13505,7 +13505,7 @@ mod tests {
         .await
         .unwrap();
         let session = test_caption_session(&state, true);
-        let admitted = session.admitted_golem_audio().await;
+        let admitted = session.admitted_buddy_audio().await;
         let task_id = state.captions.lock().await.task.as_ref().unwrap().id();
         assert!(admitted.listen_epoch.is_some());
         // The RPC validates the new authoritative chat while the old Golem
@@ -13591,7 +13591,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn golem_speech_grant_respects_privacy_and_shutdown_guards() {
+    async fn buddy_speech_grant_respects_privacy_and_shutdown_guards() {
         let state = test_caption_app_state();
         let session = test_caption_session(&state, true);
         for (in_progress, failed) in [(true, false), (false, true)] {
@@ -13600,24 +13600,24 @@ mod tests {
                 coordinator.privacy_teardown_in_progress = in_progress;
                 coordinator.privacy_teardown_failed = failed;
             }
-            grant_golem_speech(&state).await;
-            assert_eq!(session.admitted_golem_audio().await.speech_epoch, None);
+            grant_buddy_speech(&state).await;
+            assert_eq!(session.admitted_buddy_audio().await.speech_epoch, None);
             assert_eq!(state.captions.lock().await.speech_started_at, None);
         }
         {
             let mut coordinator = state.captions.lock().await;
             coordinator.privacy_teardown_failed = false;
         }
-        grant_golem_speech(&state).await;
-        let admitted = session.admitted_golem_audio().await;
+        grant_buddy_speech(&state).await;
+        let admitted = session.admitted_buddy_audio().await;
         let grant = state.captions.lock().await.speech_started_at;
         assert!(admitted.speech_epoch.is_some());
-        grant_golem_speech(&state).await;
+        grant_buddy_speech(&state).await;
         assert_eq!(state.captions.lock().await.speech_started_at, grant);
-        retire_golem_speech(&state).await;
+        retire_buddy_speech(&state).await;
         assert!(state.request_process_shutdown());
-        grant_golem_speech(&state).await;
-        assert_eq!(session.admitted_golem_audio().await.speech_epoch, None);
+        grant_buddy_speech(&state).await;
+        assert_eq!(session.admitted_buddy_audio().await.speech_epoch, None);
         assert_eq!(state.captions.lock().await.speech_started_at, None);
     }
 
@@ -13658,7 +13658,7 @@ mod tests {
             socket_audio_base_ms: 0.0,
             ms_sent: 3_000.0,
             capture_epoch: 0,
-            admission: session.admitted_golem_audio().await,
+            admission: session.admitted_buddy_audio().await,
         };
         handle_realtime_event(
             &session,
@@ -13759,7 +13759,7 @@ mod tests {
                 .is_empty()
         );
         let mut fresh = stamped_chunk(4, 9.0);
-        fresh.admission = session.admitted_golem_audio().await;
+        fresh.admission = session.admitted_buddy_audio().await;
         commit_chunk_transcript(
             &session,
             &fresh,
@@ -13820,10 +13820,10 @@ mod tests {
         // Sign-out retires this independent owner; sign-in restores speech
         // for a consenting session even while Listen remains off.
         let before_sign_in = fresh.admission;
-        retire_golem_speech(&state).await;
-        assert_eq!(session.admitted_golem_audio().await.speech_epoch, None);
+        retire_buddy_speech(&state).await;
+        assert_eq!(session.admitted_buddy_audio().await.speech_epoch, None);
         crate::cohost::resume_listen_after_sign_in(&state).await;
-        let resumed = session.admitted_golem_audio().await;
+        let resumed = session.admitted_buddy_audio().await;
         assert!(resumed.speech_epoch.is_some());
         assert_ne!(resumed.speech_epoch, before_sign_in.speech_epoch);
         assert_eq!(resumed.listen_epoch, None);
@@ -13859,7 +13859,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let with_listen = session.admitted_golem_audio().await;
+        let with_listen = session.admitted_buddy_audio().await;
         let mut buffer = CaptionChunkBuffer::new(4, 8);
         let mut chunk_timeline = CaptionTimeline::new(12.0);
         buffer.push_samples(vec![1; 2], 0, with_listen, &sequence, &mut chunk_timeline);
@@ -13872,7 +13872,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let without_listen = session.admitted_golem_audio().await;
+        let without_listen = session.admitted_buddy_audio().await;
         assert_eq!(with_listen.speech_epoch, without_listen.speech_epoch);
         assert_eq!(state.captions.lock().await.speech_started_at, speech_grant);
         buffer.push_samples(
@@ -13971,7 +13971,7 @@ mod tests {
             crate::cohost::recent_speech_since(&state, None)
                 .is_none_or(|speech| speech.finals.is_empty())
         );
-        let replacement_owner = session.admitted_golem_audio().await;
+        let replacement_owner = session.admitted_buddy_audio().await;
         let delivery = state.live_chat_persistence.begin_delivery().await;
         crate::cohost::stop_cohost_for_session_end_if_matching_before_emit(
             &state,
@@ -13980,7 +13980,7 @@ mod tests {
             std::future::ready(()),
         )
         .await;
-        assert_eq!(session.admitted_golem_audio().await, replacement_owner);
+        assert_eq!(session.admitted_buddy_audio().await, replacement_owner);
         crate::cohost::stop_cohost_for_session_end_if_matching_before_emit(
             &state,
             "replacement-consent",
@@ -14005,7 +14005,7 @@ mod tests {
         crate::cohost::start_cohost(&state, replacement)
             .await
             .unwrap();
-        replacement_chunk.admission = session.admitted_golem_audio().await;
+        replacement_chunk.admission = session.admitted_buddy_audio().await;
         crate::cohost::set_cohost_settings(
             &state,
             crate::protocol::CohostSettingsPatch {
@@ -14040,7 +14040,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admitted_speech_cannot_join_golem_after_revoke_and_regrant() {
+    async fn admitted_speech_cannot_join_buddy_after_revoke_and_regrant() {
         let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
         let state = test_caption_app_state();
         install_intent_test_task(&state, true, false).await;
@@ -14072,7 +14072,7 @@ mod tests {
             session_id: "immutable-recording".into(),
             records_to_file: false,
         });
-        let old_epoch = session.admitted_golem_audio().await;
+        let old_epoch = session.admitted_buddy_audio().await;
         let (queued_tx, queued_rx) = mpsc::channel(2);
         session.receiver = queued_rx;
         let raw_frame = |captured_at| AudioFrame {
@@ -14125,8 +14125,8 @@ mod tests {
         )
         .await
         .unwrap();
-        let revoked_epoch = session.admitted_golem_audio().await;
-        assert_eq!(revoked_epoch, AdmittedGolemAudio::default());
+        let revoked_epoch = session.admitted_buddy_audio().await;
+        assert_eq!(revoked_epoch, AdmittedBuddyAudio::default());
         queued_tx
             .send(raw_frame(std::time::Instant::now()))
             .await
@@ -14137,7 +14137,7 @@ mod tests {
         buffer.push_samples(vec![2; 4], 0, revoked_epoch, &sequence, &mut chunk_timeline);
         audio_epochs.record(30_000.0, revoked_epoch);
         crate::cohost::start_cohost(&state, params).await.unwrap();
-        let granted_epoch = session.admitted_golem_audio().await;
+        let granted_epoch = session.admitted_buddy_audio().await;
         assert_ne!(granted_epoch, old_epoch);
         assert_eq!(
             state.captions.lock().await.task.as_ref().unwrap().id(),
@@ -14149,18 +14149,18 @@ mod tests {
         for _ in 0..2 {
             let queued = session.receiver.recv().await.unwrap();
             assert_eq!(
-                session.admitted_golem_audio_for_frame(&queued).await,
-                AdmittedGolemAudio::default()
+                session.admitted_buddy_audio_for_frame(&queued).await,
+                AdmittedBuddyAudio::default()
             );
         }
         let crossing = raw_frame(grant_time + std::time::Duration::from_millis(10));
         assert_eq!(
-            session.admitted_golem_audio_for_frame(&crossing).await,
-            AdmittedGolemAudio::default()
+            session.admitted_buddy_audio_for_frame(&crossing).await,
+            AdmittedBuddyAudio::default()
         );
         let fresh = raw_frame(grant_time + std::time::Duration::from_millis(40));
         assert_eq!(
-            session.admitted_golem_audio_for_frame(&fresh).await,
+            session.admitted_buddy_audio_for_frame(&fresh).await,
             granted_epoch
         );
         // Joining/resuming the same intent preserves its capture-time boundary.
@@ -14179,8 +14179,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 old_epoch,
-                AdmittedGolemAudio::default(),
-                AdmittedGolemAudio::default()
+                AdmittedBuddyAudio::default(),
+                AdmittedBuddyAudio::default()
             ]
         );
         for (chunk, text) in chunks.iter().zip([
@@ -14209,7 +14209,7 @@ mod tests {
             audio_start_ms: Some(40_000.0),
         };
         let epoch = audio_epochs.for_event(&revoked_started, &items, old_epoch);
-        assert_eq!(epoch, AdmittedGolemAudio::default());
+        assert_eq!(epoch, AdmittedBuddyAudio::default());
         handle_realtime_event(
             &session,
             revoked_started,

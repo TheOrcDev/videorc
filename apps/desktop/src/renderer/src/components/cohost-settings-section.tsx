@@ -17,7 +17,7 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { setCohostSensitivity, useCohostSensitivity } from '@/hooks/use-cohost-sensitivity'
 import { useStudioChat, useStudioCore } from '@/hooks/use-studio'
 import type { CohostAutoChat, CohostSettings, CohostSettingsPatch, CohostTone } from '@/lib/backend'
-import { GOLEM_POSTS_PROMISE } from '@/lib/golem-auto-chat-view'
+import { BUDDY_POSTS_PROMISE } from '@/lib/buddy-auto-chat-view'
 import {
   COHOST_LISTEN_CONSENT_SENTENCE,
   COHOST_SENSITIVITIES,
@@ -160,7 +160,7 @@ export function CohostListenField({
  * Replies (plan 150, Chat tab): how Golem drafts the replies you approve, and
  * the facts it answers from.
  */
-export function GolemRepliesSection({
+export function BuddyRepliesSection({
   locked: lockedByTab = false
 }: {
   /** Golem Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
@@ -352,7 +352,7 @@ function cooldownLabel(seconds: number): string {
  * Moderation (plan 150, Chat tab): what Golem flags for you and what it may
  * put on stream. It posts only in the modes you turn on (plan 164 D4).
  */
-export function GolemModerationSection({
+export function BuddyModerationSection({
   locked: lockedByTab = false
 }: {
   /** Golem Live's unlock reason shows above: everything here is disabled (plan 150, D7). */
@@ -375,7 +375,7 @@ export function GolemModerationSection({
   }
   return (
     <PanelSection
-      description={`What Golem flags for you, and what it may put on stream. ${GOLEM_POSTS_PROMISE}`}
+      description={`What Golem flags for you, and what it may put on stream. ${BUDDY_POSTS_PROMISE}`}
       title="Moderation"
     >
       <FieldGroup variant="grouped">

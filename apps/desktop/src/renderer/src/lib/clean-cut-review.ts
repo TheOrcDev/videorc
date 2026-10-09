@@ -10,7 +10,7 @@ import type {
   CleanCutTranscriptSegment,
   CleanCutTranscriptWord
 } from './clean-cut-view'
-import { momentKind, momentLabel } from './golem-report-view'
+import { momentKind, momentLabel } from './buddy-report-view'
 import { keptDurationMs, type SkipRange } from './skip-ranges'
 
 // Clean cut review (plan 119 S14, S19): what the player skips, what the

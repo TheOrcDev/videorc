@@ -41,7 +41,7 @@ import { Kbd } from '@/components/ui/kbd'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type { CleanCutClient } from '@/hooks/use-clean-cut'
-import { useGolemReport } from '@/hooks/use-golem-report'
+import { useBuddyReport } from '@/hooks/use-buddy-report'
 import { useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
 import type { ClipMomentSource, CleanCutEdl, CleanCutJob, CleanCutMode } from '@/lib/backend'
 import {
@@ -258,7 +258,7 @@ export function CleanCutReview({
     () => new Map(effective.map((removal) => [removal.id, removal])),
     [effective]
   )
-  const report = useGolemReport(target.sessionId)
+  const report = useBuddyReport(target.sessionId)
   const pins = useMemo(() => cleanCutPins(report.payload?.moments), [report.payload])
   const condensedMode = data?.job.mode === 'condensed'
   const durationMs = data?.edl.durationMs ?? 0

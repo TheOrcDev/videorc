@@ -19,7 +19,7 @@ import type { ComponentType, SVGProps } from 'react'
 
 import type * as PhosphorIcons from '@phosphor-icons/react'
 
-import golemEmblemUrl from '../assets/golem/golem-emblem-64.webp'
+import buddyEmblemUrl from '../assets/buddy/buddy-emblem-64.webp'
 import {
   YOUTUBE_ARTBOARD,
   YOUTUBE_ICON_URL,
@@ -146,7 +146,7 @@ type _RegistryIconProps = _AssertIconProps<
  * Navigation — one slot per sidebar destination. These are the icons the
  * 2026-08-25 semantic audit reviews first: several are placeholders inherited
  * from the pre-audit set (see the audit table in the Nucleo plan). The Golem
- * tab's slot is `GolemIcon`, the Golem emblem, below.
+ * tab's slot is `BuddyIcon`, the Golem emblem, below.
  */
 export {
   VideoCamera as StudioIcon,
@@ -259,7 +259,7 @@ export {
 } from '@phosphor-icons/react'
 /**
  * AI, tooling and appearance. Golem (code name `cohost`) has its own mark,
- * the real Golem artwork: `GolemIcon` below at icon size, `GolemEmblem` larger.
+ * the real Golem artwork: `BuddyIcon` below at icon size, `BuddyEmblem` larger.
  */
 export {
   Brain as BrainIcon,
@@ -293,7 +293,7 @@ export { YOUTUBE_MARK_ASPECT, YOUTUBE_MARK_MIN_PX }
  * YouTube's mark (plan 165): the official full-colour icon from YouTube's
  * brand site, unmodified (`assets/brand/youtube/`), never a redrawn glyph.
  *
- * Like `GolemIcon` it is an `<svg>` around an `<image>`, so `currentColor`,
+ * Like `BuddyIcon` it is an `<svg>` around an `<image>`, so `currentColor`,
  * tint classes and hover recolours cannot reach the artwork: the red and the
  * white triangle are YouTube's. Its height is the `size` prop, clamped to at
  * least YOUTUBE_MARK_MIN_PX, and its width follows the mark's aspect. The
@@ -372,7 +372,7 @@ export const KickIcon: AppIcon = ({ size, weight: _weight, children, ...props })
 
 /**
  * Golem's mark (plans 149 and 164): the owner's stone golem, the full-colour
- * artwork in `assets/brand/golem/`, at icon size. The owner's call: it appears
+ * artwork in `assets/brand/buddy/`, at icon size. The owner's call: it appears
  * as its actual image everywhere, the sidebar, the Stream Manager, the Studio
  * session row, popovers and menus, never as a redrawn glyph.
  *
@@ -385,16 +385,16 @@ export const KickIcon: AppIcon = ({ size, weight: _weight, children, ...props })
  * It is the one full-colour icon in the registry. `weight` is accepted and
  * ignored, and `currentColor` never tints it: the red iris is the brand.
  */
-export const GolemIcon: AppIcon = ({ size, weight: _weight, children, ...props }) => (
+export const BuddyIcon: AppIcon = ({ size, weight: _weight, children, ...props }) => (
   <svg
     xmlns="http://www.w3.org/2000/svg"
     viewBox="0 0 256 256"
     width={size ?? '1em'}
     height={size ?? '1em'}
-    data-slot="golem-icon"
+    data-slot="buddy-icon"
     {...props}
   >
     {children}
-    <image href={golemEmblemUrl} width="256" height="256" preserveAspectRatio="xMidYMid meet" />
+    <image href={buddyEmblemUrl} width="256" height="256" preserveAspectRatio="xMidYMid meet" />
   </svg>
 )

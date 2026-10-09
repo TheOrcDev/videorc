@@ -27,7 +27,7 @@ export const COMPACT_LABEL = '@max-[799px]/stream-manager:sr-only'
 export const PANES_GRID =
   'grid min-h-0 flex-1 grid-cols-1 grid-rows-[auto_minmax(0,1fr)] @min-[1040px]/stream-manager:grid-cols-[minmax(0,1fr)_clamp(340px,34%,440px)]'
 
-export type StreamManagerPane = 'chat' | 'activity' | 'golem'
+export type StreamManagerPane = 'chat' | 'activity' | 'buddy'
 export type StreamManagerRightPane = Exclude<StreamManagerPane, 'chat'>
 
 /**

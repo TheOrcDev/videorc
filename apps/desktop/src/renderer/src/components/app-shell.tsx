@@ -32,13 +32,13 @@ import {
   type CleanCutTabRequest
 } from '@/lib/clean-cut-events'
 import { displayKeyGlyph } from '@/lib/platform'
-import { openGolemPetCreator } from '@/lib/golem-pet-creator-nav'
+import { openBuddyPetCreator } from '@/lib/buddy-pet-creator-nav'
 import {
-  isGolemTabId,
-  readLastGolemTab,
-  writeLastGolemTab,
-  type GolemTabId
-} from '@/lib/golem-tabs'
+  isBuddyTabId,
+  readLastBuddyTab,
+  writeLastBuddyTab,
+  type BuddyTabId
+} from '@/lib/buddy-tabs'
 import {
   isSettingsTabId,
   readLastSettingsTab,
@@ -73,8 +73,8 @@ const LayoutTab = lazy(async () => ({ default: (await loadLayoutTab()).LayoutTab
 const LibraryTab = lazy(async () => ({
   default: (await import('@/components/tabs/library-tab')).LibraryTab
 }))
-const GolemTab = lazy(async () => ({
-  default: (await import('@/components/tabs/golem-tab')).GolemTab
+const BuddyTab = lazy(async () => ({
+  default: (await import('@/components/tabs/buddy-tab')).BuddyTab
 }))
 const RecordingTab = lazy(async () => ({
   default: (await import('@/components/tabs/recording-tab')).RecordingTab
@@ -182,7 +182,7 @@ export function AppShell(): ReactElement {
   // Library's "Golem report" opens the Golem tab on one session's report (plan
   // 119 S3). Any other way to a page drops that ask, so the next visit to
   // Golem shows the last stream again.
-  const [golemReportSessionId, setGolemReportSessionId] = useState<string | null>(null)
+  const [buddyReportSessionId, setBuddyReportSessionId] = useState<string | null>(null)
   // Clean cut (plan 119 S14): Library's "Clean cut" selects a recording in
   // the Golem tab, and the ready toast opens a cut's review there. The card's
   // "Open in Library" focuses the cut copy's row. Like the report ask, any
@@ -192,47 +192,47 @@ export function AppShell(): ReactElement {
   const cleanCutNonceRef = useRef(0)
   // Plan 150: Golem reopens on its tab used last, like Settings; the
   // Library's report and clean-cut asks select the tab that answers them.
-  const [golemTab, setGolemTab] = useState<GolemTabId>(readLastGolemTab)
-  const selectGolemTab = useCallback((tab: GolemTabId) => {
-    setGolemTab(tab)
-    writeLastGolemTab(tab)
+  const [buddyTab, setBuddyTab] = useState<BuddyTabId>(readLastBuddyTab)
+  const selectBuddyTab = useCallback((tab: BuddyTabId) => {
+    setBuddyTab(tab)
+    writeLastBuddyTab(tab)
   }, [])
   const setActive = useCallback((tab: WorkspaceTab) => {
-    setGolemReportSessionId(null)
+    setBuddyReportSessionId(null)
     setCleanCutRequest(null)
     setLibraryFocusSessionId(null)
     setActiveTab(tab)
   }, [])
-  const openGolemReport = useCallback(
+  const openBuddyReport = useCallback(
     (sessionId: string) => {
       setCleanCutRequest(null)
-      setGolemReportSessionId(sessionId)
-      selectGolemTab('reports')
+      setBuddyReportSessionId(sessionId)
+      selectBuddyTab('reports')
       setActiveTab('ai')
     },
-    [selectGolemTab]
+    [selectBuddyTab]
   )
   const openCleanCut = useCallback(
     (request: CleanCutOpenRequest) => {
       cleanCutNonceRef.current += 1
-      setGolemReportSessionId(null)
+      setBuddyReportSessionId(null)
       setCleanCutRequest({ ...request, nonce: cleanCutNonceRef.current })
-      selectGolemTab('clean-cut')
+      selectBuddyTab('clean-cut')
       setActiveTab('ai')
     },
-    [selectGolemTab]
+    [selectBuddyTab]
   )
-  const openGolem = useCallback(
-    (tab?: GolemTabId) => {
+  const openBuddy = useCallback(
+    (tab?: BuddyTabId) => {
       if (tab) {
-        selectGolemTab(tab)
+        selectBuddyTab(tab)
       }
       setActive('ai')
     },
-    [selectGolemTab, setActive]
+    [selectBuddyTab, setActive]
   )
   const openLibrarySession = useCallback((sessionId: string) => {
-    setGolemReportSessionId(null)
+    setBuddyReportSessionId(null)
     setCleanCutRequest(null)
     setLibraryFocusSessionId(sessionId)
     setActiveTab('library')
@@ -373,31 +373,31 @@ export function AppShell(): ReactElement {
   useEffect(() => {
     const onWorkspaceNavigate = (event: Event): void => {
       const detail = (
-        event as CustomEvent<{ tab?: unknown; settingsTab?: unknown; golemTab?: unknown }>
+        event as CustomEvent<{ tab?: unknown; settingsTab?: unknown; buddyTab?: unknown }>
       ).detail
       const tab = detail?.tab
       if (tab === 'settings') {
         openSettings(isSettingsTabId(detail?.settingsTab) ? detail.settingsTab : undefined)
       } else if (tab === 'ai') {
-        openGolem(isGolemTabId(detail?.golemTab) ? detail.golemTab : undefined)
+        openBuddy(isBuddyTabId(detail?.buddyTab) ? detail.buddyTab : undefined)
       } else if (isWorkspaceTab(tab)) {
         setActive(tab)
       }
     }
     window.addEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
     return () => window.removeEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
-  }, [openGolem, openSettings, setActive])
+  }, [openBuddy, openSettings, setActive])
 
-  // Plan 170 D18: `videorc://golem` opens the Golem tab (main focused the
+  // Plan 170 D18: `videorc://buddy` opens the Golem tab (main focused the
   // window and synced the library); Make it Alive also opens the creator
   // once main saw the avatar worn.
   useEffect(() => {
-    const off = window.videorc?.onGolemDeepLink?.((navigation) => {
-      openGolem('live')
-      if (navigation.openCreator) openGolemPetCreator({ reference: 'persona-idle' })
+    const off = window.videorc?.onBuddyDeepLink?.((navigation) => {
+      openBuddy('live')
+      if (navigation.openCreator) openBuddyPetCreator({ reference: 'persona-idle' })
     })
     return off
-  }, [openGolem])
+  }, [openBuddy])
 
   useEffect(() => {
     const onOpenCleanCut = (event: Event): void => {
@@ -429,7 +429,7 @@ export function AppShell(): ReactElement {
         openStudioPanel,
         closeStudioPanel,
         openSettings,
-        openGolem
+        openBuddy
       }}
     >
       {/* The window family's shell (plan 050, D4): the sidebar sits on the
@@ -475,16 +475,16 @@ export function AppShell(): ReactElement {
                     <LibraryTab
                       focusSessionId={libraryFocusSessionId}
                       onOpenCleanCut={(sessionId) => openCleanCut({ sessionId })}
-                      onOpenGolemReport={openGolemReport}
+                      onOpenBuddyReport={openBuddyReport}
                     />
                   ) : null}
                   {active === 'ai' ? (
-                    <GolemTab
+                    <BuddyTab
                       cleanCutRequest={cleanCutRequest}
-                      reportSessionId={golemReportSessionId}
-                      tab={golemTab}
+                      reportSessionId={buddyReportSessionId}
+                      tab={buddyTab}
                       onOpenLibrarySession={openLibrarySession}
-                      onTabChange={selectGolemTab}
+                      onTabChange={selectBuddyTab}
                     />
                   ) : null}
                   {active === 'diagnostics' ? <DiagnosticsTab /> : null}

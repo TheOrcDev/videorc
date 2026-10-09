@@ -55,10 +55,10 @@ import {
 } from './chat-avatar-bytes'
 import { TWITCH_GIF_MODES, twitchGifAssetUrl, type TwitchGifMode } from './chat-gif'
 import {
-  GOLEM_IMAGE_MAX_BYTES,
-  GOLEM_PET_FILE_MAX_BYTES,
-  GOLEM_PET_SKIPPED_FILES_MAX
-} from './golem-assets'
+  BUDDY_IMAGE_MAX_BYTES,
+  BUDDY_PET_FILE_MAX_BYTES,
+  BUDDY_PET_SKIPPED_FILES_MAX
+} from './buddy-assets'
 import { openableChatLink } from './chat-link'
 import { SCOPE_RECONNECT_PLATFORMS } from './platform-scopes'
 import { MAX_RELAYED_MODERATION_OPERATIONS, MODERATION_PHASES } from './chat-moderation'
@@ -99,11 +99,11 @@ export const electronInvokeApiMethods = {
   'screens:pick-image': 'pickScreenImage',
   'backgrounds:import-image': 'importBackgroundImage',
   'scheduled-streams:import-thumbnail': 'importScheduledThumbnail',
-  'golem-assets:remove': 'removeGolemPersona',
-  'golem-assets:read-image': 'readGolemImage',
-  'golem-pets:read': 'readGolemPetFile',
-  'golem-pets:import-folder': 'importGolemPetFolder',
-  'golem-pets:read-creation': 'readGolemCreationFile',
+  'buddy-assets:remove': 'removeBuddyPersona',
+  'buddy-assets:read-image': 'readBuddyImage',
+  'buddy-pets:read': 'readBuddyPetFile',
+  'buddy-pets:import-folder': 'importBuddyPetFolder',
+  'buddy-pets:read-creation': 'readBuddyCreationFile',
   'backgrounds:asset-exists': 'backgroundAssetExists',
   'backgrounds:bundled-assets': 'getBundledBackgroundAssets',
   'avatars:cache': 'cacheChatAvatar',
@@ -238,8 +238,8 @@ export type ElectronInvokeResult<TChannel extends ElectronInvokeChannel> =
  * app unfocused — Stream Deck's native Hotkey action drives these). */
 export type { GlobalShortcutAction } from './global-shortcuts'
 
-/** Plan 170 D18: what a `videorc://golem` link asks the main window to show. */
-export interface GolemDeepLinkNavigation {
+/** Plan 170 D18: what a `videorc://buddy` link asks the main window to show. */
+export interface BuddyDeepLinkNavigation {
   openCreator: boolean
 }
 
@@ -275,7 +275,7 @@ export interface ElectronIpcEventMap {
   'captions-window:lines': CaptionsUpdate[]
   'oauth:callback-url': OAuthCallbackEnvelope
   'shortcut:navigate': string
-  'golem:deep-link': GolemDeepLinkNavigation
+  'buddy:deep-link': BuddyDeepLinkNavigation
   'shortcut:modifier': boolean
   'window:visible': boolean
   'global-shortcuts:triggered': GlobalShortcutAction
@@ -320,7 +320,7 @@ export const electronEventChannels = [
   'captions-window:lines',
   'oauth:callback-url',
   'shortcut:navigate',
-  'golem:deep-link',
+  'buddy:deep-link',
   'shortcut:modifier',
   'window:visible',
   'global-shortcuts:triggered',
@@ -478,18 +478,18 @@ const chatAvatarBytesSchema = runtimeSchema<Uint8Array | null>(
 /** One persona image as bytes (plan 164 S-C2): the Studio renderer decodes
  * it for the Golem overlay raster, as the highlight card does with avatars.
  * Null when the path names no stored file; never over the 4 MB import cap. */
-const golemImageBytesSchema = runtimeSchema<Uint8Array | null>(
-  `null or image bytes of at most ${GOLEM_IMAGE_MAX_BYTES} bytes`,
+const buddyImageBytesSchema = runtimeSchema<Uint8Array | null>(
+  `null or image bytes of at most ${BUDDY_IMAGE_MAX_BYTES} bytes`,
   (value, path) => {
     if (value === null) return null
     if (
       !(value instanceof Uint8Array) ||
       value.byteLength === 0 ||
-      value.byteLength > GOLEM_IMAGE_MAX_BYTES
+      value.byteLength > BUDDY_IMAGE_MAX_BYTES
     ) {
       throw new RuntimeSchemaError(
         path,
-        `null or image bytes of at most ${GOLEM_IMAGE_MAX_BYTES} bytes`
+        `null or image bytes of at most ${BUDDY_IMAGE_MAX_BYTES} bytes`
       )
     }
     return value
@@ -497,18 +497,18 @@ const golemImageBytesSchema = runtimeSchema<Uint8Array | null>(
 )
 /** One pet pack file as bytes (plan 168): the renderer preview decodes it.
  * Null when the pack has no such file; never over page-pet's 32 MB cap. */
-const golemPetFileBytesSchema = runtimeSchema<Uint8Array | null>(
-  `null or pack file bytes of at most ${GOLEM_PET_FILE_MAX_BYTES} bytes`,
+const buddyPetFileBytesSchema = runtimeSchema<Uint8Array | null>(
+  `null or pack file bytes of at most ${BUDDY_PET_FILE_MAX_BYTES} bytes`,
   (value, path) => {
     if (value === null) return null
     if (
       !(value instanceof Uint8Array) ||
       value.byteLength === 0 ||
-      value.byteLength > GOLEM_PET_FILE_MAX_BYTES
+      value.byteLength > BUDDY_PET_FILE_MAX_BYTES
     ) {
       throw new RuntimeSchemaError(
         path,
-        `null or pack file bytes of at most ${GOLEM_PET_FILE_MAX_BYTES} bytes`
+        `null or pack file bytes of at most ${BUDDY_PET_FILE_MAX_BYTES} bytes`
       )
     }
     return value
@@ -1387,17 +1387,17 @@ const specificRuntimeInvokeContracts = {
   'resource:trash-session-deletion': invokeContract(tupleSchema([boundedIdentifier])),
   'system:check-directory': invokeContract(tupleSchema([boundedIdentifier])),
   'backgrounds:asset-exists': invokeContract(tupleSchema([boundedIdentifier])),
-  'golem-assets:remove': invokeContract(
+  'buddy-assets:remove': invokeContract(
     tupleSchema([stringSchema({ minLength: 1, maxLength: 128 })]),
     undefinedSchema
   ),
-  'golem-assets:read-image': invokeContract(
+  'buddy-assets:read-image': invokeContract(
     tupleSchema([stringSchema({ minLength: 1, maxLength: 256 })]),
-    golemImageBytesSchema
+    buddyImageBytesSchema
   ),
   // Plan 168 S-A3: a plain persona id in; the stored pack's summary and the
   // names of the files that were not copied out, or null when cancelled.
-  'golem-pets:import-folder': invokeContract(
+  'buddy-pets:import-folder': invokeContract(
     tupleSchema([stringSchema({ minLength: 1, maxLength: 128 })]),
     nullableSchema(
       objectSchema(
@@ -1417,7 +1417,7 @@ const specificRuntimeInvokeContracts = {
             { allowUnknown: false }
           ),
           skippedFiles: arraySchema(stringSchema({ minLength: 1, maxLength: 512 }), {
-            maxLength: GOLEM_PET_SKIPPED_FILES_MAX
+            maxLength: BUDDY_PET_SKIPPED_FILES_MAX
           })
         },
         { allowUnknown: false }
@@ -1426,23 +1426,23 @@ const specificRuntimeInvokeContracts = {
   ),
   // Plan 168: persona id, pack id (uuid or `bundled:<name>`), and a file
   // relative to the pack folder; main checks each against the store rules.
-  'golem-pets:read': invokeContract(
+  'buddy-pets:read': invokeContract(
     tupleSchema([
       stringSchema({ minLength: 1, maxLength: 128 }),
       stringSchema({ minLength: 1, maxLength: 64 }),
       stringSchema({ minLength: 1, maxLength: 128 })
     ]),
-    golemPetFileBytesSchema
+    buddyPetFileBytesSchema
   ),
   // Plan 168 S-F5: persona id, creation id (a uuid) and a creation file
   // (`sources/<sheet>-v<n>.png`, `pack/mascot.webp`, `pack/manifest.json`).
-  'golem-pets:read-creation': invokeContract(
+  'buddy-pets:read-creation': invokeContract(
     tupleSchema([
       stringSchema({ minLength: 1, maxLength: 128 }),
       stringSchema({ minLength: 1, maxLength: 64 }),
       stringSchema({ minLength: 1, maxLength: 128 })
     ]),
-    golemPetFileBytesSchema
+    buddyPetFileBytesSchema
   ),
   'avatars:read': invokeContract(tupleSchema([boundedIdentifier]), chatAvatarBytesSchema),
   'global-shortcuts:set': invokeContract(tupleSchema([globalShortcutsSchema])),
@@ -1600,9 +1600,9 @@ const specificRuntimeEventSchemas = {
   'notes-window:flush-request': undefinedSchema,
   'oauth:callback-url': oauthCallbackEnvelopeSchema,
   'shortcut:navigate': enumSchema(['1', '2', '3', '4', '5', '6', '7', '8', '9', ',']),
-  // Plan 170 D18: `videorc://golem` opens the Golem tab; `openCreator` also
+  // Plan 170 D18: `videorc://buddy` opens the Golem tab; `openCreator` also
   // opens the creator once the "Make it Alive" avatar is worn.
-  'golem:deep-link': objectSchema({ openCreator: booleanSchema }, { allowUnknown: false }),
+  'buddy:deep-link': objectSchema({ openCreator: booleanSchema }, { allowUnknown: false }),
   // Whether the command modifier is physically down. Main is the only place
   // that can know: it intercepts ⌘1–⌘9 in before-input-event, so the renderer
   // never receives those chords — nor, in practice, the keyup that ends them.

@@ -2384,7 +2384,7 @@ describe('backend RPC contract', () => {
       ...base,
       command: {
         id: 'cmd-2',
-        heard: 'golem highlight the comment from coders',
+        heard: 'buddy highlight the comment from coders',
         kind: 'highlight',
         status: 'ambiguous',
         message: "Which comment? Say 'the first one' or press 1 or 2.",

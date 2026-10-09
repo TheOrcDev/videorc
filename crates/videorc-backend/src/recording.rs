@@ -3669,7 +3669,7 @@ async fn start_session_with_timeline(
     let _ = crate::comment_highlight::clear_comment_highlight_for_session_start(&state).await;
     // The Golem's bubble too (plan 164): the avatar stays (its raster is the
     // renderer's, re-pushed for this session's canvases), the words do not.
-    let _ = crate::golem_overlay::clear(&state).await;
+    let _ = crate::buddy_overlay::clear(&state).await;
     // Burn-in needs the synthetic compositor (encoder-bridge path) and, for a
     // split-leg plan, an auxiliary render. Outside those shapes the captions
     // stay UI-only — say so instead of silently skipping pixels.
@@ -3840,17 +3840,17 @@ async fn start_session_with_timeline(
                 let overlays = WindowsD3d11OverlayInput {
                     captions: state.caption_overlay.clone(),
                     highlight: state.highlight_overlay.clone(),
-                    golem: state.golem_overlay.clone(),
-                    golem_sprite: state.golem_sprite.clone(),
+                    buddy: state.buddy_overlay.clone(),
+                    buddy_sprite: state.buddy_sprite.clone(),
                     caption_on_primary: session_caption_plan.primary,
                     caption_on_auxiliary: session_caption_plan.aux,
                     highlight_on_primary,
                     highlight_on_auxiliary,
-                    golem_on_primary: d3d11_overlay_plans.golem.primary,
-                    golem_on_auxiliary: d3d11_overlay_plans.golem.aux,
+                    buddy_on_primary: d3d11_overlay_plans.buddy.primary,
+                    buddy_on_auxiliary: d3d11_overlay_plans.buddy.aux,
                 };
-                state.golem_sprite.prepare(&golem_sprite_legs(
-                    d3d11_overlay_plans.golem,
+                state.buddy_sprite.prepare(&buddy_sprite_legs(
+                    d3d11_overlay_plans.buddy,
                     (plan.primary.width, plan.primary.height),
                     plan.auxiliary.map(|video| (video.width, video.height)),
                 ));
@@ -4137,8 +4137,8 @@ async fn start_session_with_timeline(
     // Plan 168 S-B1: the pet's atlases start building now (off this task),
     // so the session's first frame already has the Golem.
     if use_encoder_bridge {
-        state.golem_sprite.prepare(&golem_sprite_legs(
-            overlay_plans.golem,
+        state.buddy_sprite.prepare(&buddy_sprite_legs(
+            overlay_plans.buddy,
             (params.output.video.width, params.output.video.height),
             encoder_bridge_stream_output
                 .as_ref()
@@ -4155,8 +4155,8 @@ async fn start_session_with_timeline(
             session = %session_id,
             primary = highlight_overlay_plan.0,
             aux = highlight_overlay_plan.1,
-            golem_primary = overlay_plans.golem.primary,
-            golem_aux = overlay_plans.golem.aux,
+            buddy_primary = overlay_plans.buddy.primary,
+            buddy_aux = overlay_plans.buddy.aux,
             // S-B2.2: any item (not only captions) whose switches disagree
             // on a shared leg asks for the split; the topology decides.
             needs_split = crate::overlay_layout::overlay_layout_needs_split(
@@ -4204,8 +4204,8 @@ async fn start_session_with_timeline(
         && !session_caption_plan.aux
         && !highlight_overlay_plan.0
         && !highlight_overlay_plan.1
-        && !overlay_plans.golem.primary
-        && !overlay_plans.golem.aux
+        && !overlay_plans.buddy.primary
+        && !overlay_plans.buddy.aux
     {
         let camera_overlay = if matches!(params.layout.layout_preset, LayoutPreset::ScreenCamera) {
             let scene = scene_from_capture_config(SceneConfigParams {
@@ -4353,8 +4353,8 @@ async fn start_session_with_timeline(
                         caption_overlay_on_aux: session_caption_plan.aux,
                         highlight_overlay_on_primary: highlight_overlay_plan.0,
                         highlight_overlay_on_aux: highlight_overlay_plan.1,
-                        golem_overlay_on_primary: overlay_plans.golem.primary,
-                        golem_overlay_on_aux: overlay_plans.golem.aux,
+                        buddy_overlay_on_primary: overlay_plans.buddy.primary,
+                        buddy_overlay_on_aux: overlay_plans.buddy.aux,
                     },
                 )
                 .await
@@ -4414,8 +4414,8 @@ async fn start_session_with_timeline(
                         caption_overlay_on_aux: session_caption_plan.aux,
                         highlight_overlay_on_primary: highlight_overlay_plan.0,
                         highlight_overlay_on_aux: highlight_overlay_plan.1,
-                        golem_overlay_on_primary: overlay_plans.golem.primary,
-                        golem_overlay_on_aux: overlay_plans.golem.aux,
+                        buddy_overlay_on_primary: overlay_plans.buddy.primary,
+                        buddy_overlay_on_aux: overlay_plans.buddy.aux,
                     },
                 )
                 .await;
@@ -20352,8 +20352,8 @@ pub async fn apply_overlay_layout_to_active_session(
         crate::compositor::OverlayLegFlags {
             highlight_on_primary: plans.highlight.primary,
             highlight_on_aux: plans.highlight.aux,
-            golem_on_primary: plans.golem.primary,
-            golem_on_aux: plans.golem.aux,
+            buddy_on_primary: plans.buddy.primary,
+            buddy_on_aux: plans.buddy.aux,
         },
     )
     .await;
@@ -20361,8 +20361,8 @@ pub async fn apply_overlay_layout_to_active_session(
         session = %session_id,
         highlight_primary = plans.highlight.primary,
         highlight_aux = plans.highlight.aux,
-        golem_primary = plans.golem.primary,
-        golem_aux = plans.golem.aux,
+        buddy_primary = plans.buddy.primary,
+        buddy_aux = plans.buddy.aux,
         swapped,
         "overlay layout changed mid-session"
     );
@@ -20383,20 +20383,20 @@ fn comment_highlight_available(use_encoder_bridge: bool, leg_plan: (bool, bool))
 }
 
 /// The legs (and their canvases) the Golem's pet draws on in a session
-/// (plan 168 S-B1), for `GolemSpriteSlot::prepare`.
-fn golem_sprite_legs(
+/// (plan 168 S-B1), for `BuddySpriteSlot::prepare`.
+fn buddy_sprite_legs(
     plan: crate::overlay_layout::OverlayLegPlan,
     primary: (u32, u32),
     auxiliary: Option<(u32, u32)>,
-) -> Vec<(crate::golem_sprite::GolemSpriteLeg, (u32, u32))> {
+) -> Vec<(crate::buddy_sprite::BuddySpriteLeg, (u32, u32))> {
     let mut legs = Vec::with_capacity(2);
     if plan.primary {
-        legs.push((crate::golem_sprite::GolemSpriteLeg::Primary, primary));
+        legs.push((crate::buddy_sprite::BuddySpriteLeg::Primary, primary));
     }
     if plan.aux
         && let Some(auxiliary) = auxiliary
     {
-        legs.push((crate::golem_sprite::GolemSpriteLeg::Auxiliary, auxiliary));
+        legs.push((crate::buddy_sprite::BuddySpriteLeg::Auxiliary, auxiliary));
     }
     legs
 }
@@ -21777,7 +21777,7 @@ async fn publish_stream_target_failure_if_active(
             "stream-target-failed",
             &format!("Streaming to {label} stopped: {reason}"),
         );
-        note_golem_destination_failed(state);
+        note_buddy_destination_failed(state);
         state.emit_event("stream.targets", snapshot);
     }
 }
@@ -22064,7 +22064,7 @@ pub(crate) async fn observe_platform_stream(
         };
         let _ = emit_health_event(state, Some(session_id), level, code, &text);
         if next == StreamTargetState::Failed {
-            note_golem_destination_failed(state);
+            note_buddy_destination_failed(state);
         }
         state.emit_event("stream.targets", snapshot);
     }
@@ -22072,11 +22072,11 @@ pub(crate) async fn observe_platform_stream(
 
 /// Plan 168 D14: a destination failed; the Golem reacts only when the persona
 /// chose a reaction for it (owner default: none).
-fn note_golem_destination_failed(state: &AppState) {
+fn note_buddy_destination_failed(state: &AppState) {
     state
-        .golem_sprite
-        .notify(crate::golem_animator::GolemAnimatorEvent::Trigger {
-            trigger: crate::golem_pet::GolemTrigger::DestinationFailed,
+        .buddy_sprite
+        .notify(crate::buddy_animator::BuddyAnimatorEvent::Trigger {
+            trigger: crate::buddy_pet::BuddyTrigger::DestinationFailed,
             reaction: None,
         });
 }

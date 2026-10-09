@@ -33,7 +33,7 @@ use crate::cohost_command::{
     CommandKind, CommandSession, CommandTarget, DetectContext, DetectedCommand, is_command_word,
 };
 use crate::comment_highlight::{CommentHighlightPhase, CommentHighlightState};
-pub use crate::golem_pet::{GolemAvatar, GolemMotionSettings, GolemTrigger};
+pub use crate::buddy_pet::{BuddyAvatar, BuddyMotionSettings, BuddyTrigger};
 use crate::live_chat::{
     LiveChatEventType, LiveChatMessage, LiveChatMessageFragment, comments_destination_id,
 };
@@ -499,7 +499,7 @@ pub const COHOST_PERSONA_PERSONALITY_MAX_CHARS: usize = 1200;
 pub const COHOST_GREETING_TEMPLATES_MAX: usize = 60;
 pub const COHOST_GREETING_TEXT_MAX_CHARS: usize = 200;
 /// A persona image path is `<personaId>/<state>.<ext>` under the managed
-/// golem-assets root (plan 164 D20); the renderer turns it into a protocol URL.
+/// buddy-assets root (plan 164 D20); the renderer turns it into a protocol URL.
 const COHOST_PERSONA_IMAGE_PATH_MAX_CHARS: usize = 256;
 /// The persona a fresh install has: the bundled default pack under this id.
 pub const COHOST_DEFAULT_PERSONA_ID: &str = "default";
@@ -575,7 +575,7 @@ impl CohostPersonaImages {
 
 /// The user's creature (plan 164): its name, personality and looks. Lives in
 /// `cohostSettings.persona`; the images are relative paths under the managed
-/// golem-assets root, owned by main (uploads) or the backend (generation).
+/// buddy-assets root, owned by main (uploads) or the backend (generation).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostPersona {
@@ -593,14 +593,14 @@ pub struct CohostPersona {
     /// Still or Alive (plan 168 D2). `default` so a row from before plan 168
     /// loads as Still.
     #[serde(default)]
-    pub avatar: GolemAvatar,
+    pub avatar: BuddyAvatar,
     /// How the Golem moves on air (plan 168 D10, D13, D15).
     #[serde(default)]
-    pub motion: GolemMotionSettings,
+    pub motion: BuddyMotionSettings,
     /// Per-trigger reaction overrides (plan 168 D14); a reaction id or
     /// `none`. Absent triggers use D14's defaults.
     #[serde(default)]
-    pub reactions: BTreeMap<GolemTrigger, String>,
+    pub reactions: BTreeMap<BuddyTrigger, String>,
     /// The library avatar this Golem is (plan 170 D12): a user avatar's uuid
     /// or `official:<slug>`. Absent (never null) for a Golem made only on
     /// this computer and for the untouched default; library sync never
@@ -618,8 +618,8 @@ impl Default for CohostPersona {
             bubble_style: CohostBubbleStyle::Speech,
             images: CohostPersonaImages::default(),
             source: CohostPersonaSource::Default,
-            avatar: GolemAvatar::Still,
-            motion: GolemMotionSettings::default(),
+            avatar: BuddyAvatar::Still,
+            motion: BuddyMotionSettings::default(),
             reactions: BTreeMap::new(),
             library_avatar_id: None,
         }
@@ -878,9 +878,9 @@ pub(crate) fn validate_persona(persona: &CohostPersona) -> Result<CohostPersona,
             ));
         }
     }
-    crate::golem_pet::validate_avatar(&valid.avatar)?;
-    crate::golem_pet::validate_motion(&valid.motion)?;
-    crate::golem_pet::validate_reactions(&valid.reactions)?;
+    crate::buddy_pet::validate_avatar(&valid.avatar)?;
+    crate::buddy_pet::validate_motion(&valid.motion)?;
+    crate::buddy_pet::validate_reactions(&valid.reactions)?;
     if valid
         .library_avatar_id
         .as_deref()
@@ -917,7 +917,7 @@ pub(crate) fn validate_auto_chat(auto_chat: &CohostAutoChat) -> Result<CohostAut
         if template
             .reaction
             .as_deref()
-            .is_some_and(|reaction| !crate::golem_pet::reaction_id_ok(reaction))
+            .is_some_and(|reaction| !crate::buddy_pet::reaction_id_ok(reaction))
         {
             return Err(
                 "A greeting's reaction is 1 to 40 lowercase letters, digits or dashes.".to_string(),
@@ -6928,11 +6928,11 @@ impl CohostEngine {
         self.auto_chat.mark(utterance_id, status)
     }
 
-    pub(crate) fn register_golem_operation(&mut self, operation_id: &str) {
+    pub(crate) fn register_buddy_operation(&mut self, operation_id: &str) {
         self.auto_chat.register_operation(operation_id);
     }
 
-    pub(crate) fn is_golem_operation(&self, operation_id: &str) -> bool {
+    pub(crate) fn is_buddy_operation(&self, operation_id: &str) -> bool {
         self.auto_chat.is_own_operation(operation_id)
     }
 
@@ -7023,8 +7023,8 @@ pub(crate) async fn set_tick_capability(state: &AppState, tick: Option<u32>) {
 
 /// Whether a `liveChat.send` operation is the Golem's own (D10): its
 /// delivery never reads as "the streamer replied".
-pub(crate) async fn is_golem_operation(state: &AppState, operation_id: &str) -> bool {
-    state.cohost.lock().await.is_golem_operation(operation_id)
+pub(crate) async fn is_buddy_operation(state: &AppState, operation_id: &str) -> bool {
+    state.cohost.lock().await.is_buddy_operation(operation_id)
 }
 
 /// Act on a lane pass: log its lines, publish proposals, spawn its sends and
@@ -7211,9 +7211,9 @@ async fn send_automatic(state: &AppState, utterance: CohostUtterance) {
     let manual = trigger == CohostUtteranceTriggerKind::Manual;
     // D18: an answer on its way to chat is a pending answer; the Golem may
     // think while it travels (never over a bubble; settled if it fails).
-    if trigger == CohostUtteranceTriggerKind::Answer && crate::golem_overlay::overlay_enabled(state)
+    if trigger == CohostUtteranceTriggerKind::Answer && crate::buddy_overlay::overlay_enabled(state)
     {
-        crate::golem_overlay::think(state).await;
+        crate::buddy_overlay::think(state).await;
     }
     // The mode is the one gate every send passes, decided at send time (D4):
     // Auto for anything automatic, Suggest or Auto for an approved card.
@@ -7280,7 +7280,7 @@ async fn send_automatic(state: &AppState, utterance: CohostUtterance) {
         .cohost
         .lock()
         .await
-        .register_golem_operation(&operation_id);
+        .register_buddy_operation(&operation_id);
     let result = crate::live_chat::send_live_chat_message(
         state,
         crate::live_chat::CommentsSendParams {
@@ -7370,10 +7370,10 @@ async fn send_automatic(state: &AppState, utterance: CohostUtterance) {
                 text: text.clone(),
                 ..utterance.clone()
             };
-            crate::golem_overlay::show_for_utterance(state, &landed).await;
+            crate::buddy_overlay::show_for_utterance(state, &landed).await;
         }
     } else if trigger == CohostUtteranceTriggerKind::Answer {
-        crate::golem_overlay::settle(state).await;
+        crate::buddy_overlay::settle(state).await;
     }
     let post = crate::protocol::CohostReportPost {
         id: utterance.id.clone(),
@@ -7418,7 +7418,7 @@ async fn fail_utterance(
         engine.snapshot()
     };
     if utterance.trigger.kind == CohostUtteranceTriggerKind::Answer {
-        crate::golem_overlay::settle(state).await;
+        crate::buddy_overlay::settle(state).await;
     }
     if let Some(session_id) = state.cohost.lock().await.auto_chat_session_id() {
         let _ = state.database.append_cohost_report_post(
@@ -7537,7 +7537,7 @@ pub async fn say_utterance(
     };
     emit_state(state, &snapshot, &lifecycle_delivery);
     drop(lifecycle_delivery);
-    crate::golem_overlay::show_for_utterance(state, &utterance).await;
+    crate::buddy_overlay::show_for_utterance(state, &utterance).await;
     if send {
         let task_state = state.clone();
         tokio::spawn(async move {
@@ -7574,12 +7574,12 @@ pub(crate) fn note_transcript_final(
     state: &AppState,
     update: &CaptionsUpdate,
     final_: RecentSpeechFinal,
-    golem_owned: bool,
+    buddy_owned: bool,
 ) {
     if final_.text.trim().is_empty() {
         return;
     }
-    if !golem_owned {
+    if !buddy_owned {
         return;
     }
     note_caption_final(state, update);
@@ -7603,7 +7603,7 @@ fn detect_voice_command(
     final_: &RecentSpeechFinal,
 ) -> Option<(CommandSession, DetectedCommand)> {
     // Contract part D: `voiceCommands: false` stops command detection.
-    if !crate::service_flags::golem_voice_commands_enabled(state) {
+    if !crate::service_flags::buddy_voice_commands_enabled(state) {
         return None;
     }
     let mut commands = state.cohost_commands.lock().ok()?;
@@ -7717,8 +7717,8 @@ fn mirror_command_slot(state: &AppState, engine: &CohostEngine) {
 /// The voice-command kill switches as they are now (contract part D).
 fn command_availability_now(state: &AppState) -> Option<CohostCommandAvailability> {
     command_availability(
-        crate::service_flags::golem_voice_commands_enabled(state),
-        crate::service_flags::golem_remove_enabled(state),
+        crate::service_flags::buddy_voice_commands_enabled(state),
+        crate::service_flags::buddy_remove_enabled(state),
     )
 }
 
@@ -7742,8 +7742,8 @@ async fn live_card_message_id(state: &AppState) -> Option<String> {
 async fn command_context(state: &AppState, premium: bool) -> CommandContext {
     CommandContext {
         premium,
-        voice_enabled: crate::service_flags::golem_voice_commands_enabled(state),
-        remove_enabled: crate::service_flags::golem_remove_enabled(state),
+        voice_enabled: crate::service_flags::buddy_voice_commands_enabled(state),
+        remove_enabled: crate::service_flags::buddy_remove_enabled(state),
         on_stream: live_card_message_id(state).await,
         now: Instant::now(),
         now_utc: chrono::Utc::now(),
@@ -7872,7 +7872,7 @@ where
     C: FnOnce(String, CohostCommandRequest) -> F,
     F: std::future::Future<Output = Result<CohostCommandResponse, CohostApiError>>,
 {
-    let voice_enabled = crate::service_flags::golem_voice_commands_enabled(state);
+    let voice_enabled = crate::service_flags::buddy_voice_commands_enabled(state);
     let ready = {
         let engine = state.cohost.lock().await;
         engine.command_parser_ready(scope, premium, voice_enabled, Instant::now())
@@ -8239,7 +8239,7 @@ async fn request_command_removal(
         ModerationRequest {
             operation_id: uuid::Uuid::new_v4().to_string(),
             message_id: request.message_id.clone(),
-            source: ModerationSource::GolemVoice,
+            source: ModerationSource::BuddyVoice,
             reason: request.reason.clone(),
             confirm_mode: request.confirm_mode,
         },
@@ -8349,7 +8349,7 @@ async fn sync_command_operation(state: &AppState, operation: ModerationOperation
 /// removal (and the report), from the stored copy, so an older change that
 /// lands late never wins. Manual removals are not commands.
 pub(crate) fn note_moderation_operation(state: &AppState, operation: &ModerationOperation) {
-    if operation.source != ModerationSource::GolemVoice {
+    if operation.source != ModerationSource::BuddyVoice {
         return;
     }
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
@@ -8563,7 +8563,7 @@ pub(crate) async fn resume_listen_after_sign_in(state: &AppState) {
     // listening (plan 140 S2).
     arm_command_detector(state, &session_id, generation, wake_word_required);
     if consent {
-        crate::captions::grant_golem_speech(state).await;
+        crate::captions::grant_buddy_speech(state).await;
     }
     start_listen_if_wanted(state, &session_id, consent, listen).await;
     let snapshot = fresh_snapshot(state).await;
@@ -8641,7 +8641,7 @@ pub async fn set_cohost_settings(
     engine.settings = next.clone();
     // Plan 168 S-B1: the pet on stream follows the persona (avatar, pack,
     // still images); the sprite worker decides whether anything changed.
-    state.golem_sprite.set_persona(&next.persona);
+    state.buddy_sprite.set_persona(&next.persona);
     // Plan 140 S3: the detector reads the wake-word setting from its slot.
     mirror_command_slot(state, &engine);
     let report = if !next.enabled && engine.session.is_some() {
@@ -8664,7 +8664,7 @@ pub async fn set_cohost_settings(
         }
     }
     if stopped {
-        crate::captions::retire_golem_speech(state).await;
+        crate::captions::retire_buddy_speech(state).await;
         clear_transcript(state);
         crate::captions::stop_listen(state).await;
         state.emit_log("info", "Golem stopped: turned off in Settings.");
@@ -8771,12 +8771,12 @@ where
         cancel_abandoned_removal(state, abandoned_removal).await;
         // Invalidate delayed listen publications and capture-resume admissions
         // before reflecting the new consent. Explicit captions keep their task.
-        crate::captions::retire_golem_speech(state).await;
+        crate::captions::retire_buddy_speech(state).await;
         crate::captions::stop_listen(state).await;
         clear_transcript(state);
         arm_command_detector(state, &session_id, generation, wake_word_required);
         if consent {
-            crate::captions::grant_golem_speech(state).await;
+            crate::captions::grant_buddy_speech(state).await;
         }
         start_listen_if_wanted(state, &session_id, consent, listen).await;
         let snapshot = fresh_snapshot(state).await;
@@ -8802,12 +8802,12 @@ where
     let wake_word_required = engine.settings.wake_word_required;
     drop(engine);
     save_session_report(state, replaced);
-    crate::captions::retire_golem_speech(state).await;
+    crate::captions::retire_buddy_speech(state).await;
     crate::captions::stop_listen(state).await;
     clear_transcript(state);
     arm_command_detector(state, &session_id, generation, wake_word_required);
     if consent {
-        crate::captions::grant_golem_speech(state).await;
+        crate::captions::grant_buddy_speech(state).await;
     }
     // The listen intent joins after the session exists (it reports into the
     // session) and before the first state emit (so the renderer sees it at
@@ -8893,7 +8893,7 @@ where
         // The off state names why the backend ended the session (a Premium
         // lapse); a streamer's own Stop carries no reason, as before.
         snapshot.reason = stopped_reason;
-        crate::captions::retire_golem_speech(state).await;
+        crate::captions::retire_buddy_speech(state).await;
         clear_transcript(state);
         crate::captions::stop_listen_with(state, listen_stop).await;
     }
@@ -8978,7 +8978,7 @@ async fn stop_cohost_for_session_end_if_matching_impl<F>(
     drop(engine);
     save_session_report(state, report);
     if stopped {
-        crate::captions::retire_golem_speech(state).await;
+        crate::captions::retire_buddy_speech(state).await;
         clear_transcript(state);
         // The recording monitor retires its capture next: the listen task
         // drains there (`finish_captions_for_capture`) instead of aborting.
@@ -9082,21 +9082,21 @@ pub(crate) async fn note_messages_under_lifecycle_fence(
     }
     // Plan 164 Phase D: greetings run with or without the tick session. The
     // sends are spawned, never awaited under the delivery fence.
-    let (auto_chat, golem_events) = {
+    let (auto_chat, buddy_events) = {
         let mut engine = state.cohost.lock().await;
         // Plan 168 S-C3: Activity rows make the Golem react on stream (the
         // greeting's own reaction wins), any chat keeps it awake.
-        let golem_events = crate::golem_animator::live_chat_events(
+        let buddy_events = crate::buddy_animator::live_chat_events(
             messages,
             &engine.settings.auto_chat,
             chrono::Utc::now(),
         );
         let auto_chat =
             engine.note_activity(messages, Instant::now(), &chrono::Utc::now().to_rfc3339());
-        (auto_chat, golem_events)
+        (auto_chat, buddy_events)
     };
-    for event in golem_events {
-        state.golem_sprite.notify(event);
+    for event in buddy_events {
+        state.buddy_sprite.notify(event);
     }
     apply_auto_chat_pass(state, auto_chat, Some(lifecycle_delivery)).await;
     let snapshot = {
@@ -12509,7 +12509,7 @@ mod tests {
     /// Plan 155, D7: Golem hears a Twitch GIF as an action with its title,
     /// never as the bracketed GIPHY title pretending to be the viewer's words.
     #[test]
-    fn golem_reads_a_twitch_gif_as_an_action_with_its_title() {
+    fn buddy_reads_a_twitch_gif_as_an_action_with_its_title() {
         let gif = |text: &str| LiveChatMessageFragment {
             fragment_type: "gif".into(),
             text: text.into(),
@@ -13464,18 +13464,18 @@ mod tests {
                     ..CohostPersonaImages::default()
                 },
                 source: CohostPersonaSource::Uploaded,
-                avatar: GolemAvatar::Alive {
+                avatar: BuddyAvatar::Alive {
                     pack_id: "0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a".to_string(),
                 },
-                motion: GolemMotionSettings {
+                motion: BuddyMotionSettings {
                     intensity: 0.8,
                     sleep_after_seconds: 0,
                     breathing: false,
                 },
                 reactions: BTreeMap::from([
-                    (GolemTrigger::Follow, "wave".to_string()),
-                    (GolemTrigger::DestinationFailed, "worried".to_string()),
-                    (GolemTrigger::Tip, "none".to_string()),
+                    (BuddyTrigger::Follow, "wave".to_string()),
+                    (BuddyTrigger::DestinationFailed, "worried".to_string()),
+                    (BuddyTrigger::Tip, "none".to_string()),
                 ]),
                 library_avatar_id: Some("official:orc".to_string()),
             }),
@@ -13541,8 +13541,8 @@ mod tests {
                 .is_none()
         );
         // A row from before plan 168 loads Still with the default motion.
-        assert_eq!(loaded.persona.avatar, GolemAvatar::Still);
-        assert_eq!(loaded.persona.motion, GolemMotionSettings::default());
+        assert_eq!(loaded.persona.avatar, BuddyAvatar::Still);
+        assert_eq!(loaded.persona.motion, BuddyMotionSettings::default());
         assert!(loaded.persona.reactions.is_empty());
         assert_eq!(json["autoChat"]["mode"], "suggest");
         assert_eq!(
@@ -13589,8 +13589,8 @@ mod tests {
         bad_path.images.idle = Some("p-1/idle.png".to_string());
         assert!(validate_persona(&bad_path).is_ok());
         // Plan 168: an Alive avatar names a uuid or a bundled pack.
-        for good in ["0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a", "bundled:golem"] {
-            bad_path.avatar = GolemAvatar::Alive {
+        for good in ["0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a", "bundled:buddy"] {
+            bad_path.avatar = BuddyAvatar::Alive {
                 pack_id: good.to_string(),
             };
             assert!(validate_persona(&bad_path).is_ok(), "{good}");
@@ -13601,19 +13601,19 @@ mod tests {
             validate_persona(&moving).unwrap_err(),
             "Motion is between 0 and 1."
         );
-        moving.motion = GolemMotionSettings {
+        moving.motion = BuddyMotionSettings {
             sleep_after_seconds: 10,
-            ..GolemMotionSettings::default()
+            ..BuddyMotionSettings::default()
         };
         assert!(validate_persona(&moving).is_err());
-        moving.motion = GolemMotionSettings::default();
+        moving.motion = BuddyMotionSettings::default();
         moving
             .reactions
-            .insert(GolemTrigger::Raid, "Big Wave".to_string());
+            .insert(BuddyTrigger::Raid, "Big Wave".to_string());
         assert!(validate_persona(&moving).is_err());
         moving
             .reactions
-            .insert(GolemTrigger::Raid, "surprised".to_string());
+            .insert(BuddyTrigger::Raid, "surprised".to_string());
         assert!(validate_persona(&moving).is_ok());
         // Plan 170 D12: a library link is a uuid or `official:<slug>`.
         for good in ["7c9e6679-7425-40de-944b-e07fc1ee9a51", "official:golem"] {
@@ -13635,7 +13635,7 @@ mod tests {
             "0B1E9F0E-6C8A-4C55-9A3F-3F6D2B1C4E5A",
             "",
         ] {
-            bad_path.avatar = GolemAvatar::Alive {
+            bad_path.avatar = BuddyAvatar::Alive {
                 pack_id: bad.to_string(),
             };
             assert_eq!(
@@ -15592,7 +15592,7 @@ mod tests {
     /// Finding 4: sign-out purges everything Golem heard under the account,
     /// blocks listening, and drops the answer of a tick in flight.
     #[tokio::test]
-    async fn sign_out_purges_what_golem_heard_and_blocks_listening() {
+    async fn sign_out_purges_what_buddy_heard_and_blocks_listening() {
         let state = test_state();
         let start = Instant::now();
         note_transcript_final(
@@ -16184,7 +16184,7 @@ mod tests {
         }
     }
 
-    async fn enable_golem(state: &AppState, enabled: bool) {
+    async fn enable_buddy(state: &AppState, enabled: bool) {
         set_cohost_settings(
             state,
             CohostSettingsPatch {
@@ -16213,12 +16213,12 @@ mod tests {
             .lock()
             .await
             .start_session("s-settings".to_string(), Vec::new());
-        enable_golem(&state, true).await;
+        enable_buddy(&state, true).await;
         start_cohost(&state, start_params("s-settings"))
             .await
             .unwrap();
         note_messages(&state, &messages("s-settings", 0..3)).await;
-        enable_golem(&state, false).await;
+        enable_buddy(&state, false).await;
         let report = state
             .database
             .get_cohost_report("s-settings")
@@ -16230,7 +16230,7 @@ mod tests {
         assert_eq!(saved_report_ids(&mut events), vec!["s-settings"]);
 
         // Explicit stop.
-        enable_golem(&state, true).await;
+        enable_buddy(&state, true).await;
         state
             .database
             .ensure_fake_live_chat_session("s-stop")
@@ -16319,7 +16319,7 @@ mod tests {
             .lock()
             .await
             .start_session("s-basic".to_string(), Vec::new());
-        enable_golem(&state, true).await;
+        enable_buddy(&state, true).await;
         let mut events = state.events.subscribe();
 
         let refused = start_cohost_if_entitled(&state, start_params("s-basic"), false)
@@ -16344,7 +16344,7 @@ mod tests {
     /// names the reason, and nothing happens while Premium holds or when
     /// nothing is running.
     #[tokio::test]
-    async fn a_premium_lapse_stops_golem_and_saves_its_report() {
+    async fn a_premium_lapse_stops_buddy_and_saves_its_report() {
         let state = test_state();
         state
             .database
@@ -16355,7 +16355,7 @@ mod tests {
             .lock()
             .await
             .start_session("s-lapse".to_string(), Vec::new());
-        enable_golem(&state, true).await;
+        enable_buddy(&state, true).await;
         start_cohost(&state, start_params("s-lapse")).await.unwrap();
         note_messages(&state, &messages("s-lapse", 0..4)).await;
         // A debug build without the Basic override resolves to the Developer
@@ -16401,7 +16401,7 @@ mod tests {
 
     /// Golem turned off and back on mid-stream: one report, merged.
     #[tokio::test]
-    async fn golem_off_and_on_mid_stream_folds_into_one_report() {
+    async fn buddy_off_and_on_mid_stream_folds_into_one_report() {
         let state = test_state();
         state.database.ensure_fake_live_chat_session("s-1").unwrap();
         state
@@ -16409,10 +16409,10 @@ mod tests {
             .lock()
             .await
             .start_session("s-1".to_string(), Vec::new());
-        enable_golem(&state, true).await;
+        enable_buddy(&state, true).await;
         start_cohost(&state, start_params("s-1")).await.unwrap();
         note_messages(&state, &messages("s-1", 0..3)).await;
-        enable_golem(&state, false).await;
+        enable_buddy(&state, false).await;
         assert_eq!(
             state
                 .database
@@ -16423,7 +16423,7 @@ mod tests {
             3
         );
 
-        enable_golem(&state, true).await;
+        enable_buddy(&state, true).await;
         start_cohost(&state, start_params("s-1")).await.unwrap();
         note_messages(&state, &messages("s-1", 3..8)).await;
         stop_cohost(&state).await;
@@ -16518,7 +16518,7 @@ mod tests {
                 target,
                 question: false,
             },
-            heard: "golem test".to_string(),
+            heard: "buddy test".to_string(),
             reason: None,
             wake_word: true,
         }
@@ -16528,7 +16528,7 @@ mod tests {
         NewCommand {
             intent: CommandIntent::Remove,
             spec: CommandTargetSpec::Resolved(vec![message_id.to_string()]),
-            heard: "golem remove that one".to_string(),
+            heard: "buddy remove that one".to_string(),
             reason: Some("toxic".to_string()),
             wake_word: true,
         }
@@ -16599,7 +16599,7 @@ mod tests {
             provider_message_id: message.provider_message_id.clone(),
             author_name: message.author_name.clone(),
             excerpt: message.message_text.clone(),
-            source: ModerationSource::GolemVoice,
+            source: ModerationSource::BuddyVoice,
             reason: Some("toxic".to_string()),
             phase,
             confirm_mode: RemoveConfirmMode::Confirm,
@@ -16814,9 +16814,9 @@ mod tests {
         }
     }
 
-    fn set_golem_flags(state: &AppState, golem: &str) {
+    fn set_buddy_flags(state: &AppState, buddy: &str) {
         let flags = crate::service_flags::parse_service_flags(
-            &format!(r#"{{"version":1,"orcle":{golem}}}"#),
+            &format!(r#"{{"version":1,"orcle":{buddy}}}"#),
             chrono::Utc::now(),
         )
         .unwrap();
@@ -16869,7 +16869,7 @@ mod tests {
         // A command: camelCase keys, kebab-case enums, empty optionals omitted.
         let command = CohostCommand {
             id: "cmd-1".to_string(),
-            heard: "golem highlight coders x".to_string(),
+            heard: "buddy highlight coders x".to_string(),
             kind: CohostCommandKind::Highlight,
             status: CohostCommandStatus::NotFound,
             message: "Golem couldn't find a comment from coders x.".to_string(),
@@ -16884,7 +16884,7 @@ mod tests {
             serde_json::to_value(&command).unwrap(),
             serde_json::json!({
                 "id": "cmd-1",
-                "heard": "golem highlight coders x",
+                "heard": "buddy highlight coders x",
                 "kind": "highlight",
                 "status": "not-found",
                 "message": "Golem couldn't find a comment from coders x.",
@@ -17140,7 +17140,7 @@ mod tests {
                 NewCommand {
                     intent: CommandIntent::Highlight,
                     spec: CommandTargetSpec::Resolved(vec![owner.id.clone(), raid.id.clone()]),
-                    heard: "golem show that".to_string(),
+                    heard: "buddy show that".to_string(),
                     reason: None,
                     wake_word: true,
                 },
@@ -17226,7 +17226,7 @@ mod tests {
     }
 
     #[test]
-    fn a_highlight_of_a_comment_golem_flagged_high_asks_first() {
+    fn a_highlight_of_a_comment_buddy_flagged_high_asks_first() {
         let now = Instant::now();
         let rows = vec![
             command_row(1, "grumpy_gus", StreamPlatform::Twitch, "you are bad"),
@@ -17534,7 +17534,7 @@ mod tests {
                 NewCommand {
                     intent: CommandIntent::Highlight,
                     spec: CommandTargetSpec::Resolved(vec![rows[0].id.clone(), rows[1].id.clone()]),
-                    heard: "golem show one of those".to_string(),
+                    heard: "buddy show one of those".to_string(),
                     reason: None,
                     wake_word: true,
                 },
@@ -17831,7 +17831,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(operation.phase, ModerationPhase::PendingConfirm);
-        assert_eq!(operation.source, ModerationSource::GolemVoice);
+        assert_eq!(operation.source, ModerationSource::BuddyVoice);
         assert_eq!(operation.message_id, rows[0].id);
         assert_eq!(operation.reason.as_deref(), Some("toxic"));
         assert_eq!(card.expires_at, operation.confirm_by);
@@ -18179,7 +18179,7 @@ mod tests {
         assert!(no_operations(&state));
 
         // Removing paused by Videorc: the same, with its own line.
-        set_golem_flags(&state, r#"{"remove":false}"#);
+        set_buddy_flags(&state, r#"{"remove":false}"#);
         run_new_command(&state, &scope, resolved_removal(&rows[0].id), true).await;
         let paused = state_command(&state).await;
         assert_eq!(paused.status, CohostCommandStatus::Unavailable);
@@ -18192,7 +18192,7 @@ mod tests {
                 remove: CohostSwitchState::Paused,
             })
         );
-        set_golem_flags(&state, "{}");
+        set_buddy_flags(&state, "{}");
 
         // Chat moderation's own Premium check refuses: unavailable too.
         crate::live_chat_moderation::set_premium_check_for_tests(&state, Arc::new(|| false)).await;
@@ -18239,7 +18239,7 @@ mod tests {
     async fn the_voice_kill_switch_stops_detection_and_every_command() {
         let rows = vec![command_row(1, "coders_x", StreamPlatform::Twitch, "hello")];
         let (state, scope) = command_state(&rows, None).await;
-        set_golem_flags(&state, r#"{"voiceCommands":false}"#);
+        set_buddy_flags(&state, r#"{"voiceCommands":false}"#);
         // Detection stops.
         assert!(
             detect_voice_command(
@@ -18282,7 +18282,7 @@ mod tests {
             })
         );
         // Back on: heard again, and the state stops saying paused.
-        set_golem_flags(&state, "{}");
+        set_buddy_flags(&state, "{}");
         let (_, command) = detect_voice_command(
             &state,
             &caption_final(2),
@@ -18543,7 +18543,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn golem_says_it_did_not_catch_an_unclear_request_unless_a_card_is_open() {
+    async fn buddy_says_it_did_not_catch_an_unclear_request_unless_a_card_is_open() {
         let rows = vec![
             command_row(1, "coders_x", StreamPlatform::Twitch, "rust is great"),
             command_row(2, "coders_y", StreamPlatform::Twitch, "which editor?"),
@@ -18735,7 +18735,7 @@ mod tests {
             "videorc-desktop/test",
             COMMAND_SESSION,
             seq,
-            "golem show what they just asked",
+            "buddy show what they just asked",
             None,
             ids.iter()
                 .map(|id| CohostCommandCandidate {
@@ -18907,7 +18907,7 @@ mod tests {
             session_id: COMMAND_SESSION.to_string(),
             generation,
         };
-        let heard = "  golem show what ada asked ";
+        let heard = "  buddy show what ada asked ";
         // Off until the capability read says otherwise.
         assert!(!engine.command_parser_ready(&scope, true, true, now));
         assert_eq!(
@@ -18934,7 +18934,7 @@ mod tests {
             .expect("a parse");
         let request = &prepared.request;
         assert_eq!(request.seq, 1);
-        assert_eq!(request.utterance, "golem show what ada asked");
+        assert_eq!(request.utterance, "buddy show what ada asked");
         assert!(request.consent_to_process_chat);
         assert_eq!(request.session_client_id, COMMAND_SESSION);
         assert_eq!(
@@ -18969,7 +18969,7 @@ mod tests {
         let prepared = engine
             .prepare_command_parse(
                 &scope,
-                "golem that one",
+                "buddy that one",
                 Some(rows[0].id.as_str()),
                 true,
                 true,
@@ -19014,7 +19014,7 @@ mod tests {
             command_row(2, "ada", StreamPlatform::Twitch, "hello"),
         ];
         let (state, scope) = command_state(&rows, None).await;
-        let heard = "golem show what coders x just asked";
+        let heard = "buddy show what coders x just asked";
         let tokens = Arc::new(AtomicUsize::new(0));
         let calls = Arc::new(AtomicUsize::new(0));
         let token = {
@@ -19160,7 +19160,7 @@ mod tests {
         let resolution = resolve_unknown_command_with(
             &state,
             &scope,
-            "golem get rid of that nonsense",
+            "buddy get rid of that nonsense",
             true,
             || Some("bearer".to_string()),
             move |_token: String, request: CohostCommandRequest| {
@@ -19536,9 +19536,9 @@ mod tests {
         engine.note_automatic_sent(start);
         assert_eq!(engine.snapshot().auto_chat_sends, 1);
         // Golem operations are its own, never the streamer's reply.
-        engine.register_golem_operation("op-golem");
-        assert!(engine.is_golem_operation("op-golem"));
-        assert!(!engine.is_golem_operation("op-streamer"));
+        engine.register_buddy_operation("op-buddy");
+        assert!(engine.is_buddy_operation("op-buddy"));
+        assert!(!engine.is_buddy_operation("op-streamer"));
     }
 
     /// Plan 164 D7: the Say box with the chat mode off and the Golem on an
@@ -19550,7 +19550,7 @@ mod tests {
         let state = test_state();
         let mut rx = state.events.subscribe();
         let mut layout = crate::overlay_layout::load_overlay_layout(&state.database);
-        layout.golem.show_on_stream = true;
+        layout.buddy.show_on_stream = true;
         crate::overlay_layout::save_overlay_layout(&state.database, &layout).unwrap();
         assert_eq!(
             state.cohost.lock().await.auto_chat_mode(),
@@ -19575,11 +19575,11 @@ mod tests {
         let first = rx.recv().await.unwrap();
         assert_eq!(first.event, COHOST_STATE_EVENT);
         let bubble = rx.recv().await.unwrap();
-        assert_eq!(bubble.event, crate::golem_overlay::GOLEM_STATE_EVENT);
+        assert_eq!(bubble.event, crate::buddy_overlay::BUDDY_STATE_EVENT);
         assert_eq!(bubble.payload["state"], "laugh");
         assert_eq!(bubble.payload["bubble"]["text"], "Hello horde");
         assert_eq!(
-            crate::golem_overlay::status(&state)
+            crate::buddy_overlay::status(&state)
                 .await
                 .bubble
                 .unwrap()
@@ -19602,12 +19602,12 @@ mod tests {
         assert!(rx.try_recv().is_err());
 
         // Both output switches off: the utterance is kept, the bubble is not.
-        layout.golem.show_on_stream = false;
+        layout.buddy.show_on_stream = false;
         crate::overlay_layout::save_overlay_layout(&state.database, &layout).unwrap();
-        crate::golem_overlay::clear(&state).await;
+        crate::buddy_overlay::clear(&state).await;
         assert_eq!(
             rx.recv().await.unwrap().event,
-            crate::golem_overlay::GOLEM_STATE_EVENT
+            crate::buddy_overlay::BUDDY_STATE_EVENT
         );
         let shown = say_utterance(
             &state,
@@ -19629,6 +19629,6 @@ mod tests {
             rx.try_recv().is_err(),
             "no bubble with the Golem on no output"
         );
-        assert_eq!(crate::golem_overlay::status(&state).await.bubble, None);
+        assert_eq!(crate::buddy_overlay::status(&state).await.bubble, None);
     }
 }

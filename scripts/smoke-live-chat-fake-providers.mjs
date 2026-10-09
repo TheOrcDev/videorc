@@ -636,7 +636,7 @@ try {
     // destination it came from (the throttle spaces them: 5 s apart per
     // destination, so each platform's rows land one per gap), and with the
     // mode `off` nothing is sent at all.
-    await assertGolemGreetings(ws)
+    await assertBuddyGreetings(ws)
 
     console.log(
       `Unified-comments fake-provider smoke OK - ${diagnostics.messagesReceived} messages, ` +
@@ -652,7 +652,7 @@ try {
   await stopApp()
 }
 
-async function assertGolemGreetings(ws) {
+async function assertBuddyGreetings(ws) {
   const settingsBefore = await request(ws, timeoutMs, 'cohost.settings.get', {})
   const templates = [
     { id: 'smoke-follow', kind: 'follow', text: 'Welcome {name}!', state: 'talk', enabled: true },
@@ -678,24 +678,24 @@ async function assertGolemGreetings(ws) {
     answers: { enabled: false, cooldownSeconds: 20 },
     banter: { enabled: false, cooldownSeconds: 240 }
   })
-  const golemDestinations = [
-    { platform: 'twitch', targetId: 'smoke-golem-twitch' },
-    { platform: 'youtube', targetId: 'smoke-golem-youtube' },
-    { platform: 'kick', targetId: 'smoke-golem-kick' }
+  const buddyDestinations = [
+    { platform: 'twitch', targetId: 'smoke-buddy-twitch' },
+    { platform: 'youtube', targetId: 'smoke-buddy-youtube' },
+    { platform: 'kick', targetId: 'smoke-buddy-kick' }
   ]
-  const startGolemSession = async (sessionId) => {
+  const startBuddySession = async (sessionId) => {
     const operations = collectEvent(ws, 'liveChat.sendOperation')
     const states = collectEvent(ws, 'cohost.state')
     await request(ws, timeoutMs, 'liveChat.start', {
       sessionId,
       platforms: ['twitch', 'youtube', 'kick'],
-      destinations: golemDestinations.map(({ platform, targetId }) => ({
+      destinations: buddyDestinations.map(({ platform, targetId }) => ({
         platform,
         targetId,
         read: 'ready',
         write: 'ready'
       })),
-      fakes: golemDestinations.map((destination) => ({
+      fakes: buddyDestinations.map((destination) => ({
         ...destination,
         count: 1,
         intervalMs: 60,
@@ -717,13 +717,13 @@ async function assertGolemGreetings(ws) {
   // and a follow (two sends, the second 5 s after the first), YouTube one
   // Super Chat, Kick one follow. Nothing else has a template.
   await request(ws, timeoutMs, 'cohost.settings.set', { autoChat: autoChat('auto') })
-  const autoSessionId = `smoke-golem-auto-${Date.now()}`
-  const auto = await startGolemSession(autoSessionId)
+  const autoSessionId = `smoke-buddy-auto-${Date.now()}`
+  const auto = await startBuddySession(autoSessionId)
   const expectedSends = [
-    { targetId: 'smoke-golem-twitch', text: 'raider42 brings 234 warriors' },
-    { targetId: 'smoke-golem-youtube', text: '$5.00 from Maria, thanks' },
-    { targetId: 'smoke-golem-kick', text: 'Welcome kick_fan!' },
-    { targetId: 'smoke-golem-twitch', text: 'Welcome new_friend!' }
+    { targetId: 'smoke-buddy-twitch', text: 'raider42 brings 234 warriors' },
+    { targetId: 'smoke-buddy-youtube', text: '$5.00 from Maria, thanks' },
+    { targetId: 'smoke-buddy-kick', text: 'Welcome kick_fan!' },
+    { targetId: 'smoke-buddy-twitch', text: 'Welcome new_friend!' }
   ]
   await waitFor(
     () => terminalSends(auto.operations, autoSessionId).length >= expectedSends.length,
@@ -759,7 +759,7 @@ async function assertGolemGreetings(ws) {
   }
   // The Twitch follow waited for the 5 s gap after the raid (plan 164 D9).
   const twitchOrder = sends
-    .filter((operation) => operation.destinations[0]?.destinationId === 'smoke-golem-twitch')
+    .filter((operation) => operation.destinations[0]?.destinationId === 'smoke-buddy-twitch')
     .map((operation) => ({ text: operation.text, at: Date.parse(operation.createdAt) }))
   if (
     twitchOrder.length !== 2 ||
@@ -788,8 +788,8 @@ async function assertGolemGreetings(ws) {
 
   // Off: the same templates, the same rows, zero sends.
   await request(ws, timeoutMs, 'cohost.settings.set', { autoChat: autoChat('off') })
-  const offSessionId = `smoke-golem-off-${Date.now()}`
-  const off = await startGolemSession(offSessionId)
+  const offSessionId = `smoke-buddy-off-${Date.now()}`
+  const off = await startBuddySession(offSessionId)
   const offRows = collectMessages(ws).messages
   await waitFor(
     () =>

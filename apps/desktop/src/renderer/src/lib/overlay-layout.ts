@@ -26,14 +26,14 @@ const PORTRAIT_BOTTOM_MARGIN = 0.22
 export const OVERLAY_ITEM_LABELS: Record<OverlayItem, string> = {
   highlight: 'Highlight',
   captions: 'Captions',
-  golem: 'Golem'
+  buddy: 'Golem'
 }
 
 /** How a Go Live sentence names the item mid-sentence (mirrors Rust). */
 const OVERLAY_ITEM_SENTENCE_LABELS: Record<OverlayItem, string> = {
   highlight: 'highlights',
   captions: 'captions',
-  golem: 'the Golem'
+  buddy: 'the Golem'
 }
 
 export const OVERLAY_SNAPS: readonly OverlaySnap[] = [
@@ -67,7 +67,7 @@ export function overlayDefaultSize(
       return portrait ? [0.78, 0.2] : [0.6, 0.26]
     case 'captions':
       return portrait ? [0.76, 0.14] : [0.92, 0.16]
-    case 'golem':
+    case 'buddy':
       return portrait ? [0.32, (0.32 * 9) / 16] : [0.18, (0.18 * 16) / 9]
   }
 }
@@ -116,14 +116,14 @@ function snappedItem(
 export const DEFAULT_OVERLAY_LAYOUT: OverlayLayout = {
   highlight: snappedItem('highlight', 'bottom-left', true, true),
   captions: snappedItem('captions', 'bottom-center', false, false),
-  golem: snappedItem('golem', 'bottom-right', false, false)
+  buddy: snappedItem('buddy', 'bottom-right', false, false)
 }
 
 export function cloneOverlayLayout(layout: OverlayLayout): OverlayLayout {
   return {
     highlight: { ...layout.highlight },
     captions: { ...layout.captions },
-    golem: { ...layout.golem }
+    buddy: { ...layout.buddy }
   }
 }
 

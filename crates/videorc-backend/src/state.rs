@@ -1148,13 +1148,13 @@ pub struct AppState {
     /// canvas. Installed and cleared together with `highlight_overlay`.
     pub simulcast_highlight_overlay: crate::captions::CaptionOverlaySlot,
     /// The Golem avatar overlay (plan 164 Phase C): one raster per output
-    /// target, pushed by the renderer through `golem.overlay.set`.
-    pub golem_overlay: crate::captions::CaptionOverlaySlots,
-    /// Which avatar state shows and the bubble that is up (`cohost.golem.state`).
-    pub golem_overlay_state: crate::golem_overlay::GolemOverlayStateSlot,
+    /// target, pushed by the renderer through `buddy.overlay.set`.
+    pub buddy_overlay: crate::captions::CaptionOverlaySlots,
+    /// Which avatar state shows and the bubble that is up (`cohost.buddy.state`).
+    pub buddy_overlay_state: crate::buddy_overlay::BuddyOverlayStateSlot,
     /// The Golem's pet on stream (plan 168 Phase B): pre-scaled atlases per
     /// leg and the per-frame draw (std mutex: read from the render threads).
-    pub golem_sprite: crate::golem_sprite::GolemSpriteSlot,
+    pub buddy_sprite: crate::buddy_sprite::BuddySpriteSlot,
     /// Backend-owned acknowledgement/lifetime for the viewer-facing comment
     /// card. The image slot above and this state are mutated under this
     /// state-machine lock so stale expiry tasks cannot clear newer cards.
@@ -1184,7 +1184,7 @@ pub struct AppState {
     pub cohost_commands: crate::cohost_command::CommandDetectorSlot,
     /// Plan 170 D12: the account Golem library (its cache, job queue, sync
     /// clock and pending edits).
-    pub golem_library: Arc<crate::cohost_library::LibraryShared>,
+    pub buddy_library: Arc<crate::cohost_library::LibraryShared>,
 }
 
 /// Masks the path of every `rtmp://` / `rtmps://` URL in a log line. FFmpeg
@@ -1264,15 +1264,15 @@ impl AppState {
         let oauth_store_path = (database.path().to_string_lossy() != ":memory:")
             .then(|| database.path().with_extension("oauth-pending.json"));
         let cohost_settings = crate::cohost::load_cohost_settings(&database);
-        let golem_sprite = crate::golem_sprite::GolemSpriteSlot::new(
+        let buddy_sprite = crate::buddy_sprite::BuddySpriteSlot::new(
             &cohost_settings.persona,
-            crate::overlay_layout::load_overlay_layout(&database).golem,
+            crate::overlay_layout::load_overlay_layout(&database).buddy,
             Some(events.clone()),
         );
         // Plan 168 Phase C: the animator draws the pet (gaze, talk, blink,
         // sleep, reactions, motion) instead of Phase B's static cell.
-        golem_sprite.set_source(Box::new(
-            crate::golem_animator::GolemAnimatorSource::for_persona(&cohost_settings.persona),
+        buddy_sprite.set_source(Box::new(
+            crate::buddy_animator::BuddyAnimatorSource::for_persona(&cohost_settings.persona),
         ));
         Self {
             process_runtime: tokio::runtime::Handle::try_current().ok(),
@@ -1377,11 +1377,11 @@ impl AppState {
             caption_overlay: crate::captions::new_caption_overlay_slots(),
             highlight_overlay: crate::captions::new_caption_overlay_slot(),
             simulcast_highlight_overlay: crate::captions::new_caption_overlay_slot(),
-            golem_overlay: crate::captions::new_caption_overlay_slots(),
-            golem_overlay_state: crate::golem_overlay::new_golem_overlay_state_slot(
+            buddy_overlay: crate::captions::new_caption_overlay_slots(),
+            buddy_overlay_state: crate::buddy_overlay::new_buddy_overlay_state_slot(
                 cohost_settings.persona.id.clone(),
             ),
-            golem_sprite,
+            buddy_sprite,
             comment_highlight: crate::comment_highlight::new_comment_highlight_slot(),
             comment_highlight_commit: Arc::new(tokio::sync::Mutex::new(())),
             cohost: crate::cohost::new_cohost_slot(cohost_settings),
@@ -1390,7 +1390,7 @@ impl AppState {
             cohost_voice: crate::cohost::new_cohost_voice_slot(),
             clip_marks: crate::clip_marks::new_clip_mark_detector_slot(),
             cohost_commands: crate::cohost_command::new_command_detector_slot(),
-            golem_library: Arc::new(crate::cohost_library::LibraryShared::new()),
+            buddy_library: Arc::new(crate::cohost_library::LibraryShared::new()),
         }
     }
 

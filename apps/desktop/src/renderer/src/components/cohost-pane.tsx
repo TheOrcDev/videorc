@@ -1,4 +1,4 @@
-import { ChevronDownIcon, MicrophoneIcon, GolemIcon } from '@/components/icons'
+import { ChevronDownIcon, MicrophoneIcon, BuddyIcon } from '@/components/icons'
 import {
   useEffect,
   useMemo,
@@ -10,8 +10,8 @@ import {
 } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
-import type { GolemPetPreviewHandle } from '@/components/golem-pet-preview'
-import { LazyGolemPetPreview } from '@/components/golem-pet-preview-lazy'
+import type { BuddyPetPreviewHandle } from '@/components/buddy-pet-preview'
+import { LazyBuddyPetPreview } from '@/components/buddy-pet-preview-lazy'
 import { CohostFlagRow } from '@/components/cohost-flag-row'
 import { CohostQuestionRow } from '@/components/cohost-question-row'
 import { CohostPresenceDot, CohostTypingDots } from '@/components/cohost-status'
@@ -33,14 +33,14 @@ import type {
   CohostSayHi,
   CohostState,
   CohostUtteranceState,
-  CohostWindowGolem
+  CohostWindowBuddy
 } from '@/lib/backend'
-import { golemStateImageUrl } from '@/lib/golem-default-pack'
+import { buddyStateImageUrl } from '@/lib/buddy-default-pack'
 import {
-  GOLEM_HEADER_PREVIEW_PX,
-  GOLEM_REACTION_CHIPS,
-  GOLEM_STILL_PACK_ID
-} from '@/lib/golem-pet-view'
+  BUDDY_HEADER_PREVIEW_PX,
+  BUDDY_REACTION_CHIPS,
+  BUDDY_STILL_PACK_ID
+} from '@/lib/buddy-pet-view'
 import { displayKeyGlyph } from '@/lib/platform'
 import { cohostEmptyStateCopy, cohostPresenceView, cohostQuestionIds } from '@/lib/cohost-presence'
 import { activeCohostSpotlight } from '@/lib/cohost-marks'
@@ -120,7 +120,7 @@ export function CohostPane({
   onEnableConsent,
   onOpenChange,
   onUpgrade,
-  golem = null,
+  buddy = null,
   sayPending = false,
   onSay,
   onShowOnStreamChange,
@@ -165,21 +165,21 @@ export function CohostPane({
   onOpenChange?: (open: boolean) => void
   onUpgrade?: (url: string) => void
   /** The Golem on stream (plan 164 S-C4); null hides the header. */
-  golem?: CohostWindowGolem | null
+  buddy?: CohostWindowBuddy | null
   /** A Say is on its way through the relay. */
   sayPending?: boolean
   /** Say something in the bubble (D7). Absent disables the box. */
   onSay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
-  /** `overlayLayout.golem.showOnStream`. Absent disables the switch. */
+  /** `overlayLayout.buddy.showOnStream`. Absent disables the switch. */
   onShowOnStreamChange?: (showOnStream: boolean) => void
   /** A reaction chip (plan 168 S-D3): `cohost.pet.react` through Studio.
    * Absent disables the chips. */
   onReact?: (reaction: string) => void
 }): ReactElement | null {
   const mode = cohostPaneMode({ gate, consented, enabled })
-  const header = golem ? (
-    <GolemHeader
-      golem={golem}
+  const header = buddy ? (
+    <BuddyHeader
+      buddy={buddy}
       sayPending={sayPending}
       onReact={onReact}
       onSay={onSay}
@@ -408,7 +408,7 @@ export function CohostPane({
             aria-hidden
             className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=closed]:-rotate-90"
           />
-          <GolemIcon
+          <BuddyIcon
             aria-hidden
             className="size-4 shrink-0 text-muted-foreground"
             weight="duotone"
@@ -720,26 +720,26 @@ export function CohostPane({
  * (each disabled when the pack has no such reaction). Free for everyone
  * (D6): no Premium, no consent, no live session.
  */
-export function GolemHeader({
-  golem,
+export function BuddyHeader({
+  buddy,
   sayPending = false,
   onSay,
   onShowOnStreamChange,
   onReact
 }: {
-  golem: CohostWindowGolem
+  buddy: CohostWindowBuddy
   sayPending?: boolean
   onSay?: (text: string, state: CohostUtteranceState) => Promise<void> | void
   onShowOnStreamChange?: (showOnStream: boolean) => void
   onReact?: (reaction: string) => void
 }): ReactElement {
   const [draft, setDraft] = useState('')
-  const previewRef = useRef<GolemPetPreviewHandle>(null)
+  const previewRef = useRef<BuddyPetPreviewHandle>(null)
   // The loaded pack's reactions; null until it loads (or when it cannot).
   const [packReactions, setPackReactions] = useState<readonly string[] | null>(null)
-  const image = golemStateImageUrl(golem.persona, golem.state)
-  const avatar = golem.persona.avatar
-  const packId = avatar?.kind === 'alive' ? avatar.packId : GOLEM_STILL_PACK_ID
+  const image = buddyStateImageUrl(buddy.persona, buddy.state)
+  const avatar = buddy.persona.avatar
+  const packId = avatar?.kind === 'alive' ? avatar.packId : BUDDY_STILL_PACK_ID
   const modKey = displayKeyGlyph('⌘', undefined)
   const say = (state: CohostUtteranceState): void => {
     const text = draft.trim()
@@ -753,53 +753,53 @@ export function GolemHeader({
     onReact(reaction)
   }
   return (
-    <div className="@container/golem-header shrink-0" data-slot="golem-header">
+    <div className="@container/buddy-header shrink-0" data-slot="buddy-header">
       <div className="flex h-10 min-w-0 items-center gap-2 px-3">
-        <div className="shrink-0" data-slot="golem-avatar" data-state={golem.state}>
-          <LazyGolemPetPreview
+        <div className="shrink-0" data-slot="buddy-avatar" data-state={buddy.state}>
+          <LazyBuddyPetPreview
             ref={previewRef}
-            label={golem.persona.name}
-            motion={golem.persona.motion}
+            label={buddy.persona.name}
+            motion={buddy.persona.motion}
             packId={packId}
-            personaId={golem.persona.id}
+            personaId={buddy.persona.id}
             placeholder={
               <img
                 alt=""
                 className="size-8 rounded-chip bg-foreground/[0.04] object-contain"
-                data-slot="golem-state-image"
-                data-state={golem.state}
+                data-slot="buddy-state-image"
+                data-state={buddy.state}
                 draggable={false}
                 src={image}
               />
             }
-            pose={golem.state === 'idle' ? null : golem.state}
-            size={GOLEM_HEADER_PREVIEW_PX}
-            stillImages={golem.persona.images}
+            pose={buddy.state === 'idle' ? null : buddy.state}
+            size={BUDDY_HEADER_PREVIEW_PX}
+            stillImages={buddy.persona.images}
             onError={() => setPackReactions(null)}
             onLoad={(info) => setPackReactions(info.reactions)}
           />
         </div>
         <span
           className="min-w-0 shrink truncate text-xs font-medium text-foreground"
-          data-slot="golem-name"
-          title={golem.persona.name}
+          data-slot="buddy-name"
+          title={buddy.persona.name}
         >
-          {golem.persona.name}
+          {buddy.persona.name}
         </span>
-        {golem.bubble ? (
+        {buddy.bubble ? (
           <span
             className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground"
-            data-slot="golem-bubble"
-            title={golem.bubble}
+            data-slot="buddy-bubble"
+            title={buddy.bubble}
           >
-            “{golem.bubble}”
+            “{buddy.bubble}”
           </span>
         ) : null}
         <label className="flex shrink-0 items-center gap-1.5 text-[11px] text-muted-foreground">
           <Switch
             aria-label="Show on stream"
-            checked={golem.showOnStream}
-            data-testid="golem-show-on-stream"
+            checked={buddy.showOnStream}
+            data-testid="buddy-show-on-stream"
             disabled={!onShowOnStreamChange}
             size="sm"
             onCheckedChange={(checked) => onShowOnStreamChange?.(checked)}
@@ -809,10 +809,10 @@ export function GolemHeader({
         {/* Phase D's chat mode control (Off · Suggest · Auto) lands here. */}
         <span className="flex-1" />
       </div>
-      <div className="flex flex-wrap items-center gap-1.5 px-3 pb-2" data-slot="golem-say">
+      <div className="flex flex-wrap items-center gap-1.5 px-3 pb-2" data-slot="buddy-say">
         <div className="flex min-w-48 flex-1 items-center gap-1.5">
           <Input
-            aria-label={`Say something as ${golem.persona.name}`}
+            aria-label={`Say something as ${buddy.persona.name}`}
             className="h-7 text-xs"
             disabled={!onSay}
             maxLength={200}
@@ -835,16 +835,16 @@ export function GolemHeader({
         <div
           aria-label="React on stream"
           className="flex shrink-0 items-center gap-1"
-          data-slot="golem-reactions"
+          data-slot="buddy-reactions"
           role="group"
         >
-          {GOLEM_REACTION_CHIPS.map((chip) => {
+          {BUDDY_REACTION_CHIPS.map((chip) => {
             const available = packReactions?.includes(chip.id) ?? false
             return (
               <Button
                 key={chip.id}
                 data-reaction={chip.id}
-                data-testid="golem-reaction-chip"
+                data-testid="buddy-reaction-chip"
                 disabled={!onReact || !available}
                 size="xs"
                 title={`${chip.label} on stream`}
@@ -1208,7 +1208,7 @@ function CohostNotice({ label, children }: { label: string; children: ReactNode 
       className="flex shrink-0 items-center gap-2 rounded-row bg-foreground/[0.04] px-2.5 py-1.5 text-[11px] text-muted-foreground"
       data-slot="cohost-notice"
     >
-      <GolemIcon aria-hidden className="size-4 shrink-0" weight="duotone" />
+      <BuddyIcon aria-hidden className="size-4 shrink-0" weight="duotone" />
       <Badge className="shrink-0" variant="outline">
         {label}
         <span className="ml-1 shrink-0 text-[10px] font-medium tracking-wide text-muted-foreground">

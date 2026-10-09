@@ -803,7 +803,7 @@ function collectCohostStates(ws) {
       for (const waiter of [...collection.waiters]) {
         waiter(parsed.payload)
       }
-    } else if (parsed.event === 'backend.log' && /\bgolem\b/i.test(parsed.payload?.message ?? '')) {
+    } else if (parsed.event === 'backend.log' && /\bbuddy\b/i.test(parsed.payload?.message ?? '')) {
       console.log(`[backend] ${parsed.payload.level}: ${parsed.payload.message}`)
     }
   })

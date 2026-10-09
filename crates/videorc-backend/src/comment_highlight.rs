@@ -296,12 +296,12 @@ fn next_generation(generation: u64) -> u64 {
 fn emit_state(state: &AppState, highlight: &CommentHighlightState) {
     // Plan 168 S-C3: the Golem looks at the card while it shows (the card's
     // rect per leg reaches the animator with every frame).
-    state.golem_sprite.notify(match highlight.phase {
-        CommentHighlightPhase::Live => crate::golem_animator::GolemAnimatorEvent::HighlightLive {
+    state.buddy_sprite.notify(match highlight.phase {
+        CommentHighlightPhase::Live => crate::buddy_animator::BuddyAnimatorEvent::HighlightLive {
             ttl_seconds: highlight_ttl_seconds(highlight),
         },
         CommentHighlightPhase::Idle | CommentHighlightPhase::Failed => {
-            crate::golem_animator::GolemAnimatorEvent::HighlightIdle
+            crate::buddy_animator::BuddyAnimatorEvent::HighlightIdle
         }
     });
     state.emit_event("comments.highlight.status", highlight.clone());

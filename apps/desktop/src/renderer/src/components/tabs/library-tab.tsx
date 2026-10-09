@@ -8,7 +8,7 @@ import {
   FolderIcon,
   LockIcon,
   MoreIcon,
-  GolemIcon,
+  BuddyIcon,
   PlayIcon,
   RepairIcon,
   ResetIcon,
@@ -79,7 +79,7 @@ import { revealInFileManagerLabel } from '@/lib/platform'
 import {
   LIBRARY_FILTERS,
   filterLibrarySessions,
-  hasGolemReport,
+  hasBuddyReport,
   isLiveSession,
   libraryStorageLabel,
   liveSessionLabel,
@@ -112,12 +112,12 @@ const SessionMarkersDialog = lazy(async () => ({
 // with filter/sort/search on top and an honest storage footer below. All list
 // logic is pure (lib/library-view); this component is the shell.
 export function LibraryTab({
-  onOpenGolemReport,
+  onOpenBuddyReport,
   onOpenCleanCut,
   focusSessionId = null
 }: {
   /** "Golem report": the Golem tab, opened on this session's report. */
-  onOpenGolemReport: (sessionId: string) => void
+  onOpenBuddyReport: (sessionId: string) => void
   /** "Clean cut": the Golem tab's Clean cut, on this recording (plan 119 S14). */
   onOpenCleanCut: (sessionId: string) => void
   /** Clean cut's "Open in Library": the row to show and focus. */
@@ -405,7 +405,7 @@ export function LibraryTab({
                   }}
                   onDelete={() => setDeleting([session])}
                   onOpenCleanCut={() => onOpenCleanCut(session.id)}
-                  onOpenGolemReport={() => onOpenGolemReport(session.id)}
+                  onOpenBuddyReport={() => onOpenBuddyReport(session.id)}
                   onOpenMarkers={() => setMarkerSession(session)}
                   onRevealSession={focusLibrarySession}
                   onRename={() => {
@@ -534,7 +534,7 @@ function LibraryRow({
   registerRow,
   onToggleSelected,
   onOpenCleanCut,
-  onOpenGolemReport,
+  onOpenBuddyReport,
   onOpenMarkers,
   onRevealSession,
   onRename,
@@ -547,7 +547,7 @@ function LibraryRow({
   registerRow: (element: HTMLDivElement | null) => void
   onToggleSelected: () => void
   onOpenCleanCut: () => void
-  onOpenGolemReport: () => void
+  onOpenBuddyReport: () => void
   onOpenMarkers: () => void
   onRevealSession: (sessionId: string) => void
   onRename: () => void
@@ -644,7 +644,7 @@ function LibraryRow({
         session={session}
         onDelete={onDelete}
         onOpenCleanCut={onOpenCleanCut}
-        onOpenGolemReport={onOpenGolemReport}
+        onOpenBuddyReport={onOpenBuddyReport}
         onOpenMarkers={onOpenMarkers}
         onRevealSession={onRevealSession}
         onRename={onRename}
@@ -721,7 +721,7 @@ function RowActions({
   filePath,
   session,
   onOpenCleanCut,
-  onOpenGolemReport,
+  onOpenBuddyReport,
   onOpenMarkers,
   onRevealSession,
   onRename,
@@ -730,7 +730,7 @@ function RowActions({
   filePath: string | null
   session: SessionSummary
   onOpenCleanCut: () => void
-  onOpenGolemReport: () => void
+  onOpenBuddyReport: () => void
   onOpenMarkers: () => void
   onRevealSession: (sessionId: string) => void
   onRename: () => void
@@ -952,10 +952,10 @@ function RowActions({
               <PlayIcon />
               Play
             </DropdownMenuItem>
-            {hasGolemReport(session) ? (
+            {hasBuddyReport(session) ? (
               // The report is saved when the stream ends (plan 119 S3).
-              <DropdownMenuItem disabled={live} onClick={onOpenGolemReport}>
-                <GolemIcon />
+              <DropdownMenuItem disabled={live} onClick={onOpenBuddyReport}>
+                <BuddyIcon />
                 Golem report
               </DropdownMenuItem>
             ) : null}
