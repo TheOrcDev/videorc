@@ -90,6 +90,7 @@ describe('Golem tab copy (plan 119 S2)', () => {
       'Golem reads your live chat.',
       "Golem hears you while you're live: your microphone audio goes to Videorc's cloud speech-to-text and comes back as text.",
       "Golem's avatar images: your description, and its idle picture for the other states, go to Videorc's cloud AI; the pictures are kept on this computer.",
+      "Creating an Alive Golem: your reference picture and its description go to Videorc's cloud AI; the pictures are kept on this computer.",
       "Golem replies in chat as you: with Answers or Banter on, its replies are drafted by Videorc's cloud AI and posted on your own account, only in the modes you turn on.",
       "Clean cut uploads a recording's audio, never the video, in short chunks for a word-by-word transcript, and sends its sentences to Videorc's cloud AI to find retakes. Neither is kept on Videorc servers after the job finishes."
     ])
