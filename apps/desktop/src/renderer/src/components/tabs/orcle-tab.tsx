@@ -12,6 +12,7 @@ import {
   OrcleRepliesSection
 } from '@/components/cohost-settings-section'
 import { GolemGreetingsSection } from '@/components/golem-greetings-section'
+import { GolemLibrarySection } from '@/components/golem-library-section'
 import { GolemPersonaSection } from '@/components/golem-persona-section'
 import { GolemPetCreator } from '@/components/golem-pet-creator'
 import { GolemPetSettings } from '@/components/golem-pet-settings'
@@ -45,6 +46,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { GOLEM_POSTS_PROMISE } from '@/lib/golem-auto-chat-view'
 import { useVideorcAccount } from '@/hooks/use-account'
 import { useCleanCut } from '@/hooks/use-clean-cut'
+import { GolemLookClientProvider } from '@/hooks/use-golem-look'
 import {
   useStudioChat,
   useStudioCore,
@@ -189,17 +191,22 @@ export function OrcleTab({
                 and Cloud AI stay at the bottom until Stream Manager takes the
                 switch (S-D6). */}
             {creatorOpen ? <GolemPetCreator onClose={closeGolemPetCreator} /> : null}
-            <PageStack className={creatorOpen ? 'hidden' : undefined}>
-              <GolemPersonaSection />
-              <GolemPetSettings />
-              <ConfigGrid className={CONFIG_GRID_PAIR}>
-                <OrcleLiveSection />
-                <div className="flex flex-col">
-                  <OrcleLivePowers onSelectTab={selectTab} />
-                  <CloudAiSection />
-                </div>
-              </ConfigGrid>
-            </PageStack>
+            {/* Plan 170: My Golems, the look panel and the onboarding share
+                one backend client and one look controller. */}
+            <GolemLookClientProvider>
+              <PageStack className={creatorOpen ? 'hidden' : undefined}>
+                <GolemLibrarySection />
+                <GolemPersonaSection />
+                <GolemPetSettings />
+                <ConfigGrid className={CONFIG_GRID_PAIR}>
+                  <OrcleLiveSection />
+                  <div className="flex flex-col">
+                    <OrcleLivePowers onSelectTab={selectTab} />
+                    <CloudAiSection />
+                  </div>
+                </ConfigGrid>
+              </PageStack>
+            </GolemLookClientProvider>
           </TabsContent>
           <TabsContent className="flex flex-1 flex-col" value="chat">
             <OrcleChatTab />

@@ -410,7 +410,11 @@ export function useGolemLook(client: GolemLookClient | null): {
   state: GolemLookState
   controller: GolemLookController | null
 } {
-  const [controller, setController] = useState<GolemLookController | null>(null)
+  // A surface that mounts beside another on the same client (the onboarding
+  // over the look panel) starts from the shared state, not from loading.
+  const [controller, setController] = useState<GolemLookController | null>(() =>
+    client ? (sharedControllers.get(client)?.controller ?? null) : null
+  )
   useEffect(() => {
     if (!client) return
     const next = acquireGolemLookController(client)

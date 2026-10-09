@@ -12,8 +12,6 @@ import type {
   CohostSettings
 } from '@/lib/backend'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
-import { prepareGolemLookPicture, type GolemLookPictureDeps } from '@/lib/golem-look-view'
-import { GOLEM_GENERATE_CONSENT_OFF } from '@/lib/golem-persona-view'
 
 import { GolemLookSection } from './golem-look-section'
 
@@ -164,13 +162,11 @@ async function settle(): Promise<void> {
 async function render({
   client,
   cohost = settings(),
-  consented = true,
-  preparePicture
+  consented = true
 }: {
   client: GolemLookClient
   cohost?: CohostSettings
   consented?: boolean
-  preparePicture?: (file: File) => ReturnType<typeof prepareGolemLookPicture>
 }): Promise<void> {
   mocked.core = {
     account: { status: 'signed-in' },
@@ -183,13 +179,7 @@ async function render({
     connection: null,
     wsStatus: 'disconnected'
   }
-  await act(async () =>
-    root.render(
-      preparePicture
-        ? createElement(GolemLookSection, { client, preparePicture })
-        : createElement(GolemLookSection, { client })
-    )
-  )
+  await act(async () => root.render(createElement(GolemLookSection, { client })))
   await settle()
 }
 
@@ -202,98 +192,35 @@ async function click(element: HTMLElement | null): Promise<void> {
   await settle()
 }
 
-async function type(value: string): Promise<void> {
-  const input = document.getElementById('golem-look-description') as HTMLTextAreaElement
-  await act(async () => {
-    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(input, value)
-    input.dispatchEvent(new Event('input', { bubbles: true }))
-  })
-}
-
-async function pickFile(file: File): Promise<void> {
-  const input = byTestId<HTMLInputElement>('golem-look-picture-input')!
-  Object.defineProperty(input, 'files', { configurable: true, value: [file] })
-  await act(async () => {
-    input.dispatchEvent(new Event('change', { bubbles: true }))
-  })
-  await settle()
-}
-
 function tiles(): HTMLElement[] {
   return [...document.querySelectorAll<HTMLElement>('[data-testid="golem-look-tile"]')]
 }
 
-describe('GolemLookSection (plan 169 D13)', () => {
-  it('keeps Create my Golem disabled until there is a description or a picture', async () => {
-    const backend = fakeBackend()
+describe('GolemLookSection (plan 169 D13, plan 170 D14)', () => {
+  it('shows the current look view-only, with the Default badge on bundled pictures', async () => {
+    await render({ client: fakeBackend().client })
+    expect(byTestId('golem-look')?.dataset.view).toBe('current')
+    expect(tiles().map((tile) => tile.dataset.state)).toEqual(['idle', 'talk', 'laugh', 'think'])
+    expect(tiles().every((tile) => tile.textContent?.includes('Default'))).toBe(true)
+    expect(document.querySelector('[data-testid="golem-look-redo"]')).toBeNull()
+    expect(byTestId('golem-look-make-alive')).toBeNull()
+  })
+
+  it('no longer carries the describe-and-create form: the onboarding makes new looks', async () => {
+    await render({ client: fakeBackend().client })
+    expect(document.getElementById('golem-look-description')).toBeNull()
+    expect(byTestId('golem-look-create')).toBeNull()
+    expect(byTestId('golem-look-picture')).toBeNull()
+    expect(document.body.textContent).not.toContain('Upload')
+  })
+
+  it('follows a look being made elsewhere on the same client (the onboarding)', async () => {
+    const backend = fakeBackend({ running: { requestId: NEXT, kind: 'create' } })
     await render({ client: backend.client })
-    const create = byTestId<HTMLButtonElement>('golem-look-create')!
-    expect(create.textContent).toContain('Create my Golem')
-    expect(create.textContent).toContain('⌘↵')
-    expect(create.disabled).toBe(true)
-    expect(byTestId('golem-look-hint')?.textContent).toBe('24 images left today · uses 4')
-    await type('   ')
-    expect(create.disabled).toBe(true)
-    await type('A grumpy stone golem')
-    expect(create.disabled).toBe(false)
-    await click(create)
-    expect(backend.requestTyped).toHaveBeenCalledWith(
-      'cohost.avatar.create',
-      { description: 'A grumpy stone golem' },
-      { timeoutMs: 15_000 }
-    )
-    // Working: four skeletons, idle first, the others after it.
     expect(byTestId('golem-look')?.dataset.view).toBe('working')
     expect(document.querySelectorAll('[data-testid="golem-look-skeleton"]')).toHaveLength(4)
     expect(tiles()[0]!.textContent).toContain('Drawing the character')
     expect(tiles()[1]!.textContent).toContain('Next, from idle')
-  })
-
-  it('shows the current look view-only, with the Default badge on bundled pictures', async () => {
-    await render({ client: fakeBackend().client })
-    expect(tiles().map((tile) => tile.dataset.state)).toEqual(['idle', 'talk', 'laugh', 'think'])
-    expect(tiles().every((tile) => tile.textContent?.includes('Default'))).toBe(true)
-    expect(document.querySelector('[data-testid="golem-look-redo"]')).toBeNull()
-    expect(document.body.textContent).not.toContain('Upload')
-    expect(byTestId('golem-look-make-alive')).toBeNull()
-  })
-
-  it('downscales the picture before sending it (1024 px, re-encoded)', async () => {
-    const backend = fakeBackend()
-    const draws: { width: number; height: number }[] = []
-    const deps: GolemLookPictureDeps = {
-      decode: async () => ({ width: 3000, height: 2000, source: 'bitmap' }),
-      draw: async (_source, width, height) => {
-        draws.push({ width, height })
-        return {
-          transparent: false,
-          encode: async (type) => new Blob([new Uint8Array(1000)], { type })
-        }
-      },
-      toBase64: async (blob) => `encoded-${blob.type}`
-    }
-    await render({
-      client: backend.client,
-      preparePicture: (file) => prepareGolemLookPicture(file, deps)
-    })
-    await pickFile(new File([new Uint8Array(5000)], 'cat.jpg', { type: 'image/jpeg' }))
-    expect(draws).toEqual([{ width: 1024, height: 683 }])
-    expect(byTestId('golem-look-picture')?.textContent).toContain('cat.jpg')
-    const create = byTestId<HTMLButtonElement>('golem-look-create')!
-    expect(create.disabled).toBe(false)
-    await click(create)
-    expect(backend.requestTyped).toHaveBeenCalledWith(
-      'cohost.avatar.create',
-      { inspirationBase64: 'encoded-image/jpeg' },
-      { timeoutMs: 15_000 }
-    )
-  })
-
-  it('says why a picture cannot be used', async () => {
-    await render({ client: fakeBackend().client })
-    await pickFile(new File(['GIF89a'], 'anim.gif', { type: 'image/gif' }))
-    expect(byTestId('golem-look-error')?.textContent).toBe('Choose a PNG, JPEG or WebP picture.')
-    expect(byTestId<HTMLButtonElement>('golem-look-create')!.disabled).toBe(true)
   })
 
   it('shows a draft: Redo only on talk, laugh and think, and the preview plays it', async () => {
@@ -310,7 +237,6 @@ describe('GolemLookSection (plan 169 D13)', () => {
       `videorc-asset://golem/default/drafts/${ID}/talk.png`
     )
     expect(mocked.previews.at(-1)).toEqual({ packId: 'still', stillImages: draft().images })
-    expect(byTestId('golem-look-create')).toBeNull()
 
     // R on a focused tile redoes it.
     const laugh = tiles()[2]!
@@ -340,31 +266,9 @@ describe('GolemLookSection (plan 169 D13)', () => {
     expect(byTestId('golem-look')?.dataset.view).toBe('current')
   })
 
-  it('tries again with the inputs, or discards the draft', async () => {
+  it('discards the draft', async () => {
     const backend = fakeBackend({ draft: draft() })
     await render({ client: backend.client })
-    const tryAgain = byTestId<HTMLButtonElement>('golem-look-try-again')!
-    expect(tryAgain.disabled).toBe(true)
-    await type('A goblin merchant')
-    expect(tryAgain.disabled).toBe(false)
-    await click(tryAgain)
-    expect(backend.requestTyped).toHaveBeenCalledWith(
-      'cohost.avatar.create',
-      { description: 'A goblin merchant' },
-      { timeoutMs: 15_000 }
-    )
-    // The run ends with a failed idle: back to the draft, with the reason.
-    await act(async () =>
-      backend.emit('cohost.avatar.progress', {
-        requestId: NEXT,
-        state: 'idle',
-        phase: 'failed',
-        error: { code: 'avatar-timeout', message: 'The model took too long. Try again.' }
-      })
-    )
-    await settle()
-    expect(byTestId('golem-look')?.dataset.view).toBe('draft')
-    expect(byTestId('golem-look-error')?.textContent).toBe('The model took too long. Try again.')
     await click(byTestId('golem-look-discard'))
     expect(backend.requestTyped).toHaveBeenCalledWith(
       'cohost.avatar.discard',
@@ -374,28 +278,23 @@ describe('GolemLookSection (plan 169 D13)', () => {
     expect(byTestId('golem-look')?.dataset.view).toBe('current')
   })
 
-  it('offers Make it Alive once the look is your own, with the reference and notes', async () => {
+  it('offers Make it Alive once the look is your own, with the reference', async () => {
     await render({
       client: fakeBackend().client,
       cohost: settings({ source: 'generated', images: { idle: 'default/idle.png' } })
     })
     // A look that only has idle shows it for the other poses.
     expect(tiles()[1]!.textContent).toContain('Uses idle')
-    await type('  A mossy stone golem ')
     await click(byTestId('golem-look-make-alive'))
-    expect(mocked.openCreator).toHaveBeenCalledWith({
-      reference: 'persona-idle',
-      notes: 'A mossy stone golem'
-    })
+    expect(mocked.openCreator).toHaveBeenCalledWith({ reference: 'persona-idle' })
   })
 
-  it('disables everything without cloud AI consent and says so once', async () => {
-    await render({ client: fakeBackend().client, consented: false })
-    expect(byTestId('golem-look-hint')?.textContent).toBe(GOLEM_GENERATE_CONSENT_OFF)
-    expect(byTestId<HTMLButtonElement>('golem-look-create')!.disabled).toBe(true)
-    expect(
-      (document.getElementById('golem-look-description') as HTMLTextAreaElement).disabled
-    ).toBe(true)
-    expect(byTestId<HTMLButtonElement>('golem-look-picture-pick')!.disabled).toBe(true)
+  it('keeps Redo off without cloud AI consent', async () => {
+    await render({ client: fakeBackend({ draft: draft() }).client, consented: false })
+    const redos = [
+      ...document.querySelectorAll<HTMLButtonElement>('[data-testid="golem-look-redo"]')
+    ]
+    expect(redos).toHaveLength(3)
+    expect(redos.every((button) => button.disabled)).toBe(true)
   })
 })
