@@ -29,8 +29,8 @@ Progress label: `Step {n} of 4`. Buttons: `Back`, `Next`, `Skip for now`
   1. "Welcome to the horde, Mira!" (talk pose)
   2. "We go live every Tuesday at 8, coders_x." (talk pose)
   3. "Ha! Good one." (laugh pose)
-  Between bubbles the idle pose; a "New follower: Mira" chip appears just
-  before bubble 1. With reduced motion, one still frame showing bubble 1.
+     Between bubbles the idle pose; a "New follower: Mira" chip appears just
+     before bubble 1. With reduced motion, one still frame showing bubble 1.
 - "What it does" heading, then five lines:
   - "Greets followers, subs and raids by name"
   - "Answers viewers' questions from what you tell it"
