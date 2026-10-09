@@ -39,6 +39,10 @@ import { permissionReconnectOptions } from '../../../shared/platform-scopes'
 
 const REMOVE_CONFIRM_MODES: readonly RemoveConfirmMode[] = ['confirm', 'countdown']
 
+// A platform's name never gives way (they are one short word); the account
+// name truncates first.
+const PLATFORM_NAME_STAYS = '[&_[data-slot=list-row-title]]:shrink-0'
+
 /**
  * The Golem tab's Voice tab (plan 140 S6, plan 150 S5), in Settings' two
  * columns. Commands: what you can say, each phrase over what it does, then the
@@ -226,6 +230,7 @@ export function OrcleVoiceCommands({
                 <ListRow
                   key={row.platform}
                   compact
+                  className={PLATFORM_NAME_STAYS}
                   context={row.accountLabel ?? undefined}
                   data-platform={row.platform}
                   data-ready={row.ready || undefined}
@@ -233,17 +238,25 @@ export function OrcleVoiceCommands({
                   interactive={false}
                   meta={
                     row.ready ? (
-                      <StatusDot label={row.message} tone="good" />
+                      <StatusDot label={row.status} tone="good" />
                     ) : (
-                      <span className="text-muted-foreground">{row.message}</span>
+                      // Not StatusDot's label: it capitalizes every word.
+                      <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+                        <StatusDot tone="warn" />
+                        {row.status}
+                      </span>
                     )
                   }
                   title={row.label}
                 >
                   {row.action ? (
+                    // The fix as a sentence stays on the button (its name and
+                    // tooltip); the row itself says only the short status.
                     <Button
+                      aria-label={row.message}
                       disabled={pending !== null}
                       size="xs"
+                      title={row.message}
                       type="button"
                       variant="outline"
                       onClick={() => fix(row)}
