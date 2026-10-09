@@ -6,6 +6,7 @@
 
 ## Status
 
+- **Status**: EXECUTED 2026-10-09 in desktop #647 and web #79
 - **Priority**: P1 (owner request, 2026-10-09)
 - **Effort**: L (about 9,800 lines in 294 desktop files, 3,000 lines in 146
   web files)
@@ -14,6 +15,38 @@
 - **Planned at**: desktop `f56c9b74` (`plan-164-golem-b`, #647), web
   `d449a35c` (`plan-170-golem-web`, #79)
 - **Route**: Orchestrator; Implementation fit 8 per repo; model lane `opus`
+
+## Execution (2026-10-09)
+
+Done the same evening by one agent per repo.
+
+- **Wire names** match on both sides: `/api/buddy/*`, the `buddy-*` error
+  codes, `cohost.buddyLibrary` and `videorc://buddy`. The catalog fixture
+  is byte-identical in both repos.
+- **The command eval** (`typesafe-ai/jev`) still passes, with "buddy" as a
+  plain word in chatter staying a non-command:
+
+  | Prompt | Cases | Intent accuracy | Target recall | Ends as labelled |
+  | ------ | ----- | --------------- | ------------- | ---------------- |
+  | Golem  | 68    | 99 %            | 81 %          | 96 %             |
+  | Buddy  | 69    | 99 %            | 79 %          | 96 %             |
+
+- **Gates.**
+  - Desktop: all TS gates, 3,818 tests, 1,951 script tests, fmt, clippy,
+    587 targeted Rust tests, build, bundle budget.
+  - Smokes: `smoke:buddy-commands`, `smoke:session-markers`,
+    `smoke:cohost-fake`, `smoke:captions-contract`,
+    `probe:comments-window`, `smoke:buddy-pet` and the full
+    `smoke:recording-studio`, all green.
+  - Web: typecheck, lint, 881 tests, build.
+- **By eye**, in the dev app: the Buddy tab, My Buddies with "Buddy the
+  Golem" first, using the official Orc, and onboarding step 1.
+- **Extra wire renames** beyond the D3 list: the comments-window action
+  kinds (`buddy-say`, `buddy-react`, `buddy-show-on-stream`), the pack
+  sidecar `buddy.json`, the bundled pack id `bundled:buddy`, and two
+  localStorage flags.
+- **Dev-machine only:** a saved overlay layout with the old `golem` key
+  resets to the default with a warning.
 
 ## The owner's ask (2026-10-09)
 
