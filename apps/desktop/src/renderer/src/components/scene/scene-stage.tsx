@@ -60,6 +60,11 @@ import {
   type StageRect
 } from './stage-transform'
 
+/** The invisible outline that drags a selected overlay item (CSS px). */
+const OVERLAY_GRAB_STROKE_PX = 10
+/** The label chip's hit width (CSS px); clamped to the item's own width. */
+const OVERLAY_CHIP_HIT_W_PX = 120
+
 const STAGE_W = 160
 /** Window chrome kept on screen beside the tallest canvas: the pane toolbar
  * and status bar, the stage's toolbar and footer rows, the 28 px handle
@@ -875,6 +880,12 @@ export function SceneStage({
                     }}
                     onPointerDown={(event) => beginOverlayGesture(entry, 'move', event)}
                   >
+                    {/* Overlay items sit above the sources, so an unselected
+                        item takes the pointer only on its label chip (the
+                        toolbar chips select it too); once selected, its
+                        interior and outline drag it. A source underneath
+                        stays clickable everywhere else (the preview-window
+                        probe's scene-hit-only gate). */}
                     <rect
                       data-videorc-stage-overlay-bounds
                       x={rect.x * STAGE_W}
@@ -882,6 +893,28 @@ export function SceneStage({
                       width={rect.width * STAGE_W}
                       height={rect.height * stageH}
                       fill="transparent"
+                      pointerEvents={selectedOverlayItem === entry.item ? 'all' : 'none'}
+                    />
+                    <rect
+                      data-videorc-stage-overlay-grab
+                      x={rect.x * STAGE_W}
+                      y={rect.y * stageH}
+                      width={rect.width * STAGE_W}
+                      height={rect.height * stageH}
+                      fill="none"
+                      pointerEvents={selectedOverlayItem === entry.item ? 'stroke' : 'none'}
+                      stroke="transparent"
+                      strokeWidth={OVERLAY_GRAB_STROKE_PX}
+                      vectorEffect="non-scaling-stroke"
+                    />
+                    <rect
+                      data-videorc-stage-overlay-chip-hit
+                      x={rect.x * STAGE_W}
+                      y={rect.y * stageH}
+                      width={Math.min(rect.width * STAGE_W, OVERLAY_CHIP_HIT_W_PX / pixelScale)}
+                      height={Math.min(rect.height * stageH, chipH + 2 * padPx)}
+                      fill="transparent"
+                      pointerEvents="all"
                     />
                     <rect
                       className={cn(
