@@ -5418,6 +5418,24 @@ pub struct AiCapabilitiesCohost {
     /// Older servers omit it: the creator stays off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pet: Option<AiCapabilitiesPet>,
+    /// The account Golem library (plan 170 D9). Older servers omit it: the
+    /// library is off and the look falls back to the plan 169 route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub golem_library: Option<AiCapabilitiesGolemLibrary>,
+}
+
+/// `cohost.golemLibrary` from `GET /api/ai/capabilities` (plan 170 D9):
+/// `enabled` when signed in and the web's library store is configured
+/// (creating still follows `avatar.enabled`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiCapabilitiesGolemLibrary {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub count: u32,
+    #[serde(default)]
+    pub limit: u32,
 }
 
 // --- Golem pets (plan 168, Phase F) ---

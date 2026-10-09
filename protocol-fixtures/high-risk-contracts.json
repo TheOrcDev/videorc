@@ -583,7 +583,8 @@
         "source": "uploaded",
         "avatar": { "kind": "alive", "packId": "0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a" },
         "motion": { "intensity": 0.8, "sleepAfterSeconds": 0, "breathing": false },
-        "reactions": { "follow": "wave", "tip": "none", "destination-failed": "worried" }
+        "reactions": { "follow": "wave", "tip": "none", "destination-failed": "worried" },
+        "libraryAvatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51"
       },
       "autoChat": {
         "mode": "suggest",
@@ -1729,6 +1730,12 @@
       "inspirationBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
     },
     "createDescriptionParams": { "description": "A grumpy stone golem with a mossy back" },
+    "createLibraryParams": {
+      "description": "A grumpy stone golem with a mossy back",
+      "name": "Grum",
+      "personality": "Grumbles, then helps.",
+      "context": "I stream speedruns on Tuesdays."
+    },
     "redoParams": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8", "state": "laugh" },
     "requestIdParams": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8" },
     "accepted": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8" },
@@ -1769,6 +1776,133 @@
       },
       "running": { "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8", "kind": "redo", "state": "think" }
     },
-    "statusNone": {}
+    "statusNone": {},
+    "libraryDraft": {
+      "requestId": "3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8",
+      "images": {
+        "idle": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/idle.png",
+        "talk": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/talk.png",
+        "laugh": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/laugh.png",
+        "think": "default/drafts/3f2a1c4e-8b7d-4e6f-a1b2-c3d4e5f6a7b8/think.png"
+      },
+      "failed": {},
+      "libraryAvatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51"
+    }
+  },
+  "golemLibrary": {
+    "signedOut": {
+      "signedIn": false,
+      "official": [
+        {
+          "id": "official:golem",
+          "slug": "golem",
+          "name": "Golem",
+          "kind": "Golem",
+          "tagline": "The original. Steady as stone.",
+          "personality": "Calm, warm and a little slow to speak. Greets every follower like an old friend and never rushes anyone."
+        },
+        {
+          "id": "official:orc",
+          "slug": "orc",
+          "name": "Golmar",
+          "kind": "Orc",
+          "tagline": "Loud, loyal, all horde.",
+          "personality": "Loud, loyal and proud of the horde. Cheers every follower like a battle won and calls the chat his warband."
+        },
+        {
+          "id": "official:goblin",
+          "slug": "goblin",
+          "name": "Nib",
+          "kind": "Goblin",
+          "tagline": "Small, sly and in on the joke.",
+          "personality": "Sly, quick and always after a good deal. Loves a joke at the streamer's expense, but never a mean one."
+        },
+        {
+          "id": "official:pirate",
+          "slug": "pirate",
+          "name": "Captain Barnacle",
+          "kind": "Pirate",
+          "tagline": "Calls your chat his crew.",
+          "personality": "Booming and theatrical. Calls viewers his crew, new followers new recruits, and every raid a boarding party."
+        },
+        {
+          "id": "official:robot",
+          "slug": "robot",
+          "name": "Bolt",
+          "kind": "Robot",
+          "tagline": "Polite, precise, loves a stat.",
+          "personality": "Polite, precise and delighted by every stat. Counts followers out loud and celebrates round numbers."
+        }
+      ],
+      "mine": null,
+      "activeAvatarId": "official:golem",
+      "serverActiveAvatarId": null,
+      "limit": 30,
+      "busy": null
+    },
+    "signedIn": {
+      "signedIn": true,
+      "official": [
+        {
+          "id": "official:orc",
+          "slug": "orc",
+          "name": "Golmar",
+          "kind": "Orc",
+          "tagline": "Loud, loyal, all horde.",
+          "personality": "Loud, loyal and proud of the horde. Cheers every follower like a battle won and calls the chat his warband."
+        }
+      ],
+      "mine": [
+        {
+          "id": "7c9e6679-7425-40de-944b-e07fc1ee9a51",
+          "name": "Grum",
+          "description": "A grumpy stone golem with a mossy back",
+          "personality": "Grumbles, then helps.",
+          "context": "I stream speedruns on Tuesdays.",
+          "createdAt": "2026-10-09T10:00:00.000Z",
+          "updatedAt": "2026-10-09T10:05:00.000Z",
+          "poses": {
+            "idle": "videorc-asset://golem/library/7c9e6679-7425-40de-944b-e07fc1ee9a51/idle-0a1b2c3d.png",
+            "talk": "videorc-asset://golem/library/7c9e6679-7425-40de-944b-e07fc1ee9a51/talk-4e5f6a7b.png",
+            "laugh": null,
+            "think": null
+          }
+        },
+        {
+          "id": "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+          "name": "Pixel",
+          "description": "",
+          "personality": "",
+          "context": "",
+          "createdAt": "2026-10-08T09:00:00.000Z",
+          "updatedAt": "2026-10-08T09:00:00.000Z",
+          "poses": { "idle": null, "talk": null, "laugh": null, "think": null }
+        }
+      ],
+      "activeAvatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51",
+      "serverActiveAvatarId": "official:pirate",
+      "limit": 30,
+      "busy": { "kind": "use", "avatarId": "official:pirate" },
+      "error": { "code": "network", "message": "Could not reach Videorc. Check your connection and try again." }
+    },
+    "localOnly": {
+      "signedIn": true,
+      "official": [],
+      "mine": [],
+      "activeAvatarId": null,
+      "serverActiveAvatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51",
+      "limit": 30,
+      "busy": { "kind": "sync" }
+    },
+    "syncParams": { "reason": "deep-link" },
+    "useParams": { "avatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51" },
+    "useOfficialParams": { "avatarId": "official:goblin" },
+    "updateParams": {
+      "avatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51",
+      "name": "Grum",
+      "context": ""
+    },
+    "deleteParams": { "avatarId": "7c9e6679-7425-40de-944b-e07fc1ee9a51" },
+    "accepted": { "accepted": true }
   }
 }

@@ -90,6 +90,8 @@ const PERSONA_IMAGE_EXTENSIONS: [&str; 3] = ["png", "webp", "jpg"];
 
 /// `cohost.avatar.create`: at least one of the two. The picture is a PNG,
 /// JPEG or WebP of at most 3 MB (the renderer fits it within 1024 px).
+/// Plan 170 D13 adds the library avatar's name (1 to 24; the persona's name
+/// when absent), personality (0 to 1200) and "About you" (0 to 4000).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CohostAvatarCreateParams {
@@ -97,6 +99,12 @@ pub struct CohostAvatarCreateParams {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inspiration_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
 }
 
 /// `cohost.avatar.redo`: one of talk, laugh or think, from the draft's idle.
@@ -155,6 +163,10 @@ pub struct CohostAvatarDraft {
     pub images: CohostPersonaImages,
     #[serde(default)]
     pub failed: BTreeMap<CohostAvatarState, CohostAvatarErrorDetail>,
+    /// Plan 170 D13: the account library avatar this draft already is (a
+    /// uuid). Absent for a draft the plan 169 route made (an older web).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_avatar_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -535,6 +547,7 @@ fn read_draft_dir(dir: &Path, persona_id: &str, request_id: &str) -> Option<Coho
         request_id: request_id.to_string(),
         images,
         failed,
+        library_avatar_id: None,
     })
 }
 

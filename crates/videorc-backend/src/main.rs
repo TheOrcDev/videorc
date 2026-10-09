@@ -25,6 +25,7 @@ mod cohost_auto_chat;
 mod cohost_avatar;
 mod cohost_command;
 mod cohost_greetings;
+mod cohost_library;
 mod cohost_throttle;
 mod color;
 mod comment_highlight;
@@ -5370,6 +5371,12 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.avatar.create"
         | "cohost.avatar.redo"
         | "cohost.avatar.discard"
+        // Plan 170 D12, D13: the library mutations answer at once; the web
+        // calls run on their own task and report `cohost.library.changed`.
+        | "cohost.library.sync"
+        | "cohost.library.use"
+        | "cohost.library.update"
+        | "cohost.library.delete"
         | "golem.overlay.set"
         | "golem.overlay.clear"
         | "cohost.pet.import"
@@ -5579,6 +5586,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.pet.list"
         | "cohost.pet.creation.status"
         | "cohost.avatar.draft.get"
+        | "cohost.library.get"
         | "cohost.report.get"
         | "cohost.report.latest"
         | "ai.capabilities.get"
@@ -9556,6 +9564,78 @@ async fn handle_text_message_with_role(
             Err(refusal) => ServerResponse::error(command.id, refusal.code, refusal.message),
         },
         // --- end Golem look (plan 169 Phase B) ---
+        // --- Golem library (plan 170 D12, D13) ---
+        "cohost.library.get" => {
+            if rpc_params_are_empty(&command.params) {
+                ServerResponse::ok(command.id, cohost_library::get(state).await)
+            } else {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "cohost.library.get does not accept parameters.",
+                )
+            }
+        }
+        "cohost.library.sync" => {
+            match serde_json::from_value::<cohost_library::CohostLibrarySyncParams>(command.params)
+            {
+                Ok(params) => match cohost_library::sync(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.library.use" => {
+            match serde_json::from_value::<cohost_library::CohostLibraryAvatarParams>(
+                command.params,
+            ) {
+                Ok(params) => match cohost_library::use_avatar(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.library.update" => {
+            match serde_json::from_value::<cohost_library::CohostLibraryUpdateParams>(
+                command.params,
+            ) {
+                Ok(params) => match cohost_library::update(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.library.delete" => {
+            match serde_json::from_value::<cohost_library::CohostLibraryAvatarParams>(
+                command.params,
+            ) {
+                Ok(params) => match cohost_library::delete(state, params).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        // --- end Golem library (plan 170) ---
         // --- Golem pets (plan 168, Phase A) ---
         "cohost.pet.list" => match golem_pet_store::list(state).await {
             Ok(packs) => ServerResponse::ok(command.id, packs),

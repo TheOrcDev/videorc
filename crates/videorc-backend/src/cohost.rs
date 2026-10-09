@@ -601,6 +601,12 @@ pub struct CohostPersona {
     /// `none`. Absent triggers use D14's defaults.
     #[serde(default)]
     pub reactions: BTreeMap<GolemTrigger, String>,
+    /// The library avatar this Golem is (plan 170 D12): a user avatar's uuid
+    /// or `official:<slug>`. Absent (never null) for a Golem made only on
+    /// this computer and for the untouched default; library sync never
+    /// overwrites a Golem without it unless it is the untouched default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_avatar_id: Option<String>,
 }
 
 impl Default for CohostPersona {
@@ -615,6 +621,7 @@ impl Default for CohostPersona {
             avatar: GolemAvatar::Still,
             motion: GolemMotionSettings::default(),
             reactions: BTreeMap::new(),
+            library_avatar_id: None,
         }
     }
 }
@@ -874,6 +881,13 @@ pub(crate) fn validate_persona(persona: &CohostPersona) -> Result<CohostPersona,
     crate::golem_pet::validate_avatar(&valid.avatar)?;
     crate::golem_pet::validate_motion(&valid.motion)?;
     crate::golem_pet::validate_reactions(&valid.reactions)?;
+    if valid
+        .library_avatar_id
+        .as_deref()
+        .is_some_and(|id| !crate::cohost_library::persona_link_ok(id))
+    {
+        return Err("The library avatar id is not a library id.".to_string());
+    }
     Ok(valid)
 }
 
@@ -13460,6 +13474,7 @@ mod tests {
                     (GolemTrigger::DestinationFailed, "worried".to_string()),
                     (GolemTrigger::Tip, "none".to_string()),
                 ]),
+                library_avatar_id: Some("official:orc".to_string()),
             }),
             auto_chat: Some(CohostAutoChat {
                 mode: CohostAutoChatMode::Suggest,
@@ -13511,6 +13526,16 @@ mod tests {
         assert_eq!(
             json["autoChat"]["greetings"]["templates"][0]["reaction"],
             "proud"
+        );
+        // Plan 170 D12: the library link rides the persona; a row from before
+        // it loads unlinked, and an unlinked persona omits it (never null).
+        assert_eq!(json["persona"]["libraryAvatarId"], "official:orc");
+        assert_eq!(loaded.persona.library_avatar_id, None);
+        assert!(
+            serde_json::to_value(&loaded.persona)
+                .unwrap()
+                .get("libraryAvatarId")
+                .is_none()
         );
         // A row from before plan 168 loads Still with the default motion.
         assert_eq!(loaded.persona.avatar, GolemAvatar::Still);
@@ -13587,6 +13612,20 @@ mod tests {
             .reactions
             .insert(GolemTrigger::Raid, "surprised".to_string());
         assert!(validate_persona(&moving).is_ok());
+        // Plan 170 D12: a library link is a uuid or `official:<slug>`.
+        for good in ["7c9e6679-7425-40de-944b-e07fc1ee9a51", "official:golem"] {
+            moving.library_avatar_id = Some(good.to_string());
+            assert!(validate_persona(&moving).is_ok(), "{good}");
+        }
+        for bad in ["", "../x", "Official:Golem", &"a".repeat(65)] {
+            moving.library_avatar_id = Some(bad.to_string());
+            assert_eq!(
+                validate_persona(&moving).unwrap_err(),
+                "The library avatar id is not a library id.",
+                "{bad}"
+            );
+        }
+        moving.library_avatar_id = None;
         for bad in [
             "../x",
             "bundled:",

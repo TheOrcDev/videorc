@@ -2267,6 +2267,10 @@ mod tests {
             cohost.pet.is_none(),
             "servers before plan 168 omit the pet block"
         );
+        assert!(
+            cohost.golem_library.is_none(),
+            "servers before plan 170 omit the library block"
+        );
     }
 
     #[test]
@@ -2291,6 +2295,22 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&with).unwrap()["cohost"]["pet"],
             value["cohost"]["pet"]
+        );
+        // Plan 170 D9: the library block rides the same proxy, field for field.
+        value["cohost"]["golemLibrary"] =
+            serde_json::json!({ "enabled": true, "count": 3, "limit": 30 });
+        let with: AiCapabilities = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            with.cohost.as_ref().unwrap().golem_library,
+            Some(crate::protocol::AiCapabilitiesGolemLibrary {
+                enabled: true,
+                count: 3,
+                limit: 30
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&with).unwrap()["cohost"]["golemLibrary"],
+            value["cohost"]["golemLibrary"]
         );
         // Basic: the block is present and off.
         value["cohost"]["pet"] = serde_json::json!({ "enabled": false, "creationsRemainingThisMonth": 0, "monthlyLimit": 0 });

@@ -284,7 +284,7 @@ async fn wait_idle(env: &AvatarEnv) {
 fn describe(text: &str) -> CohostAvatarCreateParams {
     CohostAvatarCreateParams {
         description: Some(text.to_string()),
-        inspiration_base64: None,
+        ..CohostAvatarCreateParams::default()
     }
 }
 
@@ -326,6 +326,7 @@ async fn golem_look_create_lands_as_a_draft_and_keep_makes_it_the_look() {
         CohostAvatarCreateParams {
             description: Some("  a grumpy stone golem  ".to_string()),
             inspiration_base64: Some(b64(&png_bytes(99))),
+            ..CohostAvatarCreateParams::default()
         },
     )
     .await;
@@ -836,16 +837,16 @@ async fn golem_look_refuses_before_sending_anything() {
         "The description is at most 600 characters."
     );
     let gif = CohostAvatarCreateParams {
-        description: None,
         inspiration_base64: Some(b64(b"GIF89a\x01\x00\x01\x00")),
+        ..CohostAvatarCreateParams::default()
     };
     assert_eq!(
         refused(gif, env.clone()).await.message,
         "Choose a PNG, JPEG or WebP picture."
     );
     let huge = CohostAvatarCreateParams {
-        description: None,
         inspiration_base64: Some(b64(&vec![0u8; COHOST_AVATAR_IMAGE_IN_MAX_BYTES + 1])),
+        ..CohostAvatarCreateParams::default()
     };
     let too_large = refused(huge, env.clone()).await;
     assert_eq!(too_large.code, COHOST_AVATAR_PICTURE_TOO_LARGE);
@@ -1094,6 +1095,18 @@ fn shared_high_risk_contract_fixture_matches_golem_look_dtos() {
     round_trips::<CohostAvatarDraft>("/golemLook/draft");
     round_trips::<CohostAvatarDraftStatus>("/golemLook/status");
     round_trips::<CohostAvatarDraftStatus>("/golemLook/statusNone");
+    // Plan 170 D13: the library fields on create and on the draft.
+    round_trips::<CohostAvatarCreateParams>("/golemLook/createLibraryParams");
+    round_trips::<CohostAvatarDraft>("/golemLook/libraryDraft");
+    let create: CohostAvatarCreateParams =
+        serde_json::from_value(high_risk_fixture("/golemLook/createLibraryParams")).unwrap();
+    assert_eq!(create.name.as_deref(), Some("Grum"));
+    let draft: CohostAvatarDraft =
+        serde_json::from_value(high_risk_fixture("/golemLook/libraryDraft")).unwrap();
+    assert_eq!(
+        draft.library_avatar_id.as_deref(),
+        Some("7c9e6679-7425-40de-944b-e07fc1ee9a51")
+    );
     assert!(
         serde_json::from_value::<CohostAvatarCreateParams>(
             serde_json::json!({ "description": "x", "style": "pixel" })

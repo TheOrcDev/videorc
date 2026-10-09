@@ -78,6 +78,64 @@ export function parseGolemDraftPath(
   }
 }
 
+// --- Golem library cache (plan 170 D12) ------------------------------------
+// The account library's pictures are cached under the write root as
+// `library/<avatarId>/<state>-<tag>.png` (the tag is the 8 hex digits of the
+// web URL's `?v=`, so a changed picture gets a new path). Three segments with
+// a uuid in the middle: never a persona image, a draft or a pack path.
+
+/** The cache folder under the golem write root. */
+export const GOLEM_LIBRARY_CACHE_DIR = 'library'
+
+/** `library/<avatarId>/<state>-<tag>.png` for a user avatar's cached picture. */
+export function golemLibraryPosePath(
+  avatarId: string,
+  state: CohostAvatarState,
+  tag: string
+): string {
+  return `${GOLEM_LIBRARY_CACHE_DIR}/${avatarId}/${state}-${tag}.png`
+}
+
+/**
+ * A cached library picture path taken apart, or null for anything else: a
+ * lowercase uuid avatar id, a state and an 8 hex digit tag. `file` is the name
+ * inside the avatar's cache folder.
+ */
+export function parseGolemLibraryPosePath(
+  relativePath: unknown
+): { avatarId: string; state: CohostAvatarState; tag: string; file: string } | null {
+  if (typeof relativePath !== 'string') return null
+  const match =
+    /^library\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/((idle|talk|laugh|think)-([0-9a-f]{8})\.png)$/.exec(
+      relativePath
+    )
+  if (!match) return null
+  return {
+    avatarId: match[1]!,
+    state: match[3] as CohostAvatarState,
+    tag: match[4]!,
+    file: match[2]!
+  }
+}
+
+/** The managed URL `GolemLibraryEntry.poses` carries for a cached picture. */
+export function golemLibraryPoseUrl(
+  avatarId: string,
+  state: CohostAvatarState,
+  tag: string
+): string {
+  return `videorc-asset://${GOLEM_ASSET_HOST}/${golemLibraryPosePath(avatarId, state, tag)}`
+}
+
+/** A `GolemLibraryEntry.poses` URL taken apart, or null for anything else. */
+export function parseGolemLibraryPoseUrl(
+  url: unknown
+): ReturnType<typeof parseGolemLibraryPosePath> {
+  const prefix = `videorc-asset://${GOLEM_ASSET_HOST}/`
+  if (typeof url !== 'string' || !url.startsWith(prefix)) return null
+  return parseGolemLibraryPosePath(url.slice(prefix.length))
+}
+
 // --- Golem pet packs (plan 168 S-A2, D3, D4) --------------------------------
 // A pack lives at `<golemRoot>/<personaId>/pets/<packId>/` with a uuid id; the
 // read-only bundled root (second entry of `VIDEORC_MANAGED_GOLEM_ROOTS`)

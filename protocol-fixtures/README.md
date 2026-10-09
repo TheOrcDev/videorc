@@ -28,3 +28,16 @@ Rust model; both models must reproduce it within `tolerance` (1e-4):
   `cargo test -p videorc-backend golem_motion::tests::write_shared_fixture -- --ignored`
 - Rust: `cargo test -p videorc-backend golem_motion`
 - TypeScript: `pnpm --filter @videorc/desktop test -- golem-motion.test.ts`
+
+## `golem-official-catalog.json`
+
+Videorc's official Golem library (plan 170, D10 and D11), edited by hand. The
+desktop catalog (`apps/desktop/src/shared/golem-library.ts`), the backend table
+(`crates/videorc-backend/src/cohost_library.rs`) and the web catalog
+(videorc-web `lib/golem/official.ts`) must equal it:
+
+- Rust: `cargo test -p videorc-backend golem_official_catalog`
+- TypeScript: `pnpm --filter @videorc/desktop test -- golem-library.test.ts`
+
+The library RPC shapes (`cohost.library.*`) ride `high-risk-contracts.json`
+under `golemLibrary`, with the rest of the shared wire fixtures.

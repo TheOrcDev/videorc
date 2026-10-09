@@ -71,6 +71,15 @@ import type {
   CohostAvatarRedoParams,
   CohostAvatarRequestIdParams
 } from './backend'
+import type {
+  CohostLibraryAccepted,
+  CohostLibraryDeleteParams,
+  CohostLibrarySyncParams,
+  CohostLibraryUpdateParams,
+  CohostLibraryUseParams,
+  GolemLibraryState
+} from './golem-library'
+import { GOLEM_OFFICIAL_CATALOG } from './golem-library'
 import {
   validateBackendEventPayload,
   validateBackendRpcParams,
@@ -144,6 +153,19 @@ interface HighRiskContractFixtures {
     draft: CohostAvatarDraft
     status: CohostAvatarDraftStatus
     statusNone: CohostAvatarDraftStatus
+    createLibraryParams: CohostAvatarCreateParams
+    libraryDraft: CohostAvatarDraft
+  }
+  golemLibrary: {
+    signedOut: GolemLibraryState
+    signedIn: GolemLibraryState
+    localOnly: GolemLibraryState
+    syncParams: CohostLibrarySyncParams
+    useParams: CohostLibraryUseParams
+    useOfficialParams: CohostLibraryUseParams
+    updateParams: CohostLibraryUpdateParams
+    deleteParams: CohostLibraryDeleteParams
+    accepted: CohostLibraryAccepted
   }
   golemPetCreator: {
     status: GolemPetCreationStatus
@@ -1309,6 +1331,138 @@ describe('Golem look wire (plan 169, Phase B)', () => {
         running: { requestId, kind: 'build' }
       })
     ).toThrow('cohost.avatar.draft.get')
+  })
+})
+
+describe('Golem library wire (plan 170, Phase D)', () => {
+  const library = fixtures.golemLibrary
+  const look = fixtures.golemLook
+
+  it('validates the library RPCs and event exactly as the backend round-trips them', () => {
+    expect(validateBackendRpcParams('cohost.library.get', undefined)).toBeUndefined()
+    for (const state of [library.signedOut, library.signedIn, library.localOnly]) {
+      expect(validateBackendRpcResult('cohost.library.get', state)).toStrictEqual(state)
+      expect(validateBackendEventPayload('cohost.library.changed', state)).toStrictEqual(state)
+    }
+    expect(validateBackendRpcParams('cohost.library.sync', library.syncParams)).toStrictEqual(
+      library.syncParams
+    )
+    for (const params of [library.useParams, library.useOfficialParams]) {
+      expect(validateBackendRpcParams('cohost.library.use', params)).toStrictEqual(params)
+    }
+    expect(validateBackendRpcParams('cohost.library.update', library.updateParams)).toStrictEqual(
+      library.updateParams
+    )
+    expect(validateBackendRpcParams('cohost.library.delete', library.deleteParams)).toStrictEqual(
+      library.deleteParams
+    )
+    for (const method of [
+      'cohost.library.sync',
+      'cohost.library.use',
+      'cohost.library.update',
+      'cohost.library.delete'
+    ] as const) {
+      expect(validateBackendRpcResult(method, library.accepted)).toStrictEqual(library.accepted)
+    }
+    // The signed-out state lists the whole official catalog, pictures by slug.
+    expect(library.signedOut.official).toStrictEqual(
+      GOLEM_OFFICIAL_CATALOG.map(({ description: _description, ...entry }) => entry)
+    )
+  })
+
+  it('carries the library on the persona, the create params and the draft', () => {
+    const patch = fixtures.cohost.settingsPatch
+    expect(patch.persona?.libraryAvatarId).toBe(library.useParams.avatarId)
+    expect(validateBackendRpcParams('cohost.settings.set', patch)).toStrictEqual(patch)
+    // The default persona has no link: absent, never null.
+    expect('libraryAvatarId' in fixtures.cohost.settings.persona).toBe(false)
+    expect(() =>
+      validateBackendRpcParams('cohost.settings.set', {
+        persona: { ...patch.persona, libraryAvatarId: null }
+      })
+    ).toThrow('cohost.settings.set')
+    expect(() =>
+      validateBackendRpcParams('cohost.settings.set', {
+        persona: { ...patch.persona, libraryAvatarId: 'x'.repeat(65) }
+      })
+    ).toThrow('cohost.settings.set')
+    expect(
+      validateBackendRpcParams('cohost.avatar.create', look.createLibraryParams)
+    ).toStrictEqual(look.createLibraryParams)
+    expect(validateBackendEventPayload('cohost.avatar.draft', look.libraryDraft)).toStrictEqual(
+      look.libraryDraft
+    )
+    expect(
+      validateBackendRpcResult('cohost.avatar.draft.get', { draft: look.libraryDraft })
+    ).toEqual({ draft: look.libraryDraft })
+    for (const bad of [
+      { ...look.createLibraryParams, name: '' },
+      { ...look.createLibraryParams, name: 'n'.repeat(25) },
+      { ...look.createLibraryParams, personality: 'p'.repeat(1201) },
+      { ...look.createLibraryParams, context: 'c'.repeat(4001) }
+    ]) {
+      expect(() => validateBackendRpcParams('cohost.avatar.create', bad)).toThrow(
+        'cohost.avatar.create'
+      )
+    }
+    expect(() =>
+      validateBackendEventPayload('cohost.avatar.draft', {
+        ...look.libraryDraft,
+        libraryAvatarId: 'official:golem'
+      })
+    ).toThrow('cohost.avatar.draft')
+  })
+
+  it('refuses unknown slugs, official edits, empty updates and pictures outside the cache', () => {
+    expect(() =>
+      validateBackendRpcParams('cohost.library.use', { avatarId: 'official:dragon' })
+    ).toThrow('cohost.library.use')
+    expect(() =>
+      validateBackendRpcParams('cohost.library.use', {
+        avatarId: library.useParams.avatarId.toUpperCase()
+      })
+    ).toThrow('cohost.library.use')
+    expect(() =>
+      validateBackendRpcParams('cohost.library.delete', { avatarId: 'official:golem' })
+    ).toThrow('cohost.library.delete')
+    expect(() =>
+      validateBackendRpcParams('cohost.library.update', {
+        avatarId: 'official:orc',
+        name: 'Grok'
+      })
+    ).toThrow('cohost.library.update')
+    expect(() =>
+      validateBackendRpcParams('cohost.library.update', { avatarId: library.useParams.avatarId })
+    ).toThrow('cohost.library.update')
+    expect(() => validateBackendRpcParams('cohost.library.sync', { reason: 'timer' })).toThrow(
+      'cohost.library.sync'
+    )
+    expect(() => validateBackendRpcResult('cohost.library.sync', { accepted: false })).toThrow(
+      'cohost.library.sync'
+    )
+    const entry = library.signedIn.mine![0]!
+    for (const idle of [
+      'videorc-asset://golem/default/idle.png',
+      `videorc-asset://golem/library/${entry.id}/idle.png`,
+      `videorc-asset://golem/library/${entry.id}/../idle-0a1b2c3d.png`,
+      `file:///library/${entry.id}/idle-0a1b2c3d.png`
+    ]) {
+      expect(() =>
+        validateBackendEventPayload('cohost.library.changed', {
+          ...library.signedIn,
+          mine: [{ ...entry, poses: { ...entry.poses, idle } }]
+        })
+      ).toThrow('cohost.library.changed')
+    }
+    expect(() =>
+      validateBackendRpcResult('cohost.library.get', { ...library.signedOut, error: null })
+    ).toThrow('cohost.library.get')
+    expect(() =>
+      validateBackendRpcResult('cohost.library.get', {
+        ...library.signedOut,
+        busy: { kind: 'generate' }
+      })
+    ).toThrow('cohost.library.get')
   })
 })
 

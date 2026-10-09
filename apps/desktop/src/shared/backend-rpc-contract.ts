@@ -174,6 +174,28 @@ import {
 } from './golem-pet-creator'
 import { isGolemUserPackId } from './golem-assets'
 // --- end Golem pets (plan 168, Phase F) ---
+// --- Golem library (plan 170) ---
+import { parseGolemLibraryPoseUrl } from './golem-assets'
+import {
+  GOLEM_LIBRARY_CONTEXT_MAX_CHARS,
+  GOLEM_LIBRARY_DESCRIPTION_MAX_CHARS,
+  GOLEM_LIBRARY_ID_MAX_CHARS,
+  GOLEM_LIBRARY_NAME_MAX_CHARS,
+  GOLEM_LIBRARY_PERSONALITY_MAX_CHARS,
+  GOLEM_LIBRARY_SYNC_REASONS,
+  GOLEM_OFFICIAL_SLUGS,
+  isGolemLibraryId,
+  isGolemUserAvatarId,
+  isOfficialGolemId,
+  type CohostLibraryAccepted,
+  type CohostLibraryDeleteParams,
+  type CohostLibrarySyncParams,
+  type CohostLibraryUpdateParams,
+  type CohostLibraryUseParams,
+  type GolemLibraryState,
+  type GolemOfficialId
+} from './golem-library'
+// --- end Golem library (plan 170) ---
 import {
   arraySchema,
   boundedJsonValueSchema,
@@ -390,6 +412,13 @@ export interface BackendRpcMethodMap {
   >
   'cohost.avatar.draft.get': BackendRpcDefinition<undefined, CohostAvatarDraftStatus>
   // --- end Golem look (plan 169 D9) ---
+  // --- Golem library (plan 170 D12, D13) ---
+  'cohost.library.get': BackendRpcDefinition<undefined, GolemLibraryState>
+  'cohost.library.sync': BackendRpcDefinition<CohostLibrarySyncParams, CohostLibraryAccepted>
+  'cohost.library.use': BackendRpcDefinition<CohostLibraryUseParams, CohostLibraryAccepted>
+  'cohost.library.update': BackendRpcDefinition<CohostLibraryUpdateParams, CohostLibraryAccepted>
+  'cohost.library.delete': BackendRpcDefinition<CohostLibraryDeleteParams, CohostLibraryAccepted>
+  // --- end Golem library (plan 170) ---
   // --- Golem overlay (plan 164) ---
   'cohost.golem.status': BackendRpcDefinition<undefined, GolemOverlaySnapshot>
   'golem.overlay.set': BackendRpcDefinition<SetGolemOverlayParams, OverlayTargetsInfo>
@@ -477,6 +506,9 @@ export interface BackendEventMap {
   'cohost.avatar.progress': CohostAvatarProgressEvent
   'cohost.avatar.draft': CohostAvatarDraft
   // --- end Golem look (plan 169 D9) ---
+  // --- Golem library (plan 170 D12) ---
+  'cohost.library.changed': GolemLibraryState
+  // --- end Golem library (plan 170) ---
   // --- Golem overlay (plan 164) ---
   'cohost.golem.state': GolemOverlaySnapshot
   // --- end Golem overlay (plan 164) ---
@@ -2355,7 +2387,13 @@ const cohostPersonaSchema = objectSchema(
     // carries the whole persona.
     avatar: golemAvatarSchema,
     motion: golemMotionSchema,
-    reactions: golemReactionTableSchema
+    reactions: golemReactionTableSchema,
+    // Plan 170 D12: the library avatar this Golem is (a uuid or
+    // `official:<slug>`); absent, never null. Kept a plain bounded string so a
+    // saved link never fails the settings load.
+    libraryAvatarId: optionalSchema(
+      stringSchema({ minLength: 1, maxLength: GOLEM_LIBRARY_ID_MAX_CHARS })
+    )
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostPersona>
@@ -3379,6 +3417,152 @@ const cohostReportSavedEventSchema = objectSchema(
   { sessionId: boundedString },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostReportSavedEvent>
+// --- Golem library (plan 170 D12, D13) ---
+// A user avatar id is the web's lowercase uuid; a library id is one of those
+// or a known `official:<slug>` (the backend drops slugs it does not know).
+const golemUserAvatarIdSchema = runtimeSchema<string>(
+  'a library avatar id (a uuid)',
+  (value, path) => {
+    if (!isGolemUserAvatarId(value)) {
+      throw new RuntimeSchemaError(path, 'a library avatar id (a uuid)')
+    }
+    return value
+  }
+)
+const golemLibraryIdSchema = runtimeSchema<string>(
+  'a library id (a uuid or official:<slug>)',
+  (value, path) => {
+    if (!isGolemLibraryId(value)) {
+      throw new RuntimeSchemaError(path, 'a library id (a uuid or official:<slug>)')
+    }
+    return value
+  }
+)
+const golemOfficialIdSchema = runtimeSchema<GolemOfficialId>(
+  'an official id (official:<slug>)',
+  (value, path) => {
+    if (!isOfficialGolemId(value)) {
+      throw new RuntimeSchemaError(path, 'an official id (official:<slug>)')
+    }
+    return value
+  }
+)
+// A cached picture: `videorc-asset://golem/library/<uuid>/<state>-<8 hex>.png`.
+const golemLibraryPoseUrlSchema = runtimeSchema<string>(
+  'a cached library picture URL',
+  (value, path) => {
+    if (!parseGolemLibraryPoseUrl(value)) {
+      throw new RuntimeSchemaError(path, 'a cached library picture URL')
+    }
+    return value as string
+  }
+)
+const golemLibraryNameSchema = stringSchema({
+  minLength: 1,
+  maxLength: GOLEM_LIBRARY_NAME_MAX_CHARS
+})
+const golemLibraryPersonalitySchema = stringSchema({
+  maxLength: GOLEM_LIBRARY_PERSONALITY_MAX_CHARS
+})
+const golemLibraryContextSchema = stringSchema({ maxLength: GOLEM_LIBRARY_CONTEXT_MAX_CHARS })
+const golemLibraryEntrySchema = objectSchema(
+  {
+    id: golemUserAvatarIdSchema,
+    name: golemLibraryNameSchema,
+    description: stringSchema({ maxLength: GOLEM_LIBRARY_DESCRIPTION_MAX_CHARS }),
+    personality: golemLibraryPersonalitySchema,
+    context: golemLibraryContextSchema,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    poses: objectSchema(
+      {
+        idle: nullableSchema(golemLibraryPoseUrlSchema),
+        talk: nullableSchema(golemLibraryPoseUrlSchema),
+        laugh: nullableSchema(golemLibraryPoseUrlSchema),
+        think: nullableSchema(golemLibraryPoseUrlSchema)
+      },
+      { allowUnknown: false }
+    )
+  },
+  { allowUnknown: false }
+)
+const golemLibraryStateSchema = objectSchema(
+  {
+    signedIn: booleanSchema,
+    official: arraySchema(
+      objectSchema(
+        {
+          id: golemOfficialIdSchema,
+          slug: enumSchema(GOLEM_OFFICIAL_SLUGS),
+          name: golemLibraryNameSchema,
+          kind: stringSchema({ minLength: 1, maxLength: 40 }),
+          tagline: stringSchema({ maxLength: 200 }),
+          personality: golemLibraryPersonalitySchema
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: 64 }
+    ),
+    mine: nullableSchema(arraySchema(golemLibraryEntrySchema, { maxLength: 1000 })),
+    activeAvatarId: nullableSchema(golemLibraryIdSchema),
+    serverActiveAvatarId: nullableSchema(golemLibraryIdSchema),
+    limit: numberSchema({ integer: true, min: 0, max: 10_000 }),
+    busy: nullableSchema(
+      objectSchema(
+        {
+          kind: enumSchema(['sync', 'use', 'delete', 'update']),
+          avatarId: optionalSchema(golemLibraryIdSchema)
+        },
+        { allowUnknown: false }
+      )
+    ),
+    error: optionalSchema(
+      objectSchema({ code: boundedString, message: boundedString }, { allowUnknown: false })
+    )
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<GolemLibraryState>
+const cohostLibrarySyncParamsSchema = objectSchema(
+  { reason: enumSchema(GOLEM_LIBRARY_SYNC_REASONS) },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostLibrarySyncParams>
+const cohostLibraryUseParamsSchema = objectSchema(
+  { avatarId: golemLibraryIdSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostLibraryUseParams>
+const cohostLibraryUpdateFieldsSchema = objectSchema(
+  {
+    avatarId: golemUserAvatarIdSchema,
+    name: optionalSchema(golemLibraryNameSchema),
+    personality: optionalSchema(golemLibraryPersonalitySchema),
+    context: optionalSchema(golemLibraryContextSchema)
+  },
+  { allowUnknown: false }
+)
+// The web's PATCH needs at least one field.
+const cohostLibraryUpdateParamsSchema = runtimeSchema<CohostLibraryUpdateParams>(
+  'a library update (an avatar id and at least one of name, personality, context)',
+  (value, path) => {
+    const parsed = cohostLibraryUpdateFieldsSchema.parse(value, path)
+    if (
+      parsed.name === undefined &&
+      parsed.personality === undefined &&
+      parsed.context === undefined
+    ) {
+      throw new RuntimeSchemaError(path, 'a library update with at least one field')
+    }
+    return parsed as CohostLibraryUpdateParams
+  }
+)
+const cohostLibraryDeleteParamsSchema = objectSchema(
+  { avatarId: golemUserAvatarIdSchema },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostLibraryDeleteParams>
+const cohostLibraryAcceptedSchema = objectSchema(
+  { accepted: literalSchema(true) },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostLibraryAccepted>
+// --- end Golem library (plan 170) ---
 // Plan 169 D9: the Golem look, accepted at once and answered by events.
 const cohostAvatarStateSchema = enumSchema(['idle', 'talk', 'laugh', 'think'])
 const cohostAvatarRequestIdSchema = runtimeSchema<string>(
@@ -3411,7 +3595,11 @@ const cohostAvatarCreateParamsSchema = objectSchema(
     description: optionalSchema(stringSchema({ minLength: 1, maxLength: 600 })),
     // 3 MB decoded (the backend's cap, under Vercel's 4.5 MB request body)
     // is about 4.2 M base64 characters.
-    inspirationBase64: optionalSchema(stringSchema({ minLength: 1, maxLength: 4_200_000 }))
+    inspirationBase64: optionalSchema(stringSchema({ minLength: 1, maxLength: 4_200_000 })),
+    // Plan 170 D13: the library avatar's name, personality and "About you".
+    name: optionalSchema(stringSchema({ minLength: 1, maxLength: GOLEM_LIBRARY_NAME_MAX_CHARS })),
+    personality: optionalSchema(stringSchema({ maxLength: GOLEM_LIBRARY_PERSONALITY_MAX_CHARS })),
+    context: optionalSchema(stringSchema({ maxLength: GOLEM_LIBRARY_CONTEXT_MAX_CHARS }))
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostAvatarCreateParams>
@@ -3460,7 +3648,9 @@ const cohostAvatarDraftSchema = objectSchema(
         think: optionalSchema(cohostAvatarErrorDetailSchema)
       },
       { allowUnknown: false }
-    )
+    ),
+    // Plan 170 D13: the library avatar the draft already is.
+    libraryAvatarId: optionalSchema(golemUserAvatarIdSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostAvatarDraft>
@@ -4033,6 +4223,25 @@ const runtimeContracts = {
   },
   'cohost.avatar.draft.get': { params: undefinedSchema, result: cohostAvatarDraftStatusSchema },
   // --- end Golem look (plan 169 D9) ---
+  // --- Golem library (plan 170 D12, D13) ---
+  'cohost.library.get': { params: undefinedSchema, result: golemLibraryStateSchema },
+  'cohost.library.sync': {
+    params: cohostLibrarySyncParamsSchema,
+    result: cohostLibraryAcceptedSchema
+  },
+  'cohost.library.use': {
+    params: cohostLibraryUseParamsSchema,
+    result: cohostLibraryAcceptedSchema
+  },
+  'cohost.library.update': {
+    params: cohostLibraryUpdateParamsSchema,
+    result: cohostLibraryAcceptedSchema
+  },
+  'cohost.library.delete': {
+    params: cohostLibraryDeleteParamsSchema,
+    result: cohostLibraryAcceptedSchema
+  },
+  // --- end Golem library (plan 170) ---
   // --- Golem overlay (plan 164) ---
   'cohost.golem.status': { params: undefinedSchema, result: golemOverlaySnapshotSchema },
   'golem.overlay.set': { params: setGolemOverlayParamsSchema, result: overlayTargetsInfoSchema },
@@ -4172,6 +4381,9 @@ const runtimeEventSchemas = {
   'cohost.avatar.progress': cohostAvatarProgressEventSchema,
   'cohost.avatar.draft': cohostAvatarDraftSchema,
   // --- end Golem look (plan 169 D9) ---
+  // --- Golem library (plan 170 D12) ---
+  'cohost.library.changed': golemLibraryStateSchema,
+  // --- end Golem library (plan 170) ---
   // --- Golem overlay (plan 164) ---
   'cohost.golem.state': golemOverlaySnapshotSchema,
   // --- end Golem overlay (plan 164) ---

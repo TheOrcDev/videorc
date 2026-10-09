@@ -9,6 +9,7 @@ import type {
   GolemPetImportResult,
   GolemReactionTable
 } from './golem-pet'
+import type { GolemLibraryId } from './golem-library'
 export type { BackgroundImportResult } from './background-import'
 export type { TwitchGifMode } from './chat-gif'
 
@@ -3345,6 +3346,14 @@ export interface AiCapabilities {
       creationsRemainingThisMonth: number
       monthlyLimit: number
     }
+    /** The account Golem library (plan 170 D9): `enabled` when signed in and
+     * the web's library store is configured (creating still follows
+     * `avatar.enabled`). Older servers omit it: the library is off. */
+    golemLibrary?: {
+      enabled: boolean
+      count: number
+      limit: number
+    }
   }
   entitlement: {
     checkedAt: string
@@ -5074,6 +5083,14 @@ export interface CohostPersona {
   motion: GolemMotionSettings
   /** Per-trigger reaction overrides (plan 168 D14); `{}` uses D14's defaults. */
   reactions: GolemReactionTable
+  /**
+   * The library avatar this Golem is (plan 170 D12): a user avatar's uuid or
+   * `official:<slug>`. Absent (never null) for a Golem made only on this
+   * computer (an imported pack, a look kept while signed out) and for the
+   * untouched default; sync never overwrites a Golem without it unless it is
+   * the untouched default. 1 to 64 characters.
+   */
+  libraryAvatarId?: GolemLibraryId
 }
 
 /** The chat posting mode (plan 164 D4). */
@@ -5153,6 +5170,11 @@ export interface CohostAvatarCreateParams {
   /** 1 to 600 characters. */
   description?: string
   inspirationBase64?: string
+  /** Plan 170 D13: the library avatar's name (1 to 24; the persona's name
+   * when absent), personality (0 to 1200) and "About you" (0 to 4000). */
+  name?: string
+  personality?: string
+  context?: string
 }
 
 /** The states a draft can redo; idle has no Redo (Try again makes a new character). */
@@ -5199,6 +5221,10 @@ export interface CohostAvatarDraft {
   requestId: string
   images: Partial<Record<CohostAvatarState, string>>
   failed: Partial<Record<CohostAvatarState, CohostAvatarErrorDetail>>
+  /** Plan 170 D13: the account library avatar this draft already is (a
+   * uuid; it is saved on both sides as soon as it is made). Absent for a
+   * draft made by the plan 169 route (an older web). */
+  libraryAvatarId?: string
 }
 
 export type CohostAvatarJobKind = 'create' | 'redo'
@@ -5373,6 +5399,29 @@ export interface CohostPetReactAccepted {
   reaction: string
 }
 // --- end Golem pets (plan 168, Phase A) ---
+
+// --- Golem library (plan 170 D12, D13) ---
+// The account library and the official avatars: the wire lives in `./golem-library`.
+export type {
+  CohostLibraryAccepted,
+  CohostLibraryDeleteParams,
+  CohostLibrarySyncParams,
+  CohostLibraryUpdateParams,
+  CohostLibraryUseParams,
+  GolemLibraryBusy,
+  GolemLibraryBusyKind,
+  GolemLibraryEntry,
+  GolemLibraryError,
+  GolemLibraryId,
+  GolemLibraryState,
+  GolemLibrarySyncReason,
+  GolemOfficialCatalogEntry,
+  GolemOfficialEntry,
+  GolemOfficialId,
+  GolemOfficialSlug,
+  GolemPoseState
+} from './golem-library'
+// --- end Golem library (plan 170) ---
 
 // --- Golem pets (plan 168, Phase F) ---
 // The creator (S-F4): the wire lives in `./golem-pet-creator`.
