@@ -5436,6 +5436,10 @@ pub struct AiCapabilitiesBuddyLibrary {
     pub count: u32,
     #[serde(default)]
     pub limit: u32,
+    /// Plan 172 D8: alive packs and imports sync (the web's S3 storage is
+    /// configured). Older servers omit it: nothing uploads.
+    #[serde(default)]
+    pub alive: bool,
 }
 
 // --- Buddy pets (plan 168, Phase F) ---

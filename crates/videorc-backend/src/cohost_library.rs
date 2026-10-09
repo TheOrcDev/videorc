@@ -28,11 +28,14 @@
 //!   pushed with `PATCH` after about 2 s (last write wins).
 //! - **Signed out** or the library off: `mine` is null and nothing changes;
 //!   official avatars still apply.
+//! - **Alive** (plan 172): official Buddies wear their packs, account Buddies
+//!   carry theirs between computers, and a Buddy made here can join the
+//!   library; see [`alive`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt as _;
@@ -86,7 +89,7 @@ const CACHE_CONCURRENCY: usize = 4;
 // --- The official catalog ----------------------------------------------------------
 
 /// Videorc's official avatars (D10, D11), in catalog order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BuddyOfficialSlug {
     Golem,
@@ -126,7 +129,8 @@ impl BuddyOfficialSlug {
 }
 
 /// One catalog row. `description` is what the image model was asked for;
-/// Buddy the Golem's art is the owner's original, so it has none.
+/// Buddy the Golem's art is the owner's original, so it has none. `alive`
+/// is the character's official pack (plan 172 D4), None until it ships.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuddyOfficial {
     pub slug: BuddyOfficialSlug,
@@ -136,6 +140,50 @@ pub struct BuddyOfficial {
     pub personality: &'static str,
     #[allow(dead_code)] // read by the catalog test and the official art script's mirror
     pub description: Option<&'static str>,
+    pub alive: Option<BuddyOfficialAlive>,
+}
+
+/// One file of an official pack, as the catalog pins it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuddyOfficialAliveFile {
+    pub name: &'static str,
+    pub bytes: u64,
+    pub sha256: &'static str,
+}
+
+/// An official character's alive pack (plan 172 D4): `bundled:buddy` ships
+/// inside the app; the others (`official:<slug>`) download from
+/// `/buddy/official/<slug>/alive/<version>/<name>` the first time they are
+/// used, verified file by file against this row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuddyOfficialAlive {
+    pub version: u32,
+    pub pack_id: &'static str,
+    pub bundled: bool,
+    #[allow(dead_code)] // the catalog test checks it against the fixture
+    pub cell_size: u32,
+    #[allow(dead_code)] // the catalog test checks it against the fixture
+    pub frames: u32,
+    pub files: &'static [BuddyOfficialAliveFile],
+}
+
+impl BuddyOfficialAlive {
+    pub(crate) fn to_spec(self) -> alive::OfficialAliveSpec {
+        alive::OfficialAliveSpec {
+            version: self.version,
+            pack_id: self.pack_id.to_string(),
+            bundled: self.bundled,
+            files: self
+                .files
+                .iter()
+                .map(|file| alive::AliveFileSpec {
+                    name: file.name.to_string(),
+                    bytes: file.bytes,
+                    sha256: file.sha256.to_string(),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// Plan 170 D10, D11: equal to `protocol-fixtures/buddy-official-catalog.json`.
@@ -147,6 +195,7 @@ pub const BUDDY_OFFICIAL_CATALOG: [BuddyOfficial; 5] = [
         tagline: "The original. Steady as stone.",
         personality: "Calm, warm and a little slow to speak. Greets every follower like an old friend and never rushes anyone.",
         description: None,
+        alive: None,
     },
     BuddyOfficial {
         slug: BuddyOfficialSlug::Orc,
@@ -157,6 +206,7 @@ pub const BUDDY_OFFICIAL_CATALOG: [BuddyOfficial; 5] = [
         description: Some(
             "a burly, friendly green orc with small tusks, a braided top-knot, leather shoulder guards and a wide grin",
         ),
+        alive: None,
     },
     BuddyOfficial {
         slug: BuddyOfficialSlug::Goblin,
@@ -167,6 +217,7 @@ pub const BUDDY_OFFICIAL_CATALOG: [BuddyOfficial; 5] = [
         description: Some(
             "a small cheeky yellow-green goblin with huge pointed ears, a patched vest and a coin pouch on his belt",
         ),
+        alive: None,
     },
     BuddyOfficial {
         slug: BuddyOfficialSlug::Pirate,
@@ -177,6 +228,7 @@ pub const BUDDY_OFFICIAL_CATALOG: [BuddyOfficial; 5] = [
         description: Some(
             "a jolly round pirate captain with a tricorn hat, an eye patch, a striped shirt and a big bushy beard",
         ),
+        alive: None,
     },
     BuddyOfficial {
         slug: BuddyOfficialSlug::Robot,
@@ -187,6 +239,7 @@ pub const BUDDY_OFFICIAL_CATALOG: [BuddyOfficial; 5] = [
         description: Some(
             "a rounded retro robot with a screen for a face showing simple glowing eyes, a short antenna and chunky metal hands",
         ),
+        alive: None,
     },
 ];
 
@@ -194,6 +247,17 @@ pub const BUDDY_OFFICIAL_CATALOG: [BuddyOfficial; 5] = [
 pub fn official_slug_from_id(id: &str) -> Option<BuddyOfficialSlug> {
     id.strip_prefix(BUDDY_OFFICIAL_ID_PREFIX)
         .and_then(BuddyOfficialSlug::parse)
+}
+
+/// The version of a downloadable official pack (`official:<slug>`, plan 172
+/// D4) as the catalog pins it; None for an unknown slug, a character without
+/// a pack, or one that ships bundled.
+pub fn official_pack_version(slug: &str) -> Option<u32> {
+    let slug = BuddyOfficialSlug::parse(slug)?;
+    official_buddy(slug)
+        .alive
+        .filter(|alive| !alive.bundled)
+        .map(|alive| alive.version)
 }
 
 /// A user avatar id: the web's lowercase hyphenated uuid.
@@ -219,6 +283,18 @@ pub fn persona_link_ok(id: &str) -> bool {
 
 // --- Wire types ------------------------------------------------------------------------
 
+/// Where an official character's alive pack is on this computer (plan 172
+/// D4, D12): it ships inside the app, it was downloaded and verified, it
+/// downloads the first time the Buddy is used, or it has none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BuddyOfficialAliveState {
+    Bundled,
+    Downloaded,
+    Available,
+    None,
+}
+
 /// An official avatar as `BuddyLibraryState.official` lists it; its pictures
 /// are bundled with the app, addressed by slug.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -230,10 +306,11 @@ pub struct BuddyOfficialEntry {
     pub kind: String,
     pub tagline: String,
     pub personality: String,
+    pub alive: BuddyOfficialAliveState,
 }
 
-impl From<&BuddyOfficial> for BuddyOfficialEntry {
-    fn from(official: &BuddyOfficial) -> Self {
+impl BuddyOfficialEntry {
+    fn of(official: &BuddyOfficial, alive: BuddyOfficialAliveState) -> Self {
         Self {
             id: official.slug.id(),
             slug: official.slug,
@@ -241,6 +318,7 @@ impl From<&BuddyOfficial> for BuddyOfficialEntry {
             kind: official.kind.to_string(),
             tagline: official.tagline.to_string(),
             personality: official.personality.to_string(),
+            alive,
         }
     }
 }
@@ -258,7 +336,17 @@ pub struct BuddyLibraryPoses {
     pub think: Option<String>,
 }
 
-/// One avatar of the account's own library, as the app caches it.
+/// An account Buddy's alive pack as the renderer sees it (plan 172 D9): the
+/// pack it wears once applied, and its cell size.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyLibraryEntryAlive {
+    pub pack_id: String,
+    pub cell_size: u32,
+}
+
+/// One avatar of the account's own library, as the app caches it. `alive`
+/// is always sent (null when it has no pack).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BuddyLibraryEntry {
@@ -270,6 +358,7 @@ pub struct BuddyLibraryEntry {
     pub created_at: String,
     pub updated_at: String,
     pub poses: BuddyLibraryPoses,
+    pub alive: Option<BuddyLibraryEntryAlive>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,6 +368,12 @@ pub enum BuddyLibraryBusyKind {
     Use,
     Delete,
     Update,
+    /// Plan 172 D10: a Buddy's pack goes to the account.
+    AliveUpload,
+    /// Plan 172 D4, D10: an official or account pack comes to this computer.
+    AliveDownload,
+    /// Plan 172 D10: a Buddy made here joins the library.
+    Import,
 }
 
 /// The library job running now; `avatarId` absent (never null) for a sync.
@@ -360,12 +455,47 @@ pub struct CohostLibraryAccepted {
 }
 
 /// The sync clock (D12): the account profile's `updatedAt` as last applied
-/// or seen. Backend-private (`app_settings` row `buddyLibrarySync`).
+/// or seen. Backend-private (`app_settings` row `buddyLibrarySync`), with
+/// the alive bookkeeping of plan 172 D10.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BuddyLibrarySync {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_updated_at: Option<String>,
+    /// The account pack last applied for the linked Buddy (or none): sync
+    /// downloads a pack only when the account's differs, so a Buddy switched
+    /// to Still here stays Still.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alive_seen: Option<BuddyLibraryAliveSeen>,
+    /// A pack upload or removal the account has not heard of yet; the next
+    /// sync tries again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_alive: Option<BuddyLibraryPendingAlive>,
+}
+
+/// Which account pack the linked Buddy was last given.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyLibraryAliveSeen {
+    pub avatar_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pack_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BuddyLibraryPendingAction {
+    Upload,
+    Delete,
+}
+
+/// The latest pack change made here for a linked Buddy, until the account has it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyLibraryPendingAlive {
+    pub avatar_id: String,
+    pub pack_id: String,
+    pub action: BuddyLibraryPendingAction,
 }
 
 /// Why a library RPC was refused before anything changed.
@@ -407,8 +537,20 @@ fn store_clock(state: &AppState, profile_updated_at: Option<String>) {
     if profile_updated_at.is_none() {
         return;
     }
-    if let Err(error) = save_library_sync(&state.database, &BuddyLibrarySync { profile_updated_at })
-    {
+    update_sync(state, |sync| sync.profile_updated_at = profile_updated_at);
+}
+
+/// Change the stored sync row in place (one writer at a time, so the clock
+/// and the alive bookkeeping never overwrite each other).
+pub(crate) fn update_sync(state: &AppState, edit: impl FnOnce(&mut BuddyLibrarySync)) {
+    let _row = state
+        .buddy_library
+        .sync_row
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let mut sync = load_library_sync(&state.database);
+    edit(&mut sync);
+    if let Err(error) = save_library_sync(&state.database, &sync) {
         tracing::warn!("Could not save the Buddy library sync clock: {error:#}");
     }
 }
@@ -482,21 +624,39 @@ pub(crate) fn official_webp(slug: BuddyOfficialSlug, state: CohostAvatarState) -
 
 // --- Process state ---------------------------------------------------------------------------
 
-/// What a library job needs from the process: the write root, the web client
-/// and the bearer. Tests fix their own (a temp root, a fake web).
+/// What a library job needs from the process: the write root, the bundled
+/// root, the web client and the bearer. Tests fix their own (temp roots, a
+/// fake web, and the official packs they pin).
 #[derive(Clone, Default)]
 pub(crate) struct LibraryEnv {
     pub(crate) root: Option<PathBuf>,
+    pub(crate) bundled_root: Option<PathBuf>,
     pub(crate) api: Option<VideorcApiClient>,
     pub(crate) token: Option<String>,
+    /// The official packs by slug; None reads the catalog.
+    pub(crate) official_alive: Option<Arc<BTreeMap<BuddyOfficialSlug, alive::OfficialAliveSpec>>>,
 }
 
 impl LibraryEnv {
     fn process() -> Self {
+        let roots = crate::resource_authority::configured_managed_buddy_roots();
         Self {
-            root: crate::cohost_avatar::managed_buddy_root(),
+            root: roots.first().cloned(),
+            bundled_root: roots.get(1).cloned(),
             api: VideorcApiClient::new().ok(),
             token: crate::account::stored_session_token(),
+            official_alive: None,
+        }
+    }
+
+    /// An official character's pack: the pinned one in tests, else the catalog's.
+    pub(crate) fn official_alive(
+        &self,
+        slug: BuddyOfficialSlug,
+    ) -> Option<alive::OfficialAliveSpec> {
+        match &self.official_alive {
+            Some(table) => table.get(&slug).cloned(),
+            None => official_buddy(slug).alive.map(BuddyOfficialAlive::to_spec),
         }
     }
 
@@ -568,6 +728,8 @@ pub struct LibraryShared {
     sync_queued: AtomicBool,
     watcher_running: AtomicBool,
     patch_generation: AtomicU64,
+    /// One writer of the stored sync row at a time.
+    sync_row: StdMutex<()>,
     fixed_env: Option<LibraryEnv>,
     timing: LibraryTiming,
 }
@@ -587,6 +749,7 @@ impl LibraryShared {
             sync_queued: AtomicBool::new(false),
             watcher_running: AtomicBool::new(false),
             patch_generation: AtomicU64::new(0),
+            sync_row: StdMutex::new(()),
             fixed_env: None,
             timing: LibraryTiming::default(),
         }
@@ -615,6 +778,14 @@ impl LibraryShared {
             .capability
             .as_ref()
             .is_some_and(|capability| capability.enabled)
+    }
+
+    /// The web syncs alive packs and imports (plan 172 D8): its storage is S3.
+    pub(crate) fn alive_sync(&self) -> bool {
+        self.cache()
+            .capability
+            .as_ref()
+            .is_some_and(|capability| capability.enabled && capability.alive)
     }
 
     /// The capability is known to be off (as opposed to not read yet).
@@ -647,10 +818,20 @@ fn untouched_default(persona: &CohostPersona) -> bool {
     persona.library_avatar_id.is_none() && persona.source == CohostPersonaSource::Default
 }
 
-fn official_entries() -> Vec<BuddyOfficialEntry> {
+fn official_entries(
+    states: &BTreeMap<BuddyOfficialSlug, BuddyOfficialAliveState>,
+) -> Vec<BuddyOfficialEntry> {
     BUDDY_OFFICIAL_CATALOG
         .iter()
-        .map(BuddyOfficialEntry::from)
+        .map(|official| {
+            BuddyOfficialEntry::of(
+                official,
+                states
+                    .get(&official.slug)
+                    .copied()
+                    .unwrap_or(BuddyOfficialAliveState::None),
+            )
+        })
         .collect()
 }
 
@@ -670,6 +851,10 @@ fn entry_of(
         created_at: avatar.created_at.clone(),
         updated_at: avatar.updated_at.clone(),
         poses: poses.cloned().unwrap_or_default(),
+        alive: alive::usable_alive(avatar).map(|alive| BuddyLibraryEntryAlive {
+            pack_id: alive.pack_id.clone(),
+            cell_size: alive.cell_size,
+        }),
     }
 }
 
@@ -715,6 +900,10 @@ pub async fn get(state: &AppState) -> BuddyLibraryState {
     let signed_in = signed_in(state).await;
     let persona = current_persona(state).await;
     let active = active_avatar_id(&persona);
+    let env = state.buddy_library.env();
+    let states = blocking(move || Ok(alive::official_states(&env)))
+        .await
+        .unwrap_or_default();
     let cache = state.buddy_library.cache();
     let mine = if signed_in {
         cache.web.as_ref().map(|avatars| {
@@ -728,7 +917,7 @@ pub async fn get(state: &AppState) -> BuddyLibraryState {
     };
     BuddyLibraryState {
         signed_in,
-        official: official_entries(),
+        official: official_entries(&states),
         mine,
         active_avatar_id: active.clone(),
         server_active_avatar_id: cache
@@ -947,7 +1136,11 @@ async fn run_sync(state: &AppState) -> Result<(), CohostAvatarErrorDetail> {
         list.profile_updated_at,
         &avatars,
     )
-    .await
+    .await?;
+    // Plan 172 D10: a pack change made here that the account missed, and a
+    // pack the linked Buddy gained elsewhere.
+    alive::after_sync(state, &avatars).await;
+    Ok(())
 }
 
 /// D12: apply the account's choice, offer it, or hold it until the session
@@ -1501,10 +1694,19 @@ async fn apply_account_avatar(
             .collect();
         blocking(move || write_look(&root, &persona_id, &pictures)).await?
     };
+    // Plan 172 D10: the Buddy's pack comes with it, verified, or it is Still
+    // (and the next sync tries the pack again).
+    let (wears, alive_problem) = match alive::usable_alive(avatar) {
+        Some(pack) => match alive::fetch_account_pack(env, &persona.id, &avatar.id, pack).await {
+            Ok(pack_id) => (BuddyAvatar::Alive { pack_id }, None),
+            Err(error) => (BuddyAvatar::Still, Some(error)),
+        },
+        None => (BuddyAvatar::Still, None),
+    };
     let mut next = persona;
     next.images = look.images.clone();
     next.source = CohostPersonaSource::Generated;
-    next.avatar = BuddyAvatar::Still;
+    next.avatar = wears.clone();
     if let Some(name) = library_name(&avatar.name) {
         next.name = name;
     }
@@ -1514,6 +1716,27 @@ async fn apply_account_avatar(
         .then(|| crate::cohost::truncate_utf16(&avatar.context, 4000));
     save_applied(state, next, notes, look).await?;
     state.emit_log("info", format!("Buddy is now {}.", avatar.name.trim()));
+    match alive_problem {
+        None => alive::note_alive_seen(
+            state,
+            &avatar.id,
+            match &wears {
+                BuddyAvatar::Alive { pack_id } => Some(pack_id.clone()),
+                BuddyAvatar::Still => None,
+            },
+        ),
+        Some(error) => alive::warn(
+            state,
+            CohostAvatarErrorDetail::new_owned(
+                error.code,
+                format!(
+                    "{} is still for now: its moves could not be downloaded ({}). It tries again at the next sync.",
+                    avatar.name.trim(),
+                    error.message
+                ),
+            ),
+        ),
+    }
     Ok(())
 }
 
@@ -1566,6 +1789,15 @@ async fn apply_official(
             blocking(move || write_look(&root, &persona_id, &pictures)).await?
         }
     };
+    // Plan 172 D4, D5: the pack it can wear now (bundled, or downloaded and
+    // verified); otherwise Still until the download lands.
+    let ready = {
+        let env = env.clone();
+        blocking(move || Ok(alive::official_ready_pack(&env, slug)))
+            .await
+            .unwrap_or(None)
+    };
+    let persona_id = persona.id.clone();
     let mut next = persona;
     next.images = look.images.clone();
     next.source = if slug == BuddyOfficialSlug::Golem {
@@ -1573,12 +1805,20 @@ async fn apply_official(
     } else {
         CohostPersonaSource::Generated
     };
-    next.avatar = BuddyAvatar::Still;
+    next.avatar = match &ready {
+        Some(pack_id) => BuddyAvatar::Alive {
+            pack_id: pack_id.clone(),
+        },
+        None => BuddyAvatar::Still,
+    };
     next.name = official.name.to_string();
     next.personality = official.personality.to_string();
     next.library_avatar_id = Some(slug.id());
     save_applied(state, next, None, look).await?;
     state.emit_log("info", format!("Buddy is now {}.", official.name));
+    if ready.is_none() && alive::official_downloadable(env, slug) {
+        alive::queue_official_download(state, slug, persona_id);
+    }
     Ok(())
 }
 
@@ -2130,6 +2370,9 @@ fn prune_cache(root: &Path, keep: &BTreeSet<String>) {
         }
     }
 }
+
+pub(crate) mod alive;
+pub use alive::save_to_library;
 
 #[cfg(test)]
 pub(crate) mod tests;

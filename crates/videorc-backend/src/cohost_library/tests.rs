@@ -58,6 +58,14 @@ pub(crate) fn shade_of(state: CohostAvatarState) -> u8 {
 
 // --- The fake web --------------------------------------------------------------------------------
 
+/// An account Buddy's alive pack on the fake web (plan 172): its id and
+/// files; the objects live in the fake storage.
+#[derive(Clone)]
+pub(crate) struct FakeAlive {
+    pub(crate) pack_id: String,
+    pub(crate) files: Vec<(String, Vec<u8>)>,
+}
+
 #[derive(Clone)]
 pub(crate) struct FakeAvatar {
     pub(crate) id: String,
@@ -69,6 +77,9 @@ pub(crate) struct FakeAvatar {
     pub(crate) updated_at: String,
     /// The pose versions (8 hex), and the shade offset each picture draws.
     pub(crate) poses: BTreeMap<CohostAvatarState, (String, u8)>,
+    /// Pictures an import uploaded, served instead of the drawn ones.
+    pub(crate) uploaded: BTreeMap<CohostAvatarState, Vec<u8>>,
+    pub(crate) alive: Option<FakeAlive>,
 }
 
 impl FakeAvatar {
@@ -85,6 +96,8 @@ impl FakeAvatar {
                 .iter()
                 .map(|state| (*state, (format!("{:08x}", shade_of(*state)), 0)))
                 .collect(),
+            uploaded: BTreeMap::new(),
+            alive: None,
         }
     }
 
@@ -111,15 +124,60 @@ impl FakeAvatar {
                 "talk": pose(CohostAvatarState::Talk),
                 "laugh": pose(CohostAvatarState::Laugh),
                 "think": pose(CohostAvatarState::Think)
-            }
+            },
+            "alive": self.alive.as_ref().map(|alive| serde_json::json!({
+                "packId": alive.pack_id,
+                "version": 1,
+                "cellSize": 640,
+                "frames": 3,
+                "files": alive.files.iter().map(|(name, bytes)| {
+                    let sha = alive::sha256_hex(bytes);
+                    serde_json::json!({
+                        "name": name,
+                        "url": format!("/api/buddy/avatars/{}/alive/{name}?v={}", self.id, &sha[..8]),
+                        "bytes": bytes.len(),
+                        "sha256": sha
+                    })
+                }).collect::<Vec<_>>()
+            }))
         })
     }
 
     pub(crate) fn picture(&self, state: CohostAvatarState) -> Option<Vec<u8>> {
+        if let Some(bytes) = self.uploaded.get(&state) {
+            return Some(bytes.clone());
+        }
         self.poses
             .get(&state)
             .map(|(_, offset)| png_bytes(shade_of(state) + offset))
     }
+}
+
+/// The fake storage behind the presigned URLs (plan 172): objects by key,
+/// and what each request carried.
+#[derive(Default)]
+pub(crate) struct FakeS3State {
+    pub(crate) objects: BTreeMap<String, Vec<u8>>,
+    /// `(key, content type, carried a credential)` for every PUT.
+    pub(crate) puts: Vec<(String, Option<String>, bool)>,
+    /// `(key, carried a credential)` for every GET.
+    pub(crate) gets: Vec<(String, bool)>,
+    /// The next PUT answers this status instead.
+    pub(crate) fail_put: Option<StatusCode>,
+}
+
+/// What a presign handed out, until its commit.
+#[derive(Clone)]
+pub(crate) struct FakePlan {
+    /// None for an import.
+    pub(crate) avatar_id: Option<String>,
+    pub(crate) pack_id: Option<String>,
+    pub(crate) body: serde_json::Value,
+    pub(crate) files: Vec<(String, u64, String)>,
+}
+
+fn alive_object_key(avatar_id: &str, pack_id: &str, name: &str) -> String {
+    format!("avatars/{avatar_id}/alive/{pack_id}/{name}")
 }
 
 #[derive(Default)]
@@ -137,6 +195,14 @@ pub(crate) struct FakeLibraryState {
     pub(crate) next_id: Option<String>,
     /// Pose pictures that answer 404 (`<id>/<state>`).
     pub(crate) missing_pictures: Vec<String>,
+    /// Plan 172: the fake storage, its base URL, the presigns waiting for a
+    /// commit, and the web's static official files by path.
+    pub(crate) s3: Arc<StdMutex<FakeS3State>>,
+    pub(crate) s3_base: String,
+    pub(crate) plans: BTreeMap<String, FakePlan>,
+    pub(crate) official: BTreeMap<String, Vec<u8>>,
+    /// Official file paths that wait for this barrier before answering.
+    pub(crate) hold_official: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl FakeLibraryState {
@@ -189,6 +255,124 @@ impl FakeLibrary {
     pub(crate) fn add(&self, avatar: FakeAvatar) {
         self.with(|state| state.avatars.insert(0, avatar));
     }
+
+    pub(crate) fn s3(&self) -> Arc<StdMutex<FakeS3State>> {
+        self.with(|state| state.s3.clone())
+    }
+
+    /// Give an account avatar a pack, its objects in storage.
+    pub(crate) fn set_alive(&self, avatar_id: &str, alive: FakeAlive) {
+        let s3 = self.s3();
+        for (name, bytes) in &alive.files {
+            s3.lock().unwrap().objects.insert(
+                alive_object_key(avatar_id, &alive.pack_id, name),
+                bytes.clone(),
+            );
+        }
+        self.with(|state| {
+            let avatar = state
+                .avatars
+                .iter_mut()
+                .find(|avatar| avatar.id == avatar_id)
+                .unwrap();
+            avatar.alive = Some(alive);
+        });
+    }
+
+    pub(crate) fn alive_of(&self, avatar_id: &str) -> Option<FakeAlive> {
+        self.with(|state| {
+            state
+                .avatars
+                .iter()
+                .find(|avatar| avatar.id == avatar_id)
+                .and_then(|avatar| avatar.alive.clone())
+        })
+    }
+}
+
+fn content_type_of(name: &str) -> &'static str {
+    if name.ends_with(".webp") {
+        "image/webp"
+    } else if name.ends_with(".png") {
+        "image/png"
+    } else {
+        "application/json"
+    }
+}
+
+/// A presign for `files` (`[{ name, bytes, sha256 }]`).
+fn presign(
+    fake: &mut FakeLibraryState,
+    avatar_id: Option<String>,
+    pack_id: Option<String>,
+    body: serde_json::Value,
+) -> axum::response::Response {
+    let Some(files) = body["files"].as_array() else {
+        return error_response(StatusCode::BAD_REQUEST, "invalid-request");
+    };
+    let files: Vec<(String, u64, String)> = files
+        .iter()
+        .map(|file| {
+            (
+                file["name"].as_str().unwrap_or_default().to_string(),
+                file["bytes"].as_u64().unwrap_or_default(),
+                file["sha256"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    let upload_id = format!("upload-{}", uuid::Uuid::new_v4().simple());
+    let uploads: Vec<serde_json::Value> = files
+        .iter()
+        .map(|(name, _, _)| {
+            serde_json::json!({
+                "name": name,
+                "url": format!("{}/put/{upload_id}/{name}", fake.s3_base),
+                "method": "PUT",
+                "headers": { "content-type": content_type_of(name) }
+            })
+        })
+        .collect();
+    fake.plans.insert(
+        upload_id.clone(),
+        FakePlan {
+            avatar_id,
+            pack_id,
+            body,
+            files,
+        },
+    );
+    axum::Json(serde_json::json!({
+        "uploadId": upload_id,
+        "expiresAt": "2026-10-09T11:00:00.000Z",
+        "uploads": uploads
+    }))
+    .into_response()
+}
+
+/// The uploaded objects of a plan, checked by size and SHA-256 as the web's
+/// commit does; `Err` is the web's answer.
+fn committed_files(
+    fake: &mut FakeLibraryState,
+    upload_id: &str,
+) -> Result<(FakePlan, Vec<(String, Vec<u8>)>), axum::response::Response> {
+    let Some(plan) = fake.plans.remove(upload_id) else {
+        return Err(error_response(StatusCode::GONE, "buddy-upload-expired"));
+    };
+    let s3 = fake.s3.lock().unwrap();
+    let mut files = Vec::new();
+    for (name, bytes, sha) in &plan.files {
+        let Some(object) = s3.objects.get(&format!("uploads/{upload_id}/{name}")) else {
+            return Err(error_response(StatusCode::CONFLICT, "buddy-upload-missing"));
+        };
+        if object.len() as u64 != *bytes || alive::sha256_hex(object) != *sha {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "buddy-alive-invalid",
+            ));
+        }
+        files.push((name.clone(), object.clone()));
+    }
+    Ok((plan, files))
 }
 
 fn error_response(status: StatusCode, code: &str) -> axum::response::Response {
@@ -235,11 +419,54 @@ fn handle(
             None => error_response(StatusCode::NOT_FOUND, "missing"),
         };
     }
+    if path.starts_with("/buddy/official/") {
+        // The web's static official files: public, no bearer needed.
+        return match fake.official.get(path) {
+            Some(bytes) => (
+                [(axum::http::header::CONTENT_TYPE, content_type_of(path))],
+                bytes.clone(),
+            )
+                .into_response(),
+            None => (StatusCode::NOT_FOUND, "not found").into_response(),
+        };
+    }
     if !authorized {
         return error_response(StatusCode::UNAUTHORIZED, "unauthorized");
     }
     if let Some((status, code)) = fake.fail_next.take() {
         return error_response(status, code);
+    }
+    if path == "/api/buddy/avatars/import" && *method == Method::POST {
+        return presign(fake, None, None, body);
+    }
+    if path == "/api/buddy/avatars/import/commit" && *method == Method::POST {
+        let upload_id = body["uploadId"].as_str().unwrap_or_default().to_string();
+        let (plan, files) = match committed_files(fake, &upload_id) {
+            Ok(committed) => committed,
+            Err(response) => return response,
+        };
+        let id = fake
+            .next_id
+            .take()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().hyphenated().to_string());
+        let at = fake.tick();
+        let mut avatar = FakeAvatar::new(&id, plan.body["name"].as_str().unwrap_or("Buddy"), &at);
+        avatar.description = String::new();
+        avatar.personality = plan.body["personality"].as_str().unwrap_or("").to_string();
+        avatar.context = plan.body["context"].as_str().unwrap_or("").to_string();
+        avatar.poses.clear();
+        for (name, bytes) in files {
+            let Some(state) = name.strip_suffix(".png").and_then(state_named) else {
+                continue;
+            };
+            avatar
+                .poses
+                .insert(state, (alive::sha256_hex(&bytes)[..8].to_string(), 0));
+            avatar.uploaded.insert(state, bytes);
+        }
+        let response = serde_json::json!({ "avatar": avatar.json() });
+        fake.avatars.insert(0, avatar);
+        return axum::Json(response).into_response();
     }
     let profile = |fake: &FakeLibraryState| {
         serde_json::json!({
@@ -292,9 +519,62 @@ fn handle(
     let mut parts = rest.split('/');
     let id = parts.next().unwrap_or_default().to_string();
     let tail = parts.next();
+    let after = parts.next();
     let Some(index) = fake.avatars.iter().position(|avatar| avatar.id == id) else {
         return error_response(StatusCode::NOT_FOUND, "buddy-not-found");
     };
+    match (method.clone(), tail, after) {
+        (Method::POST, Some("alive"), None) => {
+            let pack_id = body["packId"].as_str().map(str::to_string);
+            return presign(fake, Some(id), pack_id, body);
+        }
+        (Method::POST, Some("alive"), Some("commit")) => {
+            let upload_id = body["uploadId"].as_str().unwrap_or_default().to_string();
+            let (plan, files) = match committed_files(fake, &upload_id) {
+                Ok(committed) => committed,
+                Err(response) => return response,
+            };
+            if plan.avatar_id.as_deref() != Some(id.as_str()) {
+                return error_response(StatusCode::BAD_REQUEST, "buddy-upload-invalid");
+            }
+            let pack_id = plan.pack_id.unwrap_or_default();
+            {
+                let mut s3 = fake.s3.lock().unwrap();
+                for (name, bytes) in &files {
+                    s3.objects
+                        .insert(alive_object_key(&id, &pack_id, name), bytes.clone());
+                }
+            }
+            let at = fake.tick();
+            let avatar = &mut fake.avatars[index];
+            avatar.alive = Some(FakeAlive { pack_id, files });
+            avatar.updated_at = at;
+            return axum::Json(serde_json::json!({ "avatar": avatar.json() })).into_response();
+        }
+        (Method::DELETE, Some("alive"), None) => {
+            let avatar = &mut fake.avatars[index];
+            avatar.alive = None;
+            return axum::Json(serde_json::json!({ "avatar": avatar.json() })).into_response();
+        }
+        (Method::GET, Some("alive"), Some(name)) => {
+            let Some(alive) = fake.avatars[index].alive.as_ref() else {
+                return error_response(StatusCode::NOT_FOUND, "buddy-alive-missing");
+            };
+            return (
+                StatusCode::FOUND,
+                [(
+                    axum::http::header::LOCATION,
+                    format!(
+                        "{}/objects/{}",
+                        fake.s3_base,
+                        alive_object_key(&id, &alive.pack_id, name)
+                    ),
+                )],
+            )
+                .into_response();
+        }
+        _ => {}
+    }
     match (method.clone(), tail) {
         (Method::GET, None) => {
             axum::Json(serde_json::json!({ "avatar": fake.avatars[index].json() })).into_response()
@@ -368,8 +648,64 @@ fn handle(
     }
 }
 
+/// The fake storage: `PUT /put/<uploadId>/<name>` keeps the object under
+/// `uploads/<uploadId>/<name>`; `GET /objects/<key>` serves one.
+async fn spawn_fake_s3(s3: Arc<StdMutex<FakeS3State>>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = axum::Router::new().fallback(
+        move |method: Method,
+              uri: axum::http::Uri,
+              headers: axum::http::HeaderMap,
+              body: axum::body::Bytes| {
+            let s3 = s3.clone();
+            async move {
+                let credential = headers.contains_key(axum::http::header::AUTHORIZATION)
+                    || headers.contains_key(axum::http::header::COOKIE);
+                let mut store = s3.lock().unwrap();
+                let path = uri.path();
+                if method == Method::PUT
+                    && let Some(rest) = path.strip_prefix("/put/")
+                {
+                    let key = format!("uploads/{rest}");
+                    let content_type = headers
+                        .get(axum::http::header::CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string);
+                    store.puts.push((key.clone(), content_type, credential));
+                    if let Some(status) = store.fail_put.take() {
+                        return status.into_response();
+                    }
+                    store.objects.insert(key, body.to_vec());
+                    return StatusCode::OK.into_response();
+                }
+                if method == Method::GET
+                    && let Some(key) = path.strip_prefix("/objects/")
+                {
+                    store.gets.push((key.to_string(), credential));
+                    return match store.objects.get(key) {
+                        Some(bytes) => bytes.clone().into_response(),
+                        None => StatusCode::NOT_FOUND.into_response(),
+                    };
+                }
+                StatusCode::NOT_FOUND.into_response()
+            }
+        },
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://127.0.0.1:{}", address.port())
+}
+
 pub(crate) async fn spawn_fake_library() -> FakeLibrary {
-    let inner = Arc::new(StdMutex::new(FakeLibraryState::default()));
+    let s3 = Arc::new(StdMutex::new(FakeS3State::default()));
+    let s3_base = spawn_fake_s3(s3.clone()).await;
+    let inner = Arc::new(StdMutex::new(FakeLibraryState {
+        s3,
+        s3_base,
+        ..FakeLibraryState::default()
+    }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let route_state = inner.clone();
@@ -389,6 +725,15 @@ pub(crate) async fn spawn_fake_library() -> FakeLibrary {
                 } else {
                     serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null)
                 };
+                // A held official file waits (outside the lock) for its permit.
+                let hold = if uri.path().starts_with("/buddy/official/") {
+                    state.lock().unwrap().hold_official.clone()
+                } else {
+                    None
+                };
+                if let Some(hold) = hold {
+                    let _permit = hold.acquire().await;
+                }
                 let mut fake = state.lock().unwrap();
                 handle(&mut fake, &method, uri.path(), authorized, body)
             }
@@ -418,6 +763,7 @@ pub(crate) async fn use_fake_library(state: &mut AppState, root: &Path, web: &Fa
             root: Some(root.to_path_buf()),
             api: Some(web.client.clone()),
             token: Some(BEARER.to_string()),
+            ..LibraryEnv::default()
         },
         fast_timing(),
     ));
@@ -426,6 +772,7 @@ pub(crate) async fn use_fake_library(state: &mut AppState, root: &Path, web: &Fa
         enabled: true,
         count: 0,
         limit: 30,
+        alive: true,
     });
 }
 
@@ -537,9 +884,141 @@ fn buddy_official_catalog_matches_the_shared_fixture() {
         assert_eq!(row["tagline"], official.tagline);
         assert_eq!(row["personality"], official.personality);
         assert_eq!(row["description"].as_str(), official.description);
+        // Plan 172 D4: null until the pack ships.
+        assert_eq!(
+            row.as_object().unwrap().len(),
+            8,
+            "{}",
+            official.slug.as_str()
+        );
+        match official.alive {
+            None => assert!(row["alive"].is_null(), "{}", official.slug.as_str()),
+            Some(alive) => {
+                assert_eq!(row["alive"], official_alive_json(&alive));
+                assert_eq!(alive.bundled, official.slug == BuddyOfficialSlug::Golem);
+                if alive.bundled {
+                    assert_eq!(alive.pack_id, alive::BUDDY_DEFAULT_ALIVE_PACK_ID);
+                } else {
+                    assert_eq!(alive.pack_id, alive::official_pack_id(official.slug));
+                }
+            }
+        }
     }
     let slugs: Vec<_> = BUDDY_OFFICIAL_CATALOG.iter().map(|row| row.slug).collect();
     assert_eq!(slugs, BuddyOfficialSlug::ALL);
+    // The shapes place `alive` right after `description`, the last key of
+    // each row (the web's copy is byte-identical).
+    let text = include_str!("../../../../protocol-fixtures/buddy-official-catalog.json");
+    let rows: Vec<&str> = text.split("\n    {\n").skip(1).collect();
+    assert_eq!(rows.len(), BUDDY_OFFICIAL_CATALOG.len());
+    for row in rows {
+        let description = row.find("\"description\": ").unwrap();
+        let alive = row.find("\"alive\": ").unwrap();
+        let between = &row[description..alive];
+        assert_eq!(between.matches('\n').count(), 1, "{row}");
+        // No key of the row after it (nested keys sit deeper).
+        assert!(!row[alive..].contains("\n      \""), "{row}");
+    }
+}
+
+/// A catalog `alive` block as the fixture writes it (plan 172 shapes).
+fn official_alive_json(alive: &BuddyOfficialAlive) -> serde_json::Value {
+    serde_json::json!({
+        "version": alive.version,
+        "packId": alive.pack_id,
+        "bundled": alive.bundled,
+        "cellSize": alive.cell_size,
+        "frames": alive.frames,
+        "files": alive.files.iter().map(|file| serde_json::json!({
+            "name": file.name,
+            "bytes": file.bytes,
+            "sha256": file.sha256
+        })).collect::<Vec<_>>()
+    })
+}
+
+/// The filled form of the shapes reads into the Rust row and back, and a
+/// pack's three files pass the file rules.
+#[test]
+fn buddy_official_alive_filled_form_round_trips() {
+    const FILES: [BuddyOfficialAliveFile; 3] = [
+        BuddyOfficialAliveFile {
+            name: "manifest.json",
+            bytes: 1234,
+            sha256: "0000000000000000000000000000000000000000000000000000000000000001",
+        },
+        BuddyOfficialAliveFile {
+            name: "mascot.webp",
+            bytes: 3_456_789,
+            sha256: "0000000000000000000000000000000000000000000000000000000000000002",
+        },
+        BuddyOfficialAliveFile {
+            name: "buddy.json",
+            bytes: 123,
+            sha256: "0000000000000000000000000000000000000000000000000000000000000003",
+        },
+    ];
+    let alive = BuddyOfficialAlive {
+        version: 1,
+        pack_id: "official:orc",
+        bundled: false,
+        cell_size: 640,
+        frames: 40,
+        files: &FILES,
+    };
+    let json = official_alive_json(&alive);
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "version": 1,
+            "packId": "official:orc",
+            "bundled": false,
+            "cellSize": 640,
+            "frames": 40,
+            "files": [
+                { "name": "manifest.json", "bytes": 1234, "sha256": FILES[0].sha256 },
+                { "name": "mascot.webp", "bytes": 3_456_789, "sha256": FILES[1].sha256 },
+                { "name": "buddy.json", "bytes": 123, "sha256": FILES[2].sha256 }
+            ]
+        })
+    );
+    let spec = alive.to_spec();
+    assert_eq!(spec.version, 1);
+    assert!(!spec.bundled);
+    assert!(alive::alive_files_ok(&spec.files));
+    let mut wrong = spec.files.clone();
+    wrong[1].name = "mascot.png".to_string();
+    assert!(!alive::alive_files_ok(&wrong));
+    let mut big = spec.files.clone();
+    big[1].bytes = 33 * 1024 * 1024;
+    assert!(!alive::alive_files_ok(&big));
+    let mut upper = spec.files.clone();
+    upper[0].sha256 = upper[0].sha256.to_uppercase().replace('0', "A");
+    assert!(!alive::alive_files_ok(&upper));
+    assert!(!alive::alive_files_ok(&spec.files[..2]));
+}
+
+/// Plan 172 Phase B: every bundled pack the catalog lists ships in
+/// `apps/desktop/resources/buddy/<name>/` with its listed size and hash.
+#[test]
+fn buddy_official_bundled_packs_ship_with_their_listed_files() {
+    let resources =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/desktop/resources/buddy");
+    for official in BUDDY_OFFICIAL_CATALOG {
+        let Some(alive) = official.alive.filter(|alive| alive.bundled) else {
+            continue;
+        };
+        let name = alive
+            .pack_id
+            .strip_prefix(crate::buddy_pet::BUDDY_BUNDLED_PACK_PREFIX)
+            .expect("a bundled pack id");
+        let spec = alive.to_spec();
+        assert!(
+            alive::pack_verified(&resources.join(name), &spec.files),
+            "{} does not match the catalog",
+            alive.pack_id
+        );
+    }
 }
 
 /// Every official pose is bundled and decodes as a WebP (D10).
@@ -608,14 +1087,47 @@ fn shared_high_risk_contract_fixture_matches_buddy_library_dtos() {
         "/buddyLibrary/signedOut",
         "/buddyLibrary/signedIn",
         "/buddyLibrary/localOnly",
+        "/buddyLibrary/importing",
+        "/buddyLibrary/aliveUpload",
+        "/buddyLibrary/aliveDownload",
     ] {
         round_trips::<BuddyLibraryState>(pointer);
     }
+    // Plan 172: official entries carry their pack state, account entries
+    // their pack (null when none), and the three new jobs.
+    let download: BuddyLibraryState = round_trips("/buddyLibrary/aliveDownload");
+    assert_eq!(
+        download
+            .official
+            .iter()
+            .map(|entry| entry.alive)
+            .collect::<Vec<_>>(),
+        [
+            BuddyOfficialAliveState::Bundled,
+            BuddyOfficialAliveState::Available
+        ]
+    );
+    assert_eq!(
+        download.busy.unwrap().kind,
+        BuddyLibraryBusyKind::AliveDownload
+    );
+    let upload: BuddyLibraryState = round_trips("/buddyLibrary/aliveUpload");
+    assert_eq!(upload.busy.unwrap().kind, BuddyLibraryBusyKind::AliveUpload);
+    let importing: BuddyLibraryState = round_trips("/buddyLibrary/importing");
+    assert_eq!(importing.busy.unwrap().kind, BuddyLibraryBusyKind::Import);
     let signed_in: BuddyLibraryState = round_trips("/buddyLibrary/signedIn");
     assert_eq!(
         signed_in.mine.as_ref().unwrap()[1].poses,
         BuddyLibraryPoses::default()
     );
+    assert_eq!(
+        signed_in.mine.as_ref().unwrap()[0].alive,
+        Some(BuddyLibraryEntryAlive {
+            pack_id: "0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a".to_string(),
+            cell_size: 640
+        })
+    );
+    assert_eq!(signed_in.mine.as_ref().unwrap()[1].alive, None);
     let sync: CohostLibrarySyncParams = round_trips("/buddyLibrary/syncParams");
     assert_eq!(sync.reason, BuddyLibrarySyncReason::DeepLink);
     round_trips::<CohostLibraryAvatarParams>("/buddyLibrary/useParams");
@@ -657,6 +1169,7 @@ fn buddy_library_sync_clock_defaults_round_trips_and_compares() {
     assert_eq!(load_library_sync(&database), BuddyLibrarySync::default());
     let sync = BuddyLibrarySync {
         profile_updated_at: Some("2026-10-09T10:05:00.000Z".to_string()),
+        ..BuddyLibrarySync::default()
     };
     save_library_sync(&database, &sync).unwrap();
     assert_eq!(load_library_sync(&database), sync);
@@ -874,6 +1387,7 @@ async fn buddy_library_signed_out_changes_nothing_and_official_still_applies() {
             root: Some(root.clone()),
             api: Some(web.client.clone()),
             token: None,
+            ..LibraryEnv::default()
         },
         fast_timing(),
     ));
@@ -1167,6 +1681,7 @@ async fn buddy_library_turning_on_syncs_and_turning_off_forgets_the_account() {
             enabled: false,
             count: 1,
             limit: 25,
+            alive: false,
         }),
     )
     .await;
@@ -1176,6 +1691,7 @@ async fn buddy_library_turning_on_syncs_and_turning_off_forgets_the_account() {
         enabled: true,
         count: 1,
         limit: 30,
+        alive: true,
     };
     set_capability(&state, Some(on.clone())).await;
     settle(&state, |library| library.mine.is_some()).await;

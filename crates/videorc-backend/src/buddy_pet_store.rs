@@ -123,8 +123,42 @@ async fn list_in(
     state: &AppState,
     roots: Vec<PathBuf>,
 ) -> Result<Vec<BuddyPetSummary>, PetRpcError> {
-    let persona_id = active_persona(state).await.id;
-    let (packs, skipped) = blocking(move || buddy_pet::list_packs(&roots, &persona_id)).await?;
+    let persona = active_persona(state).await;
+    let persona_id = persona.id.clone();
+    // Plan 172 D4: the official pack the persona wears is listed after the
+    // bundled ones (it is Videorc's, like them); the others stay out.
+    let worn_official = match &persona.avatar {
+        BuddyAvatar::Alive { pack_id }
+            if matches!(
+                buddy_pet::parse_pack_id(pack_id),
+                Ok(buddy_pet::PackRef::Official(_))
+            ) =>
+        {
+            Some(pack_id.clone())
+        }
+        _ => None,
+    };
+    let (packs, skipped) = blocking(move || {
+        let (mut packs, mut skipped) = buddy_pet::list_packs(&roots, &persona_id);
+        if let Some(pack_id) = worn_official {
+            match buddy_pet::summarize_pack(&roots, &persona_id, &pack_id) {
+                Ok(summary) => {
+                    let at = packs
+                        .iter()
+                        .position(|pack| {
+                            !pack
+                                .pack_id
+                                .starts_with(buddy_pet::BUDDY_BUNDLED_PACK_PREFIX)
+                        })
+                        .unwrap_or(packs.len());
+                    packs.insert(at, summary);
+                }
+                Err(error) => skipped.push(format!("Buddy pack {pack_id} skipped: {error}")),
+            }
+        }
+        (packs, skipped)
+    })
+    .await?;
     for note in skipped {
         state.emit_log("warn", note);
     }
@@ -253,6 +287,8 @@ async fn remove_in(
     let persona_id = persona.id.clone();
     let pack_id = params.pack_id.clone();
     blocking(move || buddy_pet::remove_pack(&roots, &persona_id, &pack_id)).await??;
+    // Plan 172 D10: the linked library Buddy's pack leaves the account too.
+    crate::cohost_library::alive::pack_removed(state, &params.pack_id).await;
     Ok(CohostPetRemoved {
         pack_id: params.pack_id,
         settings,

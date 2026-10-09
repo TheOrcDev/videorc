@@ -743,27 +743,42 @@ pub fn parse_sidecar(bytes: &[u8], manifest: &PetManifest) -> Result<PetSidecar,
 
 /// A bundled pack id is `bundled:<name>`; its folder is `<bundled root>/<name>`.
 pub const BUDDY_BUNDLED_PACK_PREFIX: &str = "bundled:";
+/// An official pack id is `official:<slug>` (plan 172 D4): a downloaded pack
+/// at `<write root>/official/<slug>/<version>/`, the version the catalog names.
+pub const BUDDY_OFFICIAL_PACK_PREFIX: &str = "official:";
+/// The folder of downloaded official packs under the write root.
+pub const BUDDY_OFFICIAL_PACK_DIR: &str = "official";
 /// `manifest.json` and `buddy.json` are small; a larger one is refused.
 pub const BUDDY_PET_JSON_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Where a pack id points (D3): the persona's own pack (a lowercase uuid
-/// under `<write root>/<personaId>/pets/`) or a shipped one (`bundled:<name>`
-/// under the read-only second root).
+/// under `<write root>/<personaId>/pets/`), a shipped one (`bundled:<name>`
+/// under the read-only second root), or a downloaded official one
+/// (`official:<slug>`, plan 172 D4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PackRef {
     User(String),
     Bundled(String),
+    Official(String),
 }
 
-/// A pack id as the wire carries it, or `PackId` when it is neither form.
+/// A `bundled:` or `official:` name: 1 to 40 of `[a-z0-9-]`.
+fn pack_name_ok(name: &str) -> bool {
+    (1..=40).contains(&name.len())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// A pack id as the wire carries it, or `PackId` when it is none of the forms.
 pub fn parse_pack_id(pack_id: &str) -> Result<PackRef, PetError> {
     if let Some(name) = pack_id.strip_prefix(BUDDY_BUNDLED_PACK_PREFIX) {
-        if (1..=40).contains(&name.len())
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        {
+        if pack_name_ok(name) {
             return Ok(PackRef::Bundled(name.to_string()));
+        }
+    } else if let Some(slug) = pack_id.strip_prefix(BUDDY_OFFICIAL_PACK_PREFIX) {
+        if pack_name_ok(slug) {
+            return Ok(PackRef::Official(slug.to_string()));
         }
     } else if uuid::Uuid::parse_str(pack_id)
         .is_ok_and(|uuid| uuid.hyphenated().to_string() == pack_id)
@@ -805,6 +820,12 @@ pub fn pack_dir(roots: &[PathBuf], persona_id: &str, pack_id: &str) -> Result<Pa
             let root = roots.get(1).ok_or_else(not_found)?;
             (root, root.join(name))
         }
+        PackRef::Official(slug) => {
+            let root = roots.first().ok_or_else(not_found)?;
+            let version =
+                crate::cohost_library::official_pack_version(&slug).ok_or_else(not_found)?;
+            (root, official_pack_folder(root, &slug, version))
+        }
     };
     let canonical = match std::fs::canonicalize(&dir) {
         Ok(canonical) => canonical,
@@ -827,6 +848,14 @@ pub fn pack_dir(roots: &[PathBuf], persona_id: &str, pack_id: &str) -> Result<Pa
         return Err(not_found());
     }
     Ok(canonical)
+}
+
+/// `<write root>/official/<slug>/<version>/`: where a downloaded official
+/// pack lives once every file verified (plan 172 D4).
+pub fn official_pack_folder(root: &Path, slug: &str, version: u32) -> PathBuf {
+    root.join(BUDDY_OFFICIAL_PACK_DIR)
+        .join(slug)
+        .join(version.to_string())
 }
 
 /// One file of a pack folder: a regular file (never a link), at most `cap`
@@ -1183,6 +1212,17 @@ fn summarize_dir(dir: &Path, pack_id: &str) -> Result<(Option<String>, BuddyPetS
     ))
 }
 
+/// One pack's summary by id, no pixels (the worn official pack in the list).
+/// Blocking.
+pub fn summarize_pack(
+    roots: &[PathBuf],
+    persona_id: &str,
+    pack_id: &str,
+) -> Result<BuddyPetSummary, PetError> {
+    let dir = pack_dir(roots, persona_id, pack_id)?;
+    summarize_dir(&dir, pack_id).map(|(_, summary)| summary)
+}
+
 /// The packs a persona can wear (`cohost.pet.list`): every bundled pack
 /// (sorted by name), then the persona's own (oldest first). Manifests and
 /// sidecars only, no pixels. A folder that fails its manifest or sidecar is
@@ -1236,9 +1276,9 @@ pub fn list_packs(roots: &[PathBuf], persona_id: &str) -> (Vec<BuddyPetSummary>,
 }
 
 /// Delete one of the persona's own packs (`cohost.pet.remove`). Built-in
-/// packs are never removed. Blocking.
+/// and official packs are never removed. Blocking.
 pub fn remove_pack(roots: &[PathBuf], persona_id: &str, pack_id: &str) -> Result<(), PetError> {
-    if matches!(parse_pack_id(pack_id)?, PackRef::Bundled(_)) {
+    if !matches!(parse_pack_id(pack_id)?, PackRef::User(_)) {
         return Err(PetError::new(
             PetRule::PackId,
             "Built-in packs cannot be removed.",
@@ -1273,8 +1313,9 @@ pub enum BuddyAvatar {
 /// state images (D2, S-A4).
 pub const STILL_REACTION_IDS: [&str; 3] = ["talk", "laugh", "think"];
 
-/// The avatar as the wire may carry it: an Alive pack id must be a uuid or
-/// `bundled:<name>`. Whether the pack exists is checked where it is loaded.
+/// The avatar as the wire may carry it: an Alive pack id must be a uuid,
+/// `bundled:<name>` or `official:<slug>`. Whether the pack exists is checked
+/// where it is loaded.
 pub fn validate_avatar(avatar: &BuddyAvatar) -> Result<(), String> {
     match avatar {
         BuddyAvatar::Still => Ok(()),
@@ -2209,11 +2250,18 @@ pub(crate) mod tests {
             parse_pack_id("bundled:buddy").unwrap(),
             PackRef::Bundled("buddy".to_string())
         );
+        assert_eq!(
+            parse_pack_id("official:orc").unwrap(),
+            PackRef::Official("orc".to_string())
+        );
         for bad in [
             "",
             "bundled:",
             "bundled:Buddy",
             "bundled:../x",
+            "official:",
+            "official:Orc",
+            "official:../orc",
             "{0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a}",
             "0b1e9f0e6c8a4c559a3f3f6d2b1c4e5a",
             "urn:uuid:0b1e9f0e-6c8a-4c55-9a3f-3f6d2b1c4e5a",
@@ -2228,6 +2276,59 @@ pub(crate) mod tests {
             pack_dir(&temp_roots(), "../x", PACK_ID).unwrap_err().rule,
             PetRule::PackId
         );
+    }
+
+    /// Plan 172 D4: `official:<slug>` names a downloaded pack under the write
+    /// root, at the version the catalog pins; never a bundled folder, never
+    /// removable, and not found while the catalog has no pack for it.
+    #[test]
+    fn buddy_pet_official_pack_ids_resolve_under_the_write_root() {
+        let roots = temp_roots();
+        let folder = official_pack_folder(&roots[0], "orc", 3);
+        assert_eq!(folder, roots[0].join("official").join("orc").join("3"));
+        write_pack(&folder, &synthetic_manifest("mascot.png"), "mascot.png");
+        // A bundled folder of the same name is never what it means.
+        write_pack(
+            &roots[1].join("orc"),
+            &synthetic_manifest("mascot.png"),
+            "mascot.png",
+        );
+        match crate::cohost_library::official_pack_version("orc") {
+            Some(version) => {
+                let dir = official_pack_folder(&roots[0], "orc", version);
+                write_pack(&dir, &synthetic_manifest("mascot.png"), "mascot.png");
+                assert_eq!(
+                    pack_dir(&roots, "default", "official:orc").unwrap(),
+                    dir.canonicalize().unwrap()
+                );
+            }
+            None => assert_eq!(
+                pack_dir(&roots, "default", "official:orc")
+                    .unwrap_err()
+                    .rule,
+                PetRule::PackNotFound
+            ),
+        }
+        assert_eq!(
+            pack_dir(&roots, "default", "official:dragon")
+                .unwrap_err()
+                .rule,
+            PetRule::PackNotFound
+        );
+        assert_eq!(
+            remove_pack(&roots, "default", "official:orc")
+                .unwrap_err()
+                .rule,
+            PetRule::PackId
+        );
+        assert!(folder.exists());
+        assert!(
+            validate_avatar(&BuddyAvatar::Alive {
+                pack_id: "official:orc".to_string()
+            })
+            .is_ok()
+        );
+        let _ = std::fs::remove_dir_all(roots[0].parent().unwrap());
     }
 
     // --- Still pack and persona wire (S-A4) -----------------------------------

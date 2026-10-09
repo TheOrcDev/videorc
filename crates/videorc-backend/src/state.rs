@@ -1263,7 +1263,14 @@ impl AppState {
     ) -> Self {
         let oauth_store_path = (database.path().to_string_lossy() != ":memory:")
             .then(|| database.path().with_extension("oauth-pending.json"));
-        let cohost_settings = crate::cohost::load_cohost_settings(&database);
+        // Plan 172 D5: the default Buddy wears its bundled pack when it ships.
+        let cohost_settings = crate::cohost_library::alive::default_buddy_alive(
+            &database,
+            crate::cohost::load_cohost_settings(&database),
+            crate::resource_authority::configured_managed_buddy_roots()
+                .get(1)
+                .map(std::path::PathBuf::as_path),
+        );
         let buddy_sprite = crate::buddy_sprite::BuddySpriteSlot::new(
             &cohost_settings.persona,
             crate::overlay_layout::load_overlay_layout(&database).buddy,

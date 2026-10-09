@@ -5377,6 +5377,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.library.use"
         | "cohost.library.update"
         | "cohost.library.delete"
+        | "cohost.library.saveToLibrary"
         | "buddy.overlay.set"
         | "buddy.overlay.clear"
         | "cohost.pet.import"
@@ -9633,6 +9634,23 @@ async fn handle_text_message_with_role(
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
+            }
+        }
+        // Plan 172 D10: a Buddy made only here joins the library.
+        "cohost.library.saveToLibrary" => {
+            if rpc_params_are_empty(&command.params) {
+                match cohost_library::save_to_library(state).await {
+                    Ok(accepted) => ServerResponse::ok(command.id, accepted),
+                    Err(refusal) => {
+                        ServerResponse::error(command.id, refusal.code, refusal.message)
+                    }
+                }
+            } else {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "cohost.library.saveToLibrary does not accept parameters.",
+                )
             }
         }
         // --- end Buddy library (plan 170) ---

@@ -2198,6 +2198,9 @@ async fn save_in(
             summary.gaze_count as usize + summary.reactions.len()
         ),
     );
+    // Plan 172 D10: a Buddy linked to the library sends its new pack to the
+    // account (a library job, tried again at the next sync when it fails).
+    crate::cohost_library::alive::pack_saved(state, &pack_id).await;
     Ok(CohostPetSaved {
         pack: summary,
         settings,

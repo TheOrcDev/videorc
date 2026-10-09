@@ -90,6 +90,17 @@ const BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES: usize = 2 * 1024 * 1024;
 /// A stored pose is one PNG the generation made (8 MB at most, like a draft's).
 pub(crate) const BUDDY_LIBRARY_POSE_MAX_BYTES: usize = 8 * 1024 * 1024;
 // --- end Buddy library (plan 170) ---
+// --- Buddy alive packs (plan 172 D4, D7 to D10) ---
+/// One alive pack file (the atlas is up to 32 MB) moves to or from storage
+/// within this; the presign, commit and delete calls are plain rows.
+pub(crate) const BUDDY_ALIVE_TRANSFER_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(300);
+/// A commit reads every object back and checks the manifest rules.
+pub(crate) const BUDDY_ALIVE_COMMIT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(60);
+/// Official packs are static files on the web (`public/buddy/official/`).
+pub(crate) const BUDDY_OFFICIAL_ALIVE_PREFIX: &str = "/buddy/official/";
+// --- end Buddy alive packs (plan 172) ---
 /// Bounded well inside the provider-mutation RPC envelope: an update check must
 /// never wait on a slow web edge for long.
 pub(crate) const WINDOWS_PILOT_UPDATE_TOKEN_TIMEOUT: std::time::Duration =
@@ -377,6 +388,17 @@ where
             .filter_map(|item| serde_json::from_value(item).ok())
             .collect()
     }))
+}
+
+/// A tolerant optional object: a value that does not fit the desktop's shape
+/// reads as None instead of failing the body.
+fn lenient_option<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 /// Item-wise tolerant array: an entry that does not fit the desktop's shape is
@@ -696,6 +718,111 @@ pub struct BuddyLibraryWebAvatar {
     pub created_at: String,
     pub updated_at: String,
     pub poses: BuddyLibraryWebPoses,
+    /// The Buddy's alive pack (plan 172 D9); one this build cannot read
+    /// reads as none, never as a broken avatar.
+    #[serde(default, deserialize_with = "lenient_option")]
+    pub alive: Option<BuddyLibraryWebAlive>,
+}
+
+/// One file of an account Buddy's alive pack:
+/// `/api/buddy/avatars/<id>/alive/<name>?v=<first 8 of sha256>`, a 302 to a
+/// short-lived signed URL.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyLibraryWebAliveFile {
+    pub name: String,
+    pub url: String,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+/// An account Buddy's alive pack (plan 172 D9).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyLibraryWebAlive {
+    pub pack_id: String,
+    pub version: u32,
+    pub cell_size: u32,
+    pub frames: u32,
+    pub files: Vec<BuddyLibraryWebAliveFile>,
+}
+
+/// A file the app declares before it uploads it (plan 172 D8).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyUploadFile {
+    pub name: String,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+/// `POST /api/buddy/avatars/:id/alive`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyAliveUploadRequest {
+    pub pack_id: String,
+    pub files: Vec<BuddyUploadFile>,
+}
+
+/// `POST /api/buddy/avatars/import`: a Buddy made on this computer joins the
+/// library (no generation, no allowance).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyImportRequest {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    pub files: Vec<BuddyUploadFile>,
+}
+
+/// One presigned PUT: the file goes straight to storage with these headers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyUploadTarget {
+    pub name: String,
+    pub url: String,
+    pub method: String,
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+}
+
+/// The presign answer of the alive and import routes: a signed token for the
+/// commit and one PUT per declared file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyUploadPlan {
+    pub upload_id: String,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    pub uploads: Vec<BuddyUploadTarget>,
+}
+
+/// `POST .../alive/commit` and `.../import/commit`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuddyUploadCommit {
+    pub upload_id: String,
+}
+
+/// Whether `url` is an alive file path this client may send the bearer to:
+/// `/api/buddy/avatars/<avatarId>/alive/<name>`, on the API host.
+pub(crate) fn buddy_alive_path_ok(url: &str, avatar_id: &str) -> bool {
+    buddy_pose_path_ok(url) && url.starts_with(&format!("/api/buddy/avatars/{avatar_id}/alive/"))
+}
+
+/// Where a presigned PUT may go: https, or plain http on this machine (a
+/// local web in development and the tests' fake storage).
+pub(crate) fn presigned_url_ok(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    match parsed.scheme() {
+        "https" => parsed.host_str().is_some(),
+        "http" => matches!(parsed.host_str(), Some("127.0.0.1" | "localhost")),
+        _ => false,
+    }
 }
 
 /// `GET /api/buddy/avatars`: newest first. One avatar the desktop cannot
@@ -826,6 +953,18 @@ pub(crate) fn buddy_pose_path_ok(url: &str) -> bool {
         && !url.contains("//")
         && url.len() <= 512
         && url.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+/// A static path on the web this client reads without credentials: plain
+/// path characters only, no `..`, no query.
+pub(crate) fn buddy_static_path_ok(path: &str) -> bool {
+    path.starts_with('/')
+        && !path.contains("..")
+        && !path.contains("//")
+        && path.len() <= 256
+        && path
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.'))
 }
 
 // --- end Buddy library wire types (plan 170) ---
@@ -1829,6 +1968,194 @@ impl VideorcApiClient {
         read_capped_body(response, status, timeout, BUDDY_LIBRARY_POSE_MAX_BYTES).await
     }
 
+    // --- Buddy alive packs (plan 172 D4, D7 to D10) ---
+
+    /// `POST /api/buddy/avatars/:id/alive`: one presigned PUT per pack file.
+    pub async fn post_buddy_alive(
+        &self,
+        bearer_token: &str,
+        avatar_id: &str,
+        request: &BuddyAliveUploadRequest,
+    ) -> std::result::Result<BuddyUploadPlan, CohostApiError> {
+        let path = format!("{}/alive", buddy_avatar_path(avatar_id)?);
+        self.send_cohost_json(
+            reqwest::Method::POST,
+            &path,
+            bearer_token,
+            Some(request),
+            BUDDY_LIBRARY_SHORT_TIMEOUT,
+            BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// `POST /api/buddy/avatars/:id/alive/commit`: the web checks what was
+    /// uploaded and the avatar comes back with `alive` filled.
+    pub async fn post_buddy_alive_commit(
+        &self,
+        bearer_token: &str,
+        avatar_id: &str,
+        upload_id: &str,
+    ) -> std::result::Result<BuddyLibraryWebAvatarResponse, CohostApiError> {
+        let path = format!("{}/alive/commit", buddy_avatar_path(avatar_id)?);
+        self.send_cohost_json(
+            reqwest::Method::POST,
+            &path,
+            bearer_token,
+            Some(&BuddyUploadCommit {
+                upload_id: upload_id.to_string(),
+            }),
+            BUDDY_ALIVE_COMMIT_TIMEOUT,
+            BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// `DELETE /api/buddy/avatars/:id/alive`: the avatar comes back with
+    /// `alive: null`.
+    pub async fn delete_buddy_alive(
+        &self,
+        bearer_token: &str,
+        avatar_id: &str,
+    ) -> std::result::Result<BuddyLibraryWebAvatarResponse, CohostApiError> {
+        let path = format!("{}/alive", buddy_avatar_path(avatar_id)?);
+        self.send_cohost_json::<(), _>(
+            reqwest::Method::DELETE,
+            &path,
+            bearer_token,
+            None,
+            BUDDY_LIBRARY_SHORT_TIMEOUT,
+            BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// `POST /api/buddy/avatars/import`: one presigned PUT per pose.
+    pub async fn post_buddy_import(
+        &self,
+        bearer_token: &str,
+        request: &BuddyImportRequest,
+    ) -> std::result::Result<BuddyUploadPlan, CohostApiError> {
+        self.send_cohost_json(
+            reqwest::Method::POST,
+            &format!("{BUDDY_LIBRARY_AVATARS_PATH}/import"),
+            bearer_token,
+            Some(request),
+            BUDDY_LIBRARY_SHORT_TIMEOUT,
+            BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// `POST /api/buddy/avatars/import/commit`: the imported Buddy.
+    pub async fn post_buddy_import_commit(
+        &self,
+        bearer_token: &str,
+        upload_id: &str,
+    ) -> std::result::Result<BuddyLibraryWebAvatarResponse, CohostApiError> {
+        self.send_cohost_json(
+            reqwest::Method::POST,
+            &format!("{BUDDY_LIBRARY_AVATARS_PATH}/import/commit"),
+            bearer_token,
+            Some(&BuddyUploadCommit {
+                upload_id: upload_id.to_string(),
+            }),
+            BUDDY_ALIVE_COMMIT_TIMEOUT,
+            BUDDY_LIBRARY_SMALL_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    /// PUT one file straight to storage at a presigned URL: never the bearer,
+    /// only the headers the web signed (never a credential or a host).
+    pub async fn put_presigned(
+        &self,
+        target: &BuddyUploadTarget,
+        bytes: Vec<u8>,
+    ) -> std::result::Result<(), CohostApiError> {
+        if !target.method.eq_ignore_ascii_case("PUT") || !presigned_url_ok(&target.url) {
+            return Err(CohostApiError::malformed_response(
+                200,
+                "The library gave an upload address this app does not use.",
+            ));
+        }
+        let timeout = BUDDY_ALIVE_TRANSFER_TIMEOUT;
+        let mut builder = self.http.put(&target.url).timeout(timeout).body(bytes);
+        for (name, value) in &target.headers {
+            let lower = name.to_ascii_lowercase();
+            if matches!(
+                lower.as_str(),
+                "authorization" | "cookie" | "host" | "content-length" | "proxy-authorization"
+            ) {
+                continue;
+            }
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        let response = builder
+            .send()
+            .await
+            .map_err(|error| CohostApiError::from_transport_within(error, timeout))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        Err(classify_cohost_failure(
+            status.as_u16(),
+            "buddy-upload-failed",
+            format!("The upload was refused ({status})."),
+            None,
+        ))
+    }
+
+    /// One alive pack file, at most `max_bytes`: an official pack's static
+    /// file (no bearer, `/buddy/official/...`) or an account Buddy's
+    /// (`/api/buddy/avatars/<id>/alive/<name>` with the bearer, a 302 to a
+    /// signed URL that reqwest follows without it). The caller checks the
+    /// size and SHA-256.
+    pub async fn get_buddy_alive_file(
+        &self,
+        path: &str,
+        bearer_token: Option<&str>,
+        max_bytes: u64,
+    ) -> std::result::Result<Vec<u8>, CohostApiError> {
+        let official = path.starts_with(BUDDY_OFFICIAL_ALIVE_PREFIX) && buddy_static_path_ok(path);
+        let account = bearer_token.is_some() && buddy_pose_path_ok(path);
+        if !(official && bearer_token.is_none()) && !account {
+            return Err(CohostApiError::malformed_response(
+                200,
+                "The library gave a pack address this app does not read.",
+            ));
+        }
+        let timeout = BUDDY_ALIVE_TRANSFER_TIMEOUT;
+        let mut builder = self.http.get(self.endpoint(path)).timeout(timeout);
+        if let Some(token) = bearer_token {
+            builder = builder.bearer_auth(token);
+        }
+        let response = builder
+            .send()
+            .await
+            .map_err(|error| CohostApiError::from_transport_within(error, timeout))?;
+        let status = response.status();
+        if !status.is_success() {
+            let (code, message) = read_error_code_and_message(response).await;
+            return Err(classify_cohost_failure(
+                status.as_u16(),
+                &code,
+                message,
+                None,
+            ));
+        }
+        read_capped_body(
+            response,
+            status,
+            timeout,
+            usize::try_from(max_bytes).unwrap_or(usize::MAX),
+        )
+        .await
+    }
+
+    // --- end Buddy alive packs (plan 172) ---
+
     /// One JSON call to a co-host or Buddy library route: the bearer, the
     /// timeout, a response cap, and the `{ error: { code, message } }`
     /// envelope classified like every co-host failure.
@@ -2726,16 +3053,18 @@ mod tests {
             serde_json::to_value(&with).unwrap()["cohost"]["pet"],
             value["cohost"]["pet"]
         );
-        // Plan 170 D9: the library block rides the same proxy, field for field.
+        // Plan 170 D9: the library block rides the same proxy, field for field
+        // (plan 172 D8 adds `alive`).
         value["cohost"]["buddyLibrary"] =
-            serde_json::json!({ "enabled": true, "count": 3, "limit": 30 });
+            serde_json::json!({ "enabled": true, "count": 3, "limit": 30, "alive": true });
         let with: AiCapabilities = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(
             with.cohost.as_ref().unwrap().buddy_library,
             Some(crate::protocol::AiCapabilitiesBuddyLibrary {
                 enabled: true,
                 count: 3,
-                limit: 30
+                limit: 30,
+                alive: true
             })
         );
         assert_eq!(
